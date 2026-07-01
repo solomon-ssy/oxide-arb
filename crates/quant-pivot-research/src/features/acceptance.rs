@@ -13,6 +13,7 @@ use quant_pivot_models::{
         market::book::BookLevel,
     },
     enums::{
+        clickhouse::{ChFeatureSourceKind, ChFeatureValueKind},
         common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
         quant::DataQualityStatus,
@@ -383,8 +384,8 @@ fn feature_event_writer_batches_present_only() {
     let rows = feature_events(&vector, &schema, 1_000);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].feature_name, "book.mid");
-    assert_eq!(rows[0].value_kind, 1);
-    assert_eq!(rows[0].source_kind, "book");
+    assert_eq!(rows[0].value_kind, ChFeatureValueKind::Probability);
+    assert_eq!(rows[0].source_kind, ChFeatureSourceKind::Book);
     assert_eq!(rows[0].ingestion_time, 1_000);
 
     let mut missing_only = sample_vector();
@@ -988,8 +989,12 @@ fn category_feature_projects_table_index() {
     let rows = feature_events(&vector, &schema, 10);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].feature_name, "market.category");
-    assert_eq!(rows[0].value_kind, 6, "category value_kind code");
-    assert_eq!(rows[0].source_kind, "gamma_metadata");
+    assert_eq!(
+        rows[0].value_kind,
+        ChFeatureValueKind::Category,
+        "category value_kind code"
+    );
+    assert_eq!(rows[0].source_kind, ChFeatureSourceKind::GammaMetadata);
     // Sports' stable `table_index` is 1.
     assert_eq!(
         rows[0].feature_value.to_decimal(),

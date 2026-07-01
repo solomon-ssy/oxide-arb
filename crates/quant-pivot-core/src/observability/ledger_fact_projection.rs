@@ -7,6 +7,7 @@ use quant_pivot_models::{
         QuantPositionEventRow,
     },
     domain::{CapitalAllocationInfo, ExecutionOrderInfo, PositionInfo},
+    enums::clickhouse::ChQuantLedgerEventKind,
     types::RecommendationId,
 };
 
@@ -15,26 +16,22 @@ use quant_pivot_models::{
 pub fn project_execution_event(
     order: &ExecutionOrderInfo,
     recommendation_id: RecommendationId,
-    event_kind: &str,
+    event_kind: ChQuantLedgerEventKind,
     event_time: DateTime<Utc>,
 ) -> QuantExecutionEventRow {
     QuantExecutionEventRow {
         event_time: event_time.timestamp_millis(),
         order_intent_id: order.order_intent_id.clone(),
-        execution_order_id: order.execution_order_id.to_string(),
+        execution_order_id: order.execution_order_id.clone(),
         recommendation_id,
-        event_kind: event_kind.to_owned(),
+        event_kind,
         market_id: order.market_id.clone(),
         token_id: order.token_id.clone(),
-        side: order.side.as_i8(),
+        side: order.side.into(),
         price: ChPrice::from(order.price),
         shares: ChShares::from(order.shares),
         cost_usd: ChUsd::from(order.cost_usd),
-        venue_order_id: order
-            .venue_order_id
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
+        venue_order_id: order.venue_order_id.clone(),
         ingestion_time: Utc::now().timestamp_millis(),
     }
 }
@@ -43,7 +40,7 @@ pub fn project_execution_event(
 #[must_use]
 pub fn project_capital_event(
     capital: &CapitalAllocationInfo,
-    event_kind: &str,
+    event_kind: ChQuantLedgerEventKind,
     event_time: DateTime<Utc>,
 ) -> QuantCapitalAllocationEventRow {
     QuantCapitalAllocationEventRow {
@@ -51,8 +48,8 @@ pub fn project_capital_event(
         capital_allocation_id: capital.capital_allocation_id.clone(),
         order_intent_id: capital.order_intent_id.clone(),
         recommendation_id: capital.recommendation_id.clone(),
-        event_kind: event_kind.to_owned(),
-        state: capital.state.as_str().to_owned(),
+        event_kind,
+        state: capital.state.into(),
         allocated_usd: ChUsd::from(capital.allocated_usd),
         locked_usd: ChUsd::from(capital.locked_usd),
         spent_usd: ChUsd::from(capital.spent_usd),
@@ -65,7 +62,7 @@ pub fn project_capital_event(
 #[must_use]
 pub fn project_position_event(
     position: &PositionInfo,
-    event_kind: &str,
+    event_kind: ChQuantLedgerEventKind,
     event_time: DateTime<Utc>,
 ) -> QuantPositionEventRow {
     QuantPositionEventRow {
@@ -74,9 +71,9 @@ pub fn project_position_event(
         order_intent_id: position.order_intent_id.clone(),
         market_id: position.market_id.clone(),
         token_id: position.token_id.clone(),
-        event_kind: event_kind.to_owned(),
-        state: position.state.as_str().to_owned(),
-        side: position.side.as_str().to_owned(),
+        event_kind,
+        state: position.state.into(),
+        side: position.side.into(),
         shares: ChShares::from(position.shares),
         avg_price: ChPrice::from(position.avg_price),
         cost_usd: ChUsd::from(position.cost_usd),
@@ -90,6 +87,7 @@ mod tests {
     use super::*;
     use quant_pivot_models::{
         enums::{
+            clickhouse::{ChExecutionSide, ChPositionLedgerState, ChQuantLedgerEventKind},
             common::{MarketCategory, Side},
             execution::{ExecutionOrderPhase, OrderTypeKind, PositionLedgerState},
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
@@ -125,9 +123,14 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let row = project_execution_event(&order, RecommendationId::from_v7(), "submitted", now);
-        assert_eq!(row.event_kind, "submitted");
-        assert_eq!(row.side, Side::Buy.as_i8());
+        let row = project_execution_event(
+            &order,
+            RecommendationId::from_v7(),
+            ChQuantLedgerEventKind::Submitted,
+            now,
+        );
+        assert_eq!(row.event_kind, ChQuantLedgerEventKind::Submitted);
+        assert_eq!(row.side, ChExecutionSide::Buy);
     }
 
     #[test]
@@ -151,8 +154,8 @@ mod tests {
             updated_at: now,
             closed_at: None,
         };
-        let row = project_position_event(&position, "opened", now);
-        assert_eq!(row.event_kind, "opened");
-        assert_eq!(row.state, PositionLedgerState::Open.as_str());
+        let row = project_position_event(&position, ChQuantLedgerEventKind::Opened, now);
+        assert_eq!(row.event_kind, ChQuantLedgerEventKind::Opened);
+        assert_eq!(row.state, ChPositionLedgerState::Open);
     }
 }

@@ -30,8 +30,8 @@ use quant_pivot_repository::traits::{
     AttributionRepository, BacktestReportRepository, FactorRepository, FeatureRepository,
     MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
     ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
-    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
-    ShadowComparisonRepository, TrainingDatasetRepository,
+    PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository, ShadowComparisonRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::{
@@ -101,6 +101,8 @@ pub struct ResearchBundle {
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
     pub market_repo: Arc<dyn MarketRepository>,
+    /// Position ledger for `ExitDecision` lot-timeline training (06.1).
+    pub position_repo: Arc<dyn PositionRepository>,
 }
 
 struct OfflineResearchRepos {
@@ -200,6 +202,7 @@ impl ResearchBundle {
             model_runtime_factory_builder,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
+            position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
         }
     }
 
@@ -223,6 +226,7 @@ impl ResearchBundle {
                 attribution_repo: Arc::clone(&self.attribution_repo),
                 recommendation_repo: Arc::clone(&self.recommendation_repo),
                 feature_repo: Arc::clone(&self.feature_repo),
+                position_repo: Arc::clone(&self.position_repo),
             },
             TrainingDatasetBuildConfig {
                 features,

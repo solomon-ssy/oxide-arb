@@ -268,6 +268,7 @@ pub async fn close_position_full(
                 fully_exited: true,
                 revert_to_open: false,
                 reconciliation: None,
+                opportunistic_advance: None,
             },
         )
         .await

@@ -301,6 +301,9 @@ mod tests {
             factor_values: Vec::new(),
             labels,
             source_refs: Vec::new(),
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
         }
     }
 

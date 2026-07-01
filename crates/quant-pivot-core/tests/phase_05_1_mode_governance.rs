@@ -49,6 +49,12 @@ impl ModelRegistryRepository for MockModelRegistry {
     async fn create_model_spec(&self, _spec: NewModelSpec) -> Result<ModelSpecInfo, StorageError> {
         unimplemented!()
     }
+    async fn find_model_spec_by_id(
+        &self,
+        _model_spec_id: &ModelSpecId,
+    ) -> Result<Option<ModelSpecInfo>, StorageError> {
+        Ok(None)
+    }
     async fn create_model_version(
         &self,
         _version: NewModelVersion,

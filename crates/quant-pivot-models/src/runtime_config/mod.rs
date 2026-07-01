@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 7`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 9`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -26,7 +26,7 @@ use quant_pivot_error::{
 use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(7);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(9);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -258,9 +258,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn schema_version_is_seven() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 7);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 7);
+    fn schema_version_is_current() {
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 9);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 9);
     }
 
     #[test]

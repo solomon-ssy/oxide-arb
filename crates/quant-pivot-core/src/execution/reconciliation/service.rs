@@ -23,6 +23,7 @@ use quant_pivot_models::{
         PositionFill, PositionInfo, RecommendationInfo, ReconciliationLedgerWrite,
     },
     enums::{
+        clickhouse::ChQuantLedgerEventKind,
         execution::{
             ExecutionOrderPhase, ExitReason, ExitState, ReconciliationEvidenceKind,
             ReconciliationResult, VenueOrderStatus,
@@ -220,7 +221,7 @@ impl ReconciliationService {
         self.mirror_ledger_events(
             order,
             recommendation.recommendation_id.clone(),
-            "reconciled",
+            ChQuantLedgerEventKind::Reconciled,
             now,
         )
         .await?;
@@ -310,7 +311,7 @@ impl ReconciliationService {
         self.mirror_ledger_events(
             &recorded,
             recommendation.recommendation_id.clone(),
-            "operator_resolved",
+            ChQuantLedgerEventKind::OperatorResolved,
             now,
         )
         .await?;
@@ -362,7 +363,7 @@ impl ReconciliationService {
         &self,
         order: &ExecutionOrderInfo,
         recommendation_id: RecommendationId,
-        event_kind: &str,
+        event_kind: ChQuantLedgerEventKind,
         event_time: DateTime<Utc>,
     ) -> QuantResult<()> {
         self.deps.execution_events.write(project_execution_event(
@@ -438,7 +439,7 @@ impl ReconciliationService {
         self.mirror_ledger_events(
             order,
             recommendation.recommendation_id.clone(),
-            "unresolvable",
+            ChQuantLedgerEventKind::Unresolvable,
             Utc::now(),
         )
         .await?;

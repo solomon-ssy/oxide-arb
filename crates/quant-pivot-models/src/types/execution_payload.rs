@@ -116,4 +116,35 @@ impl ExecutedPartialExitNodes {
     }
 }
 
-jsonb_active!(EntryOrderSpec, ExitPolicySpec, ExecutedPartialExitNodes);
+/// Per-lot opportunistic-Sell scale-out state (Phase 06.1).
+///
+/// The Sell scorer emits a **target cumulative exit fraction** of the lot's
+/// entry-filled shares. `denominator_shares` freezes that base at the first
+/// opportunistic evaluation so the target is always measured against a fixed
+/// quantity — immune to later reductions from stop-loss / take-profit / partial
+/// nodes. `cumulative_sold_shares` is the monotonically accumulated total already
+/// sold via opportunistic exits, so the ladder only ever submits the incremental
+/// delta and repeated ticks at the same target never churn the position.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct OpportunisticExitState {
+    /// Frozen entry-filled-shares denominator (set once, on first evaluation).
+    pub denominator_shares: Option<Shares>,
+    /// Cumulative shares already opportunistically sold on this lot (monotonic).
+    pub cumulative_sold_shares: Shares,
+}
+
+impl OpportunisticExitState {
+    /// Record an additional `filled` opportunistic exit (accumulates, never
+    /// resets). Idempotency is the caller's responsibility (delta computation).
+    pub fn record_sold(&mut self, filled: Shares) {
+        self.cumulative_sold_shares =
+            Shares::new(self.cumulative_sold_shares.inner() + filled.inner());
+    }
+}
+
+jsonb_active!(
+    EntryOrderSpec,
+    ExitPolicySpec,
+    ExecutedPartialExitNodes,
+    OpportunisticExitState
+);

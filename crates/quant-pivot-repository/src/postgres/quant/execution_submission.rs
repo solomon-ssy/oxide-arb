@@ -206,6 +206,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
         validate_execution_order_transition(order.state, write.state, execution_order_id)?;
         let intent_id = order.order_intent_id.clone();
+        let entry_phase = order.order_phase == ExecutionOrderPhase::Entry;
 
         // Lock the intent so its status advances atomically with the ledger.
         let intent = load_intent_for_update(&txn, &intent_id).await?;
@@ -231,16 +232,38 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         )
         .await?;
 
+        let entry_fill_shares = if entry_phase {
+            write.fill.as_ref().map(|fill| fill.shares)
+        } else {
+            None
+        };
+
         if let Some(fill) = write.fill {
             position::apply_fill(&txn, fill).await?;
         }
 
+        // Entry fill: freeze the opportunistic scale-out denominator to venue-confirmed
+        // shares (not entry_order_json.shares). Set once; never shrinks on partial exits.
+        let prior_status = intent.status;
+        let prior_opportunistic_state = intent.opportunistic_exit_state.clone();
+        let mut intent_active = intent.into_active_model();
+        if let Some(shares) = entry_fill_shares {
+            let mut state = prior_opportunistic_state.clone();
+            if state.denominator_shares.is_none() {
+                state.denominator_shares = Some(shares);
+                intent_active.opportunistic_exit_state = ActiveValue::Set(state);
+            }
+        }
+
         // Only transition the intent when the target differs (resting `Open` and
         // `Ambiguous` keep the intent at `Submitted`).
-        if write.intent_status != intent.status {
-            validate_intent_transition(intent.status, write.intent_status, &intent_id)?;
-            let mut intent_active = intent.into_active_model();
+        if write.intent_status != prior_status {
+            validate_intent_transition(prior_status, write.intent_status, &intent_id)?;
             intent_active.status = ActiveValue::Set(write.intent_status);
+        }
+        if !matches!(intent_active.status, ActiveValue::NotSet)
+            || !matches!(intent_active.opportunistic_exit_state, ActiveValue::NotSet)
+        {
             intent_active
                 .update(&txn)
                 .await
@@ -397,6 +420,12 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // Reduce/close the lot on a (partial) fill; complete capital on full exit.
         let exit_filled = write.position_exit.is_some();
+        // The actual filled shares advance the opportunistic cumulative total.
+        let opportunistic_fill = write
+            .opportunistic_advance
+            .as_ref()
+            .zip(write.position_exit.as_ref())
+            .map(|(_advance, exit)| exit.shares);
         if let Some(exit) = write.position_exit {
             position::apply_exit(&txn, &intent_id, exit).await?;
             if write.fully_exited {
@@ -413,11 +442,20 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         let intent = load_intent_for_update(&txn, &intent_id).await?;
         let (executed_nodes, pending_node) =
             partial_exit_nodes_after_exit_settlement(&intent, write.revert_to_open, exit_filled);
+        // Advance cumulative opportunistic shares sold (denominator frozen at entry fill).
+        let opportunistic_state = opportunistic_fill.map(|filled| {
+            let mut state = intent.opportunistic_exit_state.clone();
+            state.record_sold(filled);
+            state
+        });
         let mut intent_active = intent.into_active_model();
         intent_active.exit_state = ActiveValue::Set(write.exit_state);
         intent_active.exit_reason = ActiveValue::Set(Some(write.exit_reason));
         intent_active.executed_partial_exit_node_ids = ActiveValue::Set(executed_nodes);
         intent_active.pending_partial_exit_node_id = ActiveValue::Set(pending_node);
+        if let Some(state) = opportunistic_state {
+            intent_active.opportunistic_exit_state = ActiveValue::Set(state);
+        }
         intent_active
             .update(&txn)
             .await

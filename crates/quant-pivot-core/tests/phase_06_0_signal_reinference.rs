@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use quant_pivot_core::{
     execution::{ExitSignalContext, ExitSignalEvaluator, ExitSignalVerdict},
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
+    },
     runtime_config::RuntimeConfigStore,
     service::signal_reinference::{
         ExitSignalReinferer, FreshSignal, ReinferenceSignalEvaluator,
@@ -26,8 +28,8 @@ use quant_pivot_models::{
     runtime_config::RuntimeConfig,
     types::{
         Bps, ContentHash, EventId, ExecutedPartialExitNodes, MarketId, ModelVersionId,
-        OrderIntentId, PositionId, Price, Probability, RecommendationId, RuntimeConfigVersionId,
-        Shares, TokenId, Usd,
+        OpportunisticExitState, OrderIntentId, PositionId, Price, Probability, RecommendationId,
+        RuntimeConfigVersionId, Shares, TokenId, Usd,
         execution_payload::{EntryOrderSpec, ExitPolicySpec},
     },
 };
@@ -99,6 +101,7 @@ fn sample_intent(entry_score: &str, runtime_mode: QuantRuntimeMode) -> OrderInte
         last_signal_recheck_at: None,
         executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
         pending_partial_exit_node_id: None,
+        opportunistic_exit_state: OpportunisticExitState::default(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -139,10 +142,13 @@ fn evaluator_with_config(
             .signal_invalidation_ratio
             .value,
     );
+    let metrics = Arc::new(MetricsHub::new());
+    let audit = Arc::new(ExitSignalEvaluationEventWriter::drop_only(&metrics));
     ReinferenceSignalEvaluator::new(ReinferenceSignalEvaluatorDeps {
         reinferer,
         config: Arc::new(RuntimeConfigStore::new(config)),
-        metrics: Arc::new(MetricsHub::new()),
+        metrics,
+        audit,
     })
 }
 
@@ -233,6 +239,9 @@ async fn malformed_invalidation_ratio_yields_indeterminate() {
         })),
         config: Arc::new(RuntimeConfigStore::new(config)),
         metrics: Arc::new(MetricsHub::new()),
+        audit: Arc::new(ExitSignalEvaluationEventWriter::drop_only(
+            &MetricsHub::new(),
+        )),
     });
     let verdict = evaluator
         .evaluate(ExitSignalContext {
@@ -257,6 +266,9 @@ async fn disabled_reinference_yields_indeterminate() {
         })),
         config: Arc::new(RuntimeConfigStore::new(config)),
         metrics: Arc::new(MetricsHub::new()),
+        audit: Arc::new(ExitSignalEvaluationEventWriter::drop_only(
+            &MetricsHub::new(),
+        )),
     });
     let verdict = evaluator
         .evaluate(ExitSignalContext {

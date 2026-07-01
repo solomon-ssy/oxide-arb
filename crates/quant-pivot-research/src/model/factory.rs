@@ -27,6 +27,7 @@ use crate::{
         artifact::{ModelArtifact, ModelArtifactHeader},
         overlay::WeightOverlay,
         runtime::{ModelRuntimeFactory, QuantModelRuntime},
+        sell_scorer::{SellScorerRuntime, WeightedSellScorerRuntime},
         weighted::WeightedFactorRuntime,
     },
 };
@@ -124,13 +125,10 @@ impl DefaultModelRuntimeFactory {
     }
 }
 
-#[async_trait]
-impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
-    async fn load(
-        &self,
-        model_version: &ModelVersionInfo,
-        overlay: Option<WeightOverlay>,
-    ) -> QuantResult<Box<dyn QuantModelRuntime>> {
+impl DefaultModelRuntimeFactory {
+    /// Fetch, hash-verify, validate, and schema-bind the artifact for a version.
+    /// Shared fail-closed prologue for every runtime family.
+    async fn load_verified(&self, model_version: &ModelVersionInfo) -> QuantResult<ModelArtifact> {
         let recorded = &model_version.artifact_hash;
         let key = ModelArtifact::artifact_key(recorded)?;
         let bytes = self.store.get_by_key(&key).await?;
@@ -147,6 +145,18 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
 
         artifact.validate()?;
         self.verify_header(artifact.header(), model_version)?;
+        Ok(artifact)
+    }
+}
+
+#[async_trait]
+impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
+    async fn load(
+        &self,
+        model_version: &ModelVersionInfo,
+        overlay: Option<WeightOverlay>,
+    ) -> QuantResult<Box<dyn QuantModelRuntime>> {
+        let artifact = self.load_verified(model_version).await?;
 
         match artifact {
             // The overlay (a weighted factor-weight override) is honoured only by
@@ -169,6 +179,30 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
                     .into())
                 }
             }
+            // A Sell-side scorer is loaded through the exit-scorer path, never as
+            // a Buy-side inference runtime — fail closed on the confusion.
+            ModelArtifact::SellScorer(_) => Err(ResearchError::InvalidModelArtifact {
+                detail: "sell scorer artifact must be loaded via load_sell_scorer".to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    async fn load_sell_scorer(
+        &self,
+        model_version: &ModelVersionInfo,
+    ) -> QuantResult<Box<dyn SellScorerRuntime>> {
+        let artifact = self.load_verified(model_version).await?;
+        match artifact {
+            ModelArtifact::SellScorer(body) => Ok(Box::new(WeightedSellScorerRuntime::new(*body)?)),
+            other => Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "model version {} is not a sell scorer (family {})",
+                    model_version.model_version_id,
+                    other.header().model_family
+                ),
+            }
+            .into()),
         }
     }
 }

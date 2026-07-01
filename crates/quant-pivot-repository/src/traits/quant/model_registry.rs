@@ -8,6 +8,13 @@ use quant_pivot_models::{
 pub trait ModelRegistryRepository: Send + Sync {
     async fn create_model_spec(&self, spec: NewModelSpec) -> Result<ModelSpecInfo, StorageError>;
 
+    /// Look up a model spec by id (used by governance pointer sync to route the
+    /// published version onto the Buy vs Sell/exit runtime-config pointer).
+    async fn find_model_spec_by_id(
+        &self,
+        model_spec_id: &ModelSpecId,
+    ) -> Result<Option<ModelSpecInfo>, StorageError>;
+
     async fn create_model_version(
         &self,
         version: NewModelVersion,

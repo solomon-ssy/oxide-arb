@@ -167,6 +167,10 @@ pub struct ModelConfig {
     pub active_model_version_id: Option<ModelVersionRef>,
     /// Shadow model version id.
     pub shadow_model_version_id: Option<ModelVersionRef>,
+    /// Active published Sell-side hold-vs-exit scorer version (Phase 06.1). The
+    /// opportunistic-Sell exit evaluator loads this; a distinct pointer from
+    /// `active_model_version_id` so Buy and Sell models are governed separately.
+    pub active_exit_model_version_id: Option<ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalString,
     /// Maximum age of a quality-gate report before model load is denied.
@@ -188,11 +192,40 @@ impl Default for ModelConfig {
         Self {
             active_model_version_id: None,
             shadow_model_version_id: None,
+            active_exit_model_version_id: None,
             min_model_confidence: DecimalString::new("0.50"),
             min_quality_gate_age_secs: 86_400,
             prediction_horizon_secs: 86_400,
             candidate_score_floor: DecimalString::new("0.00"),
             shadow_diff_threshold: DecimalString::new("0.10"),
+        }
+    }
+}
+
+/// Sell-side hold-vs-exit quality-gate thresholds (Phase 06.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SellQualityGateConfig {
+    /// Minimum `ExitDecision` sample count for a sell scorer to clear the gate.
+    pub min_sample_count: u64,
+    /// Minimum sell-side label coverage in `[0, 1]`.
+    pub min_label_coverage: DecimalString,
+    /// Minimum (soft) exit-alpha rank IC in `[-1, 1]`.
+    pub min_exit_alpha_rank_ic: DecimalString,
+    /// Minimum fraction of `ExitDecision` rows simulated from full L2 books.
+    pub min_l2_book_fidelity_ratio: DecimalString,
+    /// Maximum fraction of `ExitDecision` rows using microstructure fallback.
+    pub max_fallback_ratio: DecimalString,
+}
+
+impl Default for SellQualityGateConfig {
+    fn default() -> Self {
+        Self {
+            min_sample_count: 200,
+            min_label_coverage: DecimalString::new("0.60"),
+            min_exit_alpha_rank_ic: DecimalString::new("0.05"),
+            min_l2_book_fidelity_ratio: DecimalString::new("0.50"),
+            max_fallback_ratio: DecimalString::new("0.50"),
         }
     }
 }
@@ -225,6 +258,8 @@ pub struct QualityGateConfig {
     pub max_category_concentration: DecimalString,
     /// Minimum shadow comparison window (seconds) required before publish.
     pub required_shadow_window_secs: u64,
+    /// Sell-side hold-vs-exit scorer thresholds (Phase 06.1).
+    pub sell: SellQualityGateConfig,
 }
 
 impl Default for QualityGateConfig {
@@ -239,6 +274,7 @@ impl Default for QualityGateConfig {
             min_rank_ic: DecimalString::new("0.00"),
             max_category_concentration: DecimalString::new("0.60"),
             required_shadow_window_secs: 86_400,
+            sell: SellQualityGateConfig::default(),
         }
     }
 }

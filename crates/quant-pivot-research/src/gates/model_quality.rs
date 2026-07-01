@@ -18,7 +18,10 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::types::{ContentHash, ModelVersionId, Probability, TrainingDatasetId};
+use quant_pivot_models::{
+    enums::model::ModelFamily,
+    types::{ContentHash, ModelVersionId, Probability, TrainingDatasetId},
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +125,10 @@ pub enum GateId {
     HitRate,
     /// Per-category concentration within budget (soft).
     CategoryConcentration,
+    /// `ExitDecision` L2 book fidelity ratio (hard, sell family).
+    SellL2BookFidelity,
+    /// `ExitDecision` microstructure fallback ratio (hard, sell family).
+    SellFallbackRatio,
 }
 
 /// One failed gate, carrying the observed value and the threshold it missed.
@@ -159,6 +166,28 @@ pub struct QualityGateThresholds {
     pub min_rank_ic: Decimal,
     /// Maximum (soft) per-category concentration in `[0, 1]` (default 0.60).
     pub max_category_concentration: Decimal,
+}
+
+/// Sell-side hold-vs-exit gate thresholds (Phase 06.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SellQualityGateThresholds {
+    pub min_sample_count: u64,
+    pub min_label_coverage: Decimal,
+    pub min_exit_alpha_rank_ic: Decimal,
+    pub min_l2_book_fidelity_ratio: Decimal,
+    pub max_fallback_ratio: Decimal,
+}
+
+impl Default for SellQualityGateThresholds {
+    fn default() -> Self {
+        Self {
+            min_sample_count: 200,
+            min_label_coverage: Decimal::new(60, 2),
+            min_exit_alpha_rank_ic: Decimal::new(5, 2),
+            min_l2_book_fidelity_ratio: Decimal::new(50, 2),
+            max_fallback_ratio: Decimal::new(50, 2),
+        }
+    }
 }
 
 impl QualityGateThresholds {
@@ -201,6 +230,10 @@ pub struct QualityGateInput {
     pub shadow_stability: Option<Probability>,
     /// Governed thresholds.
     pub thresholds: QualityGateThresholds,
+    /// Sell-side thresholds (used when [`Self::model_family`] is an exit scorer).
+    pub sell_thresholds: SellQualityGateThresholds,
+    /// Model family under evaluation (`None` ⇒ buy-oriented defaults).
+    pub model_family: Option<ModelFamily>,
 }
 
 /// A content-addressed, persisted quality-gate evaluation.
@@ -250,11 +283,15 @@ impl ModelQualityGate for DefaultModelQualityGate {
         let mut soft: Vec<QualityGateFailure> = Vec::new();
 
         evaluate_coverage_gates(&input, &mut hard);
-        evaluate_backtest_presence(&input, &mut hard);
-        if let Some(report) = &input.backtest {
-            evaluate_backtest_gates(report, &input.thresholds, &mut hard, &mut soft);
+        if input.model_family.is_some_and(ModelFamily::is_exit_scorer) {
+            evaluate_sell_gates(&input, &mut hard, &mut soft);
+        } else {
+            evaluate_backtest_presence(&input, &mut hard);
+            if let Some(report) = &input.backtest {
+                evaluate_backtest_gates(report, &input.thresholds, &mut hard, &mut soft);
+            }
+            evaluate_intent_gates(&input, &mut hard);
         }
-        evaluate_intent_gates(&input, &mut hard);
 
         let passed = hard.is_empty();
         let report_hash = ResearchHasher::canonical(&ReportHashInput {
@@ -330,6 +367,64 @@ fn evaluate_coverage_gates(input: &QualityGateInput, hard: &mut Vec<QualityGateF
             threshold: "0".to_owned(),
             detail: "point-in-time leakage detected in training features".to_owned(),
         });
+    }
+}
+
+/// Sell-side hold-vs-exit hard/soft gates (Phase 06.1).
+fn evaluate_sell_gates(
+    input: &QualityGateInput,
+    hard: &mut Vec<QualityGateFailure>,
+    soft: &mut Vec<QualityGateFailure>,
+) {
+    let t = &input.sell_thresholds;
+    let samples = input
+        .dataset
+        .exit_decision_built
+        .max(input.dataset.built_examples);
+    if samples < t.min_sample_count {
+        hard.push(QualityGateFailure {
+            gate: GateId::SampleCount,
+            observed: samples.to_string(),
+            threshold: t.min_sample_count.to_string(),
+            detail: "insufficient ExitDecision training samples".to_owned(),
+        });
+    }
+    let label_coverage = input.dataset.label_coverage();
+    if label_coverage < t.min_label_coverage {
+        hard.push(QualityGateFailure {
+            gate: GateId::LabelCoverage,
+            observed: label_coverage.to_string(),
+            threshold: t.min_label_coverage.to_string(),
+            detail: "sell label coverage below minimum".to_owned(),
+        });
+    }
+    let l2_ratio = input.dataset.exit_l2_fidelity_ratio();
+    if l2_ratio < t.min_l2_book_fidelity_ratio {
+        hard.push(QualityGateFailure {
+            gate: GateId::SellL2BookFidelity,
+            observed: l2_ratio.to_string(),
+            threshold: t.min_l2_book_fidelity_ratio.to_string(),
+            detail: "ExitDecision L2 book fidelity below minimum".to_owned(),
+        });
+    }
+    let fallback_ratio = input.dataset.exit_fallback_ratio();
+    if fallback_ratio > t.max_fallback_ratio {
+        hard.push(QualityGateFailure {
+            gate: GateId::SellFallbackRatio,
+            observed: fallback_ratio.to_string(),
+            threshold: t.max_fallback_ratio.to_string(),
+            detail: "ExitDecision microstructure fallback ratio above maximum".to_owned(),
+        });
+    }
+    if let Some(report) = &input.backtest {
+        if report.rank_ic < t.min_exit_alpha_rank_ic {
+            soft.push(QualityGateFailure {
+                gate: GateId::RankIc,
+                observed: report.rank_ic.to_string(),
+                threshold: t.min_exit_alpha_rank_ic.to_string(),
+                detail: "exit-alpha rank IC below soft minimum".to_owned(),
+            });
+        }
     }
 }
 
@@ -461,7 +556,7 @@ fn max_category_concentration(report: &BacktestReport) -> Decimal {
 mod tests {
     use super::{
         DefaultModelQualityGate, GateId, GateIntent, GateSubject, QualityGateInput,
-        QualityGateThresholds,
+        QualityGateThresholds, SellQualityGateThresholds,
     };
     use chrono::Utc;
     use quant_pivot_models::types::{
@@ -528,6 +623,7 @@ mod tests {
             live_attribution_dropped_missing_evidence: 0,
             book_decode_failures: 0,
             matrix_probe: None,
+            ..Default::default()
         }
     }
 
@@ -540,6 +636,8 @@ mod tests {
             leakage: LeakageFindings::default(),
             shadow_stability: Some(Probability::new(dec!(0.80))),
             thresholds: QualityGateThresholds::conservative(),
+            sell_thresholds: SellQualityGateThresholds::default(),
+            model_family: None,
         }
     }
 

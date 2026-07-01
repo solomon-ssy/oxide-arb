@@ -20,6 +20,7 @@ pub mod overlay;
 pub mod rank_scores;
 pub mod runtime;
 pub mod score_percentile;
+pub mod sell_scorer;
 pub mod signal;
 pub mod trainer;
 pub mod weighted;
@@ -28,8 +29,9 @@ pub use artifact::{
     CalibratedReturnModel, ClassicalModelArtifact, ClassicalModelMetrics, DataQualityMultipliers,
     FactorWeight, FeatureImportance, HeuristicReturnModel, HorizonMultipliers,
     LiquidityMultipliers, LiquidityTier, ModelArtifact, ModelArtifactHeader, PreprocessingArtifact,
-    ReturnCurvePoint, ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec,
-    SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
+    ReturnCurvePoint, ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact,
+    SellScorerOutputSpec, SubstitutionConfidenceRules, TrainingObjectiveReport,
+    WeightedFactorModelArtifact,
 };
 pub use calibration::{
     CalibrationReport, CalibrationResult, CalibrationSample, StratumFit,
@@ -57,6 +59,11 @@ pub use runtime::{
     QuantModelRuntime,
 };
 pub use score_percentile::annotate;
+pub use sell_scorer::{
+    LotStateInput, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
+    SellScorerTrainer, TrainSellScorerRequest, WeightedSellScorerRuntime,
+    position_state_factor_values, position_state_features,
+};
 pub use signal::{
     FactorContribution, ModelExplanation, SignalCandidate, SignalWarning, signal_candidate_event,
     signal_candidate_events,

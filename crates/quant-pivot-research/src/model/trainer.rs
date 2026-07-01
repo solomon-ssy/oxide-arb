@@ -36,6 +36,9 @@ use crate::{
             SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
         },
         runtime::ModelFamily,
+        sell_scorer::position_state::{
+            is_position_state_factor, position_state_signed_contribution,
+        },
     },
     parallel::par_map_with_index,
     precision::RESEARCH_DECIMAL_SCALE,
@@ -194,7 +197,62 @@ impl ModelTrainer for WeightedFactorTrainer {
 
 /// The pure training routine (CPU-bound, deterministic).
 fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifact> {
-    if request.seed_weights.is_empty() {
+    let fit = fit_simplex_weights(
+        &request.examples,
+        &request.label,
+        &request.seed_weights,
+        request.regularization,
+        request.validation,
+    )?;
+
+    let artifact = WeightedFactorModelArtifact {
+        header: request.header.clone(),
+        weights: fit.factor_weights,
+        prediction_horizon_secs: request.prediction_horizon_secs,
+        multipliers: request.multipliers.clone(),
+        substitution_confidence_rules: request.substitution_rules.clone(),
+        return_model: request.return_model.clone(),
+        required_features: request.required_features.clone(),
+        objective_report: Some(fit.objective_report.clone()),
+    };
+    artifact.validate()?;
+    let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
+    let artifact_hash = model_artifact.content_hash()?;
+
+    Ok(TrainedModelArtifact {
+        artifact: model_artifact,
+        artifact_hash,
+        in_sample_metrics: fit.objective_report,
+        validation_metrics: fit.validation,
+    })
+}
+
+/// The outcome of the shared simplex weight fit: the frozen normalized factor
+/// weights plus the training / validation objective reports. Reused by every
+/// weighted family (Buy-side [`WeightedFactorModelArtifact`], Sell-side
+/// [`SellScorerArtifact`](crate::model::artifact::SellScorerArtifact)) so the
+/// deterministic rank-IC simplex search lives in exactly one place.
+#[derive(Debug, Clone)]
+pub(crate) struct FittedWeights {
+    /// Frozen, normalized per-factor weights in seed order.
+    pub factor_weights: Vec<FactorWeight>,
+    /// In-sample (training-fold) objective report.
+    pub objective_report: TrainingObjectiveReport,
+    /// Held-out validation report.
+    pub validation: ValidationReport,
+}
+
+/// Fit the weight simplex against a supervised label via deterministic rank-IC
+/// coordinate search (+ optional `argmin` refinement). Family-agnostic: the
+/// caller wraps the frozen weights into its concrete artifact body.
+pub(crate) fn fit_simplex_weights(
+    examples: &[TrainingExample],
+    label: &LabelSelector,
+    seed_weights: &[FactorWeight],
+    regularization: Regularization,
+    validation: ValidationSpec,
+) -> QuantResult<FittedWeights> {
+    if seed_weights.is_empty() {
         return Err(ResearchError::InvalidModelArtifact {
             detail: "trainer requires a non-empty seed weight (candidate factor) set".to_owned(),
         }
@@ -202,36 +260,31 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
     }
 
     // Deterministic factor order: the seed-weight order defines the columns.
-    let factors: Vec<FactorName> = request
-        .seed_weights
-        .iter()
-        .map(|w| w.factor.clone())
-        .collect();
-    let dataset = TrainingDataset::build(&request.examples, &request.label, &factors)?;
-    if dataset.rows.len() < request.validation.folds.max(2) as usize {
+    let factors: Vec<FactorName> = seed_weights.iter().map(|w| w.factor.clone()).collect();
+    let dataset = TrainingDataset::build(examples, label, &factors)?;
+    if dataset.rows.len() < validation.folds.max(2) as usize {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
                 "insufficient resolved samples ({}) for {} validation folds",
                 dataset.rows.len(),
-                request.validation.folds
+                validation.folds
             ),
         }
         .into());
     }
 
-    let folds = request.validation.folds.max(2) as usize;
+    let folds = validation.folds.max(2) as usize;
     let split = TimeSplit::new(dataset.rows.len(), folds);
 
     // Seed simplex (normalized, non-negative).
     let seed = normalize_simplex(
-        &request
-            .seed_weights
+        &seed_weights
             .iter()
             .map(|w| w.weight.max(Decimal::ZERO))
             .collect::<Vec<_>>(),
     );
 
-    let l2 = request.regularization.l2.max(Decimal::ZERO);
+    let l2 = regularization.l2.max(Decimal::ZERO);
     let train_rows = &dataset.rows[..split.train_end];
 
     // Base optimizer: deterministic coordinate search on the simplex.
@@ -276,25 +329,10 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
         ),
     };
 
-    let artifact = WeightedFactorModelArtifact {
-        header: request.header.clone(),
-        weights: factor_weights,
-        prediction_horizon_secs: request.prediction_horizon_secs,
-        multipliers: request.multipliers.clone(),
-        substitution_confidence_rules: request.substitution_rules.clone(),
-        return_model: request.return_model.clone(),
-        required_features: request.required_features.clone(),
-        objective_report: Some(objective_report.clone()),
-    };
-    artifact.validate()?;
-    let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
-    let artifact_hash = model_artifact.content_hash()?;
-
-    Ok(TrainedModelArtifact {
-        artifact: model_artifact,
-        artifact_hash,
-        in_sample_metrics: objective_report,
-        validation_metrics: ValidationReport {
+    Ok(FittedWeights {
+        factor_weights,
+        objective_report,
+        validation: ValidationReport {
             mean_objective: mean_objective.round_dp(RESEARCH_DECIMAL_SCALE),
             fold_objectives: fold_objectives
                 .iter()
@@ -518,6 +556,12 @@ impl TrainingDataset {
 /// `dir_sign · normalized · confidence` for one factor of one example, or `0`
 /// when the factor is absent / unresolved (confidence carries the missingness).
 fn signed_contribution(example: &TrainingExample, factor: &FactorName) -> Decimal {
+    if is_position_state_factor(factor) {
+        if let Some(state) = &example.position_state {
+            return position_state_signed_contribution(state, factor);
+        }
+        return Decimal::ZERO;
+    }
     example
         .factor_values
         .iter()
@@ -659,6 +703,9 @@ mod tests {
                 is_resolved: true,
             }],
             source_refs: Vec::new(),
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
         }
     }
 
@@ -728,7 +775,9 @@ mod tests {
                 art.validate().expect("valid weights");
                 assert!(art.objective_report.is_some(), "objective report filled");
             }
-            ModelArtifact::Classical(_) => panic!("expected weighted artifact"),
+            ModelArtifact::Classical(_) | ModelArtifact::SellScorer(_) => {
+                panic!("expected weighted artifact")
+            }
         }
     }
 

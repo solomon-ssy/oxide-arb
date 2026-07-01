@@ -438,6 +438,9 @@ async fn register_candidate_sibling(
         ModelArtifact::Classical(classical) => {
             classical.header.model_version_id = candidate_id.clone();
         }
+        ModelArtifact::SellScorer(sell) => {
+            sell.header.model_version_id = candidate_id.clone();
+        }
     }
     artifact.validate().expect("candidate artifact valid");
     let artifact_hash = artifact.content_hash().expect("candidate hash");

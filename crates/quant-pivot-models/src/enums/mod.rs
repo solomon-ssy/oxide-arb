@@ -416,6 +416,7 @@ pub mod common;
 pub mod domain;
 pub mod execution;
 pub mod factor;
+pub mod feature;
 pub mod fee;
 pub mod market;
 pub mod model;

@@ -349,6 +349,53 @@ impl Default for ExitSignalReinferencePolicy {
     }
 }
 
+/// Opportunistic-Sell exit policy (Phase 06.1).
+///
+/// Advisory model-driven scale-out when the thesis still holds but the Sell
+/// scorer ranks exiting now as better than holding. Evaluated at the same
+/// cadence as re-inference (`signal_recheck_secs`) and gated behind
+/// re-inference being enabled (thesis validity must be checkable first).
+///
+/// The scorer emits a **target cumulative exit fraction** of the lot's
+/// entry-filled shares; the ladder sells only the incremental delta beyond
+/// what opportunistic exits have already realized, so repeated ticks at the
+/// same target never churn the position. `shadow_mode` runs the scorer and
+/// writes audit rows but never submits an opportunistic exit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpportunisticSellPolicy {
+    /// Whether opportunistic-Sell evaluation is active at all.
+    pub enabled: bool,
+    /// When true, the scorer runs and is audited but never submits an exit
+    /// (fail-safe hold; SL/time/trailing/invalidation still apply).
+    pub shadow_mode: bool,
+    /// Minimum scorer confidence to act (below ⇒ hold).
+    pub min_confidence: DecimalString,
+    /// Minimum expected exit alpha (bps over holding) to act (below ⇒ hold).
+    pub min_expected_alpha_bps: i64,
+    /// Minimum P(exit now beats hold) to act (below ⇒ hold).
+    pub min_p_exit_better: DecimalString,
+    /// Upper bound on the target cumulative exit fraction the model may request.
+    pub max_sell_pct: DecimalString,
+    /// Minimum incremental fraction (of entry-filled shares) worth submitting;
+    /// deltas below this are held to avoid dust exits and fee churn.
+    pub min_opportunistic_clip_pct: DecimalString,
+}
+
+impl Default for OpportunisticSellPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            shadow_mode: true,
+            min_confidence: DecimalString::new("0.65"),
+            min_expected_alpha_bps: 50,
+            min_p_exit_better: DecimalString::new("0.50"),
+            max_sell_pct: DecimalString::new("1.0"),
+            min_opportunistic_clip_pct: DecimalString::new("0.1"),
+        }
+    }
+}
+
 /// Exit-monitor cadence, signal-degradation threshold, and re-inference policy.
 ///
 /// Price/time/trailing tiers run every `monitor_secs`; model re-inference runs
@@ -368,6 +415,8 @@ pub struct ExitMonitorPolicy {
     pub signal_invalidation_ratio: DecimalString,
     /// Model-backed thesis-invalidation re-inference (Phase 06.0).
     pub signal_reinference: ExitSignalReinferencePolicy,
+    /// Opportunistic-Sell advisory scale-out (Phase 06.1).
+    pub opportunistic_sell: OpportunisticSellPolicy,
 }
 
 impl Default for ExitMonitorPolicy {
@@ -378,6 +427,7 @@ impl Default for ExitMonitorPolicy {
             signal_recheck_secs: 60,
             signal_invalidation_ratio: DecimalString::new("0.6"),
             signal_reinference: ExitSignalReinferencePolicy::default(),
+            opportunistic_sell: OpportunisticSellPolicy::default(),
         }
     }
 }

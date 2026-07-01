@@ -162,6 +162,8 @@ pub struct MetricsHub {
     pub exit_triggers: IntCounterVec,
     /// Exit signal re-inference outcomes (06.0).
     pub exit_signal_reinference: IntCounterVec,
+    /// Opportunistic-Sell scorer evaluation outcomes (06.1).
+    pub opportunistic_sell_eval: IntCounterVec,
 }
 
 struct PipelineMetrics {
@@ -229,6 +231,7 @@ struct ExecutionMetrics {
     reconciliation_unresolvable: IntCounter,
     exit_triggers: IntCounterVec,
     exit_signal_reinference: IntCounterVec,
+    opportunistic_sell_eval: IntCounterVec,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -513,6 +516,12 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "Exit signal re-inference outcomes",
             &["outcome"]
         ),
+        opportunistic_sell_eval: register_counter_vec!(
+            registry,
+            "quant_opportunistic_sell_eval_total",
+            "Opportunistic-Sell scorer evaluation outcomes",
+            &["outcome"]
+        ),
     }
 }
 
@@ -595,6 +604,7 @@ impl MetricsHub {
             reconciliation_unresolvable: execution.reconciliation_unresolvable,
             exit_triggers: execution.exit_triggers,
             exit_signal_reinference: execution.exit_signal_reinference,
+            opportunistic_sell_eval: execution.opportunistic_sell_eval,
         }
     }
 
@@ -647,6 +657,15 @@ impl MetricsHub {
     /// `disabled`, `shadow_would_invalidate`, `shadow_hold`).
     pub fn inc_exit_signal_reinference(&self, outcome: &str) {
         self.exit_signal_reinference
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    /// Count one opportunistic-Sell scorer evaluation outcome (`disabled`,
+    /// `skipped_non_auto`, `unavailable`, `error`, `hold`, `shadow_would_sell`,
+    /// `opportunistic_sell`).
+    pub fn inc_opportunistic_sell_eval(&self, outcome: &str) {
+        self.opportunistic_sell_eval
             .with_label_values(&[outcome])
             .inc();
     }

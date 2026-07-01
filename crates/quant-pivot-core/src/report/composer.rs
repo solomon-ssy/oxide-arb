@@ -758,12 +758,12 @@ fn recommendation_events(
             rank: u32::try_from(rec.rank).unwrap_or(0),
             market_id: rec.market_id.clone(),
             token_id: rec.token_id.clone(),
-            side: rec.outcome_side.as_i8(),
+            side: rec.outcome_side.into(),
             score: ChProbability::from(rec.composite_score),
             risk_adjusted_score: ChProbability::from(rec.risk_adjusted_score),
             suggested_usd: ChUsd::from(rec.sizing_plan.suggested_usd),
             valid_until: rec.valid_until.timestamp_millis(),
-            status: rec.status.as_str().to_owned(),
+            status: rec.status.into(),
         })
         .collect()
 }

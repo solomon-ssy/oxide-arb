@@ -22,19 +22,30 @@ crate::pg_enum! {
         ClassicalRidge => "classical_ridge",
         ClassicalLasso => "classical_lasso",
         ClassicalElasticNet => "classical_elastic_net",
+        /// Sell-side hold-vs-exit weighted scorer (Phase 06.1). Distinct family
+        /// from the Buy-side `WeightedFactor` ranker so a Sell artifact can never
+        /// be confused for a Buy artifact at the registry / runtime boundary.
+        HoldVsExitWeighted => "hold_vs_exit_weighted",
     }
 }
 
 impl ModelFamily {
+    /// Whether this family is a classical (smartcore-backed) estimator.
     #[must_use]
     pub const fn is_classical(self) -> bool {
-        !matches!(self, Self::WeightedFactor)
+        !matches!(self, Self::WeightedFactor | Self::HoldVsExitWeighted)
+    }
+
+    /// Whether this family scores the Sell-side hold-vs-exit decision (06.1).
+    #[must_use]
+    pub const fn is_exit_scorer(self) -> bool {
+        matches!(self, Self::HoldVsExitWeighted)
     }
 
     #[must_use]
     pub const fn classical_kind(self) -> Option<ClassicalKind> {
         match self {
-            Self::WeightedFactor => None,
+            Self::WeightedFactor | Self::HoldVsExitWeighted => None,
             Self::ClassicalRandomForest => Some(ClassicalKind::RandomForest),
             Self::ClassicalExtraTrees => Some(ClassicalKind::ExtraTrees),
             Self::ClassicalLogisticRegression => Some(ClassicalKind::LogisticRegression),

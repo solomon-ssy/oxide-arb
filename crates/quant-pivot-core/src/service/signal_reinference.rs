@@ -32,15 +32,21 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
+    clickhouse::{ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
     domain::{OrderIntentInfo, PositionInfo},
-    enums::quant::QuantRuntimeMode,
+    enums::{
+        clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
+        quant::QuantRuntimeMode,
+    },
     types::{Bps, Price, Probability},
 };
 use rust_decimal::Decimal;
 
 use crate::{
     execution::{ExitSignalContext, ExitSignalEvaluator, ExitSignalVerdict},
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
+    },
     runtime_config::RuntimeConfigStore,
 };
 
@@ -76,6 +82,7 @@ pub struct ReinferenceSignalEvaluatorDeps<R> {
     pub reinferer: R,
     pub config: Arc<RuntimeConfigStore>,
     pub metrics: Arc<MetricsHub>,
+    pub audit: Arc<ExitSignalEvaluationEventWriter>,
 }
 
 /// Model-driven exit-signal evaluator using the score-degradation criterion.
@@ -83,6 +90,7 @@ pub struct ReinferenceSignalEvaluator<R> {
     reinferer: R,
     config: Arc<RuntimeConfigStore>,
     metrics: Arc<MetricsHub>,
+    audit: Arc<ExitSignalEvaluationEventWriter>,
 }
 
 impl<R> ReinferenceSignalEvaluator<R> {
@@ -92,7 +100,35 @@ impl<R> ReinferenceSignalEvaluator<R> {
             reinferer: deps.reinferer,
             config: deps.config,
             metrics: deps.metrics,
+            audit: deps.audit,
         }
+    }
+
+    /// Mirror one re-inference evaluation into the unified audit fact.
+    fn audit(&self, ctx: &ExitSignalContext<'_>, verdict: &ExitSignalVerdict, shadow: bool) {
+        let now_ms = ctx.now.timestamp_millis();
+        let ch_verdict: ChExitSignalVerdict = verdict.into();
+        self.audit.write(QuantExitSignalEvaluationEventRow {
+            event_time: now_ms,
+            order_intent_id: ctx.lot.order_intent_id.clone(),
+            position_id: ctx.lot.position_id.clone(),
+            market_id: ctx.lot.market_id.clone(),
+            token_id: ctx.lot.token_id.clone(),
+            evaluator_kind: ChExitSignalEvaluatorKind::Reinference,
+            verdict: ch_verdict,
+            model_version_id: Some(ctx.intent.model_version_id.clone()),
+            mark_price: ctx.mark_price.map(ChPrice::from),
+            entry_composite_score: ChProbability::from(
+                ctx.intent.exit_policy_json.entry_composite_score,
+            ),
+            fresh_composite_score: None,
+            exit_alpha_bps: None,
+            confidence: None,
+            target_cumulative_exit_pct: None,
+            shadow: u8::from(shadow),
+            detail: ch_verdict.as_str().to_owned(),
+            ingestion_time: now_ms,
+        });
     }
 }
 
@@ -196,6 +232,10 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
                 }
             }
         };
+
+        // Audit the model-determined verdict (pre-shadow-suppression) so shadow
+        // and live re-inference are both measurable ex-post.
+        self.audit(&ctx, &verdict, policy.signal_reinference.shadow_mode);
 
         if policy.signal_reinference.shadow_mode {
             return suppress_shadow_verdict(&self.metrics, &verdict);

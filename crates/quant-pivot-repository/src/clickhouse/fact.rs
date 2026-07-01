@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use clickhouse::{RowOwned, RowWrite};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::clickhouse::{
-    QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantFactorEventRow,
-    QuantFeatureEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-    QuantRecommendationEventRow, QuantSignalCandidateEventRow,
+    QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
+    QuantFactorEventRow, QuantFeatureEventRow, QuantPositionEventRow,
+    QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
+    QuantSignalCandidateEventRow,
 };
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 
@@ -149,6 +150,19 @@ impl QuantFactRepository for ChQuantFactRepository {
             .write_batch(
                 self.pool.client(),
                 "quant_recommendation_attribution_event",
+                rows,
+            )
+            .await
+    }
+
+    async fn insert_exit_signal_evaluation_events(
+        &self,
+        rows: Vec<QuantExitSignalEvaluationEventRow>,
+    ) -> Result<(), StorageError> {
+        self.write_manager
+            .write_batch(
+                self.pool.client(),
+                "quant_exit_signal_evaluation_event",
                 rows,
             )
             .await

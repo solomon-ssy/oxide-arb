@@ -16,6 +16,7 @@ use quant_pivot_models::{
         OrderIntentInfo, PositionExit, PositionInfo, SettlementRedeemLotWrite,
     },
     enums::{
+        clickhouse::ChQuantLedgerEventKind,
         execution::{ExitReason, ExitState, PositionLedgerState, SettlementRedeemState},
         quant::{ExecutionWalletKind, ExitSettlementMode, OutcomeSide, RedeemPolicy},
     },
@@ -863,14 +864,14 @@ impl SettlementRedeemService {
             if let Some(capital) = self.deps.capital.find_by_intent(intent_id).await? {
                 self.deps.capital_events.write(project_capital_event(
                     &capital,
-                    "settlement_redeem_confirmed",
+                    ChQuantLedgerEventKind::SettlementRedeemConfirmed,
                     now,
                 ));
             }
             if let Some(position) = self.deps.positions.find_by_intent(intent_id).await? {
                 self.deps.position_events.write(project_position_event(
                     &position,
-                    "settlement_redeem_confirmed",
+                    ChQuantLedgerEventKind::SettlementRedeemConfirmed,
                     now,
                 ));
             }
@@ -1132,8 +1133,8 @@ mod tests {
     use quant_pivot_models::enums::common::{OrderType, Side};
     use quant_pivot_models::enums::execution::OrderIntentKind;
     use quant_pivot_models::types::{
-        Bps, ContentHash, ExecutedPartialExitNodes, ModelVersionId, Probability, RecommendationId,
-        RuntimeConfigVersionId,
+        Bps, ContentHash, ExecutedPartialExitNodes, ModelVersionId, OpportunisticExitState,
+        Probability, RecommendationId, RuntimeConfigVersionId,
     };
     use quant_pivot_models::{
         domain::OrderIntentInfo,
@@ -1321,6 +1322,7 @@ mod tests {
             last_signal_recheck_at: None,
             executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
             pending_partial_exit_node_id: None,
+            opportunistic_exit_state: OpportunisticExitState::default(),
             created_at: now,
             updated_at: now,
         }

@@ -67,6 +67,8 @@ pub enum TaskId {
     CapitalAllocationEventsWriter,
     /// Best-effort analytics mirror for position-lot ledger events.
     PositionEventsWriter,
+    /// Best-effort analytics mirror for exit-signal evaluation audit events (06.1).
+    ExitSignalEvaluationEventsWriter,
 
     // ── Risk / periodic ───────────────────────────────────────────────
     RiskTick,
@@ -155,6 +157,7 @@ impl TaskId {
             | Self::RecommendationEventsWriter
             | Self::AttributionEventsWriter
             | Self::ExecutionEventsWriter
+            | Self::ExitSignalEvaluationEventsWriter
             | Self::CapitalAllocationEventsWriter
             | Self::PositionEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,

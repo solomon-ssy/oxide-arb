@@ -229,6 +229,26 @@ fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationRe
             detail: "must be greater than zero".to_owned(),
         });
     }
+    unit_ratio(
+        "quality_gate.sell.min_label_coverage",
+        &gate.sell.min_label_coverage,
+        report,
+    );
+    unit_ratio(
+        "quality_gate.sell.min_l2_book_fidelity_ratio",
+        &gate.sell.min_l2_book_fidelity_ratio,
+        report,
+    );
+    unit_ratio(
+        "quality_gate.sell.max_fallback_ratio",
+        &gate.sell.max_fallback_ratio,
+        report,
+    );
+    decimal(
+        "quality_gate.sell.min_exit_alpha_rank_ic",
+        &gate.sell.min_exit_alpha_rank_ic,
+        report,
+    );
 }
 
 fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -433,7 +453,40 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
         &config.execution.exit_monitor.signal_invalidation_ratio,
         report,
     );
+    validate_opportunistic_sell(config, report);
     validate_settlement_redeem(config, report);
+}
+
+fn validate_opportunistic_sell(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let policy = &config.execution.exit_monitor.opportunistic_sell;
+    unit_ratio(
+        "execution.exit_monitor.opportunistic_sell.min_confidence",
+        &policy.min_confidence,
+        report,
+    );
+    // The target cumulative exit fraction is capped at this value; a zero cap
+    // would make every opportunistic verdict a no-op, and > 1 is nonsensical.
+    half_open_unit(
+        "execution.exit_monitor.opportunistic_sell.max_sell_pct",
+        &policy.max_sell_pct,
+        report,
+    );
+    half_open_unit(
+        "execution.exit_monitor.opportunistic_sell.min_opportunistic_clip_pct",
+        &policy.min_opportunistic_clip_pct,
+        report,
+    );
+    unit_ratio(
+        "execution.exit_monitor.opportunistic_sell.min_p_exit_better",
+        &policy.min_p_exit_better,
+        report,
+    );
+    if policy.min_expected_alpha_bps < 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.exit_monitor.opportunistic_sell.min_expected_alpha_bps",
+            detail: "must be >= 0".to_owned(),
+        });
+    }
 }
 
 fn validate_settlement_redeem(config: &RuntimeConfig, report: &mut ConfigValidationReport) {

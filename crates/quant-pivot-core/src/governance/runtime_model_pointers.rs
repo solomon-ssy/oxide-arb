@@ -36,6 +36,10 @@ pub struct RuntimeModelPointerSync {
 }
 
 /// Switch the production active model pointer and optionally clear the shadow slot.
+///
+/// Routes onto the Buy-side (`active_model_version_id`) or Sell-side
+/// (`active_exit_model_version_id`) pointer by the published version's model
+/// family, so a Sell scorer publish never overwrites the Buy ranker pointer.
 pub async fn sync_production_active(
     deps: &RuntimeModelPointerSync,
     active: &ModelVersionId,
@@ -43,12 +47,41 @@ pub async fn sync_production_active(
     reason: &str,
     activated_by: &str,
 ) -> QuantResult<()> {
+    let is_exit = resolve_is_exit_scorer(deps, active).await?;
     let mut config = (*deps.runtime_config_apply.current()).clone();
-    config.model.active_model_version_id = Some(model_version_ref(active));
-    if clear_shadow {
-        config.model.shadow_model_version_id = None;
+    if is_exit {
+        config.model.active_exit_model_version_id = Some(model_version_ref(active));
+    } else {
+        config.model.active_model_version_id = Some(model_version_ref(active));
+        if clear_shadow {
+            config.model.shadow_model_version_id = None;
+        }
     }
     persist_and_apply(deps, config, reason, activated_by).await
+}
+
+/// Whether the version's model family scores the Sell-side hold-vs-exit decision.
+/// Fail-closed to the Buy pointer if the spec cannot be resolved (never silently
+/// wire an exit scorer as the entry ranker).
+async fn resolve_is_exit_scorer(
+    deps: &RuntimeModelPointerSync,
+    version_id: &ModelVersionId,
+) -> QuantResult<bool> {
+    let Some(version) = deps
+        .model_registry_repo
+        .find_model_version_by_id(version_id)
+        .await?
+    else {
+        return Ok(false);
+    };
+    let Some(spec) = deps
+        .model_registry_repo
+        .find_model_spec_by_id(&version.model_spec_id)
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(spec.model_family.is_exit_scorer())
 }
 
 /// Clear runtime-config model pointers that reference a retired version.
@@ -60,17 +93,14 @@ pub async fn sync_after_model_retire(
 ) -> QuantResult<()> {
     let current = deps.runtime_config_apply.current();
     let retired_ref = model_version_ref(retired);
-    let active_matches = current
-        .model
-        .active_model_version_id
-        .as_ref()
-        .is_some_and(|reference| reference.id == retired_ref.id);
-    let shadow_matches = current
-        .model
-        .shadow_model_version_id
-        .as_ref()
-        .is_some_and(|reference| reference.id == retired_ref.id);
-    if !active_matches && !shadow_matches {
+    let matches = |slot: &Option<ModelVersionRef>| {
+        slot.as_ref()
+            .is_some_and(|reference| reference.id == retired_ref.id)
+    };
+    let active_matches = matches(&current.model.active_model_version_id);
+    let shadow_matches = matches(&current.model.shadow_model_version_id);
+    let exit_active_matches = matches(&current.model.active_exit_model_version_id);
+    if !active_matches && !shadow_matches && !exit_active_matches {
         return Ok(());
     }
     let mut config = (*current).clone();
@@ -79,6 +109,9 @@ pub async fn sync_after_model_retire(
     }
     if shadow_matches {
         config.model.shadow_model_version_id = None;
+    }
+    if exit_active_matches {
+        config.model.active_exit_model_version_id = None;
     }
     persist_and_apply(deps, config, reason, activated_by).await
 }
@@ -91,12 +124,18 @@ pub async fn sync_shadow_candidate(
     activated_by: &str,
 ) -> QuantResult<()> {
     ensure_shadow_armable(deps, shadow).await?;
+    let is_exit = resolve_is_exit_scorer(deps, shadow).await?;
     deps.model_registry_repo
         .promote_model_to_shadow(shadow)
         .await?;
 
     let mut config = (*deps.runtime_config_apply.current()).clone();
-    config.model.shadow_model_version_id = Some(model_version_ref(shadow));
+    if is_exit {
+        // Exit scorer shadow is governed by `opportunistic_sell.shadow_mode`, not a
+        // separate runtime-config pointer.
+    } else {
+        config.model.shadow_model_version_id = Some(model_version_ref(shadow));
+    }
     persist_and_apply(deps, config, reason, activated_by).await
 }
 

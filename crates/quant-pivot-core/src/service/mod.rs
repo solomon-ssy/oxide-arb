@@ -12,6 +12,7 @@ pub mod market_selection;
 pub mod model_backed_reinferer;
 pub mod model_runner;
 pub mod model_training;
+pub mod opportunistic_sell;
 pub mod signal_reinference;
 pub mod system_status_nudge;
 pub mod training_dataset;

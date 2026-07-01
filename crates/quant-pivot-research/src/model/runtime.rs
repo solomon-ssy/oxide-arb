@@ -21,6 +21,7 @@ use crate::{
     features::{FeatureName, FeatureValue, SubstitutionAudit},
     model::{
         overlay::{WeightOverlay, WeightSource},
+        sell_scorer::SellScorerRuntime,
         signal::SignalCandidate,
     },
 };
@@ -228,6 +229,14 @@ pub trait ModelRuntimeFactory: Send + Sync {
         model_version: &ModelVersionInfo,
         overlay: Option<WeightOverlay>,
     ) -> QuantResult<Box<dyn QuantModelRuntime>>;
+
+    /// Load and validate a Sell-side hold-vs-exit scorer for a model version
+    /// (Phase 06.1). Same fail-closed hash + schema-binding checks as [`Self::load`],
+    /// but returns the exit-scorer runtime family; rejects a non-Sell artifact.
+    async fn load_sell_scorer(
+        &self,
+        model_version: &ModelVersionInfo,
+    ) -> QuantResult<Box<dyn SellScorerRuntime>>;
 }
 
 #[cfg(test)]

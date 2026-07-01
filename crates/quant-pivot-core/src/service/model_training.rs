@@ -20,7 +20,10 @@ use quant_pivot_models::{
         ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
     },
     runtime_config::sections::{FactorsConfig, ModelConfig},
-    types::{ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
+    types::{
+        ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId,
+        training::TrainingSampleSource,
+    },
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_models::{
@@ -32,12 +35,13 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    factors::FactorName,
+    factors::{FactorName, names as factor_names},
     model::{
         ClassicalKind, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
         ModelFamily, ModelTrainer, Regularization, ReturnModelSpec, ScoreMultiplierSpec,
-        SubstitutionConfidenceRules, TrainModelRequest, TrainedModelArtifact, TrainingObjective,
-        ValidationSpec, WeightedFactorTrainer,
+        SellScorerOutputSpec, SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest,
+        TrainSellScorerRequest, TrainedModelArtifact, TrainingObjective, ValidationSpec,
+        WeightedFactorTrainer,
     },
     training::{DatasetParquetCodec, TrainingExample},
 };
@@ -228,11 +232,15 @@ impl ModelTrainerService {
             factor_schema_hash: dataset.factor_schema_hash.clone(),
         };
 
-        let (artifact, metrics_json) = match input.model_family.classical_kind() {
-            None => self.train_weighted(header, input, examples).await?,
-            Some(kind) => {
-                self.train_classical(header, input, dataset, examples, kind)
-                    .await?
+        let (artifact, metrics_json) = if input.model_family.is_exit_scorer() {
+            self.train_sell_scorer(header, input, dataset, examples)?
+        } else {
+            match input.model_family.classical_kind() {
+                None => self.train_weighted(header, input, examples).await?,
+                Some(kind) => {
+                    self.train_classical(header, input, dataset, examples, kind)
+                        .await?
+                }
             }
         };
 
@@ -304,6 +312,83 @@ impl ModelTrainerService {
             },
         });
         Ok((trained.artifact, metrics_json))
+    }
+
+    /// Sell-side hold-vs-exit training path (Phase 06.1). Seeds over the market
+    /// factors plus the position-state pseudo-factors and fits the shared rank-IC
+    /// simplex against the `hold_vs_exit_alpha_bps` label.
+    fn train_sell_scorer(
+        &self,
+        header: ModelArtifactHeader,
+        input: &TrainModelInput,
+        dataset: &TrainingDatasetInfo,
+        examples: &[TrainingExample],
+    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+        if !examples
+            .iter()
+            .all(|example| example.sample_source == TrainingSampleSource::ExitDecision)
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "HoldVsExitWeighted training requires ExitDecision-only samples".to_owned(),
+            }
+            .into());
+        }
+        let seed_weights = Self::sell_seed_weights(examples);
+        let request = TrainSellScorerRequest {
+            examples: examples.to_vec(),
+            label: input.label.clone(),
+            seed_weights,
+            regularization: Regularization::default(),
+            validation: ValidationSpec {
+                folds: input.validation_folds.max(2),
+            },
+            header,
+            prediction_horizon_secs: self.config.model.prediction_horizon_secs,
+            output_spec: SellScorerOutputSpec::conservative(),
+            label_schema_hash: dataset.label_schema_hash.clone(),
+            required_features: Vec::new(),
+        };
+        let trained = SellScorerTrainer::new().train_sell_scorer(&request)?;
+        let metrics_json = serde_json::json!({
+            "in_sample": {
+                "objective_value": trained.in_sample_metrics.objective_value,
+                "summary": trained.in_sample_metrics.summary,
+            },
+            "validation": {
+                "mean_objective": trained.validation_metrics.mean_objective,
+                "fold_objectives": trained.validation_metrics.fold_objectives,
+                "sample_count": trained.validation_metrics.sample_count,
+            },
+        });
+        Ok((trained.artifact, metrics_json))
+    }
+
+    /// Seed the Sell scorer over the observed market factors plus the three
+    /// position-state pseudo-factors (uniform), so the trainer can weigh the
+    /// lot's own state alongside market factors.
+    fn sell_seed_weights(examples: &[TrainingExample]) -> Vec<FactorWeight> {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for example in examples {
+            for factor in &example.factor_values {
+                names.insert(factor.name.as_str().to_owned());
+            }
+        }
+        for pseudo in [
+            factor_names::POSITION_UNREALIZED_PNL,
+            factor_names::POSITION_TIME_IN_TRADE,
+            factor_names::POSITION_PEAK_DRAWDOWN,
+        ] {
+            names.insert(pseudo.as_str().to_owned());
+        }
+        let count = names.len().max(1);
+        let weight = Decimal::ONE / Decimal::from(count as u64);
+        names
+            .into_iter()
+            .map(|name| FactorWeight {
+                factor: FactorName::new(name),
+                weight,
+            })
+            .collect()
     }
 
     /// Derive the candidate factor seed: configured `factor_weights` if present,

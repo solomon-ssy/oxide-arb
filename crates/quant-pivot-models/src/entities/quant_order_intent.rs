@@ -7,7 +7,7 @@ use crate::{
     },
     types::{
         ContentHash, EntryOrderSpec, ExecutedPartialExitNodes, ExitPolicySpec, ModelVersionId,
-        OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
+        OpportunisticExitState, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -52,6 +52,8 @@ pub struct Model {
     pub executed_partial_exit_node_ids: ExecutedPartialExitNodes,
     #[sea_orm(column_type = "Text", nullable)]
     pub pending_partial_exit_node_id: Option<String>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub opportunistic_exit_state: OpportunisticExitState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

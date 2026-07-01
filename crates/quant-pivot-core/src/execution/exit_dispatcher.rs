@@ -19,17 +19,18 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, PositionExit,
-        PositionInfo,
+        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation,
+        OpportunisticExitAdvance, PositionExit, PositionInfo,
     },
     enums::{
+        clickhouse::ChQuantLedgerEventKind,
         common::Side,
         execution::{ExecutionOrderPhase, ExitReason, ExitState, ReconciliationEvidenceKind},
         quant::ExecutionOrderState,
     },
     types::{
         ExecutionOrderId, OrderIntentId, Price, RecommendationId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, Usd,
+        ReconciliationEvidenceChain, ReconciliationId, Shares, Usd,
     },
 };
 use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
@@ -57,6 +58,9 @@ pub struct ExitSubmitRequest {
     pub order: ExitOrderSpec,
     /// When `reason` is [`ExitReason::PartialExit`], the frozen node id being reduced.
     pub partial_exit_node_id: Option<String>,
+    /// When `reason` is [`ExitReason::Opportunistic`], the frozen entry-filled
+    /// denominator to persist so cumulative-fraction tracking stays stable.
+    pub opportunistic_denominator: Option<Shares>,
     /// Whether the market is a negative-risk market (venue signing context).
     pub neg_risk: bool,
 }
@@ -91,6 +95,7 @@ impl CoreExitDispatcher {
             reason,
             order,
             partial_exit_node_id,
+            opportunistic_denominator,
             neg_risk,
         } = request;
 
@@ -107,7 +112,7 @@ impl CoreExitDispatcher {
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
             recommendation_id.clone(),
-            "exit_submitted",
+            ChQuantLedgerEventKind::ExitSubmitted,
             Utc::now(),
         ));
 
@@ -137,8 +142,13 @@ impl CoreExitDispatcher {
             .await;
 
         // 4. Build the atomic ledger write + the confirmed realized PnL (if any).
-        let (write, realized_pnl) =
-            build_exit_ledger_write(&result, &lot, reason, &execution_order);
+        let (write, realized_pnl) = build_exit_ledger_write(
+            &result,
+            &lot,
+            reason,
+            &execution_order,
+            opportunistic_denominator,
+        );
 
         // 5. Feed the daily realized-loss dimension with the confirmed PnL.
         if let Some(pnl) = realized_pnl {
@@ -157,7 +167,7 @@ impl CoreExitDispatcher {
         self.deps.execution_events.write(project_execution_event(
             &recorded,
             recommendation_id,
-            "exit_submission_result",
+            ChQuantLedgerEventKind::ExitSubmissionResult,
             Utc::now(),
         ));
         self.deps.metrics.inc_exit_trigger(reason.as_str());
@@ -214,6 +224,7 @@ fn build_exit_ledger_write(
     lot: &PositionInfo,
     reason: ExitReason,
     execution_order: &ExecutionOrderInfo,
+    opportunistic_denominator: Option<Shares>,
 ) -> (ExitLedgerWrite, Option<Usd>) {
     let outcome = result.outcome;
     let venue_status = outcome.venue_order_status();
@@ -226,6 +237,8 @@ fn build_exit_ledger_write(
     let realized_pnl_usd = proceeds_usd - cost_basis;
     let fully_exited = filled >= lot.shares;
 
+    let opportunistic_advance = opportunistic_denominator
+        .map(|denominator_shares| OpportunisticExitAdvance { denominator_shares });
     let position_exit = |state: ExitState| ExitLedgerWrite {
         order_state: outcome_order_state(outcome),
         venue_order_id: result.venue_order_id.clone(),
@@ -246,6 +259,7 @@ fn build_exit_ledger_write(
         fully_exited,
         revert_to_open: false,
         reconciliation: Some(exit_reconciliation_row(result, execution_order, outcome)),
+        opportunistic_advance: opportunistic_advance.clone(),
     };
 
     match outcome {
@@ -263,23 +277,7 @@ fn build_exit_ledger_write(
         ),
         // Resting sell limit: stays Submitted, no position change; recon sweep
         // polls it (no recon row, like a resting entry order).
-        VenueOutcome::Open => (
-            ExitLedgerWrite {
-                order_state: ExecutionOrderState::Submitted,
-                venue_order_id: result.venue_order_id.clone(),
-                venue_status,
-                filled_at: None,
-                cancelled_at: None,
-                error_message: None,
-                exit_state: ExitState::OrderSubmitted,
-                exit_reason: reason,
-                position_exit: None,
-                fully_exited: false,
-                revert_to_open: false,
-                reconciliation: None,
-            },
-            None,
-        ),
+        VenueOutcome::Open => (resting_open_exit_write(result, reason), None),
         // Clean rejection / cancellation: revert the lot to Open and re-monitor.
         VenueOutcome::Rejected => (
             failed_exit_write(
@@ -302,23 +300,55 @@ fn build_exit_ledger_write(
             None,
         ),
         // Unconfirmed: hold the position, enqueue recon (fail-closed). No PnL.
-        VenueOutcome::Ambiguous => (
-            ExitLedgerWrite {
-                order_state: ExecutionOrderState::Ambiguous,
-                venue_order_id: result.venue_order_id.clone(),
-                venue_status: None,
-                filled_at: None,
-                cancelled_at: None,
-                error_message: result.detail.clone(),
-                exit_state: ExitState::OrderSubmitted,
-                exit_reason: reason,
-                position_exit: None,
-                fully_exited: false,
-                revert_to_open: false,
-                reconciliation: Some(exit_reconciliation_row(result, execution_order, outcome)),
-            },
-            None,
-        ),
+        VenueOutcome::Ambiguous => (ambiguous_exit_write(result, execution_order, reason), None),
+    }
+}
+
+/// Ledger write for a resting `Open` sell limit: stays `Submitted`, no position
+/// change; the recon sweep polls it (no recon row, like a resting entry order).
+fn resting_open_exit_write(result: &VenueSubmitResult, reason: ExitReason) -> ExitLedgerWrite {
+    ExitLedgerWrite {
+        order_state: ExecutionOrderState::Submitted,
+        venue_order_id: result.venue_order_id.clone(),
+        venue_status: VenueOutcome::Open.venue_order_status(),
+        filled_at: None,
+        cancelled_at: None,
+        error_message: None,
+        exit_state: ExitState::OrderSubmitted,
+        exit_reason: reason,
+        position_exit: None,
+        fully_exited: false,
+        revert_to_open: false,
+        reconciliation: None,
+        opportunistic_advance: None,
+    }
+}
+
+/// Ledger write for an unconfirmed (`Ambiguous`) venue response: hold the
+/// position untouched and enqueue reconciliation (fail-closed; no `PnL`).
+fn ambiguous_exit_write(
+    result: &VenueSubmitResult,
+    execution_order: &ExecutionOrderInfo,
+    reason: ExitReason,
+) -> ExitLedgerWrite {
+    ExitLedgerWrite {
+        order_state: ExecutionOrderState::Ambiguous,
+        venue_order_id: result.venue_order_id.clone(),
+        venue_status: None,
+        filled_at: None,
+        cancelled_at: None,
+        error_message: result.detail.clone(),
+        exit_state: ExitState::OrderSubmitted,
+        exit_reason: reason,
+        position_exit: None,
+        fully_exited: false,
+        revert_to_open: false,
+        reconciliation: Some(exit_reconciliation_row(
+            result,
+            execution_order,
+            VenueOutcome::Ambiguous,
+        )),
+        opportunistic_advance: None,
     }
 }
 
@@ -344,6 +374,7 @@ fn failed_exit_write(
         fully_exited: false,
         revert_to_open: true,
         reconciliation: Some(exit_reconciliation_row(result, execution_order, outcome)),
+        opportunistic_advance: None,
     }
 }
 

@@ -168,6 +168,9 @@ mod tests {
                 reference: "fixture".to_owned(),
                 observed_at: as_of + Duration::seconds(source_offset_secs),
             }],
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
         }
     }
 

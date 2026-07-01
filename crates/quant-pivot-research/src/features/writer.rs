@@ -56,8 +56,8 @@ pub fn feature_events(
                 feature_schema_version: u32::try_from(schema_version).unwrap_or(0),
                 feature_name: name.as_str().to_owned(),
                 feature_value: ChDecimal64::from(decimal),
-                value_kind: kind.as_i8(),
-                source_kind: source_kind.as_wire().to_owned(),
+                value_kind: kind.into(),
+                source_kind: source_kind.into(),
                 staleness_ms: vector.staleness_ms,
                 ingestion_time,
             })

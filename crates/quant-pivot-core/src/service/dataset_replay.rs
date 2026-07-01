@@ -166,6 +166,9 @@ pub async fn rematerialize_training_examples(
                 factor_values,
                 labels: meta.labels.clone(),
                 source_refs: vector.source_refs.clone(),
+                lot_context: None,
+                position_state: None,
+                book_fidelity: None,
             });
         }
     }

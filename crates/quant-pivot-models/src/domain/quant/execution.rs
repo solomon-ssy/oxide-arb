@@ -19,8 +19,8 @@ use crate::{
     },
     types::{
         ContentHash, EntryOrderSpec, ExecutedPartialExitNodes, ExecutionOrderId, ExitPolicySpec,
-        MarketId, ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId,
-        RuntimeConfigVersionId, Shares, TokenId, Usd,
+        MarketId, ModelVersionId, OpportunisticExitState, OrderId, OrderIntentId, Price,
+        RecommendationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -58,6 +58,7 @@ pub struct OrderIntentInfo {
     pub last_signal_recheck_at: Option<DateTime<Utc>>,
     pub executed_partial_exit_node_ids: ExecutedPartialExitNodes,
     pub pending_partial_exit_node_id: Option<String>,
+    pub opportunistic_exit_state: OpportunisticExitState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -69,7 +70,7 @@ info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
     admission_trace_ref, entry_order_json, exit_policy_json, risk_envelope_hash,
     expires_at, exit_state, exit_reason, next_check_at, peak_mark_price,
     last_signal_recheck_at, executed_partial_exit_node_ids, pending_partial_exit_node_id,
-    created_at, updated_at,
+    opportunistic_exit_state, created_at, updated_at,
 });
 
 /// Insert payload for `quant_order_intent`.
@@ -303,4 +304,18 @@ pub struct ExitLedgerWrite {
     pub revert_to_open: bool,
     /// Reconciliation row to enqueue (`None` for a resting `Open` exit order).
     pub reconciliation: Option<NewReconciliation>,
+    /// Opportunistic-Sell cumulative advance to persist on the intent (Phase
+    /// 06.1). Present only for an opportunistic exit fill: freezes the
+    /// denominator (if unset) and adds the *actual* filled shares to the lot's
+    /// cumulative opportunistically-sold total, in the same transaction as the
+    /// position exit — so repeated ticks never re-sell the same fraction.
+    pub opportunistic_advance: Option<OpportunisticExitAdvance>,
+}
+
+/// The opportunistic-Sell cumulative-fraction advance recorded on an exit fill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpportunisticExitAdvance {
+    /// The frozen entry-filled-shares denominator the target fraction is measured
+    /// against (persisted on first opportunistic exit, then stable).
+    pub denominator_shares: Shares,
 }

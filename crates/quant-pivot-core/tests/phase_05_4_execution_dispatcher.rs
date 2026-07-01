@@ -67,9 +67,10 @@ use quant_pivot_models::{
     runtime_config::{DecimalString, ExecutionBreakerConfig, RuntimeConfig},
     types::{
         Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, EventId, ExecutedPartialExitNodes,
-        ExecutionOrderId, ExitPolicySpec, MarketId, ModelSpecId, ModelVersionId, OrderId,
-        OrderIntentId, Price, RecommendationId, RecommendationReportId, ReconciliationId,
-        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
+        ExecutionOrderId, ExitPolicySpec, MarketId, ModelSpecId, ModelVersionId,
+        OpportunisticExitState, OrderId, OrderIntentId, Price, RecommendationId,
+        RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, SchemaVersion, Shares,
+        TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -164,6 +165,7 @@ fn intent(
         last_signal_recheck_at: None,
         executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
         pending_partial_exit_node_id: None,
+        opportunistic_exit_state: OpportunisticExitState::default(),
         created_at: now(),
         updated_at: now(),
     }
@@ -925,6 +927,13 @@ struct StubModelRegistry;
 impl ModelRegistryRepository for StubModelRegistry {
     async fn create_model_spec(&self, _: NewModelSpec) -> Result<ModelSpecInfo, StorageError> {
         unimplemented!()
+    }
+
+    async fn find_model_spec_by_id(
+        &self,
+        _: &ModelSpecId,
+    ) -> Result<Option<ModelSpecInfo>, StorageError> {
+        Ok(None)
     }
 
     async fn create_model_version(

@@ -42,7 +42,7 @@ use quant_pivot_models::{
         quant::{ExitSettlementMode, ExitTriggerKind},
     },
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
-    types::{ExitPolicySpec, PartialExitNode, Price, Shares, TokenId},
+    types::{ExitPolicySpec, OpportunisticExitState, PartialExitNode, Price, Shares, TokenId},
 };
 use rust_decimal::Decimal;
 
@@ -112,8 +112,14 @@ pub enum ExitSignalVerdict {
     /// The entry thesis no longer holds — force a full exit (high priority).
     ThesisInvalidated { detail: String },
     /// The thesis still holds, but the model ranks selling now as advantageous
-    /// (advisory, lowest non-hold tier). Implemented by the Phase 6 Sell scorer.
-    OpportunisticSell { sell_pct: Decimal, detail: String },
+    /// (advisory, lowest non-hold tier). `target_cumulative_exit_pct` is the
+    /// desired cumulative fraction of the lot's opportunistic denominator (the
+    /// entry-filled shares frozen at first evaluation); the ladder sells only the
+    /// incremental delta beyond what opportunistic exits already realized.
+    OpportunisticSell {
+        target_cumulative_exit_pct: Decimal,
+        detail: String,
+    },
     /// The thesis holds and there is no opportunistic edge.
     Holds,
     /// The signal could not be evaluated (missing features / model / stale data).
@@ -123,6 +129,7 @@ pub enum ExitSignalVerdict {
 }
 
 /// Context handed to the model-driven exit-signal evaluator.
+#[derive(Clone, Copy)]
 pub struct ExitSignalContext<'a> {
     /// The governed intent (carries the frozen entry thesis baselines).
     pub intent: &'a OrderIntentInfo,
@@ -145,6 +152,50 @@ pub trait ExitSignalEvaluator: Send + Sync {
     /// free and fail-safe (return [`ExitSignalVerdict::Indeterminate`] rather
     /// than erroring when it cannot evaluate).
     async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict;
+}
+
+/// Composes thesis-invalidation re-inference (Phase 06.0) with opportunistic
+/// Sell scoring (Phase 06.1) behind the single [`ExitSignalEvaluator`] seam.
+///
+/// Invalidation is strictly prior: re-inference runs first, and only when it
+/// **holds** does opportunistic scoring run. A `ThesisInvalidated` short-circuits
+/// (the ladder forces a full exit), and an `Indeterminate` also short-circuits —
+/// this includes the case where re-inference is disabled or the intent is not
+/// auto-execution — so opportunistic advisory selling is gated on thesis
+/// validity being checkable and holding. Fail-safe throughout: neither path can
+/// error, and any inability to evaluate resolves to Hold.
+pub struct CompositeExitSignalEvaluator {
+    reinference: Arc<dyn ExitSignalEvaluator>,
+    opportunistic: Arc<dyn ExitSignalEvaluator>,
+}
+
+impl CompositeExitSignalEvaluator {
+    /// Compose the invalidation-first re-inference evaluator with the
+    /// opportunistic Sell evaluator.
+    #[must_use]
+    pub fn new(
+        reinference: Arc<dyn ExitSignalEvaluator>,
+        opportunistic: Arc<dyn ExitSignalEvaluator>,
+    ) -> Self {
+        Self {
+            reinference,
+            opportunistic,
+        }
+    }
+}
+
+#[async_trait]
+impl ExitSignalEvaluator for CompositeExitSignalEvaluator {
+    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict {
+        // Only when the thesis still holds does opportunistic scoring get a say;
+        // `ThesisInvalidated` (forced exit) and `Indeterminate` (thesis validity
+        // unknown / re-inference disabled) short-circuit unchanged — as does a
+        // stray `OpportunisticSell`, which re-inference never emits.
+        match self.reinference.evaluate(ctx).await {
+            ExitSignalVerdict::Holds => self.opportunistic.evaluate(ctx).await,
+            other => other,
+        }
+    }
 }
 
 /// The concrete sell order an exit decision will submit to the venue.
@@ -173,6 +224,11 @@ pub enum ExitDecision {
         order: ExitOrderSpec,
         /// Set when the trigger is a scaled partial-exit node (for one-shot tracking).
         partial_exit_node_id: Option<String>,
+        /// Set for an opportunistic-Sell exit: the frozen entry-filled-shares
+        /// denominator to persist so cumulative-fraction tracking stays stable
+        /// across ticks. The dispatcher adds the *actual* filled shares to the
+        /// lot's cumulative opportunistic total.
+        opportunistic_denominator: Option<Shares>,
     },
     /// Route to manual operator handling (fail-closed: no auto submission).
     RequireManualReview { reason: ExitReason },
@@ -204,28 +260,14 @@ pub struct ExitMonitorInput {
     pub signal: ExitSignalVerdict,
     /// Partial-exit node ids already settled on this lot (one-shot nodes).
     pub executed_partial_exit_node_ids: Vec<String>,
+    /// Per-lot opportunistic scale-out state (frozen denominator + cumulative
+    /// shares already opportunistically sold), for idempotent delta sells.
+    pub opportunistic_exit_state: OpportunisticExitState,
+    /// Minimum incremental fraction (of the opportunistic denominator) worth
+    /// submitting; smaller deltas hold to avoid dust exits / fee churn.
+    pub min_opportunistic_clip_pct: Decimal,
     /// Evaluation time.
     pub now: DateTime<Utc>,
-}
-
-/// Exit-monitor boundary: produce an [`ExitDecision`] for one open lot.
-#[async_trait]
-pub trait ExitMonitor: Send + Sync {
-    async fn evaluate(&self, input: ExitMonitorInput) -> ExitDecision;
-}
-
-/// Production exit monitor — a thin async wrapper that delegates to the pure
-/// [`decide_exit`].
-///
-/// The model-driven signal is resolved upstream (the worker) and carried on
-/// [`ExitMonitorInput::signal`], keeping the decision deterministic.
-pub struct DefaultExitMonitor;
-
-#[async_trait]
-impl ExitMonitor for DefaultExitMonitor {
-    async fn evaluate(&self, input: ExitMonitorInput) -> ExitDecision {
-        decide_exit(&input)
-    }
 }
 
 /// Basis-point denominator for percentage conversions.
@@ -311,6 +353,7 @@ fn submit_or_manual(
             reason,
             order: sell_order(&input.lot.token_id, shares, limit, OrderType::Gtc),
             partial_exit_node_id: None,
+            opportunistic_denominator: None,
         },
         _ => ExitDecision::RequireManualReview { reason },
     }
@@ -339,6 +382,7 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
                         reason: ExitReason::KillSwitchEmergency,
                         order: sell_order(&lot.token_id, shares, limit, OrderType::Fok),
                         partial_exit_node_id: None,
+                        opportunistic_denominator: None,
                     }
                 }
                 // Cannot price the liquidation → fail closed to manual.
@@ -425,19 +469,75 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
         );
     }
 
-    // 10. Opportunistic Sell (advisory; Phase 6 Sell scorer).
-    if let ExitSignalVerdict::OpportunisticSell { sell_pct, .. } = &input.signal {
-        let node_shares = (shares * *sell_pct).min(shares);
-        return submit_or_manual(
-            input,
-            ExitReason::Opportunistic,
-            node_shares,
-            input.mark_price,
-        );
+    // 10. Opportunistic Sell (advisory; Phase 6 Sell scorer). Idempotent
+    //     scale-out: the verdict is a *target cumulative* fraction of a frozen
+    //     denominator, so repeated ticks at the same target only ever sell the
+    //     incremental delta — never re-firing the whole fraction each tick.
+    if let ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct,
+        ..
+    } = &input.signal
+    {
+        if let Some((delta, denominator)) = opportunistic_delta(input, *target_cumulative_exit_pct)
+        {
+            return submit_or_manual_opportunistic(input, delta, denominator);
+        }
+        return ExitDecision::Hold;
     }
 
     // 11. Otherwise hold and keep monitoring.
     ExitDecision::Hold
+}
+
+/// The incremental opportunistic sell quantity and the frozen denominator, or
+/// `None` when nothing is due. The denominator is frozen at entry fill
+/// (`record_submission_result`) to venue-confirmed shares; without it the ladder
+/// fail-closes to hold. The delta is capped at the shares still open, and held
+/// when below the min clip.
+fn opportunistic_delta(input: &ExitMonitorInput, target_pct: Decimal) -> Option<(Shares, Shares)> {
+    let state = &input.opportunistic_exit_state;
+    let denominator = state.denominator_shares?;
+    if !denominator.is_positive() {
+        return None;
+    }
+    let target = target_pct.clamp(Decimal::ZERO, Decimal::ONE);
+    let desired = denominator.inner() * target;
+    let delta = desired - state.cumulative_sold_shares.inner();
+    let min_clip = denominator.inner() * input.min_opportunistic_clip_pct;
+    if delta <= Decimal::ZERO || delta < min_clip {
+        return None;
+    }
+    // Never sell more than remains open on the lot.
+    let sell = delta.min(input.lot.shares.inner());
+    if sell <= Decimal::ZERO {
+        return None;
+    }
+    Some((Shares::new(sell), denominator))
+}
+
+/// Submit-or-manual for an opportunistic exit, carrying the frozen denominator
+/// so the dispatcher can persist the cumulative-sold advance on fill.
+fn submit_or_manual_opportunistic(
+    input: &ExitMonitorInput,
+    shares: Shares,
+    denominator: Shares,
+) -> ExitDecision {
+    if !input.kill_switch.allows_auto_exit() {
+        return ExitDecision::RequireManualReview {
+            reason: ExitReason::Opportunistic,
+        };
+    }
+    match input.mark_price {
+        Some(limit) if shares.is_positive() => ExitDecision::SubmitExitOrder {
+            reason: ExitReason::Opportunistic,
+            order: sell_order(&input.lot.token_id, shares, limit, OrderType::Gtc),
+            partial_exit_node_id: None,
+            opportunistic_denominator: Some(denominator),
+        },
+        _ => ExitDecision::RequireManualReview {
+            reason: ExitReason::Opportunistic,
+        },
+    }
 }
 
 /// Like [`submit_or_manual`] but carries the partial-exit node id when submitting.
@@ -456,6 +556,7 @@ fn submit_or_manual_with_node(
             reason,
             order: sell_order(&input.lot.token_id, shares, limit, OrderType::Gtc),
             partial_exit_node_id,
+            opportunistic_denominator: None,
         },
         _ => ExitDecision::RequireManualReview { reason },
     }

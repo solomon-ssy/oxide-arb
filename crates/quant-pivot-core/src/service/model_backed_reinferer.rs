@@ -18,13 +18,16 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{ModelRegistryRepository, RuntimeConfigVersionRepository};
 use quant_pivot_research::{
-    factors::FactorEngine,
+    factors::{FactorEngine, MarketFactorOutcome},
     features::{
         ConfiguredFeatureBuilder, FeatureSchema, FeatureVector, MarketWindowSnapshot, PitView,
         merged_required_features,
     },
     hashing::ResearchHasher,
-    model::{ActiveSchemaBinding, ModelRuntimeFactoryBuilder, QuantModelRuntime, SignalCandidate},
+    model::{
+        ActiveSchemaBinding, ModelRuntimeFactoryBuilder, ModelRuntimeOutput, QuantModelRuntime,
+        SignalCandidate,
+    },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use rust_decimal::Decimal;
@@ -193,25 +196,27 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
     }
 }
 
-struct LiveFeatureBuildRequest<'a> {
-    pit: &'a Arc<dyn PointInTimeDataSource>,
-    window_provider: &'a FeatureWindowProvider,
-    market: &'a SelectedMarket,
-    features: &'a FeaturesConfig,
-    data_quality: &'a DataQualityConfig,
-    requirements: &'a ModelFeatureRequirements,
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
-    liquidity_cap_usd: Usd,
+/// Inputs to build one lot's live feature vector for exit-side re-scoring.
+/// Shared by thesis-invalidation re-inference and the opportunistic Sell scorer.
+pub(crate) struct LiveFeatureBuildRequest<'a> {
+    pub pit: &'a Arc<dyn PointInTimeDataSource>,
+    pub window_provider: &'a FeatureWindowProvider,
+    pub market: &'a SelectedMarket,
+    pub features: &'a FeaturesConfig,
+    pub data_quality: &'a DataQualityConfig,
+    pub requirements: &'a ModelFeatureRequirements,
+    pub as_of: DateTime<Utc>,
+    pub source_delay: Duration,
+    pub liquidity_cap_usd: Usd,
 }
 
 async fn infer_lot(
     runtime: &dyn QuantModelRuntime,
     market: &SelectedMarket,
     vector: &FeatureVector,
-    outcome: &quant_pivot_research::factors::MarketFactorOutcome,
+    outcome: &MarketFactorOutcome,
     as_of: DateTime<Utc>,
-) -> QuantResult<quant_pivot_research::model::ModelRuntimeOutput> {
+) -> QuantResult<ModelRuntimeOutput> {
     let model_run_id = ModelRunId::from_v7();
     let input = build_runtime_input(
         runtime,
@@ -224,10 +229,10 @@ async fn infer_lot(
     runtime.infer_batch(input).await
 }
 
-fn factor_outcome(
+pub(crate) fn factor_outcome(
     vector: &FeatureVector,
     config: &RuntimeConfig,
-) -> QuantResult<quant_pivot_research::factors::MarketFactorOutcome> {
+) -> QuantResult<MarketFactorOutcome> {
     let factor_engine = FactorEngine::new(&config.factors, &config.features);
     let outcomes =
         factor_engine.compute_all_batch(std::slice::from_ref(vector), &config.factors)?;
@@ -269,8 +274,8 @@ async fn resolve_frozen_config(
     }
 }
 
-/// Build the [`ActiveSchemaBinding`] from a frozen config snapshot.
-fn schema_binding(
+/// Build the [`ActiveSchemaBinding`] from a config snapshot.
+pub(crate) fn schema_binding(
     features: &FeaturesConfig,
     factors: &FactorsConfig,
 ) -> QuantResult<ActiveSchemaBinding> {
@@ -280,8 +285,9 @@ fn schema_binding(
     })
 }
 
-/// Load-time policy for the intent-frozen model on the exit path.
-fn exit_model_load_ok(version: &ModelVersionInfo) -> Result<(), String> {
+/// Load-time policy for a model version on the exit path (shared by
+/// thesis-invalidation re-inference and the opportunistic Sell scorer).
+pub(crate) fn exit_model_load_ok(version: &ModelVersionInfo) -> Result<(), String> {
     match version.publication_status {
         PublicationStatus::Published | PublicationStatus::Retired => Ok(()),
         PublicationStatus::Candidate | PublicationStatus::Shadow => quality_gate_passed_ok(version),
@@ -331,7 +337,7 @@ pub fn selected_market_for_lot(
     })
 }
 
-async fn build_live_feature_vector(
+pub(crate) async fn build_live_feature_vector(
     request: &LiveFeatureBuildRequest<'_>,
 ) -> QuantResult<Option<FeatureVector>> {
     let builder = ConfiguredFeatureBuilder::new(request.features);
@@ -394,7 +400,7 @@ async fn load_window(
     })
 }
 
-fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<Usd>> {
+pub(crate) fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<Usd>> {
     let max_single = parse_config_decimal(
         "portfolio.budget.max_single_recommendation_usd",
         &config.portfolio.budget.max_single_recommendation_usd.value,

@@ -1791,6 +1791,29 @@ async fn fill_entry_lot(
         .expect("record entry fill");
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn entry_fill_freezes_opportunistic_denominator() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let intents = PgOrderIntentRepository::new(db.clone());
+
+    fill_entry_lot(&submission, &ids, &intent_id).await;
+
+    let intent = intents
+        .find_by_id(&intent_id)
+        .await
+        .expect("find intent")
+        .expect("intent row");
+    assert_eq!(
+        intent.opportunistic_exit_state.denominator_shares,
+        Some(Shares::new(dec!(100)))
+    );
+}
+
 fn exit_order(
     intent_id: &OrderIntentId,
     ids: &TxnIds,
@@ -1869,6 +1892,7 @@ async fn exit_full_releases_capital_with_realized_pnl() {
                 fully_exited: true,
                 revert_to_open: false,
                 reconciliation: None,
+                opportunistic_advance: None,
             },
         )
         .await
@@ -1934,6 +1958,7 @@ async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
                 fully_exited: false,
                 revert_to_open: false,
                 reconciliation: None,
+                opportunistic_advance: None,
             },
         )
         .await

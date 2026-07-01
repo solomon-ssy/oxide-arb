@@ -12,9 +12,15 @@ use crate::{
 };
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{NewPosition, Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery},
-    entities::quant_position,
-    enums::execution::PositionLedgerState,
+    domain::{
+        ExitTrainingLotRow, LotExitEventRow, NewPosition, Paginated, PositionExit, PositionFill,
+        PositionInfo, PositionListQuery,
+    },
+    entities::{quant_execution_order, quant_order_intent, quant_position},
+    enums::{
+        execution::{ExecutionOrderPhase, PositionLedgerState},
+        quant::ExecutionOrderState,
+    },
     types::{MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
@@ -27,6 +33,11 @@ use sea_orm::{
 /// Position-lot states still considered "open" (subject to exit monitoring).
 const OPEN_STATES: [PositionLedgerState; 2] =
     [PositionLedgerState::Open, PositionLedgerState::Closing];
+
+const CLOSED_STATES: [PositionLedgerState; 2] =
+    [PositionLedgerState::Closed, PositionLedgerState::Settled];
+
+const DEFAULT_HOLD_HORIZON_SECS: u64 = 86_400;
 
 /// Postgres-backed current-position ledger repository.
 pub struct PgPositionRepository {
@@ -142,6 +153,76 @@ impl PositionRepository for PgPositionRepository {
         Ok(Usd::new(
             row.and_then(|row| row.total).unwrap_or(Decimal::ZERO),
         ))
+    }
+
+    async fn find_exit_training_lots(
+        &self,
+        closed_from: chrono::DateTime<chrono::Utc>,
+        closed_to: chrono::DateTime<chrono::Utc>,
+        limit: u64,
+    ) -> Result<Vec<ExitTrainingLotRow>, StorageError> {
+        let rows = quant_position::Entity::find()
+            .filter(quant_position::Column::State.is_in(CLOSED_STATES))
+            .filter(quant_position::Column::ClosedAt.gte(closed_from))
+            .filter(quant_position::Column::ClosedAt.lt(closed_to))
+            .order_by_desc(quant_position::Column::ClosedAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+
+        let mut lots = Vec::with_capacity(rows.len());
+        for row in rows {
+            let position = PositionInfo::from(row);
+            let Some(closed_at) = position.closed_at else {
+                continue;
+            };
+            let Some(intent) =
+                quant_order_intent::Entity::find_by_id(position.order_intent_id.clone())
+                    .one(&self.db)
+                    .await
+                    .map_err(StorageError::from)?
+            else {
+                continue;
+            };
+            let orders = quant_execution_order::Entity::find()
+                .filter(
+                    quant_execution_order::Column::OrderIntentId
+                        .eq(position.order_intent_id.clone()),
+                )
+                .all(&self.db)
+                .await
+                .map_err(StorageError::from)?;
+            let Some(entry_shares) = resolve_entry_shares(&intent, &orders) else {
+                continue;
+            };
+            let avg_price = resolve_entry_avg_price(&position, &orders);
+            if avg_price.is_zero() {
+                continue;
+            }
+            let exit_events = exit_events_from_orders(&orders);
+            let entry_cost = avg_price.inner() * entry_shares.inner();
+            let total_net_proceeds =
+                Usd::new((entry_cost + position.realized_pnl_usd.inner()).max(Decimal::ZERO));
+            lots.push(ExitTrainingLotRow {
+                order_intent_id: position.order_intent_id,
+                position_id: position.position_id,
+                market_id: position.market_id,
+                token_id: position.token_id,
+                opened_at: position.opened_at,
+                closed_at,
+                entry_shares,
+                avg_price,
+                peak_mark_price: intent.peak_mark_price,
+                max_hold_secs: intent
+                    .exit_policy_json
+                    .max_hold_secs
+                    .unwrap_or(DEFAULT_HOLD_HORIZON_SECS),
+                total_net_proceeds,
+                exit_events,
+            });
+        }
+        Ok(lots)
     }
 }
 
@@ -351,6 +432,61 @@ fn price_from_cost_and_shares(cost_usd: Usd, shares: Shares) -> Result<Price, St
         ));
     }
     Ok(Price::new(price))
+}
+
+fn filled_entry_order(
+    orders: &[quant_execution_order::Model],
+) -> Option<&quant_execution_order::Model> {
+    orders.iter().find(|order| {
+        order.order_phase == ExecutionOrderPhase::Entry
+            && matches!(
+                order.state,
+                ExecutionOrderState::Filled | ExecutionOrderState::PartiallyFilled
+            )
+    })
+}
+
+fn resolve_entry_shares(
+    intent: &quant_order_intent::Model,
+    orders: &[quant_execution_order::Model],
+) -> Option<Shares> {
+    if let Some(shares) = intent.opportunistic_exit_state.denominator_shares {
+        return Some(shares);
+    }
+    filled_entry_order(orders).map(|order| order.shares)
+}
+
+fn resolve_entry_avg_price(
+    position: &PositionInfo,
+    orders: &[quant_execution_order::Model],
+) -> Price {
+    if !position.avg_price.is_zero() {
+        return position.avg_price;
+    }
+    filled_entry_order(orders).map_or(Price::ZERO, |order| order.price)
+}
+
+fn exit_events_from_orders(orders: &[quant_execution_order::Model]) -> Vec<LotExitEventRow> {
+    let mut events: Vec<LotExitEventRow> = orders
+        .iter()
+        .filter(|order| {
+            order.order_phase == ExecutionOrderPhase::Exit
+                && matches!(
+                    order.state,
+                    ExecutionOrderState::Filled | ExecutionOrderState::PartiallyFilled
+                )
+        })
+        .filter_map(|order| {
+            let at = order.filled_at.or(Some(order.updated_at))?;
+            Some(LotExitEventRow {
+                at,
+                shares: order.shares,
+                net_proceeds: Usd::new(order.shares.inner() * order.price.inner()),
+            })
+        })
+        .collect();
+    events.sort_by_key(|event| event.at);
+    events
 }
 
 fn page_condition(query: &PositionListQuery) -> Condition {

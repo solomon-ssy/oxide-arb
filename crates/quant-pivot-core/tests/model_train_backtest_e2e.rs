@@ -190,6 +190,9 @@ fn examples() -> Vec<TrainingExample> {
                     is_resolved: true,
                 }],
                 source_refs: Vec::new(),
+                lot_context: None,
+                position_state: None,
+                book_fidelity: None,
             });
         }
     }

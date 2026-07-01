@@ -31,8 +31,9 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalAllocationInfo, ConfirmSettlementRedeem, MarketInfo, NewSettlementRedeem, Paginated,
-        PositionInfo, SettlementRedeemInfo, SettlementRedeemListQuery, SettlementRedeemLotInfo,
+        CapitalAllocationInfo, ConfirmSettlementRedeem, ExitTrainingLotRow, MarketInfo,
+        NewSettlementRedeem, Paginated, PositionInfo, SettlementRedeemInfo,
+        SettlementRedeemListQuery, SettlementRedeemLotInfo,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -45,8 +46,8 @@ use quant_pivot_models::{
     runtime_config::RuntimeConfig,
     types::{
         Bps, EntryOrderSpec, EventId, ExecutedPartialExitNodes, ExitPolicySpec, MarketId,
-        ModelVersionId, OrderIntentId, PositionId, Price, RecommendationId, RecommendationReportId,
-        RuntimeConfigVersionId, SettlementRedeemId, Shares, TokenId, Usd,
+        ModelVersionId, OpportunisticExitState, OrderIntentId, PositionId, Price, RecommendationId,
+        RecommendationReportId, RuntimeConfigVersionId, SettlementRedeemId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -128,6 +129,7 @@ fn intent(redeem_policy: RedeemPolicy) -> quant_pivot_models::domain::OrderInten
         last_signal_recheck_at: None,
         executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
         pending_partial_exit_node_id: None,
+        opportunistic_exit_state: OpportunisticExitState::default(),
         created_at: now(),
         updated_at: now(),
     }
@@ -211,6 +213,15 @@ impl PositionRepository for StubPositions {
 
     async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError> {
         Ok(Usd::ZERO)
+    }
+
+    async fn find_exit_training_lots(
+        &self,
+        _: chrono::DateTime<Utc>,
+        _: chrono::DateTime<Utc>,
+        _: u64,
+    ) -> Result<Vec<ExitTrainingLotRow>, StorageError> {
+        Ok(Vec::new())
     }
 }
 

@@ -24,38 +24,48 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        FeatureVectorInfo, NewTrainingDataset, RecommendationAttributionInfo, RecommendationInfo,
+        ExitTrainingLotRow, FeatureVectorInfo, NewTrainingDataset, RecommendationAttributionInfo,
+        RecommendationInfo,
     },
     enums::quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
-    types::{MarketId, Price, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd},
+    types::{
+        Bps, MarketId, Price, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
+    },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, FeatureRepository, MarketRepository, QuantFactReadRepository,
-    RecommendationRepository, TrainingDatasetRepository,
+    AttributionRepository, FeatureRepository, MarketRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    factors::{FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue},
+    execution_sim::BookFidelity,
+    factors::{
+        FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue,
+        MarketFactorOutcome,
+    },
     features::{
         ConfiguredFeatureBuilder, EvidenceSourceRef, FeatureName, FeatureValue, FeatureVector,
         SubstitutionAudit,
     },
     hashing::ResearchHasher,
+    model::sell_scorer::{LotStateInput, position_state_factor_values, position_state_features},
     pit::PitQueryEngine,
     selection::SelectedMarket,
     training::{
-        DatasetCoverage, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest, ForwardWindow,
-        LabelBuildInput, LabelBuildOutput, Labeler, LiquidityExitLabeler,
-        MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, PlanMarket,
+        DatasetCoverage, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest, DecisionBook,
+        ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler, LabelBuildInput,
+        LabelBuildOutput, Labeler, LiquidityExitLabeler, LotSamplePlan, LotTerminalSnapshot,
+        LotTrainingContext, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, PlanMarket,
         ReturnToHorizonLabeler, SamplePlan, SettlementOutcomeLabeler, TrainingDatasetArtifact,
         TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample, TrainingLabel,
-        assert_no_future_leakage, label_names_for_sources, plan_samples, probe_matrix_coverage,
+        assert_no_future_leakage, label_names_for_sources, plan_lot_timeline_samples, plan_samples,
+        probe_matrix_coverage, remaining_shares_at,
     },
 };
 use rust_decimal::Decimal;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -71,6 +81,15 @@ pub fn default_labelers() -> Vec<Box<dyn Labeler>> {
         Box::new(MaxAdverseExcursionLabeler),
         Box::new(LiquidityExitLabeler),
         Box::new(SettlementOutcomeLabeler),
+    ]
+}
+
+/// Labelers materialized only for [`TrainingSampleSource::ExitDecision`] rows.
+#[must_use]
+pub fn exit_decision_labelers() -> Vec<Box<dyn Labeler>> {
+    vec![
+        Box::new(HoldVsExitProceedsLabeler),
+        Box::new(LiquidityExitLabeler),
     ]
 }
 
@@ -90,6 +109,8 @@ pub struct TrainingDatasetServiceDeps {
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
     /// Frozen feature-vector ledger referenced by recommendations.
     pub feature_repo: Arc<dyn FeatureRepository>,
+    /// Position ledger for closed-lot `ExitDecision` sampling.
+    pub position_repo: Arc<dyn PositionRepository>,
 }
 
 /// Frozen runtime-config snapshot bound to one dataset build.
@@ -115,6 +136,7 @@ pub struct TrainingDatasetService {
     attribution_repo: Arc<dyn AttributionRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
+    position_repo: Arc<dyn PositionRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     data_quality: DataQualityConfig,
@@ -142,6 +164,7 @@ impl TrainingDatasetService {
             attribution_repo: deps.attribution_repo,
             recommendation_repo: deps.recommendation_repo,
             feature_repo: deps.feature_repo,
+            position_repo: deps.position_repo,
             features: config.features,
             factors: config.factors,
             data_quality: config.data_quality,
@@ -183,6 +206,21 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             })
             .collect();
         let samples = plan_samples(&request, &plan_markets);
+        let mut lot_samples = Vec::new();
+        let mut exit_training_lots = Vec::new();
+        if wants_sample_source(&request, TrainingSampleSource::ExitDecision) {
+            exit_training_lots = self
+                .position_repo
+                .find_exit_training_lots(
+                    request.window_start,
+                    request.window_end,
+                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+                )
+                .await
+                .map_err(QuantError::from)?;
+            lot_samples =
+                plan_lot_timeline_samples(request.sample_interval_secs, &exit_training_lots);
+        }
         let training_dataset_id = request
             .training_dataset_id
             .clone()
@@ -192,6 +230,8 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             request,
             training_dataset_id,
             samples,
+            lot_samples,
+            exit_training_lots,
             label_names,
         })
     }
@@ -212,6 +252,9 @@ impl TrainingDatasetService {
                 .await
                 .map_err(QuantError::from)?;
             total += attributions.len() as u64;
+        }
+        if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
+            total += plan.lot_samples.len() as u64;
         }
         Ok(total)
     }
@@ -357,6 +400,25 @@ impl TrainingDatasetService {
                 .await?;
         }
 
+        if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
+            coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
+            coverage.planned_samples += plan.lot_samples.len() as u64;
+            self.append_exit_decision_examples(
+                ExitDecisionAppendInput {
+                    plan: &plan,
+                    pit,
+                    prefetched,
+                    context,
+                },
+                &mut ExampleBuildSink {
+                    coverage,
+                    examples: &mut examples,
+                    market_set: &mut market_set,
+                },
+            )
+            .await?;
+        }
+
         coverage.built_examples = examples.len() as u64;
         coverage.markets = market_set.len() as u64;
 
@@ -416,6 +478,9 @@ impl TrainingDatasetService {
                 factor_values,
                 labels,
                 source_refs: vector.source_refs.clone(),
+                lot_context: None,
+                position_state: None,
+                book_fidelity: None,
             });
         }
     }
@@ -515,7 +580,160 @@ impl TrainingDatasetService {
             feature_vector,
             factor_values,
             labels,
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
         }))
+    }
+
+    async fn append_exit_decision_examples(
+        &self,
+        input: ExitDecisionAppendInput<'_>,
+        sink: &mut ExampleBuildSink<'_>,
+    ) -> QuantResult<()> {
+        let lot_by_intent: HashMap<_, _> = input
+            .plan
+            .exit_training_lots
+            .iter()
+            .map(|lot| (lot.order_intent_id.clone(), lot))
+            .collect();
+        let exit_labelers = exit_decision_labelers();
+        let builder = ConfiguredFeatureBuilder::new(&self.features);
+        let engine = FactorEngine::new(&self.factors, &self.features);
+        let replay_config = self.replay_config();
+
+        for (as_of, group) in group_lot_samples(&input.plan.lot_samples) {
+            let Some(cross_section) = materialize_lot_cross_section(LotCrossSectionMaterialize {
+                builder: &builder,
+                engine: &engine,
+                replay_config: &replay_config,
+                pit: input.pit,
+                prefetched: input.prefetched,
+                as_of,
+                group: &group,
+                context: input.context,
+            })
+            .await?
+            else {
+                sink.coverage.samples_dropped_insufficient += group.len() as u64;
+                continue;
+            };
+            sink.coverage.samples_dropped_insufficient += cross_section.dropped_insufficient;
+
+            for sample in group {
+                let Some(lot) = lot_by_intent.get(&sample.order_intent_id) else {
+                    continue;
+                };
+                let Some(index) = cross_section_index_for_lot_sample(&cross_section, sample) else {
+                    sink.coverage.samples_dropped_insufficient += 1;
+                    continue;
+                };
+                self.append_exit_decision_sample(
+                    ExitDecisionSampleBuild {
+                        sample,
+                        lot,
+                        cross_section: &cross_section,
+                        market_index: index,
+                        request: &input.plan.request,
+                        prefetched: input.prefetched,
+                        pit: input.pit,
+                        max_horizon_secs: input.context.max_horizon_secs,
+                        labelers: &exit_labelers,
+                    },
+                    sink,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn append_exit_decision_sample(
+        &self,
+        input: ExitDecisionSampleBuild<'_>,
+        sink: &mut ExampleBuildSink<'_>,
+    ) -> QuantResult<()> {
+        let market = &input.cross_section.markets[input.market_index];
+        let vector = &input.cross_section.vectors[input.market_index];
+        let entry_mid = input.cross_section.entry_mids[input.market_index];
+        let outcome = &input.cross_section.outcomes[input.market_index];
+        let factor_values = eligible_factor_values(outcome);
+        let remaining =
+            remaining_shares_at(&LotTerminalSnapshot::from(input.lot), input.sample.as_of);
+        if !remaining.is_positive() {
+            return Ok(());
+        }
+        let position_state = position_state_features(LotStateInput {
+            avg_price: input.lot.avg_price.inner(),
+            mark: entry_mid.map(Price::inner),
+            opened_at: input.lot.opened_at,
+            now: input.sample.as_of,
+            max_hold_secs: input.lot.max_hold_secs,
+            peak_mark: input.lot.peak_mark_price.map(Price::inner),
+        });
+        let (decision_book, book_fidelity) =
+            decision_book_at(input.pit, &input.sample.token_id, input.sample.as_of).await?;
+        let label_ctx = ExitDecisionLabelContext {
+            remaining_shares: remaining,
+            avg_price: input.lot.avg_price,
+            fee_bps: Bps::ZERO,
+            terminal: LotTerminalSnapshot::from(input.lot),
+            decision_book,
+        };
+        let forward = forward_window(
+            input.sample.as_of,
+            input.max_horizon_secs,
+            input
+                .prefetched
+                .micro
+                .get(&input.sample.token_id)
+                .map_or(&[][..], Vec::as_slice),
+            input
+                .prefetched
+                .resolutions
+                .get(&input.sample.market_id)
+                .map_or(&[][..], Vec::as_slice),
+        );
+        let labels = self.build_labels_for(
+            &LabelBuildParams {
+                labelers: input.labelers,
+                market,
+                as_of: input.sample.as_of,
+                entry_mid,
+                request: input.request,
+                forward: &forward,
+                exit_decision: Some(&label_ctx),
+            },
+            sink.coverage,
+        );
+        record_exit_fill_fidelity(sink.coverage, book_fidelity);
+        let mut merged_factors = factor_values;
+        merged_factors.extend(position_state_factor_values(&position_state));
+        sink.market_set.insert(input.sample.market_id.clone());
+        sink.examples.push(TrainingExample {
+            example_id: TrainingExampleId::from_v7(),
+            market_id: input.sample.market_id.clone(),
+            token_id: input.sample.token_id.clone(),
+            as_of: input.sample.as_of,
+            sample_source: TrainingSampleSource::ExitDecision,
+            feature_vector: vector.clone(),
+            factor_values: merged_factors,
+            labels,
+            source_refs: vector.source_refs.clone(),
+            lot_context: Some(LotTrainingContext {
+                order_intent_id: input.sample.order_intent_id.clone(),
+                position_id: input.sample.position_id.clone(),
+                remaining_shares: remaining,
+                avg_price: input.lot.avg_price,
+                peak_mark: input.lot.peak_mark_price,
+                opened_at: input.lot.opened_at,
+                max_hold_secs: input.lot.max_hold_secs,
+            }),
+            position_state: Some(position_state),
+            book_fidelity,
+        });
+        sink.coverage.exit_decision_built += 1;
+        Ok(())
     }
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
@@ -623,23 +841,43 @@ impl TrainingDatasetService {
         forward: &ForwardWindow,
         coverage: &mut DatasetCoverage,
     ) -> Vec<TrainingLabel> {
+        self.build_labels_for(
+            &LabelBuildParams {
+                labelers: &self.labelers,
+                market,
+                as_of,
+                entry_mid,
+                request,
+                forward,
+                exit_decision: None,
+            },
+            coverage,
+        )
+    }
+
+    fn build_labels_for(
+        &self,
+        params: &LabelBuildParams<'_>,
+        coverage: &mut DatasetCoverage,
+    ) -> Vec<TrainingLabel> {
         let mut labels = Vec::new();
-        for labeler in &self.labelers {
+        for labeler in params.labelers {
             let horizons: Vec<u64> = if labeler.is_horizon_dependent() {
-                request.horizons_secs.clone()
+                params.request.horizons_secs.clone()
             } else {
                 vec![0]
             };
             for horizon_secs in horizons {
                 let input = LabelBuildInput {
-                    market_id: &market.market_id,
-                    token_id: &market.primary_token_id,
-                    yes_token_id: &market.primary_token_id,
-                    as_of,
-                    entry_mid,
+                    market_id: &params.market.market_id,
+                    token_id: &params.market.primary_token_id,
+                    yes_token_id: &params.market.primary_token_id,
+                    as_of: params.as_of,
+                    entry_mid: params.entry_mid,
                     horizon_secs,
                     min_exit_depth_usd: self.min_exit_depth_usd,
-                    forward,
+                    forward: params.forward,
+                    exit_decision: params.exit_decision,
                 };
                 match labeler.build_label(&input) {
                     LabelBuildOutput::Available(label) => {
@@ -796,11 +1034,78 @@ fn group_samples(samples: &[SamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&SampleP
     groups
 }
 
+fn group_lot_samples(samples: &[LotSamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&LotSamplePlan>> {
+    let mut groups: BTreeMap<DateTime<Utc>, Vec<&LotSamplePlan>> = BTreeMap::new();
+    for sample in samples {
+        groups.entry(sample.as_of).or_default().push(sample);
+    }
+    groups
+}
+
+async fn decision_book_at(
+    pit: &dyn PitQueryEngine,
+    token_id: &quant_pivot_models::types::TokenId,
+    as_of: DateTime<Utc>,
+) -> QuantResult<(Option<DecisionBook>, Option<BookFidelity>)> {
+    let Some(snapshot) = pit.book_at(token_id, as_of).await? else {
+        return Ok((None, None));
+    };
+    if !snapshot.bids.is_empty() {
+        return Ok((
+            Some(DecisionBook::L2 {
+                bids: Arc::clone(&snapshot.bids),
+            }),
+            Some(BookFidelity::L2),
+        ));
+    }
+    Ok((None, None))
+}
+
 struct CrossSectionAppendInput<'a> {
     cross_section: &'a ReplayCrossSection,
     prefetched: &'a Prefetched,
     request: &'a DatasetPlanRequest,
     max_horizon_secs: u64,
+}
+
+struct LabelBuildParams<'a> {
+    labelers: &'a [Box<dyn Labeler>],
+    market: &'a SelectedMarket,
+    as_of: DateTime<Utc>,
+    entry_mid: Option<Price>,
+    request: &'a DatasetPlanRequest,
+    forward: &'a ForwardWindow,
+    exit_decision: Option<&'a ExitDecisionLabelContext>,
+}
+
+struct ExitDecisionAppendInput<'a> {
+    plan: &'a DatasetPlan,
+    pit: &'a dyn PitQueryEngine,
+    prefetched: &'a Prefetched,
+    context: &'a ReplayContext,
+}
+
+struct LotCrossSectionMaterialize<'a> {
+    builder: &'a ConfiguredFeatureBuilder,
+    engine: &'a FactorEngine,
+    replay_config: &'a ReplayConfig,
+    pit: &'a dyn PitQueryEngine,
+    prefetched: &'a Prefetched,
+    as_of: DateTime<Utc>,
+    group: &'a [&'a LotSamplePlan],
+    context: &'a ReplayContext,
+}
+
+struct ExitDecisionSampleBuild<'a> {
+    sample: &'a LotSamplePlan,
+    lot: &'a ExitTrainingLotRow,
+    cross_section: &'a ReplayCrossSection,
+    market_index: usize,
+    request: &'a DatasetPlanRequest,
+    prefetched: &'a Prefetched,
+    pit: &'a dyn PitQueryEngine,
+    max_horizon_secs: u64,
+    labelers: &'a [Box<dyn Labeler>],
 }
 
 struct ExampleBuildSink<'a> {
@@ -844,10 +1149,79 @@ impl ReplayContext {
                     market_id: sample.market_id.clone(),
                     token_id: sample.token_id.clone(),
                 })
+                .chain(plan.lot_samples.iter().map(|sample| ReplaySample {
+                    market_id: sample.market_id.clone(),
+                    token_id: sample.token_id.clone(),
+                }))
                 .collect(),
             lookback: self.lookback,
             source_delay: self.source_delay,
             max_horizon_secs: self.max_horizon_secs,
         }
+    }
+}
+
+fn cross_section_index_for_lot_sample(
+    cross_section: &ReplayCrossSection,
+    sample: &LotSamplePlan,
+) -> Option<usize> {
+    cross_section
+        .markets
+        .iter()
+        .enumerate()
+        .find_map(|(index, market)| {
+            if market.market_id != sample.market_id {
+                return None;
+            }
+            if market.primary_token_id != sample.token_id {
+                return None;
+            }
+            Some(index)
+        })
+}
+
+async fn materialize_lot_cross_section(
+    input: LotCrossSectionMaterialize<'_>,
+) -> QuantResult<Option<ReplayCrossSection>> {
+    let replay_group: Vec<ReplaySample> = input
+        .group
+        .iter()
+        .map(|sample| ReplaySample {
+            market_id: sample.market_id.clone(),
+            token_id: sample.token_id.clone(),
+        })
+        .collect();
+    materialize_cross_section(
+        input.builder,
+        input.engine,
+        input.replay_config,
+        &CrossSectionRequest {
+            pit: input.pit,
+            prefetched: input.prefetched,
+            as_of: input.as_of,
+            group: &replay_group,
+            source_delay: input.context.source_delay,
+            lookback: input.context.lookback,
+        },
+    )
+    .await
+}
+
+fn eligible_factor_values(outcome: &MarketFactorOutcome) -> Vec<FactorValue> {
+    match &outcome.eligibility {
+        FactorEligibility::Eligible => outcome
+            .factors
+            .iter()
+            .map(|scored| scored.value.clone())
+            .collect(),
+        FactorEligibility::RejectCandidate { .. } => Vec::new(),
+    }
+}
+
+fn record_exit_fill_fidelity(coverage: &mut DatasetCoverage, book_fidelity: Option<BookFidelity>) {
+    if book_fidelity == Some(BookFidelity::L2) {
+        coverage.exit_fill_l2_rows += 1;
+    } else if book_fidelity.is_some() {
+        coverage.exit_fill_fallback_rows += 1;
     }
 }

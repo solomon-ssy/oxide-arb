@@ -45,8 +45,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgAttributionRepository, PgEventRepository, PgFeatureRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgRecommendationRepository, PgRuntimeConfigVersionRepository,
-        PgTrainingDatasetRepository,
+        PgModelRegistryRepository, PgPositionRepository, PgRecommendationRepository,
+        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
     },
     traits::{
         EventRepository, MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
@@ -446,6 +446,7 @@ fn service(
             attribution_repo: Arc::new(PgAttributionRepository::new(db.clone())),
             recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
+            position_repo: Arc::new(PgPositionRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features: features_config(),
@@ -706,6 +707,8 @@ async fn plan_build_reuses_training_dataset_id() {
             request: build_request,
             training_dataset_id: plan_a.training_dataset_id.clone(),
             samples: plan_a.samples.clone(),
+            lot_samples: plan_a.lot_samples.clone(),
+            exit_training_lots: plan_a.exit_training_lots.clone(),
             label_names: plan_a.label_names.clone(),
         })
         .await

@@ -27,6 +27,9 @@ pub const MAX_ADVERSE_EXCURSION_BPS: LabelName =
 pub const LIQUIDITY_EXIT_POSSIBLE: LabelName = LabelName::from_static("liquidity_exit_possible");
 /// `settlement_outcome`: terminal `settled_yes` (1.0) / `settled_no` (0.0).
 pub const SETTLEMENT_OUTCOME: LabelName = LabelName::from_static("settlement_outcome");
+/// `hold_vs_exit_alpha_bps`: bps advantage of exiting now (simulated fill @ t)
+/// over holding through the lot's terminal outcome (Phase 06.1).
+pub const HOLD_VS_EXIT_ALPHA_BPS: LabelName = LabelName::from_static("hold_vs_exit_alpha_bps");
 pub const REALIZED_RETURN_BPS: LabelName = LabelName::from_static("realized_return_bps");
 pub const REALIZED_PNL_USD: LabelName = LabelName::from_static("realized_pnl_usd");
 pub const ENTRY_FILLED: LabelName = LabelName::from_static("entry_filled");
@@ -64,6 +67,9 @@ pub fn label_names_for_sources(sources: &[TrainingSampleSource]) -> Vec<LabelNam
             MISSED_RETURN_BPS,
             RECOMMENDATION_OUTCOME,
         ]);
+    }
+    if sources.contains(&TrainingSampleSource::ExitDecision) {
+        labels.extend([HOLD_VS_EXIT_ALPHA_BPS, LIQUIDITY_EXIT_POSSIBLE]);
     }
     labels.dedup();
     labels
@@ -270,6 +276,74 @@ impl Labeler for LiquidityExitLabeler {
     }
 }
 
+/// `hold_vs_exit_alpha_bps` labeler (Phase 06.1 Sell scorer supervision).
+///
+/// Compares a depth-aware simulated exit at `t` against the net cash from holding
+/// `remaining_shares@t` through the lot's actual terminal outcome. Point-in-time
+/// correct: the hold oracle reads only pre-fetched terminal ledger facts; the
+/// exit side uses the decision book slice (L2 bid-walk or microstructure fallback).
+pub struct HoldVsExitProceedsLabeler;
+
+impl Labeler for HoldVsExitProceedsLabeler {
+    fn label_name(&self) -> LabelName {
+        HOLD_VS_EXIT_ALPHA_BPS
+    }
+
+    fn is_horizon_dependent(&self) -> bool {
+        false
+    }
+
+    fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput {
+        let Some(ctx) = input.exit_decision else {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoForwardData,
+            };
+        };
+        if input.as_of >= ctx.terminal.closed_at {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoExitPrice,
+            };
+        }
+        if !ctx.remaining_shares.is_positive() {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoEntryPrice,
+            };
+        }
+        let cost_basis = ctx.avg_price.inner() * ctx.remaining_shares.inner();
+        if cost_basis <= Decimal::ZERO {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoEntryPrice,
+            };
+        }
+        let Some(book) = &ctx.decision_book else {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoForwardData,
+            };
+        };
+        let sim = crate::execution_sim::ExitFillSimulator::new(ctx.fee_bps);
+        let fill = match book {
+            super::DecisionBook::L2 { bids } => sim.simulate_l2(bids, ctx.remaining_shares),
+            super::DecisionBook::Microstructure { best_bid, depth } => {
+                sim.simulate_fallback(*best_bid, *depth, ctx.remaining_shares)
+            }
+        };
+        if !fill.filled_shares.is_positive() {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoForwardData,
+            };
+        }
+        let exit_proceeds = fill.net_proceeds.inner();
+        let hold_terminal = super::hold_terminal_proceeds(&ctx.terminal, input.as_of).inner();
+        let alpha = (exit_proceeds - hold_terminal) / cost_basis * bps_denominator();
+        LabelBuildOutput::Available(TrainingLabel {
+            label_name: self.label_name(),
+            horizon_secs: 0,
+            value: alpha,
+            is_resolved: true,
+        })
+    }
+}
+
 /// `settlement_outcome` labeler (horizon-independent; keys on `winning_token_id`).
 pub struct SettlementOutcomeLabeler;
 
@@ -316,6 +390,7 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::types::{MarketId, Price, TokenId, Usd};
     use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
     fn at(offset: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_000_000 + offset, 0)
@@ -356,6 +431,7 @@ mod tests {
             horizon_secs,
             min_exit_depth_usd: Usd::new(Decimal::from(100)),
             forward,
+            exit_decision: None,
         }
     }
 
@@ -488,6 +564,68 @@ mod tests {
             LabelBuildOutput::NotMature {
                 reason: LabelDelayReason::SettlementPending,
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn hold_vs_exit_proceeds_prefers_exiting_when_terminal_is_worse() {
+        use super::super::{
+            DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot,
+        };
+        use quant_pivot_models::types::{Bps, Shares, Usd};
+        use std::sync::Arc;
+
+        let market = MarketId::new("m");
+        let token = TokenId::new("t");
+        let terminal = LotTerminalSnapshot {
+            entry_shares: Shares::new(dec!(100)),
+            opened_at: at(0),
+            closed_at: at(1000),
+            total_net_proceeds: Usd::new(dec!(45)),
+            exit_events: vec![LotExitEvent {
+                at: at(800),
+                shares: Shares::new(dec!(100)),
+                net_proceeds: Usd::new(dec!(45)),
+            }],
+        };
+        let ctx = ExitDecisionLabelContext {
+            remaining_shares: Shares::new(dec!(100)),
+            avg_price: price("0.50"),
+            fee_bps: Bps::ZERO,
+            terminal,
+            decision_book: Some(DecisionBook::L2 {
+                bids: Arc::new([
+                    quant_pivot_models::domain::market::book::BookLevel::from_decimal_unchecked(
+                        price("0.55"),
+                        Shares::new(dec!(100)),
+                    ),
+                ]),
+            }),
+        };
+        let window = forward(Vec::new(), 0, None);
+        let mut input = input(&market, &token, Some(price("0.55")), 0, &window);
+        input.exit_decision = Some(&ctx);
+        let out = HoldVsExitProceedsLabeler.build_label(&input);
+        assert!(matches!(out, LabelBuildOutput::Available(l) if l.value > Decimal::ZERO));
+    }
+
+    #[test]
+    fn hold_vs_exit_proceeds_requires_exit_decision_context() {
+        let market = MarketId::new("m");
+        let token = TokenId::new("t");
+        let window = forward(Vec::new(), 0, None);
+        let out = HoldVsExitProceedsLabeler.build_label(&input(
+            &market,
+            &token,
+            Some(price("0.50")),
+            0,
+            &window,
+        ));
+        assert!(matches!(
+            out,
+            LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoForwardData,
             }
         ));
     }

@@ -43,7 +43,7 @@ pub fn factor_events(
                 raw_value: ChDecimal64::from(raw),
                 normalized_score: ChProbability::from(scored.value.normalized_score),
                 confidence: ChProbability::from(scored.value.confidence),
-                direction: scored.value.direction.as_i8(),
+                direction: scored.value.direction.into(),
                 model_run_id: model_run_id.clone(),
                 ingestion_time,
             });

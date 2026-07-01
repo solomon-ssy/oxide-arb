@@ -1,6 +1,9 @@
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery},
+    domain::{
+        ExitTrainingLotRow, Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery,
+    },
     types::{MarketId, OrderIntentId, PositionId, TokenId, Usd},
 };
 
@@ -48,4 +51,12 @@ pub trait PositionRepository: Send + Sync {
 
     /// Cumulative realized `PnL` over all strategy position lots.
     async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError>;
+
+    /// Closed/settled lots whose `closed_at` falls in `[closed_from, closed_to)`.
+    async fn find_exit_training_lots(
+        &self,
+        closed_from: DateTime<Utc>,
+        closed_to: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<ExitTrainingLotRow>, StorageError>;
 }

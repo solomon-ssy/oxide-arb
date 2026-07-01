@@ -38,11 +38,12 @@ use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome,
         CapitalReconcileSettlement, ExecutionOrderInfo, ExecutionOrderPatch, ExitLedgerWrite,
-        KillSwitchPort, KillSwitchView, NewCapitalAllocation, NewExecutionOrder, NewOperationLog,
-        NewOrderIntent, NewReconciliation, OperationLogInfo, OperationLogQuery, OrderIntentInfo,
-        OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
-        PositionListQuery, RecommendationInfo, ReconciliationInfo, ReconciliationLedgerWrite,
-        ReconciliationListQuery, ReconciliationPatch, SetKillSwitchCommand, SubmissionLedgerWrite,
+        ExitTrainingLotRow, KillSwitchPort, KillSwitchView, NewCapitalAllocation,
+        NewExecutionOrder, NewOperationLog, NewOrderIntent, NewReconciliation, OperationLogInfo,
+        OperationLogQuery, OrderIntentInfo, OrderIntentListQuery, Paginated, PositionExit,
+        PositionFill, PositionInfo, PositionListQuery, RecommendationInfo, ReconciliationInfo,
+        ReconciliationLedgerWrite, ReconciliationListQuery, ReconciliationPatch,
+        SetKillSwitchCommand, SubmissionLedgerWrite,
     },
     enums::{
         common::{OrderType, Side},
@@ -58,8 +59,9 @@ use quant_pivot_models::{
     runtime_config::{ReconciliationPolicy, RuntimeConfig},
     types::{
         Bps, EntryOrderSpec, ExecutedPartialExitNodes, ExecutionOrderId, ExitPolicySpec, MarketId,
-        ModelVersionId, OrderId, OrderIntentId, PositionId, Price, RecommendationId,
-        RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        ModelVersionId, OpportunisticExitState, OrderId, OrderIntentId, PositionId, Price,
+        RecommendationId, RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, Shares,
+        TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::CapitalAllocationRepository;
@@ -141,6 +143,7 @@ fn intent(rec: &RecommendationInfo) -> OrderIntentInfo {
         last_signal_recheck_at: None,
         executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
         pending_partial_exit_node_id: None,
+        opportunistic_exit_state: OpportunisticExitState::default(),
         created_at: now(),
         updated_at: now(),
     }
@@ -733,6 +736,15 @@ impl PositionRepository for StubPositions {
 
     async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError> {
         Ok(Usd::ZERO)
+    }
+
+    async fn find_exit_training_lots(
+        &self,
+        _closed_from: chrono::DateTime<Utc>,
+        _closed_to: chrono::DateTime<Utc>,
+        _limit: u64,
+    ) -> Result<Vec<ExitTrainingLotRow>, StorageError> {
+        Ok(Vec::new())
     }
 }
 

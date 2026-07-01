@@ -16,8 +16,8 @@ use quant_pivot_models::{
     },
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
     types::{
-        Bps, ExitPolicySpec, MarketId, OrderIntentId, PartialExitNode, PositionId, Price,
-        Probability, Shares, TokenId, TrailingStop, Usd,
+        Bps, ExitPolicySpec, MarketId, OpportunisticExitState, OrderIntentId, PartialExitNode,
+        PositionId, Price, Probability, Shares, TokenId, TrailingStop, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -78,6 +78,8 @@ fn input(policy: ExitPolicySpec, mark: Option<Decimal>, kill: KillSwitchState) -
         peak_mark_price: None,
         signal: ExitSignalVerdict::Holds,
         executed_partial_exit_node_ids: Vec::new(),
+        opportunistic_exit_state: OpportunisticExitState::default(),
+        min_opportunistic_clip_pct: Decimal::ZERO,
         now: Utc::now(),
     }
 }
@@ -283,6 +285,7 @@ fn partial_exit_node_carries_node_id() {
             reason,
             order,
             partial_exit_node_id,
+            ..
         } => {
             assert_eq!(reason, ExitReason::PartialExit);
             assert_eq!(order.shares, Shares::new(dec!(50)));
@@ -295,8 +298,9 @@ fn partial_exit_node_carries_node_id() {
 #[test]
 fn opportunistic_sell_is_lowest_tier() {
     let mut i = input(empty_policy(), Some(dec!(0.50)), KillSwitchState::Closed);
+    i.opportunistic_exit_state.denominator_shares = Some(Shares::new(dec!(100)));
     i.signal = ExitSignalVerdict::OpportunisticSell {
-        sell_pct: dec!(0.3),
+        target_cumulative_exit_pct: dec!(0.3),
         detail: "model edge".to_owned(),
     };
     match decide_exit(&i) {
@@ -306,6 +310,93 @@ fn opportunistic_sell_is_lowest_tier() {
         }
         other => panic!("expected opportunistic submit, got {other:?}"),
     }
+}
+
+#[test]
+fn opportunistic_delta_requires_frozen_denominator() {
+    let mut i = input(empty_policy(), Some(dec!(0.50)), KillSwitchState::Closed);
+    i.signal = ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct: dec!(0.3),
+        detail: String::new(),
+    };
+    assert!(
+        matches!(decide_exit(&i), ExitDecision::Hold),
+        "missing frozen denominator must fail-closed to hold"
+    );
+}
+
+/// Regression (money-critical churn bug): a repeated opportunistic verdict at
+/// the same cumulative target sells only the incremental delta and then holds —
+/// it never re-fires the whole fraction each tick.
+#[test]
+fn opportunistic_cumulative_delta_no_churn() {
+    let mut i = input(empty_policy(), Some(dec!(0.50)), KillSwitchState::Closed);
+    // Denominator frozen at 100 shares; 30 already opportunistically sold.
+    i.opportunistic_exit_state.denominator_shares = Some(Shares::new(dec!(100)));
+    i.opportunistic_exit_state.cumulative_sold_shares = Shares::new(dec!(30));
+    i.signal = ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct: dec!(0.3),
+        detail: String::new(),
+    };
+    assert!(
+        matches!(decide_exit(&i), ExitDecision::Hold),
+        "target already met ⇒ hold (no churn)"
+    );
+
+    // Raising the target sells only the incremental delta (0.5×100 − 30 = 20),
+    // carrying the frozen denominator so the dispatcher can advance the total.
+    i.signal = ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct: dec!(0.5),
+        detail: String::new(),
+    };
+    match decide_exit(&i) {
+        ExitDecision::SubmitExitOrder {
+            reason,
+            order,
+            opportunistic_denominator,
+            ..
+        } => {
+            assert_eq!(reason, ExitReason::Opportunistic);
+            assert_eq!(order.shares, Shares::new(dec!(20)));
+            assert_eq!(opportunistic_denominator, Some(Shares::new(dec!(100))));
+        }
+        other => panic!("expected incremental opportunistic sell, got {other:?}"),
+    }
+}
+
+/// An incremental delta below the min clip fraction holds (avoids dust churn).
+#[test]
+fn opportunistic_below_min_clip_holds() {
+    let mut i = input(empty_policy(), Some(dec!(0.50)), KillSwitchState::Closed);
+    i.opportunistic_exit_state.denominator_shares = Some(Shares::new(dec!(100)));
+    i.min_opportunistic_clip_pct = dec!(0.5); // require ≥ 50 shares of 100
+    i.signal = ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct: dec!(0.3), // 30 < 50 ⇒ hold
+        detail: String::new(),
+    };
+    assert!(matches!(decide_exit(&i), ExitDecision::Hold));
+}
+
+/// The kill-switch `execution_halted` freezes auto-exit: an opportunistic verdict
+/// routes to manual review, never an auto-submitted exit.
+#[test]
+fn execution_halted_blocks_opportunistic_auto_exit() {
+    let mut i = input(
+        empty_policy(),
+        Some(dec!(0.50)),
+        KillSwitchState::ExecutionHalted,
+    );
+    i.opportunistic_exit_state.denominator_shares = Some(Shares::new(dec!(100)));
+    i.signal = ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct: dec!(0.3),
+        detail: String::new(),
+    };
+    assert!(matches!(
+        decide_exit(&i),
+        ExitDecision::RequireManualReview {
+            reason: ExitReason::Opportunistic
+        }
+    ));
 }
 
 #[test]

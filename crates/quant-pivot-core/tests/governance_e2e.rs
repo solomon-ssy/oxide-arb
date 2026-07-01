@@ -202,6 +202,7 @@ fn healthy_coverage() -> serde_json::Value {
         live_attribution_candidates: 0,
         live_attribution_dropped_missing_evidence: 0,
         matrix_probe: None,
+        ..Default::default()
     })
     .expect("coverage json")
 }

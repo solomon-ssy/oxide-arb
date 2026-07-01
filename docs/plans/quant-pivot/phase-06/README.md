@@ -1,6 +1,6 @@
 # Phase 06 — ML 扩展相位 子phase索引
 
-> 状态：设计文档（本目录不含代码；**Phase 5 全部落地后**再开实现）
+> 状态：设计文档 + 部分已落地（**06.0 / 06.1 已实现**，见各子phase §0 落地状态；其余仍为设计契约）
 >
 > 父文档：[`../08-third-party-crates-and-ml-stack.md`](../08-third-party-crates-and-ml-stack.md)、
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -19,7 +19,7 @@ enum + metric + config 字段），Phase 6 必须按本目录契约**填 impl**�
 | Phase 5 预留（seam） | Phase 6 填 impl | 权威子phase |
 |---|---|---|
 | `ExitSignalReinferer` + `ReinferenceSignalEvaluator`（thesis invalidation 占位） | **`ModelBackedExitSignalReinferer`** + shadow 激活 | [`06.0`](06.0-exit-signal-reinference.md) |
-| `ExitSignalEvaluator` + `ExitReason::Opportunistic` + `quant_exit_triggers_total{reason=opportunistic}` | 机会性 Sell 排序模型 + `CompositeExitSignalEvaluator` | [`06.1`](06.1-opportunistic-sell-exit-signal.md) |
+| `ExitSignalEvaluator` + `ExitReason::Opportunistic` + `quant_exit_triggers_total{reason=opportunistic}` | **已落地**：`HoldVsExitWeighted` Sell scorer + `CompositeExitSignalEvaluator` + 幂等累计 scale-out + 统一审计 fact（shadow 默认关） | [`06.1`](06.1-opportunistic-sell-exit-signal.md) |
 | `UnifiedModelRunner` + model registry artifact 类型 | ONNX / classical publish 主路径（08 §17/§15） | [`06.3`](06.3-onnx-runtime-integration.md) / [`06.4`](06.4-classical-model-publish-path.md) |
 | 05.7 attribution + training sample source | attribution feedback、自动再训练、CH/outbox 覆盖率强化 | [`06.5`](06.5-attribution-feedback-and-auto-retraining.md) |
 | recommendation frozen factor breakdown | 反事实 factor attribution / missed-return 精细估计 | [`06.6`](06.6-counterfactual-factor-attribution.md) |

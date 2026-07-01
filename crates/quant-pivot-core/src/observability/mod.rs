@@ -4,6 +4,8 @@ pub mod backpressure;
 pub mod book_fact_writer;
 pub mod capital_allocation_fact_writer;
 pub mod execution_fact_writer;
+pub mod exit_signal_fact_projection;
+pub mod exit_signal_fact_writer;
 pub mod fact_lag;
 pub mod factor_fact_writer;
 pub mod feature_fact_writer;

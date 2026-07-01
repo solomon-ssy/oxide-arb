@@ -33,7 +33,10 @@ use quant_pivot_models::{
         NewModelGovernanceAudit, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
         RollbackModelCommand, RuntimeConfigPort, ShadowStabilitySummary, TrainingDatasetInfo,
     },
-    enums::quant::{ModelGovernanceAction, PublicationStatus, TrainingDatasetStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{ModelGovernanceAction, PublicationStatus, TrainingDatasetStatus},
+    },
     runtime_config::QualityGateConfig,
     types::{AuditEventId, ModelGovernanceAuditId, ModelSpecId, ModelVersionId, Probability},
 };
@@ -45,7 +48,7 @@ use quant_pivot_research::{
     backtest::BacktestReport,
     gates::{
         GateId, GateIntent, GateSubject, ModelQualityGate, QualityGateDecision, QualityGateFailure,
-        QualityGateInput, QualityGateReport, QualityGateThresholds,
+        QualityGateInput, QualityGateReport, QualityGateThresholds, SellQualityGateThresholds,
     },
     training::{DatasetCoverage, LeakageFindings},
 };
@@ -204,6 +207,8 @@ impl ModelGovernancePort for ModelGovernanceService {
         let config = self.deps.runtime_config.current();
         let required_window = config.quality_gate.required_shadow_window_secs;
         let thresholds = thresholds_from_config(&config.quality_gate)?;
+        let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
+        let model_family = self.model_family_for_version(&version).await?;
 
         let backtest = self.latest_backtest(&version.model_version_id).await?;
         let dataset = self.dataset_coverage(&version).await?;
@@ -221,6 +226,8 @@ impl ModelGovernancePort for ModelGovernanceService {
             leakage: LeakageFindings::default(),
             shadow_stability,
             thresholds,
+            sell_thresholds,
+            model_family: Some(model_family),
         })?;
         let report = decision.report().clone();
 
@@ -461,6 +468,14 @@ impl ModelGovernancePort for ModelGovernanceService {
                 detail: format!("dataset coverage is not decodable: {error}"),
             })?;
 
+        let model_family = if coverage.exit_decision_built > 0 {
+            Some(ModelFamily::HoldVsExitWeighted)
+        } else {
+            None
+        };
+        let sell_thresholds =
+            sell_thresholds_from_config(&self.deps.runtime_config.current().quality_gate)?;
+
         let decision = self.deps.gate.evaluate(QualityGateInput {
             subject: GateSubject::TrainingDataset(dataset.training_dataset_id.clone()),
             intent: GateIntent::DatasetReady,
@@ -469,6 +484,8 @@ impl ModelGovernancePort for ModelGovernanceService {
             leakage: LeakageFindings::default(),
             shadow_stability: None,
             thresholds: self.thresholds()?,
+            sell_thresholds,
+            model_family,
         })?;
         let report = decision.report().clone();
 
@@ -551,6 +568,23 @@ impl ModelGovernanceService {
             }
             .into()
         })
+    }
+
+    /// Resolve the governed model family for a version (via its spec).
+    async fn model_family_for_version(
+        &self,
+        version: &ModelVersionInfo,
+    ) -> QuantResult<ModelFamily> {
+        let spec = self
+            .deps
+            .model_registry_repo
+            .find_model_spec_by_id(&version.model_spec_id)
+            .await?
+            .ok_or_else(|| GovernanceError::NotFound {
+                entity: "model_spec",
+                id: version.model_spec_id.to_string(),
+            })?;
+        Ok(spec.model_family)
     }
 
     /// Resolve the version to restore on rollback: the predecessor recorded at
@@ -687,6 +721,31 @@ fn thresholds_from_config(config: &QualityGateConfig) -> QuantResult<QualityGate
         max_category_concentration: parse_threshold(
             &config.max_category_concentration.value,
             "max_category_concentration",
+        )?,
+    })
+}
+
+/// Assemble sell-side [`SellQualityGateThresholds`] from the governed config section.
+fn sell_thresholds_from_config(
+    config: &QualityGateConfig,
+) -> QuantResult<SellQualityGateThresholds> {
+    Ok(SellQualityGateThresholds {
+        min_sample_count: config.sell.min_sample_count,
+        min_label_coverage: parse_threshold(
+            &config.sell.min_label_coverage.value,
+            "sell.min_label_coverage",
+        )?,
+        min_exit_alpha_rank_ic: parse_threshold(
+            &config.sell.min_exit_alpha_rank_ic.value,
+            "sell.min_exit_alpha_rank_ic",
+        )?,
+        min_l2_book_fidelity_ratio: parse_threshold(
+            &config.sell.min_l2_book_fidelity_ratio.value,
+            "sell.min_l2_book_fidelity_ratio",
+        )?,
+        max_fallback_ratio: parse_threshold(
+            &config.sell.max_fallback_ratio.value,
+            "sell.max_fallback_ratio",
         )?,
     })
 }

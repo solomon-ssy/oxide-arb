@@ -71,3 +71,222 @@ pub enum ChBookEvidenceTier {
     AggregateOnly = 3,
     Insufficient = 4,
 }
+
+// ── Quant pipeline facts (snake_case SQL labels) ─────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChExitSignalEvaluatorKind {
+    Reinference = 1,
+    Opportunistic = 2,
+}
+
+impl ChExitSignalEvaluatorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reinference => "reinference",
+            Self::Opportunistic => "opportunistic",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChExitSignalVerdict {
+    ThesisInvalidated = 1,
+    OpportunisticSell = 2,
+    Holds = 3,
+    Indeterminate = 4,
+}
+
+impl ChExitSignalVerdict {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ThesisInvalidated => "thesis_invalidated",
+            Self::OpportunisticSell => "opportunistic_sell",
+            Self::Holds => "holds",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChQuantLedgerEventKind {
+    Submitted = 1,
+    SubmissionResult = 2,
+    ExitSubmitted = 3,
+    ExitSubmissionResult = 4,
+    Reconciled = 5,
+    OperatorResolved = 6,
+    Unresolvable = 7,
+    SettlementRedeemConfirmed = 8,
+    Opened = 9,
+}
+
+impl ChQuantLedgerEventKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Submitted => "submitted",
+            Self::SubmissionResult => "submission_result",
+            Self::ExitSubmitted => "exit_submitted",
+            Self::ExitSubmissionResult => "exit_submission_result",
+            Self::Reconciled => "reconciled",
+            Self::OperatorResolved => "operator_resolved",
+            Self::Unresolvable => "unresolvable",
+            Self::SettlementRedeemConfirmed => "settlement_redeem_confirmed",
+            Self::Opened => "opened",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChExecutionSide {
+    Buy = 1,
+    Sell = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChOutcomeSide {
+    Yes = 1,
+    No = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChCapitalAllocationState {
+    Planned = 1,
+    Allocated = 2,
+    Locked = 3,
+    Spent = 4,
+    Released = 5,
+    Impaired = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChPositionLedgerState {
+    Open = 1,
+    Closing = 2,
+    Closed = 3,
+    Settled = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChRecommendationStatus {
+    Published = 1,
+    Revoked = 2,
+    Expired = 3,
+    IntentCreated = 4,
+    Executed = 5,
+    Attributed = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChRecommendationAttributionOutcome {
+    FilledExited = 1,
+    FilledSettled = 2,
+    ExpiredUnfilled = 3,
+    CancelledUnfilled = 4,
+    FailedUnfilled = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChFactorDirection {
+    Positive = 1,
+    Neutral = 0,
+    Negative = -1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChFeatureValueKind {
+    Decimal = 0,
+    Probability = 1,
+    Bps = 2,
+    Usd = 3,
+    Count = 4,
+    Bool = 5,
+    Category = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChFeatureSourceKind {
+    Book = 1,
+    GammaMetadata = 2,
+    ClickHouseFact = 3,
+    DomainExternal = 4,
+    Derived = 5,
+}
+
+impl ChFeatureSourceKind {
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Book => "book",
+            Self::GammaMetadata => "gamma_metadata",
+            Self::ClickHouseFact => "clickhouse_fact",
+            Self::DomainExternal => "domain_external",
+            Self::Derived => "derived",
+        }
+    }
+
+    /// Decode a persisted `source_kind` wire label.
+    #[must_use]
+    pub fn from_wire(label: &str) -> Option<Self> {
+        match label {
+            "book" => Some(Self::Book),
+            "gamma_metadata" => Some(Self::GammaMetadata),
+            "clickhouse_fact" => Some(Self::ClickHouseFact),
+            "domain_external" => Some(Self::DomainExternal),
+            "derived" => Some(Self::Derived),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChExitSignalEvaluatorKind, ChExitSignalVerdict, ChFeatureSourceKind, ChFeatureValueKind,
+        ChQuantLedgerEventKind,
+    };
+
+    #[test]
+    fn exit_signal_enums_expose_wire_labels() {
+        assert_eq!(
+            ChExitSignalEvaluatorKind::Reinference.as_str(),
+            "reinference"
+        );
+        assert_eq!(ChExitSignalVerdict::Holds.as_str(), "holds");
+    }
+
+    #[test]
+    fn feature_kind_codes_are_stable() {
+        assert_eq!(
+            ChFeatureValueKind::from_i8(1),
+            Some(ChFeatureValueKind::Probability)
+        );
+        assert_eq!(
+            ChFeatureSourceKind::from_wire("clickhouse_fact"),
+            Some(ChFeatureSourceKind::ClickHouseFact)
+        );
+    }
+
+    #[test]
+    fn ledger_event_kind_wire_labels() {
+        assert_eq!(
+            ChQuantLedgerEventKind::ExitSubmitted.as_str(),
+            "exit_submitted"
+        );
+    }
+}

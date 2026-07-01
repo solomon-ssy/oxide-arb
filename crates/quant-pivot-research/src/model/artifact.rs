@@ -495,6 +495,129 @@ impl WeightedFactorModelArtifact {
     }
 }
 
+/// Sell-side hold-vs-exit output mapping (Phase 06.1).
+///
+/// Converts the signed ranking `net = Σ weightᵢ·signedᵢ ∈ [-1, 1]` (positive ⇒
+/// exiting now beats holding) into the three business outputs the opportunistic
+/// evaluator consumes: expected exit alpha, the probability the exit is better,
+/// and a target cumulative exit fraction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SellScorerOutputSpec {
+    /// Expected exit alpha (bps over holding) at `net = 1`; scales linearly with
+    /// `net`, so a negative net yields a negative alpha (hold is better).
+    pub max_exit_alpha_bps: Decimal,
+    /// Logistic gain mapping `net → P(exit_better) = 1 / (1 + e^{-gain·net})`.
+    /// Must be strictly positive (a monotone increasing map).
+    pub p_exit_gain: Decimal,
+    /// Floor target cumulative exit fraction when the scorer fires; the realized
+    /// target scales from this floor up to `1.0` with conviction (`net⁺`).
+    pub default_sell_pct: Decimal,
+}
+
+impl SellScorerOutputSpec {
+    /// A conservative bootstrap mapping (hand-authored, pre-calibration).
+    #[must_use]
+    pub fn conservative() -> Self {
+        Self {
+            max_exit_alpha_bps: Decimal::from(300),
+            p_exit_gain: Decimal::from(4),
+            default_sell_pct: Decimal::ONE,
+        }
+    }
+}
+
+/// Sell-side hold-vs-exit weighted scorer artifact (Phase 06.1).
+///
+/// Symmetric to [`WeightedFactorModelArtifact`] but scores the *exit* decision
+/// for one open position lot rather than an entry ranking. Inputs are the
+/// already-normalized market factors plus lot position-state pseudo-factors
+/// (`unrealized_pnl_pct` / `time_in_trade` / `peak_mark_drawdown`); the frozen
+/// weights and [`SellScorerOutputSpec`] govern the mapping to `(exit_alpha_bps,
+/// p_exit_better, recommended cumulative exit fraction)`. A distinct artifact
+/// family so a Sell scorer can never be loaded where a Buy scorer is expected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SellScorerArtifact {
+    /// Common provenance header (`model_family = HoldVsExitWeighted`).
+    pub header: ModelArtifactHeader,
+    /// Frozen per-factor non-negative weights (normalized to sum to 1), over
+    /// both market factors and position-state pseudo-factors.
+    pub weights: Vec<FactorWeight>,
+    /// Model-intrinsic hold-vs-exit horizon, in seconds.
+    pub prediction_horizon_secs: u64,
+    /// Governed net → business-output mapping.
+    pub output_spec: SellScorerOutputSpec,
+    /// Hold-vs-exit label-schema hash the scorer was trained against.
+    pub label_schema_hash: ContentHash,
+    /// Features the scorer requires (surfaced for eligibility / audit).
+    pub required_features: Vec<FeatureName>,
+    /// Trainer objective report (`None` when hand-authored).
+    pub objective_report: Option<TrainingObjectiveReport>,
+}
+
+impl SellScorerArtifact {
+    /// Validate the structural, money-adjacent invariants: a non-empty weight
+    /// set, every weight non-negative and summing to 1, a strictly positive
+    /// logistic gain, and a default exit fraction in `(0, 1]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchError::InvalidModelArtifact`] on any violation.
+    pub fn validate(&self) -> QuantResult<()> {
+        if self.weights.is_empty() {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "sell scorer artifact has no factor weights".to_owned(),
+            }
+            .into());
+        }
+        let mut sum = Decimal::ZERO;
+        for weight in &self.weights {
+            if weight.weight < Decimal::ZERO {
+                return Err(ResearchError::InvalidModelArtifact {
+                    detail: format!(
+                        "sell factor `{}` has negative weight {}",
+                        weight.factor, weight.weight
+                    ),
+                }
+                .into());
+            }
+            sum += weight.weight;
+        }
+        if (sum - Decimal::ONE).abs() > weight_sum_tolerance() {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!("sell factor weights must sum to 1, got {sum}"),
+            }
+            .into());
+        }
+        if self.output_spec.p_exit_gain <= Decimal::ZERO {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "sell scorer p_exit_gain must be > 0".to_owned(),
+            }
+            .into());
+        }
+        if self.output_spec.default_sell_pct <= Decimal::ZERO
+            || self.output_spec.default_sell_pct > Decimal::ONE
+        {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "sell scorer default_sell_pct {} must be within (0, 1]",
+                    self.output_spec.default_sell_pct
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The frozen weights indexed by factor name for O(1) scorer lookup.
+    #[must_use]
+    pub fn weight_index(&self) -> BTreeMap<FactorName, Decimal> {
+        self.weights
+            .iter()
+            .map(|weight| (weight.factor.clone(), weight.weight))
+            .collect()
+    }
+}
+
 /// Per-feature standardization captured at training time, so inference applies
 /// the identical transform the model was fit on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,10 +689,12 @@ pub struct ClassicalModelArtifact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelArtifact {
-    /// Weighted-factor scorer.
+    /// Weighted-factor scorer (Buy-side entry ranking).
     WeightedFactor(Box<WeightedFactorModelArtifact>),
     /// Classical ML model.
     Classical(Box<ClassicalModelArtifact>),
+    /// Sell-side hold-vs-exit scorer (Phase 06.1).
+    SellScorer(Box<SellScorerArtifact>),
     // Onnx(OnnxArtifactRef) reserved — Phase 06.
 }
 
@@ -580,6 +705,7 @@ impl ModelArtifact {
         match self {
             Self::WeightedFactor(artifact) => &artifact.header,
             Self::Classical(artifact) => &artifact.header,
+            Self::SellScorer(artifact) => &artifact.header,
         }
     }
 
@@ -592,6 +718,7 @@ impl ModelArtifact {
         match self {
             Self::WeightedFactor(artifact) => artifact.validate(),
             Self::Classical(_) => Ok(()),
+            Self::SellScorer(artifact) => artifact.validate(),
         }
     }
 

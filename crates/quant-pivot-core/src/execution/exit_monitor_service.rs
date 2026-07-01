@@ -19,6 +19,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{OrderIntentInfo, PositionInfo, market::book::BookSnapshot},
     enums::execution::ExitState,
+    runtime_config::EmergencyExitPolicy,
     types::{OrderIntentId, Price},
 };
 use quant_pivot_repository::traits::{
@@ -162,14 +163,8 @@ impl ExitMonitorService {
         )
         .await;
 
-        let emergency_policy = self
-            .deps
-            .config
-            .current()
-            .execution
-            .kill_switch
-            .emergency_exit
-            .clone();
+        let emergency_policy = self.emergency_policy();
+        let min_opportunistic_clip_pct = self.opportunistic_clip_pct();
         let input = ExitMonitorInput {
             lot: lot.clone(),
             exit_policy: intent.exit_policy_json.clone(),
@@ -181,6 +176,8 @@ impl ExitMonitorService {
             peak_mark_price,
             signal,
             executed_partial_exit_node_ids: intent.executed_partial_exit_node_ids.node_ids.clone(),
+            opportunistic_exit_state: intent.opportunistic_exit_state.clone(),
+            min_opportunistic_clip_pct,
             now,
         };
 
@@ -189,6 +186,7 @@ impl ExitMonitorService {
                 reason,
                 order,
                 partial_exit_node_id,
+                opportunistic_denominator,
             } => {
                 self.deps
                     .dispatcher
@@ -197,6 +195,7 @@ impl ExitMonitorService {
                         reason,
                         order,
                         partial_exit_node_id,
+                        opportunistic_denominator,
                         neg_risk,
                     })
                     .await?;
@@ -219,6 +218,32 @@ impl ExitMonitorService {
             }
         }
         Ok(())
+    }
+
+    /// The live emergency-exit policy applied under kill-switch emergency halt.
+    fn emergency_policy(&self) -> EmergencyExitPolicy {
+        self.deps
+            .config
+            .current()
+            .execution
+            .kill_switch
+            .emergency_exit
+            .clone()
+    }
+
+    /// The live opportunistic min-clip fraction (fail-safe `0` on a malformed
+    /// snapshot — config validation rejects that at load).
+    fn opportunistic_clip_pct(&self) -> rust_decimal::Decimal {
+        self.deps
+            .config
+            .current()
+            .execution
+            .exit_monitor
+            .opportunistic_sell
+            .min_opportunistic_clip_pct
+            .value
+            .parse()
+            .unwrap_or(rust_decimal::Decimal::ZERO)
     }
 
     async fn touch_lot_monitor(

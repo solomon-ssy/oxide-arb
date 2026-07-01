@@ -11,6 +11,7 @@ mod comparison;
 #[allow(clippy::needless_update)] // NewTrainingDataset omits DB-managed created_at
 mod dataset;
 mod execution;
+mod exit_training;
 mod factor;
 mod feature;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
@@ -40,6 +41,7 @@ pub use capital::*;
 pub use comparison::*;
 pub use dataset::*;
 pub use execution::*;
+pub use exit_training::*;
 pub use factor::*;
 pub use feature::*;
 pub use governance_audit::*;

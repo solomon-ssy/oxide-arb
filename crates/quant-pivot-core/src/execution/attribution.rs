@@ -176,7 +176,7 @@ impl AttributionService {
         let row = QuantRecommendationAttributionEventRow {
             event_time: info.created_at.timestamp_millis(),
             recommendation_id: info.recommendation_id.clone(),
-            outcome: info.outcome.as_str().to_owned(),
+            outcome: info.outcome.into(),
             realized_pnl_usd: ChUsd::from(info.realized_pnl_usd.unwrap_or(Usd::ZERO)),
             max_adverse_excursion_bps: info.max_adverse_excursion_bps.map(ChDecimal64::from),
             max_favorable_excursion_bps: ChDecimal64::from(

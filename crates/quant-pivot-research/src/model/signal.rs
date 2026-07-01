@@ -157,11 +157,11 @@ pub fn signal_candidate_event(
 ) -> QuantSignalCandidateEventRow {
     QuantSignalCandidateEventRow {
         event_time,
-        signal_candidate_id: candidate.signal_candidate_id.to_string(),
+        signal_candidate_id: candidate.signal_candidate_id.clone(),
         model_run_id: candidate.model_run_id.clone(),
         market_id: candidate.market_id.clone(),
         token_id: candidate.token_id.clone(),
-        side: candidate.outcome_side.as_i8(),
+        side: candidate.outcome_side.into(),
         score: ChProbability::from(candidate.composite_score),
         confidence: ChProbability::from(candidate.confidence),
         entry_price: ChPrice::from(candidate.entry_price_ref),
@@ -276,14 +276,11 @@ mod tests {
         let row = signal_candidate_event(&candidate, "score_below_floor", 1_700_000_000_000);
 
         assert_eq!(row.event_time, 1_700_000_000_000);
-        assert_eq!(
-            row.signal_candidate_id,
-            candidate.signal_candidate_id.to_string()
-        );
+        assert_eq!(row.signal_candidate_id, candidate.signal_candidate_id);
         assert_eq!(row.model_run_id, candidate.model_run_id);
         assert_eq!(row.market_id, candidate.market_id);
         assert_eq!(row.token_id, candidate.token_id);
-        assert_eq!(row.side, OutcomeSide::No.as_i8());
+        assert_eq!(row.side, OutcomeSide::No.into());
         assert_eq!(row.rank_before_portfolio, 3);
         assert_eq!(row.rejection_reason, "score_below_floor");
         // target = 0.40 × (1 + 0.02) = 0.408; stop = 0.40 × (1 − 0.05) = 0.38.

@@ -5,7 +5,8 @@ use crate::{
     observability::{
         attribution_fact_writer::AttributionEventWriter, book_fact_writer::BookFactWriter,
         capital_allocation_fact_writer::CapitalAllocationEventWriter,
-        execution_fact_writer::ExecutionEventWriter, fact_lag::FactLagTracker,
+        execution_fact_writer::ExecutionEventWriter,
+        exit_signal_fact_writer::ExitSignalEvaluationEventWriter, fact_lag::FactLagTracker,
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub, position_fact_writer::PositionEventWriter,
         recommendation_fact_writer::RecommendationEventWriter,
@@ -17,9 +18,10 @@ use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow,
-        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantFactorEventRow,
-        QuantFeatureEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-        QuantRecommendationEventRow, QuantSignalCandidateEventRow, TickEventRow,
+        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
+        QuantFactorEventRow, QuantFeatureEventRow, QuantPositionEventRow,
+        QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
+        QuantSignalCandidateEventRow, TickEventRow,
     },
     config::DeployConfig,
 };
@@ -70,6 +72,8 @@ pub struct InfraBundle {
     pub capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
     /// Position-lot ledger sink (`quant_position_event`).
     pub position_event_writer: Arc<PositionEventWriter>,
+    /// Exit-signal evaluation audit sink (`quant_exit_signal_evaluation_event`).
+    pub exit_signal_evaluation_event_writer: Arc<ExitSignalEvaluationEventWriter>,
     /// Point-in-time read port over quant `ClickHouse` facts (feature windows).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Flush workers for each book fact stream, registered on the runner at boot.
@@ -108,6 +112,7 @@ impl InfraBundle {
             execution_event_writer: analytics.execution_event_writer,
             capital_allocation_event_writer: analytics.capital_allocation_event_writer,
             position_event_writer: analytics.position_event_writer,
+            exit_signal_evaluation_event_writer: analytics.exit_signal_evaluation_event_writer,
             fact_writer_queue: analytics.fact_writer_queue,
         })
     }
@@ -192,6 +197,7 @@ struct AnalyticsWriters {
     execution_event_writer: Arc<ExecutionEventWriter>,
     capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
     position_event_writer: Arc<PositionEventWriter>,
+    exit_signal_evaluation_event_writer: Arc<ExitSignalEvaluationEventWriter>,
     fact_writer_queue: PendingTaskQueue,
 }
 
@@ -224,6 +230,13 @@ fn build_analytics_writers(
     );
     let attribution_event_writer =
         build_attribution_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let exit_signal_evaluation_event_writer = build_exit_signal_evaluation_event_writer(
+        ch,
+        ch_write_manager,
+        metrics,
+        deploy,
+        &fact_writer_queue,
+    );
     let LedgerEventWriters {
         execution: execution_event_writer,
         capital: capital_allocation_event_writer,
@@ -240,6 +253,7 @@ fn build_analytics_writers(
         execution_event_writer,
         capital_allocation_event_writer,
         position_event_writer,
+        exit_signal_evaluation_event_writer,
         fact_writer_queue,
     }
 }
@@ -505,6 +519,38 @@ fn build_attribution_event_writer(
         config,
     );
     Arc::new(AttributionEventWriter::new(stream))
+}
+
+fn build_exit_signal_evaluation_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<ExitSignalEvaluationEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_exit_signal_evaluation_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_exit_signal_evaluation_event"]);
+    let stream = spawn_fact_stream::<QuantExitSignalEvaluationEventRow>(
+        queue,
+        TaskId::ExitSignalEvaluationEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_exit_signal_evaluation_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_exit_signal_evaluation_event"),
+        config,
+    );
+    Arc::new(ExitSignalEvaluationEventWriter::new(stream))
 }
 
 struct LedgerEventWriters {

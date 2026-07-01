@@ -5,7 +5,7 @@
 
 use chrono::Duration;
 
-use super::{DatasetPlanRequest, PlanMarket, SamplePlan};
+use super::{DatasetPlanRequest, ExitTrainingLotRow, LotSamplePlan, PlanMarket, SamplePlan};
 
 /// Generate the deterministic `(market, token, as_of)` sampling grid.
 ///
@@ -34,6 +34,43 @@ pub fn plan_samples(request: &DatasetPlanRequest, markets: &[PlanMarket]) -> Vec
                     as_of,
                 });
             }
+            as_of += step;
+        }
+    }
+    samples
+}
+
+/// Generate hold-vs-exit decision instants along each closed lot's life.
+#[must_use]
+pub fn plan_lot_timeline_samples(
+    interval_secs: u64,
+    lots: &[ExitTrainingLotRow],
+) -> Vec<LotSamplePlan> {
+    let interval_secs = i64::try_from(interval_secs.max(1)).unwrap_or(i64::MAX);
+    let step = Duration::seconds(interval_secs);
+
+    let mut ordered: Vec<&ExitTrainingLotRow> = lots.iter().collect();
+    ordered.sort_by(|a, b| {
+        (a.order_intent_id.to_string(), a.opened_at, a.closed_at).cmp(&(
+            b.order_intent_id.to_string(),
+            b.opened_at,
+            b.closed_at,
+        ))
+    });
+
+    let mut samples = Vec::new();
+    for lot in ordered {
+        let mut as_of = lot.opened_at;
+        while as_of < lot.closed_at {
+            samples.push(LotSamplePlan {
+                order_intent_id: lot.order_intent_id.clone(),
+                position_id: lot.position_id.clone(),
+                market_id: lot.market_id.clone(),
+                token_id: lot.token_id.clone(),
+                as_of,
+                opened_at: lot.opened_at,
+                closed_at: lot.closed_at,
+            });
             as_of += step;
         }
     }

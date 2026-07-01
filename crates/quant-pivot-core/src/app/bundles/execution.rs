@@ -29,18 +29,23 @@ use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBu
 use crate::{
     execution::{
         AdmissionInputBuilder, AdmissionInputBuilderDeps, AttributionService,
-        AttributionServiceDeps, ClobOrderClient, ClobReconciliationReader, CoreExecutionDispatcher,
-        CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
-        ExecutionBreaker, ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle,
-        ExitMonitorService, ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient,
-        ReconciliationService, ReconciliationServiceDeps, RelayerSettlementClient,
-        SettlementCtfClient, SettlementRedeemService, SettlementRedeemServiceDeps,
-        VenueEvidenceCollector, VenueReconciliationReader,
+        AttributionServiceDeps, ClobOrderClient, ClobReconciliationReader,
+        CompositeExitSignalEvaluator, CoreExecutionDispatcher, CoreExitDispatcher,
+        DefaultAdmissionEngine, DispatchWake, EvidenceCollector, ExecutionBreaker,
+        ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService,
+        ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient, ReconciliationService,
+        ReconciliationServiceDeps, RelayerSettlementClient, SettlementCtfClient,
+        SettlementRedeemService, SettlementRedeemServiceDeps, VenueEvidenceCollector,
+        VenueReconciliationReader,
     },
     pipeline::feature_window_provider::FeatureWindowProvider,
     service::{
         model_backed_reinferer::{
             ModelBackedExitSignalReinferer, ModelBackedExitSignalReinfererDeps,
+        },
+        opportunistic_sell::{
+            ModelBackedOpportunisticSellScorer, ModelBackedOpportunisticSellScorerDeps,
+            OpportunisticSellSignalEvaluator, OpportunisticSellSignalEvaluatorDeps,
         },
         signal_reinference::{ReinferenceSignalEvaluator, ReinferenceSignalEvaluatorDeps},
     },
@@ -325,6 +330,7 @@ fn build_exit_monitor(
 ) -> Arc<ExitMonitorService> {
     let repos = &wiring.infra.repos;
     let metrics = Arc::clone(&wiring.infra.metrics);
+    let audit = Arc::clone(&wiring.infra.exit_signal_evaluation_event_writer);
     let reinferer = ModelBackedExitSignalReinferer::new(ModelBackedExitSignalReinfererDeps {
         model_registry: Arc::clone(&wiring.research.model_registry_repo),
         factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
@@ -335,12 +341,37 @@ fn build_exit_monitor(
         market_registry: Arc::clone(&wiring.data.market_registry),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
     });
-    let exit_signal: Arc<dyn ExitSignalEvaluator> = Arc::new(ReinferenceSignalEvaluator::new(
+    // 06.0 thesis-invalidation re-inference (invalidation-first).
+    let reinference: Arc<dyn ExitSignalEvaluator> = Arc::new(ReinferenceSignalEvaluator::new(
         ReinferenceSignalEvaluatorDeps {
             reinferer,
             config: Arc::clone(&wiring.governance.runtime_config),
             metrics: Arc::clone(&metrics),
+            audit: Arc::clone(&audit),
         },
+    ));
+    // 06.1 opportunistic Sell scorer (advisory scale-out; runs only when the
+    // thesis holds — composed behind re-inference).
+    let opportunistic_scorer =
+        ModelBackedOpportunisticSellScorer::new(ModelBackedOpportunisticSellScorerDeps {
+            model_registry: Arc::clone(&wiring.research.model_registry_repo),
+            factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
+            config: Arc::clone(&wiring.governance.runtime_config),
+            pit_source: Arc::clone(&wiring.data.pit_source),
+            market_registry: Arc::clone(&wiring.data.market_registry),
+            window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
+        });
+    let opportunistic: Arc<dyn ExitSignalEvaluator> = Arc::new(
+        OpportunisticSellSignalEvaluator::new(OpportunisticSellSignalEvaluatorDeps {
+            scorer: opportunistic_scorer,
+            config: Arc::clone(&wiring.governance.runtime_config),
+            metrics: Arc::clone(&metrics),
+            audit,
+        }),
+    );
+    let exit_signal: Arc<dyn ExitSignalEvaluator> = Arc::new(CompositeExitSignalEvaluator::new(
+        reinference,
+        opportunistic,
     ));
     let exit_dispatcher = Arc::new(CoreExitDispatcher::new(ExitDispatcherDeps {
         submission: Arc::clone(submission),

@@ -24,6 +24,7 @@ use quant_pivot_models::{
         SubmissionLedgerWrite,
     },
     enums::{
+        clickhouse::ChQuantLedgerEventKind,
         common::OrderType,
         execution::{
             AdmissionOutcome, ExecutionOrderPhase, OrderTypeKind, ReconciliationEvidenceKind,
@@ -157,7 +158,7 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
             recommendation.recommendation_id.clone(),
-            "submitted",
+            ChQuantLedgerEventKind::Submitted,
             now,
         ));
 
@@ -194,7 +195,7 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         self.deps.execution_events.write(project_execution_event(
             &recorded,
             recommendation.recommendation_id.clone(),
-            "submission_result",
+            ChQuantLedgerEventKind::SubmissionResult,
             now,
         ));
         Ok(recorded)

@@ -379,6 +379,14 @@ fn model_fields() -> Vec<FieldUiEntry> {
             None,
         ),
         entry(
+            "model.active_exit_model_version_id",
+            "Active exit (Sell) scorer version",
+            "活动退出(卖出)评分模型版本",
+            22,
+            Some(FieldWidget::PlainString),
+            None,
+        ),
+        entry(
             "model.min_model_confidence",
             "Minimum model confidence",
             "最低模型置信度",
@@ -486,6 +494,52 @@ fn quality_gate_fields() -> Vec<FieldUiEntry> {
             "Required shadow window",
             "所需影子窗口秒数",
             90,
+        ),
+    ]
+    .into_iter()
+    .chain(sell_quality_gate_fields())
+    .collect()
+}
+
+fn sell_quality_gate_fields() -> Vec<FieldUiEntry> {
+    vec![
+        integer(
+            "quality_gate.sell.min_sample_count",
+            "Sell minimum sample count",
+            "卖出侧最小样本数",
+            100,
+        ),
+        entry(
+            "quality_gate.sell.min_label_coverage",
+            "Sell minimum label coverage",
+            "卖出侧最低标签覆盖率",
+            110,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.sell.min_exit_alpha_rank_ic",
+            "Sell minimum exit-alpha rank IC",
+            "卖出侧最低 exit-alpha rank IC",
+            120,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.sell.min_l2_book_fidelity_ratio",
+            "Sell minimum L2 book fidelity",
+            "卖出侧最低 L2 订单簿保真度",
+            130,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.sell.max_fallback_ratio",
+            "Sell maximum fallback ratio",
+            "卖出侧最高 microstructure fallback 比例",
+            140,
+            Some(FieldWidget::DecimalString),
+            None,
         ),
     ]
 }
@@ -861,6 +915,56 @@ fn execution_exit_monitor_fields() -> Vec<FieldUiEntry> {
             "Signal re-inference shadow mode",
             "信号再推理影子模式（只审计不触发）",
             152,
+        ),
+        boolean(
+            "execution.exit_monitor.opportunistic_sell.enabled",
+            "Opportunistic Sell enabled",
+            "启用机会性卖出",
+            154,
+        ),
+        boolean(
+            "execution.exit_monitor.opportunistic_sell.shadow_mode",
+            "Opportunistic Sell shadow mode",
+            "机会性卖出影子模式（只审计不触发）",
+            156,
+        ),
+        entry(
+            "execution.exit_monitor.opportunistic_sell.min_confidence",
+            "Opportunistic Sell min confidence",
+            "机会性卖出最低置信度",
+            158,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        integer(
+            "execution.exit_monitor.opportunistic_sell.min_expected_alpha_bps",
+            "Opportunistic Sell min expected alpha (bps)",
+            "机会性卖出最低预期超额收益(bps)",
+            160,
+        ),
+        entry(
+            "execution.exit_monitor.opportunistic_sell.min_p_exit_better",
+            "Opportunistic Sell min P(exit better)",
+            "机会性卖出最低退出优于持有概率",
+            161,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "execution.exit_monitor.opportunistic_sell.max_sell_pct",
+            "Opportunistic Sell max cumulative fraction",
+            "机会性卖出最大累计比例",
+            162,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "execution.exit_monitor.opportunistic_sell.min_opportunistic_clip_pct",
+            "Opportunistic Sell min clip fraction",
+            "机会性卖出最小增量比例",
+            164,
+            Some(FieldWidget::DecimalString),
+            None,
         ),
     ]
 }

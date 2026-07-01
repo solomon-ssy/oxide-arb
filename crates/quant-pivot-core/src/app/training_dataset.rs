@@ -13,8 +13,9 @@ use quant_pivot_models::{
     types::{RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, FeatureRepository, MarketRepository, QuantFactReadRepository,
-    RecommendationRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    AttributionRepository, FeatureRepository, MarketRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -38,6 +39,7 @@ pub struct CoreTrainingDatasetPort {
     attribution_repo: Arc<dyn AttributionRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
+    position_repo: Arc<dyn PositionRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
 }
 
@@ -56,6 +58,7 @@ impl CoreTrainingDatasetPort {
             attribution_repo: Arc::clone(&research.attribution_repo),
             recommendation_repo: Arc::clone(&research.recommendation_repo),
             feature_repo: Arc::clone(&research.feature_repo),
+            position_repo: Arc::clone(&research.position_repo),
             runtime_config,
         }
     }
@@ -82,6 +85,7 @@ impl CoreTrainingDatasetPort {
                 attribution_repo: Arc::clone(&self.attribution_repo),
                 recommendation_repo: Arc::clone(&self.recommendation_repo),
                 feature_repo: Arc::clone(&self.feature_repo),
+                position_repo: Arc::clone(&self.position_repo),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,

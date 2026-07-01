@@ -54,6 +54,7 @@ pub enum QuantOrderIntent {
     LastSignalRecheckAt,
     ExecutedPartialExitNodeIds,
     PendingPartialExitNodeId,
+    OpportunisticExitState,
     CreatedAt,
     UpdatedAt,
 }
@@ -145,6 +146,14 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantOrderIntent::PendingPartialExitNodeId)
                 .text()
                 .null(),
+        )
+        .col(
+            ColumnDef::new(QuantOrderIntent::OpportunisticExitState)
+                .json_binary()
+                .not_null()
+                .default(Expr::cust(
+                    "'{\"denominator_shares\": null, \"cumulative_sold_shares\": \"0\"}'::jsonb",
+                )),
         )
         .col(timestamp_with_write_default(QuantOrderIntent::CreatedAt))
         .col(timestamp_with_write_default(QuantOrderIntent::UpdatedAt));

@@ -10,17 +10,22 @@
 
 mod labeler;
 mod leakage;
+mod lot_hold_value;
 mod matrix;
 #[cfg(feature = "dataframe")]
 mod parquet;
 mod planner;
 
 pub use labeler::{
-    LiquidityExitLabeler, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler,
-    ReturnToHorizonLabeler, SettlementOutcomeLabeler, label_names, label_names_for_sources,
+    HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LiquidityExitLabeler,
+    MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, ReturnToHorizonLabeler,
+    SettlementOutcomeLabeler, label_names, label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
+};
+pub use lot_hold_value::{
+    LotExitEvent, LotTerminalSnapshot, hold_terminal_proceeds, proceeds_before, remaining_shares_at,
 };
 pub use matrix::{
     FeatureColumnSpec, FeatureMatrixSpec, MatrixCoverageProbe, MatrixScale, TrainingMatrix,
@@ -28,23 +33,30 @@ pub use matrix::{
 };
 #[cfg(feature = "dataframe")]
 pub use parquet::DatasetParquetCodec;
-pub use planner::plan_samples;
+pub use planner::{plan_lot_timeline_samples, plan_samples};
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::types::{
-    ArtifactUri, ContentHash, MarketId, ModelSpecId, Price, RuntimeConfigVersionId, SchemaVersion,
-    TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
-    default_sample_sources,
+use quant_pivot_models::{
+    domain::{ExitTrainingLotRow, LotExitEventRow, market::book::BookLevel},
+    types::{
+        ArtifactUri, Bps, ContentHash, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
+        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    execution_sim::BookFidelity,
     factors::FactorValue,
     features::{EvidenceSourceRef, FeatureVector},
     hashing::ResearchHasher,
+    model::sell_scorer::PositionStateFeatures,
     naming::stable_name,
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -107,6 +119,56 @@ pub struct SamplePlan {
     pub as_of: DateTime<Utc>,
 }
 
+/// One hold-vs-exit decision instant along a closed lot's timeline (Phase 06.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LotSamplePlan {
+    /// Entry intent owning the lot.
+    pub order_intent_id: OrderIntentId,
+    /// Position lot id.
+    pub position_id: PositionId,
+    /// Market the lot trades.
+    pub market_id: MarketId,
+    /// Outcome token held.
+    pub token_id: TokenId,
+    /// Hold-vs-exit decision time.
+    pub as_of: DateTime<Utc>,
+    /// When the lot opened.
+    pub opened_at: DateTime<Utc>,
+    /// When the lot closed / settled.
+    pub closed_at: DateTime<Utc>,
+}
+
+/// Lot-scoped context carried on `ExitDecision` training rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LotTrainingContext {
+    pub order_intent_id: OrderIntentId,
+    pub position_id: PositionId,
+    pub remaining_shares: Shares,
+    pub avg_price: Price,
+    pub peak_mark: Option<Price>,
+    pub opened_at: DateTime<Utc>,
+    pub max_hold_secs: u64,
+}
+
+/// Book slice used to simulate an exit at the decision instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecisionBook {
+    /// Full L2 bid ladder (best-first).
+    L2 { bids: Arc<[BookLevel]> },
+    /// Best bid + aggregate depth fallback.
+    Microstructure { best_bid: Price, depth: Shares },
+}
+
+/// Pre-fetched hold-vs-exit label inputs for one lot decision point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitDecisionLabelContext {
+    pub remaining_shares: Shares,
+    pub avg_price: Price,
+    pub fee_bps: Bps,
+    pub terminal: LotTerminalSnapshot,
+    pub decision_book: Option<DecisionBook>,
+}
+
 /// A resolved plan: which instants the dataset will materialize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetPlan {
@@ -114,8 +176,14 @@ pub struct DatasetPlan {
     pub request: DatasetPlanRequest,
     /// Dataset identity (assigned by the planner).
     pub training_dataset_id: TrainingDatasetId,
-    /// Deterministic sample instants, ordered by `(market_id, as_of)`.
+    /// Deterministic market-grid sample instants, ordered by `(market_id, as_of)`.
     pub samples: Vec<SamplePlan>,
+    /// Lot-timeline hold-vs-exit samples (Phase 06.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lot_samples: Vec<LotSamplePlan>,
+    /// Closed lots backing [`Self::lot_samples`] (not hashed; planner metadata).
+    #[serde(skip)]
+    pub exit_training_lots: Vec<ExitTrainingLotRow>,
     /// Labels this dataset materializes (one logical name; horizons fan out).
     pub label_names: Vec<LabelName>,
 }
@@ -239,6 +307,8 @@ pub struct LabelBuildInput<'a> {
     pub min_exit_depth_usd: Usd,
     /// Pre-fetched forward observations + settlement for this sample.
     pub forward: &'a ForwardWindow,
+    /// Hold-vs-exit lot context (`ExitDecision` rows only).
+    pub exit_decision: Option<&'a ExitDecisionLabelContext>,
 }
 
 // ── Example / artifact ─────────────────────────────────────────────────────
@@ -264,6 +334,15 @@ pub struct TrainingExample {
     pub labels: Vec<TrainingLabel>,
     /// Provenance of the inputs, for audit and replay.
     pub source_refs: Vec<EvidenceSourceRef>,
+    /// Lot-scoped replay context (`ExitDecision` rows only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lot_context: Option<LotTrainingContext>,
+    /// Position-state pseudo-factors aligned with runtime scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_state: Option<PositionStateFeatures>,
+    /// Exit-fill simulation fidelity (`ExitDecision` rows only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub book_fidelity: Option<BookFidelity>,
 }
 
 /// Per-sample coverage accounting for a built dataset.
@@ -291,6 +370,18 @@ pub struct DatasetCoverage {
     pub live_attribution_dropped_missing_evidence: u64,
     /// Book snapshot rows skipped due to malformed JSON or invalid level pairs.
     pub book_decode_failures: u64,
+    /// `ExitDecision` lot-timeline candidates considered.
+    #[serde(default)]
+    pub exit_decision_candidates: u64,
+    /// `ExitDecision` examples materialized.
+    #[serde(default)]
+    pub exit_decision_built: u64,
+    /// `ExitDecision` rows simulated from full L2 books.
+    #[serde(default)]
+    pub exit_fill_l2_rows: u64,
+    /// `ExitDecision` rows simulated from microstructure fallback.
+    #[serde(default)]
+    pub exit_fill_fallback_rows: u64,
     /// Optional training-matrix probe (diagnostic only; does not gate build).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix_probe: Option<MatrixCoverageProbe>,
@@ -326,6 +417,28 @@ impl DatasetCoverage {
             return Decimal::ZERO;
         }
         (Decimal::from(self.built_examples) / Decimal::from(self.planned_samples))
+            .round_dp(RESEARCH_DECIMAL_SCALE)
+    }
+
+    /// Fraction of `ExitDecision` rows simulated from full L2 books, in `[0, 1]`.
+    #[must_use]
+    pub fn exit_l2_fidelity_ratio(&self) -> Decimal {
+        let total = self.exit_fill_l2_rows + self.exit_fill_fallback_rows;
+        if total == 0 {
+            return Decimal::ZERO;
+        }
+        (Decimal::from(self.exit_fill_l2_rows) / Decimal::from(total))
+            .round_dp(RESEARCH_DECIMAL_SCALE)
+    }
+
+    /// Fraction of `ExitDecision` rows using microstructure fallback, in `[0, 1]`.
+    #[must_use]
+    pub fn exit_fallback_ratio(&self) -> Decimal {
+        let total = self.exit_fill_l2_rows + self.exit_fill_fallback_rows;
+        if total == 0 {
+            return Decimal::ZERO;
+        }
+        (Decimal::from(self.exit_fill_fallback_rows) / Decimal::from(total))
             .round_dp(RESEARCH_DECIMAL_SCALE)
     }
 }
@@ -381,8 +494,11 @@ struct CanonicalExample<'a> {
     token_id: &'a TokenId,
     as_of: DateTime<Utc>,
     sample_source: TrainingSampleSource,
+    order_intent_id: Option<&'a OrderIntentId>,
     feature_vector: &'a FeatureVector,
     factor_values: &'a [FactorValue],
+    position_state: Option<&'a PositionStateFeatures>,
+    book_fidelity: Option<BookFidelity>,
     labels: &'a [TrainingLabel],
 }
 
@@ -406,11 +522,24 @@ impl TrainingDatasetArtifact {
     ) -> QuantResult<ContentHash> {
         let mut ordered: Vec<&TrainingExample> = examples.iter().collect();
         ordered.sort_by(|a, b| {
-            (a.market_id.as_str(), a.token_id.as_str(), a.as_of).cmp(&(
-                b.market_id.as_str(),
-                b.token_id.as_str(),
-                b.as_of,
-            ))
+            (
+                a.market_id.as_str(),
+                a.token_id.as_str(),
+                a.lot_context
+                    .as_ref()
+                    .map(|ctx| ctx.order_intent_id.to_string())
+                    .unwrap_or_default(),
+                a.as_of,
+            )
+                .cmp(&(
+                    b.market_id.as_str(),
+                    b.token_id.as_str(),
+                    b.lot_context
+                        .as_ref()
+                        .map(|ctx| ctx.order_intent_id.to_string())
+                        .unwrap_or_default(),
+                    b.as_of,
+                ))
         });
         let canonical = ordered
             .into_iter()
@@ -419,8 +548,11 @@ impl TrainingDatasetArtifact {
                 token_id: &e.token_id,
                 as_of: e.as_of,
                 sample_source: e.sample_source,
+                order_intent_id: e.lot_context.as_ref().map(|ctx| &ctx.order_intent_id),
                 feature_vector: &e.feature_vector,
                 factor_values: &e.factor_values,
+                position_state: e.position_state.as_ref(),
+                book_fidelity: e.book_fidelity,
                 labels: &e.labels,
             })
             .collect();
@@ -470,6 +602,28 @@ pub trait Labeler: Send + Sync {
     fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput;
 }
 
+impl From<&LotExitEventRow> for LotExitEvent {
+    fn from(row: &LotExitEventRow) -> Self {
+        Self {
+            at: row.at,
+            shares: row.shares,
+            net_proceeds: row.net_proceeds,
+        }
+    }
+}
+
+impl From<&ExitTrainingLotRow> for LotTerminalSnapshot {
+    fn from(lot: &ExitTrainingLotRow) -> Self {
+        Self {
+            entry_shares: lot.entry_shares,
+            opened_at: lot.opened_at,
+            closed_at: lot.closed_at,
+            total_net_proceeds: lot.total_net_proceeds,
+            exit_events: lot.exit_events.iter().map(LotExitEvent::from).collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::{LabelName, TrainingExample, TrainingLabel};
@@ -510,6 +664,9 @@ pub(crate) mod fixtures {
                 is_resolved: true,
             }],
             source_refs: Vec::new(),
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
         }
     }
 }
