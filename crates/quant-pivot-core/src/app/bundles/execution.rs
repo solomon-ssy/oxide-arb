@@ -288,6 +288,7 @@ fn build_admission_builder(
         model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
         reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         execution_orders: Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
+        intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
         capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
         markets: Arc::clone(&deps.data.market_repo),
         config_versions: Arc::clone(&repos.runtime_config)

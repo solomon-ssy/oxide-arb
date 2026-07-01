@@ -83,14 +83,6 @@ pub enum FeatureStalenessPolicy {
     AllowDegraded,
 }
 
-/// Domain feature missing/null policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainFeaturePolicy {
-    RejectMissingRequired,
-    ImputeMissingOptional,
-}
-
 /// Missing factor handling policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -317,8 +309,6 @@ pub struct EntryOrderPolicy {
     pub max_slippage_bps: u32,
     /// Whether entry orders may use marketable order types.
     pub allow_market_orders: bool,
-    /// Seconds a limit trigger must hold before entry fires.
-    pub confirmation_window_secs: u64,
 }
 
 impl Default for EntryOrderPolicy {
@@ -326,26 +316,6 @@ impl Default for EntryOrderPolicy {
         Self {
             max_slippage_bps: 50,
             allow_market_orders: false,
-            confirmation_window_secs: 0,
-        }
-    }
-}
-
-/// Exit order policy for recommendations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExitOrderPolicy {
-    /// Whether generated exit orders must only reduce existing exposure.
-    pub allow_reduce_only: bool,
-    /// Maximum allowed exit-order slippage in basis points.
-    pub max_slippage_bps: u32,
-}
-
-impl Default for ExitOrderPolicy {
-    fn default() -> Self {
-        Self {
-            allow_reduce_only: true,
-            max_slippage_bps: 100,
         }
     }
 }
@@ -442,28 +412,6 @@ impl Default for EmergencyExitPolicy {
     }
 }
 
-/// Admission gates for creating order intents from recommendations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ExecutionAdmissionPolicy {
-    /// Minimum recommendation score for intent admission.
-    pub min_score: DecimalString,
-    /// Minimum recommendation confidence for intent admission.
-    pub min_confidence: DecimalString,
-    /// Require fresh feature vectors before creating an intent.
-    pub require_fresh_features: bool,
-}
-
-impl Default for ExecutionAdmissionPolicy {
-    fn default() -> Self {
-        Self {
-            min_score: DecimalString::new("0.00"),
-            min_confidence: DecimalString::new("0.50"),
-            require_fresh_features: true,
-        }
-    }
-}
-
 /// Execution kill-switch default policy.
 ///
 /// Operational state lives in the `system_kill_switch` singleton. Runtime
@@ -476,12 +424,18 @@ pub struct KillSwitchPolicy {
 }
 
 /// Capital policy for execution admission.
+///
+/// Both caps gate order-intent admission (checks `#21` / `#22`). A value of
+/// `0` **disables** that dimension (no cap) — matching the other opt-in USD
+/// governance knobs. When `> 0` the cap is enforced hard (`Deny`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CapitalPolicy {
-    /// Maximum USD that may be reserved by open execution intents.
+    /// Maximum USD that may be reserved across all open execution intents.
+    /// `0` disables the reserved-capital cap. Enforced by admission `#22`.
     pub max_reserved_usd: DecimalString,
-    /// Maximum number of open execution intents.
+    /// Maximum number of concurrently open execution intents. `0` disables the
+    /// open-intent count cap. Enforced by admission `#21`.
     pub max_open_intents: u32,
 }
 
@@ -635,18 +589,12 @@ impl Default for ExecutionBreakerConfig {
 pub struct NotificationPolicies {
     /// Notify operators when a recommendation report is published.
     pub report_published: bool,
-    /// Notify operators when execution is halted.
-    pub execution_halted: bool,
-    /// Notify operators when runtime config is activated.
-    pub config_activated: bool,
 }
 
 impl Default for NotificationPolicies {
     fn default() -> Self {
         Self {
             report_published: true,
-            execution_halted: true,
-            config_activated: true,
         }
     }
 }

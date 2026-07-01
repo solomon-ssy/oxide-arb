@@ -5,8 +5,10 @@ use alloy::{
     network::{Ethereum, EthereumWallet},
     primitives::{Address, B256, TxHash, U256},
     providers::{DynProvider, PendingTransactionBuilder, Provider, ProviderBuilder},
+    rpc::client::RpcClient,
     signers::Signer,
     sol,
+    transports::http::Http,
 };
 use quant_pivot_error::rpc::RpcError;
 use quant_pivot_models::{
@@ -15,7 +17,7 @@ use quant_pivot_models::{
     types::{MarketId, TokenId},
 };
 use reqwest::Url;
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 const STANDARD_BINARY_INDEX_SETS: [u64; 2] = [1, 2];
 
@@ -147,9 +149,21 @@ impl CtfClient {
         let mut private_key = signer.inner().clone();
         private_key.set_chain_id(Some(config.chain_id));
         let wallet = EthereumWallet::new(private_key);
+
+        // Bind the RPC request timeout: reqwest defaults to *no* timeout, which
+        // would let a money-moving redeem/oracle call hang indefinitely on a
+        // stalled provider. `onchain.rpc_timeout_ms` is the hard per-call bound.
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(config.onchain.rpc_timeout_ms))
+            .build()
+            .map_err(|e| {
+                RpcError::ConnectionFailed(format!("failed to build Polygon RPC HTTP client: {e}"))
+            })?;
+        let transport = Http::with_client(http_client, rpc_url);
+        let rpc_client = RpcClient::new(transport, false);
         let provider = ProviderBuilder::new()
             .wallet(wallet)
-            .connect_http(rpc_url)
+            .connect_client(rpc_client)
             .erased();
 
         let ctf_address = parse_address(CTF_ADDRESS, "CTF_ADDRESS")?;

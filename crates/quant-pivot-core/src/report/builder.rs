@@ -782,9 +782,9 @@ fn resolve_top_n(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantR
                 })?
                 .top_n
         }
-        ReportTrigger::AdHoc { .. } => request
-            .top_n_override
-            .unwrap_or(config.reports.default_top_n),
+        ReportTrigger::AdHoc { .. } => request.top_n_override.ok_or_else(|| {
+            QuantError::config("ad-hoc report requires an explicit top_n (no configured default)")
+        })?,
     };
     if top_n == 0 || top_n > config.reports.max_top_n {
         return Err(QuantError::config(format!(
@@ -827,9 +827,11 @@ fn resolve_source_delay(request: &BuildReportRequest, config: &RuntimeConfig) ->
             if !config.reports.ad_hoc_report_enabled {
                 return Err(QuantError::config("ad-hoc report generation is disabled"));
             }
-            Ok(request
-                .source_delay_secs_override
-                .unwrap_or(config.data_quality.source_delay_secs))
+            request.source_delay_secs_override.ok_or_else(|| {
+                QuantError::config(
+                    "ad-hoc report requires an explicit source_delay_secs (no configured default)",
+                )
+            })
         }
     }
 }

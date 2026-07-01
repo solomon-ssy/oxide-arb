@@ -281,7 +281,6 @@ mod tests {
 
         let toml = r#"
 [keys]
-source = "env"
 private_key = "0xfrom_toml"
 "#;
         std::fs::write(dir.join("quant-pivot.toml"), toml).expect("write toml");

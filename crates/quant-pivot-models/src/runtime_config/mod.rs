@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 6`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 7`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -26,7 +26,7 @@ use quant_pivot_error::{
 use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(6);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(7);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -120,7 +120,7 @@ impl From<RuntimeConfigError> for QuantError {
 }
 
 impl RuntimeConfig {
-    /// Typed parse of a stored v5 `config_json` document.
+    /// Typed parse of a stored `config_json` document (must be the current schema).
     pub fn from_json(config_json: &serde_json::Value) -> Result<Self, RuntimeConfigError> {
         let config: Self = serde_json::from_value(config_json.clone())?;
         if config.schema_version != RUNTIME_CONFIG_SCHEMA_VERSION {
@@ -258,19 +258,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn schema_version_is_six() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 6);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 6);
+    fn schema_version_is_seven() {
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 7);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 7);
     }
 
     #[test]
-    fn rejects_v5_documents() {
+    fn rejects_prior_schema_documents() {
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(5);
-        let error = RuntimeConfig::from_json(&document).expect_err("v5 must be rejected");
+        document["schema_version"] = json!(6);
+        let error = RuntimeConfig::from_json(&document).expect_err("v6 must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 5
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 6
         ));
     }
 

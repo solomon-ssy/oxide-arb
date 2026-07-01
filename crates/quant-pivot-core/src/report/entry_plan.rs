@@ -46,7 +46,6 @@ pub fn derive_entry_plan(
             &config.data_quality.min_book_depth_usd.value,
         )),
         max_book_age_ms: config.data_quality.max_book_age_ms,
-        confirmation_window_secs: policy.confirmation_window_secs,
         cancel_if_not_triggered,
         entry_reason: candidate.model_explanation.headline.clone(),
     }

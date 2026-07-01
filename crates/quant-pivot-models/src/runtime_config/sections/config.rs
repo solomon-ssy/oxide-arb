@@ -1,14 +1,13 @@
 //! Runtime-config section structs grouped by document area.
 
 use crate::{
-    enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
+    enums::{common::MarketCategory, factor::FactorFamily},
     runtime_config::wire::{
-        AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, DomainFeaturePolicy,
-        EntryOrderPolicy, ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitMonitorPolicy,
-        ExitOrderPolicy, FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy,
-        KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
-        PortfolioOptimizerConfig, ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence,
-        SettlementRedeemPolicy, SizingModelConfig,
+        AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, EntryOrderPolicy,
+        ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily, FeatureNameRef,
+        FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
+        NotificationPolicies, PortfolioOptimizerConfig, ReconciliationPolicy, ReportDeliveryPolicy,
+        ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig,
     },
     types::{SchemaVersion, Usd},
 };
@@ -62,14 +61,10 @@ pub struct DataQualityConfig {
     pub max_fact_lag_secs: u64,
     /// Minimum visible book depth in USD.
     pub min_book_depth_usd: DecimalString,
-    /// Whether degraded domain features can be used in reports.
-    pub allow_degraded_domain_features: bool,
     /// Reject crossed books before feature generation.
     pub reject_crossed_books: bool,
     /// Reject empty books before feature generation.
     pub reject_empty_books: bool,
-    /// Source delay applied to report generation for late facts.
-    pub source_delay_secs: u64,
     /// Named policy for stale feature handling.
     pub feature_staleness_policy: FeatureStalenessPolicy,
     /// Maximum tolerated stale-book ratio across the live book plane (basis points).
@@ -86,10 +81,8 @@ impl Default for DataQualityConfig {
             max_book_age_ms: 5_000,
             max_fact_lag_secs: 30,
             min_book_depth_usd: DecimalString::new("0"),
-            allow_degraded_domain_features: false,
             reject_crossed_books: true,
             reject_empty_books: true,
-            source_delay_secs: 10,
             feature_staleness_policy: FeatureStalenessPolicy::RejectStaleRequired,
             max_stale_book_ratio_bps: 2_000,
         }
@@ -106,8 +99,6 @@ pub struct FeaturesConfig {
     pub enabled_feature_families: Vec<FeatureFamily>,
     /// Required feature names (each must exist in the active feature schema).
     pub required_features: Vec<FeatureNameRef>,
-    /// Domain feature missing/null policy.
-    pub domain_feature_policy: DomainFeaturePolicy,
     /// Bar aggregation windows in seconds.
     pub bar_windows_secs: Vec<u64>,
     /// Momentum windows in seconds.
@@ -131,7 +122,6 @@ impl Default for FeaturesConfig {
                 FeatureFamily::Microstructure,
             ],
             required_features: Vec::new(),
-            domain_feature_policy: DomainFeaturePolicy::RejectMissingRequired,
             bar_windows_secs: vec![60, 300, 900],
             momentum_windows_secs: vec![300, 900, 3_600],
             volatility_windows_secs: vec![900, 3_600],
@@ -296,9 +286,7 @@ impl TrainingConfig {
 pub struct ReportsConfig {
     /// Configured report schedules.
     pub schedules: Vec<ReportScheduleConfig>,
-    /// Default `TopN` size.
-    pub default_top_n: u32,
-    /// Maximum `TopN` size.
+    /// Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run).
     pub max_top_n: u32,
     /// Fallback prediction horizon (seconds), used **only** when the model
     /// provides no per-candidate `suggested_horizon_secs` (classical / non-ML
@@ -323,7 +311,6 @@ impl Default for ReportsConfig {
     fn default() -> Self {
         Self {
             schedules: vec![ReportScheduleConfig::default()],
-            default_top_n: 20,
             max_top_n: 100,
             fallback_horizon_secs: 86_400,
             publish_empty_reports: true,
@@ -344,10 +331,6 @@ pub struct ReportScheduleConfig {
     pub cadence: ScheduleCadence,
     /// `TopN` size for this schedule.
     pub top_n: u32,
-    /// Optional selection filter reference.
-    pub market_filter_ref: Option<String>,
-    /// Optional model version override.
-    pub model_version_ref: Option<String>,
     /// Source delay in seconds.
     pub source_delay_secs: u64,
     /// Whether this schedule is enabled.
@@ -360,8 +343,6 @@ impl Default for ReportScheduleConfig {
             schedule_id: "default_interval".to_owned(),
             cadence: ScheduleCadence::default(),
             top_n: 20,
-            market_filter_ref: None,
-            model_version_ref: None,
             source_delay_secs: 10,
             enabled: true,
         }
@@ -442,23 +423,17 @@ impl Default for PortfolioConstraints {
 }
 
 /// Optional execution policy rooted in recommendations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionConfig {
-    /// Governed runtime mode.
-    pub runtime_mode: QuantRuntimeMode,
     /// Semi-auto approval policy.
     pub semi_auto: SemiAutoConfig,
     /// Auto-execution policy.
     pub auto_execution: AutoExecutionConfig,
     /// Entry order policy document.
     pub entry_order_policy: EntryOrderPolicy,
-    /// Exit order policy document.
-    pub exit_order_policy: ExitOrderPolicy,
     /// Exit-monitor cadence + signal-degradation policy.
     pub exit_monitor: ExitMonitorPolicy,
-    /// Admission policy document.
-    pub admission: ExecutionAdmissionPolicy,
     /// Kill-switch policy document.
     pub kill_switch: KillSwitchPolicy,
     /// Capital policy document.
@@ -471,26 +446,6 @@ pub struct ExecutionConfig {
     pub attribution: AttributionPolicy,
     /// Execution-breaker thresholds (venue health + auto kill-switch trip).
     pub breaker: ExecutionBreakerConfig,
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            runtime_mode: QuantRuntimeMode::ReportOnly,
-            semi_auto: SemiAutoConfig::default(),
-            auto_execution: AutoExecutionConfig::default(),
-            entry_order_policy: EntryOrderPolicy::default(),
-            exit_order_policy: ExitOrderPolicy::default(),
-            exit_monitor: ExitMonitorPolicy::default(),
-            admission: ExecutionAdmissionPolicy::default(),
-            kill_switch: KillSwitchPolicy::default(),
-            capital: CapitalPolicy::default(),
-            reconciliation: ReconciliationPolicy::default(),
-            settlement_redeem: SettlementRedeemPolicy::default(),
-            attribution: AttributionPolicy::default(),
-            breaker: ExecutionBreakerConfig::default(),
-        }
-    }
 }
 
 /// Semi-auto approval policy.
@@ -526,8 +481,6 @@ pub struct AutoExecutionConfig {
     pub min_score: DecimalString,
     /// Minimum confidence for auto-execution.
     pub min_confidence: DecimalString,
-    /// Require shadow validation before auto-execution.
-    pub require_shadow_passed: bool,
 }
 
 impl Default for AutoExecutionConfig {
@@ -538,7 +491,6 @@ impl Default for AutoExecutionConfig {
             max_total_usd_per_report: DecimalString::new("0"),
             min_score: DecimalString::new("0.00"),
             min_confidence: DecimalString::new("1.00"),
-            require_shadow_passed: true,
         }
     }
 }

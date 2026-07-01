@@ -93,7 +93,7 @@ impl ModePreflight for DefaultModePreflight {
         if target == QuantRuntimeMode::AutoExecution {
             checks.push(self.check_published_model(&config).await?);
             checks.push(self.check_shadow_period(&config, now).await?);
-            checks.push(Self::check_admission_policy(&config));
+            checks.push(Self::check_auto_policy(&config));
             checks.push(self.check_kill_switch_closed());
             checks.push(Self::check_capital_budget(&config));
             checks.push(self.check_exit_monitor(now));
@@ -352,14 +352,21 @@ impl DefaultModePreflight {
         ))
     }
 
-    fn check_admission_policy(config: &RuntimeConfig) -> PreflightCheck {
-        let admission = &config.execution.admission;
-        let ok = admission.min_score.value.parse::<Decimal>().is_ok()
-            && admission.min_confidence.value.parse::<Decimal>().is_ok();
+    fn check_auto_policy(config: &RuntimeConfig) -> PreflightCheck {
+        let auto = &config.execution.auto_execution;
+        let capital = &config.execution.capital;
+        let ok = auto.min_score.value.parse::<Decimal>().is_ok()
+            && auto.min_confidence.value.parse::<Decimal>().is_ok()
+            && auto
+                .max_total_usd_per_report
+                .value
+                .parse::<Decimal>()
+                .is_ok()
+            && capital.max_reserved_usd.value.parse::<Decimal>().is_ok();
         PreflightCheck::hard(
-            "admission_policy_valid",
+            "auto_policy_valid",
             ok,
-            "execution.admission min_score / min_confidence thresholds parseable",
+            "execution.auto_execution + capital thresholds parseable",
         )
     }
 

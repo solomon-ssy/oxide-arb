@@ -256,6 +256,18 @@ impl OrderIntentStatus {
         Self::PartiallyFilled,
     ];
 
+    /// Open (capital-holding or in-flight) statuses used by the admission
+    /// concurrency cap (`#21` `MaxOpenIntentsCheck`): reserved-but-unsubmitted
+    /// intents plus those in flight at the venue.
+    pub const OPEN: [Self; 6] = [
+        Self::PendingApproval,
+        Self::Approved,
+        Self::ApprovedByPolicy,
+        Self::AdmissionPending,
+        Self::Submitted,
+        Self::PartiallyFilled,
+    ];
+
     /// Terminal statuses with no fill (attribution / sweep eligibility).
     pub const UNFILLED_TERMINAL: [Self; 6] = [
         Self::AdmissionRejected,

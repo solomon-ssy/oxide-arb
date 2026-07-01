@@ -59,8 +59,6 @@ pub struct EntryPlan {
     pub min_depth_usd: Usd,
     /// Maximum tolerated book age at entry.
     pub max_book_age_ms: u64,
-    /// Confirmation window before a triggered entry fires.
-    pub confirmation_window_secs: u64,
     /// Whether to cancel the entry if it never triggers within the window.
     pub cancel_if_not_triggered: bool,
     /// Human explanation of the entry decision.

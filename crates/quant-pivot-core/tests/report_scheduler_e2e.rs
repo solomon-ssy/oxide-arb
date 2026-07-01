@@ -118,8 +118,6 @@ fn schedule(schedule_id: &str, cadence: ScheduleCadence) -> ReportScheduleConfig
         schedule_id: schedule_id.to_owned(),
         cadence,
         top_n: 10,
-        market_filter_ref: None,
-        model_version_ref: None,
         source_delay_secs: 0,
         enabled: true,
     }

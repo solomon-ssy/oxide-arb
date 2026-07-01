@@ -80,7 +80,7 @@ pub fn build_preferences_schema() -> RuntimeConfigSchemaView {
     RuntimeConfigSchemaView { groups, fields }
 }
 
-/// Validate hand-maintained runtime-config UI metadata against the v3 schema.
+/// Validate hand-maintained runtime-config UI metadata against the current schema.
 #[must_use]
 pub fn preferences_schema_ui_gaps() -> Vec<String> {
     let schema = RuntimeConfig::json_schema();

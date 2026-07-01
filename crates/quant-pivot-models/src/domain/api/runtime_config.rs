@@ -74,7 +74,6 @@ pub enum FieldWidget {
 #[serde(rename_all = "snake_case")]
 pub enum FieldSemantics {
     Money,
-    RuntimeMode,
     Credential,
     EmptyMeansAll,
 }

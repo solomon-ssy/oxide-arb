@@ -1,6 +1,7 @@
 //! Runtime-config activation applicator — Phase 0 minimal propagation.
 
 use crate::{
+    execution::breaker::ExecutionBreaker,
     governance::WeightOverlayApplicator,
     infra::schedule::ReportScheduleRunner,
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
@@ -32,7 +33,8 @@ pub struct RuntimeConfigSubscribers {
     pub alerts: Arc<AlertDispatcher>,
     /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
     pub weight_overlay: Arc<WeightOverlayApplicator>,
-    /// Deploy-time WS subscription look-ahead (hours); not yet runtime-config v5.
+    /// Deploy-time WS subscription look-ahead (hours); this is a structural
+    /// (restart-bound) parameter from `market_data.websocket`, not runtime config.
     pub subscription_window_hours: u64,
 }
 
@@ -43,6 +45,11 @@ pub struct RuntimeConfigApplicator {
     /// (the runner depends on the report lifecycle, which is built after
     /// governance). `None` until [`Self::attach_report_scheduler`] is called.
     report_scheduler: Mutex<Option<Arc<dyn ReportScheduleRunner>>>,
+    /// Execution breaker, late-bound after the execution bundle is assembled
+    /// (the breaker is built after governance). `None` until
+    /// [`Self::attach_execution_breaker`] is called. Activations hot-swap its
+    /// venue-health / daily-loss thresholds without a restart.
+    execution_breaker: Mutex<Option<Arc<ExecutionBreaker>>>,
 }
 
 impl RuntimeConfigApplicator {
@@ -52,12 +59,18 @@ impl RuntimeConfigApplicator {
             store,
             subscribers,
             report_scheduler: Mutex::new(None),
+            execution_breaker: Mutex::new(None),
         }
     }
 
     /// Bind the report schedule runner so activations rebuild report jobs.
     pub fn attach_report_scheduler(&self, runner: Arc<dyn ReportScheduleRunner>) {
         *self.report_scheduler.lock() = Some(runner);
+    }
+
+    /// Bind the execution breaker so activations hot-reload its thresholds.
+    pub fn attach_execution_breaker(&self, breaker: Arc<ExecutionBreaker>) {
+        *self.execution_breaker.lock() = Some(breaker);
     }
 
     fn preflight_internal(candidate: &RuntimeConfig) -> Result<(), ControlError> {
@@ -102,6 +115,10 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         Self::preflight_internal(&config)?;
         let arc = Arc::new(config);
         self.propagate(&arc);
+        let breaker = self.execution_breaker.lock().clone();
+        if let Some(breaker) = breaker {
+            breaker.reload(&arc.execution.breaker);
+        }
         let scheduler = self.report_scheduler.lock().clone();
         self.store.swap(Arc::clone(&arc));
 

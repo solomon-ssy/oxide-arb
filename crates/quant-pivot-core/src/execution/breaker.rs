@@ -227,12 +227,36 @@ impl BreakerInner {
     }
 }
 
-/// Stateful venue-health + daily-loss breaker that auto-trips the operational
-/// kill-switch.
-pub struct ExecutionBreaker {
+/// Hot-swappable threshold snapshot: the governed config plus the pre-parsed
+/// daily realized-loss cap. Held behind an [`ArcSwap`] so a runtime-config
+/// activation atomically replaces the thresholds without touching the rolling
+/// window accumulator in [`BreakerInner`].
+struct BreakerThresholds {
     config: ExecutionBreakerConfig,
     /// Parsed daily realized-loss cap (USD). `0` disables the dimension.
     daily_loss_cap: Decimal,
+}
+
+impl BreakerThresholds {
+    fn new(config: ExecutionBreakerConfig) -> Self {
+        let daily_loss_cap = config
+            .daily_realized_loss_cap_usd
+            .value
+            .parse::<Decimal>()
+            .unwrap_or(Decimal::ZERO)
+            .max(Decimal::ZERO);
+        Self {
+            config,
+            daily_loss_cap,
+        }
+    }
+}
+
+/// Stateful venue-health + daily-loss breaker that auto-trips the operational
+/// kill-switch.
+pub struct ExecutionBreaker {
+    /// Hot-reloadable thresholds (swapped by the runtime-config applicator).
+    thresholds: ArcSwap<BreakerThresholds>,
     inner: Mutex<BreakerInner>,
     health: VenueHealthHandle,
     kill_switch: Arc<dyn KillSwitchPort>,
@@ -248,21 +272,32 @@ impl ExecutionBreaker {
         operation_log: Arc<dyn OperationLogRepository>,
         metrics: Arc<MetricsHub>,
     ) -> Self {
-        let daily_loss_cap = config
-            .daily_realized_loss_cap_usd
-            .value
-            .parse::<Decimal>()
-            .unwrap_or(Decimal::ZERO)
-            .max(Decimal::ZERO);
         Self {
-            config,
-            daily_loss_cap,
+            thresholds: ArcSwap::from_pointee(BreakerThresholds::new(config)),
             inner: Mutex::new(BreakerInner::default()),
             health: VenueHealthHandle::default(),
             kill_switch,
             operation_log,
             metrics,
         }
+    }
+
+    /// Hot-reload the breaker thresholds from a newly activated runtime config.
+    ///
+    /// Only the thresholds/cooldown/daily-loss cap are replaced; the rolling
+    /// failure window and daily accumulator in [`BreakerInner`] are preserved so
+    /// an activation never resets in-flight safety state. The published venue
+    /// health is recomputed immediately so a tightened daily-loss cap can move
+    /// the breaker into the 80% degrade band without waiting for the next event.
+    pub fn reload(&self, config: &ExecutionBreakerConfig) {
+        self.thresholds
+            .store(Arc::new(BreakerThresholds::new(config.clone())));
+        let (venue_health, daily_loss) = {
+            let inner = self.lock();
+            (inner.health.clone(), inner.daily_loss())
+        };
+        self.health
+            .store(self.combined_health(&venue_health, daily_loss));
     }
 
     /// Clone of the venue-health hot-read handle (injected into admission).
@@ -278,8 +313,11 @@ impl ExecutionBreaker {
     /// escalation edge this trips the kill-switch (latched) outside the lock.
     pub async fn observe_venue(&self, success: bool, detail: &str) {
         let (tripped, venue_health, daily_loss) = {
+            let thresholds = self.thresholds.load();
             let mut inner = self.lock();
-            let tripped = inner.record(Instant::now(), success, &self.config).tripped;
+            let tripped = inner
+                .record(Instant::now(), success, &thresholds.config)
+                .tripped;
             (tripped, inner.health.clone(), inner.daily_loss())
         };
         self.health
@@ -298,7 +336,8 @@ impl ExecutionBreaker {
     /// resets at the UTC day boundary (a latched kill-switch is **not** cleared
     /// by the rollover — fail-closed). `0` cap disables the dimension.
     pub async fn observe_realized_pnl(&self, pnl: Usd, now: DateTime<Utc>) {
-        if self.daily_loss_cap <= Decimal::ZERO {
+        let daily_loss_cap = self.thresholds.load().daily_loss_cap;
+        if daily_loss_cap <= Decimal::ZERO {
             return;
         }
         let (tripped, venue_health, loss) = {
@@ -306,7 +345,7 @@ impl ExecutionBreaker {
             inner.roll_day(now.date_naive());
             inner.realized_pnl_today += pnl.inner();
             let loss = inner.daily_loss();
-            let tripped = loss >= self.daily_loss_cap && !inner.daily_tripped;
+            let tripped = loss >= daily_loss_cap && !inner.daily_tripped;
             if tripped {
                 inner.daily_tripped = true;
             }
@@ -314,10 +353,7 @@ impl ExecutionBreaker {
         };
         self.health.store(self.combined_health(&venue_health, loss));
         if tripped {
-            let detail = format!(
-                "daily realized loss {loss} reached cap {}",
-                self.daily_loss_cap
-            );
+            let detail = format!("daily realized loss {loss} reached cap {daily_loss_cap}");
             self.trip_kill_switch(DIMENSION_DAILY_LOSS, &detail).await;
         }
     }
@@ -330,15 +366,11 @@ impl ExecutionBreaker {
             VenueHealth::Degraded { reason } => Some(reason.clone()),
             VenueHealth::Healthy => None,
         };
-        let degrade_at = self.daily_loss_cap * Decimal::from(DAILY_LOSS_DEGRADE_FRACTION.0)
+        let daily_loss_cap = self.thresholds.load().daily_loss_cap;
+        let degrade_at = daily_loss_cap * Decimal::from(DAILY_LOSS_DEGRADE_FRACTION.0)
             / Decimal::from(DAILY_LOSS_DEGRADE_FRACTION.1);
-        let daily_reason =
-            (self.daily_loss_cap > Decimal::ZERO && daily_loss >= degrade_at).then(|| {
-                format!(
-                    "daily realized loss {daily_loss} ≥ 80% of cap {}",
-                    self.daily_loss_cap
-                )
-            });
+        let daily_reason = (daily_loss_cap > Decimal::ZERO && daily_loss >= degrade_at)
+            .then(|| format!("daily realized loss {daily_loss} ≥ 80% of cap {daily_loss_cap}"));
         match (venue_reason, daily_reason) {
             (None, None) => VenueHealth::Healthy,
             (Some(v), Some(d)) => VenueHealth::Degraded {
@@ -370,9 +402,9 @@ impl ExecutionBreaker {
                 // Otherwise the kill-switch latch is still held — stay Degraded
                 // (no self-heal; only an operator ack clears the latch).
             } else if let VenueHealth::Degraded { .. } = inner.health {
+                let cooldown_secs = self.thresholds.load().config.cooldown_secs;
                 let healed = inner.last_failure_at.is_none_or(|last| {
-                    Instant::now().duration_since(last)
-                        >= Duration::from_secs(self.config.cooldown_secs)
+                    Instant::now().duration_since(last) >= Duration::from_secs(cooldown_secs)
                 });
                 if healed {
                     inner.samples.clear();

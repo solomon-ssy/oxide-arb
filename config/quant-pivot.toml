@@ -146,11 +146,25 @@ size_threshold = 1
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
-# Purpose: report TTL expire-sweep cadence (seconds). Drives only the decoupled
-# expire_due_reports sweep — NOT report fire scheduling (cadence comes from
-# runtime-config reports.schedules[] via tokio-cron-scheduler).
-# Default: 300.
+# Purpose: report TTL expire-sweep cadence (seconds). Serves the
+# ReportDeadlineScheduler reconcile/look-ahead interval AND the decoupled
+# ReportExpireSweep backstop — NOT report fire scheduling (cadence comes from
+# runtime-config reports.schedules[] via tokio-cron-scheduler). Default: 300.
 report_expire_sweep_secs = 300
+# Purpose: order-intent TTL expire-sweep cadence (seconds). Serves the
+# IntentDeadlineScheduler look-ahead AND the IntentExpireSweep backstop that
+# releases reserved capital at expires_at. The DB is the source of truth, so a
+# missed/duplicated wake only affects latency. Default: 60.
+intent_expire_sweep_secs = 60
+# Purpose: auto-execution dispatcher poll-backstop cadence (seconds). The
+# dispatcher is wake-driven (a fresh ApprovedByPolicy nudges it); this cadence
+# catches missed wakes, retries admission defers, and drains crash-recovery
+# work. Default: 10.
+execution_dispatch_secs = 10
+# Purpose: execution-breaker self-heal tick cadence (seconds). Drives
+# ExecutionBreaker::tick, which recovers Degraded -> Healthy after cooldown.
+# Halted is latched and never auto-heals. Default: 5.
+execution_breaker_tick_secs = 5
 # Purpose: best-effort strategy-capital equity history cadence (seconds).
 # Report generation still writes its own authoritative equity snapshot in the
 # report transaction; this worker only adds between-report history points.
@@ -197,13 +211,9 @@ artifact_root = "./var/artifacts"
 # Never commit real secrets. See docs/operations/runbook.md §3.2.
 
 [keys]
-# Purpose: credential source. "env" = inline private_key; "keystore" = encrypted
-# file at keystore_path (reserved). Impact: order-submitting identity.
-# Default: "env".
-source = "env"
-
 # Bot wallet private key (hex, 0x prefix optional). Rabby bot sub-account export.
-# Override: QUANT_PIVOT__KEYS__PRIVATE_KEY
+# The single signing credential; CLOB L2 read/write credentials are derived from
+# it by the SDK at connect time. Override: QUANT_PIVOT__KEYS__PRIVATE_KEY
 # private_key = "0x..............................................................."
 
 # ── Observability (logging only) ─────────────────────────────────────────────

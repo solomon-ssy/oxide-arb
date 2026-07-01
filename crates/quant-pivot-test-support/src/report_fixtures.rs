@@ -171,7 +171,6 @@ fn entry_plan() -> EntryPlan {
         valid_until: Utc.timestamp_opt(1_700_003_600, 0).unwrap(),
         min_depth_usd: Usd::new(dec!(100)),
         max_book_age_ms: 2_000,
-        confirmation_window_secs: 30,
         cancel_if_not_triggered: true,
         entry_reason: "limit entry at edge".to_owned(),
     }

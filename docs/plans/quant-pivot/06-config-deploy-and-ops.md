@@ -1,112 +1,79 @@
 # 06 — 配置、部署与运维设计
 
-> 状态：生产级目标设计
+> 状态：生产级目标设计（与实现对齐）
 >
-> 目标：用 deploy-config + runtime-config v3 支撑 quant-pivot，删除旧 Endgame trading 配置面。
+> 目标：用 deploy-config + runtime-config **v7** 支撑 quant-pivot，删除旧 Endgame trading 配置面。
+
+本文件描述**当前实现态**：deploy config 树见 [`crates/quant-pivot-models/src/config/`](../../../crates/quant-pivot-models/src/config/mod.rs)，runtime config v7 见 [`crates/quant-pivot-models/src/runtime_config/`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)。
 
 ## 0. 配置分层
 
-继续保留两层配置模型：
+两层配置模型：
 
-- Deploy config：进程启动绑定，改动需要重启。
-- Runtime config v3：受治理、版本化、热激活。
+- **Deploy config**（`config/quant-pivot.toml`）：进程启动绑定，改动需要重启。连接、池、shard/channel、worker cadence、credential source、web server、logging。
+- **Runtime config v7**：受治理、版本化（`runtime_config_version` WORM）、热激活（`ArcSwap` + applicator push），存 Postgres，只经治理 API 修改。
 
 禁止：
 
 - 把可热更新策略参数放进 TOML。
 - 把连接池、worker 并发、credential source 放进 runtime config。
-- 保留 runtime-config v2 parser。
-- 允许未知 key 静默通过。
+- 保留旧 runtime-config parser（v7 之前的 schema 一律拒绝；仅 bootstrap 迁移路径读旧文档，见 §10）。
+- 允许未知 key 静默通过（deploy + runtime 全部 `deny_unknown_fields`）。
 
 ## 1. Deploy Config
 
-### 1.1 保留 section
+根类型 [`DeployConfig`](../../../crates/quant-pivot-models/src/config/mod.rs)。每个 section 与 `[section]` 1:1。加载优先级（后者覆盖前者）：`QUANT_PIVOT__*` env → `quant-pivot.local.toml` → `quant-pivot.toml` → 编译内默认。
 
-| Section | 命运 | 说明 |
+### 1.1 Section 清单（真实结构）
+
+| Section | 字段 | 说明 |
 |---|---|---|
-| `[polymarket]` | 保留 | CLOB/Gamma endpoint、chain id |
-| `[polymarket.onchain]` | 保留但可选 | report_only 不要求 RPC ready |
-| `[polymarket.fees]` | 保留 | fee 是 feature 和 execution cost 输入 |
-| `[market_data.websocket]` | 保留并改语义 | transport config，不再包含 endgame hotset |
-| `[market_data.gamma]` | 保留 | market catalog sync |
-| `[observability]` | 保留 | logging |
-| `[db.postgres]` | 保留 | 权威状态 |
-| `[db.clickhouse]` | 保留 | facts/analytics |
-| `[cache]` | 保留 | Redis/Moka |
-| `[web]` | 保留 | admin API/WS |
+| `[polymarket]` | `clob_base_url`, `clob_ws_url`, `chain_id` | CLOB/WS endpoint、链 id（必须 137） |
+| `[polymarket.onchain]` | `rpc_url`, `rpc_timeout_ms` | Polygon JSON-RPC；`rpc_timeout_ms` 是 CTF oracle/redeem 的硬超时（reqwest 默认无超时） |
+| `[polymarket.relayer]` | `base_url`, `api_key`, `api_key_address`, `request_timeout_ms` | proxy/gnosis_safe 的 gasless money-moving；EOA 忽略 |
+| `[polymarket.fees]` | `exponent`, `unknown_category_rate`, `category_rates{}` | fee = C×feeRate×p×(1−p)^exponent |
+| `[market_data.websocket]` | `reconnect_delay_ms`, `max_reconnect_delay_ms`, `max_subscriptions_per_connection`, `engine_max_subscription_tokens`, `engine_subscription_window_hours` | WS transport + 引擎订阅 hotset cap/窗口 |
+| `[market_data.gamma]` | `base_url`, `full_sync_interval_secs`, `page_size` | market catalog sync |
+| `[market_data.data_api]` | `base_url`, `page_size`, `size_threshold` | keyless 持仓读取（report capital base） |
+| `[observability]` | `log_level`, `log_json` | logging（metrics 常开于 `GET /metrics`） |
+| `[db.postgres]` | 连接/池/GUC（17 字段） | 权威状态 |
+| `[db.clickhouse]` | `url`, `database`, `user`, `password`, `flush_interval_secs`, `batch_size`, `max_concurrent_inserts` | facts/analytics |
+| `[cache]` / `[cache.redis]` / `[cache.moka]` | 见 struct | Redis L2 + Moka L1 |
+| `[keys]` | `private_key` | **唯一签名凭证**；CLOB L2 由 SDK 在 connect 时派生 |
+| `[web]` / `[web.jwt]` | 见 struct | admin API/WS + JWT |
+| `[quant.workers]` | `report_expire_sweep_secs`, `intent_expire_sweep_secs`, `execution_dispatch_secs`, `execution_breaker_tick_secs`, `equity_snapshot_secs` | 后台 worker cadence（restart-bound） |
+| `[quant.account]` | `funder`, `wallet_kind` | Data API 持仓读取地址 + 钱包形态 |
+| `[research]` | `artifact_root` | artifact store 根目录 |
 
-### 1.2 删除 section/field
+### 1.2 相对旧设计删除的 deploy 字段
 
 | Path | 删除原因 |
 |---|---|
-| `[execution.book_apply]` | 旧 execution runner shard |
-| `[settlement.lifecycle]` | 旧 settlement worker channel |
-| `market_data.websocket.engine_endgame_window_hours` | Endgame-only hot subscription |
-| `market_data.websocket.engine_max_subscription_tokens` | 命名绑定 engine trading hotset，改为 quant ingestion cap |
-| `[keys]` mode-aware required policy / `load_credentials_in_report_only` | 纠偏：私钥不再 mode-gated——**所有 mode 都加载私钥用于读真实账户**（report_only ≠ dry-run）；仅签名/下单为 semi_auto/auto |
+| `[keys].source` / `[keys].keystore_path` / `KeySource` | keystore 未实现；只用 `private_key`。凭证来源不再有枚举，删除死设计 |
+| `[execution.book_apply]` / `[settlement.lifecycle]` | 旧 execution/settlement worker 面 |
+| 旧 `[keys]` mode-aware required policy / `load_credentials_in_report_only` | 私钥不再 mode-gated——**所有 mode 都加载私钥用于读真实账户**（report_only ≠ dry-run）；仅签名/下单为 semi_auto/auto |
 
-### 1.3 新增 deploy sections
+### 1.3 关键语义
 
-```toml
-[quant.workers]
-report_expire_sweep_secs = 300
-materialization_worker_count = 2
-model_run_worker_count = 1
-order_intent_worker_count = 1
-exit_monitor_worker_count = 1
+- **私钥所有 mode 都需要**（读真实抵押余额 + 派生 L2 读凭证）；**签名/下单**用途仅 `semi_auto`/`auto_execution` preflight 才要求。
+- `quant.account.funder`：`eoa` 必须等于 signer EOA 派生地址；`proxy`/`gnosis_safe` 必须等于 CREATE2 推导地址（启动校验）。
+- `proxy`/`gnosis_safe` 在升级到 order-submitting mode 时 preflight 硬要求 `[polymarket.relayer].api_key` + `api_key_address`。
+- `polymarket.onchain.rpc_timeout_ms` 已接线进 alloy provider 的 reqwest client：redeem/oracle 调用超时即失败，绝不无限挂起。
 
-[quant.storage]
-feature_batch_size = 5000
-factor_batch_size = 5000
-recommendation_batch_size = 1000
-fact_flush_interval_secs = 5
+## 2. Runtime Config v7
 
-[quant.execution]
-order_worker_channel_capacity = 1024
-exit_monitor_channel_capacity = 1024
-reconciliation_channel_capacity = 256
-
-[quant.account]
-# Polymarket funder 地址。Data API `GET /positions?user=<funder>` 用此地址读真实持仓（keyless）。
-# eoa: 必须等于 [keys].private_key 派生地址；proxy/gnosis_safe: 必须等于 CREATE2 推导的代理/Safe 地址（启动校验）。
-funder = "0x..."
-# 钱包形态，驱动下单 signature_type 与链上结算路由：
-#   "eoa"         — 资金在 signer EOA，直接签名+自付 gas 赎回。
-#   "proxy"       — Polymarket Proxy（EIP-1167，Magic/邮箱用户），经 relayer gasless 赎回。
-#   "gnosis_safe" — 1-of-1 Gnosis Safe（浏览器钱包），经 relayer gasless 赎回。
-wallet_kind = "eoa"
-
-[polymarket.relayer]
-# proxy / gnosis_safe 的 money-moving（如 CTF redeem）经 Polymarket gasless relayer 提交；eoa 忽略。
-base_url = "https://relayer-v2.polymarket.com"
-# api_key = "..."           # QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY（secret）
-# api_key_address = "0x..." # QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY_ADDRESS（密钥所属 EOA 地址）
-request_timeout_ms = 15000
-
-[market_data.data_api]
-# Data API base URL（公开持仓读取，keyless）。
-base_url = "https://data-api.polymarket.com"
-```
-
-> `proxy` / `gnosis_safe` 拓扑在 `semi_auto` / `auto_execution` upgrade 时，preflight
-> `credentials_loaded` 硬要求 `[polymarket.relayer].api_key` + `api_key_address`。
-
-**私钥所有 mode 都需要（用于读真实抵押余额 + 派生 L2 读凭证）**；私钥的**签名/下单**用途
-仅 `semi_auto` / `auto_execution` preflight 才要求。已删除 `load_credentials_in_report_only`
-（凭证不再 mode-gated）。
-
-## 2. Runtime Config v3
-
-### 2.1 Root
+根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 7`。
 
 ```text
 RuntimeConfig {
-  schema_version: 3,
+  schema_version: 7,
   selection,
   data_quality,
   features,
   factors,
   model,
+  quality_gate,
+  training,
   reports,
   portfolio,
   execution,
@@ -114,488 +81,182 @@ RuntimeConfig {
 }
 ```
 
-删除 v2：
+### 2.1 `selection`
 
-- `detection`
-- `execution` old
-- `risk`
-- `settlement`
-- `redeem_routing`
+`enabled_categories`, `min_liquidity_usd`, `min_volume_24h_usd`, `max_spread_bps`, `allow_near_resolution`, `min_time_to_resolution_secs`, `max_time_to_resolution_secs`, `max_selection_size`。
 
-### 2.2 `selection`
+人工禁用不属于 runtime-config；唯一权威是 catalog `MarketStatus::ManuallyBlocked`，经 governed block/unblock API 修改，由 selection/admission fail-closed 消费。
 
-字段：
+### 2.2 `data_quality`
 
-- `enabled_categories`
-- `min_liquidity_usd`
-- `min_volume_24h_usd`
-- `max_spread_bps`
-- `allow_near_resolution`
-- `min_time_to_resolution_secs`
-- `max_time_to_resolution_secs`
-- `max_selection_size`
+`max_book_age_ms`, `max_fact_lag_secs`, `min_book_depth_usd`, `reject_crossed_books`, `reject_empty_books`, `feature_staleness_policy`, `max_stale_book_ratio_bps`。
 
-人工禁用不属于 runtime-config。唯一权威是 catalog `MarketStatus::ManuallyBlocked`，
-通过 governed market block/unblock API 修改，并由 selection/admission fail closed 消费。
+> **v7 删除**：`allow_degraded_domain_features`、`source_delay_secs`（前者从未消费；后者只作 ad-hoc 报告 source-delay 回退，已合并——见 §2.8）。exit 再推断的 as-of 回退改用 `max_fact_lag_secs`。
 
-### 2.3 `data_quality`
+### 2.3 `features`
 
-字段：
+`feature_schema_version`, `enabled_feature_families`, `required_features`, `bar_windows_secs`, `momentum_windows_secs`, `volatility_windows_secs`, `depth_levels`, `max_concurrent_market_resolves`。
 
-- `max_book_age_ms`
-- `max_fact_lag_secs`
-- `min_book_depth_usd`
-- `allow_degraded_domain_features`
-- `reject_crossed_books`
-- `reject_empty_books`
-- `source_delay_secs`
-- `feature_staleness_policy`
-- `max_stale_book_ratio_bps` — plane-wide stale ratio cap for execution admission (#6)
+> **v7 删除**：`domain_feature_policy`（从未消费）。
 
-### 2.4 `features`
+### 2.4 `factors`
 
-字段：
+`enabled_factor_families`（仅 generic 家族；domain 因子由 category 路由）、`factor_weights`、`min_factor_confidence`、`missing_factor_policy`。因子集合身份经 `factor_schema_hash` 绑定模型 artifact。
 
-- `feature_schema_version`
-- `enabled_feature_families`
-- `required_features`
-- `domain_feature_policy`
-- `bar_windows_secs`
-- `momentum_windows_secs`
-- `volatility_windows_secs`
-- `depth_levels`
+### 2.5 `model`
 
-### 2.5 `factors`
+`active_model_version_id`, `shadow_model_version_id`, `min_model_confidence`, `min_quality_gate_age_secs`, `prediction_horizon_secs`, `candidate_score_floor`, `shadow_diff_threshold`。在线推断读冻结 artifact 的 horizon，不读 config。
 
-字段：
+### 2.6 `quality_gate`
 
-- `enabled_factor_families` — `Vec<FactorFamily>`（仅 generic 家族；domain 因子由 category 路由）
-- `factor_weights`
-- `min_factor_confidence`
-- `missing_factor_policy`
+`min_sample_count`, `min_label_coverage`, `min_critical_feature_coverage`, `max_drawdown`, `min_liquidity_exit_feasibility`, `min_shadow_overlap_stability`, `min_rank_ic`, `max_category_concentration`, `required_shadow_window_secs`。模型发布/回滚/数据集晋升门禁消费。
 
-因子集合身份由 `enabled_factor_families` 推导，经 `factor_schema_hash` 绑定模型 artifact；无独立的 factor set id 字段。
+### 2.7 `training`
 
-### 2.6 `model`
+`max_book_staleness_ms`, `min_exit_depth_usd`。离线数据集构建参数（PIT 回看窗口远宽于在线 gate）。
 
-字段（schema 全集；**在线消费 phase 见下表**）：
+### 2.8 `reports`
 
-| 字段 | 在线消费 phase | 说明 |
-|------|----------------|------|
-| `active_model_version_id` | **3.4** | active 已发布版本 |
-| `shadow_model_version_id` | **3.4** | 可选 shadow |
-| `min_model_confidence` | **3.4** | runner `accepted` 过滤 + CH `rejection_reason` |
-| `candidate_score_floor` | **3.4** | 同上 |
-| `shadow_diff_threshold` | **3.4** | shadow vs active diff（metrics）；3.7 持久化/告警 |
-| `min_quality_gate_age_secs` | **3.7** | quality gate 报告 freshness；3.4 **不读** |
-| `prediction_horizon_secs` | **3.6 写入 artifact** | 在线读 artifact，不读 config（3.4 §4.2） |
+`schedules`, `max_top_n`, `fallback_horizon_secs`, `publish_empty_reports`, `entry_window_ratio`, `ad_hoc_report_enabled`, `delivery_policy`。
 
-完整 defer 索引：[`phase-03/README.md`](phase-03/README.md) §6。
+Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs` 或 `cron{expr, timezone?}`）, `top_n`, `source_delay_secs`, `enabled`。
 
-### 2.7 `reports`
+> **v7 破坏式合并**：`schedule` 层是 `top_n` / `source_delay` 的**唯一权威**。删除 `reports.default_top_n` 与 `data_quality.source_delay_secs`。**ad-hoc 报告必须在请求中显式携带 `top_n` + `source_delay_secs`**，缺失即 fail closed（无配置回退）。schedule 上删除死占位符 `market_filter_ref` / `model_version_ref`。
 
-字段：
+### 2.9 `portfolio`
 
-- `schedules`
-- `default_top_n`
-- `max_top_n`
-- `fallback_horizon_secs`（仅当模型未给 `suggested_horizon_secs` 时回退；有效期主路径数据驱动）
-- `publish_empty_reports`
-- `entry_window_ratio`（`(0,1]`，进场截止 = `as_of + effective_horizon * entry_window_ratio`）
-- `ad_hoc_report_enabled`
-- `delivery_policy`
+三段（政策 ≠ 状态；真实资金来自账户快照，`total_budget_usd` 仅治理护栏）：
 
-Schedule（`ReportScheduleConfig`）：
+- `budget`：`total_budget_usd`（治理护栏；`equity = min(真实净清算, total_budget_usd)`）、`min_recommendation_usd`、`max_single_recommendation_usd`。
+- `constraints`：`max_market_exposure_usd`、`max_event_exposure_usd`、`max_category_exposure_usd`、`max_correlated_exposure_usd`、`liquidity_usage_cap_pct`、`correlation{enabled, lookback_days, min_observations, cluster_threshold}`。
+- `sizing`（Kelly 唯一）：`kelly_fraction`、`max_position_pct`、`target_reward_multiple`、`confidence_weighting`、`drawdown_scaling`。
+- `optimizer`：`solver`（`microlp` 默认 / `highs` 可选 native）、`integer_inclusion`、`objective_return_weight`。求解阶梯 MILP → relaxation → 空 plan，无 wall-clock 超时（确定性重放）。
 
-- `schedule_id`
-- `cadence` — **二选一**（Phase 4）：
-  - `interval_secs`（`> 0`）→ `ScheduleCadence::Interval`
-  - `cron` — `{ expr, timezone? }` → `ScheduleCadence::Cron`（6-field croner）
-- `top_n`
-- `market_filter_ref`
-- `model_version_ref`
-- `source_delay_secs`
-- `enabled`
+### 2.10 `execution`
 
-`deploy.quant.workers.report_expire_sweep_secs`（取代已删除的 `report_scheduler_tick_secs`）：
-report TTL **expire sweep** cadence（默认 300），**不是** report 主触发器；主触发由
-`ReportScheduleRunner` / `tokio-cron-scheduler` 承担（见 [04 §23](04-topn-report-and-recommendation.md#23-report-schedule-runnerphase-4-调度层)）。
+`semi_auto`, `auto_execution`, `entry_order_policy`, `exit_monitor`, `kill_switch`, `capital`, `reconciliation`, `settlement_redeem`, `attribution`, `breaker`。
 
-### 2.8 `portfolio`
+- `semi_auto`：`approval_ttl_secs`、`allow_size_reduction`。
+- `auto_execution`：`enabled`、`max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence`。
+- `entry_order_policy`：`max_slippage_bps`、`allow_market_orders`。
+- `exit_monitor`：`enabled`、`monitor_secs`、`signal_recheck_secs`、`signal_invalidation_ratio`、`signal_reinference{enabled, shadow_mode}`。
+- `capital`：`max_reserved_usd`、`max_open_intents`（**v7 起真正生效**，见 §3.3）。
+- `reconciliation`：`enabled`、`interval_secs`、`stale_open_secs`。
+- `settlement_redeem`：`enabled`、`interval_secs`、`batch_size`、`max_attempts`、`retry_backoff_secs`、`confirmation_blocks`、`allow_during_emergency`、`hold_to_resolution_enabled`、`hold_to_resolution_within_secs`。
+- `attribution`：`enabled`、`sweep_secs`、`batch_size`。
+- `breaker`（`ExecutionBreakerConfig`）：`venue_consecutive_failures_to_degrade`、`venue_consecutive_failures_to_halt`、`venue_error_rate_bps_to_halt`、`venue_min_window_samples`、`venue_window_secs`、`cooldown_secs`、`daily_realized_loss_cap_usd`。**v7 起真正热更新**（见 §3.4）。
 
-破坏式三段（政策 ≠ 状态；真实资金来自账户快照，`total_budget_usd` 仅为治理护栏，见 04.1）：
+> **v7 删除**：`exit_order_policy` 整块（退出滑点由 Kelly exit ladder / emergency_exit 决定）、`admission{min_score, min_confidence, require_fresh_features}`（分数/置信度门槛由 `auto_execution.*` + 结构化 freshness 承担）、`auto_execution.require_shadow_passed`、`entry_order_policy.confirmation_window_secs`（从未在 admission 校验，连同 `EntryPlan.confirmation_window_secs` 一并删除）、`execution.runtime_mode`（运营 mode 权威在 `system_runtime_state` / `RuntimeModeHandle`，非 runtime config）。
 
-`portfolio.budget`：
+### 2.11 `notification`
 
-- `total_budget_usd`（治理护栏 = 最大可部署上限；`equity = min(真实净清算, total_budget_usd)`，
-  planner 总部署 room 另受真实 `available_usd` 约束）
-- `min_recommendation_usd`
-- `max_single_recommendation_usd`
+`telegram{bot_token, chat_id}`、`webhook{url}`、`policies{report_published}`。
 
-`portfolio.constraints`：
+> **v7 删除**：`policies.execution_halted`、`policies.config_activated`（从未消费；执行停止/配置激活通过其它路径通知）。
 
-- `max_market_exposure_usd`
-- `max_event_exposure_usd`
-- `max_category_exposure_usd`
-- `max_correlated_exposure_usd`（**Phase 05.8 起真正生效**：经 `portfolio.constraints.correlation`
-  估计相关簇后由 LP/MILP 精确约束）
-- `liquidity_usage_cap_pct`
-- `correlation`（Phase 05.8 新增）：`{ enabled, lookback_days, min_observations, cluster_threshold }`
-  —— 历史中价共动 Pearson 聚类（观测不足回退 event/category proxy），`enabled=false` 时相关簇为空
-  （等价 Phase 4 行为，相关性 cap 不约束）。
+## 3. Config Validation 与热更新闭环
 
-`portfolio.sizing`（tagged enum `model`）：
+### 3.1 Common validation（[`validation.rs`](../../../crates/quant-pivot-models/src/runtime_config/validation.rs)）
 
-- `Kelly { kelly_fraction, max_position_pct, target_reward_multiple, confidence_weighting,
-  drawdown_scaling }`（默认；`confidence_weighting` 为置信度收缩曲线，`target_reward_multiple`
-  为目标/止损倍数 R，用于反解 Kelly 胜率）
+- `schema_version` 必须为 7；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
 
-Kelly 是唯一 production sizing model；`confidence_weighting` 只作为 Kelly 分数的估计不确定性收缩输入。
+### 3.2 Mode-aware validation（deploy + preflight）
 
-`portfolio.optimizer`（Phase 05.8 新增；组合分配的唯一路径，greedy 已删除）：
+- `report_only`：要求 private key + `quant.account.funder`（读真实抵押 + 持仓）；不要求下单 readiness；要求 data ingest ready、report schedule valid。
+- `semi_auto`：要求 credentials source、approval role、order client、exit monitor。
+- `auto_execution`：semi_auto 全部 + active model published + auto policy budget > 0 + kill switch closed + quality gates fresh + no blocking reconciliation。
 
-- `{ solver, integer_inclusion, objective_return_weight }`
-- `solver`：`microlp`（纯 Rust 默认，零 native，进 report_only build）/ `highs`（可选 native，
-  仅 `lp-solver-highs` feature 启用时链接；未启用则运行期降级 microlp）。
-- `integer_inclusion`：`true`=精确 binary-inclusion MILP（生产主路径）；`false`=连续 relaxation +
-  确定性取整（也是 MILP 失败的兜底模式与回测模式）。
-- `objective_return_weight`：目标函数 `wᵢ=scoreᵢ·(1+λ·ret_normᵢ)` 的 λ（≥0；默认 0=纯 conviction）。
+### 3.3 Capital 风控门（admission #21 / #22）
 
-> **刻意未纳入 `time_limit_ms`**：wall-clock 超时与「同输入同 plan」的确定性重放矛盾（回测
-> `report_hash`、生产 replay 均要求 byte-stable）。求解失败统一走 **MILP → relaxation → 空 plan**
-> 阶梯（`OptimizerSolverStatus::FellBackRelaxation` / `SolverUnavailable`），不引入非确定性超时降级。
+`execution.capital.{max_open_intents, max_reserved_usd}` 由 admission engine 消费（[`checks.rs`](../../../crates/quant-pivot-core/src/execution/admission/checks.rs)）：
 
-> runtime-config schema 随 Phase 05.8 升级为 **v6**（新增 `portfolio.optimizer` 与
-> `portfolio.constraints.correlation`）。
+- **#21 `MaxOpenIntents`**：`0` 禁用；否则 `open_intent_count > max_open_intents` → `Deny`（`open_intent_count` 由 `OrderIntentRepository::count_open()` 在 build 时读取，含 `OrderIntentStatus::OPEN` 全集，被审 intent 已计入，无 off-by-one）。
+- **#22 `MaxReservedCapital`**：`0` 禁用；否则 `account.reserved_usd > max_reserved_usd` → `Deny`。
 
-### 2.9 `execution`
+admission 由 20 条增至 **22 条固定顺序检查**，两门紧邻 `CapitalBudget`（#10）之后。
 
-新语义，不复用旧 timeout/funnel/coalescer。
+### 3.4 Breaker 热更新
 
-字段：
+`execution.breaker.*` 是运行时配置，须**真正热更新**：[`ExecutionBreaker`](../../../crates/quant-pivot-core/src/execution/breaker.rs) 将阈值置于 `ArcSwap<BreakerThresholds>`，applicator 激活时 push `reload(&config.execution.breaker)`，**只换阈值**，保留滚动失败窗口与日内亏损累加器状态。latched `execution_halted` 仍须 operator ack 解除。
 
-- `runtime_mode`
-- `semi_auto`
-- `auto_execution`
-- `entry_order_policy`
-- `exit_order_policy`
-- `admission`
-- `kill_switch`
-- `capital`
-- `reconciliation`
-- `breaker`（执行熔断器，自动 trip kill-switch；设计见 [phase-05/05.4 §6.5](phase-05/05.4-entry-execution-and-venue-submission.md)）
+### 3.5 热更新机制
 
-`semi_auto`：
-
-- `approval_ttl_secs`
-- `allow_size_reduction`
-
-`breaker`（`ExecutionBreaker`，05.4 落 venue 维度，05.5/05.6 接入 recon/日内亏损维度）：
-
-- `venue_failure_window_secs` — 连续失败 / error-rate 滚动窗口。
-- `venue_consecutive_failures_to_degrade` — 退化阈值（→ admission `#18` defer，瞬态，可自愈）。
-- `venue_consecutive_failures_to_halt` — 熔断阈值（→ kill-switch `execution_halted` latch）。
-- `venue_error_rate_bps_to_halt` — 窗口 error-rate 熔断阈值（基点）。
-- `cooldown_secs` — 退化态自愈所需的无失败冷却时长。
-- `daily_realized_loss_cap_usd` — 日内已实现亏损硬上限（≥ cap → 熔断；≥ 80% → 退化）。
-
-> latch 语义：breaker 升级的 `execution_halted` 须 operator 经 `POST /api/system/kill-switch`（ack）
-> 解除；breaker 不自动解除已升级的 kill-switch（钱相关 fail-closed）。瞬态退化按 `cooldown_secs` 自愈。
-
-`auto_execution`：
-
-- `enabled`
-- `max_orders_per_report`
-- `max_total_usd_per_report`
-- `min_score`
-- `min_confidence`
-- `require_shadow_passed`
-
-### 2.10 `notification`
-
-保留并扩展：
-
-- Telegram。
-- webhook。
-- report published。
-- report empty。
-- model gate failure。
-- execution halted。
-- fact lag。
-
-## 3. Config Validation
-
-### 3.1 Common validation
-
-- schema_version 必须为 3。
-- unknown fields reject。
-- Decimal string parse。
-- all USD >= 0。
-- all percentages in valid range。
-- schedule id unique。
-- model refs valid format。
-
-### 3.2 Mode-aware validation
-
-`report_only`：
-
-- **要求 private key + `quant.account.funder`**（读真实抵押 + 持仓；报告强制建立在真实账户上，
-  缺失则报告生成 fail closed）。
-- **不**要求 CLOB order **submission** readiness（签名/下单仅 semi_auto/auto）。
-- 要求 data ingest ready。
-- 要求 report schedule valid。
-
-`semi_auto`：
-
-- 要求 credentials source configured。
-- 要求 approval role exists。
-- 要求 order client can be built。
-- 要求 exit monitor enabled。
-
-`auto_execution`：
-
-- 要求 all semi_auto checks。
-- 要求 active model published。
-- 要求 auto policy budget > 0。
-- 要求 kill switch closed。
-- 要求 quality gates fresh。
-- 要求 no blocking reconciliation。
+`RuntimeConfigStore`（`ArcSwap<RuntimeConfig>`）承载 live active 快照；激活路径 `POST /api/runtime-config/versions/{id}/activate` → 校验 → 持久化激活链 → `RuntimeConfigApplicator::apply`：先 push 订阅者（market filter/cache、data quality、alerts、weight overlay、WS 订阅、**execution breaker**），再 swap store，最后 rebuild report schedule。worker（recon/exit_monitor/settlement/attribution）每轮重读 `store.current()`。报告构建按 `trigger_time` 从 PG 取 point-in-time 版本（回放确定性）。
 
 ## 4. Runtime Config UI
 
-删除 UI groups：
+UI groups（[`schema/ui.rs`](../../../crates/quant-pivot-models/src/schema/ui.rs)，经 `preferences_schema` 校验与 struct 1:1）：Selection、Data Quality、Features、Factors、Model、Quality Gate、Training、Reports、Portfolio、Execution、Notifications。
 
-- Detection。
-- Execution old。
-- Risk old。
-- Settlement。
-
-新增 UI groups：
-
-- Selection。
-- Data Quality。
-- Features。
-- Factors。
-- Model。
-- Reports。
-- Portfolio。
-- Execution Mode。
-- Notifications。
-
-所有 money-critical 字段必须带确认：
-
-- portfolio budget。
-- max recommendation size。
-- auto execution enable。
-- risk limits。
-- model publish。
-- mode switch。
+money-critical 字段（`money` 语义 + 确认）：portfolio budget、max recommendation size、capital caps、auto execution enable、breaker 亏损上限、mode switch、model publish。
 
 ## 5. Deployment
 
 ### 5.1 Docker
 
-当前只有 ClickHouse compose。目标新增：
-
-- `docker-compose.dev.yml`
-- `docker-compose.quant.yml`
-- Postgres。
-- Redis。
-- ClickHouse。
-- quant-pivot service。
-- optional UI。
+目标：`docker-compose.dev.yml`、`docker-compose.quant.yml`（Postgres、Redis、ClickHouse、quant-pivot service、optional UI）。
 
 ### 5.2 Secrets
 
-report_only 必需：
+report_only 必需：Postgres/ClickHouse/Redis 密码、JWT secret、**Polymarket private key**（读真实抵押 + 派生 L2 读凭证）、**`quant.account.funder`**。
 
-- Postgres password。
-- ClickHouse password。
-- Redis password if enabled。
-- JWT secret。
-- **Polymarket private key**（读真实抵押余额 + 派生 L2 读凭证；report_only ≠ dry-run）。
-- **`quant.account.funder`**（Data API 持仓读取）。
-
-semi_auto / auto_execution 额外（**签名/下单**用途，非读取）：
-
-- 同一 Polymarket private key 用于 EIP-712 订单签名 + L2 写凭证。
-- Polygon RPC if attribution requires on-chain evidence。
+semi_auto / auto_execution 额外（签名/下单）：同一 private key 用于 EIP-712 签名 + L2 写；proxy/gnosis_safe 需 relayer 凭证；Polygon RPC（attribution/redeem）。
 
 禁止在 production example 写真实 secrets。
 
 ### 5.3 Process roles
 
-第一版可以单进程，内部 worker 分组：
-
-- web。
-- ingest。
-- research。
+第一版单进程，内部 worker 分组：web、ingest、research、report、execution。后续可拆进程，但数据库 schema 与 runtime config 不应依赖拆分。
 
 ### 5.3.1 Offline research jobs（3.5+）
 
-Dataset plan/build 通过 Admin HTTP API（非 xtask CLI）：
-
-```bash
-# Dry plan (requires JWT + Accept-Api-Version: v1 + X-Acting-Role)
-curl -X POST .../api/research/training-datasets/plan -d '{ ... }'
-
-# Full build (PG + ClickHouse + deploy.research.artifact_root)
-curl -X POST .../api/research/training-datasets/build -d '{ ... }'
-```
-
-契约见 [`phase-03/03.5.1-training-dataset-admin-api.md`](plans/quant-pivot/phase-03/03.5.1-training-dataset-admin-api.md)。
-Phase 07 UI 对接同一组 endpoint。
-
-- report。
-- execution。
-
-后续可拆进程，但数据库 schema 和 runtime config 不应依赖拆分。
+Dataset plan/build 经 Admin HTTP API（非 xtask CLI）：`POST /api/research/training-datasets/{plan,build}`。契约见 [`phase-03/03.5.1-training-dataset-admin-api.md`](phase-03/03.5.1-training-dataset-admin-api.md)。
 
 ## 6. CI 与质量门禁
 
-保留：
+保留：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、architecture lint、MSRV。
 
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
-- architecture lint。
-- MSRV。
-
-新增：
-
-- no old Endgame symbols gate。
-- no old `ExecutionMode` gate。
-- no runtime config v2 gate。
-- no compatibility re-export gate。
-- schema graph includes quant tables。
-- runtime config schema snapshot。
-- report payload snapshot。
-- ClickHouse row snapshot。
-
-删除/替换：
-
-- old hot path SLO。
-- old endgame e2e benchmark。
-- old production Live gate。
+新增/维护：no old Endgame symbols gate、no old `ExecutionMode` gate、no prior-schema runtime config gate、no compatibility re-export gate、schema graph includes quant tables、**runtime config schema snapshot（schema_version=7）**、report payload snapshot、ClickHouse row snapshot。
 
 ## 7. Benchmark
 
-删除 benchmark：
-
-- `detect_with_direction`
-- `pipeline_process` old。
-- `scanner_scan_market`
-- `funnel_immediate_dispatch`
-- `execution_pipeline_paper_sync`
-- old `pre_trade_pass`
-
-新增 benchmark：
-
-- `feature_build_market`
-- `factor_compute_market`
-- `model_score_market`
-- `topn_select_1000`
-- `report_build_topn`
-- `portfolio_plan_1000`
-- `order_intent_admission`
-- `clickhouse_quant_fact_encode`
+以 quant report path 为中心：`feature_build_market`、`factor_compute_market`、`model_score_market`、`topn_select_1000`、`report_build_topn`、`portfolio_plan_1000`、`order_intent_admission`、`clickhouse_quant_fact_encode`。删除旧 endgame/paper benchmark。
 
 ## 8. Observability
 
 ### 8.1 Metrics
 
-新增：
-
-- `quant_report_runs_total`
-- `quant_report_run_duration_seconds`
-- `quant_reports_published_total`
-- `quant_reports_empty_total`
-- `quant_feature_vectors_built_total`
-- `quant_factor_values_built_total`
-- `quant_model_runs_total`
-- `quant_model_quality_gate_failures_total`
-- `quant_recommendations_published_total`
-- `quant_order_intents_total`
-- `quant_execution_halted`
-- `quant_fact_writer_lag_seconds`
+`quant_report_runs_total`、`quant_report_run_duration_seconds`、`quant_reports_published_total`、`quant_reports_empty_total`、`quant_feature_vectors_built_total`、`quant_factor_values_built_total`、`quant_model_runs_total`、`quant_model_quality_gate_failures_total`、`quant_recommendations_published_total`、`quant_order_intents_total`、`quant_execution_halted`、`quant_fact_writer_lag_seconds`、`quant_execution_breaker_trip`（venue/daily_loss）、admission_denied（按 check id，含 `max_open_intents`/`max_reserved_capital`）。
 
 ### 8.2 Logs
 
-关键 structured fields：
-
-- `report_id`
-- `recommendation_id`
-- `model_version_id`
-- `runtime_config_version_id`
-- `market_selection_id`
-- `order_intent_id`
-- `market_id`
-- `token_id`
-- `mode`
+关键 structured fields：`report_id`、`recommendation_id`、`model_version_id`、`runtime_config_version_id`、`market_selection_id`、`order_intent_id`、`market_id`、`token_id`、`mode`。
 
 ### 8.3 Alerts
 
-Critical：
-
-- report schedule missed。
-- model quality gate failed。
-- fact writer lag over threshold。
-- auto execution halted。
-- reconciliation unresolvable。
-
-Warning：
-
-- empty report。
-- data quality degraded。
-- feature coverage low。
-- shadow/live model divergence high。
+Critical：report schedule missed、model quality gate failed、fact writer lag、execution halted、reconciliation unresolvable。Warning：empty report、data quality degraded、feature coverage low、shadow/live divergence high。
 
 ## 9. Runbooks
 
-旧 runbook 删除或归档：
+新增：启动 report_only、标准二元 CTF auto-redeem、发布模型、运行 ad-hoc report（**须显式提供 top_n + source_delay_secs**）、切换 auto_execution、Auto-execution 恢复（unresolvable / latched kill-switch）、审批 OrderIntent、kill switch、处理 stale report / fact lag / unresolvable execution。
 
-- DryRun/Paper/Live 切换。
-- Endgame detector tuning。
-- old settlement redeem / redeem routing。
-- bankroll and risk metrics old。
+## 10. Bootstrap 与 schema 变更
 
-新增 runbook：
-
-- 启动 report_only。
-- 标准二元 CTF auto-redeem：EOA-only signer/funder 校验、`Submitted` 恢复、`ManualRequired` 处置。
-- 发布模型。
-- 运行 ad-hoc report。
-- 切换 auto_execution。
-- **Auto-execution 恢复**（unresolvable / latched kill-switch）：
-  1. `GET /api/system/execution-recovery` — 查看 `next_steps` 与 blocking reconciliations。
-  2. 对每个 blocking row：`POST /api/quant/reconciliations/{id}/resolve`（定终态 + 校正 ledger）。
-  3. 若 `kill_switch_requires_ack`：`POST /api/system/kill-switch`（`ack: true`）。
-  4. `POST /api/system/quant-mode` 或确认 `SystemStatus` preflight 通过后再恢复 auto dispatch。
-- 审批 OrderIntent。
-- 切换 auto_execution。
-- kill switch。
-- 处理 stale report。
-- 处理 fact lag。
-- 处理 unresolvable execution。
-
-## 10. Migration 风险
-
-- stored runtime config v2 必须一次性迁移或删除。
-- env var 旧 key 会因 deny_unknown_fields 导致启动失败，必须同步清理。
-- UI schema snapshot 必须更新。
-- old tests 会大量失败，Phase 0 必须先删旧测试或改名隔离。
-- old docs 引用 ADR-001/ADR-002 缺失，必须修正链接。
-- old `system_runtime_state.execution_mode` 必须迁移为 `quant_runtime_mode`。
+- 项目尚未正式运行，**不做** runtime config schema 迁移；bootstrap（[`governance.rs`](../../../crates/quant-pivot-core/src/app/bundles/governance.rs) `ensure_runtime_config_activation`）在直接解析失败后 fail-closed 到默认 v7 文档并激活。
+- env var 旧 key（如 `QUANT_PIVOT__KEYS__SOURCE`）会因 `deny_unknown_fields` 导致启动失败，必须同步清理。
+- UI schema snapshot 必须更新（schema_version=7）。
+- 旧 tests 大量失败者需删除或改名隔离。
+- `EntryPlan.confirmation_window_secs` 删除影响 report payload snapshot，须重生成。
 
 ## 11. 验收标准
 
-- `config/quant-pivot.toml` 不包含 old execution/settlement/endgame hotset。
-- `RuntimeConfig::schema_version == 3`。
-- runtime schema 不包含 `detection`、old `risk`、old `settlement`。
-- report_only 启动要求 private key + `quant.account.funder`（账户读取；报告强制真实账户）；缺失则报告生成 fail closed。
+- `config/quant-pivot.toml` / `production.example.toml` 与 `DeployConfig` struct **1:1**，无 old execution/settlement/endgame hotset、无 `[keys].source`。
+- `RuntimeConfig::schema_version == 7`；runtime schema 不含 `detection`、old `risk`、old `settlement`、`exit_order_policy`、`admission`、`domain_feature_policy`、`default_top_n`。
+- report_only 启动要求 private key + `quant.account.funder`；缺失则报告生成 fail closed。
 - semi_auto/auto_execution preflight 额外覆盖签名/下单 credentials 与 order client readiness。
+- admission 为 22 条；`capital.{max_open_intents, max_reserved_usd}` 生效（0=禁用）。
+- `execution.breaker.*` 激活即热更新，无需重启。
+- ad-hoc 报告缺 `top_n` / `source_delay_secs` 时 fail closed。
 - CI gate 能阻止旧 Endgame 符号回流。
-- benchmark 全部以 quant report path 为中心。
 
 ## 12. 第三方依赖治理
 
@@ -603,21 +264,9 @@ Warning：
 
 ### 12.1 Dependency Gate
 
-每个新 crate 引入前必须记录：
-
-- crate 名称。
-- 使用模块。
-- 引入 Phase。
-- 是否默认 feature。
-- MSRV。
-- native dependency。
-- binary size impact。
-- license。
-- fallback。
+每个新 crate 引入前记录：crate 名、使用模块、引入 Phase、是否默认 feature、MSRV、native dependency、binary size impact、license、fallback。
 
 ### 12.2 Feature Gate
-
-建议 workspace feature：
 
 ```toml
 [features]
@@ -632,36 +281,6 @@ quant-lp-solver = ["good_lp"]
 
 `report_only` 基础服务默认不启用 `quant-ml-onnx` 和 `quant-ml-deep`。
 
-### 12.3 MSRV Gate
+### 12.3 MSRV / Native / Spike Gate
 
-当前 workspace MSRV 是 1.85。已调研的风险：
-
-- `ort` 最新 2.x rc 可能要求 1.88。
-- 引入 `ort` latest 前必须选择：
-  - 升级 workspace MSRV。
-  - 使用较旧 `ort` rc 并承担维护风险。
-  - 暂缓 ONNX，继续 weighted/classical model。
-
-MSRV 变化必须作为独立 Phase 决策，不夹在业务改动里。
-
-### 12.4 Native Dependency Gate
-
-需要重点审查：
-
-- `ort` 的 ONNX Runtime binaries / dynamic loading。
-- `good_lp` 后端 solver，如 HiGHS/CBC。
-- `polars` feature 组合导致的编译时间和二进制体积。
-- `burn`/`candle` GPU backend。
-
-生产 Docker 必须明确安装或复制 native runtime，不允许依赖开发机环境。
-
-### 12.5 Spike Gate
-
-以下 spike 通过前不得进入主路径：
-
-- Polars feature build benchmark。
-- SmartCore artifact serialization。
-- Argmin deterministic optimization。
-- GoodLP solver backend comparison。
-- Ort MSRV/native deployment check。
-- Burn/Candle deployment spike。
+MSRV 变化作为独立 Phase 决策；`ort`/`good_lp`/`polars`/`burn`/`candle` 的 native 依赖须审查；生产 Docker 必须明确安装或复制 native runtime。相关 spike（Polars/SmartCore/Argmin/GoodLP/Ort/Burn）通过前不得进入主路径。

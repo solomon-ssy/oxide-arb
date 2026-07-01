@@ -198,6 +198,8 @@ crate::wire_enum! {
         EntryTrigger => "entry_trigger",
         RiskEnvelopeHash => "risk_envelope_hash",
         CapitalBudget => "capital_budget",
+        MaxOpenIntents => "max_open_intents",
+        MaxReservedCapital => "max_reserved_capital",
         MarketExposure => "market_exposure",
         EventExposure => "event_exposure",
         CategoryExposure => "category_exposure",

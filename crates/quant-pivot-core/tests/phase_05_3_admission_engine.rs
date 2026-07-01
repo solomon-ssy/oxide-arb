@@ -1,6 +1,6 @@
 //! Phase 05.3 — execution admission engine + check integration tests.
 //!
-//! The fixture passes all 20 checks; each test mutates exactly one input field
+//! The fixture passes all 22 checks; each test mutates exactly one input field
 //! to drive the matching deny/defer outcome. Checks are pure, so the engine is
 //! exercised entirely in-memory with no DB / venue.
 
@@ -23,20 +23,21 @@ use quant_pivot_core::{
 use quant_pivot_error::{QuantError, QuantResult, account::AccountError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        AppendReconciliationEvidence, BookLevel, BookSnapshot, CapitalAllocationInfo,
-        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch, MarketInfo,
-        MarketPageQuery, ModelSpecInfo, ModelVersionInfo, NewExecutionOrder, NewModelSpec,
-        NewModelVersion, NewOperationLog, NewReconciliation, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
-        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
-        ReconciliationListQuery, ReconciliationPatch, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo, UpsertMarket,
+        AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome, BookLevel,
+        BookSnapshot, CapitalAllocationInfo, DataQualityPort, DataQualitySnapshot,
+        ExecutionOrderInfo, ExecutionOrderPatch, MarketInfo, MarketPageQuery, ModelSpecInfo,
+        ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewOrderIntent, NewReconciliation, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, OrderIntentListQuery,
+        Paginated, QuantReportListQuery, RecommendationInfo, RecommendationReportInfo,
+        ReconciliationInfo, ReconciliationListQuery, ReconciliationPatch,
+        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
     },
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
-            AdmissionCheckId, AdmissionOutcome, CapitalAllocationState, ExitState, KillSwitchState,
-            OrderIntentKind,
+            AdmissionCheckId, AdmissionOutcome, ApprovalInvalidation, CapitalAllocationState,
+            ExitState, KillSwitchState, OrderIntentKind,
         },
         market::MarketStatus,
         quant::{
@@ -55,8 +56,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ExecutionOrderRepository, MarketRepository,
-    ModelRegistryRepository, RecommendationReportRepository, RecommendationRepository,
-    ReconciliationRepository, RuntimeConfigVersionRepository,
+    ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
+    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::AccountSnapshot;
 use quant_pivot_test_support::report_fixtures;
@@ -222,6 +223,9 @@ fn passing() -> AdmissionInput {
         allocation: Some(allocation),
         book: Some(book(vec![level("0.42", "600")], NOW_MS - 500)),
         budget_total_usd: Usd::new(dec!(10000)),
+        open_intent_count: 0,
+        max_open_intents: 0,
+        max_reserved_usd: Usd::ZERO,
         model_published: true,
         data_quality: green_data_quality(),
         max_stale_book_ratio_bps: 2_000,
@@ -261,7 +265,7 @@ fn denied_checks(decision: &AdmissionDecision) -> Vec<AdmissionCheckId> {
         .collect()
 }
 
-const CANONICAL_ORDER: [AdmissionCheckId; 20] = [
+const CANONICAL_ORDER: [AdmissionCheckId; 22] = [
     AdmissionCheckId::IntentState,
     AdmissionCheckId::RecommendationFreshness,
     AdmissionCheckId::ReportStatus,
@@ -272,6 +276,8 @@ const CANONICAL_ORDER: [AdmissionCheckId; 20] = [
     AdmissionCheckId::EntryTrigger,
     AdmissionCheckId::RiskEnvelopeHash,
     AdmissionCheckId::CapitalBudget,
+    AdmissionCheckId::MaxOpenIntents,
+    AdmissionCheckId::MaxReservedCapital,
     AdmissionCheckId::MarketExposure,
     AdmissionCheckId::EventExposure,
     AdmissionCheckId::CategoryExposure,
@@ -294,11 +300,11 @@ async fn admission_allows_when_all_checks_pass() {
         decision.trace
     );
     assert!(decision.denial_reason.is_none());
-    assert_eq!(decision.trace.len(), 20);
+    assert_eq!(decision.trace.len(), 22);
 }
 
 #[tokio::test]
-async fn admission_runs_twenty_checks_in_fixed_order() {
+async fn admission_runs_all_checks_in_fixed_order() {
     let decision = full(passing()).await;
     let order: Vec<AdmissionCheckId> = decision.trace.iter().map(|trace| trace.check).collect();
     assert_eq!(order, CANONICAL_ORDER.to_vec());
@@ -319,6 +325,52 @@ async fn admission_decision_is_deterministic_for_same_input() {
     };
     assert_eq!(project(&first), project(&second));
     assert_eq!(first.denial_reason, second.denial_reason);
+}
+
+#[tokio::test]
+async fn admission_denies_when_open_intent_cap_exceeded() {
+    let mut input = passing();
+    input.max_open_intents = 3;
+    input.open_intent_count = 4;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::MaxOpenIntents));
+}
+
+#[tokio::test]
+async fn admission_allows_open_intent_count_at_cap() {
+    let mut input = passing();
+    input.max_open_intents = 3;
+    input.open_intent_count = 3;
+    let decision = full(input).await;
+    assert!(!denied_checks(&decision).contains(&AdmissionCheckId::MaxOpenIntents));
+}
+
+#[tokio::test]
+async fn admission_open_intent_cap_disabled_when_zero() {
+    let mut input = passing();
+    input.max_open_intents = 0;
+    input.open_intent_count = 10_000;
+    let decision = full(input).await;
+    assert!(!denied_checks(&decision).contains(&AdmissionCheckId::MaxOpenIntents));
+}
+
+#[tokio::test]
+async fn admission_denies_when_reserved_capital_cap_exceeded() {
+    let mut input = passing();
+    input.max_reserved_usd = Usd::new(dec!(100));
+    // Fixture reserves 250 USD on the account snapshot.
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::MaxReservedCapital));
+}
+
+#[tokio::test]
+async fn admission_reserved_capital_cap_disabled_when_zero() {
+    let mut input = passing();
+    input.max_reserved_usd = Usd::ZERO;
+    let decision = full(input).await;
+    assert!(!denied_checks(&decision).contains(&AdmissionCheckId::MaxReservedCapital));
 }
 
 #[tokio::test]
@@ -589,6 +641,7 @@ async fn admission_fail_closed_when_account_unavailable() {
         model_registry: Arc::new(StubModelRegistry),
         reconciliation: Arc::new(StubReconciliation),
         execution_orders: Arc::new(StubExecutionOrders),
+        intents: Arc::new(StubIntents),
         capital: Arc::new(StubCapital),
         markets: Arc::new(StubMarkets),
         config_versions: Arc::new(StubConfigVersions),
@@ -958,6 +1011,111 @@ impl ReconciliationRepository for StubReconciliation {
 
     async fn count_blocking_unresolvable(&self) -> Result<u64, StorageError> {
         Ok(0)
+    }
+}
+
+struct StubIntents;
+
+#[async_trait]
+impl OrderIntentRepository for StubIntents {
+    async fn create_with_allocation(
+        &self,
+        _: NewOrderIntent,
+        _: NewCapitalAllocation,
+    ) -> Result<OrderIntentInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn approve(
+        &self,
+        _: &OrderIntentId,
+        _: ApproveOrderIntent,
+        _: Option<EntryOrderSpec>,
+        _: Option<Usd>,
+        _: DateTime<Utc>,
+    ) -> Result<ApproveOrderIntentOutcome, StorageError> {
+        unimplemented!()
+    }
+
+    async fn reject(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn cancel(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn expire(
+        &self,
+        _: &OrderIntentId,
+        _: NewOperationLog,
+    ) -> Result<OrderIntentInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn invalidate(
+        &self,
+        _: &OrderIntentId,
+        _: ApprovalInvalidation,
+        _: NewOperationLog,
+    ) -> Result<OrderIntentInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_id(&self, _: &OrderIntentId) -> Result<Option<OrderIntentInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn page(
+        &self,
+        _: OrderIntentListQuery,
+    ) -> Result<Paginated<OrderIntentInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_expired(&self, _: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn upcoming_expirations(
+        &self,
+        _: DateTime<Utc>,
+        _: u64,
+    ) -> Result<Vec<(OrderIntentId, DateTime<Utc>)>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_active_by_recommendation(
+        &self,
+        _: &RecommendationId,
+    ) -> Result<Option<OrderIntentInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_active_intents_by_recommendation(
+        &self,
+        _: &RecommendationId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_active_by_report(
+        &self,
+        _: &RecommendationReportId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn count_open(&self) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
+    async fn find_attribution_candidates(
+        &self,
+        _: Vec<OrderIntentStatus>,
+        _: u64,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        unimplemented!()
     }
 }
 

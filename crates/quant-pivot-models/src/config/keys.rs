@@ -1,4 +1,4 @@
-//! API keys and credential source configuration.
+//! Wallet credential configuration.
 //!
 //! # Loading precedence (per field, high → low)
 //!
@@ -20,19 +20,15 @@ use std::fmt;
 /// Environment variable for the bot wallet private key.
 pub const ENV_PRIVATE_KEY: &str = "QUANT_PIVOT__KEYS__PRIVATE_KEY";
 
-/// Credential source and wallet private key.
+/// Wallet private key.
 ///
 /// `private_key` may be supplied in `quant-pivot.toml`, `quant-pivot.local.toml`,
 /// and/or `QUANT_PIVOT__KEYS__PRIVATE_KEY`. Environment variables override file
-/// values when present.
+/// values when present. It is the single credential the process signs with and
+/// derives Polymarket CLOB L2 read/write credentials from at connect time.
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeysConfig {
-    /// Credential source hint. `env` = inline `private_key` (TOML and/or env);
-    /// `keystore` reserved for encrypted keystore file (future).
-    pub source: KeySource,
-    /// Path to the encrypted keystore file (if `source` is `Keystore`).
-    pub keystore_path: Option<String>,
     /// Wallet private key for signing, CLOB L1 auth, and runtime L2 derivation.
     pub private_key: Option<String>,
 }
@@ -40,11 +36,6 @@ pub struct KeysConfig {
 impl fmt::Debug for KeysConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeysConfig")
-            .field("source", &self.source)
-            .field(
-                "keystore_path",
-                &self.keystore_path.as_ref().map(|p| format!("{p:?}")),
-            )
             .field("private_key", &secret_present(self.private_key.as_ref()))
             .finish()
     }
@@ -63,31 +54,15 @@ impl KeysConfig {
     ///
     /// Empty strings (e.g. `private_key = ""` in TOML) are treated as unset.
     pub fn normalize(&mut self) {
-        empty_to_none(&mut self.private_key);
-        empty_to_none(&mut self.keystore_path);
+        if self.private_key.as_deref().is_some_and(str::is_empty) {
+            self.private_key = None;
+        }
     }
 
     /// Whether the wallet private key is populated.
     #[must_use]
     pub const fn private_key_present(&self) -> bool {
         self.private_key.is_some()
-    }
-}
-
-/// Source of cryptographic credentials.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum KeySource {
-    /// Inline `[keys].private_key` (TOML and/or `QUANT_PIVOT__KEYS__PRIVATE_KEY`).
-    #[default]
-    Env,
-    /// Encrypted keystore file at `keystore_path` (reserved).
-    Keystore,
-}
-
-fn empty_to_none(slot: &mut Option<String>) {
-    if slot.as_deref().is_some_and(str::is_empty) {
-        *slot = None;
     }
 }
 
@@ -99,7 +74,6 @@ mod tests {
     fn normalize_clears_empty_strings() {
         let mut keys = KeysConfig {
             private_key: Some(String::new()),
-            ..KeysConfig::default()
         };
         keys.normalize();
         assert!(!keys.private_key_present());
@@ -109,7 +83,6 @@ mod tests {
     fn debug_redacts_secrets() {
         let keys = KeysConfig {
             private_key: Some("0xsecret".into()),
-            ..KeysConfig::default()
         };
         let debug = format!("{keys:?}");
         assert!(!debug.contains("0xsecret"));
@@ -122,7 +95,6 @@ mod tests {
         assert!(
             KeysConfig {
                 private_key: Some("0xabc".into()),
-                ..KeysConfig::default()
             }
             .private_key_present()
         );

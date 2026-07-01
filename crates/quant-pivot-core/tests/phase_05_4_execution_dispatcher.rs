@@ -351,6 +351,10 @@ impl OrderIntentRepository for MemoryIntentRepo {
         Ok(Vec::new())
     }
 
+    async fn count_open(&self) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
     async fn find_attribution_candidates(
         &self,
         _: Vec<OrderIntentStatus>,
@@ -1261,6 +1265,7 @@ fn build_harness_with_result(
         model_registry: Arc::new(StubModelRegistry),
         reconciliation: Arc::new(StubReconciliation),
         execution_orders: Arc::new(StubExecutionOrders),
+        intents: Arc::clone(&intents) as Arc<dyn OrderIntentRepository>,
         capital: Arc::new(StubCapital(alloc)),
         markets: Arc::new(StubMarkets),
         config_versions: Arc::new(StubConfigVersions),
@@ -1495,6 +1500,9 @@ async fn report_only_mode_denied_by_admission_engine() {
         )),
         book: Some(book(vec![level("0.42", "600")])),
         budget_total_usd: Usd::new(dec!(10_000)),
+        open_intent_count: 0,
+        max_open_intents: 0,
+        max_reserved_usd: Usd::ZERO,
         model_published: true,
         data_quality: green_data_quality(),
         max_stale_book_ratio_bps: 2_000,

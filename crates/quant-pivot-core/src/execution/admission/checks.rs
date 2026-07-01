@@ -1,4 +1,4 @@
-//! The 20 admission checks (parent §4.2), each a pure function of the frozen
+//! The 22 admission checks (parent §4.2), each a pure function of the frozen
 //! [`AdmissionInput`]. Every check is hard: a violation is `Deny`, a
 //! not-now-but-retryable condition is `Defer`, otherwise `Allow`.
 
@@ -347,6 +347,66 @@ impl AdmissionCheck for CapitalBudgetCheck {
         AdmissionCheckTrace::pass(self.id(), "order funded and within budget")
             .with_threshold(remaining_budget.to_string())
             .with_actual(notional.to_string())
+    }
+}
+
+// 10a ────────────────────────────────────────────────────────────────────────
+/// Concurrently open (non-terminal) order intents stay within the governed cap.
+///
+/// `execution.capital.max_open_intents` bounds how many intents may hold capital
+/// in flight at once. `0` disables the cap. The intent under admission is already
+/// counted in `open_intent_count` (it is `Approved` / `ApprovedByPolicy`), so the
+/// check is `open_intent_count <= cap` — no off-by-one add-back.
+pub(super) struct MaxOpenIntentsCheck;
+
+impl AdmissionCheck for MaxOpenIntentsCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::MaxOpenIntents
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        if input.max_open_intents == 0 {
+            return AdmissionCheckTrace::pass(self.id(), "open-intent cap disabled");
+        }
+        let cap = u64::from(input.max_open_intents);
+        if input.open_intent_count > cap {
+            return AdmissionCheckTrace::deny(self.id(), "open intent count exceeds cap")
+                .with_threshold(cap.to_string())
+                .with_actual(input.open_intent_count.to_string());
+        }
+        AdmissionCheckTrace::pass(self.id(), "open intent count within cap")
+            .with_threshold(cap.to_string())
+            .with_actual(input.open_intent_count.to_string())
+    }
+}
+
+// 10b ────────────────────────────────────────────────────────────────────────
+/// Total capital reserved by open intents stays within the governed cap.
+///
+/// `execution.capital.max_reserved_usd` bounds the aggregate reserved capital;
+/// `0` disables it. `account.reserved_usd` already includes this intent's
+/// `Allocated` reservation, so the check compares the current total reservation
+/// directly against the cap.
+pub(super) struct MaxReservedCapitalCheck;
+
+impl AdmissionCheck for MaxReservedCapitalCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::MaxReservedCapital
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        if input.max_reserved_usd == Usd::ZERO {
+            return AdmissionCheckTrace::pass(self.id(), "reserved-capital cap disabled");
+        }
+        let reserved = input.account.reserved_usd;
+        if reserved > input.max_reserved_usd {
+            return AdmissionCheckTrace::deny(self.id(), "reserved capital exceeds cap")
+                .with_threshold(input.max_reserved_usd.to_string())
+                .with_actual(reserved.to_string());
+        }
+        AdmissionCheckTrace::pass(self.id(), "reserved capital within cap")
+            .with_threshold(input.max_reserved_usd.to_string())
+            .with_actual(reserved.to_string())
     }
 }
 

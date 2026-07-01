@@ -330,6 +330,10 @@ impl OrderIntentRepository for StubIntents {
         Ok(Vec::new())
     }
 
+    async fn count_open(&self) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
     async fn find_attribution_candidates(
         &self,
         _: Vec<quant_pivot_models::enums::quant::OrderIntentStatus>,

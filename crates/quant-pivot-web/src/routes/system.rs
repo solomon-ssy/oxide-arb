@@ -121,7 +121,6 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
         "db": masked_db_view(deploy),
         "cache": masked_cache_view(deploy),
         "keys": {
-            "source": format!("{:?}", deploy.keys.source),
             "private_key_present": deploy.keys.private_key_present(),
         },
         "web": masked_web_view(deploy),

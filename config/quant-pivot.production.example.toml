@@ -51,9 +51,25 @@ chain_id = 137
 # provider in production. Override via QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL.
 # Default: "https://polygon-rpc.com".
 rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/REPLACE_WITH_ALCHEMY_KEY"
-# Purpose: RPC request timeout (ms). Impact: oracle/redeem failure latency.
-# Default: 10000.
+# Purpose: RPC request timeout (ms). Impact: hard per-call bound on the Polygon
+# JSON-RPC client — a money-moving redeem/oracle call fails after this instead
+# of hanging (reqwest has no default timeout). Default: 10000.
 rpc_timeout_ms = 10000
+
+# Gasless relayer for money-moving Proxy / Gnosis Safe transactions (e.g. CTF
+# redeemPositions). Only required when quant.account.wallet_kind is "proxy" or
+# "gnosis_safe"; EOA settlement signs + pays gas directly and ignores this.
+[polymarket.relayer]
+# Purpose: relayer submit/status base URL. Default: "https://relayer-v2.polymarket.com".
+base_url = "https://relayer-v2.polymarket.com"
+# Purpose: relayer API key (secret). Set via env, never here.
+# Override: QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY
+# api_key = "...."
+# Purpose: address that owns the relayer API key (the signer EOA address).
+# Override: QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY_ADDRESS
+# api_key_address = "0x...."
+# Purpose: relayer HTTP request timeout (ms). Default: 15000.
+request_timeout_ms = 15000
 
 # Per-category feeRate (official 2026-04-04). Override when PM updates docs.
 # Exponent is always 1 per https://docs.polymarket.com/trading/fees
@@ -96,6 +112,13 @@ max_reconnect_delay_ms = 30000
 # Impact: connection count vs per-connection event volume. Caution: Polymarket
 # enforces server-side limits — keep at or below 200. Default: 200.
 max_subscriptions_per_connection = 200
+# Purpose: maximum engine-owned CLOB token subscriptions across all transport
+# shards. Impact: hard caps Polymarket WS pressure. Default: 2000.
+engine_max_subscription_tokens = 2000
+# Purpose: look-ahead window (hours) for the engine WS subscription hotset.
+# Impact: markets outside this window stay in catalog/storage but do not consume
+# WS capacity until they approach resolution. Default: 72.
+engine_subscription_window_hours = 72
 
 [market_data.gamma]
 # Purpose: Gamma REST base URL (market catalog + resolution metadata).
@@ -118,11 +141,31 @@ size_threshold = 1
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
+# Report TTL expire-sweep + deadline look-ahead cadence (seconds). Default: 300.
 report_expire_sweep_secs = 300
+# Order-intent TTL expire-sweep cadence (seconds); releases reserved capital at
+# expires_at. Default: 60.
+intent_expire_sweep_secs = 60
+# Auto-execution dispatcher poll-backstop cadence (seconds). Default: 10.
+execution_dispatch_secs = 10
+# Execution-breaker self-heal tick cadence (seconds). Default: 5.
+execution_breaker_tick_secs = 5
+# Best-effort equity-history snapshot cadence (seconds). Default: 300.
+equity_snapshot_secs = 300
 
 [quant.account]
 # Polymarket proxy/funder address for Data API position reads. Required (all modes).
 # funder = "0x...."
+# Wallet shape for money-moving on-chain settlement: "eoa" signs + pays gas
+# directly; "proxy" / "gnosis_safe" redeem via the relayer. Default: "eoa".
+wallet_kind = "eoa"
+
+# ── Research Plane ────────────────────────────────────────────────────────────
+
+[research]
+# Local filesystem root for the artifact store (training datasets, serialized
+# model artifacts), addressed as file://<artifact_root>/... Default: "./var/artifacts".
+artifact_root = "./var/artifacts"
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -131,10 +174,8 @@ report_expire_sweep_secs = 300
 # applies only in semi_auto / auto_execution. L2 credentials are SDK-derived at connect.
 
 [keys]
-# Purpose: credential source. "env" = inline private_key; "keystore" = encrypted file
-# at keystore_path (reserved). Impact: order-submitting identity. Default: "env".
-source = "env"
-
+# Bot wallet private key: the single signing credential; CLOB L2 credentials are
+# SDK-derived from it at connect time. Set via env, never here.
 # private_key = "0xREPLACE_WITH_BOT_PRIVATE_KEY"
 
 # ── Observability (logging only) ─────────────────────────────────────────────
@@ -263,6 +304,11 @@ database = 0
 pool_size = 16
 # Purpose: per-operation timeout (ms). Default: 1000.
 timeout_ms = 500
+# Purpose: startup readiness budget (ms): total time allowed to establish and
+# PING the first connection (cache + JWT blacklist pools) before failing closed.
+# Kept separate from timeout_ms so a tight per-op deadline never starves initial
+# connection establishment. Default: 5000.
+connect_timeout_ms = 5000
 # Purpose: key namespace prefix. Default: "oarb:".
 key_prefix = "oarb:"
 

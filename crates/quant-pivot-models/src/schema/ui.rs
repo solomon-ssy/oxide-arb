@@ -230,12 +230,6 @@ fn data_quality_fields() -> Vec<FieldUiEntry> {
             30,
         ),
         boolean(
-            "data_quality.allow_degraded_domain_features",
-            "Allow degraded features",
-            "允许降级特征",
-            40,
-        ),
-        boolean(
             "data_quality.reject_crossed_books",
             "Reject crossed books",
             "拒绝交叉订单簿",
@@ -246,12 +240,6 @@ fn data_quality_fields() -> Vec<FieldUiEntry> {
             "Reject empty books",
             "拒绝空订单簿",
             60,
-        ),
-        integer(
-            "data_quality.source_delay_secs",
-            "Source delay",
-            "数据源延迟秒数",
-            70,
         ),
         entry(
             "data_quality.feature_staleness_policy",
@@ -292,14 +280,6 @@ fn feature_fields() -> Vec<FieldUiEntry> {
             "必需特征",
             30,
             Some(FieldWidget::StringList),
-            None,
-        ),
-        entry(
-            "features.domain_feature_policy",
-            "Domain feature policy",
-            "领域特征策略",
-            40,
-            Some(FieldWidget::EnumSelect),
             None,
         ),
         entry(
@@ -537,7 +517,6 @@ fn report_fields() -> Vec<FieldUiEntry> {
             Some(FieldWidget::JsonTree),
             None,
         ),
-        integer("reports.default_top_n", "Default TopN", "默认 TopN", 20),
         integer("reports.max_top_n", "Maximum TopN", "最大 TopN", 30),
         integer(
             "reports.fallback_horizon_secs",
@@ -731,15 +710,7 @@ fn portfolio_optimizer_fields() -> Vec<FieldUiEntry> {
 }
 
 fn execution_fields() -> Vec<FieldUiEntry> {
-    let mut fields = vec![entry(
-        "execution.runtime_mode",
-        "Runtime mode",
-        "运行模式",
-        10,
-        Some(FieldWidget::EnumSelect),
-        Some(FieldSemantics::RuntimeMode),
-    )];
-    fields.extend(execution_semi_auto_fields());
+    let mut fields = execution_semi_auto_fields();
     fields.extend(execution_auto_fields());
     fields.extend(execution_policy_fields());
     fields
@@ -798,12 +769,6 @@ fn execution_auto_fields() -> Vec<FieldUiEntry> {
             Some(FieldWidget::DecimalString),
             None,
         ),
-        boolean(
-            "execution.auto_execution.require_shadow_passed",
-            "Require shadow passed",
-            "要求影子验证通过",
-            100,
-        ),
     ]
 }
 
@@ -820,46 +785,6 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
             "Allow market orders",
             "允许市价单",
             120,
-        ),
-        integer(
-            "execution.entry_order_policy.confirmation_window_secs",
-            "Entry confirmation window",
-            "限价确认窗口秒数",
-            125,
-        ),
-        boolean(
-            "execution.exit_order_policy.allow_reduce_only",
-            "Exit reduce only",
-            "退出仅减仓",
-            130,
-        ),
-        integer(
-            "execution.exit_order_policy.max_slippage_bps",
-            "Exit max slippage",
-            "退出最大滑点",
-            140,
-        ),
-        entry(
-            "execution.admission.min_score",
-            "Admission min score",
-            "准入最低分",
-            150,
-            Some(FieldWidget::DecimalString),
-            None,
-        ),
-        entry(
-            "execution.admission.min_confidence",
-            "Admission min confidence",
-            "准入最低置信度",
-            160,
-            Some(FieldWidget::DecimalString),
-            None,
-        ),
-        boolean(
-            "execution.admission.require_fresh_features",
-            "Require fresh features",
-            "要求新鲜特征",
-            170,
         ),
         entry(
             "execution.kill_switch.emergency_exit.kind",
@@ -1123,18 +1048,6 @@ fn notification_fields() -> Vec<FieldUiEntry> {
             "Notify report published",
             "报告发布通知",
             40,
-        ),
-        boolean(
-            "notification.policies.execution_halted",
-            "Notify execution halted",
-            "执行停止通知",
-            50,
-        ),
-        boolean(
-            "notification.policies.config_activated",
-            "Notify config activated",
-            "配置激活通知",
-            60,
         ),
     ]
 }

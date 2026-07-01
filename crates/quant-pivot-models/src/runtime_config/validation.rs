@@ -1,8 +1,8 @@
-//! Runtime-config v5 semantic validation.
+//! Runtime-config v7 semantic validation.
 //!
-//! This module validates only the quant-pivot v5 document. Legacy Endgame
-//! Deleted pre-quant configuration paths are not accepted in Phase 1 clean-break
-//! runtime configuration.
+//! This module validates only the current quant-pivot document. Legacy Endgame
+//! and superseded pre-quant configuration paths are not accepted (clean-break
+//! runtime configuration).
 
 use super::{
     DecimalString, RuntimeConfig, ScheduleCadence, SizingModelConfig, sections::FeaturesConfig,
@@ -37,7 +37,6 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_reports(config, &mut report);
     validate_portfolio(config, &mut report);
     validate_execution(config, &mut report);
-    validate_notification(config, &mut report);
     report
 }
 
@@ -247,11 +246,10 @@ fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport
 }
 
 fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
-    if config.reports.default_top_n == 0 || config.reports.default_top_n > config.reports.max_top_n
-    {
+    if config.reports.max_top_n == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "reports.default_top_n",
-            detail: "must be in 1..=reports.max_top_n".to_owned(),
+            field: "reports.max_top_n",
+            detail: "must be greater than zero".to_owned(),
         });
     }
     if config.reports.fallback_horizon_secs == 0 {
@@ -400,14 +398,6 @@ fn validate_sizing(sizing: &SizingModelConfig, report: &mut ConfigValidationRepo
 }
 
 fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
-    if config.execution.runtime_mode.allows_auto_execution()
-        && !config.execution.auto_execution.enabled
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.auto_execution.enabled",
-            detail: "must be true when runtime_mode is auto_execution".to_owned(),
-        });
-    }
     decimal(
         "execution.auto_execution.max_total_usd_per_report",
         &config.execution.auto_execution.max_total_usd_per_report,
@@ -423,17 +413,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
         &config.execution.auto_execution.min_confidence,
         report,
     );
-    decimal(
-        "execution.admission.min_score",
-        &config.execution.admission.min_score,
-        report,
-    );
-    decimal(
-        "execution.admission.min_confidence",
-        &config.execution.admission.min_confidence,
-        report,
-    );
-    decimal(
+    non_negative_decimal(
         "execution.capital.max_reserved_usd",
         &config.execution.capital.max_reserved_usd,
         report,
@@ -489,23 +469,6 @@ fn validate_settlement_redeem(config: &RuntimeConfig, report: &mut ConfigValidat
             field: "execution.settlement_redeem.hold_to_resolution_within_secs",
             detail: "must be greater than zero when hold_to_resolution_enabled is true".to_owned(),
         });
-    }
-}
-
-fn validate_notification(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
-    if config.execution.runtime_mode.allows_order_submission()
-        && config.notification.telegram.bot_token.trim().is_empty()
-        && config.notification.webhook.url.trim().is_empty()
-    {
-        report
-            .errors
-            .push(ConfigValidationError::MissingCredentials {
-                mode: config.execution.runtime_mode.as_str().to_owned(),
-                missing: vec![
-                    "notification.telegram.bot_token",
-                    "notification.webhook.url",
-                ],
-            });
     }
 }
 
@@ -581,7 +544,7 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 mod tests {
     use super::{RuntimeConfig, validate_runtime_config};
     use crate::{
-        enums::{factor::FactorFamily, quant::QuantRuntimeMode},
+        enums::factor::FactorFamily,
         runtime_config::{DecimalString, FeatureNameRef, RUNTIME_CONFIG_SCHEMA_VERSION},
     };
 
@@ -595,15 +558,6 @@ mod tests {
     fn invalid_decimal_is_rejected() {
         let mut config = RuntimeConfig::default();
         config.portfolio.budget.total_budget_usd = DecimalString::new("not-a-decimal");
-        let report = validate_runtime_config(&config);
-        assert!(report.has_errors());
-    }
-
-    #[test]
-    fn auto_execution_requires_enabled_policy() {
-        let mut config = RuntimeConfig::default();
-        config.execution.runtime_mode = QuantRuntimeMode::AutoExecution;
-        config.execution.auto_execution.enabled = false;
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }

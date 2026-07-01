@@ -42,8 +42,8 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
-    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
-    TransactionTrait,
+    EntityTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, TransactionTrait,
 };
 
 /// Statuses a TTL sweep may expire.
@@ -407,6 +407,14 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .await
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn count_open(&self) -> Result<u64, StorageError> {
+        quant_order_intent::Entity::find()
+            .filter(quant_order_intent::Column::Status.is_in(OrderIntentStatus::OPEN))
+            .count(&self.db)
+            .await
+            .map_err(StorageError::from)
     }
 
     async fn find_attribution_candidates(

@@ -128,7 +128,7 @@ pub struct ModelRunRequest<'a> {
     pub factors: &'a FactorsConfig,
     /// Frozen model config (active / shadow refs, floors, horizon).
     pub model: &'a ModelConfig,
-    /// `TopN` bound for the shadow comparison overlap (from `reports.default_top_n`).
+    /// `TopN` bound for the shadow comparison overlap (the report's resolved `TopN`).
     pub top_n: usize,
     /// Decision time.
     pub as_of: DateTime<Utc>,

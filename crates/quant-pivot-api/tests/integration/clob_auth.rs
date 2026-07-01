@@ -2,7 +2,7 @@
 
 use quant_pivot_api::{clob::ClobClient, keystore::Keystore, wallet::WalletTopology};
 use quant_pivot_models::{
-    config::{KeySource, KeysConfig, PolymarketConfig},
+    config::{KeysConfig, PolymarketConfig},
     domain::order::{OrderAmount, OrderRequest},
     enums::{
         common::{OrderType, Side},
@@ -16,9 +16,7 @@ use std::env::var;
 fn test_keystore() -> Option<Keystore> {
     let key = var("QUANT_PIVOT_TEST_PRIVATE_KEY").ok()?;
     Keystore::from_config(&KeysConfig {
-        source: KeySource::Env,
         private_key: Some(key),
-        keystore_path: None,
     })
     .ok()
 }

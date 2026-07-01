@@ -18,8 +18,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ExecutionOrderRepository, MarketRepository,
-    ModelRegistryRepository, RecommendationReportRepository, RecommendationRepository,
-    ReconciliationRepository, RuntimeConfigVersionRepository,
+    ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
+    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
 };
 use rust_decimal::Decimal;
 
@@ -39,6 +39,7 @@ pub struct AdmissionInputBuilderDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
+    pub intents: Arc<dyn OrderIntentRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub markets: Arc<dyn MarketRepository>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
@@ -90,6 +91,8 @@ impl AdmissionInputBuilder {
         let config = deps.config.current();
         let budget_total_usd = parse_budget_usd(&config.portfolio.budget.total_budget_usd.value)?;
         let max_stale_book_ratio_bps = config.data_quality.max_stale_book_ratio_bps;
+        let max_open_intents = config.execution.capital.max_open_intents;
+        let max_reserved_usd = parse_capital_usd(&config.execution.capital.max_reserved_usd.value)?;
 
         let report_id = recommendation.recommendation_report_id.clone();
         let market_id = recommendation.market_id.clone();
@@ -106,6 +109,7 @@ impl AdmissionInputBuilder {
             active_version_result,
             account_result,
             market_result,
+            open_intent_result,
         ) = tokio::join!(
             deps.reports.find_by_id(&report_id),
             deps.model_registry
@@ -120,7 +124,8 @@ impl AdmissionInputBuilder {
                     .snapshot(now)
                     .await
             },
-            deps.markets.find_by_id(&market_id)
+            deps.markets.find_by_id(&market_id),
+            deps.intents.count_open(),
         );
 
         let report = report_result?
@@ -140,6 +145,7 @@ impl AdmissionInputBuilder {
             == MarketStatus::ManuallyBlocked;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
+        let open_intent_count = open_intent_result?;
 
         let book = deps.book_store.load(&intent.entry_order_json.token_id);
         let data_quality = deps.data_quality.snapshot();
@@ -164,6 +170,9 @@ impl AdmissionInputBuilder {
             allocation,
             book,
             budget_total_usd,
+            open_intent_count,
+            max_open_intents,
+            max_reserved_usd,
             model_published,
             data_quality,
             max_stale_book_ratio_bps,
@@ -197,6 +206,19 @@ fn parse_budget_usd(value: &str) -> QuantResult<Usd> {
         .map_err(|error| {
             QuantError::config(format!(
                 "portfolio.budget.total_budget_usd is not a valid decimal: {error}"
+            ))
+        })
+}
+
+/// Parse the governed reserved-capital cap, failing closed on a malformed value.
+fn parse_capital_usd(value: &str) -> QuantResult<Usd> {
+    value
+        .trim()
+        .parse::<Decimal>()
+        .map(Usd::new)
+        .map_err(|error| {
+            QuantError::config(format!(
+                "execution.capital.max_reserved_usd is not a valid decimal: {error}"
             ))
         })
 }

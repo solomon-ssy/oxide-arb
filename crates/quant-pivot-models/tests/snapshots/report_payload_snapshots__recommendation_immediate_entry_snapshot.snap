@@ -46,7 +46,6 @@ expression: recommendation_immediate_entry()
     "valid_until": "2023-11-14T23:13:20Z",
     "min_depth_usd": "100",
     "max_book_age_ms": 2000,
-    "confirmation_window_secs": 30,
     "cancel_if_not_triggered": false,
     "entry_reason": "immediate entry with slippage cap"
   },

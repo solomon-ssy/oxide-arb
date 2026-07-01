@@ -361,14 +361,22 @@ async fn ensure_runtime_config_activation(
     repo: &dyn RuntimeConfigVersionRepository,
 ) -> QuantResult<RuntimeConfig> {
     let current = repo.load_current().await?;
+    // Fast path: the active config already parses under the current schema.
     if let Some(version) = &current {
         if let Ok(config) = RuntimeConfig::from_json(&version.config_json) {
             return Ok(config);
         }
-        tracing::warn!("active runtime config invalid — reseeding defaults");
     }
 
+    // Otherwise fail closed to defaults (no schema migration — project is pre-production).
+    if current.is_some() {
+        tracing::warn!("active runtime config invalid — reseeding defaults");
+    }
     let config = RuntimeConfig::default();
+    let reason = format!(
+        "bootstrap default runtime config (schema_version={RUNTIME_CONFIG_SCHEMA_VERSION})"
+    );
+
     let config_json = config.to_json();
     let config_hash = CanonicalDigest::content_hash_json(&config_json)?;
     let version = match repo.load_by_hash(&config_hash).await? {
@@ -381,9 +389,7 @@ async fn ensure_runtime_config_activation(
                 config_json,
                 source: RuntimeConfigVersionSource::Bootstrap,
                 created_by: "system".to_owned(),
-                reason: format!(
-                    "bootstrap default runtime config (schema_version={RUNTIME_CONFIG_SCHEMA_VERSION})"
-                ),
+                reason,
             })
             .await?
         }

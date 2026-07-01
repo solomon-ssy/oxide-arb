@@ -3,7 +3,7 @@
 //! submission (05.4).
 //!
 //! Admission never mutates the report and never submits an order. It runs a
-//! fixed sequence of 20 hard checks over a frozen [`AdmissionInput`] (built once
+//! fixed sequence of 22 hard checks over a frozen [`AdmissionInput`] (built once
 //! by the [`AdmissionInputBuilder`], which owns *all* I/O) and produces an
 //! [`AdmissionDecision`] of allow / deny / defer plus a full per-check trace and
 //! replayable [`StateVersion`].
@@ -114,6 +114,15 @@ pub struct AdmissionInput {
     /// Governed total budget cap (`portfolio.budget.total_budget_usd`), distilled
     /// from the active config at build time.
     pub budget_total_usd: Usd,
+    /// Number of currently open (non-terminal) order intents holding capital,
+    /// counted at build time. Consumed by `#21` (`MaxOpenIntentsCheck`).
+    pub open_intent_count: u64,
+    /// Governed cap on concurrently open intents
+    /// (`execution.capital.max_open_intents`; `0` disables). Distilled at build.
+    pub max_open_intents: u32,
+    /// Governed cap on total reserved capital
+    /// (`execution.capital.max_reserved_usd`; `0` disables). Distilled at build.
+    pub max_reserved_usd: Usd,
     /// Whether the intent's model version is still `Published`.
     pub model_published: bool,
     /// Live data-quality classification of the book plane.

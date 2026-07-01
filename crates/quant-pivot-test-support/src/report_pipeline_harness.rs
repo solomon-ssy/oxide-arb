@@ -886,7 +886,6 @@ fn runtime_config_for_pipeline(
         reports: ReportsConfig {
             publish_empty_reports: true,
             ad_hoc_report_enabled: true,
-            default_top_n: 5,
             ..ReportsConfig::default()
         },
         ..RuntimeConfig::default()

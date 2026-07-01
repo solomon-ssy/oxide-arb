@@ -93,6 +93,12 @@ impl AppContext {
         governance
             .applicator
             .attach_report_scheduler(Arc::clone(&report.scheduler));
+        // Late-bind the execution breaker so activation hot-swaps its venue /
+        // daily-loss thresholds without a restart (the breaker is built with the
+        // execution bundle, after governance).
+        governance
+            .applicator
+            .attach_execution_breaker(Arc::clone(&execution.breaker));
         governance.bootstrap_execution_recovery().await?;
 
         Ok(Self {
