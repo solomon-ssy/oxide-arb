@@ -444,6 +444,15 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
             detail: "must be greater than zero".to_owned(),
         });
     }
+    // Signal-degradation floor = entry_score × ratio. A ratio outside (0, 1]
+    // would either never invalidate (0) or set the floor above the entry score
+    // (> 1, forcing exits on the tiniest drift) — reject at load so the exit
+    // monitor never scores the forced-exit tier against a nonsense threshold.
+    half_open_unit(
+        "execution.exit_monitor.signal_invalidation_ratio",
+        &config.execution.exit_monitor.signal_invalidation_ratio,
+        report,
+    );
     validate_settlement_redeem(config, report);
 }
 

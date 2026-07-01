@@ -15,13 +15,14 @@
 //! 2. data stale → manual (never guess a price)
 //! 3. market abnormal → manual
 //! 4. stop-loss (+ trailing folded into the effective stop)
-//! 5. thesis invalidated (model re-inference)
+//! 5. thesis invalidated (model re-inference; auto-execution intents only)
+//!    - a `HoldToResolution` lot short-circuits to hold here: the protective
+//!      tiers above still fire, but the take-gains / timeout tiers below are skipped.
 //! 6. time exit
 //! 7. manual review checkpoint (frozen `manual_review_at`)
 //! 8. take-profit
 //! 9. partial-exit node (each node fires at most once)
 //! 10. opportunistic Sell (advisory; Phase 6 model)
-//! 10. settlement-hold → hold (never auto-exit)
 //! 11. hold
 //!
 //! Every non-emergency submit is gated by [`KillSwitchState::allows_auto_exit`]:
@@ -144,17 +145,6 @@ pub trait ExitSignalEvaluator: Send + Sync {
     /// free and fail-safe (return [`ExitSignalVerdict::Indeterminate`] rather
     /// than erroring when it cannot evaluate).
     async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict;
-}
-
-/// A no-op evaluator that always holds — the default until the re-inference
-/// engine (this phase) / Sell scorer (Phase 6) is wired, and the test seam.
-pub struct NoopExitSignalEvaluator;
-
-#[async_trait]
-impl ExitSignalEvaluator for NoopExitSignalEvaluator {
-    async fn evaluate(&self, _ctx: ExitSignalContext<'_>) -> ExitSignalVerdict {
-        ExitSignalVerdict::Holds
-    }
 }
 
 /// The concrete sell order an exit decision will submit to the venue.

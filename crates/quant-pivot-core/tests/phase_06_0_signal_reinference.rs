@@ -48,11 +48,11 @@ impl ExitSignalReinferer for StubReinferer {
     }
 }
 
-fn sample_intent(entry_score: &str) -> OrderIntentInfo {
+fn sample_intent(entry_score: &str, runtime_mode: QuantRuntimeMode) -> OrderIntentInfo {
     OrderIntentInfo {
         order_intent_id: OrderIntentId::from_v7(),
         recommendation_id: RecommendationId::from_v7(),
-        runtime_mode: QuantRuntimeMode::AutoExecution,
+        runtime_mode,
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         model_version_id: ModelVersionId::from_v7(),
         intent_kind: OrderIntentKind::Buy,
@@ -157,7 +157,7 @@ async fn shadow_mode_suppresses_thesis_invalidated_exit() {
         evaluator_with_config(StubReinferer(Some(fresh)), RuntimeConfig::default(), true);
     let verdict = evaluator
         .evaluate(ExitSignalContext {
-            intent: &sample_intent("0.8"),
+            intent: &sample_intent("0.8", QuantRuntimeMode::AutoExecution),
             lot: &sample_lot(),
             mark_price: Some(Price::new(dec!(0.45))),
             now: Utc::now(),
@@ -177,7 +177,7 @@ async fn live_mode_triggers_thesis_invalidated_on_score_degradation() {
         evaluator_with_config(StubReinferer(Some(fresh)), RuntimeConfig::default(), false);
     let verdict = evaluator
         .evaluate(ExitSignalContext {
-            intent: &sample_intent("0.8"),
+            intent: &sample_intent("0.8", QuantRuntimeMode::AutoExecution),
             lot: &sample_lot(),
             mark_price: Some(Price::new(dec!(0.45))),
             now: Utc::now(),
@@ -187,6 +187,62 @@ async fn live_mode_triggers_thesis_invalidated_on_score_degradation() {
         verdict,
         ExitSignalVerdict::ThesisInvalidated { .. }
     ));
+}
+
+/// A `SemiAuto` (human-owned) position must never be force-closed by signal
+/// re-inference, even in live mode with a fully-degraded fresh score.
+#[tokio::test]
+async fn semiauto_intent_skips_thesis_invalidation() {
+    let fresh = FreshSignal {
+        composite_score: Probability::new(dec!(0.30)),
+        expected_return_bps: Bps::new(dec!(100)),
+        auto_exec_eligible: true,
+    };
+    let evaluator =
+        evaluator_with_config(StubReinferer(Some(fresh)), RuntimeConfig::default(), false);
+    let verdict = evaluator
+        .evaluate(ExitSignalContext {
+            intent: &sample_intent("0.8", QuantRuntimeMode::SemiAuto),
+            lot: &sample_lot(),
+            mark_price: Some(Price::new(dec!(0.45))),
+            now: Utc::now(),
+        })
+        .await;
+    assert!(matches!(verdict, ExitSignalVerdict::Indeterminate { .. }));
+}
+
+/// A corrupted `signal_invalidation_ratio` must fail safe (hold), never silently
+/// become the most aggressive 1.0 floor that would force-exit on any drift.
+#[tokio::test]
+async fn malformed_invalidation_ratio_yields_indeterminate() {
+    let mut config = RuntimeConfig::default();
+    config.execution.exit_monitor.signal_reinference.enabled = true;
+    config.execution.exit_monitor.signal_reinference.shadow_mode = false;
+    "not-a-decimal".clone_into(
+        &mut config
+            .execution
+            .exit_monitor
+            .signal_invalidation_ratio
+            .value,
+    );
+    let evaluator = ReinferenceSignalEvaluator::new(ReinferenceSignalEvaluatorDeps {
+        reinferer: StubReinferer(Some(FreshSignal {
+            composite_score: Probability::new(dec!(0.30)),
+            expected_return_bps: Bps::new(dec!(100)),
+            auto_exec_eligible: true,
+        })),
+        config: Arc::new(RuntimeConfigStore::new(config)),
+        metrics: Arc::new(MetricsHub::new()),
+    });
+    let verdict = evaluator
+        .evaluate(ExitSignalContext {
+            intent: &sample_intent("0.8", QuantRuntimeMode::AutoExecution),
+            lot: &sample_lot(),
+            mark_price: Some(Price::new(dec!(0.45))),
+            now: Utc::now(),
+        })
+        .await;
+    assert!(matches!(verdict, ExitSignalVerdict::Indeterminate { .. }));
 }
 
 #[tokio::test]
@@ -204,7 +260,7 @@ async fn disabled_reinference_yields_indeterminate() {
     });
     let verdict = evaluator
         .evaluate(ExitSignalContext {
-            intent: &sample_intent("0.8"),
+            intent: &sample_intent("0.8", QuantRuntimeMode::AutoExecution),
             lot: &sample_lot(),
             mark_price: None,
             now: Utc::now(),

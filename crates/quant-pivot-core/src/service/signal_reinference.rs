@@ -33,6 +33,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{OrderIntentInfo, PositionInfo},
+    enums::quant::QuantRuntimeMode,
     types::{Bps, Price, Probability},
 };
 use rust_decimal::Decimal;
@@ -68,26 +69,6 @@ pub trait ExitSignalReinferer: Send + Sync {
         mark_price: Option<Price>,
         now: DateTime<Utc>,
     ) -> QuantResult<Option<FreshSignal>>;
-}
-
-/// Fail-safe reinferer that never produces a fresh score (always `Ok(None)`),
-/// so the evaluator yields [`ExitSignalVerdict::Indeterminate`].
-///
-/// Used when `signal_reinference.enabled = false`. Keeps the exit loop safe:
-/// the signal tier never forces an exit, while deterministic tiers protect capital.
-pub struct IndeterminateReinferer;
-
-#[async_trait]
-impl ExitSignalReinferer for IndeterminateReinferer {
-    async fn reinfer(
-        &self,
-        _intent: &OrderIntentInfo,
-        _lot: &PositionInfo,
-        _mark_price: Option<Price>,
-        _now: DateTime<Utc>,
-    ) -> QuantResult<Option<FreshSignal>> {
-        Ok(None)
-    }
 }
 
 /// Dependencies for [`ReinferenceSignalEvaluator`].
@@ -160,11 +141,35 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
             };
         }
 
-        let invalidation_ratio = policy
-            .signal_invalidation_ratio
-            .value
-            .parse::<Decimal>()
-            .unwrap_or(Decimal::ONE);
+        // Thesis-invalidation is a *forced* exit (ladder tier 5, fires even under
+        // hold-to-resolution). It is only ever auto-submitted for intents entered
+        // under auto-execution — a human owns the exit for `SemiAuto` / report-only
+        // positions, so re-inference never force-closes them (fail-safe hold).
+        if ctx.intent.runtime_mode != QuantRuntimeMode::AutoExecution {
+            self.metrics.inc_exit_signal_reinference("skipped_non_auto");
+            return ExitSignalVerdict::Indeterminate {
+                detail: "thesis-invalidation forced exit applies to auto-execution intents only"
+                    .to_owned(),
+            };
+        }
+
+        let invalidation_ratio = match policy.signal_invalidation_ratio.value.parse::<Decimal>() {
+            Ok(ratio) => ratio,
+            Err(error) => {
+                // A malformed ratio must never silently become the most
+                // aggressive floor (1.0). Fail-safe to hold; config validation
+                // rejects this at load, so this only guards a corrupted snapshot.
+                self.metrics.inc_exit_signal_reinference("error");
+                tracing::warn!(
+                    %error,
+                    value = %policy.signal_invalidation_ratio.value,
+                    "signal_invalidation_ratio is not a valid decimal; holding (fail-safe)"
+                );
+                return ExitSignalVerdict::Indeterminate {
+                    detail: "signal_invalidation_ratio misconfigured".to_owned(),
+                };
+            }
+        };
         let entry_score = ctx.intent.exit_policy_json.entry_composite_score;
 
         let verdict = match self

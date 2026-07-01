@@ -330,7 +330,6 @@ fn build_exit_monitor(
         weight_overlay: Arc::clone(&wiring.governance.weight_overlay),
         config_versions: Arc::clone(&repos.runtime_config)
             as Arc<dyn RuntimeConfigVersionRepository>,
-        live_config: Arc::clone(&wiring.governance.runtime_config),
         pit_source: Arc::clone(&wiring.data.pit_source),
         market_registry: Arc::clone(&wiring.data.market_registry),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
