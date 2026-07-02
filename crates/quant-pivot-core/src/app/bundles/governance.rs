@@ -107,6 +107,8 @@ pub struct GovernanceBundle {
     pub exit_monitor_health: ExitMonitorHealthHandle,
     /// Lock-free execution recovery summary embedded in [`SystemStatus`].
     pub execution_recovery: Arc<ExecutionRecoveryCoordinator>,
+    /// Shared WS fan-out helper for mode / kill-switch and lifecycle broadcasts.
+    pub status_publisher: Arc<SystemStatusPublisher>,
 }
 
 impl GovernanceBundle {
@@ -174,6 +176,7 @@ impl GovernanceBundle {
             weight_overlay,
             exit_monitor_health,
             execution_recovery,
+            status_publisher,
         }
     }
 
@@ -314,7 +317,7 @@ fn wire_operational_controls(deps: OperationalControlsDeps<'_>) -> OperationalCo
         status_publisher: Arc::clone(status_publisher),
         execution_recovery: execution_recovery.handle(),
     }));
-    status_publisher.register(Arc::clone(&runtime_control));
+    status_publisher.register(Arc::clone(&runtime_control) as Arc<dyn RuntimeControlPort>);
 
     OperationalControls {
         kill_switch,

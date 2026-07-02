@@ -278,6 +278,12 @@ impl ClobWsManager {
             .collect()
     }
 
+    /// All tokens currently live on the transport (engine baseline ∪ web overlay).
+    #[must_use]
+    pub fn all_subscribed_tokens(&self) -> HashSet<TokenId> {
+        self.subscriptions.lock().active_tokens()
+    }
+
     /// Returns the unified event receiver for all shards.
     pub const fn events(&self) -> &Receiver<PipelineEvent> {
         &self.output_rx

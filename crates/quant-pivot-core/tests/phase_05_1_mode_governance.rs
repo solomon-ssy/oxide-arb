@@ -677,7 +677,7 @@ mod pg {
                 SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).execution_recovery,
             ),
         }));
-        status_publisher.register(Arc::clone(&control));
+        status_publisher.register(Arc::clone(&control) as Arc<dyn RuntimeControlPort>);
 
         (control, mode_repo, preflight, events_rx)
     }
@@ -828,7 +828,7 @@ mod pg {
                 SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).execution_recovery,
             ),
         }));
-        status_publisher.register(Arc::clone(&control));
+        status_publisher.register(Arc::clone(&control) as Arc<dyn RuntimeControlPort>);
 
         kill_switch_control
             .set(SetKillSwitchCommand {

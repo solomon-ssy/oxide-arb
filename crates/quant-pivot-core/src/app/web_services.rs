@@ -74,6 +74,10 @@ impl AppContext {
             shutdown.cancel();
         });
 
+        self.register_book_update_coalescer(runner, ws_sessions.clone());
+
+        self.register_system_status_broadcaster(runner);
+
         runner.spawn(TaskId::WsBroadcaster, move |token| async move {
             spawn_ws_broadcaster(event_rx, ws_sessions, token).await;
         });
@@ -300,6 +304,10 @@ impl MarketDataPort for CoreMarketData {
 
     fn subscribed_tokens(&self, token_ids: &[TokenId]) -> HashSet<TokenId> {
         self.ws_manager.subscribed_tokens(token_ids)
+    }
+
+    fn all_subscribed_tokens(&self) -> HashSet<TokenId> {
+        self.ws_manager.all_subscribed_tokens()
     }
 
     async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError> {

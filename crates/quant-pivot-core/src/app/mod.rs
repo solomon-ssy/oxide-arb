@@ -3,6 +3,7 @@
 pub mod account_read;
 pub mod attribution_worker;
 pub mod backtest;
+pub mod book_update_coalescer;
 pub mod bootstrap;
 pub mod build;
 pub mod execution_dispatcher;
@@ -20,6 +21,7 @@ pub mod reconciliation_worker;
 pub mod report_scheduler;
 pub mod runtime_tasks;
 pub mod settlement_redeem_worker;
+pub mod system_status_broadcaster;
 pub mod task_id;
 pub mod task_registry;
 pub mod training_dataset;

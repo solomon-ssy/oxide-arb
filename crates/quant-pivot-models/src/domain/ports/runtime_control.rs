@@ -128,6 +128,10 @@ pub trait MarketDataPort: Send + Sync {
 
     fn subscribed_tokens(&self, token_ids: &[TokenId]) -> HashSet<TokenId>;
 
+    /// Union of all tokens currently live on the CLOB WS transport (engine +
+    /// web overlay). Used to resolve `MarketPageQuery::subscribed` server-side.
+    fn all_subscribed_tokens(&self) -> HashSet<TokenId>;
+
     async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError>;
 
     async fn unsubscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError>;

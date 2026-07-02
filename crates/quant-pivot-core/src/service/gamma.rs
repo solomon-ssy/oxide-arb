@@ -7,7 +7,7 @@ use crate::{
     },
     service::{
         catalog_lifecycle::apply_past_deadline_to_sync_batch, catalog_readiness::CatalogReadiness,
-        ws_subscription::WsSubscriptionCoordinator,
+        system_status_nudge::SystemStatusNudge, ws_subscription::WsSubscriptionCoordinator,
     },
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ use quant_pivot_api::{
 use quant_pivot_error::{QuantError, market::MarketError};
 use quant_pivot_models::{
     domain::{
-        market,
+        CoreEvent, CoreEventPublisher, market,
         market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
     enums::market::MarketStatus,
@@ -28,7 +28,11 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{EventRepository, MarketRepository};
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
 
@@ -45,6 +49,11 @@ pub struct GammaServiceDeps {
     pub metrics: Arc<MetricsHub>,
     pub catalog: Arc<CatalogReadiness>,
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
+    /// Runtime event bus — `market.resolved` WS frames are published from the
+    /// authoritative persistence point (settled-status transitions).
+    pub events: CoreEventPublisher,
+    /// Wake the system-status broadcaster after catalog warmup completes.
+    pub status_nudge: SystemStatusNudge,
     /// WS subscription look-ahead window (hours) from deploy config.
     pub subscription_window_hours: u64,
     /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
@@ -63,6 +72,8 @@ pub struct GammaService {
     metrics: Arc<MetricsHub>,
     catalog: Arc<CatalogReadiness>,
     ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
+    events: CoreEventPublisher,
+    status_nudge: SystemStatusNudge,
     subscription_window_hours: u64,
     full_sync_interval_secs: u64,
     last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
@@ -82,6 +93,8 @@ impl GammaService {
             metrics: deps.metrics,
             catalog: deps.catalog,
             ws_subscription: deps.ws_subscription,
+            events: deps.events,
+            status_nudge: deps.status_nudge,
             subscription_window_hours: deps.subscription_window_hours,
             full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
             last_sync_at: parking_lot::Mutex::new(None),
@@ -111,6 +124,7 @@ impl GammaService {
             u64::try_from(self.market_registry.active_markets().len()).unwrap_or(u64::MAX);
         self.catalog.mark_ready(markets, synced_at);
         self.metrics.catalog_ready.set(1);
+        self.status_nudge.nudge();
     }
 
     async fn sync_inner(&self) -> Result<(), QuantError> {
@@ -340,9 +354,52 @@ impl GammaService {
         if markets.is_empty() {
             return;
         }
+        let newly_settled = self.detect_settlement_transitions(markets).await;
         match self.market_repo.upsert_batch(markets.to_vec()).await {
-            Ok(n) => tracing::debug!(count = n, "persisted markets"),
+            Ok(n) => {
+                tracing::debug!(count = n, "persisted markets");
+                self.publish_market_resolutions(newly_settled);
+            }
             Err(e) => tracing::warn!(error = %e, "failed to persist markets"),
+        }
+    }
+
+    /// Load prior persisted statuses for the settled markets in this batch and
+    /// resolve which of them are settling for the first time.
+    async fn detect_settlement_transitions(
+        &self,
+        markets: &[UpsertMarket],
+    ) -> Vec<(MarketId, bool)> {
+        let ids: Vec<MarketId> = markets
+            .iter()
+            .filter(|market| market.status == MarketStatus::Settled)
+            .map(|market| market.market_id.clone())
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let prior: HashMap<MarketId, MarketStatus> = match self.market_repo.find_by_ids(&ids).await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| (row.market_id.clone(), row.status))
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to load prior market statuses; skipping market.resolved publish"
+                );
+                return Vec::new();
+            }
+        };
+        settlement_transitions(markets, &prior)
+    }
+
+    fn publish_market_resolutions(&self, resolved: Vec<(MarketId, bool)>) {
+        for (market_id, outcome) in resolved {
+            tracing::info!(%market_id, outcome, "market settled; publishing market.resolved");
+            self.events
+                .publish(CoreEvent::MarketResolved { market_id, outcome });
         }
     }
 
@@ -399,6 +456,39 @@ impl GammaService {
     }
 }
 
+/// Markets in `batch` transitioning to [`MarketStatus::Settled`] from a
+/// previously persisted non-settled row, paired with whether YES won.
+///
+/// Requiring a prior row keeps `market.resolved` a true *transition* signal: a
+/// fresh bootstrap ingesting thousands of historically settled markets
+/// publishes nothing (no operator was watching them), while a watched market
+/// settling live publishes exactly once — the upsert makes the row `Settled`,
+/// so subsequent syncs skip it.
+fn settlement_transitions(
+    batch: &[UpsertMarket],
+    prior: &HashMap<MarketId, MarketStatus>,
+) -> Vec<(MarketId, bool)> {
+    batch
+        .iter()
+        .filter(|market| market.status == MarketStatus::Settled)
+        .filter(|market| {
+            prior
+                .get(&market.market_id)
+                .is_some_and(|status| *status != MarketStatus::Settled)
+        })
+        .map(|market| (market.market_id.clone(), yes_outcome_won(market)))
+        .collect()
+}
+
+/// Whether the settled market resolved to YES (Gamma settlement carries the
+/// winning outcome name; binary markets use "Yes"/"No").
+fn yes_outcome_won(market: &UpsertMarket) -> bool {
+    market
+        .outcome
+        .as_deref()
+        .is_some_and(|outcome| outcome.eq_ignore_ascii_case("yes"))
+}
+
 fn prewarm_token_intern(markets: &[MarketRegistryInfo]) {
     let token_ids: Vec<&str> = markets
         .iter()
@@ -452,7 +542,10 @@ fn collect_missing_market_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quant_pivot_models::{enums::common::CategorySet, types::EventId};
+    use quant_pivot_models::{
+        enums::common::{CategorySet, TickSize},
+        types::{EventId, TokenId},
+    };
 
     #[test]
     fn collect_missing_dedupes_and_skips_embedded() {
@@ -474,5 +567,72 @@ mod tests {
         let embedded = HashSet::from([MarketId::new("m1")]);
         let missing = collect_missing_market_ids(&events, &embedded);
         assert_eq!(missing, vec![MarketId::new("m2")]);
+    }
+
+    fn upsert(id: &str, status: MarketStatus, outcome: Option<&str>) -> UpsertMarket {
+        UpsertMarket {
+            market_id: MarketId::new(id),
+            event_id: EventId::new("evt-1"),
+            question: "Test?".into(),
+            slug: "test".into(),
+            categories: CategorySet::EMPTY,
+            status,
+            outcome: outcome.map(str::to_owned),
+            yes_token_id: TokenId::new(format!("{id}-yes")),
+            no_token_id: TokenId::new(format!("{id}-no")),
+            tick_size: TickSize::Hundredth,
+            neg_risk: false,
+            end_date: None,
+            resolved_at: None,
+            fees_enabled: false,
+            fee_rate: None,
+            fee_exponent: None,
+            fee_taker_only: None,
+            fee_rebate_rate: None,
+            fee_source: None,
+            fee_observed_at: None,
+        }
+    }
+
+    #[test]
+    fn settlement_transitions_detects_only_newly_settled_known_markets() {
+        let batch = vec![
+            // Active → Settled with YES winning: publish (outcome = true).
+            upsert("m-live", MarketStatus::Settled, Some("Yes")),
+            // Already settled in DB: no re-publish.
+            upsert("m-old", MarketStatus::Settled, Some("No")),
+            // Settled but never persisted before (bootstrap backfill): skip.
+            upsert("m-new", MarketStatus::Settled, Some("Yes")),
+            // Not settled: never a candidate.
+            upsert("m-active", MarketStatus::Active, None),
+        ];
+        let prior = HashMap::from([
+            (MarketId::new("m-live"), MarketStatus::Active),
+            (MarketId::new("m-old"), MarketStatus::Settled),
+            (MarketId::new("m-active"), MarketStatus::Active),
+        ]);
+
+        let resolved = settlement_transitions(&batch, &prior);
+        assert_eq!(resolved, vec![(MarketId::new("m-live"), true)]);
+    }
+
+    #[test]
+    fn settlement_transitions_maps_no_outcome_to_false() {
+        let batch = vec![upsert("m1", MarketStatus::Settled, Some("No"))];
+        let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Paused)]);
+        assert_eq!(
+            settlement_transitions(&batch, &prior),
+            vec![(MarketId::new("m1"), false)]
+        );
+    }
+
+    #[test]
+    fn settlement_transitions_missing_outcome_defaults_to_false() {
+        let batch = vec![upsert("m1", MarketStatus::Settled, None)];
+        let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Active)]);
+        assert_eq!(
+            settlement_transitions(&batch, &prior),
+            vec![(MarketId::new("m1"), false)]
+        );
     }
 }

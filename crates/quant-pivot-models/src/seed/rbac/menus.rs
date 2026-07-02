@@ -27,12 +27,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 7,
+    version: 8,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v7",
+    checksum: "rbac.menus.bootstrap.v8",
     loader: load_boxed,
 };
 
@@ -206,16 +206,16 @@ fn build_tree() -> MenuTree {
     t
 }
 
-/// Command center: the operator首屏 dashboard. Quick actions render off the
-/// global access-code set (buttons are seeded once under their canonical page),
-/// so the dashboard node itself carries no button children.
+/// Command center: the operator首屏 dashboard. System control button permissions
+/// are canonical here (header state lights + dashboard quick actions); UI
+/// visibility still comes from the role's global access-code set.
 fn build_command_center(t: &mut MenuTree) {
     let command_center = t.dir(
         "command-center",
         "page.menu.group.commandCenter",
         "lucide:layout-dashboard",
     );
-    t.page_affixed(PageSpec {
+    let dashboard = t.page_affixed(PageSpec {
         parent: &command_center,
         name: "dashboard",
         title: "page.menu.dashboard",
@@ -224,6 +224,30 @@ fn build_command_center(t: &mut MenuTree) {
         permission_code: None,
         icon: "lucide:home",
     });
+    t.button(
+        &dashboard,
+        "system:switch_mode",
+        "Switch Runtime Mode",
+        perm(ResourceType::System, Operation::SwitchMode),
+    );
+    t.button(
+        &dashboard,
+        "system:halt",
+        "Halt",
+        perm(ResourceType::System, Operation::Halt),
+    );
+    t.button(
+        &dashboard,
+        "system:resume",
+        "Resume",
+        perm(ResourceType::System, Operation::Resume),
+    );
+    t.button(
+        &dashboard,
+        "system:emergency",
+        "Emergency Halt",
+        perm(ResourceType::System, Operation::Emergency),
+    );
 }
 
 /// Trading plane: market registry + the `RecommendationReport` primary artifact.
@@ -425,8 +449,7 @@ fn build_research(t: &mut MenuTree) {
     );
 }
 
-/// Governance plane: runtime-config version lifecycle + the system control panel
-/// (quant runtime mode + kill-switch transitions).
+/// Governance plane: runtime-config version lifecycle (hot-activatable config).
 fn build_governance(t: &mut MenuTree) {
     let governance = t.dir(
         "governance",
@@ -459,39 +482,6 @@ fn build_governance(t: &mut MenuTree) {
         "runtime_config:rollback",
         "Rollback Version",
         perm(ResourceType::RuntimeConfig, Operation::Rollback),
-    );
-    let system = t.page(PageSpec {
-        parent: &governance,
-        name: "system",
-        title: "page.menu.system",
-        path: "/system",
-        component: "system/index",
-        permission_code: Some(perm(ResourceType::System, Operation::Read)),
-        icon: "lucide:server-cog",
-    });
-    t.button(
-        &system,
-        "system:switch_mode",
-        "Switch Runtime Mode",
-        perm(ResourceType::System, Operation::SwitchMode),
-    );
-    t.button(
-        &system,
-        "system:halt",
-        "Halt",
-        perm(ResourceType::System, Operation::Halt),
-    );
-    t.button(
-        &system,
-        "system:resume",
-        "Resume",
-        perm(ResourceType::System, Operation::Resume),
-    );
-    t.button(
-        &system,
-        "system:emergency",
-        "Emergency Halt",
-        perm(ResourceType::System, Operation::Emergency),
     );
 }
 
@@ -701,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_tree_has_phase_10_execution_and_system_pages() {
+    fn seed_tree_has_phase_10_execution_pages_and_dashboard_system_buttons() {
         let tree = build_tree();
         let names: HashSet<_> = tree
             .models
@@ -722,11 +712,18 @@ mod tests {
             "settlement-redeems",
             "account",
             "research-workbench",
-            "system",
             "quant_report:enqueue",
+            "system:switch_mode",
+            "system:halt",
+            "system:resume",
+            "system:emergency",
         ] {
             assert!(names.contains(expected), "missing menu node `{expected}`");
         }
+        assert!(
+            !names.contains("system"),
+            "legacy /system page must be removed"
+        );
     }
 
     #[test]

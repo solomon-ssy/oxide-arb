@@ -11,6 +11,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use validator::Validate;
 
 /// Filter + pagination query for the markets list endpoint.
@@ -24,6 +25,12 @@ pub struct MarketPageQuery {
     pub status: Option<MarketStatus>,
     pub category: Option<MarketCategory>,
     pub event_id: Option<EventId>,
+    /// When set, filter markets whose YES/NO tokens are both live on the CLOB WS
+    /// transport (`true`) or not (`false`). Resolved server-side against the
+    /// runtime subscription union — never client-supplied token sets.
+    pub subscribed: Option<bool>,
+    #[serde(skip)]
+    pub resolved_subscribed_tokens: Option<HashSet<TokenId>>,
     #[serde(flatten)]
     pub page: PageRequest,
 }

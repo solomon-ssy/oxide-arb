@@ -48,6 +48,7 @@
 | 10.4 | Execution Plane | **Intent -> ledger 执行闭环** | [`10.4-execution-plane.md`](10.4-execution-plane.md) |
 | 10.5 | Research & Governance | **研究 + 治理工作台** | [`10.5-research-and-governance.md`](10.5-research-and-governance.md) |
 | 10.6 | Hardening | **防回流 + 测试 + 删除证明** | [`10.6-hardening.md`](10.6-hardening.md) |
+| 10.7 | Deploy Config & Preferences | **部署/运行配置 UI 分离** | [`10.7-deploy-config-and-preferences.md`](10.7-deploy-config-and-preferences.md) |
 
 ## 2. 依赖图
 
@@ -68,6 +69,8 @@ flowchart TD
     P102 --> P105
     P104 --> P106
     P105 --> P106
+    P105 --> P107["10.7 Deploy Config & Preferences"]
+    P107 --> P106
 ```
 
 执行原则：

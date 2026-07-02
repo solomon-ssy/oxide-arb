@@ -367,6 +367,10 @@ impl MarketDataPort for MockMarketData {
         HashSet::new()
     }
 
+    fn all_subscribed_tokens(&self) -> HashSet<TokenId> {
+        HashSet::new()
+    }
+
     async fn subscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), ControlError> {
         Ok(())
     }

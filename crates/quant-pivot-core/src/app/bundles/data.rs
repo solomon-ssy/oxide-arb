@@ -28,7 +28,9 @@ use quant_pivot_api::{
     ws::{ClobWsManager, WsEventDropHook},
 };
 use quant_pivot_models::{
-    config::DeployConfig, domain::PointInTimeDataSource, runtime_config::RuntimeConfig,
+    config::DeployConfig,
+    domain::{CoreEventPublisher, PointInTimeDataSource},
+    runtime_config::RuntimeConfig,
 };
 use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
@@ -45,6 +47,7 @@ pub struct DataBundleDeps<'a> {
     pub metrics: &'a Arc<MetricsHub>,
     pub infra: &'a InfraBundle,
     pub runtime: &'a RuntimeConfig,
+    pub events: &'a CoreEventPublisher,
 }
 
 /// Polymarket data ingest subsystem: books, catalog, pipeline, and quality gates.
@@ -113,6 +116,7 @@ impl DataBundle {
                     .engine_subscription_window_hours,
             ),
         ));
+        let status_nudge = SystemStatusNudge::default();
         let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
             gamma_client: Arc::clone(&gamma_client),
             market_registry: Arc::clone(&market_registry),
@@ -128,6 +132,8 @@ impl DataBundle {
             metrics: Arc::clone(deps.metrics),
             catalog: Arc::clone(&catalog),
             ws_subscription: Some(Arc::clone(&ws_subscription)),
+            events: deps.events.clone(),
+            status_nudge: status_nudge.clone(),
             subscription_window_hours: deps
                 .deploy
                 .market_data
@@ -145,7 +151,6 @@ impl DataBundle {
             Arc::clone(&book_store),
             Arc::clone(&market_registry),
         ));
-        let status_nudge = SystemStatusNudge::default();
         let data_pipeline = build_data_pipeline(
             &book_store,
             &market_registry,

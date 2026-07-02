@@ -76,16 +76,23 @@ impl SessionRegistry {
         }
     }
 
-    /// Push operator-global frames to every connected session without requiring
-    /// an explicit subscribe (system status + alerts are always-on).
-    pub fn fanout_channel(&self, channel: WsChannel, text: &str) {
-        if matches!(channel, WsChannel::SystemStatus | WsChannel::SystemAlert) {
+    /// Deliver one event frame according to its subscription key.
+    ///
+    /// System status + alerts are always-on: every connected session receives
+    /// them without an explicit subscribe. Every other channel — including
+    /// market-scoped `market.book_update` keys — is delivered only to sessions
+    /// holding the exact [`SubscriptionKey`] (channel + optional market).
+    pub fn fanout_event(&self, key: &SubscriptionKey, text: &str) {
+        if matches!(
+            key.channel,
+            WsChannel::SystemStatus | WsChannel::SystemAlert
+        ) {
             for entry in self.sessions.iter() {
                 let _ = entry.value().outbound.try_send(text.to_owned());
             }
             return;
         }
-        self.fanout(&SubscriptionKey::global(channel), text);
+        self.fanout(key, text);
     }
 
     /// Number of live sessions (diagnostics / tests).
@@ -137,7 +144,7 @@ pub async fn spawn_ws_broadcaster(
                     return;
                 };
                 if let Some((key, envelope)) = event_envelope(&event) {
-                    registry.fanout_channel(key.channel, &envelope.to_text());
+                    registry.fanout_event(&key, &envelope.to_text());
                 }
             }
         }
@@ -156,13 +163,16 @@ mod tests {
         sync::{Arc, RwLock},
     };
 
-    fn handle_with(keys: Vec<SubscriptionKey>) -> SessionHandle {
-        let (outbound, _rx) = flume::bounded::<String>(8);
+    fn handle_with(keys: Vec<SubscriptionKey>) -> (SessionHandle, flume::Receiver<String>) {
+        let (outbound, rx) = flume::bounded::<String>(8);
         let subscriptions: HashSet<SubscriptionKey> = keys.into_iter().collect();
-        SessionHandle {
-            outbound,
-            subscriptions: Arc::new(RwLock::new(subscriptions)),
-        }
+        (
+            SessionHandle {
+                outbound,
+                subscriptions: Arc::new(RwLock::new(subscriptions)),
+            },
+            rx,
+        )
     }
 
     fn book(market: &str) -> SubscriptionKey {
@@ -172,15 +182,17 @@ mod tests {
     #[test]
     fn subscribed_markets_extracts_only_book_update_markets() {
         let registry = SessionRegistry::default();
-        registry.register(handle_with(vec![
+        let (first, _rx1) = handle_with(vec![
             SubscriptionKey::global(WsChannel::SystemStatus),
             book("0xaaa"),
             book("0xbbb"),
-        ]));
-        registry.register(handle_with(vec![
+        ]);
+        registry.register(first);
+        let (second, _rx2) = handle_with(vec![
             book("0xaaa"),
             SubscriptionKey::global(WsChannel::QuantReport),
-        ]));
+        ]);
+        registry.register(second);
 
         let markets = registry.subscribed_markets();
         assert_eq!(
@@ -195,10 +207,70 @@ mod tests {
     #[test]
     fn subscribed_markets_empty_without_book_subscriptions() {
         let registry = SessionRegistry::default();
-        registry.register(handle_with(vec![
+        let (handle, _rx) = handle_with(vec![
             SubscriptionKey::global(WsChannel::SystemStatus),
             SubscriptionKey::global(WsChannel::QuantReport),
-        ]));
+        ]);
+        registry.register(handle);
         assert!(registry.subscribed_markets().is_empty());
+    }
+
+    #[test]
+    fn fanout_event_delivers_scoped_book_update_to_matching_market_only() {
+        let registry = SessionRegistry::default();
+        let (watcher, watcher_rx) = handle_with(vec![book("0xaaa")]);
+        registry.register(watcher);
+        let (other_market, other_market_rx) = handle_with(vec![book("0xbbb")]);
+        registry.register(other_market);
+        let (global_only, global_only_rx) =
+            handle_with(vec![SubscriptionKey::global(WsChannel::QuantReport)]);
+        registry.register(global_only);
+
+        registry.fanout_event(&book("0xaaa"), "book-frame");
+
+        assert_eq!(watcher_rx.try_recv().as_deref(), Ok("book-frame"));
+        assert!(
+            other_market_rx.try_recv().is_err(),
+            "different market must not receive scoped frame"
+        );
+        assert!(
+            global_only_rx.try_recv().is_err(),
+            "session without book subscription must not receive scoped frame"
+        );
+    }
+
+    #[test]
+    fn fanout_event_global_channel_requires_subscription() {
+        let registry = SessionRegistry::default();
+        let (subscribed, subscribed_rx) =
+            handle_with(vec![SubscriptionKey::global(WsChannel::MarketResolved)]);
+        registry.register(subscribed);
+        let (unsubscribed, unsubscribed_rx) = handle_with(vec![book("0xaaa")]);
+        registry.register(unsubscribed);
+
+        registry.fanout_event(
+            &SubscriptionKey::global(WsChannel::MarketResolved),
+            "resolved-frame",
+        );
+
+        assert_eq!(subscribed_rx.try_recv().as_deref(), Ok("resolved-frame"));
+        assert!(unsubscribed_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fanout_event_always_on_channels_reach_every_session() {
+        let registry = SessionRegistry::default();
+        let (with_subs, with_subs_rx) = handle_with(vec![book("0xaaa")]);
+        registry.register(with_subs);
+        let (bare, bare_rx) = handle_with(vec![]);
+        registry.register(bare);
+
+        registry.fanout_event(
+            &SubscriptionKey::global(WsChannel::SystemStatus),
+            "status-frame",
+        );
+
+        assert_eq!(with_subs_rx.try_recv().as_deref(), Ok("status-frame"));
+        assert_eq!(bare_rx.try_recv().as_deref(), Ok("status-frame"));
     }
 }

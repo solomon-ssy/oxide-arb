@@ -2,7 +2,7 @@ use crate::{
     postgres::{
         catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
         error,
-        query::paginate_mapped,
+        query::{non_empty, paginate_mapped},
         write::upsert_many_chunked,
     },
     traits::MarketRepository,
@@ -19,11 +19,12 @@ use quant_pivot_models::{
         market::MarketStatus,
     },
     schema::column,
-    types::MarketId,
+    types::{MarketId, TokenId},
 };
 use sea_orm::{
     ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QueryTrait, sea_query::OnConflict,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    sea_query::{Condition, Expr, OnConflict, extension::postgres::PgExpr},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -208,25 +209,71 @@ async fn do_update_status(
     Ok(())
 }
 
+fn page_condition(query: &MarketPageQuery) -> Condition {
+    let mut condition = Condition::all()
+        .add_option(query.status.map(|status| MarketColumn::Status.eq(status)))
+        .add_option(
+            query
+                .event_id
+                .as_ref()
+                .map(|event_id| MarketColumn::EventId.eq(event_id.clone())),
+        )
+        .add_option(query.category.map(|category| {
+            Expr::cust_with_values(
+                r#""market"."categories" @> ARRAY[$1]::qp_market_category[]"#,
+                [category.as_str()],
+            )
+        }));
+
+    if let (Some(want_subscribed), Some(tokens)) =
+        (query.subscribed, query.resolved_subscribed_tokens.as_ref())
+    {
+        if want_subscribed {
+            if tokens.is_empty() {
+                condition = condition.add(Expr::cust("1 = 0"));
+            } else {
+                let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
+                condition = condition
+                    .add(MarketColumn::YesTokenId.is_in(token_ids.clone()))
+                    .add(MarketColumn::NoTokenId.is_in(token_ids));
+            }
+        } else if !tokens.is_empty() {
+            let token_ids: Vec<TokenId> = tokens.iter().cloned().collect();
+            condition = condition.add(
+                Condition::any()
+                    .add(MarketColumn::YesTokenId.is_not_in(token_ids.clone()))
+                    .add(MarketColumn::NoTokenId.is_not_in(token_ids)),
+            );
+        }
+    }
+
+    if let Some(search) = non_empty(query.keyword.as_deref()) {
+        let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
+        condition = condition.add(
+            Condition::any()
+                .add(Expr::col(MarketColumn::Question).ilike(pattern.clone()))
+                .add(Expr::col(MarketColumn::Slug).ilike(pattern)),
+        );
+    }
+
+    condition
+}
+
 async fn do_page(
     db: &impl ConnectionTrait,
     query: MarketPageQuery,
 ) -> Result<Paginated<MarketInfo>, StorageError> {
     let normalized = query.normalized();
-    let select = MarketEntity::find()
-        .apply_if(normalized.status, |query, status| {
-            query.filter(MarketColumn::Status.eq(status))
-        })
-        .apply_if(normalized.keyword.as_deref(), |query, search| {
-            let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
-            query.filter(
-                MarketColumn::Question
-                    .contains(&pattern)
-                    .or(MarketColumn::Slug.contains(&pattern)),
-            )
-        })
-        .order_by_desc(MarketColumn::UpdatedAt);
-    paginate_mapped(select, db, &normalized.page, Into::into).await
+    paginate_mapped(
+        MarketEntity::find()
+            .filter(page_condition(&normalized))
+            .order_by_desc(MarketColumn::UpdatedAt)
+            .order_by_asc(MarketColumn::MarketId),
+        db,
+        &normalized.page,
+        Into::into,
+    )
+    .await
 }
 
 #[async_trait::async_trait]
@@ -314,5 +361,115 @@ impl MarketRepository for PgMarketRepositoryTxn<'_> {
         outcome: Option<&str>,
     ) -> Result<(), StorageError> {
         do_update_status(self.txn, id, status, outcome).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_condition;
+    use quant_pivot_models::{
+        domain::{MarketPageQuery, pagination::PageRequest},
+        enums::{common::MarketCategory, market::MarketStatus},
+        types::{EventId, TokenId},
+    };
+    use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+    use std::collections::HashSet;
+
+    #[test]
+    fn page_condition_adds_optional_filters_to_sql() {
+        let query = MarketPageQuery {
+            keyword: Some("election".into()),
+            status: Some(MarketStatus::Active),
+            category: Some(MarketCategory::Politics),
+            event_id: Some(EventId::new("evt-1")),
+            page: PageRequest::default(),
+            ..Default::default()
+        };
+
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#""market"."status" ="#));
+        assert!(sql.contains(r#""market"."event_id" ="#));
+        assert!(sql.contains(r#""market"."categories" @> ARRAY["#));
+        assert!(sql.contains("ILIKE"));
+        assert!(sql.contains("election"));
+    }
+
+    #[test]
+    fn page_condition_empty_matches_all_rows() {
+        let query = MarketPageQuery::default();
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(!sql.contains(r#""market"."status" ="#));
+        assert!(!sql.contains(r#""market"."event_id" ="#));
+        assert!(!sql.contains(r#""market"."categories" @> ARRAY["#));
+        assert!(!sql.contains("ILIKE"));
+    }
+
+    #[test]
+    fn page_condition_ignores_blank_keyword() {
+        let query = MarketPageQuery {
+            keyword: Some(String::new()),
+            ..Default::default()
+        };
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(!sql.contains("ILIKE"));
+    }
+
+    #[test]
+    fn page_condition_subscribed_true_requires_both_tokens_in_union() {
+        let query = MarketPageQuery {
+            subscribed: Some(true),
+            resolved_subscribed_tokens: Some([TokenId::new("tok-yes")].into()),
+            ..Default::default()
+        };
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#""market"."yes_token_id" IN"#));
+        assert!(sql.contains(r#""market"."no_token_id" IN"#));
+    }
+
+    #[test]
+    fn page_condition_subscribed_true_with_empty_union_matches_nothing() {
+        let query = MarketPageQuery {
+            subscribed: Some(true),
+            resolved_subscribed_tokens: Some(HashSet::new()),
+            ..Default::default()
+        };
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains("1 = 0"));
+    }
+
+    #[test]
+    fn page_condition_subscribed_false_excludes_fully_subscribed_pairs() {
+        let query = MarketPageQuery {
+            subscribed: Some(false),
+            resolved_subscribed_tokens: Some([TokenId::new("tok-a"), TokenId::new("tok-b")].into()),
+            ..Default::default()
+        };
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#""market"."yes_token_id" NOT IN"#));
+        assert!(sql.contains(r#""market"."no_token_id" NOT IN"#));
     }
 }

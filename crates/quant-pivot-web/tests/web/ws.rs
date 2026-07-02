@@ -14,8 +14,9 @@ use actix_test::{TestServer, start as start_test_server};
 use actix_web::{App, http::StatusCode, middleware::from_fn, test::TestRequest, web};
 use futures_util::{SinkExt, StreamExt};
 use quant_pivot_models::{
-    domain::{CoreEvent, SubscriptionKey, SystemAlertEvent, WsChannel},
+    domain::{CoreEvent, SubscriptionKey, SystemAlertEvent, WsChannel, api::MarketBookView},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
+    types::MarketId,
 };
 use quant_pivot_web::ws::SessionHandle;
 
@@ -281,6 +282,84 @@ async fn ws_broadcaster_delivers_subscribed_core_event() {
     assert_eq!(envelope["data"]["message"], "ws-bus-integration");
 }
 
+fn book_update(market: &str) -> CoreEvent {
+    CoreEvent::MarketBookUpdate {
+        market_id: MarketId::new(market),
+        view: Box::new(MarketBookView {
+            market_id: MarketId::new(market),
+            yes: None,
+            no: None,
+        }),
+    }
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_market_scoped_book_update_reaches_only_matching_subscriber() {
+    let env = TestEnv::start().await;
+
+    let (watcher_tx, watcher_rx) = flume::bounded::<String>(8);
+    env.state.ws_sessions.register(SessionHandle {
+        outbound: watcher_tx,
+        subscriptions: Arc::new(RwLock::new(HashSet::from([SubscriptionKey::scoped(
+            WsChannel::MarketBookUpdate,
+            MarketId::new("0xaaa"),
+        )]))),
+    });
+
+    let (other_tx, other_rx) = flume::bounded::<String>(8);
+    env.state.ws_sessions.register(SessionHandle {
+        outbound: other_tx,
+        subscriptions: Arc::new(RwLock::new(HashSet::from([SubscriptionKey::scoped(
+            WsChannel::MarketBookUpdate,
+            MarketId::new("0xbbb"),
+        )]))),
+    });
+
+    env.state.events.publish(book_update("0xaaa"));
+
+    let text = tokio::time::timeout(Duration::from_secs(2), watcher_rx.recv_async())
+        .await
+        .expect("scoped book update should arrive within 2s")
+        .expect("channel open");
+    let envelope: serde_json::Value = serde_json::from_str(&text).expect("json envelope");
+    assert_eq!(envelope["type"], "market.book_update");
+    assert_eq!(envelope["data"]["market_id"], "0xaaa");
+
+    assert!(
+        other_rx.try_recv().is_err(),
+        "session scoped to a different market must not receive the frame"
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_market_resolved_reaches_global_subscriber() {
+    let env = TestEnv::start().await;
+
+    let (outbound, rx) = flume::bounded::<String>(8);
+    env.state.ws_sessions.register(SessionHandle {
+        outbound,
+        subscriptions: Arc::new(RwLock::new(HashSet::from([SubscriptionKey::global(
+            WsChannel::MarketResolved,
+        )]))),
+    });
+
+    env.state.events.publish(CoreEvent::MarketResolved {
+        market_id: MarketId::new("0xccc"),
+        outcome: true,
+    });
+
+    let text = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
+        .await
+        .expect("market.resolved should arrive within 2s")
+        .expect("channel open");
+    let envelope: serde_json::Value = serde_json::from_str(&text).expect("json envelope");
+    assert_eq!(envelope["type"], "market.resolved");
+    assert_eq!(envelope["data"]["market_id"], "0xccc");
+    assert_eq!(envelope["data"]["outcome"], true);
+}
+
 #[actix_web::test]
 #[ignore = "requires Docker"]
 async fn ws_system_status_broadcast_without_subscribe() {
@@ -333,4 +412,60 @@ async fn ws_subscribe_receives_multiple_system_status_events() {
         .publish(CoreEvent::SystemStatusChanged(status));
     let second = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
     assert!(second["data"]["checked_at"].is_string());
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_system_status_lifecycle_phase_push() {
+    use chrono::Utc;
+    use quant_pivot_models::domain::{
+        OperationalPhase,
+        lifecycle::{MarketDataConnectivity, WsShardConnectivity},
+        ports::runtime_control::CatalogState,
+    };
+
+    let env = TestEnv::start().await;
+    let token = client::login(&env, "admin", "admin").await;
+    let mut server = start_ws_server(env.state.clone());
+    attach_api_version(&mut server);
+    let mut session = connect_ws(&mut server, &token).await;
+
+    let warming = recv_until_type(&mut session, "system.status", Duration::from_millis(500)).await;
+    assert_eq!(
+        warming["data"]["operational_phase"]["phase"],
+        "catalog_warming"
+    );
+
+    let mut status = env.state.control.system_status();
+    status.catalog = CatalogState::Ready {
+        markets: 42,
+        synced_at: Utc::now(),
+    };
+    status.operational_phase = OperationalPhase::MarketDataConnecting;
+    status.market_data = MarketDataConnectivity {
+        ready: false,
+        last_message_age_ms: None,
+        ws_shards: WsShardConnectivity {
+            total: 2,
+            disconnected: 1,
+            oldest_disconnected_secs: Some(3),
+            connected_ratio_bps: 5_000,
+        },
+    };
+    env.state
+        .events
+        .publish(CoreEvent::SystemStatusChanged(status));
+
+    let pushed = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
+    assert_eq!(
+        pushed["data"]["operational_phase"]["phase"],
+        "market_data_connecting"
+    );
+    assert_eq!(pushed["data"]["catalog"]["state"], "ready");
+    assert_eq!(pushed["data"]["market_data"]["ready"], false);
+    assert_eq!(pushed["data"]["market_data"]["ws_shards"]["total"], 2);
+    assert_eq!(
+        pushed["data"]["market_data"]["ws_shards"]["disconnected"],
+        1
+    );
 }
