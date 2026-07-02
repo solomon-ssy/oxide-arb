@@ -1,0 +1,258 @@
+# Phase 11 — Alpha Quality & Closed-Loop Hardening 子phase索引
+
+> 状态：生产级破坏式重构设计（**规划/设计冻结阶段，未进入代码落地**）
+>
+> 父文档（概念真理）：
+> [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
+> [`../04-topn-report-and-recommendation.md`](../04-topn-report-and-recommendation.md)、
+> [`../05-execution-risk-and-governance.md`](../05-execution-risk-and-governance.md)、
+> [`../08-third-party-crates-and-ml-stack.md`](../08-third-party-crates-and-ml-stack.md)、
+> [`../09-account-capital-position-reconciliation.md`](../09-account-capital-position-reconciliation.md)
+>
+> 兼容策略（逐条不可妥协，与全仓一致）：**零兼容、零 re-export、零向前兼容、零死语义**。
+> 删除旧启发式常量、删除"写了但从不 emit"的枚举值、删除静默填零路径。不追求最小变更/最小侵入/
+> 最小工作量;优先正确领域模型、语义精准、生产可维护性,必要时破坏式重构。
+
+## 0. 为什么单独开 Phase 11
+
+Phase 3–6 已把 quant-pivot 建成一套**工程治理达到生产级**的系统:真实 CLOB 签名下单、22 项准入、
+证据链对账、凭证 fail-closed、good_lp MILP、分数 Kelly、模型 publish/rollback/shadow 治理。
+
+但一次针对**关键算法与模型训练是否生产级最佳实践 + 业务闭环语义是否精准**的深度审计,发现系统的
+**"阿尔法层"与"研究反馈闭环"尚未生产级**。用一句话概括:
+
+> **一个薄、手调、未校准的信号,被包在一套非常严谨的治理/执行/资金闭环里。执行侧闭环语义精准且
+> fail-closed;研究侧闭环(训练 → 归因 → 再训练)并未闭合,且信号质量在方法论上未被证伪。**
+
+Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行层同等的生产级标准**,同时清除死语义与
+静默降级。它是一次"跨 Phase 3/4/5/6 的加固与重构",不是新功能堆叠。
+
+## 1. Phase 11 关闭的 23 个审计问题(逐点映射,一点不漏)
+
+> 编号沿用审计报告的 23 点。每一点都必须有归属子phase,且在该子phase文档的 §1(目标与闭环定位)
+> 与 §10(延后/缺口)显式回指本表。**任一点无归属即视为规划失败。**
+
+| # | 审计问题(简述) | 归属子phase |
+|---|---|---|
+| 1 | 默认只启用 3/9 因子(`FactorsConfig::default` 只开 Liquidity + Momentum) | [11.1](11.1-factor-and-signal-redesign.md) |
+| 2 | `ts.momentum` 恒等于 `simple_return`,与收益因子共线 | [11.1](11.1-factor-and-signal-redesign.md) |
+| 3 | 归一化参数手调启发式(logistic k/x0),非学习;rank/zscore 需全截面 batch | [11.1](11.1-factor-and-signal-redesign.md) |
+| 4 | 垂直/领域信号完全缺席(domain feature 恒 missing、domain factor 从不注册) | [11.2](11.2-polymarket-vertical-alpha.md) |
+| 5 | 收益映射默认未校准启发式 `HeuristicReturnModel{300,500}` | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
+| 6 | 训练目标只有 rank IC + L2;下行/换手惩罚不在优化目标里 | [11.4](11.4-training-objective-learning-to-rank.md) |
+| 7 | 泄漏防护只是时间戳扫描,非 purged/embargo/CPCV;无 DSR;rank_ic soft | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
+| 8 | 无概率校准(Platt/Isotonic) | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
+| 9 | 发布不重扫泄漏(`LeakageFindings::default()`) | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
+| 10 | 历史 registry PIT 返回 None → 离线/在线特征不对称 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
+| 11 | classical ML 缺失非关键特征 `fill_missing:0.0`,违反禁止静默填零 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
+| 12 | 默认二进制不链接 optimize/ml-classical;不开 lp-solver 返回空推荐 | [11.0](11.0-contract-freeze-and-deletion-inventory.md) |
+| 13 | Kelly 的 q 来自未校准收益模型 → 系统性过押/错押 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
+| 14 | TP/SL 由模型启发式曲线推导,不用经验 MFE/MAE | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
+| 15 | 退出结构最小化(partial/trailing/invalidation 恒空) | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
+| 16 | 入场触发只有 LimitPrice/Immediate;无 confirmation_window | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
+| 17 | 无 superseded 报告状态、无持久化 building、错过 tick 不补跑 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
+| 18 | FOK 来源是配置 `allow_market_orders`,非 recommendation 流动性要求;neg-risk | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
+| 19 | 06.5 归因→自动再训练完全未实现 → 研究闭环开环 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 20 | 06.6 反事实因子归因未实现;`max_adverse_excursion_bps:None` | [11.10](11.10-counterfactual-factor-attribution.md) |
+| 21 | factor governance 无 quality gate/shadow/WORM 审计 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 22 | preflight `order_client_ready`/`exit_monitor_health` 是占位 | [11.11](11.11-execution-governance-hardening.md) |
+| 23 | 死语义(DrawdownCap/Planned/superseded/EntryTriggerKind 未 emit) | [11.0](11.0-contract-freeze-and-deletion-inventory.md) + 各实现子phase |
+
+## 2. 子phase索引
+
+| 子phase | 标题 | 闭环定位 | 关闭点 | 文档 |
+|---|---|---|---|---|
+| 11.0 | Contract Freeze & Deletion Inventory | 语义精准地基 / 删除死语义 / build 硬化 | 12, 23 | [11.0](11.0-contract-freeze-and-deletion-inventory.md) |
+| 11.1 | Factor & Signal Redesign | 因子多样性 + 截面归一化 | 1, 2, 3 | [11.1](11.1-factor-and-signal-redesign.md) |
+| 11.2 | Polymarket Vertical Alpha | 领域/结构性信号闭环 | 4 | [11.2](11.2-polymarket-vertical-alpha.md) |
+| 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
+| 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
+| 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论 | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
+| 11.6 | Training-Serving Parity & No-Silent-Zero | 特征一致性 / 禁止静默零 | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
+| 11.7 | Labeling, Entry & Exit Closed-Loop | 三重障碍标注 + 入场/退出闭环 | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
+| 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
+| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
+| 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
+
+## 3. 依赖图
+
+```mermaid
+flowchart TD
+    P110["11.0 Contract Freeze & Deletion"]
+    P111["11.1 Factor & Signal Redesign"]
+    P112["11.2 Polymarket Vertical Alpha"]
+    P113["11.3 Calibration & Kelly Safety"]
+    P114["11.4 Training Objective & LTR"]
+    P115["11.5 Leakage/CPCV/DSR"]
+    P116["11.6 Train-Serve Parity"]
+    P117["11.7 Labeling/Entry/Exit"]
+    P118["11.8 Report Lifecycle FSM"]
+    P119["11.9 Attribution Feedback + Retrain"]
+    P1110["11.10 Counterfactual Attribution"]
+    P1111["11.11 Execution Hardening"]
+
+    P110 --> P111
+    P110 --> P116
+    P111 --> P112
+    P111 --> P114
+    P116 --> P114
+    P114 --> P115
+    P111 --> P113
+    P114 --> P113
+    P115 --> P113
+    P113 --> P117
+    P117 --> P118
+    P115 --> P119
+    P113 --> P119
+    P119 --> P1110
+    P110 --> P1111
+    P119 --> P1111
+```
+
+执行原则:
+
+- **11.0** 是设计冻结点:锁定新 config schema(v10)、新枚举、删除清单、feature-gate 策略。不写业务逻辑。
+- **11.1 / 11.6** 是数据地基:先把因子/归一化/训练-服务一致性打好,再谈训练目标。
+- **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
+- **11.7 → 11.8** 是产物表达力:退出/入场结构 + 报告生命周期语义。
+- **11.9 → 11.10** 是研究闭环:归因反馈 + 自动再训练 + 反事实归因,闭合"开环"。
+- **11.2 / 11.11** 相对独立,可并行。
+
+## 4. 全局设计基线(贯穿全部子phase)
+
+沿用 [`phase-03/README.md`](../phase-03/README.md) §3 的六条基线,并新增 Phase 11 专属五条:
+
+1. **可解释优先**:任何新模型族(LTR/GBDT/校准器)必须能输出 recommendation-level 的因子贡献
+   (见 11.10);无法解释到 recommendation level 的模型只能 shadow,不能 auto-execution(与 08 §15.5 一致)。
+2. **校准是硬不变量**:任何进入 Kelly sizing 的 `expected_return`/`downside`/`P(win)` 必须来自
+   **校准后**的模型输出;未校准 artifact 禁止 publish(11.3)。
+3. **防过拟合是硬门禁**:任何 model version publish 前必须有 CPCV 多路径分布 + Deflated Sharpe +
+   PBO 报告;`rank_ic` 升为**硬门禁**(11.5)。
+4. **训练-服务零 skew**:同一 feature/factor 定义只有一份,离线与在线走同一定义;禁止"离线重跑今日
+   逻辑覆盖历史"(11.6);禁止任何静默填零(全平面)。
+5. **零死语义**:任何 enum 值/config 字段/DTO 字段,要么在生产路径被 emit/消费,要么删除。新增
+   `scripts/lint-dead-semantics.sh`(11.0)在 CI 强制。
+
+## 5. 货币/数值不变量(与全仓一致)
+
+- 货币/价格/shares/probability 一律 newtype(`Usd`/`Price`/`Shares`/`Probability`);`f64` 仅允许
+  在训练矩阵/校准器/求解器边界,禁止泄漏到 money domain。
+- NaN/inf 一律**拒绝样本**,禁止转 0/中性值静默通过。
+- 所有 artifact(model/calibrator/dataset/backtest/attribution)有 `blake3:` canonical hash。
+- Decimal ↔ f64 转换必须记录 scale/unit/missing policy。
+
+## 6. 文档契约模板(每篇子phase固定 10 节顺序)
+
+与 [`phase-03/README.md`](../phase-03/README.md) §7 / [`phase-05/README.md`](../phase-05/README.md) §7 一致:
+
+1. **目标与闭环定位**(含回指 §1 关闭的审计点)
+2. **删除 / 合并 / 重构清单**(加替代代码前必须删的 crate/模块/类型/config/enum;无则显式写"无")
+3. **新领域类型 / 表 / ClickHouse fact**
+4. **deploy-config key 与 runtime-config schema path**
+5. **必建模块与 trait**(模块树 + verbatim Rust trait 签名)
+6. **生产不变量与失败语义**(PIT、降级、hash、fail-closed)
+7. **第三方 crate 引入**(允许/禁止 + feature gate)
+8. **验收测试**(unit / component / integration 必须覆盖的路径)
+9. **Blocker**(触发即判定失败)
+10. **延后 / 缺口**(明确不做、留给后续)
+
+## 7. 质量门禁(每个子phase收尾必跑)
+
+```bash
+cargo fmt --all --
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p quant-pivot-research --features ml-classical,dataframe,optimize,lp-solver -- -D warnings
+bash scripts/lint-architecture.sh
+bash scripts/lint-quant-pivot-boundary.sh
+bash scripts/lint-quant-pivot-errors.sh
+bash scripts/lint-dead-semantics.sh   # 11.0 新增
+cargo test --workspace
+```
+
+## 8. 与既有 Phase 06 设计文档的关系(零兼容处理)
+
+Phase 06 中 `06.5`(attribution feedback & auto-retraining)与 `06.6`(counterfactual factor
+attribution)是**设计文档,未落地**(审计点 19/20)。Phase 11 采取**破坏式接管**:
+
+- [11.9](11.9-attribution-feedback-and-auto-retraining.md) **取代** 06.5,并把 champion-challenger、
+  drift-triggered retraining、factor governance gates 一并纳入(06.5 原设计不含这些)。
+- [11.10](11.10-counterfactual-factor-attribution.md) **取代** 06.6,并升级为 SHAP/counterfactual
+  统一 attribution 引擎。
+- 落地时:06.5/06.6 文档头部标注 `> SUPERSEDED by phase-11/11.9(11.10)`,不做 re-export、不保留旧
+  seam 命名;新命名以 Phase 11 为准。
+- 06.0/06.1(exit reinference / opportunistic sell)已落地,Phase 11 **不回推**,只在 11.7 复用其
+  `ExitSignalEvaluator` seam。
+
+## 9. 外部参考文献(权威来源,落地时逐条核对)
+
+> 每篇子phase文档在 §5/§6 引用时必须带上下面对应链接。此处为总书目。
+
+**防过拟合与验证方法论(11.5)**
+
+- López de Prado, M. (2018). *Advances in Financial Machine Learning*, Wiley. Ch.7(purge/embargo)、Ch.12(CPCV)、Ch.11(backtest overfitting)。
+- Purged cross-validation methodology: <https://github.com/eslazarev/purged-cross-validation/blob/main/docs/methodology.md>
+- Purged cross-validation (Wikipedia): <https://en.wikipedia.org/wiki/Purged_cross-validation>
+- Combinatorial Purged CV (ML4T): <https://ml4trading.io/docs/diagnostic/methods/cpcv/>
+- Bailey & López de Prado (2014). *The Deflated Sharpe Ratio*, Journal of Portfolio Management 40(5)。
+- Bailey & López de Prado (2012). *The Sharpe Ratio Efficient Frontier*, Journal of Risk 15(2)(PSR / Min Track Record Length)。
+
+**概率校准(11.3)**
+
+- scikit-learn Probability calibration: <https://scikit-learn.org/stable/modules/calibration.html>
+- CalibratedClassifierCV: <https://scikit-learn.org/stable/modules/generated/sklearn.calibration.CalibratedClassifierCV.html>
+- Calibration workflow(reliability + Brier): <https://metricgate.com/blogs/workflow-calibrating-predicted-probabilities/>
+- MachineLearningMastery — calibrated classification: <https://machinelearningmastery.com/calibrated-classification-model-in-scikit-learn/>
+
+**Kelly 与仓位(11.3)**
+
+- MacLean, Thorp, Ziemba — *The Good and Bad Properties of the Kelly Criterion*: <https://www.stat.berkeley.edu/~aldous/157/Papers/Good_Bad_Kelly.pdf>
+- Kelly criterion (Wikipedia): <https://en.wikipedia.org/wiki/Kelly_criterion>
+- Advanced Kelly(edge uncertainty / 多注收缩 / 25% 总敞口上限): <https://comparenbet.org/guide-advanced-kelly>
+- Nick Yoder — The Kelly Criterion(分数 Kelly 与回撤): <https://nickyoder.com/kelly-criterion/>
+
+**训练目标 / Learning-to-Rank(11.4)**
+
+- Poh, Lim, Zohren, Roberts (2020). *Building Cross-Sectional Systematic Strategies By Learning to Rank*: <https://arxiv.org/pdf/2012.07149v1> (SSRN: <https://doi.org/10.2139/ssrn.3751012>)
+- LambdaRankIC — Directly Optimizing Rank IC: <https://arxiv.org/html/2605.00501>
+- XGBoost Learning to Rank(LambdaMART): <https://xgboost.readthedocs.io/en/latest/tutorials/learning_to_rank.html>
+- LambdaMART explained: <https://www.shaped.ai/blog/lambdamart-explained-the-workhorse-of-learning-to-rank>
+
+**标注 / 元标注 / 退出(11.7)**
+
+- Triple-Barrier method: <https://paperswithbacktest.com/course/triple-barrier-method>
+- Meta-labeling: <https://paperswithbacktest.com/course/meta-labeling>
+- Triple-barrier & meta-labeling(mlfinlab docs): <https://random-docs.readthedocs.io/en/latest/implementations/tb_meta_labeling.html>
+
+**因子归一化(11.1)**
+
+- Coqueret & Guida — *Machine Learning for Factor Investing*, Ch.4 Data preprocessing: <https://www.mlfactor.com/Data.html>
+- Cross-sectional normalization operators(winsor/zscore/rank/neutralize): <https://docs.skelfresearch.com/sigc/operators/cross-sectional/>
+- Custom factor investing(winsorize→zscore→neutralize→IC 验证): <https://stockalpha.ai/alpha-learning/custom-factor-investing-building-your-own-alpha-factors>
+
+**Polymarket 垂直信号(11.2)**
+
+- Polymarket-v1 Database(favorite-longshot reversal、neg-risk、participant concentration): <https://arxiv.org/html/2606.04217v1>
+- How Wise is the Crowd? Bias and Edge in Prediction Markets: <https://doi.org/10.5281/zenodo.18821864>
+- Polymarket Create Order(GTC/GTD/FOK/FAK + negRisk): <https://docs.polymarket.com/trading/orders/create>
+- Polymarket Orders Overview: <https://docs.polymarket.com/trading/orders/overview>
+- NegRisk execution mechanics: <https://polymarkets.co.il/en/bots/polymarket-negrisk-execution/>
+
+**训练-服务一致性(11.6)**
+
+- Feature stores & training-serving consistency: <https://scalemind.dev/ai/ml/mlops/feature-stores-and-training-serving-consistency/>
+- Training-serving skew(Google Rules of ML #29/#32/#37): <https://datarekha.com/mlops/training-serving-skew/>
+- Feature stores & PIT joins: <https://hld.handbook.academy/curriculum/ai-ml-system-design/feature-stores-model-serving/>
+
+**MLOps 自动再训练 / champion-challenger / drift(11.9)**
+
+- Retraining & continual learning: <https://datarekha.com/mlops/retraining/>
+- Champion-Challenger deployment: <https://www.snowflake.com/en/developers/guides/ml-champion-challenger-model-deployment/>
+- Zero-touch model promotion(Vertex AI): <https://medium.com/@artur.fejklowicz/zero-touch-ml-model-promotion-building-a-fully-automated-champion-challenger-pipeline-on-google-aa0bb5cfc854>
+
+**归因 / 反事实(11.10)**
+
+- SHAP(GitHub): <https://github.com/shap/shap>
+- SHAP docs: <https://shap.readthedocs.io/en/stable/>
+- Interpretable ML Book — Shapley values: <https://christophm.github.io/interpretable-ml-book/shapley.html>
+- Counterfactual SHAP (CF-SHAP), FAccT 2022: <https://facctconference.org/static/pdfs_2022/facct22-3533168.pdf>
