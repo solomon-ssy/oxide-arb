@@ -585,7 +585,7 @@ fn replay_config() -> ReplayConfig {
         },
         data_quality: DataQualityConfig {
             max_book_age_ms: 60_000,
-            max_fact_lag_secs: 120,
+            max_feature_bucket_age_secs: 120,
             ..DataQualityConfig::default()
         },
     }

@@ -478,7 +478,7 @@ fn service(
                 // (10s): PIT evidence must be older than the delay but younger than
                 // the book-age bound.
                 max_book_age_ms: 60_000,
-                max_fact_lag_secs: 120,
+                max_feature_bucket_age_secs: 120,
                 ..DataQualityConfig::default()
             },
             training: TrainingConfig::default(),

@@ -185,15 +185,15 @@ impl DefaultModePreflight {
                 .saturating_div(snapshot.total_tokens)
         };
         let green = snapshot.total_tokens > 0
-            && !snapshot.fact_lag_exceeded
+            && !snapshot.ingest_lag_exceeded
             && snapshot.insufficient == 0
             && stale_bps <= MAX_STALE_RATIO_BPS;
         let detail = format!(
-            "tokens={}, insufficient={}, stale={}, fact_lag_exceeded={}",
+            "tokens={}, insufficient={}, stale={}, ingest_lag_exceeded={}",
             snapshot.total_tokens,
             snapshot.insufficient,
             snapshot.stale,
-            snapshot.fact_lag_exceeded
+            snapshot.ingest_lag_exceeded
         );
         PreflightCheck::hard("data_quality_green", green, detail)
     }

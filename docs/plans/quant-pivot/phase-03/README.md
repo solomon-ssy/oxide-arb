@@ -22,7 +22,7 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
   typed IDs、ClickHouse quant fact 表 + row 类型、`QuantFactRepository` /
   `ChQuantFactRepository`。
 - Phase 2 完成：`BookFactWriter`、`AsyncWriter` / `ChWriteManager`、
-  `FactLagTracker`、`BookDataQualityService`，以及 **live-only** 的
+  `IngestPipelineLagTracker`、`BookDataQualityService`，以及 **live-only** 的
   [`LiveBookDataSource`](../../../crates/quant-pivot-core/src/pipeline/point_in_time.rs)。
   runtime-config v3 九段（`selection` / `data_quality` / `features` / `factors` /
   `model` / `reports` / `portfolio` / `execution` / `notification`）齐全。

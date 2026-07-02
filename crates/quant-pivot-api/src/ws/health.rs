@@ -5,7 +5,9 @@
 //! the core `HealthChecker`) instead of per-shard reconnect log spam.
 
 use parking_lot::RwLock;
-use quant_pivot_models::types::TokenId;
+use quant_pivot_models::{
+    domain::governance::lifecycle::WS_MARKET_DATA_STALE_THRESHOLD_MS, types::TokenId,
+};
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Display, Formatter},
@@ -146,6 +148,25 @@ pub trait WsShardHealthPort: Send + Sync {
 
     /// Milliseconds since the last CLOB websocket message on any shard.
     fn last_message_age_ms(&self) -> Option<u64>;
+
+    /// Milliseconds since a specific token last produced a normalized WS event
+    /// (local receipt clock), or `None` when the token has never been seen.
+    fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64>;
+
+    /// Whether market-data is healthy: global traffic fresh within
+    /// [`WS_MARKET_DATA_STALE_THRESHOLD_MS`] AND every spawned shard connected.
+    ///
+    /// Single source of truth for the connection-liveness exemption: while
+    /// healthy, a quiet-but-valid book is the current venue truth and stays
+    /// usable; only connection failure turns an aged book into a stale one.
+    fn market_data_healthy(&self) -> bool {
+        let summary = self.shard_health();
+        let coverage_ready = summary.total == 0 || summary.disconnected == 0;
+        let traffic_fresh = self
+            .last_message_age_ms()
+            .is_some_and(|age| age < WS_MARKET_DATA_STALE_THRESHOLD_MS);
+        traffic_fresh && coverage_ready
+    }
 }
 
 fn connected_ratio_bps(total: usize, disconnected: usize) -> u32 {

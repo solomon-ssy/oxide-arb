@@ -8,7 +8,7 @@ use quant_pivot_models::{
         ChSchemaVersion, ChShares, ChUsd, MarketResolutionRow, TickEventRow,
     },
     domain::{
-        book::{BookLevel, BookSnapshot},
+        book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
         pipeline::{BookSnapshotCmd, PriceDeltaCmd},
     },
     enums::clickhouse::{ChBookEventType, ChFactSource, ChSnapshotReason},
@@ -22,8 +22,6 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use std::{mem, sync::Arc};
 
-use super::{fact_lag::FactLagTracker, metrics_hub::MetricsHub};
-
 pub struct BookFactWriter {
     ticks: Arc<AsyncWriter<TickEventRow>>,
     l2: Arc<AsyncWriter<BookL2ReplayRow>>,
@@ -31,8 +29,6 @@ pub struct BookFactWriter {
     microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
     resolutions: Arc<AsyncWriter<MarketResolutionRow>>,
     microstructure_pending: DashMap<TokenId, BookMicrostructureRow>,
-    fact_lag: Arc<FactLagTracker>,
-    metrics: Arc<MetricsHub>,
 }
 
 struct SnapshotLevels<'a> {
@@ -84,8 +80,6 @@ impl BookFactWriter {
         snapshot_writer: Arc<AsyncWriter<BookSnapshotRow>>,
         microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
         resolution_writer: Arc<AsyncWriter<MarketResolutionRow>>,
-        fact_lag: Arc<FactLagTracker>,
-        metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             ticks: tick_writer,
@@ -94,8 +88,6 @@ impl BookFactWriter {
             microstructure_1s: microstructure_1s_writer,
             resolutions: resolution_writer,
             microstructure_pending: DashMap::new(),
-            fact_lag,
-            metrics,
         }
     }
 
@@ -111,14 +103,6 @@ impl BookFactWriter {
                 self.microstructure_1s.write(row);
             }
         }
-    }
-
-    fn record_fact_lag(&self, stream: &'static str, event_time_ms: i64, ingestion_time_ms: i64) {
-        let event_ms = u64::try_from(event_time_ms.max(0)).unwrap_or(0);
-        let ingestion_ms = u64::try_from(ingestion_time_ms.max(0)).unwrap_or(0);
-        let lag_ms = ingestion_ms.saturating_sub(event_ms);
-        self.fact_lag.record_ms(lag_ms);
-        self.metrics.observe_fact_lag_ms(stream, lag_ms);
     }
 
     pub fn write_snapshot(
@@ -168,7 +152,6 @@ impl BookFactWriter {
             feed_event_hash: snapshot_feed_event_hash(cmd),
             schema_version: ChSchemaVersion(2),
         };
-        self.record_fact_lag("book_l2_replay_hot", l2.event_time, ingestion_time);
         self.l2.write(l2);
         let snapshot = BookSnapshot::new(
             Arc::clone(&cmd.bids.levels),
@@ -250,7 +233,6 @@ impl BookFactWriter {
             feed_event_hash: delta_feed_event_hash(cmd),
             schema_version: ChSchemaVersion(2),
         };
-        self.record_fact_lag("book_l2_replay_hot", row.event_time, ingestion_time);
         self.l2.write(row);
         // Full-book microstructure must be generated from the published
         // snapshot after deltas are applied; callers pass it via
@@ -282,11 +264,6 @@ impl BookFactWriter {
         best_ask: Price,
         timestamp_ms: u64,
     ) {
-        self.record_fact_lag(
-            "tick_events",
-            i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
-            Utc::now().timestamp_millis(),
-        );
         self.ticks.write(TickEventRow {
             token_id: token_id.clone(),
             market_id,
@@ -394,7 +371,6 @@ impl BookFactWriter {
             source: ChFactSource::WsMarketResolved,
             schema_version: ChSchemaVersion(2),
         });
-        self.record_fact_lag("market_resolution_event", resolved_at, observed_at);
     }
 
     pub fn write_shard_status(&self, shard_id: usize, status: ShardConnectionStatus) {
@@ -433,7 +409,6 @@ impl BookFactWriter {
         let best_bid = input.bids.first().map(|level| level.price_decimal());
         let best_ask = input.asks.first().map(|level| level.price_decimal());
         let levels_count = u16::try_from(input.bids.len() + input.asks.len()).unwrap_or(u16::MAX);
-        self.record_fact_lag("book_snapshots", input.event_time, input.ingestion_time);
         self.snapshots.write(BookSnapshotRow {
             token_id: input.token_id.clone(),
             market_id: input.market_id,
@@ -473,11 +448,6 @@ impl BookFactWriter {
             bucket_ms(now_ms, 1_000),
         );
         if event_type == ChBookEventType::Snapshot {
-            self.record_fact_lag(
-                "book_microstructure_1s",
-                second_observation.bucket_time,
-                now_ms,
-            );
             self.microstructure_1s.write(second_observation);
             return;
         }
@@ -496,22 +466,151 @@ impl BookFactWriter {
             }
         }
         if let Some(row) = stale_bucket {
-            self.record_fact_lag("book_microstructure_1s", row.bucket_time, now_ms);
             self.microstructure_1s.write(row);
         }
     }
 }
 
+/// Incremental weighted mean of an optional `Decimal64` bucket field.
+///
+/// `None` contributes nothing (empty-book observations do not skew the mean);
+/// otherwise each side's running mean is weighted by its observation count so
+/// folding single-observation rows yields a correct arithmetic mean.
+/// Smaller of two optional samples (`None` is the identity).
+fn opt_min(a: Option<Decimal>, b: Option<Decimal>) -> Option<Decimal> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+/// Larger of two optional samples (`None` is the identity).
+fn opt_max(a: Option<Decimal>, b: Option<Decimal>) -> Option<Decimal> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+/// Observation-count-weighted mean of two optional samples so that folding
+/// single-observation rows yields a correct arithmetic mean (`None` = no data,
+/// contributes nothing).
+fn opt_weighted_mean(
+    a: Option<Decimal>,
+    a_count: u64,
+    b: Option<Decimal>,
+    b_count: u64,
+) -> Option<Decimal> {
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let xw = Decimal::from(a_count.max(1));
+            let yw = Decimal::from(b_count.max(1));
+            Some((x * xw + y * yw) / (xw + yw))
+        }
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (None, None) => None,
+    }
+}
+
+fn merge_mean_decimal(
+    current: Option<ChDecimal64>,
+    current_count: u64,
+    next: Option<ChDecimal64>,
+    next_count: u64,
+) -> Option<ChDecimal64> {
+    opt_weighted_mean(
+        current.map(ChDecimal64::to_decimal),
+        current_count,
+        next.map(ChDecimal64::to_decimal),
+        next_count,
+    )
+    .map(ChDecimal64::from)
+}
+
+/// Merge a pending 1s bucket with a later same-second observation, producing an
+/// honest OHLC + mean aggregation: `open` stays first, `close` takes the latest,
+/// `high`/`low`/`min`/`max` track real extrema, and every `_avg` is a true
+/// observation-weighted mean (never "last value wins").
 fn merge_microstructure_row(current: &mut BookMicrostructureRow, next: BookMicrostructureRow) {
+    let prior_count = current.update_count;
+    let next_count = next.update_count;
     current.market_id = next.market_id;
+
+    // Best-bid / best-ask OHLC: open untouched (first), close = latest.
+    current.best_bid_high = opt_max(
+        current.best_bid_high.map(|v| v.to_price().inner()),
+        next.best_bid_high.map(|v| v.to_price().inner()),
+    )
+    .map(|d| ChPrice::from(Price::new(d)));
+    current.best_bid_low = opt_min(
+        current.best_bid_low.map(|v| v.to_price().inner()),
+        next.best_bid_low.map(|v| v.to_price().inner()),
+    )
+    .map(|d| ChPrice::from(Price::new(d)));
     current.best_bid_close = next.best_bid_close;
+    current.best_ask_high = opt_max(
+        current.best_ask_high.map(|v| v.to_price().inner()),
+        next.best_ask_high.map(|v| v.to_price().inner()),
+    )
+    .map(|d| ChPrice::from(Price::new(d)));
+    current.best_ask_low = opt_min(
+        current.best_ask_low.map(|v| v.to_price().inner()),
+        next.best_ask_low.map(|v| v.to_price().inner()),
+    )
+    .map(|d| ChPrice::from(Price::new(d)));
     current.best_ask_close = next.best_ask_close;
-    current.spread_bps_avg = next.spread_bps_avg;
     current.mid_price_close = next.mid_price_close;
-    current.top1_depth_usd_avg = next.top1_depth_usd_avg;
-    current.top5_depth_usd_avg = next.top5_depth_usd_avg;
-    current.top20_depth_usd_avg = next.top20_depth_usd_avg;
-    current.imbalance_avg = next.imbalance_avg;
+
+    // Spread band: real min / max, true mean.
+    current.spread_bps_min = opt_min(
+        current.spread_bps_min.map(|v| v.to_bps().inner()),
+        next.spread_bps_min.map(|v| v.to_bps().inner()),
+    )
+    .map(ChBps::from);
+    current.spread_bps_max = opt_max(
+        current.spread_bps_max.map(|v| v.to_bps().inner()),
+        next.spread_bps_max.map(|v| v.to_bps().inner()),
+    )
+    .map(ChBps::from);
+    current.spread_bps_avg = opt_weighted_mean(
+        current.spread_bps_avg.map(|v| v.to_bps().inner()),
+        prior_count,
+        next.spread_bps_avg.map(|v| v.to_bps().inner()),
+        next_count,
+    )
+    .map(ChBps::from);
+
+    // Depth (`_avg`) and imbalance: true observation-weighted means, so the
+    // `_avg` column name is honest instead of "last value wins".
+    current.top1_depth_usd_avg = opt_weighted_mean(
+        current.top1_depth_usd_avg.map(|v| v.to_usd().inner()),
+        prior_count,
+        next.top1_depth_usd_avg.map(|v| v.to_usd().inner()),
+        next_count,
+    )
+    .map(ChUsd::from);
+    current.top5_depth_usd_avg = opt_weighted_mean(
+        current.top5_depth_usd_avg.map(|v| v.to_usd().inner()),
+        prior_count,
+        next.top5_depth_usd_avg.map(|v| v.to_usd().inner()),
+        next_count,
+    )
+    .map(ChUsd::from);
+    current.top20_depth_usd_avg = opt_weighted_mean(
+        current.top20_depth_usd_avg.map(|v| v.to_usd().inner()),
+        prior_count,
+        next.top20_depth_usd_avg.map(|v| v.to_usd().inner()),
+        next_count,
+    )
+    .map(ChUsd::from);
+    current.imbalance_avg = merge_mean_decimal(
+        current.imbalance_avg,
+        prior_count,
+        next.imbalance_avg,
+        next_count,
+    );
     current.update_count = current.update_count.saturating_add(next.update_count);
     current.snapshot_count = current.snapshot_count.saturating_add(next.snapshot_count);
     current.delta_count = current.delta_count.saturating_add(next.delta_count);
@@ -599,13 +698,21 @@ fn microstructure_row(
         max_book_age_ms: u64::try_from(Utc::now().timestamp_millis())
             .unwrap_or(0)
             .saturating_sub(snapshot.timestamp_ms),
-        schema_version: ChSchemaVersion(1),
+        // v2: `imbalance_avg` switched from full-book USD notional to top-N
+        // share-weighted queue imbalance (and to a true intra-second mean).
+        schema_version: ChSchemaVersion(2),
     }
 }
 
+/// Top-N share-weighted queue imbalance `(bid - ask) / (bid + ask)` in `[-1, 1]`.
+///
+/// Uses near-touch share depth (best [`IMBALANCE_DEPTH_LEVELS`] levels per side),
+/// not full-book USD notional: USD weighting is structurally ask-biased (ask
+/// prices > bid prices) and full-book summation is dominated by deep resting
+/// liquidity, both of which destroy the signal's meaning. Positive = bid-heavy.
 fn imbalance(snapshot: &BookSnapshot) -> Option<Decimal> {
-    let bid = snapshot.total_bid_depth_usd.to_decimal();
-    let ask = snapshot.total_ask_depth_usd.to_decimal();
+    let bid = top_n_share_depth(&snapshot.bids, IMBALANCE_DEPTH_LEVELS).inner();
+    let ask = top_n_share_depth(&snapshot.asks, IMBALANCE_DEPTH_LEVELS).inner();
     let total = bid + ask;
     if total.is_zero() {
         return None;
@@ -671,4 +778,97 @@ fn spread_bps(best_bid: Option<Price>, best_ask: Option<Price>) -> Option<Decima
         return None;
     }
     Some((ask.inner() - bid.inner()) / mid.inner() * Decimal::from(10_000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quant_pivot_models::types::Shares;
+
+    fn level(price: i64, size: i64) -> BookLevel {
+        BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::new(price, 2)),
+            Shares::new(Decimal::from(size)),
+        )
+    }
+
+    fn snapshot(bids: &[BookLevel], asks: &[BookLevel]) -> BookSnapshot {
+        BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0, 0)
+    }
+
+    #[test]
+    fn imbalance_is_share_weighted_not_usd_biased() {
+        // Low-mid book with EQUAL shares per side. The old full-book USD formula
+        // returned a large negative value (ask price ≫ bid price); the top-N
+        // share formula is zero — the correct "balanced" reading.
+        let snap = snapshot(&[level(5, 10)], &[level(95, 10)]);
+        assert_eq!(imbalance(&snap), Some(Decimal::ZERO));
+    }
+
+    #[test]
+    fn imbalance_is_minus_one_when_bids_empty() {
+        let snap = snapshot(&[], &[level(60, 10)]);
+        assert_eq!(imbalance(&snap), Some(Decimal::NEGATIVE_ONE));
+    }
+
+    #[test]
+    fn imbalance_is_plus_one_when_asks_empty() {
+        let snap = snapshot(&[level(40, 10)], &[]);
+        assert_eq!(imbalance(&snap), Some(Decimal::ONE));
+    }
+
+    #[test]
+    fn imbalance_none_when_both_sides_empty() {
+        let snap = snapshot(&[], &[]);
+        assert_eq!(imbalance(&snap), None);
+    }
+
+    #[test]
+    fn opt_weighted_mean_respects_observation_counts() {
+        // 0.2 over 3 obs merged with 0.6 over 1 obs → (0.2*3 + 0.6*1)/4 = 0.3.
+        assert_eq!(
+            opt_weighted_mean(Some(Decimal::new(2, 1)), 3, Some(Decimal::new(6, 1)), 1),
+            Some(Decimal::new(3, 1)),
+        );
+        assert_eq!(
+            opt_weighted_mean(Some(Decimal::new(5, 1)), 9, None, 1),
+            Some(Decimal::new(5, 1)),
+        );
+        assert_eq!(opt_weighted_mean(None, 1, None, 1), None);
+    }
+
+    #[test]
+    fn opt_min_max_track_extrema_over_none() {
+        assert_eq!(
+            opt_min(Some(Decimal::TEN), Some(Decimal::ONE)),
+            Some(Decimal::ONE)
+        );
+        assert_eq!(
+            opt_max(Some(Decimal::TEN), Some(Decimal::ONE)),
+            Some(Decimal::TEN)
+        );
+        assert_eq!(opt_min(None, Some(Decimal::ONE)), Some(Decimal::ONE));
+        assert_eq!(opt_max(Some(Decimal::TEN), None), Some(Decimal::TEN));
+    }
+
+    #[test]
+    fn merge_mean_decimal_is_a_true_running_mean() {
+        let current = Some(ChDecimal64::from(Decimal::new(2, 1))); // 0.2, 1 obs
+        let next = Some(ChDecimal64::from(Decimal::new(6, 1))); // 0.6, 1 obs
+        let merged = merge_mean_decimal(current, 1, next, 1).expect("some");
+        assert_eq!(merged.to_decimal(), Decimal::new(4, 1)); // 0.4
+    }
+
+    #[test]
+    fn merge_mean_decimal_ignores_none_contributions() {
+        let value = Some(ChDecimal64::from(Decimal::new(3, 1)));
+        assert_eq!(
+            merge_mean_decimal(value, 5, None, 1).map(ChDecimal64::to_decimal),
+            Some(Decimal::new(3, 1)),
+        );
+        assert_eq!(
+            merge_mean_decimal(None, 5, value, 1).map(ChDecimal64::to_decimal),
+            Some(Decimal::new(3, 1)),
+        );
+    }
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_models::{
     domain::market::{
-        book::{BookLevel, BookSnapshot},
+        book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
         registry::MarketRegistryInfo,
     },
     enums::market::MarketStatus,
@@ -121,11 +121,19 @@ impl ResolvedBook {
         Usd::new(side_depth_usd(&self.bids, n).inner() + side_depth_usd(&self.asks, n).inner())
     }
 
-    /// Depth imbalance `(bid - ask) / (bid + ask)` in `[-1, 1]`.
+    /// Top-N share-weighted queue imbalance `(bid - ask) / (bid + ask)` in
+    /// `[-1, 1]`, positive = bid-heavy.
+    ///
+    /// Uses near-touch share depth (best [`IMBALANCE_DEPTH_LEVELS`] levels per
+    /// side), not full-book USD notional. Full-book USD weighting is
+    /// structurally ask-biased (ask prices exceed bid prices) and dominated by
+    /// deep resting liquidity, which strips the signal of predictive meaning.
+    /// Kept identical to the ingest-side `imbalance()` so live, persisted, and
+    /// materialized values share one definition.
     #[must_use]
     pub fn depth_imbalance(&self) -> Option<Decimal> {
-        let bid = self.bid_depth_usd().inner();
-        let ask = self.ask_depth_usd().inner();
+        let bid = top_n_share_depth(&self.bids, IMBALANCE_DEPTH_LEVELS).inner();
+        let ask = top_n_share_depth(&self.asks, IMBALANCE_DEPTH_LEVELS).inner();
         let total = bid + ask;
         if total.is_zero() {
             return None;

@@ -55,7 +55,9 @@ impl AppContext {
                         metrics.set_data_quality_tokens("degraded", snapshot.degraded);
                         metrics.set_data_quality_tokens("stale", snapshot.stale);
                         metrics.set_data_quality_tokens("insufficient", snapshot.insufficient);
-                        metrics.set_fact_lag_worst_ms(data_quality.take_worst_fact_lag_ms());
+                        metrics.set_ingest_pipeline_lag_worst_ms(
+                            data_quality.take_worst_ingest_lag_ms(),
+                        );
                         QuantResult::Ok(())
                     }
                 },

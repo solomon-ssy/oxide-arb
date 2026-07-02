@@ -1,16 +1,17 @@
 //! CLOB websocket health test doubles.
 
 use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
+use quant_pivot_models::types::TokenId;
 use std::sync::Arc;
 
 /// Fixed shard connectivity for integration tests (no live socket or manager).
 #[derive(Debug, Clone, Copy)]
-pub struct FixedWsShardHealth {
+pub struct WsShardHealth {
     summary: ShardHealthSummary,
     last_message_age_ms: Option<u64>,
 }
 
-impl FixedWsShardHealth {
+impl WsShardHealth {
     /// One connected shard with a fresh message — satisfies market-data readiness.
     #[must_use]
     pub fn operational() -> Arc<dyn WsShardHealthPort> {
@@ -44,12 +45,17 @@ impl FixedWsShardHealth {
     }
 }
 
-impl WsShardHealthPort for FixedWsShardHealth {
+impl WsShardHealthPort for WsShardHealth {
     fn shard_health(&self) -> ShardHealthSummary {
         self.summary
     }
 
     fn last_message_age_ms(&self) -> Option<u64> {
+        self.last_message_age_ms
+    }
+
+    fn token_message_age_ms(&self, _token_id: &TokenId) -> Option<u64> {
+        // Test double: fall back to the global message age for every token.
         self.last_message_age_ms
     }
 }

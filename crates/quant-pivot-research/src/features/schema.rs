@@ -115,8 +115,8 @@ pub enum StalenessRule {
     None,
     /// Bounded by `data_quality.max_book_age_ms`.
     MaxBookAge,
-    /// Bounded by `data_quality.max_fact_lag_secs`.
-    MaxFactLag,
+    /// Bounded by `data_quality.max_feature_bucket_age_secs`.
+    MaxFeatureBucketAge,
 }
 
 /// How a feature behaves when its value is absent. The four-state policy is the
@@ -495,7 +495,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     use FeatureValueKind::Decimal as Dec;
     use PitRule::FactBeforeAsOfMinusDelay as Pit;
     use SourceRequirement::MicrostructureWindow as Src;
-    use StalenessRule::MaxFactLag as Stale;
+    use StalenessRule::MaxFeatureBucketAge as Stale;
 
     for window in &config.bar_windows_secs {
         out.push(
@@ -568,7 +568,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureValueKind::{Decimal as Dec, Probability};
     use PitRule::FactBeforeAsOfMinusDelay as Pit;
     use SourceRequirement::MicrostructureWindow as Src;
-    use StalenessRule::MaxFactLag as Stale;
+    use StalenessRule::MaxFeatureBucketAge as Stale;
 
     for (name, kind, unit) in [
         (micro::QUOTE_UPDATE_RATE, Dec, FeatureUnit::PerSecond),

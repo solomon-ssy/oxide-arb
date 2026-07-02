@@ -458,8 +458,9 @@ curl -sS "$BASE/api/quant/data-quality" \
   -H "Accept-Api-Version: v1" | jq .
 ```
 
-期望：`total_tokens > 0`；`fresh + acceptable` 占多数；`fact_lag_exceeded: false`。  
-`worst_fact_lag_ms` 接近或超过 `max_fact_lag_ms` 表示 ClickHouse 写入滞后，会影响离线训练集的 PIT 精度。
+期望：`total_tokens > 0`；`fresh + acceptable` 占多数（= 可用盘口，静默但有效的冷门 book 属 `acceptable`，非故障）；`ingest_lag_exceeded: false`。  
+`worst_book_age_ms` 是跨 token 实际观测到的最差盘口年龄（对照阈值 `max_book_age_ms`）。  
+`worst_ingest_lag_ms` 接近或超过 `max_ingest_lag_ms` 表示 ClickHouse 入库管道（enqueue→flush）滞后，会影响离线训练集的 PIT 精度；它衡量写入背压，与 venue 盘口年龄无关。
 
 **5. 子系统健康**
 
@@ -500,8 +501,8 @@ Postgres、ClickHouse、Redis 探针应为 `healthy`。
 |------|----------|
 | `gamma_markets_total` | > 0，full sync 后稳定 |
 | `gamma_last_sync_success` | 1（最近一次 sync 成功） |
-| `fact_lag_worst_ms` | 低于 runtime-config `data_quality.max_fact_lag_ms` |
-| `fact_writer_lag_seconds`（若暴露） | 无持续增大 |
+| `ingest_pipeline_lag_worst_ms` | 低于 runtime-config `data_quality.max_ingest_lag_ms` |
+| `ingest_pipeline_lag_seconds`（按 writer） | 无持续增大 |
 
 #### 6.4.5 用 ClickHouse 确认 L2 历史（训练前）
 
@@ -659,6 +660,19 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
 ```
 
 回滚也是 governed mutation，会写 operation log。
+
+### 7.4 升级：盘口失衡口径与数据质量指标变更（本次发布必读）
+
+本次发布重定义了盘口失衡与数据质量/滞后语义，属**破坏式变更**。部署后按序执行：
+
+1. **runtime-config 字段迁移**：`data_quality.max_fact_lag_secs` 已拆分为两个语义独立字段——
+   - `max_ingest_lag_ms`（默认 `10000`）：入库管道 enqueue→flush 背压阈值，供实时数据质量 / 执行准入 / 选市使用；
+   - `max_feature_bucket_age_secs`（默认 `30`）：特征桶陈旧度阈值，供物化 / 训练 / 回测使用。
+   新建版本时若沿用旧 JSON，必须替换该字段（旧名已移除，`deny_unknown_fields` 会拒绝）。
+2. **强制模型工件失效 + 重训**：`book.depth_imbalance` 由「全簿 USD 名义额」改为「盘口 Top-5 档股数加权队列失衡」，`FeaturesConfig.feature_schema_version` 默认已升为 `2`。现网需在激活的 runtime-config 中把 `features.feature_schema_version` 提升，使 `feature_schema_hash` 变化——模型工厂据此拒绝旧语义训练的候选工件（否则会静默用新特征给旧权重打分）。
+3. **重物化 + 回测重跑 + 重训**：冻结数据集只存 schedule+label、特征恒重算，故对既有训练数据集重跑训练（加权 + 经典两条路径）与回测即自动采用新口径（PIT book 由 `book_snapshots` 180d 保留可重放）。**新旧模型指标不可跨语义直接比较**，需重新过质量门。
+4. **图表历史（可选）**：ClickHouse `book_microstructure_1s.imbalance_avg` 为前向修正（新行 `schema_version=2`，Top-N 股数口径 + 真桶内均值）。如需修正历史图表，可从 `book_snapshots` 按新公式回填并刷新 `book_microstructure_1m`；否则保持前向修正即可（该列不参与模型/回测，仅供图表）。
+5. **仪表盘字段**：`GET /api/quant/data-quality` 现返回 `worst_book_age_ms`（实测最差盘口年龄）、`worst_ingest_lag_ms` / `max_ingest_lag_ms` / `ingest_lag_exceeded`；首页「活跃市场」页脚展示「可用盘口 = fresh + acceptable」比例。
 
 ## 8. 生成与阅读报告
 

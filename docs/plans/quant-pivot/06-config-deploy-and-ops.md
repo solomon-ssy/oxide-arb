@@ -91,9 +91,12 @@ RuntimeConfig {
 
 ### 2.2 `data_quality`
 
-`max_book_age_ms`, `max_fact_lag_secs`, `min_book_depth_usd`, `reject_crossed_books`, `reject_empty_books`, `feature_staleness_policy`, `max_stale_book_ratio_bps`。
+`max_book_age_ms`, `max_ingest_lag_ms`, `max_feature_bucket_age_secs`, `min_book_depth_usd`, `reject_crossed_books`, `reject_empty_books`, `feature_staleness_policy`, `max_stale_book_ratio_bps`。
 
-> **v7 删除**：`allow_degraded_domain_features`、`source_delay_secs`（前者从未消费；后者只作 ad-hoc 报告 source-delay 回退，已合并——见 §2.8）。exit 再推断的 as-of 回退改用 `max_fact_lag_secs`。
+`max_ingest_lag_ms` 衡量入库管道 enqueue→ClickHouse flush-ack 背压（实时数据质量 / 执行准入 / 选市）；`max_feature_bucket_age_secs` 衡量物化特征桶陈旧度（训练 / 回测 / 在线特征）。二者语义独立，不可混用。
+
+> **v7 删除**：`allow_degraded_domain_features`、`source_delay_secs`（前者从未消费；后者只作 ad-hoc 报告 source-delay 回退，已合并——见 §2.8）。exit 再推断的 as-of 回退改用 `max_feature_bucket_age_secs`。
+> **拆分**：旧 `max_fact_lag_secs` 拆为 `max_ingest_lag_ms`（管道背压）与 `max_feature_bucket_age_secs`（特征桶陈旧度）。
 
 ### 2.3 `features`
 

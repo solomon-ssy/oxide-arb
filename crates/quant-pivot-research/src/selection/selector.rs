@@ -160,7 +160,8 @@ mod tests {
             book_age_ms: Some(500),
             crossed: false,
             empty: false,
-            fact_lag_ms: 1_000,
+            connection_healthy: true,
+            ingest_lag_ms: 1_000,
             observed_at: as_of(),
         }
     }
@@ -268,26 +269,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn data_quality_filter_excludes_stale_book_and_fact_lag() {
+    async fn data_quality_filter_is_connection_aware_for_book_age() {
+        // Aged book while the connection is UNHEALTHY → stale (may be missing
+        // updates).
         let mut stale = healthy_candidate("0xstale");
         stale.book_age_ms = Some(60_000);
+        stale.connection_healthy = false;
+        // Aged book while the connection is HEALTHY → still the venue truth,
+        // admitted (quiet ≠ stale on Polymarket).
+        let mut quiet = healthy_candidate("0xquiet");
+        quiet.book_age_ms = Some(60_000);
+        quiet.connection_healthy = true;
+        // Ingest pipeline backpressure is independent of book age.
         let mut lagging = healthy_candidate("0xlag");
-        lagging.fact_lag_ms = 120_000;
+        lagging.ingest_lag_ms = 120_000;
 
         let snapshot = build(
             request_with(selection_config()),
-            vec![healthy_candidate("0xfresh"), stale, lagging],
+            vec![healthy_candidate("0xfresh"), stale, quiet, lagging],
         )
         .await;
 
-        assert_eq!(snapshot.included.len(), 1);
+        assert_eq!(snapshot.included.len(), 2);
         let reasons = snapshot
             .excluded
             .iter()
             .map(|market| market.reason.clone())
             .collect::<Vec<_>>();
         assert!(reasons.contains(&ExclusionReason::StaleBook));
-        assert!(reasons.contains(&ExclusionReason::FactLagExceeded));
+        assert!(reasons.contains(&ExclusionReason::IngestLagExceeded));
         assert_eq!(snapshot.exclusion_summary.stale_book_count, 1);
     }
 

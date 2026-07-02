@@ -57,8 +57,15 @@ impl Default for SelectionConfig {
 pub struct DataQualityConfig {
     /// Maximum age for a book snapshot before it is stale.
     pub max_book_age_ms: u64,
-    /// Maximum acceptable `ClickHouse` fact lag.
-    pub max_fact_lag_secs: u64,
+    /// Maximum acceptable ingest **pipeline** lag (enqueue→ClickHouse flush-ack),
+    /// in milliseconds. Live-plane backpressure health only — NOT venue book age.
+    /// Governs `DataQualitySnapshot.ingest_lag_exceeded`, execution admission, and
+    /// market-candidate selection.
+    pub max_ingest_lag_ms: u64,
+    /// Maximum acceptable age (seconds) of the freshest materialized feature
+    /// bucket at decision time. Governs offline/online feature staleness
+    /// (`StalenessRule::MaxFeatureBucketAge`) — independent of live ingest lag.
+    pub max_feature_bucket_age_secs: u64,
     /// Minimum visible book depth in USD.
     pub min_book_depth_usd: DecimalString,
     /// Reject crossed books before feature generation.
@@ -79,7 +86,8 @@ impl Default for DataQualityConfig {
     fn default() -> Self {
         Self {
             max_book_age_ms: 5_000,
-            max_fact_lag_secs: 30,
+            max_ingest_lag_ms: 10_000,
+            max_feature_bucket_age_secs: 30,
             min_book_depth_usd: DecimalString::new("0"),
             reject_crossed_books: true,
             reject_empty_books: true,
@@ -114,7 +122,12 @@ pub struct FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: SchemaVersion::FIRST,
+            // v2: `book.depth_imbalance` switched from full-book USD notional to
+            // top-N share-weighted queue imbalance. Bumping the schema version
+            // changes `feature_schema_hash`, so the model factory rejects
+            // artifacts trained under the old semantics (forcing rematerialize +
+            // retrain) instead of silently scoring a different feature.
+            feature_schema_version: SchemaVersion::new(2),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,

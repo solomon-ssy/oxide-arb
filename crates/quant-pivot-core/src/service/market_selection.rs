@@ -116,7 +116,8 @@ mod tests {
             book_age_ms: Some(500),
             crossed: false,
             empty: false,
-            fact_lag_ms: 1_000,
+            connection_healthy: true,
+            ingest_lag_ms: 1_000,
             observed_at: as_of(),
         }
     }

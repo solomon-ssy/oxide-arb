@@ -4,6 +4,7 @@
 //! shutdown. Legacy Endgame detection / execution / risk / settlement /
 //! control-factor series do not exist here.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use prometheus::{
@@ -11,6 +12,13 @@ use prometheus::{
     Opts, Registry, TextEncoder,
 };
 use quant_pivot_storage::write::AsyncWriterObservability;
+
+/// Convert an integer millisecond lag into fractional seconds for histograms.
+fn lag_secs_from_ms(lag_ms: u64) -> f64 {
+    let whole_secs = lag_ms / 1_000;
+    let frac_ms = u32::try_from(lag_ms % 1_000).unwrap_or(u32::MAX);
+    f64::from(u32::try_from(whole_secs).unwrap_or(u32::MAX)) + f64::from(frac_ms) / 1_000.0
+}
 
 macro_rules! register_counter {
     ($registry:expr, $name:expr, $help:expr) => {{
@@ -108,8 +116,8 @@ pub struct MetricsHub {
 
     // ── Data quality ──────────────────────────────────────────────────────
     pub data_quality_tokens: IntGaugeVec,
-    pub fact_lag_worst_ms: IntGauge,
-    pub fact_lag_seconds: HistogramVec,
+    pub ingest_pipeline_lag_worst_ms: IntGauge,
+    pub ingest_pipeline_lag_seconds: HistogramVec,
 
     // ── Infra / async writers ─────────────────────────────────────────────
     pub async_writer_dropped: IntCounterVec,
@@ -540,16 +548,16 @@ impl MetricsHub {
             "Live book tokens by data-quality status",
             &["status"]
         );
-        let fact_lag_worst_ms = register_gauge_int!(
+        let ingest_pipeline_lag_worst_ms = register_gauge_int!(
             &registry,
-            "quant_pivot_fact_lag_worst_ms",
-            "Peak ingest-side fact lag in the last observation window (milliseconds)"
+            "quant_pivot_ingest_pipeline_lag_worst_ms",
+            "Peak ingest pipeline lag (enqueue→flush-ack) in the last window (milliseconds)"
         );
-        let fact_lag_seconds = register_histogram_vec!(
+        let ingest_pipeline_lag_seconds = register_histogram_vec!(
             &registry,
-            "quant_pivot_fact_lag_seconds",
-            "Ingest-side fact lag (ingestion_time - event_time) by stream",
-            &["stream"],
+            "quant_pivot_ingest_pipeline_lag_seconds",
+            "Ingest pipeline lag (enqueue→flush-ack) by writer",
+            &["writer"],
             FACT_LAG_BUCKETS_SECS
         );
         let execution = register_execution_metrics(&registry);
@@ -577,8 +585,8 @@ impl MetricsHub {
             subscription_selected_total: subscription.selected_total,
             subscription_window_coverage_ratio: subscription.detection_window_coverage_ratio,
             data_quality_tokens,
-            fact_lag_worst_ms,
-            fact_lag_seconds,
+            ingest_pipeline_lag_worst_ms,
+            ingest_pipeline_lag_seconds,
             async_writer_dropped: infra.async_writer_dropped,
             async_writer_queue_depth: infra.async_writer_queue_depth,
             async_writer_flush_failed: infra.async_writer_flush_failed,
@@ -675,29 +683,37 @@ impl MetricsHub {
         self.auto_execution_halted.set(i64::from(halted));
     }
 
-    /// Observe one fact-lag sample for a named stream.
-    pub fn observe_fact_lag_ms(&self, stream: &str, lag_ms: u64) {
-        let whole_secs = lag_ms / 1_000;
-        let frac_ms = u32::try_from(lag_ms % 1_000).unwrap_or(u32::MAX);
-        let lag_secs =
-            f64::from(u32::try_from(whole_secs).unwrap_or(u32::MAX)) + f64::from(frac_ms) / 1_000.0;
-        self.fact_lag_seconds
-            .with_label_values(&[stream])
-            .observe(lag_secs);
+    /// Observe one ingest-pipeline-lag sample (enqueue→flush-ack) for a writer.
+    pub fn observe_ingest_pipeline_lag_ms(&self, writer: &str, lag_ms: u64) {
+        self.ingest_pipeline_lag_seconds
+            .with_label_values(&[writer])
+            .observe(lag_secs_from_ms(lag_ms));
     }
 
-    /// Publish the peak fact lag for the elapsed observation window.
-    pub fn set_fact_lag_worst_ms(&self, lag_ms: u64) {
-        self.fact_lag_worst_ms
+    /// Publish the peak ingest pipeline lag for the elapsed observation window.
+    pub fn set_ingest_pipeline_lag_worst_ms(&self, lag_ms: u64) {
+        self.ingest_pipeline_lag_worst_ms
             .set(i64::try_from(lag_ms).unwrap_or(i64::MAX));
     }
 
     /// Build observability handles for one named async writer.
+    ///
+    /// Every writer reports its enqueue→flush-ack latency into the per-writer
+    /// `ingest_pipeline_lag_seconds` histogram (complete backpressure telemetry).
+    /// Feeding the plane-level [`IngestPipelineLagTracker`] that gates book-plane
+    /// data quality is done separately, and only for the book-fact streams, so a
+    /// slow output sink never poisons the live book-quality gate.
     #[must_use]
     pub fn async_writer_observability(&self, writer: &'static str) -> AsyncWriterObservability {
+        let lag_histogram = self
+            .ingest_pipeline_lag_seconds
+            .with_label_values(&[writer]);
         AsyncWriterObservability {
             queue_depth: Some(self.async_writer_queue_depth.with_label_values(&[writer])),
             flush_failed: Some(self.async_writer_flush_failed.with_label_values(&[writer])),
+            flush_lag_ms: Some(Arc::new(move |lag_ms| {
+                lag_histogram.observe(lag_secs_from_ms(lag_ms));
+            })),
         }
     }
 

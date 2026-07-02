@@ -20,6 +20,7 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -38,11 +39,28 @@ type FlushFn<T> = Box<
     dyn Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send>> + Send + Sync,
 >;
 
-/// Optional Prometheus handles for queue depth and flush failures.
+/// Callback reporting the worst enqueue→flush-ack latency (ms) of a batch.
+///
+/// This is the true ingest pipeline lag (queue wait + persist), independent of
+/// venue event age. Kept as a closure so the storage layer stays agnostic of
+/// the core lag tracker / metrics it feeds.
+pub type FlushLagReporter = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// Optional Prometheus handles for queue depth and flush failures, plus the
+/// ingest-pipeline-lag reporter.
 #[derive(Clone, Default)]
 pub struct AsyncWriterObservability {
     pub queue_depth: Option<IntGauge>,
     pub flush_failed: Option<IntCounter>,
+    /// Reports enqueue→flush-ack latency (ms) after each successful batch flush.
+    pub flush_lag_ms: Option<FlushLagReporter>,
+}
+
+/// One queued item stamped with its enqueue instant so the worker can measure
+/// enqueue→flush-ack latency (ingest pipeline lag) without inspecting `T`.
+struct Queued<T> {
+    item: T,
+    enqueued: Instant,
 }
 
 /// Construction parameters for an [`AsyncWriter`].
@@ -93,7 +111,7 @@ impl AsyncWriterConfig {
 ///
 /// Cheap to clone (clones the `flume` sender and shares the drop counter).
 pub struct AsyncWriter<T: Send + 'static> {
-    tx: flume::Sender<T>,
+    tx: flume::Sender<Queued<T>>,
     name: &'static str,
     drops: IntCounter,
     observability: AsyncWriterObservability,
@@ -147,9 +165,14 @@ impl<T: Send + 'static> AsyncWriter<T> {
     }
 
     /// Enqueue an item without blocking. Returns `false` and counts a drop when
-    /// the channel is full or closed — the caller must never block on this.
+    /// the channel is full or closed — the caller must never block on this. The
+    /// item is stamped with its enqueue instant for ingest-lag measurement.
     pub fn write(&self, item: T) -> bool {
-        if self.tx.try_send(item).is_err() {
+        let queued = Queued {
+            item,
+            enqueued: Instant::now(),
+        };
+        if self.tx.try_send(queued).is_err() {
             self.drops.inc();
             self.note_drop();
             return false;
@@ -197,7 +220,7 @@ impl<T: Send + 'static> AsyncWriter<T> {
 
 /// Background drain that batches items and flushes them through the sink.
 pub struct AsyncWriterWorker<T: Send + 'static> {
-    rx: flume::Receiver<T>,
+    rx: flume::Receiver<Queued<T>>,
     flush: FlushFn<T>,
     name: &'static str,
     batch_size: usize,
@@ -263,17 +286,30 @@ impl<T: Send + 'static> AsyncWriterWorker<T> {
         flush: &FlushFn<T>,
         name: &'static str,
         observability: &AsyncWriterObservability,
-        buffer: &mut Vec<T>,
+        buffer: &mut Vec<Queued<T>>,
     ) {
         if buffer.is_empty() {
             return;
         }
-        let batch = std::mem::take(buffer);
-        if let Err(error) = flush(batch).await {
-            if let Some(counter) = &observability.flush_failed {
-                counter.inc();
+        let queued = std::mem::take(buffer);
+        // Oldest enqueue instant in the batch → worst-case pipeline lag once the
+        // flush is acknowledged below.
+        let oldest_enqueued = queued.iter().map(|q| q.enqueued).min();
+        let batch: Vec<T> = queued.into_iter().map(|q| q.item).collect();
+        match flush(batch).await {
+            Ok(()) => {
+                if let (Some(report), Some(oldest)) = (&observability.flush_lag_ms, oldest_enqueued)
+                {
+                    let lag_ms = u64::try_from(oldest.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    report(lag_ms);
+                }
             }
-            warn!(writer = name, %error, "batch flush failed; batch dropped");
+            Err(error) => {
+                if let Some(counter) = &observability.flush_failed {
+                    counter.inc();
+                }
+                warn!(writer = name, %error, "batch flush failed; batch dropped");
+            }
         }
     }
 }

@@ -258,9 +258,10 @@ fn green_snapshot() -> DataQualitySnapshot {
         stale: 0,
         insufficient: 0,
         max_book_age_ms: 0,
-        max_fact_lag_ms: 0,
-        worst_fact_lag_ms: 0,
-        fact_lag_exceeded: false,
+        worst_book_age_ms: 0,
+        max_ingest_lag_ms: 0,
+        worst_ingest_lag_ms: 0,
+        ingest_lag_exceeded: false,
     }
 }
 
@@ -410,7 +411,7 @@ async fn semi_auto_all_green_passes() {
 async fn semi_auto_requires_credentials_and_data_quality() {
     let mut fixture = PreflightFixture::ready_for_auto();
     fixture.deploy.keys.private_key = None;
-    fixture.snapshot.fact_lag_exceeded = true;
+    fixture.snapshot.ingest_lag_exceeded = true;
     let report = fixture
         .build()
         .run(QuantRuntimeMode::SemiAuto)

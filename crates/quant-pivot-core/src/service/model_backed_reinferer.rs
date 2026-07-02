@@ -151,9 +151,9 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             required_features: runtime.required_features(),
         };
         // Exit re-inference has no schedule/request source delay; fall back the
-        // live feature `as_of` by the maximum tolerated fact lag so the window
-        // end lands on the freshest guaranteed-settled fact boundary.
-        let source_delay = Duration::from_secs(config.data_quality.max_fact_lag_secs);
+        // live feature `as_of` by the maximum tolerated feature-bucket age so the
+        // window end lands on the freshest guaranteed-settled fact boundary.
+        let source_delay = Duration::from_secs(config.data_quality.max_feature_bucket_age_secs);
         let as_of = now - source_delay;
         let Some(liquidity_cap_usd) = liquidity_score_cap(&config)? else {
             return Ok(None);

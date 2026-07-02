@@ -217,11 +217,17 @@ fn data_quality_fields() -> Vec<FieldUiEntry> {
             "最大订单簿年龄",
             10,
         ),
-        integer(
-            "data_quality.max_fact_lag_secs",
-            "Maximum fact lag",
-            "最大事实延迟",
+        duration(
+            "data_quality.max_ingest_lag_ms",
+            "Maximum ingest pipeline lag",
+            "最大入库管道滞后",
             20,
+        ),
+        integer(
+            "data_quality.max_feature_bucket_age_secs",
+            "Maximum feature bucket age",
+            "最大特征桶年龄",
+            21,
         ),
         money(
             "data_quality.min_book_depth_usd",

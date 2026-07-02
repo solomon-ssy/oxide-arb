@@ -19,7 +19,7 @@ use crate::{
         },
     },
 };
-use quant_pivot_api::fees::FeeCalculator;
+use quant_pivot_api::{fees::FeeCalculator, ws::WsShardHealthPort};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::{FactorGovernancePort, ModelGovernancePort};
 use quant_pivot_models::{
@@ -135,7 +135,8 @@ impl ResearchBundle {
         let candidate_provider = Arc::new(MarketCandidateProvider::new(
             Arc::clone(&deps.data.market_registry),
             Arc::clone(&deps.data.book_store),
-            Arc::clone(&deps.infra.fact_lag_tracker),
+            Arc::clone(&deps.data.ws_manager) as Arc<dyn WsShardHealthPort>,
+            Arc::clone(&deps.infra.ingest_lag_tracker),
         ));
         let feature_repo: Arc<dyn FeatureRepository> =
             Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>;

@@ -25,7 +25,7 @@ use crate::{
 use quant_pivot_api::{
     fees::FeeCalculator,
     gamma::GammaClient,
-    ws::{ClobWsManager, WsEventDropHook},
+    ws::{ClobWsManager, WsEventDropHook, WsShardHealthPort},
 };
 use quant_pivot_models::{
     config::DeployConfig,
@@ -76,10 +76,9 @@ pub struct DataBundle {
 impl DataBundle {
     /// Wire the full Polymarket ingest stack from deploy config and infra handles.
     pub fn assemble(deps: &DataBundleDeps<'_>) -> Self {
-        let on_events_dropped: WsEventDropHook = {
-            let metrics = Arc::clone(deps.metrics);
-            Arc::new(move |n| metrics.ws_events_dropped.inc_by(n))
-        };
+        let drop_metrics = Arc::clone(deps.metrics);
+        let on_events_dropped: WsEventDropHook =
+            Arc::new(move |n| drop_metrics.ws_events_dropped.inc_by(n));
         let ws_manager = Arc::new(ClobWsManager::new(
             &deps.deploy.polymarket,
             &deps.deploy.market_data.websocket,
@@ -144,8 +143,9 @@ impl DataBundle {
 
         let data_quality = Arc::new(BookDataQualityService::new(
             Arc::clone(&book_store),
+            Arc::clone(&ws_manager) as Arc<dyn WsShardHealthPort>,
             &deps.runtime.data_quality,
-            Arc::clone(&deps.infra.fact_lag_tracker),
+            Arc::clone(&deps.infra.ingest_lag_tracker),
         ));
         let pit_source: Arc<dyn PointInTimeDataSource> = Arc::new(LiveBookDataSource::new(
             Arc::clone(&book_store),

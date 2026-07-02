@@ -171,10 +171,10 @@ impl AdmissionCheck for DataQualityCheck {
         if dq.total_tokens == 0 {
             return AdmissionCheckTrace::deny(self.id(), "no tokens classified");
         }
-        if dq.fact_lag_exceeded {
-            return AdmissionCheckTrace::deny(self.id(), "clickhouse fact lag exceeded")
-                .with_threshold(dq.max_fact_lag_ms.to_string())
-                .with_actual(dq.worst_fact_lag_ms.to_string());
+        if dq.ingest_lag_exceeded {
+            return AdmissionCheckTrace::deny(self.id(), "clickhouse ingest pipeline lag exceeded")
+                .with_threshold(dq.max_ingest_lag_ms.to_string())
+                .with_actual(dq.worst_ingest_lag_ms.to_string());
         }
         if dq.insufficient > 0 {
             return AdmissionCheckTrace::deny(self.id(), "tokens with insufficient data present")

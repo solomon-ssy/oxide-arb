@@ -37,8 +37,8 @@ pub struct SelectorHashInput {
     pub max_selection_size: u32,
     /// Maximum allowed published-book age, in milliseconds.
     pub max_book_age_ms: u64,
-    /// Maximum allowed worst-case fact-write lag, in milliseconds.
-    pub max_fact_lag_ms: u64,
+    /// Maximum allowed worst-case ingest pipeline lag (enqueue→flush), in ms.
+    pub max_ingest_lag_ms: u64,
     /// Reject crossed books.
     pub reject_crossed_books: bool,
     /// Reject empty (one-sided) books.
@@ -79,7 +79,7 @@ impl SelectorHashInput {
             max_time_to_resolution_secs: selection.max_time_to_resolution_secs,
             max_selection_size: selection.max_selection_size,
             max_book_age_ms: data_quality.max_book_age_ms,
-            max_fact_lag_ms: data_quality.max_fact_lag_secs.saturating_mul(1_000),
+            max_ingest_lag_ms: data_quality.max_ingest_lag_ms,
             reject_crossed_books: data_quality.reject_crossed_books,
             reject_empty_books: data_quality.reject_empty_books,
             selected_market_ids,

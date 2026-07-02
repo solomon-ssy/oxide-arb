@@ -264,12 +264,12 @@ impl ConfiguredFeatureBuilder {
         let assembly = self.assemble(&raw, &required, data_quality, resolved.as_of);
 
         let book_age_ms = book_age_ms(resolved.as_of, resolved.book.as_ref());
-        let fact_lag_ms = fact_lag_ms(resolved.as_of, resolved.window);
+        let feature_bucket_age_ms = feature_bucket_age_ms(resolved.as_of, resolved.window);
         let data_quality_status = classify(
             assembly.rejected,
             assembly.degraded,
             book_age_ms,
-            fact_lag_ms,
+            feature_bucket_age_ms,
             data_quality,
         );
 
@@ -281,7 +281,7 @@ impl ConfiguredFeatureBuilder {
             values: assembly.values,
             substitutions: assembly.substitutions,
             data_quality: data_quality_status,
-            staleness_ms: book_age_ms.max(fact_lag_ms),
+            staleness_ms: book_age_ms.max(feature_bucket_age_ms),
             source_refs: assembly.evidence,
         }
     }
@@ -452,10 +452,11 @@ fn in_range(spec: &FeatureSpec, value: &FeatureValue) -> bool {
 
 /// Whether a present value's freshest input violates the spec's staleness bound.
 ///
-/// `MaxBookAge` is bounded by `data_quality.max_book_age_ms`; `MaxFactLag` by
-/// `data_quality.max_fact_lag_secs`. A bound of zero (or [`StalenessRule::None`])
-/// means unbounded. A feature with no evidence carries no measurable age and is
-/// never marked stale here (its absence is handled elsewhere).
+/// `MaxBookAge` is bounded by `data_quality.max_book_age_ms`;
+/// `MaxFeatureBucketAge` by `data_quality.max_feature_bucket_age_secs`. A bound
+/// of zero (or [`StalenessRule::None`]) means unbounded. A feature with no
+/// evidence carries no measurable age and is never marked stale here (its
+/// absence is handled elsewhere).
 fn staleness_breach(
     spec: &FeatureSpec,
     evidence: Option<&EvidenceSourceRef>,
@@ -465,7 +466,9 @@ fn staleness_breach(
     let bound_ms = match spec.staleness_policy {
         StalenessRule::None => return false,
         StalenessRule::MaxBookAge => data_quality.max_book_age_ms,
-        StalenessRule::MaxFactLag => data_quality.max_fact_lag_secs.saturating_mul(1_000),
+        StalenessRule::MaxFeatureBucketAge => data_quality
+            .max_feature_bucket_age_secs
+            .saturating_mul(1_000),
     };
     if bound_ms == 0 {
         return false;
@@ -494,39 +497,42 @@ fn book_age_ms(as_of: DateTime<Utc>, book: Option<&ResolvedBook>) -> u64 {
     book.map_or(0, |book| age_ms(as_of, book.observed_at))
 }
 
-/// Worst fact lag in milliseconds at `as_of`: age of the freshest window bucket.
+/// Freshest materialized feature-bucket age in milliseconds at `as_of`: age of
+/// the freshest window bucket.
 ///
-/// Point-in-time correct: a window with no buckets contributes no lag (its
+/// Point-in-time correct: a window with no buckets contributes no age (its
 /// absence is handled by the null policy, not here).
-fn fact_lag_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> u64 {
+fn feature_bucket_age_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> u64 {
     window
         .freshest_bucket_time()
         .map_or(0, |bucket_time| age_ms(as_of, bucket_time))
 }
 
 /// Classify the vector's aggregate data quality across both freshness
-/// dimensions: book age (bounded by `max_book_age_ms`) and fact lag (bounded by
-/// `max_fact_lag_secs`). The two are judged independently — fact lag is never
-/// measured against the book-age bound.
+/// dimensions: book age (bounded by `max_book_age_ms`) and feature-bucket age
+/// (bounded by `max_feature_bucket_age_secs`). The two are judged independently
+/// — bucket age is never measured against the book-age bound.
 const fn classify(
     rejected: bool,
     degraded: bool,
     book_age_ms: u64,
-    fact_lag_ms: u64,
+    feature_bucket_age_ms: u64,
     data_quality: &DataQualityConfig,
 ) -> DataQualityStatus {
     if rejected {
         return DataQualityStatus::Insufficient;
     }
     let book_bound = data_quality.max_book_age_ms;
-    let fact_bound = data_quality.max_fact_lag_secs.saturating_mul(1_000);
-    if exceeds(book_age_ms, book_bound) || exceeds(fact_lag_ms, fact_bound) {
+    let bucket_bound = data_quality
+        .max_feature_bucket_age_secs
+        .saturating_mul(1_000);
+    if exceeds(book_age_ms, book_bound) || exceeds(feature_bucket_age_ms, bucket_bound) {
         return DataQualityStatus::Stale;
     }
     if degraded {
         return DataQualityStatus::Degraded;
     }
-    if within_half(book_age_ms, book_bound) && within_half(fact_lag_ms, fact_bound) {
+    if within_half(book_age_ms, book_bound) && within_half(feature_bucket_age_ms, bucket_bound) {
         DataQualityStatus::Fresh
     } else {
         DataQualityStatus::Acceptable

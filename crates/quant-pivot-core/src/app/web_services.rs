@@ -29,9 +29,7 @@ use quant_pivot_repository::traits::{
     RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
     SettlementRedeemRepository, UserRepository, UserRoleRepository,
 };
-use quant_pivot_storage::write::{
-    AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker,
-};
+use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
     AppState,
     audit::OperationLogBuffer,
@@ -249,20 +247,9 @@ fn build_operation_log_writer(
             Box::pin(async move { repo.append_batch(rows).await })
         },
         op_log_drops,
-        AsyncWriterObservability {
-            queue_depth: Some(
-                ctx.infra
-                    .metrics
-                    .async_writer_queue_depth
-                    .with_label_values(&["operation_log"]),
-            ),
-            flush_failed: Some(
-                ctx.infra
-                    .metrics
-                    .async_writer_flush_failed
-                    .with_label_values(&["operation_log"]),
-            ),
-        },
+        ctx.infra
+            .metrics
+            .async_writer_observability("operation_log"),
     );
     (
         OperationLogBuffer::new(Arc::new(op_log_writer)),

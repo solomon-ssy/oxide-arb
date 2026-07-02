@@ -194,9 +194,10 @@ fn green_data_quality() -> DataQualitySnapshot {
         stale: 0,
         insufficient: 0,
         max_book_age_ms: 5_000,
-        max_fact_lag_ms: 30_000,
-        worst_fact_lag_ms: 0,
-        fact_lag_exceeded: false,
+        worst_book_age_ms: 0,
+        max_ingest_lag_ms: 30_000,
+        worst_ingest_lag_ms: 0,
+        ingest_lag_exceeded: false,
     }
 }
 

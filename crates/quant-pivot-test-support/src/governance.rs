@@ -10,7 +10,7 @@ use quant_pivot_core::{
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_storage::postgres::PostgresPool;
 
-use crate::{storage::inert_clickhouse_pool, ws::FixedWsShardHealth};
+use crate::{storage::inert_clickhouse_pool, ws::WsShardHealth};
 
 /// Build a [`HealthChecker`] with catalog + market-data marked operational
 /// (no live Gamma sync, CLOB websocket, or `ClickHouse` probe required).
@@ -25,7 +25,7 @@ pub fn operational_health_checker(
     Arc::new(HealthChecker::new(HealthCheckerDeps {
         pg_pool: pg,
         ch_pool: Arc::new(inert_clickhouse_pool(&deploy.db.clickhouse)),
-        ws_health: FixedWsShardHealth::operational(),
+        ws_health: WsShardHealth::operational(),
         catalog,
         runtime_mode,
     }))

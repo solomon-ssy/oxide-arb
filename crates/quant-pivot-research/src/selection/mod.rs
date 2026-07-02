@@ -164,8 +164,8 @@ pub enum ExclusionReason {
     SpreadTooWide,
     /// Book staler than allowed.
     StaleBook,
-    /// Fact lag exceeded the threshold.
-    FactLagExceeded,
+    /// Ingest pipeline lag (enqueue→flush) exceeded the threshold.
+    IngestLagExceeded,
     /// Resolution is near/ambiguous.
     ResolutionAmbiguous,
     /// Manually blocked by an operator.

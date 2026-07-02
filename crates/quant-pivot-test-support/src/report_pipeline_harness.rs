@@ -8,7 +8,7 @@ use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
     governance::{RuntimeModeHandle, WeightOverlayApplicator},
     observability::{
-        alert_dispatcher::AlertDispatcher, fact_lag::FactLagTracker,
+        alert_dispatcher::AlertDispatcher, fact_lag::IngestPipelineLagTracker,
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub, recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
@@ -107,11 +107,11 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
-use crate::factor_governance::publish_all_factor_definitions;
 use crate::{
     catalog_fixtures::{make_event, make_market},
     report_fixtures,
 };
+use crate::{factor_governance::publish_all_factor_definitions, ws::WsShardHealth};
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
 pub const EVENT_ID: &str = "evt-report-pipeline-e2e";
@@ -720,7 +720,8 @@ fn build_report_builder(
         candidate_provider: Arc::new(MarketCandidateProvider::new(
             Arc::clone(registry),
             Arc::clone(book_store),
-            Arc::new(FactLagTracker::new()),
+            WsShardHealth::operational(),
+            Arc::new(IngestPipelineLagTracker::new()),
         )),
         feature_pipeline: Arc::new(FeaturePipelineService::new(
             FeatureWindowProvider::new(Arc::new(EmptyFactRead)),

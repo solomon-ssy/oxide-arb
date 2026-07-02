@@ -327,6 +327,10 @@ impl WsShardHealthPort for ClobWsManager {
     fn last_message_age_ms(&self) -> Option<u64> {
         Self::last_message_age_ms(self)
     }
+
+    fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64> {
+        Self::token_message_age_ms(self, token_id)
+    }
 }
 
 #[cfg(test)]

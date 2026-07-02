@@ -6,9 +6,10 @@ use crate::{
         attribution_fact_writer::AttributionEventWriter, book_fact_writer::BookFactWriter,
         capital_allocation_fact_writer::CapitalAllocationEventWriter,
         execution_fact_writer::ExecutionEventWriter,
-        exit_signal_fact_writer::ExitSignalEvaluationEventWriter, fact_lag::FactLagTracker,
-        factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
-        metrics_hub::MetricsHub, position_fact_writer::PositionEventWriter,
+        exit_signal_fact_writer::ExitSignalEvaluationEventWriter,
+        fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
+        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
+        position_fact_writer::PositionEventWriter,
         recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
@@ -54,8 +55,8 @@ pub struct InfraBundle {
     pub cache: Arc<CacheManager>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub metrics: Arc<MetricsHub>,
-    /// Shared lag tracker for book facts and data-quality gates.
-    pub fact_lag_tracker: Arc<FactLagTracker>,
+    /// Shared ingest-pipeline-lag tracker (enqueue→flush) for data-quality gates.
+    pub ingest_lag_tracker: Arc<IngestPipelineLagTracker>,
     pub book_fact_writer: Arc<BookFactWriter>,
     pub feature_event_writer: Arc<FeatureEventWriter>,
     /// Long-format factor-event sink (`quant_factor_event`).
@@ -87,7 +88,7 @@ impl InfraBundle {
         let analytics = build_analytics_writers(
             &persistence.ch,
             &persistence.ch_write_manager,
-            &persistence.fact_lag_tracker,
+            &persistence.ingest_lag_tracker,
             &metrics,
             deploy,
         );
@@ -101,7 +102,7 @@ impl InfraBundle {
             cache: persistence.cache,
             jwt_blacklist: persistence.jwt_blacklist,
             metrics,
-            fact_lag_tracker: persistence.fact_lag_tracker,
+            ingest_lag_tracker: persistence.ingest_lag_tracker,
             quant_fact_read: persistence.quant_fact_read,
             book_fact_writer: analytics.book_fact_writer,
             feature_event_writer: analytics.feature_event_writer,
@@ -125,7 +126,7 @@ struct PersistenceConnections {
     redis: RedisPool,
     cache: Arc<CacheManager>,
     jwt_blacklist: Arc<RedisTokenBlacklist>,
-    fact_lag_tracker: Arc<FactLagTracker>,
+    ingest_lag_tracker: Arc<IngestPipelineLagTracker>,
     ch_write_manager: Arc<ChWriteManager>,
     quant_fact_read: Arc<dyn QuantFactReadRepository>,
 }
@@ -160,7 +161,7 @@ async fn connect_persistence(
         &deploy.cache.redis.key_prefix,
     ));
     let repos = PgRepositories::wire(&pg);
-    let fact_lag_tracker = Arc::new(FactLagTracker::new());
+    let ingest_lag_tracker = Arc::new(IngestPipelineLagTracker::new());
     let ch_write_manager = Arc::new(ChWriteManager::new(
         deploy.db.clickhouse.max_concurrent_inserts,
     ));
@@ -181,7 +182,7 @@ async fn connect_persistence(
         redis,
         cache,
         jwt_blacklist,
-        fact_lag_tracker,
+        ingest_lag_tracker,
         ch_write_manager,
         quant_fact_read,
     })
@@ -204,12 +205,12 @@ struct AnalyticsWriters {
 fn build_analytics_writers(
     ch: &Arc<ClickHousePool>,
     ch_write_manager: &Arc<ChWriteManager>,
-    fact_lag_tracker: &Arc<FactLagTracker>,
+    ingest_lag_tracker: &Arc<IngestPipelineLagTracker>,
     metrics: &Arc<MetricsHub>,
     deploy: &DeployConfig,
 ) -> AnalyticsWriters {
     let (book_fact_writer, fact_writer_queue) =
-        build_book_fact_writer(ch, ch_write_manager, fact_lag_tracker, metrics, deploy);
+        build_book_fact_writer(ch, ch_write_manager, ingest_lag_tracker, metrics, deploy);
     let feature_event_writer =
         build_feature_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
     let factor_event_writer =
@@ -265,7 +266,7 @@ fn build_analytics_writers(
 fn build_book_fact_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
-    fact_lag: &Arc<FactLagTracker>,
+    ingest_lag: &Arc<IngestPipelineLagTracker>,
     metrics: &Arc<MetricsHub>,
     deploy: &DeployConfig,
 ) -> (Arc<BookFactWriter>, PendingTaskQueue) {
@@ -281,6 +282,18 @@ fn build_book_fact_writer(
             .flush_interval(flush_interval)
     };
     let drops = |name: &'static str| metrics.async_writer_dropped.with_label_values(&[name]);
+    // Observability that also feeds the enqueue→flush pipeline lag into the
+    // shared tracker (data-quality plane) and the Prometheus histogram.
+    let lag_obs = |name: &'static str| {
+        let mut obs = metrics.async_writer_observability(name);
+        let tracker = Arc::clone(ingest_lag);
+        let metrics = Arc::clone(metrics);
+        obs.flush_lag_ms = Some(Arc::new(move |lag_ms| {
+            tracker.record_ms(lag_ms);
+            metrics.observe_ingest_pipeline_lag_ms(name, lag_ms);
+        }));
+        obs
+    };
 
     let ticks = spawn_fact_stream::<TickEventRow>(
         &queue,
@@ -291,7 +304,7 @@ fn build_book_fact_writer(
             "tick_events",
         )),
         drops("tick_events"),
-        metrics.async_writer_observability("tick_events"),
+        lag_obs("tick_events"),
         config("tick_events"),
     );
     let l2 = spawn_fact_stream::<BookL2ReplayRow>(
@@ -303,7 +316,7 @@ fn build_book_fact_writer(
             "book_l2_replay_hot",
         )),
         drops("book_l2_replay_hot"),
-        metrics.async_writer_observability("book_l2_replay_hot"),
+        lag_obs("book_l2_replay_hot"),
         config("book_l2_replay_hot"),
     );
     let snapshots = spawn_fact_stream::<BookSnapshotRow>(
@@ -315,7 +328,7 @@ fn build_book_fact_writer(
             "book_snapshots",
         )),
         drops("book_snapshots"),
-        metrics.async_writer_observability("book_snapshots"),
+        lag_obs("book_snapshots"),
         config("book_snapshots"),
     );
     let microstructure = spawn_fact_stream::<BookMicrostructureRow>(
@@ -327,7 +340,7 @@ fn build_book_fact_writer(
             "book_microstructure_1s",
         )),
         drops("book_microstructure_1s"),
-        metrics.async_writer_observability("book_microstructure_1s"),
+        lag_obs("book_microstructure_1s"),
         config("book_microstructure_1s"),
     );
     let resolutions = spawn_fact_stream::<MarketResolutionRow>(
@@ -339,7 +352,7 @@ fn build_book_fact_writer(
             "market_resolution_event",
         )),
         drops("market_resolution_event"),
-        metrics.async_writer_observability("market_resolution_event"),
+        lag_obs("market_resolution_event"),
         config("market_resolution_event"),
     );
 
@@ -349,8 +362,6 @@ fn build_book_fact_writer(
         snapshots,
         microstructure,
         resolutions,
-        Arc::clone(fact_lag),
-        Arc::clone(metrics),
     ));
     (writer, queue)
 }

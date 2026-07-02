@@ -55,7 +55,8 @@ pub struct MarketCandidate {
     pub best_ask: Option<Price>,
     /// Combined bid+ask USD depth of the primary token's published book.
     pub depth_usd: Option<Usd>,
-    /// Age of the primary token's published book, in milliseconds.
+    /// Age of the primary token's published book, in milliseconds, on the local
+    /// WS receipt clock (venue clock skew / reconnect re-writes excluded).
     ///
     /// `None` when no book has ever been published for the token.
     pub book_age_ms: Option<u64>,
@@ -63,10 +64,15 @@ pub struct MarketCandidate {
     pub crossed: bool,
     /// Whether the primary token's book is empty (no bid or no ask).
     pub empty: bool,
-    /// Worst observed fact-write lag at `observed_at`, in milliseconds.
+    /// Whether market-data is healthy (traffic fresh + all shards connected) at
+    /// `observed_at` — a process-global reading shared by all candidates in a
+    /// round. While healthy, a quiet-but-valid aged book is still the venue truth
+    /// and is not treated as stale by selection (mirrors the data-quality plane).
+    pub connection_healthy: bool,
+    /// Worst observed ingest pipeline lag (enqueue→flush) at `observed_at`, ms.
     ///
     /// This is a process-global measurement shared by all candidates in a round.
-    pub fact_lag_ms: u64,
+    pub ingest_lag_ms: u64,
     /// The instant this candidate was frozen (equals the selection `as_of`).
     pub observed_at: DateTime<Utc>,
 }

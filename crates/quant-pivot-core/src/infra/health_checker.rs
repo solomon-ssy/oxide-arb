@@ -125,7 +125,7 @@ mod tests {
         domain::{SubsystemCheckStatus, WS_MARKET_DATA_STALE_THRESHOLD_MS},
     };
     use quant_pivot_test_support::{
-        pg::setup_pg, storage::inert_clickhouse_pool, ws::FixedWsShardHealth,
+        pg::setup_pg, storage::inert_clickhouse_pool, ws::WsShardHealth,
     };
 
     fn checker_with(
@@ -149,7 +149,7 @@ mod tests {
         let deploy = DeployConfig::default();
         let checker = checker_with(
             Arc::new(CatalogReadiness::new()),
-            FixedWsShardHealth::operational(),
+            WsShardHealth::operational(),
             Arc::new(pg),
             &deploy,
         );
@@ -171,7 +171,7 @@ mod tests {
         catalog.mark_ready(1, Utc::now());
         let checker = checker_with(
             catalog,
-            FixedWsShardHealth::with_message_age(None),
+            WsShardHealth::with_message_age(None),
             Arc::new(pg),
             &deploy,
         );
@@ -193,7 +193,7 @@ mod tests {
         catalog.mark_ready(1, Utc::now());
         let checker = checker_with(
             catalog,
-            FixedWsShardHealth::with_message_age(Some(42)),
+            WsShardHealth::with_message_age(Some(42)),
             Arc::new(pg),
             &deploy,
         );
@@ -211,7 +211,7 @@ mod tests {
         catalog.mark_ready(1, Utc::now());
         let checker = checker_with(
             catalog,
-            FixedWsShardHealth::with_message_age(Some(WS_MARKET_DATA_STALE_THRESHOLD_MS)),
+            WsShardHealth::with_message_age(Some(WS_MARKET_DATA_STALE_THRESHOLD_MS)),
             Arc::new(pg),
             &deploy,
         );
@@ -235,7 +235,7 @@ mod tests {
         catalog.mark_ready(1, Utc::now());
         let checker = checker_with(
             catalog,
-            FixedWsShardHealth::custom(
+            WsShardHealth::custom(
                 ShardHealthSummary {
                     total: 2,
                     disconnected: 1,

@@ -1,8 +1,14 @@
 //! Live book-plane data-quality classification.
 //!
 //! Maps each token's current book to a [`DataQualityStatus`] from the staleness
-//! ladder plus structural checks (empty / crossed) and ingest-side fact lag.
-//! The aggregate [`DataQualitySnapshot`] feeds the operator API and Prometheus.
+//! ladder, structural checks (empty / crossed), and market-data connection
+//! liveness. Classification is a function of **per-token** signals only (local
+//! book age via the WS receipt clock, empty/crossed); ingest pipeline lag
+//! (`enqueue`→`ClickHouse` flush-ack) is a **plane-level** field on
+//! [`DataQualitySnapshot`] and never downgrades individual tokens. On
+//! Polymarket a quiet but valid book stays usable while the connection is
+//! healthy; only connection failure plus an aged book yields [`DataQualityStatus::Stale`].
+//! The aggregate snapshot feeds the operator API and Prometheus.
 //!
 //! TODO(phase-3): gate on `min_book_depth_usd` once feature builders consume
 //! per-level notionals; depth-in-USD is intentionally out of scope here.
@@ -11,6 +17,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use chrono::Utc;
+use quant_pivot_api::ws::WsShardHealthPort;
 use quant_pivot_models::{
     domain::{DataQualityInput, DataQualityPort, DataQualityReport, DataQualitySnapshot},
     enums::{common::StalenessLevel, quant::DataQualityStatus},
@@ -18,7 +25,7 @@ use quant_pivot_models::{
 };
 
 use crate::{
-    observability::fact_lag::FactLagTracker,
+    observability::fact_lag::IngestPipelineLagTracker,
     pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
 };
 
@@ -33,7 +40,7 @@ pub trait DataQualityService: Send + Sync {
 /// Hot-swappable gating policy derived from `DataQualityConfig`.
 struct QualityPolicy {
     max_book_age_ms: u64,
-    max_fact_lag_ms: u64,
+    max_ingest_lag_ms: u64,
     reject_crossed_books: bool,
     reject_empty_books: bool,
 }
@@ -42,7 +49,7 @@ impl QualityPolicy {
     const fn from_config(config: &DataQualityConfig) -> Self {
         Self {
             max_book_age_ms: config.max_book_age_ms,
-            max_fact_lag_ms: config.max_fact_lag_secs.saturating_mul(1_000),
+            max_ingest_lag_ms: config.max_ingest_lag_ms,
             reject_crossed_books: config.reject_crossed_books,
             reject_empty_books: config.reject_empty_books,
         }
@@ -51,25 +58,34 @@ impl QualityPolicy {
 
 /// `BookStore`-backed data-quality service. Clones of the staleness classifier
 /// and the policy snapshot are hot-reloaded together on config activation.
+///
+/// Per-token classification is a function of **per-token** signals only
+/// (structure + local book age + connection liveness). The `ClickHouse` ingest
+/// pipeline lag is a **plane-level** health field on the snapshot, never a
+/// per-token downgrade — a slow persistence pipeline must not poison the live
+/// freshness of every token.
 pub struct BookDataQualityService {
     book_store: Arc<BookStore>,
+    ws_health: Arc<dyn WsShardHealthPort>,
     staleness: StalenessClassifier,
     policy: ArcSwap<QualityPolicy>,
-    fact_lag: Arc<FactLagTracker>,
+    ingest_lag: Arc<IngestPipelineLagTracker>,
 }
 
 impl BookDataQualityService {
     #[must_use]
     pub fn new(
         book_store: Arc<BookStore>,
+        ws_health: Arc<dyn WsShardHealthPort>,
         config: &DataQualityConfig,
-        fact_lag: Arc<FactLagTracker>,
+        ingest_lag: Arc<IngestPipelineLagTracker>,
     ) -> Self {
         Self {
             book_store,
+            ws_health,
             staleness: StalenessClassifier::new(config),
             policy: ArcSwap::from_pointee(QualityPolicy::from_config(config)),
-            fact_lag,
+            ingest_lag,
         }
     }
 
@@ -80,17 +96,17 @@ impl BookDataQualityService {
             .store(Arc::new(QualityPolicy::from_config(config)));
     }
 
-    /// Reset and return the peak fact lag for the elapsed metrics window.
+    /// Reset and return the peak ingest pipeline lag for the elapsed window.
     #[must_use]
-    pub fn take_worst_fact_lag_ms(&self) -> u64 {
-        self.fact_lag.take_worst_ms()
+    pub fn take_worst_ingest_lag_ms(&self) -> u64 {
+        self.ingest_lag.take_worst_ms()
     }
 
-    fn status_for(
+    const fn status_for(
         staleness: StalenessLevel,
         crossed: bool,
         empty: bool,
-        fact_lag_ms: Option<u64>,
+        connection_healthy: bool,
         policy: &QualityPolicy,
     ) -> DataQualityStatus {
         if empty && policy.reject_empty_books {
@@ -99,13 +115,20 @@ impl BookDataQualityService {
         if crossed && policy.reject_crossed_books {
             return DataQualityStatus::Degraded;
         }
-        if fact_lag_ms.is_some_and(|lag| lag > policy.max_fact_lag_ms) {
-            return DataQualityStatus::Degraded;
-        }
         match staleness {
             StalenessLevel::Fresh => DataQualityStatus::Fresh,
             StalenessLevel::Acceptable => DataQualityStatus::Acceptable,
-            StalenessLevel::Stale | StalenessLevel::Expired => DataQualityStatus::Stale,
+            // Aged beyond the acceptable window: on Polymarket a quiet book is
+            // not resent, so this is only a problem when the connection itself
+            // is unhealthy (we may be missing updates). Otherwise the book is
+            // still the current venue truth → Acceptable.
+            StalenessLevel::Stale | StalenessLevel::Expired => {
+                if connection_healthy {
+                    DataQualityStatus::Acceptable
+                } else {
+                    DataQualityStatus::Stale
+                }
+            }
         }
     }
 
@@ -122,7 +145,7 @@ impl DataQualityService for BookDataQualityService {
             staleness,
             input.crossed,
             input.empty,
-            input.fact_lag_ms,
+            input.connection_healthy,
             &policy,
         );
         DataQualityReport {
@@ -138,21 +161,26 @@ impl DataQualityService for BookDataQualityService {
     fn snapshot(&self) -> DataQualitySnapshot {
         let now_ms = Self::now_ms();
         let policy = self.policy.load();
-        let worst_fact_lag_ms = self.fact_lag.peek_worst_ms();
-        let fact_lag_exceeded = worst_fact_lag_ms > policy.max_fact_lag_ms;
-        let mut snapshot =
-            DataQualitySnapshot::empty(Utc::now(), policy.max_book_age_ms, policy.max_fact_lag_ms);
-        snapshot.worst_fact_lag_ms = worst_fact_lag_ms;
-        snapshot.fact_lag_exceeded = fact_lag_exceeded;
+        let worst_ingest_lag_ms = self.ingest_lag.peek_worst_ms();
+        let ingest_lag_exceeded = worst_ingest_lag_ms > policy.max_ingest_lag_ms;
+        let connection_healthy = self.ws_health.market_data_healthy();
+        let mut snapshot = DataQualitySnapshot::empty(
+            Utc::now(),
+            policy.max_book_age_ms,
+            policy.max_ingest_lag_ms,
+        );
+        snapshot.worst_ingest_lag_ms = worst_ingest_lag_ms;
+        snapshot.ingest_lag_exceeded = ingest_lag_exceeded;
 
-        let aggregate_lag = if fact_lag_exceeded {
-            Some(worst_fact_lag_ms)
-        } else {
-            None
-        };
-
+        let mut worst_book_age_ms = 0_u64;
         for (token_id, book) in self.book_store.published_snapshots() {
-            let book_age_ms = now_ms.saturating_sub(book.timestamp_ms);
+            // Prefer the local WS receipt clock (no venue clock skew / reconnect
+            // re-write artifacts); fall back to the venue timestamp age.
+            let book_age_ms = self
+                .ws_health
+                .token_message_age_ms(&token_id)
+                .unwrap_or_else(|| now_ms.saturating_sub(book.timestamp_ms));
+            worst_book_age_ms = worst_book_age_ms.max(book_age_ms);
             let empty = book.bids.is_empty() || book.asks.is_empty();
             let crossed = match (book.best_bid(), book.best_ask()) {
                 (Some(bid), Some(ask)) => bid >= ask,
@@ -163,10 +191,11 @@ impl DataQualityService for BookDataQualityService {
                 book_age_ms,
                 crossed,
                 empty,
-                fact_lag_ms: aggregate_lag,
+                connection_healthy,
             });
             snapshot.tally(report.status);
         }
+        snapshot.worst_book_age_ms = worst_book_age_ms;
         snapshot
     }
 }
@@ -174,5 +203,74 @@ impl DataQualityService for BookDataQualityService {
 impl DataQualityPort for BookDataQualityService {
     fn snapshot(&self) -> DataQualitySnapshot {
         DataQualityService::snapshot(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy() -> QualityPolicy {
+        QualityPolicy::from_config(&DataQualityConfig::default())
+    }
+
+    #[test]
+    fn empty_book_is_insufficient_regardless_of_connection() {
+        let status =
+            BookDataQualityService::status_for(StalenessLevel::Fresh, false, true, true, &policy());
+        assert_eq!(status, DataQualityStatus::Insufficient);
+    }
+
+    #[test]
+    fn crossed_book_is_degraded() {
+        let status =
+            BookDataQualityService::status_for(StalenessLevel::Fresh, true, false, true, &policy());
+        assert_eq!(status, DataQualityStatus::Degraded);
+    }
+
+    #[test]
+    fn fresh_and_acceptable_pass_through() {
+        assert_eq!(
+            BookDataQualityService::status_for(
+                StalenessLevel::Fresh,
+                false,
+                false,
+                true,
+                &policy()
+            ),
+            DataQualityStatus::Fresh,
+        );
+        assert_eq!(
+            BookDataQualityService::status_for(
+                StalenessLevel::Acceptable,
+                false,
+                false,
+                true,
+                &policy(),
+            ),
+            DataQualityStatus::Acceptable,
+        );
+    }
+
+    #[test]
+    fn quiet_but_valid_book_stays_acceptable_when_connection_healthy() {
+        // On Polymarket a quiet book is not resent; an aged-but-valid book is
+        // still the venue truth while the connection is healthy.
+        for level in [StalenessLevel::Stale, StalenessLevel::Expired] {
+            assert_eq!(
+                BookDataQualityService::status_for(level, false, false, true, &policy()),
+                DataQualityStatus::Acceptable,
+            );
+        }
+    }
+
+    #[test]
+    fn aged_book_is_stale_only_when_connection_unhealthy() {
+        for level in [StalenessLevel::Stale, StalenessLevel::Expired] {
+            assert_eq!(
+                BookDataQualityService::status_for(level, false, false, false, &policy()),
+                DataQualityStatus::Stale,
+            );
+        }
     }
 }

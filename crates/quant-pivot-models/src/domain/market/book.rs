@@ -99,6 +99,14 @@ impl BookLevel {
     }
 }
 
+/// Default near-touch depth (levels per side) for queue imbalance.
+///
+/// Kept small so the metric reflects executable near-touch pressure rather than
+/// deep resting liquidity, per OBI/MLOFI microstructure practice. The live KPI
+/// (frontend `metrics.ts`) MUST use the same depth so the instantaneous KPI and
+/// the persisted `imbalance_avg` series stay comparable.
+pub const IMBALANCE_DEPTH_LEVELS: usize = 5;
+
 /// Sum USD depth across levels (precomputed at publish time).
 #[must_use]
 #[inline]
@@ -106,6 +114,20 @@ pub fn total_depth_usd(levels: &[BookLevel]) -> MicroUsd {
     levels
         .iter()
         .fold(MicroUsd::ZERO, |acc, l| acc + l.depth_usd())
+}
+
+/// Sum share depth (Σ size) across the best `n` levels (best-first ordering).
+///
+/// Basis for the top-N share-weighted queue-imbalance signal. Shares (not USD
+/// notional) are used deliberately: USD weighting is biased toward the ask side
+/// because ask prices exceed bid prices, which structurally skews imbalance
+/// negative regardless of true resting pressure.
+#[must_use]
+#[inline]
+pub fn top_n_share_depth(levels: &[BookLevel], n: usize) -> Shares {
+    levels.iter().take(n).fold(Shares::ZERO, |acc, level| {
+        Shares::new(acc.inner() + level.size.to_decimal())
+    })
 }
 
 /// Sum ask-side share depth at prices at or below `limit_price` (buy walk).
@@ -509,5 +531,18 @@ mod tests {
 
     fn level_with_size(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
+    }
+
+    #[test]
+    fn top_n_share_depth_sums_best_n_by_shares() {
+        let levels = [
+            level_with_size(dec!(0.50), dec!(10)),
+            level_with_size(dec!(0.49), dec!(20)),
+            level_with_size(dec!(0.48), dec!(30)),
+        ];
+        // Share-weighted (not USD): far levels do not get a price multiplier.
+        assert_eq!(top_n_share_depth(&levels, 2), Shares::new(dec!(30)));
+        assert_eq!(top_n_share_depth(&levels, 10), Shares::new(dec!(60)));
+        assert_eq!(top_n_share_depth(&[], 5), Shares::ZERO);
     }
 }

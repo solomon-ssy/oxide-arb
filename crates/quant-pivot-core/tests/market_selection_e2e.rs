@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use quant_pivot_core::{
-    observability::{fact_lag::FactLagTracker, metrics_hub::MetricsHub},
+    observability::{fact_lag::IngestPipelineLagTracker, metrics_hub::MetricsHub},
     pipeline::{
         book_store::BookStore, market_candidate_provider::MarketCandidateProvider,
         market_registry::MarketRegistry,
@@ -30,6 +30,7 @@ use quant_pivot_research::selection::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    ws::WsShardHealth,
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
@@ -144,7 +145,8 @@ async fn provider_selector_mapper_persist_round_trip() {
     let provider = MarketCandidateProvider::new(
         Arc::clone(&registry),
         Arc::clone(&book_store),
-        Arc::new(FactLagTracker::new()),
+        WsShardHealth::operational(),
+        Arc::new(IngestPipelineLagTracker::new()),
     );
     let selector = ConfiguredMarketSelector::new();
     let selection_repo = PgMarketSelectionRepository::new(db);

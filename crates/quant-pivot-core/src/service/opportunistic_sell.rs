@@ -140,7 +140,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         let requirements = ModelFeatureRequirements {
             required_features: runtime.required_features(),
         };
-        let source_delay = Duration::from_secs(config.data_quality.max_fact_lag_secs);
+        let source_delay = Duration::from_secs(config.data_quality.max_feature_bucket_age_secs);
         let as_of =
             now - chrono::Duration::from_std(source_delay).unwrap_or(chrono::Duration::zero());
         let Some(liquidity_cap_usd) = liquidity_score_cap(config.as_ref())? else {

@@ -224,6 +224,22 @@ fn feature_schema_version_change_changes_hash() {
     );
 }
 
+#[test]
+fn default_feature_schema_invalidates_pre_imbalance_artifacts() {
+    // The default schema version was bumped when `book.depth_imbalance` switched
+    // to top-N share-weighted queue imbalance; its hash must therefore differ
+    // from the pre-change v1 schema so old model artifacts are rejected on load.
+    let config_v1 = FeaturesConfig {
+        feature_schema_version: SchemaVersion::new(1),
+        ..FeaturesConfig::default()
+    };
+    let default_hash =
+        ResearchHasher::feature_schema(&FeatureSchema::build(&FeaturesConfig::default()))
+            .expect("hash");
+    let v1_hash = ResearchHasher::feature_schema(&FeatureSchema::build(&config_v1)).expect("hash");
+    assert_ne!(default_hash, v1_hash);
+}
+
 // ── Domain missing ─────────────────────────────────────────────────────────
 
 struct EmptyPit;
@@ -414,7 +430,8 @@ fn candidate_with_book() -> MarketCandidate {
         best_ask: Some(Price::new(Decimal::new(52, 2))),
         depth_usd: Some(Usd::new(Decimal::from(200))),
         book_age_ms: Some(500),
-        fact_lag_ms: 0,
+        connection_healthy: true,
+        ingest_lag_ms: 0,
         crossed: false,
         empty: false,
         observed_at: Utc::now(),
@@ -837,7 +854,7 @@ async fn feature_stale_book_rejects_market() {
 async fn allow_degraded_keeps_stale_required_fact_feature() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
     let token = TokenId::new("tok-degraded");
-    // Buckets older than the 30s `max_fact_lag_secs` but within the 60s window,
+    // Buckets older than the 30s `max_feature_bucket_age_secs` but within the 60s window,
     // with >= 2 mids so the return is *present* (and so subject to staleness).
     let buckets = vec![
         micro_bucket(

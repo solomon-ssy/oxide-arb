@@ -51,8 +51,8 @@ pub struct SelectionThresholds {
     pub max_time_to_resolution_secs: u64,
     /// Maximum allowed published-book age, in milliseconds.
     pub max_book_age_ms: u64,
-    /// Maximum allowed worst-case fact-write lag, in milliseconds.
-    pub max_fact_lag_ms: u64,
+    /// Maximum allowed worst-case ingest pipeline lag (enqueue→flush), in ms.
+    pub max_ingest_lag_ms: u64,
     /// Reject crossed books.
     pub reject_crossed_books: bool,
     /// Reject empty (one-sided) books.
@@ -77,7 +77,7 @@ impl SelectionThresholds {
             min_time_to_resolution_secs: selection.min_time_to_resolution_secs,
             max_time_to_resolution_secs: selection.max_time_to_resolution_secs,
             max_book_age_ms: data_quality.max_book_age_ms,
-            max_fact_lag_ms: data_quality.max_fact_lag_secs.saturating_mul(1_000),
+            max_ingest_lag_ms: data_quality.max_ingest_lag_ms,
             reject_crossed_books: data_quality.reject_crossed_books,
             reject_empty_books: data_quality.reject_empty_books,
         })
@@ -210,7 +210,15 @@ fn spread_bps(candidate: &MarketCandidate) -> Option<Decimal> {
     Bps::relative(ask - bid, mid).map(Bps::inner)
 }
 
-/// Stage 4 — data-quality gate over book freshness and fact lag.
+/// Stage 4 — data-quality gate over book structure, freshness, and ingest lag.
+///
+/// Freshness is connection-aware, mirroring the live data-quality plane: on
+/// Polymarket a quiet book is not resent, so an aged-but-valid book only counts
+/// as stale when the market-data connection is unhealthy (we might be missing
+/// updates). While the connection is healthy the book is the current venue
+/// truth and is admitted; precise point-in-time freshness is then enforced
+/// deterministically at feature materialization (`MaxBookAge`), keeping the
+/// online/offline feature computation identical.
 pub struct DataQualityFilter;
 
 impl SelectionFilter for DataQualityFilter {
@@ -222,12 +230,13 @@ impl SelectionFilter for DataQualityFilter {
         let candidate = ctx.candidate;
         let thresholds = ctx.thresholds;
 
-        match candidate.book_age_ms {
-            Some(age) if age > thresholds.max_book_age_ms => {
-                return FilterOutcome::Exclude(ExclusionReason::StaleBook);
-            }
-            None => return FilterOutcome::Exclude(ExclusionReason::StaleBook),
-            Some(_) => {}
+        // Fail closed: a token that never published a book is unusable.
+        let Some(age) = candidate.book_age_ms else {
+            return FilterOutcome::Exclude(ExclusionReason::StaleBook);
+        };
+        // Age condemns the book only when the connection is unhealthy.
+        if !candidate.connection_healthy && age > thresholds.max_book_age_ms {
+            return FilterOutcome::Exclude(ExclusionReason::StaleBook);
         }
         if thresholds.reject_crossed_books && candidate.crossed {
             return FilterOutcome::Exclude(ExclusionReason::StaleBook);
@@ -235,8 +244,8 @@ impl SelectionFilter for DataQualityFilter {
         if thresholds.reject_empty_books && candidate.empty {
             return FilterOutcome::Exclude(ExclusionReason::StaleBook);
         }
-        if candidate.fact_lag_ms > thresholds.max_fact_lag_ms {
-            return FilterOutcome::Exclude(ExclusionReason::FactLagExceeded);
+        if candidate.ingest_lag_ms > thresholds.max_ingest_lag_ms {
+            return FilterOutcome::Exclude(ExclusionReason::IngestLagExceeded);
         }
         FilterOutcome::Keep
     }
@@ -352,7 +361,7 @@ pub const fn accumulate_exclusion(
         ExclusionReason::NotOpen
         | ExclusionReason::CategoryDisabled
         | ExclusionReason::SpreadTooWide
-        | ExclusionReason::FactLagExceeded
+        | ExclusionReason::IngestLagExceeded
         | ExclusionReason::ResolutionAmbiguous
         | ExclusionReason::SelectionCapExceeded
         | ExclusionReason::ModelFeatureUnavailable { .. } => summary.other_count += 1,

@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
     observability::{
-        fact_lag::FactLagTracker, feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
+        fact_lag::IngestPipelineLagTracker, feature_fact_writer::FeatureEventWriter,
+        metrics_hub::MetricsHub,
     },
     pipeline::{
         book_store::BookStore, feature_window_provider::FeatureWindowProvider,
@@ -53,6 +54,7 @@ use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObse
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    ws::WsShardHealth,
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
@@ -348,7 +350,8 @@ async fn create_feature_vector_then_find() {
     let provider = MarketCandidateProvider::new(
         Arc::clone(&registry),
         Arc::clone(&book_store),
-        Arc::new(FactLagTracker::new()),
+        WsShardHealth::operational(),
+        Arc::new(IngestPipelineLagTracker::new()),
     );
     let selector = ConfiguredMarketSelector::new();
     let features = FeaturesConfig::default();

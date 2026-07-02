@@ -295,7 +295,7 @@ impl MarketMicrostructureQuery {
 /// One microstructure observation bucket projected for the dashboard chart.
 ///
 /// Money / price / bps fields serialize as canonical decimal strings; the
-/// resting-depth `imbalance` is a raw ratio in `[-1, 1]`.
+/// top-N share-weighted queue `imbalance` is a raw ratio in `[-1, 1]`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MicrostructureBucket {
     /// Bucket start time (epoch millis).
@@ -310,7 +310,8 @@ pub struct MicrostructureBucket {
     pub depth_top1_usd: Option<Usd>,
     pub depth_top5_usd: Option<Usd>,
     pub depth_top20_usd: Option<Usd>,
-    /// Resting-depth imbalance `(bid - ask) / (bid + ask)`, bid-heavy positive.
+    /// Top-N share-weighted queue imbalance `(bid - ask) / (bid + ask)` over the
+    /// best few levels per side, bid-heavy positive.
     pub imbalance: Option<Decimal>,
     pub last_trade_count: u64,
     pub update_count: u64,
