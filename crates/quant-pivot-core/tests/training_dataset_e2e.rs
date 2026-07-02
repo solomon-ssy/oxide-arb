@@ -18,7 +18,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
-        MarketResolutionRow, MidPriceBucketRow,
+        MarketResolutionRow, MidPriceBucketRow, TickEventRow,
     },
     domain::{
         NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset,
@@ -146,6 +146,26 @@ impl QuantFactReadRepository for ControllableFactRead {
             }
         }
         Ok(rows)
+    }
+
+    async fn microstructure_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _minute: bool,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn last_trades(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _limit: u64,
+    ) -> Result<Vec<TickEventRow>, StorageError> {
+        Ok(Vec::new())
     }
 
     async fn book_snapshot_at(

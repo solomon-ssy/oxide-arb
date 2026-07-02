@@ -143,6 +143,9 @@ impl Display for ShardHealthSummary {
 /// Read-only shard connectivity projection for health and system-status assembly.
 pub trait WsShardHealthPort: Send + Sync {
     fn shard_health(&self) -> ShardHealthSummary;
+
+    /// Milliseconds since the last CLOB websocket message on any shard.
+    fn last_message_age_ms(&self) -> Option<u64>;
 }
 
 fn connected_ratio_bps(total: usize, disconnected: usize) -> u32 {

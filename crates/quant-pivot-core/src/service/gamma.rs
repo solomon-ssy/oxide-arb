@@ -20,7 +20,7 @@ use quant_pivot_api::{
 use quant_pivot_error::{QuantError, market::MarketError};
 use quant_pivot_models::{
     domain::{
-        CoreEvent, CoreEventPublisher, market,
+        CatalogStatusPort, CoreEvent, CoreEventPublisher, market,
         market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
     enums::market::MarketStatus,
@@ -35,6 +35,9 @@ use std::{
 };
 
 const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
+/// Only publish `market.resolved` for settlements whose `resolved_at` falls
+/// within this window — filters historical reconciliation during full sync.
+const LIVE_RESOLUTION_WINDOW: chrono::Duration = chrono::Duration::hours(48);
 
 /// Dependencies injected into [`GammaService`].
 pub struct GammaServiceDeps {
@@ -392,10 +395,19 @@ impl GammaService {
                 return Vec::new();
             }
         };
-        settlement_transitions(markets, &prior)
+        settlement_transitions(markets, &prior, Utc::now())
     }
 
     fn publish_market_resolutions(&self, resolved: Vec<(MarketId, bool)>) {
+        if !self.catalog.is_ready() {
+            if !resolved.is_empty() {
+                tracing::debug!(
+                    count = resolved.len(),
+                    "suppressing market.resolved during catalog warmup"
+                );
+            }
+            return;
+        }
         for (market_id, outcome) in resolved {
             tracing::info!(%market_id, outcome, "market settled; publishing market.resolved");
             self.events
@@ -463,10 +475,13 @@ impl GammaService {
 /// fresh bootstrap ingesting thousands of historically settled markets
 /// publishes nothing (no operator was watching them), while a watched market
 /// settling live publishes exactly once — the upsert makes the row `Settled`,
-/// so subsequent syncs skip it.
+/// so subsequent syncs skip it. Only settlements with a recent `resolved_at`
+/// (within [`LIVE_RESOLUTION_WINDOW`]) pass — stale DB reconciliation during
+/// full sync stays silent.
 fn settlement_transitions(
     batch: &[UpsertMarket],
     prior: &HashMap<MarketId, MarketStatus>,
+    now: DateTime<Utc>,
 ) -> Vec<(MarketId, bool)> {
     batch
         .iter()
@@ -476,8 +491,16 @@ fn settlement_transitions(
                 .get(&market.market_id)
                 .is_some_and(|status| *status != MarketStatus::Settled)
         })
+        .filter(|market| is_recently_resolved(market, now))
         .map(|market| (market.market_id.clone(), yes_outcome_won(market)))
         .collect()
+}
+
+/// Whether the settlement is recent enough to notify operators (live transition).
+fn is_recently_resolved(market: &UpsertMarket, now: DateTime<Utc>) -> bool {
+    market
+        .resolved_at
+        .is_some_and(|resolved_at| now - resolved_at <= LIVE_RESOLUTION_WINDOW)
 }
 
 /// Whether the settled market resolved to YES (Gamma settlement carries the
@@ -569,7 +592,12 @@ mod tests {
         assert_eq!(missing, vec![MarketId::new("m2")]);
     }
 
-    fn upsert(id: &str, status: MarketStatus, outcome: Option<&str>) -> UpsertMarket {
+    fn upsert(
+        id: &str,
+        status: MarketStatus,
+        outcome: Option<&str>,
+        resolved_at: Option<DateTime<Utc>>,
+    ) -> UpsertMarket {
         UpsertMarket {
             market_id: MarketId::new(id),
             event_id: EventId::new("evt-1"),
@@ -583,7 +611,7 @@ mod tests {
             tick_size: TickSize::Hundredth,
             neg_risk: false,
             end_date: None,
-            resolved_at: None,
+            resolved_at,
             fees_enabled: false,
             fee_rate: None,
             fee_exponent: None,
@@ -596,15 +624,31 @@ mod tests {
 
     #[test]
     fn settlement_transitions_detects_only_newly_settled_known_markets() {
+        let now = Utc::now();
         let batch = vec![
             // Active → Settled with YES winning: publish (outcome = true).
-            upsert("m-live", MarketStatus::Settled, Some("Yes")),
+            upsert(
+                "m-live",
+                MarketStatus::Settled,
+                Some("Yes"),
+                Some(now - chrono::Duration::hours(1)),
+            ),
             // Already settled in DB: no re-publish.
-            upsert("m-old", MarketStatus::Settled, Some("No")),
+            upsert(
+                "m-old",
+                MarketStatus::Settled,
+                Some("No"),
+                Some(now - chrono::Duration::hours(1)),
+            ),
             // Settled but never persisted before (bootstrap backfill): skip.
-            upsert("m-new", MarketStatus::Settled, Some("Yes")),
+            upsert(
+                "m-new",
+                MarketStatus::Settled,
+                Some("Yes"),
+                Some(now - chrono::Duration::hours(1)),
+            ),
             // Not settled: never a candidate.
-            upsert("m-active", MarketStatus::Active, None),
+            upsert("m-active", MarketStatus::Active, None, None),
         ];
         let prior = HashMap::from([
             (MarketId::new("m-live"), MarketStatus::Active),
@@ -612,27 +656,92 @@ mod tests {
             (MarketId::new("m-active"), MarketStatus::Active),
         ]);
 
-        let resolved = settlement_transitions(&batch, &prior);
+        let resolved = settlement_transitions(&batch, &prior, now);
         assert_eq!(resolved, vec![(MarketId::new("m-live"), true)]);
     }
 
     #[test]
     fn settlement_transitions_maps_no_outcome_to_false() {
-        let batch = vec![upsert("m1", MarketStatus::Settled, Some("No"))];
+        let now = Utc::now();
+        let batch = vec![upsert(
+            "m1",
+            MarketStatus::Settled,
+            Some("No"),
+            Some(now - chrono::Duration::hours(1)),
+        )];
         let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Paused)]);
         assert_eq!(
-            settlement_transitions(&batch, &prior),
+            settlement_transitions(&batch, &prior, now),
             vec![(MarketId::new("m1"), false)]
         );
     }
 
     #[test]
     fn settlement_transitions_missing_outcome_defaults_to_false() {
-        let batch = vec![upsert("m1", MarketStatus::Settled, None)];
+        let now = Utc::now();
+        let batch = vec![upsert(
+            "m1",
+            MarketStatus::Settled,
+            None,
+            Some(now - chrono::Duration::hours(1)),
+        )];
         let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Active)]);
         assert_eq!(
-            settlement_transitions(&batch, &prior),
+            settlement_transitions(&batch, &prior, now),
             vec![(MarketId::new("m1"), false)]
         );
+    }
+
+    #[test]
+    fn settlement_transitions_suppresses_stale_resolved_at() {
+        let now = Utc::now();
+        let batch = vec![upsert(
+            "m-stale",
+            MarketStatus::Settled,
+            Some("Yes"),
+            Some(now - LIVE_RESOLUTION_WINDOW - chrono::Duration::hours(1)),
+        )];
+        let prior = HashMap::from([(MarketId::new("m-stale"), MarketStatus::Active)]);
+
+        assert!(settlement_transitions(&batch, &prior, now).is_empty());
+    }
+
+    #[test]
+    fn settlement_transitions_keeps_recent_resolved_at() {
+        let now = Utc::now();
+        let batch = vec![upsert(
+            "m-recent",
+            MarketStatus::Settled,
+            Some("Yes"),
+            Some(now - chrono::Duration::hours(1)),
+        )];
+        let prior = HashMap::from([(MarketId::new("m-recent"), MarketStatus::Active)]);
+
+        assert_eq!(
+            settlement_transitions(&batch, &prior, now),
+            vec![(MarketId::new("m-recent"), true)]
+        );
+    }
+
+    #[test]
+    fn settlement_transitions_bootstrap_empty_prior_publishes_nothing() {
+        let now = Utc::now();
+        let batch = vec![upsert(
+            "m-bootstrap",
+            MarketStatus::Settled,
+            Some("Yes"),
+            Some(now - chrono::Duration::hours(1)),
+        )];
+
+        assert!(settlement_transitions(&batch, &HashMap::new(), now).is_empty());
+    }
+
+    #[test]
+    fn settlement_transitions_missing_resolved_at_is_not_publishable() {
+        let now = Utc::now();
+        let batch = vec![upsert("m1", MarketStatus::Settled, Some("Yes"), None)];
+        let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Active)]);
+
+        assert!(settlement_transitions(&batch, &prior, now).is_empty());
     }
 }

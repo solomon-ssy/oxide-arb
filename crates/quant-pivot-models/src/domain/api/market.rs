@@ -2,14 +2,17 @@
 //! (including the order-book projection).
 
 use crate::{
+    clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd, TickEventRow},
     domain::{BookLevel, MarketInfo, market::book::BookSnapshot, pagination::PageRequest},
     enums::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
     },
-    types::{EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
+    types::{Bps, EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::query::QueryError;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use validator::Validate;
@@ -213,6 +216,169 @@ pub struct MarketBookView {
     pub market_id: MarketId,
     pub yes: Option<MarketBookSideView>,
     pub no: Option<MarketBookSideView>,
+}
+
+/// Bucket resolution chosen for a microstructure series response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MicrostructureResolution {
+    /// One-second buckets (`book_microstructure_1s`).
+    Second,
+    /// One-minute buckets (`book_microstructure_1m`).
+    Minute,
+}
+
+impl MicrostructureResolution {
+    /// Whether the 1-minute rollup table should be read.
+    #[must_use]
+    pub const fn is_minute(self) -> bool {
+        matches!(self, Self::Minute)
+    }
+}
+
+/// Inbound query for the market microstructure history endpoint.
+///
+/// Both bounds are optional: `to` defaults to now and `from` to a one-hour
+/// look-back. [`MarketMicrostructureQuery::resolve`] hardens the window and
+/// picks the bucket resolution by span (1s vs 1m rollup).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MarketMicrostructureQuery {
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// Resolved, validated microstructure window plus the chosen bucket table.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedMicrostructureWindow {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub resolution: MicrostructureResolution,
+}
+
+impl MarketMicrostructureQuery {
+    /// Default look-back when `from` is omitted (1 hour).
+    const DEFAULT_LOOKBACK_MINUTES: i64 = 60;
+    /// Hard span ceiling to keep row counts bounded.
+    const MAX_DAYS: i64 = 7;
+    /// Windows wider than this read the 1-minute rollup instead of 1-second.
+    const MINUTE_THRESHOLD_HOURS: i64 = 3;
+
+    /// Resolve to a validated window plus bucket resolution. `to` defaults to
+    /// now, `from` to `to - 1h`; inverted or over-`MAX_DAYS` windows return a
+    /// domain [`QueryError`] (mapped web-side via `From`).
+    pub fn resolve(&self) -> Result<ResolvedMicrostructureWindow, QueryError> {
+        let to = self.to.unwrap_or_else(Utc::now);
+        let from = self
+            .from
+            .unwrap_or(to - Duration::minutes(Self::DEFAULT_LOOKBACK_MINUTES));
+        if to < from {
+            return Err(QueryError::Inverted);
+        }
+        if to - from > Duration::days(Self::MAX_DAYS) {
+            return Err(QueryError::TooWide {
+                max_days: Self::MAX_DAYS,
+            });
+        }
+        let resolution = if to - from > Duration::hours(Self::MINUTE_THRESHOLD_HOURS) {
+            MicrostructureResolution::Minute
+        } else {
+            MicrostructureResolution::Second
+        };
+        Ok(ResolvedMicrostructureWindow {
+            from,
+            to,
+            resolution,
+        })
+    }
+}
+
+/// One microstructure observation bucket projected for the dashboard chart.
+///
+/// Money / price / bps fields serialize as canonical decimal strings; the
+/// resting-depth `imbalance` is a raw ratio in `[-1, 1]`.
+#[derive(Debug, Clone, Serialize)]
+pub struct MicrostructureBucket {
+    /// Bucket start time (epoch millis).
+    pub bucket_ms: i64,
+    pub mid_open: Option<Price>,
+    pub mid_close: Option<Price>,
+    pub best_bid_close: Option<Price>,
+    pub best_ask_close: Option<Price>,
+    pub spread_bps_min: Option<Bps>,
+    pub spread_bps_avg: Option<Bps>,
+    pub spread_bps_max: Option<Bps>,
+    pub depth_top1_usd: Option<Usd>,
+    pub depth_top5_usd: Option<Usd>,
+    pub depth_top20_usd: Option<Usd>,
+    /// Resting-depth imbalance `(bid - ask) / (bid + ask)`, bid-heavy positive.
+    pub imbalance: Option<Decimal>,
+    pub last_trade_count: u64,
+    pub update_count: u64,
+    pub gap_count: u64,
+    pub crossed_count: u64,
+}
+
+impl MicrostructureBucket {
+    /// Project a persisted 1s/1m microstructure row into the wire bucket.
+    #[must_use]
+    pub fn from_row(row: &BookMicrostructureRow) -> Self {
+        Self {
+            bucket_ms: row.bucket_time,
+            mid_open: row.mid_price_open.map(ChPrice::to_price),
+            mid_close: row.mid_price_close.map(ChPrice::to_price),
+            best_bid_close: row.best_bid_close.map(ChPrice::to_price),
+            best_ask_close: row.best_ask_close.map(ChPrice::to_price),
+            spread_bps_min: row.spread_bps_min.map(ChBps::to_bps),
+            spread_bps_avg: row.spread_bps_avg.map(ChBps::to_bps),
+            spread_bps_max: row.spread_bps_max.map(ChBps::to_bps),
+            depth_top1_usd: row.top1_depth_usd_avg.map(ChUsd::to_usd),
+            depth_top5_usd: row.top5_depth_usd_avg.map(ChUsd::to_usd),
+            depth_top20_usd: row.top20_depth_usd_avg.map(ChUsd::to_usd),
+            imbalance: row.imbalance_avg.map(ChDecimal64::to_decimal),
+            last_trade_count: row.last_trade_count,
+            update_count: row.update_count,
+            gap_count: row.gap_count,
+            crossed_count: row.crossed_count,
+        }
+    }
+}
+
+/// A single last-trade print for the price-chart overlay.
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketTradeTick {
+    pub token_id: TokenId,
+    /// Trade event time (epoch millis).
+    pub ts_ms: i64,
+    pub price: Price,
+}
+
+impl MarketTradeTick {
+    /// Project a `LastTrade` tick-event row, dropping rows without a price.
+    #[must_use]
+    pub fn from_row(row: TickEventRow) -> Option<Self> {
+        row.last_trade_price.map(|price| Self {
+            token_id: row.token_id,
+            ts_ms: row.event_time,
+            price: price.to_price(),
+        })
+    }
+}
+
+/// Historical microstructure series (YES + NO) for a single market, plus recent
+/// last-trade prints for overlay markers.
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketMicrostructureView {
+    pub market_id: MarketId,
+    pub yes_token_id: TokenId,
+    pub no_token_id: TokenId,
+    pub resolution: MicrostructureResolution,
+    /// Window start (epoch millis).
+    pub from_ms: i64,
+    /// Window end (epoch millis).
+    pub to_ms: i64,
+    pub yes: Vec<MicrostructureBucket>,
+    pub no: Vec<MicrostructureBucket>,
+    pub trades: Vec<MarketTradeTick>,
 }
 
 #[cfg(test)]

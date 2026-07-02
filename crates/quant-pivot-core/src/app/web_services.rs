@@ -126,6 +126,7 @@ async fn build_app_state(
         data_quality: Arc::clone(&ctx.data.data_quality) as Arc<dyn DataQualityPort>,
         events: ctx.events.clone(),
         markets: Arc::clone(&ctx.data.market_repo),
+        quant_facts: Arc::clone(&ctx.infra.quant_fact_read),
         ws_sessions: SessionRegistry::default(),
         metrics: Arc::new(CoreMetricsScrape {
             registry: ctx.infra.metrics.registry.clone(),

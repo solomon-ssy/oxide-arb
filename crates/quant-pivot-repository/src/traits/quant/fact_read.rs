@@ -12,7 +12,10 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
+    clickhouse::{
+        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
+        TickEventRow,
+    },
     types::{MarketId, TokenId},
 };
 
@@ -30,6 +33,30 @@ pub trait QuantFactReadRepository: Send + Sync {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
+
+    /// Microstructure buckets for `token_ids` whose `bucket_time` falls in
+    /// `[from_ms, to_ms)` (epoch milliseconds), ordered by token then time.
+    /// Reads the 1-minute rollup (`book_microstructure_1m`) when `minute` is
+    /// set, otherwise the 1-second table — the two share the same row schema.
+    /// Powers the market-detail history charts (not the PIT feature window).
+    async fn microstructure_series(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        minute: bool,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
+
+    /// Recent `LastTrade` tick events for `token_ids` with `event_time` in
+    /// `[from_ms, to_ms)` (epoch milliseconds), newest first, capped at `limit`.
+    /// Feeds last-trade overlay markers on the price chart.
+    async fn last_trades(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        limit: u64,
+    ) -> Result<Vec<TickEventRow>, StorageError>;
 
     /// Coarse mid-price series per token for correlation estimation: the last
     /// `mid_price_close` within each `bucket_secs` interval over

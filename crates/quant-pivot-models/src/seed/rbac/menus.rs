@@ -27,12 +27,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 8,
+    version: 9,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v8",
+    checksum: "rbac.menus.bootstrap.v9",
     loader: load_boxed,
 };
 
@@ -80,6 +80,9 @@ struct NodeSpec<'a> {
     icon: Option<&'a str>,
     permission_code: Option<String>,
     affix_tab: bool,
+    /// Route the SPA can navigate to but never renders in the sidebar (detail
+    /// pages). `Button` nodes are always hidden regardless of this flag.
+    hide_in_menu: bool,
 }
 
 /// Route page fields for [`MenuTree::page`].
@@ -105,6 +108,7 @@ impl Default for NodeSpec<'_> {
             icon: None,
             permission_code: None,
             affix_tab: false,
+            hide_in_menu: false,
         }
     }
 }
@@ -123,7 +127,7 @@ impl MenuTree {
         let id = stable_menu_id(spec.name);
         let sort = self.next_sort;
         self.next_sort += 1;
-        let hide_in_menu = matches!(spec.kind, MenuKind::Button);
+        let hide_in_menu = spec.hide_in_menu || matches!(spec.kind, MenuKind::Button);
         self.grants.push(MenuGrantSpec {
             id: id.clone(),
             kind: spec.kind,
@@ -161,14 +165,22 @@ impl MenuTree {
     }
 
     fn page(&mut self, spec: PageSpec<'_>) -> MenuId {
-        self.push_page(spec, false)
+        self.push_page(spec, false, false)
     }
 
     fn page_affixed(&mut self, spec: PageSpec<'_>) -> MenuId {
-        self.push_page(spec, true)
+        self.push_page(spec, true, false)
     }
 
-    fn push_page(&mut self, spec: PageSpec<'_>, affix_tab: bool) -> MenuId {
+    /// A navigable route that never appears in the sidebar (e.g. a detail page
+    /// reached from a table row). Parent it under a directory, not another
+    /// page, so it renders as a sibling route rather than nesting inside the
+    /// parent page's component.
+    fn page_hidden(&mut self, spec: PageSpec<'_>) -> MenuId {
+        self.push_page(spec, false, true)
+    }
+
+    fn push_page(&mut self, spec: PageSpec<'_>, affix_tab: bool, hide_in_menu: bool) -> MenuId {
         self.push(NodeSpec {
             parent: Some(spec.parent),
             kind: MenuKind::Menu,
@@ -179,6 +191,7 @@ impl MenuTree {
             icon: Some(spec.icon),
             permission_code: spec.permission_code,
             affix_tab,
+            hide_in_menu,
         })
     }
 
@@ -268,6 +281,17 @@ fn build_trading(t: &mut MenuTree) {
         "Subscribe / Block",
         perm(ResourceType::Market, Operation::Update),
     );
+    // Full-screen market detail (live book + microstructure charts), reached
+    // from a table row — navigable but hidden from the sidebar.
+    t.page_hidden(PageSpec {
+        parent: &trading,
+        name: "market-detail",
+        title: "page.menu.marketDetail",
+        path: "/markets/:id",
+        component: "markets/detail/index",
+        permission_code: Some(perm(ResourceType::Market, Operation::Read)),
+        icon: "lucide:line-chart",
+    });
     let quant_reports = t.page(PageSpec {
         parent: &trading,
         name: "quant-reports",

@@ -6,7 +6,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
+    clickhouse::{
+        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
+        TickEventRow,
+    },
+    enums::clickhouse::ChBookEventType,
     types::{MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
@@ -51,6 +55,76 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(from_ms)
             .bind(to_ms)
             .fetch_all::<BookMicrostructureRow>()
+            .await?;
+        Ok(rows)
+    }
+
+    async fn microstructure_series(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        minute: bool,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The 1s and 1m tables share an identical column schema, so only the
+        // relation name differs — never interpolate untrusted input here.
+        let sql = if minute {
+            "SELECT ?fields FROM book_microstructure_1m \
+             WHERE token_id IN ? \
+             AND bucket_time >= fromUnixTimestamp64Milli(?) \
+             AND bucket_time < fromUnixTimestamp64Milli(?) \
+             ORDER BY token_id, bucket_time"
+        } else {
+            "SELECT ?fields FROM book_microstructure_1s \
+             WHERE token_id IN ? \
+             AND bucket_time >= fromUnixTimestamp64Milli(?) \
+             AND bucket_time < fromUnixTimestamp64Milli(?) \
+             ORDER BY token_id, bucket_time"
+        };
+        let rows = self
+            .pool
+            .client()
+            .query(sql)
+            .bind(token_ids)
+            .bind(from_ms)
+            .bind(to_ms)
+            .fetch_all::<BookMicrostructureRow>()
+            .await?;
+        Ok(rows)
+    }
+
+    async fn last_trades(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        limit: u64,
+    ) -> Result<Vec<TickEventRow>, StorageError> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .pool
+            .client()
+            .query(
+                "SELECT ?fields FROM tick_events \
+                 WHERE token_id IN ? \
+                 AND event_type = ? \
+                 AND last_trade_price IS NOT NULL \
+                 AND event_time >= fromUnixTimestamp64Milli(?) \
+                 AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY event_time DESC, ingestion_time DESC, sequence DESC \
+                 LIMIT ?",
+            )
+            .bind(token_ids)
+            .bind(ChBookEventType::LastTrade)
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(limit)
+            .fetch_all::<TickEventRow>()
             .await?;
         Ok(rows)
     }

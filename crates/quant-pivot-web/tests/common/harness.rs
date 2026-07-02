@@ -20,8 +20,13 @@ use async_trait::async_trait;
 use quant_pivot_core::{app::execution_read::CoreExecutionReadPort, report::AdHocReportRequest};
 use quant_pivot_error::{
     QuantError, QuantResult, auth::AuthError, control::ControlError, execution::ExecutionError,
+    storage::StorageError,
 };
 use quant_pivot_models::{
+    clickhouse::{
+        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
+        TickEventRow,
+    },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
@@ -40,7 +45,7 @@ use quant_pivot_models::{
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, FactorDefinitionId, ModelComparisonReportId, ModelVersionId,
+        BacktestReportId, FactorDefinitionId, MarketId, ModelComparisonReportId, ModelVersionId,
         OrderIntentId, TokenId, TrainingDatasetId,
     },
 };
@@ -51,7 +56,7 @@ use quant_pivot_repository::{
     },
     traits::{
         AttributionRepository, ExecutionOrderRepository, PositionRepository,
-        ReconciliationRepository, SettlementRedeemRepository,
+        QuantFactReadRepository, ReconciliationRepository, SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::cache::connect_pool;
@@ -174,6 +179,7 @@ impl TestEnv {
             data_quality: Arc::clone(&data_quality) as Arc<dyn DataQualityPort>,
             events,
             markets: Arc::clone(&repos.markets),
+            quant_facts: Arc::new(MockQuantFactRead),
             ws_sessions,
             metrics: Arc::new(MockMetricsScrape),
             readiness: Arc::new(PgRedisReadiness::new(
@@ -348,6 +354,87 @@ struct MockMetricsScrape;
 impl MetricsScrapePort for MockMetricsScrape {
     fn gather_prometheus(&self) -> String {
         String::new()
+    }
+}
+
+/// No-op quant fact read port for web integration tests. The market-detail
+/// microstructure endpoint is exercised for routing / RBAC only; the live
+/// ClickHouse-backed series are covered by repository integration tests.
+struct MockQuantFactRead;
+
+#[async_trait]
+impl QuantFactReadRepository for MockQuantFactRead {
+    async fn microstructure_window(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn microstructure_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _minute: bool,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn last_trades(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _limit: u64,
+    ) -> Result<Vec<TickEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn mid_price_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _bucket_secs: u32,
+    ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn book_snapshot_at(
+        &self,
+        _token_id: &TokenId,
+        _as_of_ms: i64,
+    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn book_snapshots_between(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolution_at(
+        &self,
+        _market_id: &MarketId,
+        _as_of_ms: i64,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn resolutions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<MarketResolutionRow>, StorageError> {
+        Ok(Vec::new())
     }
 }
 

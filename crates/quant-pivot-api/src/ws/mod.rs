@@ -323,6 +323,10 @@ impl WsShardHealthPort for ClobWsManager {
     fn shard_health(&self) -> ShardHealthSummary {
         self.health.summary()
     }
+
+    fn last_message_age_ms(&self) -> Option<u64> {
+        Self::last_message_age_ms(self)
+    }
 }
 
 #[cfg(test)]

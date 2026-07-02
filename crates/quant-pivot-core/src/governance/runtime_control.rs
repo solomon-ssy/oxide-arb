@@ -125,14 +125,18 @@ impl RuntimeControlPort for QuantRuntimeControl {
             oldest_disconnected_secs: shards.oldest_disconnected_secs,
             connected_ratio_bps: shards.connected_ratio_bps,
         };
-        let market_ready = catalog.is_ready() && shards.total > 0 && shards.disconnected == 0;
+        let last_message_age_ms = self.health_checker.ws_last_message_age_ms();
+        let market_data = MarketDataConnectivity::from_parts(last_message_age_ms, ws_shards);
         let active_markets = match &catalog {
             CatalogState::Ready { markets, .. } => u32::try_from(*markets).unwrap_or(u32::MAX),
             CatalogState::Warming => 0,
         };
         let kill_switch = self.kill_switch.view();
-        let operational_phase =
-            operational_phase_from_readiness(kill_switch.state, catalog.is_ready(), market_ready);
+        let operational_phase = operational_phase_from_readiness(
+            kill_switch.state,
+            catalog.is_ready(),
+            market_data.ready,
+        );
 
         SystemStatus {
             quant_runtime_mode: self.runtime_mode.current(),
@@ -140,11 +144,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
             active_markets,
             catalog,
             operational_phase,
-            market_data: MarketDataConnectivity {
-                ready: market_ready,
-                last_message_age_ms: None,
-                ws_shards,
-            },
+            market_data,
             kill_switch,
             execution_recovery: self.execution_recovery.current(),
             checked_at: Utc::now(),

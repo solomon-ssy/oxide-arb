@@ -14,9 +14,9 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, MenuRepository, OperationLogRepository, RoleMenuRepository,
-    RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository, UserRepository,
-    UserRoleRepository,
+    MarketRepository, MenuRepository, OperationLogRepository, QuantFactReadRepository,
+    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
+    UserRepository, UserRoleRepository,
 };
 
 use crate::{
@@ -52,6 +52,9 @@ pub struct AppState {
     pub data_quality: Arc<dyn DataQualityPort>,
     pub events: CoreEventPublisher,
     pub markets: Arc<dyn MarketRepository>,
+    /// Historical `ClickHouse` fact read port for market-detail charts
+    /// (microstructure series + last-trade prints).
+    pub quant_facts: Arc<dyn QuantFactReadRepository>,
     pub ws_sessions: SessionRegistry,
     pub metrics: Arc<dyn MetricsScrapePort>,
     pub readiness: Arc<dyn ReadinessPort>,

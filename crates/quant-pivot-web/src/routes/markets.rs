@@ -8,7 +8,9 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         BlockMarketRequest, MarketBookSideView, MarketBookSummaryView, MarketBookView,
-        MarketDataPort, MarketInfo, MarketPageQuery, MarketView, Paginated, UnblockMarketRequest,
+        MarketDataPort, MarketInfo, MarketMicrostructureQuery, MarketMicrostructureView,
+        MarketPageQuery, MarketTradeTick, MarketView, MicrostructureBucket, Paginated,
+        UnblockMarketRequest,
     },
     enums::{
         market::MarketStatus,
@@ -45,6 +47,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/markets/{market_id}/book",
             Rule::ResourceOp(ResourceType::Market, Operation::Read),
             book,
+        ),
+        spec(
+            Method::GET,
+            "/markets/{market_id}/microstructure",
+            Rule::ResourceOp(ResourceType::Market, Operation::Read),
+            microstructure,
         ),
         spec(
             Method::POST,
@@ -160,6 +168,70 @@ pub async fn book(
         no: no.map(|snapshot| {
             MarketBookSideView::from_snapshot(market.no_token_id.clone(), &snapshot)
         }),
+    }))
+}
+
+/// Cap on last-trade prints returned for the price-chart overlay.
+const MICROSTRUCTURE_TRADE_LIMIT: u64 = 500;
+
+/// `GET /api/markets/{market_id}/microstructure` — historical charts source.
+///
+/// Returns mid / spread / depth / imbalance buckets for the market's YES + NO
+/// tokens plus recent last-trade prints. Powers the market-detail charts. The
+/// bucket resolution (1s vs 1m rollup) is chosen from the resolved window span.
+pub async fn microstructure(
+    state: web::Data<AppState>,
+    market_id: web::Path<MarketId>,
+    query: web::Query<MarketMicrostructureQuery>,
+) -> Result<WebResponse<MarketMicrostructureView>, WebError> {
+    let market_id = market_id.into_inner();
+    // `QueryError` (inverted / over-wide window) maps to a 400 via `From`.
+    let window = query.into_inner().resolve()?;
+    let market = state
+        .markets
+        .find_by_id(&market_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("market not found: {market_id}")))?;
+    let from_ms = window.from.timestamp_millis();
+    let to_ms = window.to.timestamp_millis();
+    let tokens = vec![market.yes_token_id.clone(), market.no_token_id.clone()];
+    let rows = state
+        .quant_facts
+        .microstructure_series(
+            tokens.clone(),
+            from_ms,
+            to_ms,
+            window.resolution.is_minute(),
+        )
+        .await?;
+    let trades = state
+        .quant_facts
+        .last_trades(tokens, from_ms, to_ms, MICROSTRUCTURE_TRADE_LIMIT)
+        .await?;
+    // Rows arrive ordered by token then time; split into YES / NO series.
+    let mut yes = Vec::new();
+    let mut no = Vec::new();
+    for row in &rows {
+        if row.token_id == market.yes_token_id {
+            yes.push(MicrostructureBucket::from_row(row));
+        } else if row.token_id == market.no_token_id {
+            no.push(MicrostructureBucket::from_row(row));
+        }
+    }
+    let trades = trades
+        .into_iter()
+        .filter_map(MarketTradeTick::from_row)
+        .collect();
+    Ok(WebResponse::ok(MarketMicrostructureView {
+        market_id: market.market_id.clone(),
+        yes_token_id: market.yes_token_id.clone(),
+        no_token_id: market.no_token_id.clone(),
+        resolution: window.resolution,
+        from_ms,
+        to_ms,
+        yes,
+        no,
+        trades,
     }))
 }
 
