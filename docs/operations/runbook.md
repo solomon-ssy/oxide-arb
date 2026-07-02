@@ -1,6 +1,6 @@
 # quant-pivot 生产运行 Runbook
 
-> Last reviewed: 2026-07-01.
+> Last reviewed: 2026-07-02.
 >
 > This document is an operating manual for quant-pivot on Polymarket. It explains how to prepare credentials and capital, start the system, read reports, place governed orders, sell or redeem positions, and respond to incidents. It is not investment advice. Every buy/sell decision must be traceable to a published `RecommendationReport`, an `OrderIntent`, an `ExecutionOrder`, or an explicit operator incident action.
 
@@ -386,6 +386,209 @@ curl -sS "$BASE/api/quant/account/live" \
 - no pending/unresolvable reconciliation；
 - market data WS 和 Gamma/Data API 正常。
 
+### 6.4 冷启动：数据采集是否正常
+
+首次部署时 Postgres / ClickHouse 为空，**数据摄取可以立即开始，但报告与训练有各自的前置条件**（见 §8.0）。本节说明要采集哪些数据、大致需要多久、以及如何用 API / 日志 / 指标确认采集正常。
+
+#### 6.4.1 三层数据与用途
+
+| 层 | 存储 | 采集内容 | 用途 | 大致可用时间 |
+|----|------|----------|------|--------------|
+| **L1 目录 + 实时盘口** | Postgres `market` / `event`；进程内 BookStore；CLOB WS | Gamma 全量/增量同步；订阅 token 的 L2 订单簿 | 市场列表、实时 book、报告选市（live PIT） | 启动后 **数分钟**（首次 Gamma full sync + WS shard 就绪） |
+| **L2 历史盘口事实** | ClickHouse `book_snapshots`、`tick_events`、`book_l2_replay_hot`、`book_microstructure_*` | WS 增量写入；异步 fact writer 批量刷盘 | 离线训练集的 PIT 特征/标签、回测 | 持续 ingest **数小时** 起有可用窗口；训练窗口越长需要越久 |
+| **L3 量化事实** | ClickHouse `quant_feature_event`、`quant_factor_event` 等 | 特征/因子/信号/报告流水线产出 | 研究分析、归因反馈、后续再训练 | 首份报告跑通后才有；冷启动阶段可忽略 |
+
+**训练集 build** 主要消费 **L1 目录 + L2 历史盘口**（以及可选的 live attribution，需已有执行闭环）。  
+**在线报告** 主要消费 **L1 实时盘口 + 已发布的 active model**（不读 ClickHouse 历史窗做 live scoring）。
+
+#### 6.4.2 用 API 确认 L1（目录 + 实时 book）
+
+**1. 系统生命周期 — 目录与 WS 是否就绪**
+
+```bash
+curl -sS "$BASE/api/system/status" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '{
+    catalog: .data.catalog,
+    operational_phase: .data.operational_phase,
+    market_data: .data.market_data,
+    active_markets: .data.active_markets
+  }'
+```
+
+期望（ ingest 正常时）：
+
+| 字段 | 正常值 | 含义 |
+|------|--------|------|
+| `catalog.state` | `"ready"` | Gamma 首次 full sync 已完成 |
+| `catalog.markets` | `> 0` | 已注册市场数 |
+| `operational_phase.phase` | `"operational"` | 目录就绪且 WS 有新鲜 book 消息 |
+| `market_data.ready` | `true` | 全局 CLOB WS 连通且消息未过期 |
+| `market_data.ws_shards.disconnected` | `0` | 所有 WS shard 已连接 |
+| `active_markets` | `> 0` | 当前活跃可检测市场数 |
+
+若长期停留在 `catalog_warming` 或 `market_data_connecting`，检查 Gamma endpoint、CLOB WS URL、网络与进程日志（`quant_pivot_core::service::gamma`、`quant_pivot_api::ws::router`）。
+
+**2. 市场列表 — Postgres 是否有 catalog**
+
+```bash
+curl -sS "$BASE/api/markets?page=1&size=5" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '{total: .data.total, sample: [.data.items[] | {market_id, question, status}]}'
+```
+
+`total > 0` 表示 Gamma 持久化成功。若 API 有数据但日志曾出现 `failed to persist markets`，说明 upsert 曾失败（常见为 Postgres 枚举 cast 问题），需升级至含修复的二进制并观察下次 sync。
+
+**3. 单市场盘口 — BookStore 是否有 L2**
+
+```bash
+MARKET_ID="<从 markets 列表取一个 market_id>"
+curl -sS "$BASE/api/markets/$MARKET_ID/book" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq .
+```
+
+YES/NO 两侧应有 bid/ask 档位；若长期为空，检查该 market 是否已订阅（tier1 选市日志 `subscribed=N`）。
+
+**4. 数据质量快照 — 实时 book 新鲜度**
+
+```bash
+curl -sS "$BASE/api/quant/data-quality" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq .
+```
+
+期望：`total_tokens > 0`；`fresh + acceptable` 占多数；`fact_lag_exceeded: false`。  
+`worst_fact_lag_ms` 接近或超过 `max_fact_lag_ms` 表示 ClickHouse 写入滞后，会影响离线训练集的 PIT 精度。
+
+**5. 子系统健康**
+
+```bash
+curl -sS "$BASE/api/system/health" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '{overall_healthy: .data.overall_healthy, checks: .data.checks}'
+```
+
+Postgres、ClickHouse、Redis 探针应为 `healthy`。
+
+#### 6.4.3 用日志确认采集（无需 DB 直连）
+
+启动后日志中应出现类似条目（时间戳因环境而异）：
+
+| 日志关键词 | 含义 |
+|------------|------|
+| `gamma full sync complete events=… registered=…` | Gamma 目录同步完成 |
+| `CLOB websocket subscription ingest synced … subscribed=N` | WS 订阅与 tier 选市完成 |
+| `WS shard spawned shard_id=…` | CLOB WS 分片就绪 |
+| `ClickHouse schema ensured` | CH 表结构已就绪 |
+| `Tick size changed asset_id=…` | 盘口增量正常（INFO，非错误） |
+
+**可忽略的 WARN（若进程继续启动）**：
+
+- `POST /auth/api-key … Could not create api key` — SDK 在 key 已存在时 create 失败后会 derive 成功。
+
+**需要处理的 WARN/ERROR**：
+
+- `failed to persist markets` — Postgres upsert 失败，目录不完整。
+- `report generation failed … active_model_version_id is not configured` — 尚无已发布模型（冷启动预期；见 §8.0 关 schedule）。
+
+#### 6.4.4 用 Prometheus 指标确认（可选）
+
+从 `/metrics` 抓取（名称前缀 `quant_pivot_`）：
+
+| 指标 | 正常趋势 |
+|------|----------|
+| `gamma_markets_total` | > 0，full sync 后稳定 |
+| `gamma_last_sync_success` | 1（最近一次 sync 成功） |
+| `fact_lag_worst_ms` | 低于 runtime-config `data_quality.max_fact_lag_ms` |
+| `fact_writer_lag_seconds`（若暴露） | 无持续增大 |
+
+#### 6.4.5 用 ClickHouse 确认 L2 历史（训练前）
+
+直连 ClickHouse（替换连接参数）：
+
+```sql
+-- 最近是否有 book 快照写入
+SELECT count() AS rows, max(ingestion_time) AS latest
+FROM book_snapshots
+WHERE ingestion_time > now() - INTERVAL 1 HOUR;
+
+-- 按 token 看覆盖（抽样）
+SELECT token_id, count() AS snaps, min(event_time) AS first_seen, max(event_time) AS last_seen
+FROM book_snapshots
+WHERE ingestion_time > now() - INTERVAL 24 HOUR
+GROUP BY token_id
+ORDER BY snaps DESC
+LIMIT 10;
+```
+
+`rows > 0` 且 `latest` 接近当前时间，说明 L2 历史事实在积累。  
+**训练集 plan 的 `planned_samples` 依赖这段历史**；窗口 `[window_start, window_end)` 内没有足够 PIT book 的样本会在 build 时被丢弃。
+
+#### 6.4.6 训练集需要累积多久（数量级）
+
+没有固定「日历天数」，取决于 **窗口长度、采样间隔、订阅市场数、标签 horizon** 和 **quality gate 阈值**。默认 runtime-config 参考值：
+
+| 参数 | 默认值 | 影响 |
+|------|--------|------|
+| `model.prediction_horizon_secs` | `86400`（24h） | 训练标签需样本 `as_of` 之后 24h 内有 forward book 数据 |
+| `quality_gate.min_sample_count` | `500` | publish 门禁：回测/数据集样本数 |
+| `quality_gate.min_label_coverage` | `0.70` | 标签覆盖率 |
+| `reports.schedules[default_interval].cadence` | 每 `300`s | 与训练无关；冷启动无模型时会 ERROR |
+
+**实操估算**（默认 24h horizon、`sample_interval_secs=300`、tier1 ~1600 token）：
+
+1. **L1 就绪**：启动后 ~5–15 分钟（Gamma + WS）。
+2. **L2 可用于短窗 plan**：连续 ingest **≥ 几小时** 后可对最近 1–4 小时窗口做 plan，看 `planned_samples`。
+3. **标签成熟**：窗口内每个样本的标签要求 `as_of + horizon` 之前的数据已 ingest。  
+   因此 **`window_end` 应 ≤ `now - max(horizons_secs)`**（通常 ≤ now − 24h），否则大量 `labels_not_mature`。
+4. **首次 publish**：在 label 成熟的前提下，往往还需要 **≥ 7–14 天** 连续 ingest + 足够跨市场样本，才能通过默认 `min_sample_count=500`；Quant 可在授权下临时调低 gate 做 bootstrap。
+
+先用 **plan 干跑** 看数量，再决定 build（§8.2）：
+
+```bash
+curl -sS -X POST "$BASE/api/research/training-datasets/plan" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_spec_id": "<已有 model spec UUID>",
+    "runtime_config_version_id": "<active runtime config version UUID>",
+    "window_start": "2026-06-25T00:00:00Z",
+    "window_end": "2026-07-01T00:00:00Z",
+    "sample_interval_secs": 300,
+    "horizons_secs": [86400],
+    "source_delay_secs": 10,
+    "reason": "cold-start dry plan"
+  }' | jq '{planned_samples: .data.planned_samples, training_dataset_id: .data.training_dataset_id}'
+```
+
+`planned_samples` 接近 0 → 继续 ingest 或扩大窗口 / 检查 ClickHouse。
+
+Build（在 plan 满意后，复用相同 window 参数 + plan 返回的 `training_dataset_id`）：
+
+```bash
+curl -sS -X POST "$BASE/api/research/training-datasets/build" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "training_dataset_id": "<plan 返回的 UUID>",
+    "model_spec_id": "<model spec UUID>",
+    "runtime_config_version_id": "<runtime config version UUID>",
+    "window_start": "2026-06-25T00:00:00Z",
+    "window_end": "2026-07-01T00:00:00Z",
+    "sample_interval_secs": 300,
+    "horizons_secs": [86400],
+    "source_delay_secs": 10,
+    "reason": "cold-start first dataset build"
+  }' | jq '{status: .data.status, sample_count: .data.sample_count}'
+```
+
+Poll `GET /api/research/training-datasets/{id}` 直到终端态。
+
 ## 7. Runtime-config 操作
 
 ### 7.1 查看当前配置和 schema
@@ -427,7 +630,7 @@ VERSION_ID=$(
         "execution.entry_order_policy.max_slippage_bps": 50
       }
     }' \
-  | jq -r '.data.id'
+  | jq -r '.data.runtime_config_version_id'
 )
 
 curl -sS -X POST "$BASE/api/runtime-config/versions/$VERSION_ID/activate" \
@@ -459,22 +662,222 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
 
 ## 8. 生成与阅读报告
 
-### 8.1 定时报告
+### 8.0 前置条件（冷启动必读）
 
-默认 runtime-config 会启用一个 interval schedule。报告生成流程：
+**出报告 ≠ 只要进程跑起来。** 当前实现中，每次报告构建（定时或 ad-hoc）在选市之前会 **fail-closed** 检查：
 
-1. 读取 active runtime-config；
+1. **`model.active_model_version_id` 已配置** — 指向 registry 中 **`PublicationStatus::Published`** 的模型版本，且 artifact 可加载。
+2. **数据 ingest 就绪** — `operational_phase` 为 `operational`（或仅收紧型 degrade 仍允许报告）；实时 book 满足 data-quality 阈值。
+3. **账户可读** — 所有 mode 下 CLOB collateral + Data API positions 可用（ReportOnly 不是 dry-run）。
+
+因此 **第一次运行、库里没有任何模型时，报告必然失败** — 这是设计行为，不是 ingest 坏了。  
+默认 bootstrap runtime-config 会 **启用** `default_interval` 定时 schedule（每 300s），但 **`active_model_version_id = null`**，所以日志会出现：
+
+`report generation failed … model.active_model_version_id is not configured`
+
+**冷启动推荐做法**（详见 §8.2）：
+
+1. 先确认 §6.4 数据采集正常。
+2. 用 runtime-config **关闭** `default_interval` schedule，避免无意义 ERROR 刷屏。
+3. 连续 ingest 直至 training-dataset **plan** 的 `planned_samples` 足够。
+4. 走 **train → backtest → publish** 治理链（publish 会自动写入 `active_model_version_id`）。
+5. 再开启 schedule 或手动触发 ad-hoc 报告。
+
+**训练集与报告的关系**：
+
+| 问题 | 答案 |
+|------|------|
+| 出报告是否必须有训练集？ | **不直接需要**；报告读的是 **已发布模型 artifact**，不是训练集 Parquet。 |
+| 那模型从哪来？ | 标准路径是 **训练集 build → train → backtest → publish**。没有 publish 就没有 active model。 |
+| 能否跳过训练手动指模型？ | 可以 patch `model.active_model_version_id` 到已有 **Published** 版本，但版本仍须先注册 artifact。 |
+
+### 8.1 从冷启动到第一份报告（完整流程）
+
+```mermaid
+flowchart TD
+    start[进程启动 ingest] --> verify[§6.4 验证 L1/L2]
+    verify --> disable[关闭 default_interval schedule]
+    disable --> ingest[连续 ingest 数小时至数天]
+    ingest --> plan[training-datasets/plan]
+    plan --> build[training-datasets/build]
+    build --> train[models/train]
+    train --> backtest[models/backtest]
+    backtest --> publish[models/publish]
+    publish --> enable[开启 schedule 或 ad-hoc]
+    enable --> report[RecommendationReport 发布]
+```
+
+**Step 0 — 关闭默认定时报告（避免 ERROR 刷屏）**
+
+```bash
+VERSION_ID=$(
+  curl -sS -X POST "$BASE/api/runtime-config/versions" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+    -H "X-Acting-Role: quant" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "reason": "cold start: disable scheduled reports until model published",
+      "config_patch": {
+        "reports.schedules": [{
+          "schedule_id": "default_interval",
+          "cadence": {"interval_secs": 300},
+          "top_n": 20,
+          "source_delay_secs": 10,
+          "enabled": false
+        }]
+      }
+    }' | jq -r '.data.runtime_config_version_id'
+)
+
+curl -sS -X POST "$BASE/api/runtime-config/versions/$VERSION_ID/activate" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"activate cold-start schedule disable"}' | jq .
+```
+
+> **注意**：`reports.schedules` 是 **整数组替换**，patch 时必须带上完整 schedule 对象，不能只改 `enabled` 字段。
+
+**Step 1 — Plan / Build 训练集**
+
+前提：
+
+- `quant_model_spec` 中已有目标 `model_spec_id`（Research Workbench 或 DBA 预置）；
+- `runtime_config_version_id` 用当前 active 版本：
+
+```bash
+curl -sS "$BASE/api/runtime-config" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '.data.version.runtime_config_version_id'
+```
+
+1. **Plan**（不写 ledger，只看 `planned_samples`）— 见 §6.4.6 示例。
+2. **Build**（同 plan body，加上 plan 返回的 `training_dataset_id`）— 见 §6.4.6 build 示例。
+3. **Poll** `GET /api/research/training-datasets/{id}` 直到 `status` 为终端态。Trainer 只吃 **`ready`** 状态。
+
+**Step 2 — Train → Backtest → Publish**
+
+```bash
+# Train（返回 model_version_id，状态 candidate）
+curl -sS -X POST "$BASE/api/research/models/train" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_spec_id": "<model spec UUID>",
+    "training_dataset_id": "<ready dataset UUID>",
+    "runtime_config_version_id": "<runtime config version UUID>",
+    "model_family": "weighted_factor",
+    "label_name": "return_to_horizon",
+    "label_horizon_secs": 86400,
+    "reason": "cold-start first model"
+  }' | jq '{model_version_id: .data.model_version_id, publication_status: .data.publication_status}'
+
+# Backtest
+curl -sS -X POST "$BASE/api/research/models/<model_version_id>/backtest" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "training_dataset_id": "<holdout or same dataset UUID>",
+    "runtime_config_version_id": "<runtime config version UUID>",
+    "calibrate": true,
+    "reason": "cold-start backtest before publish"
+  }' | jq .
+
+# Publish（quality gate 通过后自动 sync model.active_model_version_id）
+curl -sS -X POST "$BASE/api/research/models/<model_version_id>/publish" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"promote first production model"}' | jq .
+```
+
+确认指针已写入：
+
+```bash
+curl -sS "$BASE/api/runtime-config" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" | jq '.data.config.model.active_model_version_id'
+```
+
+**Step 3 — 开启报告**
+
+- 重新 patch `reports.schedules[].enabled=true`，或
+- 启用 ad-hoc 并手动触发（§8.4）。
+
+### 8.2 定时报告 vs Ad-hoc 报告
+
+| 维度 | 定时报告（Scheduled） | Ad-hoc 报告 |
+|------|----------------------|-------------|
+| 触发 | runtime-config `reports.schedules[]` + cron/interval worker | 人工 `POST /api/quant/reports/run` 或 UI「立即生成」 |
+| 默认 | bootstrap **enabled**（`default_interval`，300s） | bootstrap **disabled**（`ad_hoc_report_enabled=false`） |
+| `top_n` | 取自 schedule 配置 | **请求体必填**（无配置回退） |
+| `source_delay_secs` | 取自 schedule 配置 | **请求体必填** |
+| 幂等键 | `schedule_id` + `trigger_time` 派生 | 请求体 `request_id`（客户端生成） |
+| HTTP | 无直接 HTTP（后台 scheduler） | `POST` 返回 **202 Accepted**（异步入队） |
+| 典型用途 | 生产周期性 Top-N | 事故恢复后验证、semi_auto 审批前刷新、策略变更后手动快照 |
+
+两者走 **同一套** `ReportLifecycleService::run` 流水线；差异仅在触发源、参数来源和治理开关。
+
+### 8.3 定时报告
+
+默认 runtime-config 包含一个 interval schedule（`schedule_id=default_interval`，`interval_secs=300`，`top_n=20`，`source_delay_secs=10`）。
+
+报告生成流程：
+
+1. 读取 trigger-time 的 point-in-time runtime-config；
 2. 计算 `as_of = trigger_time - source_delay_secs`；
-3. selection 选出候选市场；
-4. account provider 读取真实 venue 账户；
-5. feature/factor/model 输出信号；
-6. portfolio planner 做 sizing 和约束优化；
-7. composer 生成 Top-N `RecommendationReport`；
-8. report 发布到 Postgres 和 WebSocket。
+3. **`active_requirements`** — 加载 Published active model；
+4. selection 选出候选市场；
+5. account provider 读取真实 venue 账户；
+6. feature / factor / model 输出信号；
+7. portfolio planner 做 sizing 和约束优化；
+8. composer 生成 Top-N `RecommendationReport`；
+9. 持久化 + WebSocket `quant.report` 事件。
 
-### 8.2 Ad-hoc 报告
+Schedule 被 **disabled** 时，worker 不会触发；若误配为 enabled 且无 active model，每 tick ERROR（§8.0）。
 
-ad-hoc 必须显式提供 `top_n` 和 `source_delay_secs`，且 `reports.ad_hoc_report_enabled=true`。
+### 8.4 Ad-hoc 报告（详细）
+
+**是什么**：Ad-hoc（「按需 / 手动」）报告是一次 **显式触发** 的报告构建，不等待定时 schedule。  
+与定时报告产出相同类型的 `RecommendationReport`（Top-N 推荐 + sizing + exit plan），但：
+
+- 由 operator / quant **主动发起**（API 或 Admin UI）；
+- **必须**在请求中指定 `top_n` 和 `source_delay_secs`（代码 fail-closed，无默认值）；
+- 受 `reports.ad_hoc_report_enabled` 治理（默认 `false`）；
+- **异步执行**：HTTP 只负责入队，不阻塞到报告写完。
+
+**何时使用**：
+
+- 冷启动完成 publish 后，**第一次验证**报告流水线；
+- 数据质量事故恢复后（§16.1），确认新 report 正常再恢复交易；
+- `semi_auto` 审批窗口前需要 **最新** Top-N（runbook §11 场景）；
+- 策略/runtime-config 变更后，不想等到下一个 300s tick。
+
+**启用 ad-hoc**（一次性 patch）：
+
+```bash
+curl -sS -X POST "$BASE/api/runtime-config/versions" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: quant" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "reason": "enable manual report runs for operators",
+    "config_patch": {
+      "reports.ad_hoc_report_enabled": true
+    }
+  }' | jq -r '.data.runtime_config_version_id'
+# 然后 activate（同 §7.2）
+```
+
+**触发 ad-hoc**（`quant_report:enqueue` 权限；`X-Acting-Role: quant` 或 operator 角色）：
 
 ```bash
 curl -sS -X POST "$BASE/api/quant/reports/run" \
@@ -483,22 +886,45 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
   -H "X-Acting-Role: quant" \
   -H "Content-Type: application/json" \
   -d '{
-    "request_id": "manual-20260701-001",
-    "reason": "pre-trade fresh report before semi_auto approval window",
+    "request_id": "manual-20260702-001",
+    "reason": "first report after model publish",
     "top_n": 20,
     "source_delay_secs": 10
   }' | jq .
 ```
 
-返回 `202` 时只表示入队成功。用报告列表或 WS 追踪完成：
+**响应语义**：
 
-```bash
-curl -sS "$BASE/api/quant/reports/latest" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept-Api-Version: v1" | jq .
-```
+| HTTP | Body | 含义 |
+|------|------|------|
+| **202 Accepted** | `{ request_id, trigger_key }` | 已入队；**尚无** `recommendation_report_id` |
+| **409 Conflict** | `ad-hoc report generation is disabled` | 未开启 `ad_hoc_report_enabled` |
+| **4xx** | validation / auth | 缺 `top_n`/`source_delay_secs`、权限不足等 |
 
-### 8.3 如何读一条 Recommendation
+**跟踪完成**（三选一，推荐 1+2）：
+
+1. **WebSocket** — 订阅 `quant.report` 频道，事件序列：`started` → `published` / `empty` / `failed`。
+2. **轮询列表** — `GET /api/quant/reports?limit=5` 按 `created_at` 查看新行；或 `GET /api/quant/reports/latest`（仅 **published** Top-N）。
+3. **Metrics** — `quant_report_runs_total`、`quant_reports_published_total`、`quant_reports_empty_total`。
+
+**幂等**：相同 `request_id` 重复 POST 不会重复构建（回归测试 `ad_hoc_idempotent_on_trigger_key`）。客户端应使用全局唯一 `request_id`（如 `manual-<date>-<seq>`）。
+
+**与 `publish_empty_reports` 的关系**：
+
+- 默认 `publish_empty_reports=true`：模型跑完但无 positive signal 时仍 **持久化** empty report（带 `empty_reason`）。
+- `publish_empty_reports=false`：empty 结果 **跳过 Postgres**，仅 ephemeral WS + metric。
+- 无论哪种，**没有 active model 时在更早阶段失败**，不会产生 empty report。
+
+**Ad-hoc 仍失败时的常见原因**（与定时报告相同）：
+
+| 错误 / empty_reason | 处理 |
+|---------------------|------|
+| `active_model_version_id is not configured` | 完成 §8.1 publish 流程 |
+| `active model … must be published` | 指向 Candidate 版本；需 publish |
+| `insufficient data quality` | §6.4 数据质量 / WS |
+| `no positive signal` | 正常空报告，非 ingest 故障 |
+
+### 8.5 如何读一条 Recommendation
 
 每条推荐至少要看这些块：
 

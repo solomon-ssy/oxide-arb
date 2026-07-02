@@ -178,11 +178,22 @@ impl BookFactWriter {
         );
         self.write_microstructure_observation(
             &cmd.asset_id,
-            market_id,
+            market_id.clone(),
             &snapshot,
             ChBookEventType::Snapshot,
             0,
         );
+        self.write_snapshot_levels(SnapshotLevels {
+            token_id: &cmd.asset_id,
+            market_id,
+            reason: ChSnapshotReason::WsSnapshot,
+            bids: &cmd.bids.levels,
+            asks: &cmd.asks.levels,
+            event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
+            ingestion_time,
+            book_version,
+            source: ChFactSource::WsSnapshot,
+        });
     }
 
     pub fn write_published_snapshot(
