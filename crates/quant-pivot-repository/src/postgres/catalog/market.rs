@@ -1,10 +1,9 @@
 use crate::{
     postgres::{
-        catalog::ingest::{
-            find_existing_str_id_chunks, find_models_by_str_id_chunks, upsert_many_chunked,
-        },
+        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
         error,
         query::paginate_mapped,
+        write::upsert_many_chunked,
     },
     traits::MarketRepository,
 };
@@ -169,6 +168,8 @@ async fn do_upsert_batch(
     db: &impl ConnectionTrait,
     dtos: Vec<UpsertMarket>,
 ) -> Result<u64, StorageError> {
+    // Mixed NULL / non-NULL native-enum columns (e.g. `fee_source`) in one batch
+    // are homogenised inside `upsert_many_chunked` — see `align_partial_columns`.
     upsert_many_chunked::<MarketEntity, UpsertMarket>(db, dtos, market_upsert_on_conflict()).await
 }
 

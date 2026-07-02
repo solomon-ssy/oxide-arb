@@ -7,7 +7,7 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, Paginated},
-    entities::operation_log::{ActiveModel, Column, Entity},
+    entities::operation_log::{Column, Entity},
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
@@ -15,13 +15,12 @@ use sea_orm::{
 };
 
 use crate::{
-    batch,
-    postgres::query::{non_empty, paginate_mapped},
+    postgres::{
+        query::{non_empty, paginate_mapped},
+        write::insert_many_chunked,
+    },
     traits::OperationLogRepository,
 };
-
-/// Number of insert columns in `NewOperationLog` (excludes DB-default `occurred_at`).
-const OPERATION_LOG_COLUMNS: usize = 21;
 
 /// Operation-log repository backed by Postgres.
 pub struct PgOperationLogRepository {
@@ -50,27 +49,11 @@ async fn do_append_batch(
     if logs.is_empty() {
         return Ok(());
     }
-
-    let chunk_size = batch::max_rows_per_insert(OPERATION_LOG_COLUMNS);
+    // One transaction so all chunks commit atomically. `insert_many_chunked`
+    // handles bind-limit chunking and aligns the nullable `resource_type` enum
+    // across mixed rows (see `align_partial_columns`).
     let txn = db.begin().await.map_err(StorageError::from)?;
-    let mut chunk: Vec<ActiveModel> = Vec::with_capacity(chunk_size);
-    for log in logs {
-        chunk.push(log.into_active_model());
-        if chunk.len() < chunk_size {
-            continue;
-        }
-        let models = std::mem::take(&mut chunk);
-        Entity::insert_many(models)
-            .exec_without_returning(&txn)
-            .await
-            .map_err(StorageError::from)?;
-    }
-    if !chunk.is_empty() {
-        Entity::insert_many(chunk)
-            .exec_without_returning(&txn)
-            .await
-            .map_err(StorageError::from)?;
-    }
+    insert_many_chunked::<Entity, NewOperationLog>(&txn, logs).await?;
     txn.commit().await.map_err(StorageError::from)?;
     Ok(())
 }

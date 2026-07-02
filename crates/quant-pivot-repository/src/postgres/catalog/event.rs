@@ -1,6 +1,7 @@
 use crate::{
-    postgres::catalog::ingest::{
-        find_existing_str_id_chunks, find_models_by_str_id_chunks, upsert_many_chunked,
+    postgres::{
+        catalog::ingest::{find_existing_str_id_chunks, find_models_by_str_id_chunks},
+        write::upsert_many_chunked,
     },
     traits::EventRepository,
 };

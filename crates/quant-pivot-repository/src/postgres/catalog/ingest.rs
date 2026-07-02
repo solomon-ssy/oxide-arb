@@ -1,15 +1,14 @@
-//! Shared chunked ingest helpers for Gamma catalog repositories.
+//! Shared chunked id-lookup helpers for Gamma catalog repositories.
+//!
+//! Batch write primitives (`insert_many_chunked` / `upsert_many_chunked`) live
+//! in [`crate::postgres::write`].
 
 use std::collections::HashSet;
 
-use num_traits::ToPrimitive;
 use quant_pivot_error::storage::StorageError;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, Iterable, QueryFilter, QuerySelect,
-    sea_query::OnConflict,
-};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect};
 
-use crate::batch::{chunk_for_in_clause, chunk_for_insert};
+use crate::batch::chunk_for_in_clause;
 
 /// Load all rows whose string id column matches any of `ids`, chunking the `IN`
 /// list to stay under the Postgres bind-parameter limit.
@@ -61,34 +60,4 @@ where
         existing.extend(batch);
     }
     Ok(existing)
-}
-
-/// Multi-row upsert split into bind-safe chunks.
-pub async fn upsert_many_chunked<E, A>(
-    db: &impl ConnectionTrait,
-    dtos: Vec<A>,
-    on_conflict: OnConflict,
-) -> Result<u64, StorageError>
-where
-    E: EntityTrait,
-    A: IntoActiveModel<E::ActiveModel>,
-    E::Column: Iterable,
-{
-    if dtos.is_empty() {
-        return Ok(0);
-    }
-    let count = ToPrimitive::to_u64(&dtos.len()).unwrap_or(u64::MAX);
-    let models: Vec<E::ActiveModel> = dtos
-        .into_iter()
-        .map(IntoActiveModel::into_active_model)
-        .collect();
-    let rows_per_insert = crate::batch::max_rows_per_insert(E::Column::iter().count());
-    for chunk in chunk_for_insert(&models, rows_per_insert) {
-        E::insert_many(chunk.to_vec())
-            .on_conflict(on_conflict.clone())
-            .exec(db)
-            .await
-            .map_err(StorageError::from)?;
-    }
-    Ok(count)
 }
