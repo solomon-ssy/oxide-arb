@@ -217,13 +217,20 @@ fn page_condition(query: &MarketPageQuery) -> Condition {
                 .event_id
                 .as_ref()
                 .map(|event_id| MarketColumn::EventId.eq(event_id.clone())),
-        )
-        .add_option(query.category.map(|category| {
+        );
+
+    if query.category_unknown == Some(true) {
+        condition = condition.add(Expr::cust(
+            r#""market"."categories" = '{}'::qp_market_category[]"#,
+        ));
+    } else {
+        condition = condition.add_option(query.category.map(|category| {
             Expr::cust_with_values(
-                r#""market"."categories" @> ARRAY[$1]::qp_market_category[]"#,
-                [category.as_str()],
+                r#"$1::qp_market_category = ANY("market"."categories")"#,
+                vec![category],
             )
         }));
+    }
 
     if let (Some(want_subscribed), Some(tokens)) =
         (query.subscribed, query.resolved_subscribed_tokens.as_ref())
@@ -393,7 +400,7 @@ mod tests {
 
         assert!(sql.contains(r#""market"."status" ="#));
         assert!(sql.contains(r#""market"."event_id" ="#));
-        assert!(sql.contains(r#""market"."categories" @> ARRAY["#));
+        assert!(sql.contains(r#"::qp_market_category = ANY("market"."categories")"#));
         assert!(sql.contains("ILIKE"));
         assert!(sql.contains("election"));
     }
@@ -440,6 +447,20 @@ mod tests {
 
         assert!(sql.contains(r#""market"."yes_token_id" IN"#));
         assert!(sql.contains(r#""market"."no_token_id" IN"#));
+    }
+
+    #[test]
+    fn page_condition_category_unknown_matches_empty_array() {
+        let query = MarketPageQuery {
+            category_unknown: Some(true),
+            ..Default::default()
+        };
+        let sql = super::MarketEntity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#""market"."categories" = '{}'"#));
     }
 
     #[test]

@@ -24,6 +24,8 @@ pub struct MarketPageQuery {
     pub keyword: Option<String>,
     pub status: Option<MarketStatus>,
     pub category: Option<MarketCategory>,
+    /// When `true`, match markets with an empty `categories` array (UI "未知").
+    pub category_unknown: Option<bool>,
     pub event_id: Option<EventId>,
     /// When set, filter markets whose YES/NO tokens are both live on the CLOB WS
     /// transport (`true`) or not (`false`). Resolved server-side against the
