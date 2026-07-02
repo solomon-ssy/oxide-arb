@@ -14,7 +14,7 @@ use serde::Serialize;
 use quant_pivot_models::{
     domain::{
         RecommendationInfo, RecommendationReportInfo,
-        api::{QuantRecommendationView, QuantReportDetailView},
+        api::{QuantRecommendationView, QuantReportDetailView, RecommendationViewContext},
     },
     enums::quant::{
         EntryTriggerKind, ExitSettlementMode, ExitTriggerKind, IneligibilityReason, OutcomeSide,
@@ -38,6 +38,17 @@ pub struct TopNReportSnapshot {
 
 fn at(ts: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(ts, 0).unwrap()
+}
+
+/// Project a fixture recommendation into its view for snapshots: parent report
+/// published, no blocking intent.
+fn view(recommendation: RecommendationInfo) -> QuantRecommendationView {
+    RecommendationViewContext {
+        recommendation,
+        report_status: RecommendationReportStatus::Published,
+        active_order_intent_id: None,
+    }
+    .into()
 }
 
 fn report_id(seed: &str) -> RecommendationReportId {
@@ -206,7 +217,7 @@ pub fn non_empty_topn_report() -> TopNReportSnapshot {
         summary,
     ));
     let recommendations = vec![
-        QuantRecommendationView::from(base_recommendation(
+        view(base_recommendation(
             "snapshot-report-topn",
             "snapshot-rec-1",
             1,
@@ -214,7 +225,7 @@ pub fn non_empty_topn_report() -> TopNReportSnapshot {
             OutcomeSide::Yes,
             Usd::new(dec!(300)),
         )),
-        QuantRecommendationView::from(base_recommendation(
+        view(base_recommendation(
             "snapshot-report-topn",
             "snapshot-rec-2",
             2,
@@ -273,7 +284,7 @@ pub fn recommendation_limit_entry() -> QuantRecommendationView {
         Usd::new(dec!(250)),
     );
     rec.entry_plan = limit_entry_plan();
-    QuantRecommendationView::from(rec)
+    view(rec)
 }
 
 /// Recommendation with immediate entry (fixture-only variety).
@@ -288,7 +299,7 @@ pub fn recommendation_immediate_entry() -> QuantRecommendationView {
         Usd::new(dec!(250)),
     );
     rec.entry_plan = immediate_entry_plan();
-    QuantRecommendationView::from(rec)
+    view(rec)
 }
 
 /// Recommendation with scaled partial-exit nodes.
@@ -303,7 +314,7 @@ pub fn recommendation_partial_exits() -> QuantRecommendationView {
         Usd::new(dec!(250)),
     );
     rec.exit_plan = partial_exit_plan();
-    QuantRecommendationView::from(rec)
+    view(rec)
 }
 
 /// Recommendation withheld from auto-execution while remaining semi-auto eligible.
@@ -318,5 +329,5 @@ pub fn recommendation_not_auto_eligible() -> QuantRecommendationView {
         Usd::new(dec!(250)),
     );
     rec.execution_eligibility = not_auto_eligible();
-    QuantRecommendationView::from(rec)
+    view(rec)
 }

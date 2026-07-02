@@ -12,10 +12,10 @@
 
 use crate::{
     domain::RecommendationInfo,
-    enums::quant::{OutcomeSide, RecommendationStatus},
+    enums::quant::{OutcomeSide, RecommendationReportStatus, RecommendationStatus},
     types::{
         Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketContext,
-        MarketId, Probability, RecommendationFactorBreakdown, RecommendationId,
+        MarketId, OrderIntentId, Probability, RecommendationFactorBreakdown, RecommendationId,
         RecommendationIdentity, RecommendationReportId, RiskEnvelope, SizingPlan, TokenId,
     },
 };
@@ -23,6 +23,13 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 /// Full outbound projection of one actionable recommendation.
+///
+/// Beyond the frozen decision contract, the view carries the two governance
+/// facts a client needs to decide whether an [`OrderIntent`] may still be
+/// created without a follow-up round-trip: the parent report's current
+/// lifecycle [`Self::report_status`] and the id of any blocking pre-submission
+/// intent [`Self::active_order_intent_id`]. Both are resolved server-side (the
+/// single source of truth) so the intent-creation gate never guesses.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantRecommendationView {
     pub recommendation_id: RecommendationId,
@@ -53,10 +60,32 @@ pub struct QuantRecommendationView {
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
     pub created_at: DateTime<Utc>,
+    /// Current lifecycle state of the parent report (authoritative).
+    pub report_status: RecommendationReportStatus,
+    /// Id of the blocking pre-submission order intent, when one already exists.
+    pub active_order_intent_id: Option<OrderIntentId>,
 }
 
-impl From<RecommendationInfo> for QuantRecommendationView {
-    fn from(info: RecommendationInfo) -> Self {
+/// Assembly input for a [`QuantRecommendationView`].
+///
+/// The view joins facts owned by three repositories (recommendation, report,
+/// order intent). This context is the single construction path — there is no
+/// `From<RecommendationInfo>` shortcut — so a view can never be emitted without
+/// its governance facts resolved.
+#[derive(Debug, Clone)]
+pub struct RecommendationViewContext {
+    pub recommendation: RecommendationInfo,
+    pub report_status: RecommendationReportStatus,
+    pub active_order_intent_id: Option<OrderIntentId>,
+}
+
+impl From<RecommendationViewContext> for QuantRecommendationView {
+    fn from(ctx: RecommendationViewContext) -> Self {
+        let RecommendationViewContext {
+            recommendation: info,
+            report_status,
+            active_order_intent_id,
+        } = ctx;
         Self {
             recommendation_id: info.recommendation_id,
             recommendation_report_id: info.recommendation_report_id,
@@ -86,6 +115,8 @@ impl From<RecommendationInfo> for QuantRecommendationView {
             valid_until: info.valid_until,
             status: info.status,
             created_at: info.created_at,
+            report_status,
+            active_order_intent_id,
         }
     }
 }

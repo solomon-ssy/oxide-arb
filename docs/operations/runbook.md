@@ -673,6 +673,7 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
 3. **重物化 + 回测重跑 + 重训**：冻结数据集只存 schedule+label、特征恒重算，故对既有训练数据集重跑训练（加权 + 经典两条路径）与回测即自动采用新口径（PIT book 由 `book_snapshots` 180d 保留可重放）。**新旧模型指标不可跨语义直接比较**，需重新过质量门。
 4. **图表历史（可选）**：ClickHouse `book_microstructure_1s.imbalance_avg` 为前向修正（新行 `schema_version=2`，Top-N 股数口径 + 真桶内均值）。如需修正历史图表，可从 `book_snapshots` 按新公式回填并刷新 `book_microstructure_1m`；否则保持前向修正即可（该列不参与模型/回测，仅供图表）。
 5. **仪表盘字段**：`GET /api/quant/data-quality` 现返回 `worst_book_age_ms`（实测最差盘口年龄）、`worst_ingest_lag_ms` / `max_ingest_lag_ms` / `ingest_lag_exceeded`；首页「活跃市场」页脚展示「可用盘口 = fresh + acceptable」比例。
+6. **选市新鲜度一致化**：选市 `DataQualityFilter` 与数据质量面同源——盘口年龄改用本地 WS 接收时钟，且**连接健康时静默盘口不再判 StaleBook**（只有连接不健康且超龄才排除）。精确 PIT 新鲜度仍由物化层 `MaxBookAge` 确定性把关（在线/离线一致）。若希望更严的选市在线门槛，调 `max_book_age_ms`；`ingest_pipeline_lag_seconds` 现覆盖全部 async writer。
 
 ## 8. 生成与阅读报告
 

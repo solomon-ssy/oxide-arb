@@ -182,7 +182,9 @@ expression: non_empty_topn_report()
       "valid_from": "2023-11-14T22:13:20Z",
       "valid_until": "2023-11-15T22:13:20Z",
       "status": "published",
-      "created_at": "2023-11-14T22:13:20Z"
+      "created_at": "2023-11-14T22:13:20Z",
+      "report_status": "published",
+      "active_order_intent_id": null
     },
     {
       "recommendation_id": "a1ce9884-a3e7-5c5f-bef0-a07ce3923c65",
@@ -304,7 +306,9 @@ expression: non_empty_topn_report()
       "valid_from": "2023-11-14T22:13:20Z",
       "valid_until": "2023-11-15T22:13:20Z",
       "status": "published",
-      "created_at": "2023-11-14T22:13:20Z"
+      "created_at": "2023-11-14T22:13:20Z",
+      "report_status": "published",
+      "active_order_intent_id": null
     }
   ]
 }

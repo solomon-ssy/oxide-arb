@@ -10,7 +10,8 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{
-        Paginated, QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReportDiff,
+        Paginated, QuantEvidenceView, QuantRecommendationView, QuantReportListQuery,
+        RecommendationReportInfo, ReportDiff,
     },
     enums::quant::ReportKind,
     types::{RecommendationId, RecommendationReportId},
@@ -63,17 +64,26 @@ pub trait QuantReportPort: Send + Sync {
         kind: ReportKind,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
 
-    /// Load all recommendations for a report, ordered by rank.
+    /// Load all recommendations for a report as fully-assembled views (ranked),
+    /// with parent report status and any blocking intent resolved.
     async fn find_recommendations(
         &self,
         report_id: &RecommendationReportId,
-    ) -> QuantResult<Vec<RecommendationInfo>>;
+    ) -> QuantResult<Vec<QuantRecommendationView>>;
 
-    /// Load one recommendation by id.
+    /// Load one recommendation by id as a fully-assembled view (parent report
+    /// status + blocking intent resolved). Returns `None` when it does not exist.
     async fn find_recommendation(
         &self,
         recommendation_id: &RecommendationId,
-    ) -> QuantResult<Option<RecommendationInfo>>;
+    ) -> QuantResult<Option<QuantRecommendationView>>;
+
+    /// Load one recommendation's replay-handle evidence. Returns `None` when the
+    /// recommendation does not exist.
+    async fn find_evidence(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> QuantResult<Option<QuantEvidenceView>>;
 
     /// Compute the structural diff between two reports.
     ///

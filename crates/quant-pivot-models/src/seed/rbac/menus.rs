@@ -27,7 +27,7 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 9,
+    version: 10,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
@@ -313,6 +313,28 @@ fn build_trading(t: &mut MenuTree) {
         "Revoke Report",
         perm(ResourceType::QuantReport, Operation::Revoke),
     );
+    // Full-screen report detail (overview + summary, ranked recommendations,
+    // structural diff), reached from the report list — navigable but hidden.
+    t.page_hidden(PageSpec {
+        parent: &trading,
+        name: "report-detail",
+        title: "page.menu.reportDetail",
+        path: "/quant/reports/:id",
+        component: "quant/reports/detail/index",
+        permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
+        icon: "lucide:file-text",
+    });
+    // Full-screen recommendation detail (score / plans / factors / evidence /
+    // attribution), deep-linkable and reached from a report's recommendations.
+    t.page_hidden(PageSpec {
+        parent: &trading,
+        name: "recommendation-detail",
+        title: "page.menu.recommendationDetail",
+        path: "/quant/recommendations/:id",
+        component: "quant/recommendations/detail",
+        permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
+        icon: "lucide:target",
+    });
 }
 
 /// Execution plane: intent审批台, CLOB submission ledger, system-lot positions,
@@ -736,6 +758,8 @@ mod tests {
             "settlement-redeems",
             "account",
             "research-workbench",
+            "report-detail",
+            "recommendation-detail",
             "quant_report:enqueue",
             "system:switch_mode",
             "system:halt",

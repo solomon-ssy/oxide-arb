@@ -56,12 +56,12 @@ pub async fn get(
     state: web::Data<AppState>,
     id: web::Path<RecommendationId>,
 ) -> Result<WebResponse<QuantRecommendationView>, WebError> {
-    let info = state
+    let view = state
         .quant_reports
         .find_recommendation(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("recommendation not found: {id}")))?;
-    Ok(WebResponse::ok(QuantRecommendationView::from(info)))
+    Ok(WebResponse::ok(view))
 }
 
 /// `GET /api/quant/recommendations/{id}/evidence` — replay handles.
@@ -69,12 +69,12 @@ pub async fn evidence(
     state: web::Data<AppState>,
     id: web::Path<RecommendationId>,
 ) -> Result<WebResponse<QuantEvidenceView>, WebError> {
-    let info = state
+    let view = state
         .quant_reports
-        .find_recommendation(&id)
+        .find_evidence(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("recommendation not found: {id}")))?;
-    Ok(WebResponse::ok(QuantEvidenceView::from(info)))
+    Ok(WebResponse::ok(view))
 }
 
 /// `GET /api/quant/recommendations/{id}/attribution` — final WORM attribution.

@@ -12,7 +12,10 @@ use quant_pivot_models::{
     domain::CoreEventPublisher,
     runtime_config::{ReportScheduleConfig, ReportsConfig},
 };
-use quant_pivot_repository::traits::{RecommendationReportRepository, RecommendationRepository};
+use quant_pivot_repository::postgres::PgOrderIntentRepository;
+use quant_pivot_repository::traits::{
+    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+};
 use quant_pivot_test_support::report_pipeline_harness::FixtureReportSeedContext;
 use quant_pivot_test_support::report_pipeline_harness::{HarnessOptions, ReportPipelineHarness};
 use sea_orm::DatabaseConnection;
@@ -74,10 +77,13 @@ pub async fn build_core_report_stack(
     let report_repo = Arc::clone(&harness.report_repo) as Arc<dyn RecommendationReportRepository>;
     let recommendation_repo =
         Arc::clone(&harness.recommendation_repo) as Arc<dyn RecommendationRepository>;
+    let order_intent_repo =
+        Arc::new(PgOrderIntentRepository::new(db.clone())) as Arc<dyn OrderIntentRepository>;
 
     let port = Arc::new(CoreQuantReportPort::new(
         report_repo,
         recommendation_repo,
+        order_intent_repo,
         Arc::new(harness.lifecycle),
         scheduler,
     ));

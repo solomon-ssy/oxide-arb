@@ -122,5 +122,7 @@ expression: recommendation_limit_entry()
   "valid_from": "2023-11-14T22:13:20Z",
   "valid_until": "2023-11-15T22:13:20Z",
   "status": "published",
-  "created_at": "2023-11-14T22:13:20Z"
+  "created_at": "2023-11-14T22:13:20Z",
+  "report_status": "published",
+  "active_order_intent_id": null
 }

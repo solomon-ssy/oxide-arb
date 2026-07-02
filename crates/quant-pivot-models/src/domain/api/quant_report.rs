@@ -135,6 +135,7 @@ pub struct QuantReportListQuery {
     pub kind: Option<ReportKind>,
     pub status: Option<RecommendationReportStatus>,
     pub trigger_kind: Option<ReportTriggerKind>,
+    pub runtime_mode: Option<QuantRuntimeMode>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     #[serde(flatten)]

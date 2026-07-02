@@ -6,20 +6,23 @@
 //! the [`ReportLifecycleService`] (transactional + post-commit event). Handlers
 //! never touch a repository or a venue client directly.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        AdHocReportCommand, AdHocReportEnqueued, Paginated, QuantReportListQuery, QuantReportPort,
-        RecommendationInfo, RecommendationReportInfo, ReportDiff, compute_report_diff,
+        AdHocReportCommand, AdHocReportEnqueued, Paginated, QuantEvidenceView,
+        QuantRecommendationView, QuantReportListQuery, QuantReportPort, RecommendationInfo,
+        RecommendationReportInfo, RecommendationViewContext, ReportDiff, compute_report_diff,
     },
-    enums::quant::ReportKind,
-    types::{RecommendationId, RecommendationReportId},
+    enums::quant::{RecommendationReportStatus, ReportKind},
+    types::{OrderIntentId, RecommendationId, RecommendationReportId},
 };
-use quant_pivot_repository::traits::{RecommendationReportRepository, RecommendationRepository};
+use quant_pivot_repository::traits::{
+    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+};
 
 use crate::{
     infra::schedule::ReportScheduleRunner,
@@ -30,6 +33,7 @@ use crate::{
 pub struct CoreQuantReportPort {
     report_repo: Arc<dyn RecommendationReportRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
+    order_intent_repo: Arc<dyn OrderIntentRepository>,
     lifecycle: Arc<ReportLifecycleService>,
     scheduler: Arc<dyn ReportScheduleRunner>,
 }
@@ -40,15 +44,32 @@ impl CoreQuantReportPort {
     pub fn new(
         report_repo: Arc<dyn RecommendationReportRepository>,
         recommendation_repo: Arc<dyn RecommendationRepository>,
+        order_intent_repo: Arc<dyn OrderIntentRepository>,
         lifecycle: Arc<ReportLifecycleService>,
         scheduler: Arc<dyn ReportScheduleRunner>,
     ) -> Self {
         Self {
             report_repo,
             recommendation_repo,
+            order_intent_repo,
             lifecycle,
             scheduler,
         }
+    }
+
+    /// Project a recommendation into its outbound view, joining the parent
+    /// report's lifecycle status and any blocking pre-submission intent.
+    fn assemble_view(
+        recommendation: RecommendationInfo,
+        report_status: RecommendationReportStatus,
+        active_order_intent_id: Option<OrderIntentId>,
+    ) -> QuantRecommendationView {
+        RecommendationViewContext {
+            recommendation,
+            report_status,
+            active_order_intent_id,
+        }
+        .into()
     }
 }
 
@@ -78,18 +99,71 @@ impl QuantReportPort for CoreQuantReportPort {
     async fn find_recommendations(
         &self,
         report_id: &RecommendationReportId,
-    ) -> QuantResult<Vec<RecommendationInfo>> {
-        Ok(self.recommendation_repo.find_by_report(report_id).await?)
+    ) -> QuantResult<Vec<QuantRecommendationView>> {
+        let recommendations = self.recommendation_repo.find_by_report(report_id).await?;
+        if recommendations.is_empty() {
+            return Ok(Vec::new());
+        }
+        // FK guarantees the report exists when it has recommendations; if it is
+        // somehow absent, fall back to the persisted per-recommendation status.
+        let Some(report) = self.report_repo.find_by_id(report_id).await? else {
+            return Ok(Vec::new());
+        };
+        let blocking = self
+            .order_intent_repo
+            .find_active_by_report(report_id)
+            .await?
+            .into_iter()
+            .map(|intent| (intent.recommendation_id, intent.order_intent_id))
+            .collect::<HashMap<_, _>>();
+        Ok(recommendations
+            .into_iter()
+            .map(|rec| {
+                let active = blocking.get(&rec.recommendation_id).cloned();
+                Self::assemble_view(rec, report.status, active)
+            })
+            .collect())
     }
 
     async fn find_recommendation(
         &self,
         recommendation_id: &RecommendationId,
-    ) -> QuantResult<Option<RecommendationInfo>> {
+    ) -> QuantResult<Option<QuantRecommendationView>> {
+        let Some(recommendation) = self
+            .recommendation_repo
+            .find_by_id(recommendation_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(report) = self
+            .report_repo
+            .find_by_id(&recommendation.recommendation_report_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let active_order_intent_id = self
+            .order_intent_repo
+            .find_active_by_recommendation(recommendation_id)
+            .await?
+            .map(|intent| intent.order_intent_id);
+        Ok(Some(Self::assemble_view(
+            recommendation,
+            report.status,
+            active_order_intent_id,
+        )))
+    }
+
+    async fn find_evidence(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> QuantResult<Option<QuantEvidenceView>> {
         Ok(self
             .recommendation_repo
             .find_by_id(recommendation_id)
-            .await?)
+            .await?
+            .map(QuantEvidenceView::from))
     }
 
     async fn diff_reports(

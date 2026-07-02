@@ -135,11 +135,7 @@ pub async fn recommendations(
     state: web::Data<AppState>,
     id: web::Path<RecommendationReportId>,
 ) -> Result<WebResponse<Vec<QuantRecommendationView>>, WebError> {
-    let recs = state.quant_reports.find_recommendations(&id).await?;
-    let views = recs
-        .into_iter()
-        .map(QuantRecommendationView::from)
-        .collect();
+    let views = state.quant_reports.find_recommendations(&id).await?;
     Ok(WebResponse::ok(views))
 }
 

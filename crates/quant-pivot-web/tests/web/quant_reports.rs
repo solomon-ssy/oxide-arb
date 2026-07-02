@@ -157,6 +157,25 @@ async fn reports_list_paginated_view() {
     assert_eq!(row["total_suggested_usd"], json!("500"));
     // List rows never embed the full summary object.
     assert!(row.get("summary").is_none());
+
+    // runtime_mode filter narrows the result set (fixture runs report_only).
+    let matched = get(
+        &env,
+        "/api/quant/reports?page=1&size=10&runtime_mode=report_only",
+        &admin,
+    )
+    .await;
+    assert_eq!(matched.status, StatusCode::OK);
+    assert_eq!(matched.json()["data"]["total"], json!(1));
+
+    let filtered = get(
+        &env,
+        "/api/quant/reports?page=1&size=10&runtime_mode=auto_execution",
+        &admin,
+    )
+    .await;
+    assert_eq!(filtered.status, StatusCode::OK);
+    assert_eq!(filtered.json()["data"]["total"], json!(0));
 }
 
 #[actix_web::test]
@@ -195,6 +214,9 @@ async fn report_detail_recommendations_and_evidence_views() {
     assert!(items[0]["sizing_plan"].is_object());
     assert!(items[0]["exit_plan"].is_object());
     assert!(items[0]["execution_eligibility"].is_object());
+    // Enriched governance facts: parent report status + blocking intent id.
+    assert_eq!(items[0]["report_status"], json!("published"));
+    assert_eq!(items[0]["active_order_intent_id"], Value::Null);
     let rec_id = items[0]["recommendation_id"]
         .as_str()
         .expect("rec id")
@@ -207,6 +229,8 @@ async fn report_detail_recommendations_and_evidence_views() {
     )
     .await;
     assert_eq!(one.status, StatusCode::OK);
+    assert_eq!(one.json()["data"]["report_status"], json!("published"));
+    assert_eq!(one.json()["data"]["active_order_intent_id"], Value::Null);
 
     let evidence = get(
         &env,

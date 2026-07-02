@@ -24,10 +24,10 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     AccountSnapshotRepository, AttributionRepository, EquitySnapshotRepository,
-    ExecutionOrderRepository, MenuRepository, OperationLogRepository, PositionRepository,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
-    SettlementRedeemRepository, UserRepository, UserRoleRepository,
+    ExecutionOrderRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
+    PositionRepository, RecommendationReportRepository, RecommendationRepository,
+    ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+    RuntimeConfigVersionRepository, SettlementRedeemRepository, UserRepository, UserRoleRepository,
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
@@ -151,6 +151,7 @@ async fn build_app_state(
         quant_reports: Arc::new(CoreQuantReportPort::new(
             Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,
             Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+            Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
             Arc::clone(&ctx.report.lifecycle),
             Arc::clone(&ctx.report.scheduler),
         )),
