@@ -101,7 +101,7 @@ impl WsChannel {
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
             Self::QuantReport => ResourceType::QuantReport,
             Self::QuantIntent => ResourceType::OrderIntent,
-            Self::MaterializationRunUpdate => ResourceType::Publication,
+            Self::MaterializationRunUpdate => ResourceType::Materialization,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
         }
     }
@@ -205,8 +205,18 @@ impl Display for SubscriptionKey {
 #[cfg(test)]
 mod tests {
     use super::{ChannelScope, SubscriptionKey, WsChannel};
-    use crate::types::MarketId;
+    use crate::{enums::rbac::ResourceType, types::MarketId};
     use std::str::FromStr;
+
+    #[test]
+    fn materialization_channel_reads_materialization_resource() {
+        // The run-update channel is a materialization-run lifecycle stream, so it
+        // gates on `materialization:read` — not `publication:read`.
+        assert_eq!(
+            WsChannel::MaterializationRunUpdate.resource(),
+            ResourceType::Materialization
+        );
+    }
 
     #[test]
     fn channel_round_trips_via_from_str() {

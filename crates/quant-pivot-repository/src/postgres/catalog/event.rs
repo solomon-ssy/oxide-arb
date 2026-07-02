@@ -9,6 +9,7 @@ use quant_pivot_models::{
     domain::{EventInfo, UpsertEvent},
     entities::event::{Column, Entity},
     enums::market::EventStatus,
+    schema::column,
     types::EventId,
 };
 use sea_orm::{
@@ -77,12 +78,15 @@ fn event_upsert_on_conflict() -> OnConflict {
         .update_columns([
             Column::Title,
             Column::Slug,
-            Column::Status,
             Column::Tags,
             Column::NegRisk,
             Column::EndDate,
             Column::RawGamma,
         ])
+        .values([(
+            Column::Status,
+            column::pg_enum_excluded::<EventStatus>(Column::Status),
+        )])
         .to_owned()
 }
 

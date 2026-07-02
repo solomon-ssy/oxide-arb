@@ -487,13 +487,13 @@ async fn assign_permissions_validates_and_round_trips() {
     perms
         .set_permissions_for_role(AssignPermissions {
             role_id: role.id.clone(),
-            permissions: vec![Permission::new(ResourceType::Audit, Operation::Read)],
+            permissions: vec![Permission::new(ResourceType::OperationLog, Operation::Read)],
         })
         .await
         .expect("replace permissions");
     assert_eq!(
         perms.list_permissions(&role.id).await.expect("list again"),
-        vec![Permission::new(ResourceType::Audit, Operation::Read)]
+        vec![Permission::new(ResourceType::OperationLog, Operation::Read)]
     );
 
     // Invalid resource×operation pair is rejected.

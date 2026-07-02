@@ -8,6 +8,7 @@ use quant_pivot_models::{
     domain::{SystemRuntimeStateInfo, UpsertSystemRuntimeState},
     entities::system_runtime_state::{ActiveModel, Column, Entity},
     enums::quant::QuantRuntimeMode,
+    schema::column,
 };
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, sea_query::OnConflict};
 
@@ -50,12 +51,11 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
         Entity::insert(active_model)
             .on_conflict(
                 OnConflict::column(Column::Id)
-                    .update_columns([
+                    .update_columns([Column::ChangedBy, Column::Reason, Column::ChangedAt])
+                    .values([(
                         Column::QuantRuntimeMode,
-                        Column::ChangedBy,
-                        Column::Reason,
-                        Column::ChangedAt,
-                    ])
+                        column::pg_enum_excluded::<QuantRuntimeMode>(Column::QuantRuntimeMode),
+                    )])
                     .to_owned(),
             )
             .exec(&self.db)

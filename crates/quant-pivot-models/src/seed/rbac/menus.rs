@@ -27,12 +27,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 6,
+    version: 7,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v6",
+    checksum: "rbac.menus.bootstrap.v7",
     loader: load_boxed,
 };
 
@@ -196,21 +196,27 @@ impl MenuTree {
 
 fn build_tree() -> MenuTree {
     let mut t = MenuTree::new();
-    build_dashboard(&mut t);
+    build_command_center(&mut t);
     build_trading(&mut t);
-    build_operations(&mut t);
+    build_execution(&mut t);
+    build_research(&mut t);
+    build_governance(&mut t);
     build_access_control(&mut t);
+    build_audit(&mut t);
     t
 }
 
-fn build_dashboard(t: &mut MenuTree) {
-    let dashboard_root = t.dir(
-        "dashboard_root",
-        "page.menu.group.dashboard",
+/// Command center: the operator首屏 dashboard. Quick actions render off the
+/// global access-code set (buttons are seeded once under their canonical page),
+/// so the dashboard node itself carries no button children.
+fn build_command_center(t: &mut MenuTree) {
+    let command_center = t.dir(
+        "command-center",
+        "page.menu.group.commandCenter",
         "lucide:layout-dashboard",
     );
-    let overview = t.page_affixed(PageSpec {
-        parent: &dashboard_root,
+    t.page_affixed(PageSpec {
+        parent: &command_center,
         name: "dashboard",
         title: "page.menu.dashboard",
         path: "/dashboard",
@@ -218,35 +224,9 @@ fn build_dashboard(t: &mut MenuTree) {
         permission_code: None,
         icon: "lucide:home",
     });
-    t.button(
-        &overview,
-        "system:halt",
-        "Halt",
-        perm(ResourceType::System, Operation::Halt),
-    );
-    t.button(
-        &overview,
-        "system:resume",
-        "Resume",
-        perm(ResourceType::System, Operation::Resume),
-    );
-    t.button(
-        &overview,
-        "system:switch_mode",
-        "Switch Mode",
-        perm(ResourceType::System, Operation::SwitchMode),
-    );
-    t.page(PageSpec {
-        parent: &dashboard_root,
-        name: "analytics",
-        title: "page.menu.analytics",
-        path: "/analytics",
-        component: "analytics/index",
-        permission_code: Some(perm(ResourceType::Analytics, Operation::Read)),
-        icon: "lucide:line-chart",
-    });
 }
 
+/// Trading plane: market registry + the `RecommendationReport` primary artifact.
 fn build_trading(t: &mut MenuTree) {
     let trading = t.dir("trading", "page.menu.group.trading", "lucide:trending-up");
     let markets = t.page(PageSpec {
@@ -261,7 +241,7 @@ fn build_trading(t: &mut MenuTree) {
     t.button(
         &markets,
         "market:update",
-        "Subscribe / Unsubscribe",
+        "Subscribe / Block",
         perm(ResourceType::Market, Operation::Update),
     );
     let quant_reports = t.page(PageSpec {
@@ -275,7 +255,7 @@ fn build_trading(t: &mut MenuTree) {
     });
     t.button(
         &quant_reports,
-        "quant_report:run",
+        "quant_report:enqueue",
         "Run Ad-hoc Report",
         perm(ResourceType::QuantReport, Operation::Enqueue),
     );
@@ -287,100 +267,174 @@ fn build_trading(t: &mut MenuTree) {
     );
 }
 
-fn build_operations(t: &mut MenuTree) {
-    let operations = t.dir(
-        "operations",
-        "page.menu.group.operations",
-        "lucide:settings-2",
-    );
-    build_operations_runtime_config(t, &operations);
-    let quant_models = t.page(PageSpec {
-        parent: &operations,
-        name: "quant-models",
-        title: "page.menu.quantModels",
-        path: "/quant/models",
-        component: "quant/models/index",
-        permission_code: Some(perm(ResourceType::Publication, Operation::Read)),
-        icon: "lucide:git-branch",
+/// Execution plane: intent审批台, CLOB submission ledger, system-lot positions,
+/// reconciliation queue, settlement redeems, and the live venue account.
+fn build_execution(t: &mut MenuTree) {
+    let execution = t.dir("execution", "page.menu.group.execution", "lucide:zap");
+    let intents = t.page(PageSpec {
+        parent: &execution,
+        name: "order-intents",
+        title: "page.menu.orderIntents",
+        path: "/quant/intents",
+        component: "quant/intents/index",
+        permission_code: Some(perm(ResourceType::OrderIntent, Operation::Read)),
+        icon: "lucide:list-checks",
     });
     t.button(
-        &quant_models,
-        "quant_model:reject",
-        "Reject",
-        perm(ResourceType::Publication, Operation::Reject),
+        &intents,
+        "order_intent:create",
+        "Create Intent",
+        perm(ResourceType::OrderIntent, Operation::Create),
     );
     t.button(
-        &quant_models,
-        "quant_model:shadow",
-        "Promote to Shadow",
-        perm(ResourceType::Publication, Operation::Shadow),
+        &intents,
+        "order_intent:approve",
+        "Approve Intent",
+        perm(ResourceType::OrderIntent, Operation::Approve),
     );
     t.button(
-        &quant_models,
-        "quant_model:publish",
-        "Publish",
-        perm(ResourceType::Publication, Operation::Publish),
+        &intents,
+        "order_intent:reject",
+        "Reject Intent",
+        perm(ResourceType::OrderIntent, Operation::Reject),
     );
     t.button(
-        &quant_models,
-        "quant_model:emergency",
-        "Emergency Publish",
-        perm(ResourceType::Publication, Operation::Emergency),
+        &intents,
+        "order_intent:cancel",
+        "Cancel Intent",
+        perm(ResourceType::OrderIntent, Operation::Cancel),
     );
-    let publications = t.page(PageSpec {
-        parent: &operations,
-        name: "publications",
-        title: "page.menu.publications",
-        path: "/publications",
-        component: "publications/index",
-        permission_code: Some(perm(ResourceType::Publication, Operation::Read)),
-        icon: "lucide:rocket",
-    });
     t.button(
-        &publications,
-        "publication:rollback",
-        "Rollback",
-        perm(ResourceType::Publication, Operation::Rollback),
-    );
-    let replay = t.page(PageSpec {
-        parent: &operations,
-        name: "replay",
-        title: "page.menu.replay",
-        path: "/replay",
-        component: "replay/index",
-        permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
-        icon: "lucide:history",
-    });
-    t.button(
-        &replay,
-        "replay:create",
-        "Start Replay",
-        perm(ResourceType::Replay, Operation::Create),
+        &intents,
+        "order_intent:submit",
+        "Submit Intent",
+        perm(ResourceType::OrderIntent, Operation::Submit),
     );
     t.page(PageSpec {
-        parent: &operations,
-        name: "audit",
-        title: "page.menu.audit",
-        path: "/audit",
-        component: "audit/index",
-        permission_code: Some(perm(ResourceType::Audit, Operation::Read)),
-        icon: "lucide:file-search",
+        parent: &execution,
+        name: "execution-orders",
+        title: "page.menu.executionOrders",
+        path: "/quant/execution-orders",
+        component: "quant/execution-orders/index",
+        permission_code: Some(perm(ResourceType::ExecutionOrder, Operation::Read)),
+        icon: "lucide:receipt",
     });
     t.page(PageSpec {
-        parent: &operations,
-        name: "operation-log",
-        title: "page.menu.operationLog",
-        path: "/operation-log",
-        component: "operation-log/index",
-        permission_code: Some(perm(ResourceType::OperationLog, Operation::Read)),
-        icon: "lucide:scroll-text",
+        parent: &execution,
+        name: "positions",
+        title: "page.menu.positions",
+        path: "/quant/positions",
+        component: "quant/positions/index",
+        permission_code: Some(perm(ResourceType::Position, Operation::Read)),
+        icon: "lucide:layers",
+    });
+    let reconciliations = t.page(PageSpec {
+        parent: &execution,
+        name: "reconciliations",
+        title: "page.menu.reconciliations",
+        path: "/quant/reconciliations",
+        component: "quant/reconciliations/index",
+        permission_code: Some(perm(ResourceType::Reconciliation, Operation::Read)),
+        icon: "lucide:scale",
+    });
+    t.button(
+        &reconciliations,
+        "reconciliation:resolve",
+        "Resolve",
+        perm(ResourceType::Reconciliation, Operation::Resolve),
+    );
+    t.page(PageSpec {
+        parent: &execution,
+        name: "settlement-redeems",
+        title: "page.menu.settlementRedeems",
+        path: "/quant/settlement-redeems",
+        component: "quant/settlement-redeems/index",
+        permission_code: Some(perm(ResourceType::SettlementRedeem, Operation::Read)),
+        icon: "lucide:banknote",
+    });
+    t.page(PageSpec {
+        parent: &execution,
+        name: "account",
+        title: "page.menu.account",
+        path: "/quant/account",
+        component: "quant/account/index",
+        permission_code: Some(perm(ResourceType::AccountSnapshot, Operation::Read)),
+        icon: "lucide:wallet",
     });
 }
 
-/// Runtime-config page + version-lifecycle buttons under `operations`.
-fn build_operations_runtime_config(t: &mut MenuTree, operations: &MenuId) {
+/// Research plane: a single ID-driven workbench (dataset plan/build, train,
+/// backtest, model + factor governance). No伪列表 — the backend exposes no
+/// list/catalog endpoints (see 10.0 §3.5).
+fn build_research(t: &mut MenuTree) {
+    let research = t.dir(
+        "research",
+        "page.menu.group.research",
+        "lucide:flask-conical",
+    );
+    let workbench = t.page(PageSpec {
+        parent: &research,
+        name: "research-workbench",
+        title: "page.menu.researchWorkbench",
+        path: "/research/workbench",
+        component: "research/workbench/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:microscope",
+    });
+    t.button(
+        &workbench,
+        "materialization:create",
+        "Plan / Build Dataset & Train Model",
+        perm(ResourceType::Materialization, Operation::Create),
+    );
+    t.button(
+        &workbench,
+        "replay:create",
+        "Run Backtest",
+        perm(ResourceType::Replay, Operation::Create),
+    );
+    t.button(
+        &workbench,
+        "publication:publish",
+        "Publish Model",
+        perm(ResourceType::Publication, Operation::Publish),
+    );
+    t.button(
+        &workbench,
+        "publication:rollback",
+        "Rollback Model",
+        perm(ResourceType::Publication, Operation::Rollback),
+    );
+    t.button(
+        &workbench,
+        "publication:retire",
+        "Retire Model",
+        perm(ResourceType::Publication, Operation::Retire),
+    );
+    t.button(
+        &workbench,
+        "factor_definition:publish",
+        "Publish Factor",
+        perm(ResourceType::FactorDefinition, Operation::Publish),
+    );
+    t.button(
+        &workbench,
+        "factor_definition:retire",
+        "Retire Factor",
+        perm(ResourceType::FactorDefinition, Operation::Retire),
+    );
+}
+
+/// Governance plane: runtime-config version lifecycle + the system control panel
+/// (quant runtime mode + kill-switch transitions).
+fn build_governance(t: &mut MenuTree) {
+    let governance = t.dir(
+        "governance",
+        "page.menu.group.governance",
+        "lucide:settings-2",
+    );
     let runtime_config = t.page(PageSpec {
-        parent: operations,
+        parent: &governance,
         name: "runtime-config",
         title: "page.menu.runtimeConfig",
         path: "/runtime-config",
@@ -406,6 +460,53 @@ fn build_operations_runtime_config(t: &mut MenuTree, operations: &MenuId) {
         "Rollback Version",
         perm(ResourceType::RuntimeConfig, Operation::Rollback),
     );
+    let system = t.page(PageSpec {
+        parent: &governance,
+        name: "system",
+        title: "page.menu.system",
+        path: "/system",
+        component: "system/index",
+        permission_code: Some(perm(ResourceType::System, Operation::Read)),
+        icon: "lucide:server-cog",
+    });
+    t.button(
+        &system,
+        "system:switch_mode",
+        "Switch Runtime Mode",
+        perm(ResourceType::System, Operation::SwitchMode),
+    );
+    t.button(
+        &system,
+        "system:halt",
+        "Halt",
+        perm(ResourceType::System, Operation::Halt),
+    );
+    t.button(
+        &system,
+        "system:resume",
+        "Resume",
+        perm(ResourceType::System, Operation::Resume),
+    );
+    t.button(
+        &system,
+        "system:emergency",
+        "Emergency Halt",
+        perm(ResourceType::System, Operation::Emergency),
+    );
+}
+
+/// Audit trail: the operation log is the single generic audit entry point.
+fn build_audit(t: &mut MenuTree) {
+    let audit = t.dir("audit-trail", "page.menu.group.audit", "lucide:file-search");
+    t.page(PageSpec {
+        parent: &audit,
+        name: "operation-log",
+        title: "page.menu.operationLog",
+        path: "/operation-log",
+        component: "operation-log/index",
+        permission_code: Some(perm(ResourceType::OperationLog, Operation::Read)),
+        icon: "lucide:scroll-text",
+    });
 }
 
 fn build_access_control(t: &mut MenuTree) {
@@ -587,6 +688,45 @@ mod tests {
         assert!(!names.contains("risk"));
         assert!(!names.contains("risk-overview"));
         assert!(!names.contains("blacklist"));
+        // Phase 10.0 removals: old operations/analytics/audit surfaces.
+        assert!(!names.contains("analytics"));
+        assert!(!names.contains("audit"));
+        assert!(!names.contains("publications"));
+        assert!(!names.contains("replay"));
+        assert!(!names.contains("quant-models"));
+        assert!(!names.contains("operations"));
+        // Stale button name replaced by the canonical permission code.
+        assert!(!names.contains("quant_report:run"));
+        assert!(!names.contains("quant_model:reject"));
+    }
+
+    #[test]
+    fn seed_tree_has_phase_10_execution_and_system_pages() {
+        let tree = build_tree();
+        let names: HashSet<_> = tree
+            .models
+            .iter()
+            .map(|model| {
+                if let sea_orm::ActiveValue::Set(name) = &model.name {
+                    name.clone()
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+        for expected in [
+            "order-intents",
+            "execution-orders",
+            "positions",
+            "reconciliations",
+            "settlement-redeems",
+            "account",
+            "research-workbench",
+            "system",
+            "quant_report:enqueue",
+        ] {
+            assert!(names.contains(expected), "missing menu node `{expected}`");
+        }
     }
 
     #[test]
@@ -603,19 +743,19 @@ mod tests {
     }
 
     #[test]
-    fn analytics_page_is_under_dashboard() {
+    fn dashboard_is_under_command_center() {
         let tree = build_tree();
-        let dashboard_root = stable_menu_id("dashboard_root");
-        let analytics = tree
+        let command_center = stable_menu_id("command-center");
+        let dashboard = tree
             .models
             .iter()
             .find(|model| {
-                matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "analytics")
+                matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "dashboard")
             })
-            .expect("analytics menu node");
+            .expect("dashboard menu node");
         assert_eq!(
-            analytics.parent_id,
-            sea_orm::ActiveValue::Set(Some(dashboard_root))
+            dashboard.parent_id,
+            sea_orm::ActiveValue::Set(Some(command_center))
         );
     }
 

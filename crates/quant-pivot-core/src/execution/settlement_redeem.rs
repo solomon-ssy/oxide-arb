@@ -1,15 +1,23 @@
 //! Settlement redemption service for resolved standard binary CTF markets.
 
-use std::{collections::BTreeMap, str::FromStr, sync::Arc, time::Duration as StdDuration};
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    sync::{Arc, OnceLock},
+    time::Duration as StdDuration,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::{
     ctf::{CtfClient, CtfPendingRedeem, CtfSubmittedRedeemReceipt},
+    keystore::OrderSigner,
     relayer::{RelayerClient, RelayerTxOutcome},
+    wallet::WalletTopology,
 };
 use quant_pivot_error::{QuantResult, execution::ExecutionError, rpc::RpcError};
 use quant_pivot_models::{
+    config::RelayerConfig,
     constants::COLLATERAL_SCALE,
     domain::{
         ConfirmSettlementRedeem, MarketInfo, NewSettlementRedeem, NewSettlementRedeemLot,
@@ -209,6 +217,22 @@ impl SettlementCtfClient for CtfClient {
     }
 }
 
+/// Inputs to connect the gasless relayer, captured at boot but consumed lazily.
+///
+/// Held by [`RelayerSettlementClient`] so the relayer HTTP client (and its
+/// mandatory API credentials) is only materialized when a redeem is first
+/// attempted — never at boot.
+pub struct RelayerConnectParams {
+    /// EOA signer that signs the relayer `SafeTx` / Proxy relay payload.
+    pub signer: Arc<OrderSigner>,
+    /// Relayer endpoint + API credentials (validated at first use).
+    pub relayer_config: RelayerConfig,
+    /// Resolved wallet topology (selects Proxy vs Safe relay tx type + funder).
+    pub wallet: WalletTopology,
+    /// Polygon chain id for the relayer domain.
+    pub chain_id: u64,
+}
+
 /// Relayer-backed settlement client for Proxy / Gnosis Safe topologies.
 ///
 /// On-chain reads (payout vector, balances, simulate) stay on the Polygon RPC
@@ -216,20 +240,51 @@ impl SettlementCtfClient for CtfClient {
 /// broadcast gaslessly by the Polymarket relayer from the funder wallet. The
 /// relayer transaction id is surfaced as the persisted `tx_hash` so the worker's
 /// recovery path can re-poll it after a restart.
+///
+/// The relayer connection is **deferred**: reads work immediately, but the
+/// relayer (which requires API credentials) is connected on the first redeem.
+/// This lets `report_only` — which never redeems — boot without relayer creds,
+/// while `semi_auto` / `auto_execution` still fail closed at redeem time when the
+/// credentials are missing.
 pub struct RelayerSettlementClient {
     reads: CtfClient,
-    relayer: RelayerClient,
     funder_address: String,
+    relayer: OnceLock<RelayerClient>,
+    connect: RelayerConnectParams,
 }
 
 impl RelayerSettlementClient {
+    /// Build a settlement client that connects the relayer lazily on first use.
     #[must_use]
-    pub const fn new(reads: CtfClient, relayer: RelayerClient, funder_address: String) -> Self {
+    pub const fn deferred(
+        reads: CtfClient,
+        funder_address: String,
+        connect: RelayerConnectParams,
+    ) -> Self {
         Self {
             reads,
-            relayer,
             funder_address,
+            relayer: OnceLock::new(),
+            connect,
         }
+    }
+
+    /// Connect (once) and return the gasless relayer client.
+    ///
+    /// Fails closed with the relayer credential/connection error at the point of
+    /// actual redemption when credentials are absent.
+    fn relayer(&self) -> Result<&RelayerClient, RpcError> {
+        if let Some(relayer) = self.relayer.get() {
+            return Ok(relayer);
+        }
+        let relayer = RelayerClient::connect(
+            self.connect.signer.as_ref(),
+            &self.connect.relayer_config,
+            &self.connect.wallet,
+            self.connect.chain_id,
+        )?;
+        let _ = self.relayer.set(relayer);
+        Ok(self.relayer.get().expect("relayer set above"))
     }
 }
 
@@ -328,12 +383,12 @@ impl SettlementCtfClient for RelayerSettlementClient {
         &self,
         market_id: &MarketId,
     ) -> Result<Box<dyn SettlementRedeemTx>, RpcError> {
-        let submission = self
-            .relayer
+        let relayer = self.relayer()?;
+        let submission = relayer
             .submit_standard_binary_redeem(market_id.as_str())
             .await?;
         Ok(Box::new(RelayerRedeemTx {
-            relayer: self.relayer.clone(),
+            relayer: relayer.clone(),
             transaction_id: submission.transaction_id,
         }) as Box<dyn SettlementRedeemTx>)
     }
@@ -343,7 +398,7 @@ impl SettlementCtfClient for RelayerSettlementClient {
         tx_hash: &str,
         _confirmations: u64,
     ) -> Result<SettlementCtfSubmittedRedeemReceipt, RpcError> {
-        Ok(match self.relayer.transaction_outcome(tx_hash).await? {
+        Ok(match self.relayer()?.transaction_outcome(tx_hash).await? {
             RelayerTxOutcome::Pending => SettlementCtfSubmittedRedeemReceipt::Pending,
             RelayerTxOutcome::Confirmed { tx_hash } => {
                 SettlementCtfSubmittedRedeemReceipt::Confirmed(SettlementCtfRedeemReceipt {

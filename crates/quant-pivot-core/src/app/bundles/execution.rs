@@ -9,8 +9,7 @@
 use std::sync::Arc;
 
 use quant_pivot_api::{
-    clob::ClobClient, ctf::CtfClient, keystore::OrderSigner, relayer::RelayerClient,
-    wallet::WalletTopology,
+    clob::ClobClient, ctf::CtfClient, keystore::OrderSigner, wallet::WalletTopology,
 };
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
@@ -34,9 +33,9 @@ use crate::{
         DefaultAdmissionEngine, DispatchWake, EvidenceCollector, ExecutionBreaker,
         ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService,
         ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient, ReconciliationService,
-        ReconciliationServiceDeps, RelayerSettlementClient, SettlementCtfClient,
-        SettlementRedeemService, SettlementRedeemServiceDeps, VenueEvidenceCollector,
-        VenueReconciliationReader,
+        ReconciliationServiceDeps, RelayerConnectParams, RelayerSettlementClient,
+        SettlementCtfClient, SettlementRedeemService, SettlementRedeemServiceDeps,
+        VenueEvidenceCollector, VenueReconciliationReader,
     },
     pipeline::feature_window_provider::FeatureWindowProvider,
     service::{
@@ -249,19 +248,21 @@ fn build_settlement_ctf_client(
     if deps.wallet.is_eoa() {
         return Ok(Arc::new(ctf) as Arc<dyn SettlementCtfClient>);
     }
-    let relayer = RelayerClient::connect(
-        deps.signer.as_ref(),
-        &deps.deploy.polymarket.relayer,
-        &deps.wallet,
-        deps.deploy.polymarket.chain_id,
-    )
-    .map_err(|error| {
-        QuantError::config(format!("relayer settlement client unavailable: {error}"))
-    })?;
-    Ok(Arc::new(RelayerSettlementClient::new(
+    // Proxy / Gnosis Safe: on-chain reads work immediately, but the gasless
+    // relayer (which requires API credentials) is connected lazily on the first
+    // redeem. `report_only` never redeems, so it boots without relayer creds;
+    // `semi_auto` / `auto_execution` fail closed at redeem time if creds are
+    // absent (relayer credential gating lives in mode preflight / validation).
+    let connect = RelayerConnectParams {
+        signer: Arc::clone(&deps.signer),
+        relayer_config: deps.deploy.polymarket.relayer.clone(),
+        wallet: deps.wallet,
+        chain_id: deps.deploy.polymarket.chain_id,
+    };
+    Ok(Arc::new(RelayerSettlementClient::deferred(
         ctf,
-        relayer,
         funder_address.to_owned(),
+        connect,
     )) as Arc<dyn SettlementCtfClient>)
 }
 

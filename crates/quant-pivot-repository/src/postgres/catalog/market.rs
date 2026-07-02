@@ -14,7 +14,12 @@ use quant_pivot_models::{
     entities::market::{
         ActiveModel as MarketActiveModel, Column as MarketColumn, Entity as MarketEntity,
     },
-    enums::market::MarketStatus,
+    enums::{
+        common::{MarketCategory, TickSize},
+        fee::FeeSource,
+        market::MarketStatus,
+    },
+    schema::column,
     types::MarketId,
 };
 use sea_orm::{
@@ -114,11 +119,8 @@ fn market_upsert_on_conflict() -> OnConflict {
             MarketColumn::EventId,
             MarketColumn::Question,
             MarketColumn::Slug,
-            MarketColumn::Categories,
-            MarketColumn::Status,
             MarketColumn::YesTokenId,
             MarketColumn::NoTokenId,
-            MarketColumn::TickSize,
             MarketColumn::NegRisk,
             MarketColumn::Outcome,
             MarketColumn::EndDate,
@@ -128,8 +130,25 @@ fn market_upsert_on_conflict() -> OnConflict {
             MarketColumn::FeeExponent,
             MarketColumn::FeeTakerOnly,
             MarketColumn::FeeRebateRate,
-            MarketColumn::FeeSource,
             MarketColumn::FeeObservedAt,
+        ])
+        .values([
+            (
+                MarketColumn::Categories,
+                column::pg_enum_array_excluded::<MarketCategory>(MarketColumn::Categories),
+            ),
+            (
+                MarketColumn::Status,
+                column::pg_enum_excluded::<MarketStatus>(MarketColumn::Status),
+            ),
+            (
+                MarketColumn::TickSize,
+                column::pg_enum_excluded::<TickSize>(MarketColumn::TickSize),
+            ),
+            (
+                MarketColumn::FeeSource,
+                column::pg_enum_excluded::<FeeSource>(MarketColumn::FeeSource),
+            ),
         ])
         .to_owned()
 }

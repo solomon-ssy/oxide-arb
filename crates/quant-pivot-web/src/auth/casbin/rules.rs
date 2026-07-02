@@ -48,13 +48,28 @@ pub enum Rule {
     /// Defined and evaluated here in Phase 6.4; the governance routes that use
     /// it land in Phase 6.5.
     ActingRoleGoverned(ResourceType, Operation),
+
+    /// A governed, audited mutation whose concrete operation is not known until
+    /// the request body is parsed, so the operation-level authorization is
+    /// **deferred to the handler**. The middleware still enforces the governed
+    /// preconditions — an explicit `acting_role` that the caller holds (enabled)
+    /// — and resolves it for the audit envelope; the handler then computes the
+    /// exact `(resource, operation)` from the payload and authorizes it against
+    /// the acting role (super-admin bypass preserved).
+    ///
+    /// Used by the kill-switch endpoint, where the required permission depends on
+    /// the transition (`halt` / `resume` / `emergency`).
+    ActingRoleDeferred(ResourceType),
 }
 
 impl Rule {
     /// Whether this rule authorizes a governed, audited mutation.
     #[must_use]
     pub const fn is_governed(&self) -> bool {
-        matches!(self, Self::ActingRoleGoverned(..))
+        matches!(
+            self,
+            Self::ActingRoleGoverned(..) | Self::ActingRoleDeferred(..)
+        )
     }
 
     /// Resolves the `acting_role` recorded into the audit envelope when a
@@ -119,6 +134,23 @@ impl Rule {
                     .has_policy(acting_role, resource.as_str(), operation.as_str())
                     .await
                 {
+                    return Err(WebError::Forbidden);
+                }
+                Ok(AuthzOutcome {
+                    acting_role: Some(acting_role.to_owned()),
+                })
+            }
+
+            Self::ActingRoleDeferred(_resource) => {
+                // Governed preconditions only: the operation-level authorization
+                // is performed by the handler once the payload is known.
+                let acting_role = acting_role
+                    .map(str::trim)
+                    .filter(|role| !role.is_empty())
+                    .ok_or_else(|| {
+                        WebError::BadRequest("missing acting role (X-Acting-Role)".to_owned())
+                    })?;
+                if !roles.contains_enabled(acting_role) {
                     return Err(WebError::Forbidden);
                 }
                 Ok(AuthzOutcome {
@@ -285,5 +317,50 @@ mod tests {
             .await
             .expect("governed action with held role + policy is allowed");
         assert_eq!(outcome.acting_role.as_deref(), Some("risk_owner"));
+    }
+
+    #[actix_web::test]
+    async fn deferred_missing_acting_role_is_bad_request() {
+        let casbin = CasbinService::in_memory().await;
+        let result = Rule::ActingRoleDeferred(ResourceType::System)
+            .evaluate(
+                &claims(),
+                &roles(&[("operator", RoleStatus::Enabled)]),
+                &casbin,
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(WebError::BadRequest(_))));
+    }
+
+    #[actix_web::test]
+    async fn deferred_acting_role_not_held_is_forbidden() {
+        let casbin = CasbinService::in_memory().await;
+        let result = Rule::ActingRoleDeferred(ResourceType::System)
+            .evaluate(
+                &claims(),
+                &roles(&[("viewer", RoleStatus::Enabled)]),
+                &casbin,
+                Some("operator"),
+            )
+            .await;
+        assert!(matches!(result, Err(WebError::Forbidden)));
+    }
+
+    #[actix_web::test]
+    async fn deferred_held_role_resolves_without_op_check() {
+        // No policy is registered: the deferred rule authorizes the governed
+        // preconditions only and leaves the op-level check to the handler.
+        let casbin = CasbinService::in_memory().await;
+        let outcome = Rule::ActingRoleDeferred(ResourceType::System)
+            .evaluate(
+                &claims(),
+                &roles(&[("operator", RoleStatus::Enabled)]),
+                &casbin,
+                Some("  operator  "),
+            )
+            .await
+            .expect("deferred governed action resolves the acting role");
+        assert_eq!(outcome.acting_role.as_deref(), Some("operator"));
     }
 }

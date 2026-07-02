@@ -17,8 +17,9 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, IntoActiveModel,
-    JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set, TransactionTrait,
-    sea_query::{Expr, OnConflict, Query, SelectStatement, SimpleExpr},
+    Iterable, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait, Set,
+    TransactionTrait,
+    sea_query::{Expr, OnConflict, SelectStatement, SimpleExpr},
 };
 
 /// Postgres-backed recommendation attribution repository.
@@ -144,7 +145,7 @@ pub async fn blocks_attribution(
 ) -> Result<bool, sea_orm::DbErr> {
     if quant_order_intent::Entity::find()
         .filter(quant_order_intent::Column::RecommendationId.eq(recommendation_id.clone()))
-        .filter(quant_order_intent::Column::Status.is_not_in(terminal_intents()))
+        .filter(quant_order_intent::Column::Status.is_in(non_terminal_intents()))
         .limit(1)
         .one(db)
         .await?
@@ -209,6 +210,16 @@ fn terminal_intents() -> Vec<OrderIntentStatus> {
         .collect()
 }
 
+/// Complement of [`terminal_intents`]. Prefer `is_in` over `is_not_in` for Postgres
+/// native enums: [`SeaORM`](sea_orm)'s raw `sea_query` path binds `is_not_in` as text
+/// (`<>`), which Postgres rejects for `qp_order_intent_status`.
+fn non_terminal_intents() -> Vec<OrderIntentStatus> {
+    let terminal = terminal_intents();
+    OrderIntentStatus::iter()
+        .filter(|status| !terminal.contains(status))
+        .collect()
+}
+
 fn blocking_orders() -> Vec<ExecutionOrderState> {
     vec![
         ExecutionOrderState::Submitted,
@@ -230,91 +241,66 @@ fn blocking_positions() -> Vec<PositionLedgerState> {
 
 fn exists_non_terminal_intent() -> SimpleExpr {
     exists(
-        Query::select()
+        quant_order_intent::Entity::find()
+            .select_only()
             .column(quant_order_intent::Column::OrderIntentId)
-            .from(quant_order_intent::Entity)
-            .and_where(rec_correlation(
-                quant_order_intent::Column::RecommendationId,
-            ))
-            .and_where(Expr::col(quant_order_intent::Column::Status).is_not_in(terminal_intents()))
-            .to_owned(),
+            .filter(recommendation_matches_intent())
+            .filter(quant_order_intent::Column::Status.is_in(non_terminal_intents()))
+            .into_query(),
     )
 }
 
 fn exists_open_position() -> SimpleExpr {
     exists(
-        Query::select()
+        quant_position::Entity::find()
+            .select_only()
             .column(quant_position::Column::PositionId)
-            .from(quant_position::Entity)
-            .inner_join(
-                quant_order_intent::Entity,
-                Expr::col((
-                    quant_position::Entity,
-                    quant_position::Column::OrderIntentId,
-                ))
-                .equals((
-                    quant_order_intent::Entity,
-                    quant_order_intent::Column::OrderIntentId,
-                )),
+            .join(
+                JoinType::InnerJoin,
+                quant_position::Relation::OrderIntent.def(),
             )
-            .and_where(rec_correlation(
-                quant_order_intent::Column::RecommendationId,
-            ))
-            .and_where(Expr::col(quant_position::Column::State).is_in(blocking_positions()))
-            .to_owned(),
+            .filter(recommendation_matches_intent())
+            .filter(quant_position::Column::State.is_in(blocking_positions()))
+            .into_query(),
     )
 }
 
 fn exists_blocking_order() -> SimpleExpr {
     exists(
-        Query::select()
+        quant_execution_order::Entity::find()
+            .select_only()
             .column(quant_execution_order::Column::ExecutionOrderId)
-            .from(quant_execution_order::Entity)
-            .inner_join(
-                quant_order_intent::Entity,
-                Expr::col((
-                    quant_execution_order::Entity,
-                    quant_execution_order::Column::OrderIntentId,
-                ))
-                .equals((
-                    quant_order_intent::Entity,
-                    quant_order_intent::Column::OrderIntentId,
-                )),
+            .join(
+                JoinType::InnerJoin,
+                quant_execution_order::Relation::OrderIntent.def(),
             )
-            .and_where(rec_correlation(
-                quant_order_intent::Column::RecommendationId,
-            ))
-            .and_where(Expr::col(quant_execution_order::Column::State).is_in(blocking_orders()))
-            .to_owned(),
+            .filter(recommendation_matches_intent())
+            .filter(quant_execution_order::Column::State.is_in(blocking_orders()))
+            .into_query(),
     )
 }
 
 fn exists_blocking_recon() -> SimpleExpr {
     exists(
-        Query::select()
+        quant_reconciliation::Entity::find()
+            .select_only()
             .column(quant_reconciliation::Column::ReconciliationId)
-            .from(quant_reconciliation::Entity)
-            .inner_join(
-                quant_order_intent::Entity,
-                Expr::col((
-                    quant_reconciliation::Entity,
-                    quant_reconciliation::Column::OrderIntentId,
-                ))
-                .equals((
-                    quant_order_intent::Entity,
-                    quant_order_intent::Column::OrderIntentId,
-                )),
+            .join(
+                JoinType::InnerJoin,
+                quant_reconciliation::Relation::OrderIntent.def(),
             )
-            .and_where(rec_correlation(
-                quant_order_intent::Column::RecommendationId,
-            ))
-            .and_where(Expr::col(quant_reconciliation::Column::Result).is_in(blocking_recons()))
-            .to_owned(),
+            .filter(recommendation_matches_intent())
+            .filter(quant_reconciliation::Column::Result.is_in(blocking_recons()))
+            .into_query(),
     )
 }
 
-fn rec_correlation(intent_recommendation_col: quant_order_intent::Column) -> SimpleExpr {
-    Expr::col((quant_order_intent::Entity, intent_recommendation_col)).equals((
+fn recommendation_matches_intent() -> SimpleExpr {
+    Expr::col((
+        quant_order_intent::Entity,
+        quant_order_intent::Column::RecommendationId,
+    ))
+    .equals((
         quant_recommendation::Entity,
         quant_recommendation::Column::RecommendationId,
     ))

@@ -342,7 +342,7 @@ timeout_ms = 1000
 # deadline never starves initial connection establishment. Default: 5000.
 connect_timeout_ms = 5000
 # Purpose: key namespace prefix. Default: "oarb:".
-key_prefix = "oarb:"
+key_prefix = "qp:"
 
 [cache.moka]
 # Purpose: in-process (L1) cache entry capacity. Impact: memory vs hit rate.

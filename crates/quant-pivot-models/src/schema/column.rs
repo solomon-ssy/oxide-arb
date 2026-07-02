@@ -221,6 +221,27 @@ pub fn pg_enum_value<E: ActiveEnum>(value: &E) -> SimpleExpr {
     Expr::value(value.to_value()).cast_as(Alias::new(type_name))
 }
 
+const EXCLUDED: &str = "excluded";
+
+/// `EXCLUDED.<column>` cast to a Postgres native enum for upsert conflict updates.
+///
+/// [`SeaORM`](sea_orm) binds [`ActiveEnum`] insert values as text; without an explicit cast,
+/// `ON CONFLICT DO UPDATE SET col = EXCLUDED.col` fails when `col` is a native
+/// enum type.
+pub fn pg_enum_excluded<E: ActiveEnum>(column: impl IntoIden) -> SimpleExpr {
+    pg_excluded_cast(column, E::name().to_string())
+}
+
+/// `EXCLUDED.<column>` cast to a Postgres native enum array for upsert conflict updates.
+pub fn pg_enum_array_excluded<E: ActiveEnum>(column: impl IntoIden) -> SimpleExpr {
+    let type_name = E::name().to_string();
+    pg_excluded_cast(column, format!("{type_name}[]"))
+}
+
+fn pg_excluded_cast(column: impl IntoIden, pg_type: impl AsRef<str>) -> SimpleExpr {
+    Expr::col((Alias::new(EXCLUDED), column.into_iden())).cast_as(Alias::new(pg_type.as_ref()))
+}
+
 /// Nullable `NUMERIC(10, 4)` for an optional basis-point value.
 pub fn bps_null(column: impl IntoIden) -> ColumnDef {
     numeric_null(column, Bps::PRECISION)

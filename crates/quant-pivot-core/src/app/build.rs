@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use quant_pivot_api::{
     clob::ClobClient,
     keystore::{Keystore, OrderSigner},
-    wallet::WalletTopology,
+    wallet::{WalletOwnershipClient, WalletTopology},
 };
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{config::DeployConfig, domain::CoreEventPublisher};
@@ -57,7 +57,7 @@ impl AppContext {
         // is not dry-run, so the real venue must be reachable.
         let keystore = Keystore::from_config(&deploy.keys)?;
         let signer = keystore.signer_arc();
-        let wallet = resolve_wallet_topology(&deploy, &signer)?;
+        let wallet = resolve_wallet_topology(&deploy, &signer).await?;
         let clob =
             Arc::new(ClobClient::connect(Arc::clone(&signer), &deploy.polymarket, &wallet).await?);
         let account = AccountBundle::assemble(AccountBundleDeps {
@@ -120,9 +120,11 @@ impl AppContext {
 /// Resolve and validate the venue wallet topology from deploy config.
 ///
 /// The funder is mandatory in every mode (report sizing reads the real venue
-/// account); for EOA it must equal the signer, and for Proxy / Gnosis Safe it
-/// must equal the CREATE2-derived wallet controlled by the signer.
-fn resolve_wallet_topology(
+/// account). For EOA it must equal the signer; for Proxy / Gnosis Safe it must
+/// either match the CREATE2-derived wallet (fast, offline) or — when the pinned
+/// SDK cannot reproduce that Polymarket wallet generation — be proven on-chain to
+/// be controlled by the signer via [`WalletOwnershipClient`].
+async fn resolve_wallet_topology(
     deploy: &DeployConfig,
     signer: &OrderSigner,
 ) -> QuantResult<WalletTopology> {
@@ -134,11 +136,14 @@ fn resolve_wallet_topology(
         .map(str::trim)
         .filter(|funder| !funder.is_empty())
         .ok_or_else(|| QuantError::config("quant.account.funder is required to reach the venue"))?;
-    WalletTopology::resolve(
+    let ownership = WalletOwnershipClient::connect(&deploy.polymarket)?;
+    WalletTopology::resolve_verified(
         deploy.quant.account.wallet_kind,
         signer.address(),
         funder,
         deploy.polymarket.chain_id,
+        &ownership,
     )
+    .await
     .map_err(|error| QuantError::config(error.to_string()))
 }

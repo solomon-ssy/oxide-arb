@@ -9,6 +9,7 @@ use quant_pivot_models::{
         SystemStatus,
     },
     enums::{
+        execution::KillSwitchState,
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
@@ -18,7 +19,7 @@ use serde::Serialize;
 
 use crate::{
     audit::OperationCtx,
-    auth::casbin::Rule,
+    auth::casbin::{Rule, checker::SUPER_ADMIN_ROLE},
     error::WebError,
     extractors::{ActingRole, AuthedActor, ValidatedJson},
     response::WebResponse,
@@ -61,7 +62,9 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/system/kill-switch",
-            Rule::ActingRoleGoverned(ResourceType::System, Operation::Halt),
+            // The required permission depends on the transition (halt / resume /
+            // emergency), computed in the handler once the target state is known.
+            Rule::ActingRoleDeferred(ResourceType::System),
             set_kill_switch,
         ),
         spec(
@@ -251,15 +254,50 @@ pub async fn kill_switch_status(
     Ok(WebResponse::ok(state.kill_switch.view()))
 }
 
+/// The permission a kill-switch transition requires, keyed on the transition's
+/// intent rather than a single blanket `system:halt`:
+///
+/// - entering or clearing `emergency_halted` is an emergency-authority action →
+///   `system:emergency`;
+/// - loosening (a strictly lower restriction rank), e.g. clearing a tightened
+///   state back toward `closed`, is a resume action → `system:resume`;
+/// - tightening or holding at an equal rank is a halt action → `system:halt`.
+const fn required_kill_switch_op(current: KillSwitchState, target: KillSwitchState) -> Operation {
+    if target.is_emergency() || current.is_emergency() {
+        Operation::Emergency
+    } else if target.restriction_rank() < current.restriction_rank() {
+        Operation::Resume
+    } else {
+        Operation::Halt
+    }
+}
+
 pub async fn set_kill_switch(
     state: web::Data<AppState>,
     actor: AuthedActor,
-    _acting_role: ActingRole,
+    acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<SetKillSwitchRequest>,
 ) -> Result<WebResponse<KillSwitchView>, WebError> {
     let body = body.into_inner();
-    let before_hash = canonical_state_hash(&state.kill_switch.view())?;
+    let current = state.kill_switch.view();
+    // Operation-level authorization deferred from the route rule: the required
+    // system permission depends on the requested transition. Super-admin keeps
+    // the global bypass; every other actor's declared role must carry the op.
+    let required_op = required_kill_switch_op(current.state, body.state);
+    if !actor.roles.contains_enabled(SUPER_ADMIN_ROLE)
+        && !state
+            .casbin
+            .has_policy(
+                &acting_role.0,
+                ResourceType::System.as_str(),
+                required_op.as_str(),
+            )
+            .await
+    {
+        return Err(WebError::Forbidden);
+    }
+    let before_hash = canonical_state_hash(&current)?;
     op_ctx.set_action(OperationCategory::System, "system.set_kill_switch");
     op_ctx.set_detail(serde_json::json!({
         "target_state": body.state.as_str(),
