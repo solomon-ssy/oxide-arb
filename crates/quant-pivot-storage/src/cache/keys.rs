@@ -52,12 +52,10 @@ impl CacheKey {
     pub const fn ttl(&self) -> Duration {
         match self {
             Self::MarketInfo { .. } | Self::EventInfo { .. } | Self::ActiveMarkets => {
-                Duration::from_secs(300)
+                Duration::from_mins(5)
             }
-            Self::MarketMetadata { .. } => Duration::from_secs(1800),
-            Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => {
-                Duration::from_secs(60)
-            }
+            Self::MarketMetadata { .. } => Duration::from_mins(30),
+            Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => Duration::from_mins(1),
         }
     }
 

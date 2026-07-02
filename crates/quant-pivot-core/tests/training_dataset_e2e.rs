@@ -8,6 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_core::service::training_dataset::{
     TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
     default_labelers,
@@ -447,6 +448,7 @@ fn service(
             recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
+            fee_calculator: Arc::new(FeeCalculator::new()),
         },
         TrainingDatasetBuildConfig {
             features: features_config(),

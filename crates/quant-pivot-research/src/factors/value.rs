@@ -114,7 +114,7 @@ impl FactorDefinitionSpec {
     /// Whether this factor is **required** for market eligibility (it declares at
     /// least one quality gate).
     #[must_use]
-    pub fn is_required(&self) -> bool {
+    pub const fn is_required(&self) -> bool {
         !self.quality_gates.is_empty()
     }
 }

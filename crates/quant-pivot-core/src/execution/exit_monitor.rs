@@ -411,10 +411,9 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
     if let (Some(mark), Some(stop)) = (
         input.mark_price,
         effective_stop(policy, lot.avg_price, input.peak_mark_price),
-    ) {
-        if mark <= stop {
-            return submit_or_manual(input, ExitReason::StopLoss, shares, Some(mark));
-        }
+    ) && mark <= stop
+    {
+        return submit_or_manual(input, ExitReason::StopLoss, shares, Some(mark));
     }
 
     // 5. Thesis invalidated (model re-inference) — forced full exit (protective:
@@ -451,11 +450,10 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
     // 8. Take-profit.
     if let (Some(mark), Some(target)) =
         (input.mark_price, take_profit_target(policy, lot.avg_price))
+        && mark >= target
     {
-        if mark >= target {
-            // Sell at the target (the resting bid is at or above it).
-            return submit_or_manual(input, ExitReason::TakeProfit, shares, Some(target));
-        }
+        // Sell at the target (the resting bid is at or above it).
+        return submit_or_manual(input, ExitReason::TakeProfit, shares, Some(target));
     }
 
     // 9. Partial-exit node due (each node fires at most once).

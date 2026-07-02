@@ -3,7 +3,7 @@
 //! `plan_samples` is a pure function: the same `(request, markets)` always yields
 //! the same ordered sample set, which is what makes `dataset_hash` reproducible.
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use super::{DatasetPlanRequest, ExitTrainingLotRow, LotSamplePlan, PlanMarket, SamplePlan};
 
@@ -41,9 +41,15 @@ pub fn plan_samples(request: &DatasetPlanRequest, markets: &[PlanMarket]) -> Vec
 }
 
 /// Generate hold-vs-exit decision instants along each closed lot's life.
+///
+/// Decision instants start at `max(opened_at, window_start)`: ticks before the
+/// dataset window have no prefetched book/microstructure facts, so emitting them
+/// would only produce dropped rows. The lot's true `opened_at`/`closed_at` are
+/// still carried on each plan for point-in-time position-state computation.
 #[must_use]
 pub fn plan_lot_timeline_samples(
     interval_secs: u64,
+    window_start: DateTime<Utc>,
     lots: &[ExitTrainingLotRow],
 ) -> Vec<LotSamplePlan> {
     let interval_secs = i64::try_from(interval_secs.max(1)).unwrap_or(i64::MAX);
@@ -60,7 +66,7 @@ pub fn plan_lot_timeline_samples(
 
     let mut samples = Vec::new();
     for lot in ordered {
-        let mut as_of = lot.opened_at;
+        let mut as_of = lot.opened_at.max(window_start);
         while as_of < lot.closed_at {
             samples.push(LotSamplePlan {
                 order_intent_id: lot.order_intent_id.clone(),
@@ -82,9 +88,10 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::types::{
-        MarketId, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TokenId,
-        default_sample_sources,
+        MarketId, ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId,
+        SchemaVersion, Shares, TokenId, Usd, default_sample_sources,
     };
+    use rust_decimal::Decimal;
 
     fn request(interval_secs: u64) -> DatasetPlanRequest {
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
@@ -128,6 +135,38 @@ mod tests {
         // Ordered by (market_id, as_of): aaa before zzz.
         assert_eq!(first[0].market_id.as_str(), "aaa");
         assert!(first[0].as_of < first[1].as_of);
+    }
+
+    fn exit_lot(opened_offset: i64, closed_offset: i64) -> ExitTrainingLotRow {
+        let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        ExitTrainingLotRow {
+            order_intent_id: OrderIntentId::from_v7(),
+            position_id: PositionId::from_v7(),
+            market_id: MarketId::new("0xmkt"),
+            token_id: TokenId::new("token-1"),
+            opened_at: start + Duration::seconds(opened_offset),
+            closed_at: start + Duration::seconds(closed_offset),
+            entry_shares: Shares::new(Decimal::from(100)),
+            avg_price: Price::new(Decimal::new(5, 1)),
+            peak_mark_price: None,
+            max_hold_secs: 86_400,
+            total_net_proceeds: Usd::new(Decimal::from(60)),
+            exit_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn lot_timeline_clamps_to_window_start() {
+        let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        // Lot opened 100s before the window; closes 120s into it.
+        let lots = vec![exit_lot(-100, 120)];
+        let samples = plan_lot_timeline_samples(60, start, &lots);
+        // Ticks start at window_start (0), not opened_at (-100): 0, 60 (< 120).
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].as_of, start);
+        assert_eq!(samples[1].as_of, start + Duration::seconds(60));
+        // The true lifetime is still carried for position-state computation.
+        assert_eq!(samples[0].opened_at, start - Duration::seconds(100));
     }
 
     #[test]

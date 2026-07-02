@@ -191,10 +191,10 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
                 if overlap < min_obs {
                     continue;
                 }
-                if let Some(corr) = pearson(&returns[i][..overlap], &returns[j][..overlap]) {
-                    if corr.abs() >= threshold {
-                        uf.union(i, j);
-                    }
+                if let Some(corr) = pearson(&returns[i][..overlap], &returns[j][..overlap])
+                    && corr.abs() >= threshold
+                {
+                    uf.union(i, j);
                 }
             }
         }

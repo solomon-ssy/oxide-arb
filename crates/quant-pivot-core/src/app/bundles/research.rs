@@ -19,6 +19,7 @@ use crate::{
         },
     },
 };
+use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::{FactorGovernancePort, ModelGovernancePort};
 use quant_pivot_models::{
@@ -103,6 +104,8 @@ pub struct ResearchBundle {
     pub market_repo: Arc<dyn MarketRepository>,
     /// Position ledger for `ExitDecision` lot-timeline training (06.1).
     pub position_repo: Arc<dyn PositionRepository>,
+    /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
+    pub fee_calculator: Arc<FeeCalculator>,
 }
 
 struct OfflineResearchRepos {
@@ -203,6 +206,7 @@ impl ResearchBundle {
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            fee_calculator: Arc::clone(&deps.data.fee_calculator),
         }
     }
 
@@ -227,6 +231,7 @@ impl ResearchBundle {
                 recommendation_repo: Arc::clone(&self.recommendation_repo),
                 feature_repo: Arc::clone(&self.feature_repo),
                 position_repo: Arc::clone(&self.position_repo),
+                fee_calculator: Arc::clone(&self.fee_calculator),
             },
             TrainingDatasetBuildConfig {
                 features,

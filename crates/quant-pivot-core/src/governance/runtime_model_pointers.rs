@@ -61,8 +61,10 @@ pub async fn sync_production_active(
 }
 
 /// Whether the version's model family scores the Sell-side hold-vs-exit decision.
-/// Fail-closed to the Buy pointer if the spec cannot be resolved (never silently
-/// wire an exit scorer as the entry ranker).
+///
+/// Fail-**closed**: if the version or its spec cannot be resolved we cannot know
+/// which pointer to route onto, so we refuse the sync (a silent `false` would
+/// misroute a Sell scorer onto the Buy `active_model_version_id`).
 async fn resolve_is_exit_scorer(
     deps: &RuntimeModelPointerSync,
     version_id: &ModelVersionId,
@@ -72,14 +74,22 @@ async fn resolve_is_exit_scorer(
         .find_model_version_by_id(version_id)
         .await?
     else {
-        return Ok(false);
+        return Err(GovernanceError::NotFound {
+            entity: "model_version",
+            id: version_id.to_string(),
+        }
+        .into());
     };
     let Some(spec) = deps
         .model_registry_repo
         .find_model_spec_by_id(&version.model_spec_id)
         .await?
     else {
-        return Ok(false);
+        return Err(GovernanceError::NotFound {
+            entity: "model_spec",
+            id: version.model_spec_id.to_string(),
+        }
+        .into());
     };
     Ok(spec.model_family.is_exit_scorer())
 }

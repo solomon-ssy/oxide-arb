@@ -31,7 +31,7 @@ impl ScheduleAlert {
     }
 
     #[must_use]
-    pub fn idempotency_suffix(&self) -> &str {
+    pub const fn idempotency_suffix(&self) -> &str {
         self.schedule_id.as_str()
     }
 }
@@ -152,7 +152,7 @@ impl Channels {
         Self {
             telegram,
             webhook,
-            cooldown_duration: Duration::from_secs(60),
+            cooldown_duration: Duration::from_mins(1),
         }
     }
 }
@@ -215,11 +215,11 @@ impl AlertDispatcher {
         let event = alert.event(channels.cooldown_duration.as_secs());
         let cooldown_key = event.idempotency_key.clone();
         let cooldown_duration = Duration::from_secs(event.dedupe_secs);
-        if let Some(last) = self.cooldown.get(&cooldown_key) {
-            if last.elapsed() < cooldown_duration {
-                tracing::debug!(alert_key = %event.idempotency_key, title = %event.title, "alert suppressed by cooldown");
-                return;
-            }
+        if let Some(last) = self.cooldown.get(&cooldown_key)
+            && last.elapsed() < cooldown_duration
+        {
+            tracing::debug!(alert_key = %event.idempotency_key, title = %event.title, "alert suppressed by cooldown");
+            return;
         }
         self.cooldown.insert(cooldown_key, Instant::now());
 
@@ -227,10 +227,10 @@ impl AlertDispatcher {
             events.publish(CoreEvent::Alert(event.clone()));
         }
 
-        if let Some(recordings) = &self.recordings {
-            if let Ok(mut guard) = recordings.lock() {
-                guard.push(alert.clone());
-            }
+        if let Some(recordings) = &self.recordings
+            && let Ok(mut guard) = recordings.lock()
+        {
+            guard.push(alert.clone());
         }
 
         let text = format!(
@@ -260,11 +260,11 @@ impl AlertDispatcher {
         let event = alert.event(channels.cooldown_duration.as_secs());
         let cooldown_key = event.idempotency_key.clone();
         let cooldown_duration = Duration::from_secs(event.dedupe_secs);
-        if let Some(last) = self.cooldown.get(&cooldown_key) {
-            if last.elapsed() < cooldown_duration {
-                tracing::debug!(alert_key = %event.idempotency_key, title = %event.title, "operator notification suppressed by cooldown");
-                return;
-            }
+        if let Some(last) = self.cooldown.get(&cooldown_key)
+            && last.elapsed() < cooldown_duration
+        {
+            tracing::debug!(alert_key = %event.idempotency_key, title = %event.title, "operator notification suppressed by cooldown");
+            return;
         }
         self.cooldown.insert(cooldown_key, Instant::now());
 
@@ -272,10 +272,10 @@ impl AlertDispatcher {
             events.publish(CoreEvent::Alert(event.clone()));
         }
 
-        if let Some(recordings) = &self.recordings {
-            if let Ok(mut guard) = recordings.lock() {
-                guard.push(alert.clone());
-            }
+        if let Some(recordings) = &self.recordings
+            && let Ok(mut guard) = recordings.lock()
+        {
+            guard.push(alert.clone());
         }
 
         let text = format!(
@@ -381,7 +381,7 @@ mod tests {
         let recordings = Arc::new(Mutex::new(Vec::new()));
         let dispatcher = AlertDispatcher::with_recordings_and_cooldown(
             Arc::clone(&recordings),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
 
         dispatcher.dispatch(alert("same")).await;

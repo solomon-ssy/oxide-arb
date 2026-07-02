@@ -26,7 +26,7 @@ use tokio_util::{
 
 /// How far ahead deadlines are pre-loaded into the queue, bounding its size.
 /// Deadlines beyond this are picked up by a later reconcile.
-const LOOKAHEAD_HORIZON: Duration = Duration::from_secs(15 * 60);
+const LOOKAHEAD_HORIZON: Duration = Duration::from_mins(15);
 
 /// Run a deadline scheduler until `token` is cancelled.
 ///

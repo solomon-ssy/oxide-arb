@@ -9,7 +9,7 @@
 .env
 .env.*
 !.env.example
-config/oxide-arb.local.toml
+config/quant-pivot.local.toml
 .DS_Store
 
 # VS Code extension stats

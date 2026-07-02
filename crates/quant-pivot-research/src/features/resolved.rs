@@ -298,7 +298,7 @@ impl MarketWindowSnapshot {
 
     /// Whether the window has any buckets.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.buckets.is_empty()
     }
 

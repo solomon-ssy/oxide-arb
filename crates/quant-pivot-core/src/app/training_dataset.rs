@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
@@ -40,6 +41,7 @@ pub struct CoreTrainingDatasetPort {
     recommendation_repo: Arc<dyn RecommendationRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
     position_repo: Arc<dyn PositionRepository>,
+    fee_calculator: Arc<FeeCalculator>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
 }
 
@@ -59,6 +61,7 @@ impl CoreTrainingDatasetPort {
             recommendation_repo: Arc::clone(&research.recommendation_repo),
             feature_repo: Arc::clone(&research.feature_repo),
             position_repo: Arc::clone(&research.position_repo),
+            fee_calculator: Arc::clone(&research.fee_calculator),
             runtime_config,
         }
     }
@@ -86,6 +89,7 @@ impl CoreTrainingDatasetPort {
                 recommendation_repo: Arc::clone(&self.recommendation_repo),
                 feature_repo: Arc::clone(&self.feature_repo),
                 position_repo: Arc::clone(&self.position_repo),
+                fee_calculator: Arc::clone(&self.fee_calculator),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,

@@ -305,7 +305,7 @@ subject to:
 重要约束：
 
 - 最新 `ort 2.0.0-rc.12` MSRV 约为 1.88。
-- 当前 workspace MSRV 是 1.85。
+- 当前 workspace MSRV 是 1.91。
 - 引入 latest `ort` 前必须决定是否升级 MSRV。
 - 如果不升级，只能评估较旧 rc 版本，且要接受 API/安全/维护权衡。
 
@@ -866,7 +866,7 @@ FeatureVector
 
 ### 17.6 风险与约束
 
-- 最新 `ort` 可能要求 MSRV 1.88；当前 workspace 是 1.85。
+- 最新 `ort` 可能要求 MSRV 1.88；当前 workspace 是 1.91（已覆盖）。
 - ONNX Runtime 可能引入 binary/native runtime。
 - CUDA/TensorRT 等 execution provider 不能默认启用。
 - report_only 不应强制加载 ONNX runtime。
@@ -1142,7 +1142,7 @@ opportunistic Sell → [`phase-06/06.1-opportunistic-sell-exit-signal.md`](phase
 
 ## 23. Phase 3.0 依赖引入登记
 
-> 状态：Phase 3.0 落地时登记。workspace MSRV = 1.85（`resolver = "2"`）。
+> 状态：Phase 3.0 落地时登记；2026-07 升级至 1.91（`alloy` 等传递依赖硬要求）。workspace MSRV = 1.91（`resolver = "2"`）。
 > `ndarray` / `ndarray-stats` / `statrs` / `rayon` 为 **base deps**（03.2 在线
 > feature plane 必需）；`polars` / `smartcore` / `argmin` 仍按 feature gate optional
 > 引用；默认 build（`default = []`）链接 base numeric stack，绝不链接 polars /

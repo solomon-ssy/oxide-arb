@@ -37,7 +37,7 @@ async fn setup_redis() -> (
 async fn redis_set_get_roundtrip() {
     let (backend, _container) = setup_redis().await;
     backend
-        .set("k1", b"v1", Duration::from_secs(60))
+        .set("k1", b"v1", Duration::from_mins(1))
         .await
         .unwrap();
     let val = backend.get("k1").await.unwrap();
@@ -57,7 +57,7 @@ async fn redis_get_missing_returns_none() {
 async fn redis_delete_removes_entry() {
     let (backend, _container) = setup_redis().await;
     backend
-        .set("del_me", b"data", Duration::from_secs(60))
+        .set("del_me", b"data", Duration::from_mins(1))
         .await
         .unwrap();
     let removed = backend.delete("del_me").await.unwrap();
@@ -73,7 +73,7 @@ async fn redis_mget_mset() {
     backend
         .mset(
             &[("a", b"1"), ("b", b"2"), ("c", b"3")],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
         .await
         .unwrap();

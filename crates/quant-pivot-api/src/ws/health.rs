@@ -52,13 +52,13 @@ impl ShardHealthBoard {
     /// Record a connection state transition for `shard_id` (idempotent).
     pub fn set_connected(&self, shard_id: usize, connected: bool) {
         let mut slots = self.slots.write();
-        if let Some(slot) = slots.get_mut(shard_id) {
-            if slot.connected != connected {
-                *slot = ShardSlot {
-                    connected,
-                    since: Instant::now(),
-                };
-            }
+        if let Some(slot) = slots.get_mut(shard_id)
+            && slot.connected != connected
+        {
+            *slot = ShardSlot {
+                connected,
+                since: Instant::now(),
+            };
         }
     }
 

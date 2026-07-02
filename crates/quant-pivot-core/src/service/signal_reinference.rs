@@ -105,7 +105,13 @@ impl<R> ReinferenceSignalEvaluator<R> {
     }
 
     /// Mirror one re-inference evaluation into the unified audit fact.
-    fn audit(&self, ctx: &ExitSignalContext<'_>, verdict: &ExitSignalVerdict, shadow: bool) {
+    fn audit(
+        &self,
+        ctx: &ExitSignalContext<'_>,
+        verdict: &ExitSignalVerdict,
+        fresh_composite: Option<Probability>,
+        shadow: bool,
+    ) {
         let now_ms = ctx.now.timestamp_millis();
         let ch_verdict: ChExitSignalVerdict = verdict.into();
         self.audit.write(QuantExitSignalEvaluationEventRow {
@@ -121,7 +127,7 @@ impl<R> ReinferenceSignalEvaluator<R> {
             entry_composite_score: ChProbability::from(
                 ctx.intent.exit_policy_json.entry_composite_score,
             ),
-            fresh_composite_score: None,
+            fresh_composite_score: fresh_composite.map(ChProbability::from),
             exit_alpha_bps: None,
             confidence: None,
             target_cumulative_exit_pct: None,
@@ -208,34 +214,49 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
         };
         let entry_score = ctx.intent.exit_policy_json.entry_composite_score;
 
-        let verdict = match self
+        let (verdict, fresh_composite) = match self
             .reinferer
             .reinfer(ctx.intent, ctx.lot, ctx.mark_price, ctx.now)
             .await
         {
             Ok(Some(fresh)) => {
                 self.metrics.inc_exit_signal_reinference("fresh");
-                degradation_verdict(entry_score, &fresh, invalidation_ratio)
+                let composite = Some(fresh.composite_score);
+                (
+                    degradation_verdict(entry_score, &fresh, invalidation_ratio),
+                    composite,
+                )
             }
             Ok(None) => {
                 self.metrics.inc_exit_signal_reinference("unavailable");
-                ExitSignalVerdict::Indeterminate {
-                    detail: "signal re-inference unavailable (missing features/model/stale)"
-                        .to_owned(),
-                }
+                (
+                    ExitSignalVerdict::Indeterminate {
+                        detail: "signal re-inference unavailable (missing features/model/stale)"
+                            .to_owned(),
+                    },
+                    None,
+                )
             }
             Err(error) => {
                 self.metrics.inc_exit_signal_reinference("error");
                 tracing::warn!(%error, "exit signal re-inference failed; holding (fail-safe)");
-                ExitSignalVerdict::Indeterminate {
-                    detail: format!("re-inference error: {error}"),
-                }
+                (
+                    ExitSignalVerdict::Indeterminate {
+                        detail: format!("re-inference error: {error}"),
+                    },
+                    None,
+                )
             }
         };
 
         // Audit the model-determined verdict (pre-shadow-suppression) so shadow
         // and live re-inference are both measurable ex-post.
-        self.audit(&ctx, &verdict, policy.signal_reinference.shadow_mode);
+        self.audit(
+            &ctx,
+            &verdict,
+            fresh_composite,
+            policy.signal_reinference.shadow_mode,
+        );
 
         if policy.signal_reinference.shadow_mode {
             return suppress_shadow_verdict(&self.metrics, &verdict);

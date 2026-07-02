@@ -126,14 +126,14 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         // runtime-config is the schedule truth source, so a transient rebuild
         // failure is logged and retried on the next activation / restart rather
         // than rolling back an already-validated, already-stored activation.
-        if let Some(scheduler) = scheduler {
-            if let Err(error) = scheduler.sync_from_config(&arc.reports).await {
-                tracing::warn!(
-                    %error,
-                    "report schedule rebuild after activation failed; \
-                     will retry on next activation or restart"
-                );
-            }
+        if let Some(scheduler) = scheduler
+            && let Err(error) = scheduler.sync_from_config(&arc.reports).await
+        {
+            tracing::warn!(
+                %error,
+                "report schedule rebuild after activation failed; \
+                 will retry on next activation or restart"
+            );
         }
         Ok(())
     }

@@ -282,9 +282,13 @@ impl ModelQualityGate for DefaultModelQualityGate {
         let mut hard: Vec<QualityGateFailure> = Vec::new();
         let mut soft: Vec<QualityGateFailure> = Vec::new();
 
-        evaluate_coverage_gates(&input, &mut hard);
-        if input.model_family.is_some_and(ModelFamily::is_exit_scorer) {
+        let is_exit = input.model_family.is_some_and(ModelFamily::is_exit_scorer);
+        evaluate_coverage_gates(&input, is_exit, &mut hard);
+        if is_exit {
             evaluate_sell_gates(&input, &mut hard, &mut soft);
+            // Sell publish is still gated on shadow overlap stability (the buy
+            // liquidity-feasibility/backtest gates do not apply to exit scorers).
+            evaluate_shadow_stability_gate(&input, &mut hard);
         } else {
             evaluate_backtest_presence(&input, &mut hard);
             if let Some(report) = &input.backtest {
@@ -323,31 +327,42 @@ impl ModelQualityGate for DefaultModelQualityGate {
 }
 
 /// Coverage + leakage hard gates (every intent).
-fn evaluate_coverage_gates(input: &QualityGateInput, hard: &mut Vec<QualityGateFailure>) {
+///
+/// The sample-count and label-coverage bars are family-specific: for exit
+/// scorers the Sell gate owns them (against the `sell.*` thresholds), so they are
+/// skipped here to avoid double-applying the Buy `min_sample_count` bar to a
+/// sell-only dataset. Feature coverage and PIT leakage are universal.
+fn evaluate_coverage_gates(
+    input: &QualityGateInput,
+    is_exit: bool,
+    hard: &mut Vec<QualityGateFailure>,
+) {
     let t = &input.thresholds;
-    // Sample count: prefer the backtest's resolved samples, else the dataset's
-    // built examples (DatasetReady has no backtest).
-    let samples = input
-        .backtest
-        .as_ref()
-        .map_or(input.dataset.built_examples, |report| report.sample_count);
-    if samples < t.min_sample_count {
-        hard.push(QualityGateFailure {
-            gate: GateId::SampleCount,
-            observed: samples.to_string(),
-            threshold: t.min_sample_count.to_string(),
-            detail: "insufficient resolved samples".to_owned(),
-        });
-    }
+    if !is_exit {
+        // Sample count: prefer the backtest's resolved samples, else the dataset's
+        // built examples (DatasetReady has no backtest).
+        let samples = input
+            .backtest
+            .as_ref()
+            .map_or(input.dataset.built_examples, |report| report.sample_count);
+        if samples < t.min_sample_count {
+            hard.push(QualityGateFailure {
+                gate: GateId::SampleCount,
+                observed: samples.to_string(),
+                threshold: t.min_sample_count.to_string(),
+                detail: "insufficient resolved samples".to_owned(),
+            });
+        }
 
-    let label_coverage = input.dataset.label_coverage();
-    if label_coverage < t.min_label_coverage {
-        hard.push(QualityGateFailure {
-            gate: GateId::LabelCoverage,
-            observed: label_coverage.to_string(),
-            threshold: t.min_label_coverage.to_string(),
-            detail: "label coverage below minimum".to_owned(),
-        });
+        let label_coverage = input.dataset.label_coverage();
+        if label_coverage < t.min_label_coverage {
+            hard.push(QualityGateFailure {
+                gate: GateId::LabelCoverage,
+                observed: label_coverage.to_string(),
+                threshold: t.min_label_coverage.to_string(),
+                detail: "label coverage below minimum".to_owned(),
+            });
+        }
     }
 
     let feature_coverage = input.dataset.feature_build_coverage();
@@ -416,15 +431,15 @@ fn evaluate_sell_gates(
             detail: "ExitDecision microstructure fallback ratio above maximum".to_owned(),
         });
     }
-    if let Some(report) = &input.backtest {
-        if report.rank_ic < t.min_exit_alpha_rank_ic {
-            soft.push(QualityGateFailure {
-                gate: GateId::RankIc,
-                observed: report.rank_ic.to_string(),
-                threshold: t.min_exit_alpha_rank_ic.to_string(),
-                detail: "exit-alpha rank IC below soft minimum".to_owned(),
-            });
-        }
+    if let Some(report) = &input.backtest
+        && report.rank_ic < t.min_exit_alpha_rank_ic
+    {
+        soft.push(QualityGateFailure {
+            gate: GateId::RankIc,
+            observed: report.rank_ic.to_string(),
+            threshold: t.min_exit_alpha_rank_ic.to_string(),
+            detail: "exit-alpha rank IC below soft minimum".to_owned(),
+        });
     }
 }
 
@@ -513,22 +528,30 @@ fn evaluate_intent_gates(input: &QualityGateInput, hard: &mut Vec<QualityGateFai
         }
     }
 
-    if input.intent.requires_shadow_stability() {
-        match input.shadow_stability {
-            Some(stability) if stability.inner() >= t.min_shadow_overlap_stability => {}
-            Some(stability) => hard.push(QualityGateFailure {
-                gate: GateId::ShadowOverlapStability,
-                observed: stability.inner().to_string(),
-                threshold: t.min_shadow_overlap_stability.to_string(),
-                detail: "shadow overlap stability below minimum".to_owned(),
-            }),
-            None => hard.push(QualityGateFailure {
-                gate: GateId::ShadowOverlapStability,
-                observed: "none".to_owned(),
-                threshold: t.min_shadow_overlap_stability.to_string(),
-                detail: "shadow stability not established over the required window".to_owned(),
-            }),
-        }
+    evaluate_shadow_stability_gate(input, hard);
+}
+
+/// Hard gate: publish / auto intents require an established shadow-overlap
+/// stability. Family-agnostic, so both Buy and Sell publishes are gated on it.
+fn evaluate_shadow_stability_gate(input: &QualityGateInput, hard: &mut Vec<QualityGateFailure>) {
+    if !input.intent.requires_shadow_stability() {
+        return;
+    }
+    let t = &input.thresholds;
+    match input.shadow_stability {
+        Some(stability) if stability.inner() >= t.min_shadow_overlap_stability => {}
+        Some(stability) => hard.push(QualityGateFailure {
+            gate: GateId::ShadowOverlapStability,
+            observed: stability.inner().to_string(),
+            threshold: t.min_shadow_overlap_stability.to_string(),
+            detail: "shadow overlap stability below minimum".to_owned(),
+        }),
+        None => hard.push(QualityGateFailure {
+            gate: GateId::ShadowOverlapStability,
+            observed: "none".to_owned(),
+            threshold: t.min_shadow_overlap_stability.to_string(),
+            detail: "shadow stability not established over the required window".to_owned(),
+        }),
     }
 }
 

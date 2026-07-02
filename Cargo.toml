@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 license = "MIT"
 
 [workspace.lints.rust]
@@ -100,7 +100,7 @@ async-trait = "0.1"
 strum = { version = "0.28", features = ["derive"] }
 
 # Validation
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 # Binary codec for cache serialization
 bitcode = { version = "0.6", features = ["derive", "serde", "rust_decimal"] }

@@ -195,10 +195,10 @@ impl RetryController {
 
     /// Process a failure and decide whether to retry.
     pub fn on_failure(&mut self) -> RetryDecision {
-        if let Some(max) = self.max_attempts {
-            if self.retries_used >= max {
-                return RetryDecision::Exhausted;
-            }
+        if let Some(max) = self.max_attempts
+            && self.retries_used >= max
+        {
+            return RetryDecision::Exhausted;
         }
         match self.backoff.next_backoff() {
             Some(dur) => {

@@ -46,7 +46,7 @@ async fn setup_clickhouse() -> (
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
-        .with_startup_timeout(Duration::from_secs(120))
+        .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
         .expect("ClickHouse container");
@@ -68,7 +68,7 @@ async fn clickhouse_database_bootstrap_creates_missing_database() {
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
-        .with_startup_timeout(Duration::from_secs(120))
+        .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
         .expect("ClickHouse container");
@@ -256,7 +256,7 @@ fn tick_writer(
         AsyncWriterConfig::new("tick_events")
             .capacity(10_000)
             .batch_size(10_000)
-            .flush_interval(Duration::from_secs(3600)),
+            .flush_interval(Duration::from_hours(1)),
         move |rows: Vec<TickEventRow>| {
             let write_manager = Arc::clone(&write_manager);
             let client = client.clone();

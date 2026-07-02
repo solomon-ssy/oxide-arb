@@ -698,10 +698,11 @@ fn confidence_summary(recommendations: &[NewRecommendation]) -> ConfidenceSummar
 
 fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount> {
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-    if let Some(empty) = &input.empty {
-        if empty.reason != EmptyReason::InsufficientDataQuality && empty.rejected_count > 0 {
-            counts.insert(empty.reason.as_str().to_owned(), empty.rejected_count);
-        }
+    if let Some(empty) = &input.empty
+        && empty.reason != EmptyReason::InsufficientDataQuality
+        && empty.rejected_count > 0
+    {
+        counts.insert(empty.reason.as_str().to_owned(), empty.rejected_count);
     }
     if input.feature_rejected_count > 0 {
         *counts

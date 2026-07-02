@@ -62,11 +62,13 @@
 
 ## 2. Runtime Config v7
 
-根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 7`。
+根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 9`（以代码为准；本节结构文字仍以 v7 基线书写，后续 bump 只增段不改既有语义）。
+
+> **schema 版本历史**：v7 基线 → … → **v9**（Phase 06.1：新增 `model.active_exit_model_version_id`、`quality_gate.sell.*`、`execution.exit_monitor.opportunistic_sell.min_p_exit_better`）。
 
 ```text
 RuntimeConfig {
-  schema_version: 7,
+  schema_version: 9,
   selection,
   data_quality,
   features,
@@ -158,7 +160,7 @@ Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs
 
 ### 3.1 Common validation（[`validation.rs`](../../../crates/quant-pivot-models/src/runtime_config/validation.rs)）
 
-- `schema_version` 必须为 7；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
+- `schema_version` 必须为 9；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
 
 ### 3.2 Mode-aware validation（deploy + preflight）
 

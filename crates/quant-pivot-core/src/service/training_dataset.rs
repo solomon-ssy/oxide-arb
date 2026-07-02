@@ -21,8 +21,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    clickhouse::{BookMicrostructureRow, ChPrice, ChUsd},
     domain::{
         ExitTrainingLotRow, FeatureVectorInfo, NewTrainingDataset, RecommendationAttributionInfo,
         RecommendationInfo,
@@ -30,7 +32,8 @@ use quant_pivot_models::{
     enums::quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
     types::{
-        Bps, MarketId, Price, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
+        Bps, MarketId, Price, Shares, TokenId, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -111,6 +114,8 @@ pub struct TrainingDatasetServiceDeps {
     pub feature_repo: Arc<dyn FeatureRepository>,
     /// Position ledger for closed-lot `ExitDecision` sampling.
     pub position_repo: Arc<dyn PositionRepository>,
+    /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
+    pub fee_calculator: Arc<FeeCalculator>,
 }
 
 /// Frozen runtime-config snapshot bound to one dataset build.
@@ -137,6 +142,7 @@ pub struct TrainingDatasetService {
     recommendation_repo: Arc<dyn RecommendationRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
     position_repo: Arc<dyn PositionRepository>,
+    fee_calculator: Arc<FeeCalculator>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     data_quality: DataQualityConfig,
@@ -165,6 +171,7 @@ impl TrainingDatasetService {
             recommendation_repo: deps.recommendation_repo,
             feature_repo: deps.feature_repo,
             position_repo: deps.position_repo,
+            fee_calculator: deps.fee_calculator,
             features: config.features,
             factors: config.factors,
             data_quality: config.data_quality,
@@ -218,8 +225,11 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
                 )
                 .await
                 .map_err(QuantError::from)?;
-            lot_samples =
-                plan_lot_timeline_samples(request.sample_interval_secs, &exit_training_lots);
+            lot_samples = plan_lot_timeline_samples(
+                request.sample_interval_secs,
+                request.window_start,
+                &exit_training_lots,
+            );
         }
         let training_dataset_id = request
             .training_dataset_id
@@ -663,20 +673,33 @@ impl TrainingDatasetService {
         if !remaining.is_positive() {
             return Ok(());
         }
+        let micro = input
+            .prefetched
+            .micro
+            .get(&input.sample.token_id)
+            .map_or(&[][..], Vec::as_slice);
+        // Peak-to-`as_of` (strictly past): the lot's lifetime peak persisted at
+        // close would leak future price into an early-tick drawdown feature.
+        let peak_mark = peak_mark_to(micro, input.lot.opened_at, input.sample.as_of);
         let position_state = position_state_features(LotStateInput {
             avg_price: input.lot.avg_price.inner(),
             mark: entry_mid.map(Price::inner),
             opened_at: input.lot.opened_at,
             now: input.sample.as_of,
             max_hold_secs: input.lot.max_hold_secs,
-            peak_mark: input.lot.peak_mark_price.map(Price::inner),
+            peak_mark: peak_mark.map(Price::inner),
         });
         let (decision_book, book_fidelity) =
-            decision_book_at(input.pit, &input.sample.token_id, input.sample.as_of).await?;
+            decision_book_at(input.pit, &input.sample.token_id, input.sample.as_of, micro).await?;
+        // Govern the exit fee with the same calculator the live exit dispatcher
+        // uses (via reconciliation), converted to an effective bps of the exit
+        // notional so the label matches production net proceeds.
+        let exit_price = entry_mid.unwrap_or(input.lot.avg_price);
+        let fee_bps = self.exit_fee_bps(remaining, exit_price, market, &input.sample.token_id);
         let label_ctx = ExitDecisionLabelContext {
             remaining_shares: remaining,
             avg_price: input.lot.avg_price,
-            fee_bps: Bps::ZERO,
+            fee_bps,
             terminal: LotTerminalSnapshot::from(input.lot),
             decision_book,
         };
@@ -725,7 +748,7 @@ impl TrainingDatasetService {
                 position_id: input.sample.position_id.clone(),
                 remaining_shares: remaining,
                 avg_price: input.lot.avg_price,
-                peak_mark: input.lot.peak_mark_price,
+                peak_mark,
                 opened_at: input.lot.opened_at,
                 max_hold_secs: input.lot.max_hold_secs,
             }),
@@ -734,6 +757,31 @@ impl TrainingDatasetService {
         });
         sink.coverage.exit_decision_built += 1;
         Ok(())
+    }
+
+    /// Effective exit fee in basis points of the exit notional, quoted from the
+    /// governed venue fee calculator (same schedule the live exit dispatcher
+    /// uses). Zero notional or no schedule → no fee.
+    fn exit_fee_bps(
+        &self,
+        shares: Shares,
+        price: Price,
+        market: &SelectedMarket,
+        token_id: &TokenId,
+    ) -> Bps {
+        let notional = shares.inner() * price.inner();
+        if notional <= Decimal::ZERO {
+            return Bps::ZERO;
+        }
+        let fee_usd = self.fee_calculator.calculate(
+            shares,
+            price,
+            market.category,
+            &market.market_id,
+            token_id,
+        );
+        let bps = (fee_usd.inner() / notional * Decimal::from(10_000)).max(Decimal::ZERO);
+        Bps::new(bps)
     }
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
@@ -1046,11 +1094,11 @@ async fn decision_book_at(
     pit: &dyn PitQueryEngine,
     token_id: &quant_pivot_models::types::TokenId,
     as_of: DateTime<Utc>,
+    micro: &[BookMicrostructureRow],
 ) -> QuantResult<(Option<DecisionBook>, Option<BookFidelity>)> {
-    let Some(snapshot) = pit.book_at(token_id, as_of).await? else {
-        return Ok((None, None));
-    };
-    if !snapshot.bids.is_empty() {
+    if let Some(snapshot) = pit.book_at(token_id, as_of).await?
+        && !snapshot.bids.is_empty()
+    {
         return Ok((
             Some(DecisionBook::L2 {
                 bids: Arc::clone(&snapshot.bids),
@@ -1058,7 +1106,71 @@ async fn decision_book_at(
             Some(BookFidelity::L2),
         ));
     }
+    // No L2 depth at the decision instant: fall back to the latest microstructure
+    // bucket at or before `as_of` (best bid + aggregate depth), tagged degraded so
+    // the sell quality gate can bound the fallback ratio. Under-estimates slippage
+    // (single-price walk) — acceptable for a coverage-recovering degraded row.
+    if let Some((best_bid, depth)) = microstructure_fallback(micro, as_of) {
+        return Ok((
+            Some(DecisionBook::Microstructure { best_bid, depth }),
+            Some(BookFidelity::MicrostructureFallback),
+        ));
+    }
     Ok((None, None))
+}
+
+/// Peak mark observed over `[opened_at, as_of]` from the microstructure series
+/// (per-bucket best-bid high). PIT-safe: never reads a bucket past `as_of`, so
+/// the derived drawdown feature cannot leak a future peak. `None` when no bucket
+/// covers the range (drawdown then degrades to zero, not a leaked value).
+fn peak_mark_to(
+    micro: &[BookMicrostructureRow],
+    opened_at: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+) -> Option<Price> {
+    let start = opened_at.timestamp_millis();
+    let end = as_of.timestamp_millis();
+    micro
+        .iter()
+        .filter(|row| row.bucket_time >= start && row.bucket_time <= end)
+        .filter_map(|row| {
+            row.best_bid_high
+                .or(row.best_bid_close)
+                .or(row.mid_price_close)
+        })
+        .map(ChPrice::to_price)
+        .max()
+}
+
+/// Best bid + aggregate share depth from the latest microstructure bucket at or
+/// before `as_of`. PIT-safe: never reads a future bucket. Share depth is the
+/// top-of-book USD depth divided by the best bid.
+fn microstructure_fallback(
+    micro: &[BookMicrostructureRow],
+    as_of: DateTime<Utc>,
+) -> Option<(Price, Shares)> {
+    let as_of_ms = as_of.timestamp_millis();
+    let row = micro
+        .iter()
+        .filter(|row| row.bucket_time <= as_of_ms)
+        .max_by_key(|row| row.bucket_time)?;
+    let best_bid = row
+        .best_bid_close
+        .or(row.best_bid_open)
+        .or(row.mid_price_close)
+        .map(ChPrice::to_price)?;
+    if best_bid.inner() <= Decimal::ZERO {
+        return None;
+    }
+    let depth_usd = row
+        .top5_depth_usd_avg
+        .or(row.top1_depth_usd_avg)
+        .map(ChUsd::to_usd)?;
+    let depth_shares = depth_usd.inner() / best_bid.inner();
+    if depth_shares <= Decimal::ZERO {
+        return None;
+    }
+    Some((best_bid, Shares::new(depth_shares)))
 }
 
 struct CrossSectionAppendInput<'a> {

@@ -60,7 +60,8 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::service::{
-    dataset_replay::rematerialize_training_examples, historical_replay::ReplayConfig,
+    dataset_replay::{rematerialize_exit_decision_examples, rematerialize_training_examples},
+    historical_replay::ReplayConfig,
 };
 
 /// Repository + store dependencies for the trainer service.
@@ -132,15 +133,31 @@ impl ModelTrainerService {
     pub async fn train(&self, input: TrainModelInput) -> QuantResult<ModelVersionInfo> {
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
         let parquet_examples = self.decode_examples(&dataset).await?;
-        let examples = rematerialize_training_examples(
-            &dataset,
-            &parquet_examples,
-            Arc::clone(&self.deps.fact_read),
-            Arc::clone(&self.deps.market_repo),
-            &self.replay,
-            self.max_book_staleness,
-        )
-        .await?;
+        // Exit scorers train on per-lot `ExitDecision` rows: recompute market
+        // factors PIT but preserve each lot's frozen labels + position-state
+        // (the generic rematerialize would rewrite them to `HistoricalPit` and
+        // drop the lot state, tripping the Sell-training guard).
+        let examples = if input.model_family.is_exit_scorer() {
+            rematerialize_exit_decision_examples(
+                &dataset,
+                &parquet_examples,
+                Arc::clone(&self.deps.fact_read),
+                Arc::clone(&self.deps.market_repo),
+                &self.replay,
+                self.max_book_staleness,
+            )
+            .await?
+        } else {
+            rematerialize_training_examples(
+                &dataset,
+                &parquet_examples,
+                Arc::clone(&self.deps.fact_read),
+                Arc::clone(&self.deps.market_repo),
+                &self.replay,
+                self.max_book_staleness,
+            )
+            .await?
+        };
 
         let model_version_id = ModelVersionId::from_v7();
         let model_run_id = ModelRunId::from_v7();

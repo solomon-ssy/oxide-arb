@@ -8,7 +8,7 @@ use std::time::Duration;
 async fn moka_set_get_roundtrip() {
     let backend = MokaBackend::new(100);
     backend
-        .set("key1", b"value1", Duration::from_secs(60))
+        .set("key1", b"value1", Duration::from_mins(1))
         .await
         .unwrap();
     let val = backend.get("key1").await.unwrap();
@@ -26,7 +26,7 @@ async fn moka_get_missing_returns_none() {
 async fn moka_delete_removes_entry() {
     let backend = MokaBackend::new(100);
     backend
-        .set("key1", b"value1", Duration::from_secs(60))
+        .set("key1", b"value1", Duration::from_mins(1))
         .await
         .unwrap();
     backend.delete("key1").await.unwrap();
@@ -39,7 +39,7 @@ async fn moka_exists_check() {
     let backend = MokaBackend::new(100);
     assert!(!backend.exists("key1").await.unwrap());
     backend
-        .set("key1", b"value1", Duration::from_secs(60))
+        .set("key1", b"value1", Duration::from_mins(1))
         .await
         .unwrap();
     assert!(backend.exists("key1").await.unwrap());
@@ -49,11 +49,11 @@ async fn moka_exists_check() {
 async fn moka_mget_returns_correct_order() {
     let backend = MokaBackend::new(100);
     backend
-        .set("a", b"1", Duration::from_secs(60))
+        .set("a", b"1", Duration::from_mins(1))
         .await
         .unwrap();
     backend
-        .set("c", b"3", Duration::from_secs(60))
+        .set("c", b"3", Duration::from_mins(1))
         .await
         .unwrap();
 
@@ -67,7 +67,7 @@ async fn moka_mget_returns_correct_order() {
 async fn moka_mset_bulk_write() {
     let backend = MokaBackend::new(100);
     backend
-        .mset(&[("x", b"10"), ("y", b"20")], Duration::from_secs(60))
+        .mset(&[("x", b"10"), ("y", b"20")], Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(backend.get("x").await.unwrap(), Some(b"10".to_vec()));
@@ -81,7 +81,7 @@ async fn cache_key_format_and_ttl() {
     };
     assert_eq!(key.as_str(), "mkt:0xabc");
     assert_eq!(key.domain(), "market");
-    assert_eq!(key.ttl(), Duration::from_secs(300));
+    assert_eq!(key.ttl(), Duration::from_mins(5));
 }
 
 #[tokio::test]

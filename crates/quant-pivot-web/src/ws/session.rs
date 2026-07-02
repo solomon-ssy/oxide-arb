@@ -76,10 +76,10 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
                 let Some(Ok(message)) = incoming else { break };
                 match message {
                     Message::Text(text) => {
-                        if let Some(reply) = handle_command(&ctx, &subscriptions, &text).await {
-                            if session.text(reply).await.is_err() {
-                                break;
-                            }
+                        if let Some(reply) = handle_command(&ctx, &subscriptions, &text).await
+                            && session.text(reply).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Message::Ping(bytes) => {

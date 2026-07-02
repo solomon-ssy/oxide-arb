@@ -563,6 +563,26 @@ impl SellScorerArtifact {
     ///
     /// Returns [`ResearchError::InvalidModelArtifact`] on any violation.
     pub fn validate(&self) -> QuantResult<()> {
+        // Family guard (doc Blocker): a mis-tagged header must never load as a
+        // Sell scorer, or a Buy ranker could be scored as an exit model.
+        if self.header.model_family != ModelFamily::HoldVsExitWeighted {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "sell scorer artifact has non-exit model family {:?}",
+                    self.header.model_family
+                ),
+            }
+            .into());
+        }
+        if self.output_spec.max_exit_alpha_bps <= Decimal::ZERO {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "sell scorer max_exit_alpha_bps {} must be > 0",
+                    self.output_spec.max_exit_alpha_bps
+                ),
+            }
+            .into());
+        }
         if self.weights.is_empty() {
             return Err(ResearchError::InvalidModelArtifact {
                 detail: "sell scorer artifact has no factor weights".to_owned(),
@@ -776,7 +796,8 @@ mod tests {
     use super::{
         DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers, ModelArtifact,
         ModelArtifactHeader, ReturnCurvePoint, ReturnModelSpec, ScoreMultiplierSpec,
-        SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+        SellScorerArtifact, SellScorerOutputSpec, SubstitutionConfidenceRules,
+        WeightedFactorModelArtifact,
     };
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
@@ -848,6 +869,60 @@ mod tests {
         assert!(negative.validate().is_err(), "no negative weight allowed");
 
         assert!(sample_artifact().validate().is_ok());
+    }
+
+    fn sell_artifact(family: ModelFamily) -> SellScorerArtifact {
+        SellScorerArtifact {
+            header: ModelArtifactHeader {
+                model_version_id: ModelVersionId::from_v7(),
+                model_family: family,
+                feature_schema_hash: hash("aaa"),
+                factor_schema_hash: hash("bbb"),
+            },
+            weights: vec![
+                FactorWeight {
+                    factor: LIQUIDITY_DEPTH,
+                    weight: dec!(0.6),
+                },
+                FactorWeight {
+                    factor: MOMENTUM,
+                    weight: dec!(0.4),
+                },
+            ],
+            prediction_horizon_secs: 86_400,
+            output_spec: SellScorerOutputSpec::conservative(),
+            label_schema_hash: hash("ccc"),
+            required_features: Vec::new(),
+            objective_report: None,
+        }
+    }
+
+    #[test]
+    fn sell_artifact_validates_and_rejects_wrong_family() {
+        // A correctly-tagged exit scorer validates.
+        assert!(
+            sell_artifact(ModelFamily::HoldVsExitWeighted)
+                .validate()
+                .is_ok()
+        );
+        // A Buy family tagged into a Sell artifact is rejected (Blocker guard):
+        // a Sell scorer must never load where a Buy ranker is expected.
+        assert!(
+            sell_artifact(ModelFamily::WeightedFactor)
+                .validate()
+                .is_err(),
+            "non-exit model family must be rejected"
+        );
+    }
+
+    #[test]
+    fn sell_artifact_rejects_non_positive_alpha_scale() {
+        let mut artifact = sell_artifact(ModelFamily::HoldVsExitWeighted);
+        artifact.output_spec.max_exit_alpha_bps = Decimal::ZERO;
+        assert!(
+            artifact.validate().is_err(),
+            "max_exit_alpha_bps must be > 0 (a zero/negative scale flips alpha sign)"
+        );
     }
 
     #[test]

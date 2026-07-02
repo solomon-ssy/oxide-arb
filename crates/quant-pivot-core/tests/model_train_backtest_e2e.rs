@@ -12,6 +12,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -627,7 +628,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         },
         trainer_config(),
         replay_config(),
-        std::time::Duration::from_secs(60),
+        Duration::from_mins(1),
     );
 
     // ── Train ────────────────────────────────────────────────────────────
@@ -682,7 +683,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         },
         &portfolio(),
         replay_config(),
-        std::time::Duration::from_secs(60),
+        Duration::from_mins(1),
     );
 
     let report = backtester

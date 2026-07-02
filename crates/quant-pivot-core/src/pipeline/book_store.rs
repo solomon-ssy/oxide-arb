@@ -94,7 +94,7 @@ impl BookStore {
         let n = self
             .metric_update_counter
             .fetch_add(1, StdSyncOrdering::Relaxed);
-        if n % 1024 == 0 {
+        if n.is_multiple_of(1024) {
             self.metrics
                 .book_store_token_count
                 .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));

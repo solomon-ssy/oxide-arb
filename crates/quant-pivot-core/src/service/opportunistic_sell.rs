@@ -216,6 +216,51 @@ impl<S> OpportunisticSellSignalEvaluator<S> {
     }
 }
 
+impl<S: OpportunisticSellScorer> OpportunisticSellSignalEvaluator<S> {
+    /// Score the lot, or `None` when the enabled scorer could not evaluate. The
+    /// couldn't-score paths record an `Indeterminate` audit row (so shadow-period
+    /// coverage is not silently biased) and the eval metric before returning.
+    async fn fetch_score(
+        &self,
+        ctx: &ExitSignalContext<'_>,
+        shadow: bool,
+        model_version_id: Option<&ModelVersionId>,
+    ) -> Option<SellScore> {
+        match self
+            .scorer
+            .score(ctx.intent, ctx.lot, ctx.mark_price, ctx.now)
+            .await
+        {
+            Ok(Some(score)) => Some(score),
+            Ok(None) => {
+                self.audit.write(audit_row(
+                    ctx,
+                    None,
+                    None,
+                    ChExitSignalVerdict::Indeterminate,
+                    model_version_id,
+                    shadow,
+                ));
+                self.metrics.inc_opportunistic_sell_eval("unavailable");
+                None
+            }
+            Err(error) => {
+                self.audit.write(audit_row(
+                    ctx,
+                    None,
+                    None,
+                    ChExitSignalVerdict::Indeterminate,
+                    model_version_id,
+                    shadow,
+                ));
+                self.metrics.inc_opportunistic_sell_eval("error");
+                tracing::warn!(%error, "opportunistic sell scoring failed; holding (fail-safe)");
+                None
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignalEvaluator<S> {
     async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict {
@@ -232,21 +277,19 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             return ExitSignalVerdict::Holds;
         }
 
-        let score = match self
-            .scorer
-            .score(ctx.intent, ctx.lot, ctx.mark_price, ctx.now)
+        // Resolve the active exit-model version up front so the enabled-path
+        // audit rows (including the couldn't-score paths below) carry it.
+        let model_version_id = snapshot
+            .model
+            .active_exit_model_version_id
+            .as_ref()
+            .and_then(|reference| ModelVersionId::try_from(reference).ok());
+
+        let Some(score) = self
+            .fetch_score(&ctx, policy.shadow_mode, model_version_id.as_ref())
             .await
-        {
-            Ok(Some(score)) => score,
-            Ok(None) => {
-                self.metrics.inc_opportunistic_sell_eval("unavailable");
-                return ExitSignalVerdict::Holds;
-            }
-            Err(error) => {
-                self.metrics.inc_opportunistic_sell_eval("error");
-                tracing::warn!(%error, "opportunistic sell scoring failed; holding (fail-safe)");
-                return ExitSignalVerdict::Holds;
-            }
+        else {
+            return ExitSignalVerdict::Holds;
         };
 
         let min_confidence = parse_decimal(&policy.min_confidence.value);
@@ -254,11 +297,6 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             parse_decimal_or(&policy.min_p_exit_better.value, Decimal::new(5, 1));
         let max_sell_pct = parse_decimal_or(&policy.max_sell_pct.value, Decimal::ONE);
         let min_alpha = Decimal::from(policy.min_expected_alpha_bps);
-        let model_version_id = snapshot
-            .model
-            .active_exit_model_version_id
-            .as_ref()
-            .and_then(|reference| ModelVersionId::try_from(reference).ok());
 
         let target = score
             .recommended_cumulative_exit_pct
@@ -272,8 +310,8 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
         if !fires {
             self.audit.write(audit_row(
                 &ctx,
-                &score,
-                target,
+                Some(&score),
+                Some(target),
                 ChExitSignalVerdict::Holds,
                 model_version_id.as_ref(),
                 false,
@@ -286,8 +324,8 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
         if policy.shadow_mode {
             self.audit.write(audit_row(
                 &ctx,
-                &score,
-                target,
+                Some(&score),
+                Some(target),
                 ChExitSignalVerdict::OpportunisticSell,
                 model_version_id.as_ref(),
                 true,
@@ -299,8 +337,8 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
 
         self.audit.write(audit_row(
             &ctx,
-            &score,
-            target,
+            Some(&score),
+            Some(target),
             ChExitSignalVerdict::OpportunisticSell,
             model_version_id.as_ref(),
             false,
@@ -319,11 +357,13 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
     }
 }
 
-/// Project one opportunistic evaluation into the audit fact row.
+/// Project one opportunistic evaluation into the audit fact row. `score` /
+/// `target_cumulative_exit_pct` are `None` on the couldn't-score paths (the
+/// scorer was unavailable or errored), which record an Indeterminate row.
 fn audit_row(
     ctx: &ExitSignalContext<'_>,
-    score: &SellScore,
-    target_cumulative_exit_pct: Decimal,
+    score: Option<&SellScore>,
+    target_cumulative_exit_pct: Option<Decimal>,
     verdict: ChExitSignalVerdict,
     model_version_id: Option<&ModelVersionId>,
     shadow: bool,
@@ -343,9 +383,9 @@ fn audit_row(
             ctx.intent.exit_policy_json.entry_composite_score,
         ),
         fresh_composite_score: None,
-        exit_alpha_bps: Some(ChDecimal64::from(score.exit_alpha_bps.inner())),
-        confidence: Some(ChProbability::from(score.confidence)),
-        target_cumulative_exit_pct: Some(ChDecimal64::from(target_cumulative_exit_pct)),
+        exit_alpha_bps: score.map(|score| ChDecimal64::from(score.exit_alpha_bps.inner())),
+        confidence: score.map(|score| ChProbability::from(score.confidence)),
+        target_cumulative_exit_pct: target_cumulative_exit_pct.map(ChDecimal64::from),
         shadow: u8::from(shadow),
         detail: verdict.as_str().to_owned(),
         ingestion_time: now_ms,

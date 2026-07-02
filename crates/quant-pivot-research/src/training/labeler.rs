@@ -251,11 +251,11 @@ impl Labeler for LiquidityExitLabeler {
         let mut exit_possible = false;
         for sample in input.forward.samples.iter().filter(|s| s.at <= cutoff) {
             saw_forward = true;
-            if let Some(depth) = sample.top1_depth_usd {
-                if depth.inner() >= input.min_exit_depth_usd.inner() {
-                    exit_possible = true;
-                    break;
-                }
+            if let Some(depth) = sample.top1_depth_usd
+                && depth.inner() >= input.min_exit_depth_usd.inner()
+            {
+                exit_possible = true;
+                break;
             }
         }
         if !saw_forward {

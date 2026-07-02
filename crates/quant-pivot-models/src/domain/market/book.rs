@@ -362,7 +362,7 @@ impl OrderbookSide {
 
     #[must_use]
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.levels.is_empty()
     }
 

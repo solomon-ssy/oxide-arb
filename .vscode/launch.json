@@ -1,217 +1,154 @@
 {
-    // Cursor / VS Code Run and Debug — CodeLLDB + cargo build.
-    // Log level: RUST_LOG overrides [observability].log_level in config/oxide-arb.toml.
-    // When RUST_LOG is unset, the binary uses log_level from config (default: info).
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "oxide-arb (info — config default)",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=oxide-arb",
-                    "--package=oxide-arb-bin"
-                ],
-                "filter": {
-                    "name": "oxide-arb",
-                    "kind": "bin"
-                }
-            },
-            "args": [
-                "--config-dir",
-                "config"
-            ],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
-                "OXIDE_ARB_CONFIG_DIR": "config"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "oxide-arb (debug — full RUST_LOG)",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=oxide-arb",
-                    "--package=oxide-arb-bin"
-                ],
-                "filter": {
-                    "name": "oxide-arb",
-                    "kind": "bin"
-                }
-            },
-            "args": [
-                "--config-dir",
-                "config"
-            ],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
-                "OXIDE_ARB_CONFIG_DIR": "config",
-                "RUST_LOG": "debug"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "oxide-arb (detection funnel debug)",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=oxide-arb",
-                    "--package=oxide-arb-bin"
-                ],
-                "filter": {
-                    "name": "oxide-arb",
-                    "kind": "bin"
-                }
-            },
-            "args": [
-                "--config-dir",
-                "config"
-            ],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
-                "OXIDE_ARB_CONFIG_DIR": "config",
-                "RUST_LOG": "info,oxide_arb_core::detection::scanner=debug,oxide_arb_algorithm::pipeline=debug"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'oxide-arb'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=oxide-arb",
-                    "--package=oxide-arb-bin"
-                ],
-                "filter": {
-                    "name": "oxide-arb",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'oxide_arb_core'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=oxide-arb-core"
-                ],
-                "filter": {
-                    "name": "oxide_arb_core",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'oxide_arb_algorithm'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=oxide-arb-algorithm"
-                ],
-                "filter": {
-                    "name": "oxide_arb_algorithm",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'oxide_arb_risk'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=oxide-arb-risk"
-                ],
-                "filter": {
-                    "name": "oxide_arb_risk",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'oxide_arb_error'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=oxide-arb-error"
-                ],
-                "filter": {
-                    "name": "oxide_arb_error",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
-            }
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in library 'oxide_arb_web'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=oxide-arb-web"
-                ],
-                "filter": {
-                    "name": "oxide_arb_web",
-                    "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
-            }
+  // Cursor / VS Code Run and Debug — CodeLLDB + cargo build.
+  // Log level: RUST_LOG overrides [observability].log_level in config/quant-pivot.toml.
+  // When RUST_LOG is unset, the binary uses log_level from config (default: info).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "quant-pivot (info — config default)",
+      "cargo": {
+        "args": ["build", "--bin=quant-pivot", "--package=quant-pivot-bin"],
+        "filter": {
+          "name": "quant-pivot",
+          "kind": "bin"
         }
-    ]
+      },
+      "args": ["--config-dir", "config"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
+        "OXIDE_ARB_CONFIG_DIR": "config"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "quant-pivot (debug — full RUST_LOG)",
+      "cargo": {
+        "args": ["build", "--bin=quant-pivot", "--package=quant-pivot-bin"],
+        "filter": {
+          "name": "quant-pivot",
+          "kind": "bin"
+        }
+      },
+      "args": ["--config-dir", "config"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
+        "QUANT_PIVOT_CONFIG_DIR": "config",
+        "RUST_LOG": "debug"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "quant-pivot (detection funnel debug)",
+      "cargo": {
+        "args": ["build", "--bin=quant-pivot", "--package=quant-pivot-bin"],
+        "filter": {
+          "name": "quant-pivot",
+          "kind": "bin"
+        }
+      },
+      "args": ["--config-dir", "config"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
+        "QUANT_PIVOT_CONFIG_DIR": "config",
+        "RUST_LOG": "info,oxide_arb_core::detection::scanner=debug,oxide_arb_algorithm::pipeline=debug"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'quant-pivot'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--bin=quant-pivot",
+          "--package=quant-pivot-bin"
+        ],
+        "filter": {
+          "name": "quant-pivot",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'quant_pivot_core'",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=quant-pivot-core"],
+        "filter": {
+          "name": "quant_pivot_core",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'quant_pivot_research'",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=quant-pivot-research"],
+        "filter": {
+          "name": "quant_pivot_research",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'quant_pivot_error'",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=quant-pivot-error"],
+        "filter": {
+          "name": "quant_pivot_error",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+      }
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'quant_pivot_web'",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=quant-pivot-web"],
+        "filter": {
+          "name": "quant_pivot_web",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+      }
+    }
+  ]
 }

@@ -198,10 +198,11 @@ pub(crate) fn classify_leaf(
     if type_name.as_deref() == Some("array") {
         return classify_array_leaf(schema);
     }
-    if type_name.as_deref() == Some("object") && is_open_map_object(schema) {
-        if let Some(classified) = classify_map_leaf(schema, default) {
-            return classified;
-        }
+    if type_name.as_deref() == Some("object")
+        && is_open_map_object(schema)
+        && let Some(classified) = classify_map_leaf(schema, default)
+    {
+        return classified;
     }
 
     if let Some(enum_values) = extract_enum_values(schema) {

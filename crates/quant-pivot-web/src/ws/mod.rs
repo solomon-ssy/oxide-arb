@@ -106,10 +106,10 @@ impl SessionRegistry {
         for entry in self.sessions.iter() {
             if let Ok(subscriptions) = entry.value().subscriptions.read() {
                 for key in subscriptions.iter() {
-                    if key.channel == WsChannel::MarketBookUpdate {
-                        if let Some(market) = &key.market {
-                            markets.insert(market.clone());
-                        }
+                    if key.channel == WsChannel::MarketBookUpdate
+                        && let Some(market) = &key.market
+                    {
+                        markets.insert(market.clone());
                     }
                 }
             }

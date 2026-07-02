@@ -555,7 +555,7 @@ impl TrainingDataset {
 
 /// `dir_sign · normalized · confidence` for one factor of one example, or `0`
 /// when the factor is absent / unresolved (confidence carries the missingness).
-fn signed_contribution(example: &TrainingExample, factor: &FactorName) -> Decimal {
+pub(crate) fn signed_contribution(example: &TrainingExample, factor: &FactorName) -> Decimal {
     if is_position_state_factor(factor) {
         if let Some(state) = &example.position_state {
             return position_state_signed_contribution(state, factor);

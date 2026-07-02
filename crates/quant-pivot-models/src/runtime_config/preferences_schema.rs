@@ -167,10 +167,10 @@ mod tests {
             if !group.label.has_en_and_zh() {
                 gaps.push(format!("group.{}.label", group.id));
             }
-            if let Some(description) = &group.description {
-                if !description.has_en_and_zh() {
-                    gaps.push(format!("group.{}.description", group.id));
-                }
+            if let Some(description) = &group.description
+                && !description.has_en_and_zh()
+            {
+                gaps.push(format!("group.{}.description", group.id));
             }
         }
 

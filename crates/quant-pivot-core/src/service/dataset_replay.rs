@@ -21,8 +21,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
 use quant_pivot_research::{
-    factors::{FactorEligibility, FactorEngine},
-    features::ConfiguredFeatureBuilder,
+    factors::{FactorEligibility, FactorEngine, FactorValue},
+    features::{ConfiguredFeatureBuilder, FeatureVector},
+    model::sell_scorer::position_state_factor_values,
     training::{LabelName, TrainingExample, TrainingLabel},
 };
 use rust_decimal::Decimal;
@@ -33,6 +34,10 @@ use crate::{
     },
     service::historical_replay::{CrossSectionRequest, ReplayConfig, materialize_cross_section},
 };
+
+/// A recomputed market cross-section entry: the PIT feature vector plus its
+/// eligible market factor values (position-state pseudo-factors merged per-lot).
+type MarketFactorReplay = (FeatureVector, Vec<FactorValue>);
 
 /// The replay schedule + forward label truth extracted from frozen Parquet rows.
 pub struct ReplaySchedule {
@@ -176,6 +181,130 @@ pub async fn rematerialize_training_examples(
     if rematerialized.is_empty() {
         return Err(ResearchError::DatasetBuild {
             detail: "PIT rematerialization produced zero training examples".to_owned(),
+        }
+        .into());
+    }
+    Ok(rematerialized)
+}
+
+/// Recompute the **market** factors for `ExitDecision` samples point-in-time
+/// while preserving each lot-timeline row's frozen per-lot truth (labels,
+/// position-state, lot context, book fidelity).
+///
+/// The general [`rematerialize_training_examples`] path is wrong for the Sell
+/// scorer: it rewrites every row to `HistoricalPit` and discards `position_state`
+/// / `lot_context`, and its `(as_of, market, token)` label index collapses the
+/// multiple lots that share a token at one instant. Here market factors still
+/// flow through the shared [`materialize_cross_section`] kernel (never trusted
+/// from Parquet), but they are keyed by `(as_of, market, token)` and re-attached
+/// to each frozen lot row, which carries its own labels + position-state. The
+/// lot's position-state pseudo-factors are re-merged so the trainer sees the
+/// same feature shape the dataset build produced.
+pub async fn rematerialize_exit_decision_examples(
+    dataset: &TrainingDatasetInfo,
+    parquet_examples: &[TrainingExample],
+    fact_read: Arc<dyn QuantFactReadRepository>,
+    market_repo: Arc<dyn MarketRepository>,
+    replay: &ReplayConfig,
+    max_book_staleness: Duration,
+) -> QuantResult<Vec<TrainingExample>> {
+    let schedule = ReplaySchedule::from_examples(parquet_examples);
+    let source_delay = Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
+    let lookback = max_feature_lookback(&replay.features);
+    let max_horizon_secs = max_horizon(dataset);
+
+    let loader = HistoricalWindowLoader::new(fact_read, market_repo, max_book_staleness);
+    let window = loader
+        .load(&WindowSpec {
+            window_start: dataset.window_start,
+            window_end: dataset.window_end,
+            samples: schedule.sample_set.clone(),
+            lookback,
+            source_delay,
+            max_horizon_secs,
+        })
+        .await?;
+
+    let builder = ConfiguredFeatureBuilder::new(&replay.features);
+    let engine = FactorEngine::new(&replay.factors, &replay.features);
+
+    // Recompute the PIT market factors once per (as_of, market, token); many
+    // lots may share the same key and reuse the same market cross-section.
+    let mut market_factors: HashMap<(DateTime<Utc>, MarketId, TokenId), MarketFactorReplay> =
+        HashMap::new();
+    for (as_of, group) in &schedule.by_as_of {
+        let Some(cross) = materialize_cross_section(
+            &builder,
+            &engine,
+            replay,
+            &CrossSectionRequest {
+                pit: &window.pit,
+                prefetched: &window.prefetched,
+                as_of: *as_of,
+                group,
+                source_delay,
+                lookback,
+            },
+        )
+        .await?
+        else {
+            continue;
+        };
+        for (index, vector) in cross.vectors.iter().enumerate() {
+            let market = &cross.markets[index];
+            let outcome = &cross.outcomes[index];
+            let factors = match &outcome.eligibility {
+                FactorEligibility::Eligible => outcome
+                    .factors
+                    .iter()
+                    .map(|scored| scored.value.clone())
+                    .collect(),
+                FactorEligibility::RejectCandidate { .. } => Vec::new(),
+            };
+            market_factors.insert(
+                (
+                    cross.as_of,
+                    market.market_id.clone(),
+                    market.primary_token_id.clone(),
+                ),
+                (vector.clone(), factors),
+            );
+        }
+    }
+
+    let mut rematerialized = Vec::with_capacity(parquet_examples.len());
+    for example in parquet_examples {
+        let key = (
+            example.as_of,
+            example.market_id.clone(),
+            example.token_id.clone(),
+        );
+        let Some((vector, factors)) = market_factors.get(&key) else {
+            continue;
+        };
+        let mut factor_values = factors.clone();
+        if let Some(state) = &example.position_state {
+            factor_values.extend(position_state_factor_values(state));
+        }
+        rematerialized.push(TrainingExample {
+            example_id: example.example_id.clone(),
+            market_id: example.market_id.clone(),
+            token_id: example.token_id.clone(),
+            as_of: example.as_of,
+            sample_source: TrainingSampleSource::ExitDecision,
+            feature_vector: vector.clone(),
+            factor_values,
+            labels: example.labels.clone(),
+            source_refs: vector.source_refs.clone(),
+            lot_context: example.lot_context.clone(),
+            position_state: example.position_state.clone(),
+            book_fidelity: example.book_fidelity,
+        });
+    }
+
+    if rematerialized.is_empty() {
+        return Err(ResearchError::DatasetBuild {
+            detail: "PIT rematerialization produced zero ExitDecision training examples".to_owned(),
         }
         .into());
     }

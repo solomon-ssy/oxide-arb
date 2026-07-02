@@ -1079,7 +1079,7 @@ Phase 3/4 可选 classical ML：
 
 - `burn`：后续 Rust-native 深度学习训练。
 - `candle`：后续轻量推理或 domain text feature。
-- `ort`：后续 ONNX 推理；注意最新版本 MSRV 可能高于当前 workspace 1.85。
+- `ort`：后续 ONNX 推理；注意最新版本 MSRV 可能高于当前 workspace 1.91。
 - `good_lp`：组合优化复杂化后引入；第一版可用 deterministic greedy planner。
 
 ### 24.4 训练 Artifact

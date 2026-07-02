@@ -42,7 +42,7 @@ async fn setup_clickhouse() -> (
                 .with_port(8123.into())
                 .with_expected_status_code(200u16),
         ))
-        .with_startup_timeout(Duration::from_secs(120))
+        .with_startup_timeout(Duration::from_mins(2))
         .start()
         .await
         .expect("ClickHouse container");

@@ -15,12 +15,12 @@ pub struct ConfigValidationReport {
 
 impl ConfigValidationReport {
     #[must_use]
-    pub fn has_errors(&self) -> bool {
+    pub const fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.errors.is_empty() && self.warnings.is_empty()
     }
 

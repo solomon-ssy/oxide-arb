@@ -131,13 +131,13 @@ pub async fn logout(
     op_ctx.set_action(OperationCategory::Auth, "auth.logout");
     state.jwt.revoke(&actor.claims).await?;
 
-    if let Some(payload) = body {
-        if let Some(refresh_token) = payload.into_inner().refresh_token {
-            // Best-effort: only a well-formed refresh token can be revoked; a
-            // malformed one is already useless.
-            if let Ok(claims) = state.jwt.decode(&refresh_token, TokenType::Refresh) {
-                state.jwt.revoke(&claims).await?;
-            }
+    if let Some(payload) = body
+        && let Some(refresh_token) = payload.into_inner().refresh_token
+    {
+        // Best-effort: only a well-formed refresh token can be revoked; a
+        // malformed one is already useless.
+        if let Ok(claims) = state.jwt.decode(&refresh_token, TokenType::Refresh) {
+            state.jwt.revoke(&claims).await?;
         }
     }
 

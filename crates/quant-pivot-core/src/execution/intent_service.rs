@@ -926,7 +926,7 @@ mod tests {
         let entry_valid_until = now + Duration::hours(2);
         let resolved = resolve_policy(
             IntentPolicyDecision::RequiresApproval {
-                approval_ttl: StdDuration::from_secs(86_400),
+                approval_ttl: StdDuration::from_hours(24),
             },
             now,
             rec_valid_until,
@@ -944,7 +944,7 @@ mod tests {
         let entry_valid_until = now + Duration::hours(24);
         let resolved = resolve_policy(
             IntentPolicyDecision::RequiresApproval {
-                approval_ttl: StdDuration::from_secs(900),
+                approval_ttl: StdDuration::from_mins(15),
             },
             now,
             rec_valid_until,
@@ -961,7 +961,7 @@ mod tests {
         let entry_valid_until = now + Duration::minutes(30);
         let resolved = resolve_policy(
             IntentPolicyDecision::RequiresApproval {
-                approval_ttl: StdDuration::from_secs(86_400),
+                approval_ttl: StdDuration::from_hours(24),
             },
             now,
             rec_valid_until,
@@ -977,7 +977,7 @@ mod tests {
         assert!(matches!(
             resolve_policy(
                 IntentPolicyDecision::RequiresApproval {
-                    approval_ttl: StdDuration::from_secs(900),
+                    approval_ttl: StdDuration::from_mins(15),
                 },
                 now,
                 now - Duration::minutes(1),

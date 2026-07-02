@@ -32,19 +32,19 @@ impl<T: Clone + Send + 'static> DebouncedWriter<T> {
                     biased;
                     () = shutdown.cancelled() => {
                         let val = latest.lock().take();
-                        if let Some(val) = val {
-                            if let Err(e) = write_fn(val).await {
-                                tracing::warn!(writer = %name, error = %e, "final debounced flush failed");
-                            }
+                        if let Some(val) = val
+                            && let Err(e) = write_fn(val).await
+                        {
+                            tracing::warn!(writer = %name, error = %e, "final debounced flush failed");
                         }
                         return Ok(());
                     }
                     _ = timer.tick() => {
                         let val = latest.lock().take();
-                        if let Some(val) = val {
-                            if let Err(e) = write_fn(val).await {
-                                tracing::warn!(writer = %name, error = %e, "debounced flush failed");
-                            }
+                        if let Some(val) = val
+                            && let Err(e) = write_fn(val).await
+                        {
+                            tracing::warn!(writer = %name, error = %e, "debounced flush failed");
                         }
                     }
                 }

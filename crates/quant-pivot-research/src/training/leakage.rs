@@ -53,7 +53,7 @@ pub struct LeakageFindings {
 impl LeakageFindings {
     /// Whether the scan found no future-dated feature evidence.
     #[must_use]
-    pub fn is_clean(&self) -> bool {
+    pub const fn is_clean(&self) -> bool {
         self.violations.is_empty()
     }
 

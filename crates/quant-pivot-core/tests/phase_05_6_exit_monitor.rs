@@ -312,6 +312,28 @@ fn opportunistic_sell_is_lowest_tier() {
     }
 }
 
+/// Take-profit (tier 8) strictly precedes opportunistic Sell (tier 10): when the
+/// mark satisfies the take-profit target the ladder takes the full profit exit,
+/// never the advisory opportunistic scale-out.
+#[test]
+fn take_profit_precedes_opportunistic_sell() {
+    let mut policy = empty_policy();
+    policy.take_profit_price = Some(Price::new(dec!(0.60)));
+    let mut i = input(policy, Some(dec!(0.60)), KillSwitchState::Closed);
+    i.opportunistic_exit_state.denominator_shares = Some(Shares::new(dec!(100)));
+    i.signal = ExitSignalVerdict::OpportunisticSell {
+        target_cumulative_exit_pct: dec!(0.3),
+        detail: "model edge".to_owned(),
+    };
+    match decide_exit(&i) {
+        ExitDecision::SubmitExitOrder { reason, order, .. } => {
+            assert_eq!(reason, ExitReason::TakeProfit);
+            assert_eq!(order.shares, Shares::new(dec!(100)));
+        }
+        other => panic!("expected take-profit submit (tier 8 wins), got {other:?}"),
+    }
+}
+
 #[test]
 fn opportunistic_delta_requires_frozen_denominator() {
     let mut i = input(empty_policy(), Some(dec!(0.50)), KillSwitchState::Closed);

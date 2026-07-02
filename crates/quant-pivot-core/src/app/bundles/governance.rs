@@ -362,10 +362,10 @@ async fn ensure_runtime_config_activation(
 ) -> QuantResult<RuntimeConfig> {
     let current = repo.load_current().await?;
     // Fast path: the active config already parses under the current schema.
-    if let Some(version) = &current {
-        if let Ok(config) = RuntimeConfig::from_json(&version.config_json) {
-            return Ok(config);
-        }
+    if let Some(version) = &current
+        && let Ok(config) = RuntimeConfig::from_json(&version.config_json)
+    {
+        return Ok(config);
     }
 
     // Otherwise fail closed to defaults (no schema migration — project is pre-production).
