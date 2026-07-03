@@ -20,7 +20,10 @@ use validator::Validate;
 use crate::{
     domain::{ModelVersionInfo, pagination::PageRequest},
     enums::quant::PublicationStatus,
-    types::{ContentHash, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
+    types::{
+        ContentHash, ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId,
+        TrainingDatasetId,
+    },
 };
 
 /// Inbound body for `POST /research/models/train`.
@@ -70,6 +73,9 @@ pub struct TrainedModelView {
     /// Trainer metrics (in-sample + validation objective report).
     pub metrics: serde_json::Value,
     pub created_at: DateTime<Utc>,
+    /// Materialization run id — populated on `POST .../train` only (absent on poll).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_run_id: Option<ModelRunId>,
 }
 
 /// Paginated filter for the trained-model registry catalog.
@@ -99,6 +105,7 @@ impl From<ModelVersionInfo> for TrainedModelView {
             publication_status: info.publication_status.as_str().to_owned(),
             metrics: info.metrics_json,
             created_at: info.created_at,
+            model_run_id: None,
         }
     }
 }

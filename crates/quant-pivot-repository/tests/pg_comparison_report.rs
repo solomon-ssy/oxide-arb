@@ -179,8 +179,8 @@ async fn quant_model_comparison_report_migration_and_crud() {
             comparison_report_id: comparison_report_id.clone(),
             baseline_model_version_id: baseline_version.clone(),
             candidate_model_version_id: candidate_version.clone(),
-            baseline_report_id: baseline_report,
-            candidate_report_id: candidate_report,
+            baseline_report_id: baseline_report.clone(),
+            candidate_report_id: candidate_report.clone(),
             model_run_id,
             rank_ic_delta: dec!(0.15),
             hit_rate_delta: dec!(0.05),
@@ -211,4 +211,25 @@ async fn quant_model_comparison_report_migration_and_crud() {
         .expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].comparison_report_id, comparison_report_id);
+
+    let by_candidate = repo
+        .find_by_backtest_report_id(&candidate_report)
+        .await
+        .expect("find by candidate report")
+        .expect("row");
+    assert_eq!(by_candidate.comparison_report_id, comparison_report_id);
+
+    let by_baseline = repo
+        .find_by_backtest_report_id(&baseline_report)
+        .await
+        .expect("find by baseline report")
+        .expect("row");
+    assert_eq!(by_baseline.comparison_report_id, comparison_report_id);
+
+    let id_map = repo
+        .comparison_ids_for_backtest_reports(&[candidate_report.clone(), baseline_report.clone()])
+        .await
+        .expect("batch lookup");
+    assert_eq!(id_map.get(&candidate_report), Some(&comparison_report_id));
+    assert_eq!(id_map.get(&baseline_report), Some(&comparison_report_id));
 }

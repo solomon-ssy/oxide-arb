@@ -2,10 +2,10 @@
 
 use async_trait::async_trait;
 
+use std::collections::HashMap;
+
 use crate::{
-    domain::{
-        BacktestReportInfo, BacktestReportView, ModelComparisonReportInfo, RunBacktestRequest,
-    },
+    domain::{BacktestReportView, ModelComparisonReportInfo, RunBacktestRequest},
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId},
 };
 use quant_pivot_error::QuantResult;
@@ -26,11 +26,17 @@ pub trait BacktestPort: Send + Sync {
         request: RunBacktestRequest,
     ) -> QuantResult<BacktestReportView>;
 
-    /// Load a persisted backtest report.
+    /// Load a persisted backtest report (comparison id enriched when present).
     async fn find_report(
         &self,
         backtest_report_id: &BacktestReportId,
-    ) -> QuantResult<Option<BacktestReportInfo>>;
+    ) -> QuantResult<Option<BacktestReportView>>;
+
+    /// Batch-resolve comparison ids for catalog list enrichment.
+    async fn comparison_ids_for_backtest_reports(
+        &self,
+        backtest_report_ids: &[BacktestReportId],
+    ) -> QuantResult<HashMap<BacktestReportId, ModelComparisonReportId>>;
 
     /// Load a persisted pairwise comparison report.
     async fn find_comparison_report(

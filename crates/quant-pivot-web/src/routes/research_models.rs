@@ -140,9 +140,31 @@ pub async fn list_backtest_reports(
     let page = state
         .research_catalog
         .list_backtest_reports(query.into_inner())
-        .await?
-        .map(BacktestReportView::from);
-    Ok(WebResponse::ok(page))
+        .await?;
+    let ids: Vec<_> = page
+        .items
+        .iter()
+        .map(|info| info.backtest_report_id.clone())
+        .collect();
+    let comparison_ids = state
+        .backtests
+        .comparison_ids_for_backtest_reports(&ids)
+        .await?;
+    let items = page
+        .items
+        .into_iter()
+        .map(|info| {
+            let comparison_report_id = comparison_ids.get(&info.backtest_report_id).cloned();
+            BacktestReportView::from_info(info, comparison_report_id)
+        })
+        .collect();
+    Ok(WebResponse::ok(Paginated {
+        items,
+        page: page.page,
+        size: page.size,
+        total: page.total,
+        has_next: page.has_next,
+    }))
 }
 
 /// `GET /api/research/comparison-reports` — paginated comparison-report catalog.
@@ -169,10 +191,14 @@ pub async fn train(
     let request = body.into_inner();
     let reason = request.reason.clone();
     let view = state.model_training.train(request).await?;
+    let materialization_run_id = view
+        .model_run_id
+        .as_ref()
+        .map_or_else(|| view.model_version_id.to_string(), ToString::to_string);
     state
         .events
         .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
-            run_id: view.model_version_id.to_string(),
+            run_id: materialization_run_id,
             kind: MaterializationRunKind::Training,
             status: MaterializationRunStatus::Completed,
         }));
@@ -245,12 +271,12 @@ pub async fn get_backtest_report(
     state: web::Data<AppState>,
     id: web::Path<BacktestReportId>,
 ) -> Result<WebResponse<BacktestReportView>, WebError> {
-    let info = state
+    let view = state
         .backtests
         .find_report(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("backtest report not found: {id}")))?;
-    Ok(WebResponse::ok(BacktestReportView::from(info)))
+    Ok(WebResponse::ok(view))
 }
 
 /// `GET /api/research/comparison-reports/{id}` — stored pairwise comparison.

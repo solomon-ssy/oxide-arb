@@ -1,14 +1,11 @@
 //! Core implementation of [`BacktestPort`] for the Admin API (Phase 3.6).
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    domain::{
-        BacktestPort, BacktestReportInfo, BacktestReportView, ModelComparisonReportInfo,
-        RunBacktestRequest,
-    },
+    domain::{BacktestPort, BacktestReportView, ModelComparisonReportInfo, RunBacktestRequest},
     runtime_config::RuntimeConfig,
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
 };
@@ -123,9 +120,10 @@ impl BacktestPort for CoreBacktestPort {
         match request.comparison_model_version_id {
             Some(baseline) => {
                 let (info, comparison) = service.run_comparison(input, baseline).await?;
-                let mut view = BacktestReportView::from(info);
-                view.comparison_report_id = Some(comparison.comparison_report_id);
-                Ok(view)
+                Ok(BacktestReportView::from_info(
+                    info,
+                    Some(comparison.comparison_report_id),
+                ))
             }
             None => Ok(BacktestReportView::from(service.run(input).await?)),
         }
@@ -134,9 +132,32 @@ impl BacktestPort for CoreBacktestPort {
     async fn find_report(
         &self,
         backtest_report_id: &BacktestReportId,
-    ) -> QuantResult<Option<BacktestReportInfo>> {
-        self.backtest_report_repo
+    ) -> QuantResult<Option<BacktestReportView>> {
+        let info = self
+            .backtest_report_repo
             .find_by_id(backtest_report_id)
+            .await
+            .map_err(QuantError::from)?;
+        let Some(info) = info else {
+            return Ok(None);
+        };
+        let comparison = self
+            .comparison_report_repo
+            .find_by_backtest_report_id(backtest_report_id)
+            .await
+            .map_err(QuantError::from)?;
+        Ok(Some(BacktestReportView::from_info(
+            info,
+            comparison.map(|row| row.comparison_report_id),
+        )))
+    }
+
+    async fn comparison_ids_for_backtest_reports(
+        &self,
+        backtest_report_ids: &[BacktestReportId],
+    ) -> QuantResult<HashMap<BacktestReportId, ModelComparisonReportId>> {
+        self.comparison_report_repo
+            .comparison_ids_for_backtest_reports(backtest_report_ids)
             .await
             .map_err(QuantError::from)
     }

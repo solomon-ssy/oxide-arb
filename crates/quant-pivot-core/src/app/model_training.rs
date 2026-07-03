@@ -110,7 +110,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             .parse()
             .map_err(|error: ModelFamilyParseError| QuantError::config(error.to_string()))?;
         let service = self.service_for(&request.runtime_config_version_id).await?;
-        let version = service
+        let outcome = service
             .train(TrainModelInput {
                 model_spec_id: request.model_spec_id,
                 training_dataset_id: request.training_dataset_id,
@@ -123,7 +123,9 @@ impl ModelTrainingPort for CoreModelTrainingPort {
                 validation_folds: request.validation_folds,
             })
             .await?;
-        Ok(TrainedModelView::from(version))
+        let mut view = TrainedModelView::from(outcome.version);
+        view.model_run_id = Some(outcome.model_run_id);
+        Ok(view)
     }
 
     async fn find_version(

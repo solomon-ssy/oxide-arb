@@ -652,7 +652,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
     );
 
     // ── Train ────────────────────────────────────────────────────────────
-    let version = trainer
+    let outcome = trainer
         .train(TrainModelInput {
             model_spec_id: model_spec_id.clone(),
             training_dataset_id: dataset_id.clone(),
@@ -666,6 +666,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         })
         .await
         .expect("train");
+    let version = outcome.version;
     assert_eq!(version.publication_status, PublicationStatus::Candidate);
     assert_eq!(version.training_dataset_id.as_ref(), Some(&dataset_id));
 

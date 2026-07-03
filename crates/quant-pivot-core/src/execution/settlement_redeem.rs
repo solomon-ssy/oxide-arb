@@ -668,7 +668,8 @@ impl SettlementRedeemService {
             .build_preflight(settlement_redeem_id, market, lots)
             .await?;
         if let PreflightDecision::ManualRequired { reason, record } = preflight {
-            self.deps.settlement_redeems.upsert_pending(record).await?;
+            let redeem = self.deps.settlement_redeems.upsert_pending(record).await?;
+            self.publish_manual_required(&redeem.settlement_redeem_id, &market.market_id);
             tracing::warn!(
                 market_id = %market.market_id,
                 reason,
@@ -682,6 +683,7 @@ impl SettlementRedeemService {
 
         let redeem = self.deps.settlement_redeems.upsert_pending(record).await?;
         if redeem.state == SettlementRedeemState::ManualRequired {
+            self.publish_manual_required(&redeem.settlement_redeem_id, &market.market_id);
             return Ok(MarketRedeemOutcome::ManualRequired);
         }
         if redeem.state == SettlementRedeemState::Confirmed {
@@ -1010,6 +1012,18 @@ impl SettlementRedeemService {
                 market_id: market_id.clone(),
                 state,
             }));
+    }
+
+    fn publish_manual_required(
+        &self,
+        settlement_redeem_id: &SettlementRedeemId,
+        market_id: &MarketId,
+    ) {
+        self.publish_settlement(
+            settlement_redeem_id,
+            market_id,
+            SettlementRedeemState::ManualRequired,
+        );
     }
 }
 

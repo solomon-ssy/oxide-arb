@@ -1,5 +1,7 @@
 //! Postgres-backed pairwise model-comparison report ledger repository (append-only).
 
+use std::collections::HashMap;
+
 use crate::traits::ModelComparisonReportRepository;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
@@ -8,7 +10,7 @@ use quant_pivot_models::{
         Paginated,
     },
     entities::quant_model_comparison_report,
-    types::{ModelComparisonReportId, ModelVersionId},
+    types::{BacktestReportId, ModelComparisonReportId, ModelVersionId},
 };
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
@@ -94,5 +96,62 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
             Into::into,
         )
         .await
+    }
+
+    async fn find_by_backtest_report_id(
+        &self,
+        backtest_report_id: &BacktestReportId,
+    ) -> Result<Option<ModelComparisonReportInfo>, StorageError> {
+        quant_model_comparison_report::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(
+                        quant_model_comparison_report::Column::CandidateReportId
+                            .eq(backtest_report_id.clone()),
+                    )
+                    .add(
+                        quant_model_comparison_report::Column::BaselineReportId
+                            .eq(backtest_report_id.clone()),
+                    ),
+            )
+            .order_by_desc(quant_model_comparison_report::Column::CreatedAt)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn comparison_ids_for_backtest_reports(
+        &self,
+        backtest_report_ids: &[BacktestReportId],
+    ) -> Result<HashMap<BacktestReportId, ModelComparisonReportId>, StorageError> {
+        if backtest_report_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = quant_model_comparison_report::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(
+                        quant_model_comparison_report::Column::CandidateReportId
+                            .is_in(backtest_report_ids.to_vec()),
+                    )
+                    .add(
+                        quant_model_comparison_report::Column::BaselineReportId
+                            .is_in(backtest_report_ids.to_vec()),
+                    ),
+            )
+            .order_by_desc(quant_model_comparison_report::Column::CreatedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let info = ModelComparisonReportInfo::from(row);
+            map.entry(info.candidate_report_id.clone())
+                .or_insert_with(|| info.comparison_report_id.clone());
+            map.entry(info.baseline_report_id.clone())
+                .or_insert_with(|| info.comparison_report_id.clone());
+        }
+        Ok(map)
     }
 }

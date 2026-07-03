@@ -92,6 +92,17 @@ pub struct BacktestReportListQuery {
 
 impl From<BacktestReportInfo> for BacktestReportView {
     fn from(info: BacktestReportInfo) -> Self {
+        Self::from_info(info, None)
+    }
+}
+
+impl BacktestReportView {
+    /// Build a wire view, optionally attaching the pairwise comparison id when
+    /// this report participated in pair-mode backtest.
+    pub fn from_info(
+        info: BacktestReportInfo,
+        comparison_report_id: Option<ModelComparisonReportId>,
+    ) -> Self {
         Self {
             backtest_report_id: info.backtest_report_id,
             model_version_id: info.model_version_id,
@@ -114,7 +125,7 @@ impl From<BacktestReportInfo> for BacktestReportView {
             report_hash: info.report_hash,
             parquet_uri: info.parquet_uri,
             created_at: info.created_at,
-            comparison_report_id: None,
+            comparison_report_id,
         }
     }
 }

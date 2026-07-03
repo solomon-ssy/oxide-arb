@@ -104,6 +104,12 @@ pub struct TrainModelInput {
     pub validation_folds: u32,
 }
 
+/// Successful training outcome — version row plus the materialization run id.
+pub struct TrainModelOutcome {
+    pub version: ModelVersionInfo,
+    pub model_run_id: ModelRunId,
+}
+
 /// Offline trainer service.
 pub struct ModelTrainerService {
     deps: ModelTrainerServiceDeps,
@@ -130,7 +136,7 @@ impl ModelTrainerService {
     }
 
     /// Train a model and register it as a Candidate version.
-    pub async fn train(&self, input: TrainModelInput) -> QuantResult<ModelVersionInfo> {
+    pub async fn train(&self, input: TrainModelInput) -> QuantResult<TrainModelOutcome> {
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
         let parquet_examples = self.decode_examples(&dataset).await?;
         // Exit scorers train on per-lot `ExitDecision` rows: recompute market
@@ -178,7 +184,10 @@ impl ModelTrainerService {
                         Some(model_version_id.clone()),
                     )
                     .await?;
-                Ok(version)
+                Ok(TrainModelOutcome {
+                    version,
+                    model_run_id,
+                })
             }
             Err(error) => {
                 let _ = self

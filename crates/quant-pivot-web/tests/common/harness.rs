@@ -1,6 +1,7 @@
 //! Integration-test harness (Phase 0).
 
 use std::{
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -661,8 +662,15 @@ impl BacktestPort for MockBacktestPort {
     async fn find_report(
         &self,
         _backtest_report_id: &BacktestReportId,
-    ) -> QuantResult<Option<BacktestReportInfo>> {
+    ) -> QuantResult<Option<BacktestReportView>> {
         Ok(None)
+    }
+
+    async fn comparison_ids_for_backtest_reports(
+        &self,
+        _backtest_report_ids: &[BacktestReportId],
+    ) -> QuantResult<HashMap<BacktestReportId, ModelComparisonReportId>> {
+        Ok(HashMap::new())
     }
 
     async fn find_comparison_report(
