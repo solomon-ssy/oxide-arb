@@ -35,8 +35,8 @@ use quant_pivot_models::{
         ConfirmSettlementRedeem, ExitTrainingLotRow, MarketInfo, NewCapitalAllocation,
         NewOperationLog, NewOrderIntent, NewSettlementRedeem, OrderIntentInfo,
         OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
-        PositionListQuery, RecommendationInfo, SettlementRedeemInfo, SettlementRedeemListQuery,
-        SettlementRedeemLotInfo,
+        PositionListQuery, PositionSummary, RecommendationInfo, SettlementRedeemInfo,
+        SettlementRedeemListQuery, SettlementRedeemLotInfo, SettlementRedeemSummary,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -184,14 +184,14 @@ impl PositionRepository for StubPositions {
         Ok(None)
     }
 
-    async fn find_by_id(&self, _: &PositionId) -> Result<Option<PositionInfo>, StorageError> {
+    async fn find_by_id(&self, _: &PositionId) -> Result<Option<PositionSummary>, StorageError> {
         Ok(None)
     }
 
     async fn page(
         &self,
         query: PositionListQuery,
-    ) -> Result<Paginated<PositionInfo>, StorageError> {
+    ) -> Result<Paginated<PositionSummary>, StorageError> {
         Ok(Paginated::from_request(
             Vec::new(),
             0,
@@ -438,7 +438,7 @@ impl SettlementRedeemRepository for EmptySettlementRedeems {
     async fn page(
         &self,
         query: SettlementRedeemListQuery,
-    ) -> Result<Paginated<SettlementRedeemInfo>, StorageError> {
+    ) -> Result<Paginated<SettlementRedeemSummary>, StorageError> {
         Ok(Paginated::from_request(
             Vec::new(),
             0,

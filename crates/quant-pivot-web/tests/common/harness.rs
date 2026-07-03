@@ -17,7 +17,10 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
-use quant_pivot_core::{app::execution_read::CoreExecutionReadPort, report::AdHocReportRequest};
+use quant_pivot_core::{
+    app::execution_read::CoreExecutionReadPort, execution::IntentLifecyclePublisher,
+    report::AdHocReportRequest,
+};
 use quant_pivot_error::{
     QuantError, QuantResult, auth::AuthError, control::ControlError, execution::ExecutionError,
     storage::StorageError,
@@ -141,6 +144,7 @@ impl TestEnv {
         let operation_log = OperationLogBuffer::direct(Arc::clone(&repos.operation_logs));
 
         let (events, event_rx) = CoreEventPublisher::bounded(256);
+        let intent_lifecycle = Arc::new(IntentLifecyclePublisher::new(events.clone()));
         let ws_sessions = SessionRegistry::default();
         let ws_shutdown = CancellationToken::new();
         tokio::spawn(spawn_ws_broadcaster(
@@ -155,7 +159,7 @@ impl TestEnv {
         let core_report =
             crate::core_report_port::build_core_report_stack(&db, events.clone()).await;
         let ad_hoc_enqueued = Arc::clone(&core_report.enqueued);
-        let order_intents = build_order_intent_service(&db, events.clone());
+        let order_intents = build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
         let state = AppState {
             deploy: Arc::new(test_deploy_config()),
             runtime_config_apply: Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,

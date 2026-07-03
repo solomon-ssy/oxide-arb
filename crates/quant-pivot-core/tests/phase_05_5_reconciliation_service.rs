@@ -16,8 +16,8 @@ use quant_pivot_api::clob::{ClobTrade, OpenOrder};
 use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_core::{
     execution::{
-        CollectedReconciliation, EvidenceCollector, ExecutionBreaker, PolymarketOrderClient,
-        ReconciliationService, ReconciliationServiceDeps, VenueCancelResult,
+        CollectedReconciliation, EvidenceCollector, ExecutionBreaker, IntentLifecyclePublisher,
+        PolymarketOrderClient, ReconciliationService, ReconciliationServiceDeps, VenueCancelResult,
         VenueEvidenceCollector, VenueOrder, VenueReconciliationReader, VenueSubmitResult,
         reconciliation::OperatorReconcileResolution,
     },
@@ -37,13 +37,13 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome,
-        CapitalReconcileSettlement, ExecutionOrderInfo, ExecutionOrderPatch, ExitLedgerWrite,
-        ExitTrainingLotRow, KillSwitchPort, KillSwitchView, NewCapitalAllocation,
+        CapitalReconcileSettlement, CoreEventPublisher, ExecutionOrderInfo, ExecutionOrderPatch,
+        ExitLedgerWrite, ExitTrainingLotRow, KillSwitchPort, KillSwitchView, NewCapitalAllocation,
         NewExecutionOrder, NewOperationLog, NewOrderIntent, NewReconciliation, OperationLogInfo,
         OperationLogQuery, OrderIntentInfo, OrderIntentListQuery, Paginated, PositionExit,
-        PositionFill, PositionInfo, PositionListQuery, RecommendationInfo, ReconciliationInfo,
-        ReconciliationLedgerWrite, ReconciliationListQuery, ReconciliationPatch,
-        SetKillSwitchCommand, SubmissionLedgerWrite,
+        PositionFill, PositionInfo, PositionListQuery, PositionSummary, RecommendationInfo,
+        ReconciliationInfo, ReconciliationLedgerWrite, ReconciliationListQuery,
+        ReconciliationPatch, SetKillSwitchCommand, SubmissionLedgerWrite,
     },
     enums::{
         common::{OrderType, Side},
@@ -711,14 +711,14 @@ impl PositionRepository for StubPositions {
     async fn find_by_id(
         &self,
         _position_id: &PositionId,
-    ) -> Result<Option<PositionInfo>, StorageError> {
+    ) -> Result<Option<PositionSummary>, StorageError> {
         Ok(None)
     }
 
     async fn page(
         &self,
         query: PositionListQuery,
-    ) -> Result<Paginated<PositionInfo>, StorageError> {
+    ) -> Result<Paginated<PositionSummary>, StorageError> {
         let query = query.normalized();
         Ok(Paginated::from_request(Vec::new(), 0, &query.page))
     }
@@ -908,6 +908,9 @@ fn service_harness(
         execution_events: noop_execution_writer(),
         capital_events: noop_capital_writer(),
         position_events: noop_position_writer(),
+        intent_lifecycle: Arc::new(IntentLifecyclePublisher::new(
+            CoreEventPublisher::bounded(16).0,
+        )),
     });
     ServiceHarness {
         service,

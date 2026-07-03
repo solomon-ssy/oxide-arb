@@ -27,12 +27,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 10,
+    version: 11,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v9",
+    checksum: "rbac.menus.bootstrap.v10",
     loader: load_boxed,
 };
 
@@ -431,6 +431,18 @@ fn build_execution(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::AccountSnapshot, Operation::Read)),
         icon: "lucide:wallet",
     });
+    // Full-screen intent detail (frozen entry / exit policy / risk envelope,
+    // approval + admission trace, linked execution orders), deep-linkable and
+    // reached from the approval console or a create-intent handoff.
+    t.page_hidden(PageSpec {
+        parent: &execution,
+        name: "order-intent-detail",
+        title: "page.menu.orderIntentDetail",
+        path: "/quant/intents/:id",
+        component: "quant/intents/detail/index",
+        permission_code: Some(perm(ResourceType::OrderIntent, Operation::Read)),
+        icon: "lucide:list-checks",
+    });
 }
 
 /// Research plane: a single ID-driven workbench (dataset plan/build, train,
@@ -752,6 +764,7 @@ mod tests {
             .collect();
         for expected in [
             "order-intents",
+            "order-intent-detail",
             "execution-orders",
             "positions",
             "reconciliations",

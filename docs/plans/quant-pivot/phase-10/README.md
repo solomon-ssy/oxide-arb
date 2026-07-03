@@ -1,6 +1,6 @@
 # Phase 10 — Frontend Refactor 子phase索引
 
-> 状态：10.0 契约冻结（含后端破坏式对齐）已完成；**10.1 types/API/WS/store 地基**、**10.2 导航/首屏/markets/account**、**10.3 Report Plane** 已落地并通过质量门禁（前端 typecheck/build/unit/eslint/oxlint 全绿；后端 fmt/clippy/boundary/errors/architecture + models/repository 单测全绿）；10.4–10.6 为设计计划，未进入代码落地。
+> 状态：10.0 契约冻结（含后端破坏式对齐）已完成；**10.1 types/API/WS/store 地基**、**10.2 导航/首屏/markets/account**、**10.3 Report Plane**、**10.4 Execution Plane** 已落地并通过质量门禁（前端 typecheck/build/unit/eslint/oxlint 全绿；后端 fmt/clippy/boundary/errors/architecture + models/repository/web/core 单测全绿）；10.5–10.6 为设计计划，未进入代码落地。
 >
 > 父文档（概念规格）：[`../10-frontend-refactor.md`](../10-frontend-refactor.md)、
 > [`../04-topn-report-and-recommendation.md`](../04-topn-report-and-recommendation.md)、

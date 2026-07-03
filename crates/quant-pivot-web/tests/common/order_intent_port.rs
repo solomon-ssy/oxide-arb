@@ -4,15 +4,14 @@ use std::sync::Arc;
 
 use quant_pivot_core::{
     execution::{
-        CoreOrderIntentService, DefaultRuntimeModeGate, DispatchWake, OrderIntentServiceDeps,
-        RuntimeModeGate,
+        CoreOrderIntentService, DefaultRuntimeModeGate, DispatchWake, IntentLifecyclePublisher,
+        OrderIntentServiceDeps, RuntimeModeGate,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
 use quant_pivot_models::{
-    domain::CoreEventPublisher,
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
 };
@@ -31,7 +30,7 @@ use sea_orm::DatabaseConnection;
 /// state (the money flow is covered by the repository + unit tests).
 pub fn build_order_intent_service(
     db: &DatabaseConnection,
-    events: CoreEventPublisher,
+    intent_lifecycle: Arc<IntentLifecyclePublisher>,
 ) -> Arc<CoreOrderIntentService> {
     let runtime_mode = RuntimeModeHandle::new(QuantRuntimeMode::SemiAuto);
     let kill_switch = KillSwitchHandle::new(KillSwitchState::Closed);
@@ -49,7 +48,7 @@ pub fn build_order_intent_service(
         intents: Arc::new(PgOrderIntentRepository::new(db.clone()))
             as Arc<dyn OrderIntentRepository>,
         config,
-        events,
+        intent_lifecycle,
         dispatch_wake: DispatchWake::new(),
         metrics: Arc::new(MetricsHub::new()),
     }))

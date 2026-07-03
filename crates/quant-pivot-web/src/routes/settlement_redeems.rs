@@ -4,7 +4,7 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         Paginated, SettlementRedeemDetailView, SettlementRedeemListQuery, SettlementRedeemLotView,
-        SettlementRedeemView,
+        SettlementRedeemSummary, SettlementRedeemView,
     },
     enums::rbac::{Operation, ResourceType},
     types::SettlementRedeemId,
@@ -55,12 +55,17 @@ async fn get(
         .get_settlement_redeem(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("settlement redeem not found: {id}")))?;
+    let lot_count = i64::try_from(detail.lots.len()).unwrap_or(i64::MAX);
+    let lots = detail
+        .lots
+        .into_iter()
+        .map(SettlementRedeemLotView::from)
+        .collect();
     Ok(WebResponse::ok(SettlementRedeemDetailView {
-        redeem: SettlementRedeemView::from(detail.redeem),
-        lots: detail
-            .lots
-            .into_iter()
-            .map(SettlementRedeemLotView::from)
-            .collect(),
+        redeem: SettlementRedeemView::from(SettlementRedeemSummary {
+            redeem: detail.redeem,
+            lot_count,
+        }),
+        lots,
     }))
 }

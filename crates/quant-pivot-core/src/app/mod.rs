@@ -32,7 +32,7 @@ mod bundles;
 pub use bundles::*;
 
 use crate::{
-    execution::DispatchWake,
+    execution::{DispatchWake, IntentLifecyclePublisher},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::schedule::ReportScheduleRunner,
     report::ReportLifecycleService,
@@ -58,6 +58,8 @@ pub struct AppContext {
     pub config: Arc<DeployConfig>,
     pub shutdown: CancellationToken,
     pub events: CoreEventPublisher,
+    /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).
+    pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
     pub event_rx: Mutex<Option<Receiver<CoreEvent>>>,
     pub infra: InfraBundle,
     pub data: DataBundle,

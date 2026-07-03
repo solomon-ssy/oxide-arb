@@ -3,7 +3,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         ConfirmSettlementRedeem, NewSettlementRedeem, Paginated, SettlementRedeemInfo,
-        SettlementRedeemListQuery, SettlementRedeemLotInfo,
+        SettlementRedeemListQuery, SettlementRedeemLotInfo, SettlementRedeemSummary,
     },
     types::{MarketId, SettlementRedeemId},
 };
@@ -21,10 +21,11 @@ pub trait SettlementRedeemRepository: Send + Sync {
         funder_address: &str,
     ) -> Result<Option<SettlementRedeemInfo>, StorageError>;
 
+    /// Page redeem batches, each carrying its joined `lot_count`.
     async fn page(
         &self,
         query: SettlementRedeemListQuery,
-    ) -> Result<Paginated<SettlementRedeemInfo>, StorageError>;
+    ) -> Result<Paginated<SettlementRedeemSummary>, StorageError>;
 
     async fn list_lots_by_redeem(
         &self,

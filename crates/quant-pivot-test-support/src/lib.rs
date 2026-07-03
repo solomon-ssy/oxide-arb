@@ -15,6 +15,7 @@ pub mod report_fixtures;
 pub mod report_pipeline_harness;
 pub mod report_snapshots;
 pub mod storage;
+pub mod ui_demo_seed;
 pub mod ws;
 
 use uuid::Uuid;

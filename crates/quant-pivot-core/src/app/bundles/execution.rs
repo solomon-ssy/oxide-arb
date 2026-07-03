@@ -32,10 +32,11 @@ use crate::{
         CompositeExitSignalEvaluator, CoreExecutionDispatcher, CoreExitDispatcher,
         DefaultAdmissionEngine, DispatchWake, EvidenceCollector, ExecutionBreaker,
         ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService,
-        ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient, ReconciliationService,
-        ReconciliationServiceDeps, RelayerConnectParams, RelayerSettlementClient,
-        SettlementCtfClient, SettlementRedeemService, SettlementRedeemServiceDeps,
-        VenueEvidenceCollector, VenueReconciliationReader,
+        ExitMonitorServiceDeps, ExitSignalEvaluator, IntentLifecyclePublisher,
+        PolymarketOrderClient, ReconciliationService, ReconciliationServiceDeps,
+        RelayerConnectParams, RelayerSettlementClient, SettlementCtfClient,
+        SettlementRedeemService, SettlementRedeemServiceDeps, VenueEvidenceCollector,
+        VenueReconciliationReader,
     },
     pipeline::feature_window_provider::FeatureWindowProvider,
     service::{
@@ -58,6 +59,8 @@ pub struct ExecutionBundleDeps<'a> {
     pub governance: &'a GovernanceBundle,
     pub research: &'a ResearchBundle,
     pub account: &'a AccountBundle,
+    /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).
+    pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
     /// Shared authenticated CLOB client (same identity as the account bundle).
     pub clob: Arc<ClobClient>,
     /// Shared EOA signer loaded once at boot.
@@ -143,6 +146,7 @@ impl ExecutionBundle {
                 breaker: Arc::clone(&breaker),
                 metrics: Arc::clone(&infra.metrics),
                 execution_events: Arc::clone(&infra.execution_event_writer),
+                intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
             }));
 
         // Reconciliation engine (05.5): venue reader + fixed-order evidence
@@ -171,6 +175,7 @@ impl ExecutionBundle {
             execution_events: Arc::clone(&infra.execution_event_writer),
             capital_events: Arc::clone(&infra.capital_allocation_event_writer),
             position_events: Arc::clone(&infra.position_event_writer),
+            intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
         }));
 
         // Exit-monitor engine (05.6): model-driven signal seam + exit dispatcher

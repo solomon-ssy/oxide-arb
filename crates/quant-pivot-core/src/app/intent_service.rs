@@ -41,7 +41,7 @@ impl AppContext {
             intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
             config: self.runtime_config(),
             metrics: Arc::clone(&self.infra.metrics),
-            events: self.events.clone(),
+            intent_lifecycle: Arc::clone(&self.intent_lifecycle),
             dispatch_wake: self.execution_wake(),
         }))
     }

@@ -10,10 +10,12 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
+use std::collections::HashMap;
+
 use quant_pivot_models::{
     domain::{
         ConfirmSettlementRedeem, NewSettlementRedeem, Paginated, SettlementRedeemInfo,
-        SettlementRedeemListQuery, SettlementRedeemLotInfo,
+        SettlementRedeemListQuery, SettlementRedeemLotInfo, SettlementRedeemSummary,
     },
     entities::{quant_order_intent, quant_settlement_redeem, quant_settlement_redeem_lot},
     enums::execution::{ExitReason, ExitState, SettlementRedeemState},
@@ -21,7 +23,8 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    sea_query::Expr,
 };
 
 pub struct PgSettlementRedeemRepository {
@@ -50,9 +53,9 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
     async fn page(
         &self,
         query: SettlementRedeemListQuery,
-    ) -> Result<Paginated<SettlementRedeemInfo>, StorageError> {
+    ) -> Result<Paginated<SettlementRedeemSummary>, StorageError> {
         let query = query.normalized();
-        paginate_mapped(
+        let page: Paginated<SettlementRedeemInfo> = paginate_mapped(
             quant_settlement_redeem::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_settlement_redeem::Column::CreatedAt),
@@ -60,7 +63,21 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
             &query.page,
             Into::into,
         )
-        .await
+        .await?;
+        let counts = lot_counts_for(
+            &self.db,
+            page.items
+                .iter()
+                .map(|redeem| redeem.settlement_redeem_id.clone()),
+        )
+        .await?;
+        Ok(page.map(|redeem| {
+            let lot_count = counts
+                .get(&redeem.settlement_redeem_id)
+                .copied()
+                .unwrap_or(0);
+            SettlementRedeemSummary { redeem, lot_count }
+        }))
     }
 
     async fn list_lots_by_redeem(
@@ -249,6 +266,37 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         txn.commit().await.map_err(StorageError::from)?;
         Ok(confirmed.into())
     }
+}
+
+#[derive(Debug, FromQueryResult)]
+struct LotCountRow {
+    settlement_redeem_id: SettlementRedeemId,
+    lot_count: i64,
+}
+
+/// Count lots per redeem batch for the given ids in a single grouped query.
+async fn lot_counts_for(
+    db: &DatabaseConnection,
+    ids: impl Iterator<Item = SettlementRedeemId>,
+) -> Result<HashMap<SettlementRedeemId, i64>, StorageError> {
+    let ids: Vec<SettlementRedeemId> = ids.collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = quant_settlement_redeem_lot::Entity::find()
+        .select_only()
+        .column(quant_settlement_redeem_lot::Column::SettlementRedeemId)
+        .column_as(Expr::cust("COUNT(*)"), "lot_count")
+        .filter(quant_settlement_redeem_lot::Column::SettlementRedeemId.is_in(ids))
+        .group_by(quant_settlement_redeem_lot::Column::SettlementRedeemId)
+        .into_model::<LotCountRow>()
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.settlement_redeem_id, row.lot_count))
+        .collect())
 }
 
 async fn load_redeem(

@@ -210,9 +210,12 @@ impl ReportLifecycleEvent {
 /// Which lifecycle transition an [`IntentLifecycleEvent`] describes.
 ///
 /// Every variant is backed by a committed `quant_order_intent` row (intents are
-/// only ever persisted, never ephemeral): `Created` for a freshly reserved
-/// intent, `Approved` after operator approval, and the terminal
-/// `Rejected` / `Cancelled` / `Expired` / `Invalidated` transitions.
+/// only ever persisted, never ephemeral). The pre-submission transitions
+/// (`Created` / `Approved` / `Rejected` / `Cancelled` / `Expired` /
+/// `Invalidated`) are published by the intent service; the post-submission
+/// transitions (`Submitted` / `AdmissionRejected` / `PartiallyFilled` /
+/// `Filled` / `Failed`) are published by the dispatcher and the reconciliation
+/// service as the venue truth settles, so ledger consoles converge in real time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntentEventKind {
@@ -228,6 +231,16 @@ pub enum IntentEventKind {
     Expired,
     /// A governed fact changed and the intent was invalidated; capital released.
     Invalidated,
+    /// An approved intent was submitted to the venue (order write-ahead).
+    Submitted,
+    /// Admission denied the claimed intent; capital released.
+    AdmissionRejected,
+    /// A submitted intent partially filled at the venue.
+    PartiallyFilled,
+    /// A submitted intent fully filled at the venue.
+    Filled,
+    /// A submitted intent failed at the venue (unfilled); capital released.
+    Failed,
 }
 
 impl IntentEventKind {
@@ -241,6 +254,80 @@ impl IntentEventKind {
             Self::Cancelled => "quant.intent.cancelled",
             Self::Expired => "quant.intent.expired",
             Self::Invalidated => "quant.intent.invalidated",
+            Self::Submitted => "quant.intent.submitted",
+            Self::AdmissionRejected => "quant.intent.admission_rejected",
+            Self::PartiallyFilled => "quant.intent.partially_filled",
+            Self::Filled => "quant.intent.filled",
+            Self::Failed => "quant.intent.failed",
+        }
+    }
+
+    /// The post-submission lifecycle event for a committed status, if the status
+    /// maps to an observable venue-settled transition.
+    ///
+    /// Pre-submission states (`Draft` / `PendingApproval` / `Approved` /
+    /// `ApprovedByPolicy`) and the transient `AdmissionPending` claim have no
+    /// post-submission event; the intent service publishes their transitions
+    /// explicitly. Used by the dispatcher and reconciliation service to fan out
+    /// the venue-settled outcome via [`IntentLifecyclePublisher`].
+    ///
+    /// [`IntentLifecyclePublisher`]: crate::domain::runtime::core_event
+    #[must_use]
+    pub const fn for_execution_status(status: OrderIntentStatus) -> Option<Self> {
+        match status {
+            OrderIntentStatus::Submitted => Some(Self::Submitted),
+            OrderIntentStatus::AdmissionRejected => Some(Self::AdmissionRejected),
+            OrderIntentStatus::PartiallyFilled => Some(Self::PartiallyFilled),
+            OrderIntentStatus::Filled => Some(Self::Filled),
+            OrderIntentStatus::Failed => Some(Self::Failed),
+            OrderIntentStatus::Cancelled => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod intent_event_kind_tests {
+    use super::{IntentEventKind, OrderIntentStatus};
+
+    #[test]
+    fn post_submission_statuses_map_to_events() {
+        assert_eq!(
+            IntentEventKind::for_execution_status(OrderIntentStatus::Submitted),
+            Some(IntentEventKind::Submitted),
+        );
+        assert_eq!(
+            IntentEventKind::for_execution_status(OrderIntentStatus::Filled),
+            Some(IntentEventKind::Filled),
+        );
+        assert_eq!(
+            IntentEventKind::for_execution_status(OrderIntentStatus::PartiallyFilled),
+            Some(IntentEventKind::PartiallyFilled),
+        );
+        assert_eq!(
+            IntentEventKind::for_execution_status(OrderIntentStatus::Failed),
+            Some(IntentEventKind::Failed),
+        );
+        assert_eq!(
+            IntentEventKind::for_execution_status(OrderIntentStatus::AdmissionRejected),
+            Some(IntentEventKind::AdmissionRejected),
+        );
+        assert_eq!(
+            IntentEventKind::for_execution_status(OrderIntentStatus::Cancelled),
+            Some(IntentEventKind::Cancelled),
+        );
+    }
+
+    #[test]
+    fn pre_submission_and_transient_statuses_have_no_event() {
+        for status in [
+            OrderIntentStatus::Draft,
+            OrderIntentStatus::PendingApproval,
+            OrderIntentStatus::Approved,
+            OrderIntentStatus::ApprovedByPolicy,
+            OrderIntentStatus::AdmissionPending,
+        ] {
+            assert_eq!(IntentEventKind::for_execution_status(status), None);
         }
     }
 }

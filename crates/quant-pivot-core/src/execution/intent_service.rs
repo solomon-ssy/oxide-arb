@@ -19,10 +19,9 @@ use quant_pivot_error::{QuantResult, execution::ExecutionError, storage::Storage
 use quant_pivot_models::{
     domain::{
         ApproveIntentCommand, ApproveOrderIntent, ApproveOrderIntentOutcome, CancelIntentCommand,
-        CoreEvent, CoreEventPublisher, CreateIntentCommand, IntentEventKind, IntentLifecycleEvent,
-        NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
-        OrderIntentListQuery, OrderIntentPort, Paginated, RecommendationInfo,
-        RecommendationReportInfo, RejectIntentCommand,
+        CreateIntentCommand, IntentEventKind, NewCapitalAllocation, NewOperationLog,
+        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, OrderIntentPort, Paginated,
+        RecommendationInfo, RecommendationReportInfo, RejectIntentCommand,
     },
     enums::{
         common::{OrderType, Side},
@@ -45,6 +44,7 @@ use rust_decimal::Decimal;
 use crate::{
     execution::{
         dispatch_wake::DispatchWake,
+        intent_lifecycle::IntentLifecyclePublisher,
         mode_gate::{IntentPolicyDecision, RuntimeModeGate},
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
@@ -91,7 +91,8 @@ pub struct OrderIntentServiceDeps {
     pub intents: Arc<dyn OrderIntentRepository>,
     pub config: Arc<RuntimeConfigStore>,
     pub metrics: Arc<MetricsHub>,
-    pub events: CoreEventPublisher,
+    /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).
+    pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
     /// Wake the dispatcher when an `ApprovedByPolicy` intent is created (auto).
     pub dispatch_wake: DispatchWake,
 }
@@ -107,7 +108,7 @@ pub struct CoreOrderIntentService {
     intents: Arc<dyn OrderIntentRepository>,
     config: Arc<RuntimeConfigStore>,
     metrics: Arc<MetricsHub>,
-    events: CoreEventPublisher,
+    lifecycle: Arc<IntentLifecyclePublisher>,
     dispatch_wake: DispatchWake,
 }
 
@@ -124,7 +125,7 @@ impl CoreOrderIntentService {
             intents: deps.intents,
             config: deps.config,
             metrics: deps.metrics,
-            events: deps.events,
+            lifecycle: deps.intent_lifecycle,
             dispatch_wake: deps.dispatch_wake,
         }
     }
@@ -376,10 +377,7 @@ impl CoreOrderIntentService {
     }
 
     fn publish(&self, intent: &OrderIntentInfo, event: IntentEventKind, now: DateTime<Utc>) {
-        self.events
-            .publish(CoreEvent::Intent(IntentLifecycleEvent::from_intent(
-                intent, event, now,
-            )));
+        self.lifecycle.publish(intent, event, now);
     }
 }
 

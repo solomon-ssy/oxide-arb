@@ -14,14 +14,14 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         ExitTrainingLotRow, LotExitEventRow, NewPosition, Paginated, PositionExit, PositionFill,
-        PositionInfo, PositionListQuery,
+        PositionInfo, PositionListQuery, PositionSummary,
     },
     entities::{quant_execution_order, quant_order_intent, quant_position},
     enums::{
         execution::{ExecutionOrderPhase, PositionLedgerState},
         quant::ExecutionOrderState,
     },
-    types::{MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderIntentId, PositionId, Price, RecommendationId, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 use sea_orm::{
@@ -29,6 +29,7 @@ use sea_orm::{
     EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
     sea_query::Expr,
 };
+use std::collections::HashMap;
 
 /// Position-lot states still considered "open" (subject to exit monitoring).
 const OPEN_STATES: [PositionLedgerState; 2] =
@@ -84,20 +85,35 @@ impl PositionRepository for PgPositionRepository {
     async fn find_by_id(
         &self,
         position_id: &PositionId,
-    ) -> Result<Option<PositionInfo>, StorageError> {
-        quant_position::Entity::find_by_id(position_id.clone())
+    ) -> Result<Option<PositionSummary>, StorageError> {
+        let Some(position): Option<PositionInfo> =
+            quant_position::Entity::find_by_id(position_id.clone())
+                .one(&self.db)
+                .await
+                .map_err(StorageError::from)?
+                .map(Into::into)
+        else {
+            return Ok(None);
+        };
+        let intent = quant_order_intent::Entity::find_by_id(position.order_intent_id.clone())
             .one(&self.db)
             .await
-            .map_err(StorageError::from)
-            .map(|row| row.map(Into::into))
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                error::not_found(entity::QUANT_ORDER_INTENT, &position.order_intent_id)
+            })?;
+        Ok(Some(PositionSummary {
+            recommendation_id: intent.recommendation_id,
+            position,
+        }))
     }
 
     async fn page(
         &self,
         query: PositionListQuery,
-    ) -> Result<Paginated<PositionInfo>, StorageError> {
+    ) -> Result<Paginated<PositionSummary>, StorageError> {
         let query = query.normalized();
-        paginate_mapped(
+        let page: Paginated<PositionInfo> = paginate_mapped(
             quant_position::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_position::Column::OpenedAt),
@@ -105,7 +121,28 @@ impl PositionRepository for PgPositionRepository {
             &query.page,
             Into::into,
         )
-        .await
+        .await?;
+        let recommendations = recommendation_ids_for(
+            &self.db,
+            page.items
+                .iter()
+                .map(|position| position.order_intent_id.clone()),
+        )
+        .await?;
+        let mut summaries = Vec::with_capacity(page.items.len());
+        for position in page.items {
+            let recommendation_id = recommendations
+                .get(&position.order_intent_id)
+                .cloned()
+                .ok_or_else(|| {
+                    error::not_found(entity::QUANT_ORDER_INTENT, &position.order_intent_id)
+                })?;
+            summaries.push(PositionSummary {
+                position,
+                recommendation_id,
+            });
+        }
+        Ok(Paginated::new(summaries, page.total, page.page, page.size))
     }
 
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {
@@ -487,6 +524,38 @@ fn exit_events_from_orders(orders: &[quant_execution_order::Model]) -> Vec<LotEx
         .collect();
     events.sort_by_key(|event| event.at);
     events
+}
+
+#[derive(Debug, FromQueryResult)]
+struct IntentRecommendationRow {
+    order_intent_id: OrderIntentId,
+    recommendation_id: RecommendationId,
+}
+
+/// Resolve `order_intent_id -> recommendation_id` for a page of lots in one
+/// query, so the read view can deep-link a lot to its recommendation without an
+/// N+1 lookup per row.
+async fn recommendation_ids_for(
+    db: &impl ConnectionTrait,
+    ids: impl Iterator<Item = OrderIntentId>,
+) -> Result<HashMap<OrderIntentId, RecommendationId>, StorageError> {
+    let ids: Vec<OrderIntentId> = ids.collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = quant_order_intent::Entity::find()
+        .select_only()
+        .column(quant_order_intent::Column::OrderIntentId)
+        .column(quant_order_intent::Column::RecommendationId)
+        .filter(quant_order_intent::Column::OrderIntentId.is_in(ids))
+        .into_model::<IntentRecommendationRow>()
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.order_intent_id, row.recommendation_id))
+        .collect())
 }
 
 fn page_condition(query: &PositionListQuery) -> Condition {

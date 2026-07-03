@@ -30,6 +30,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
@@ -140,6 +141,17 @@ impl From<ExecutionOrderInfo> for ExecutionOrderView {
     }
 }
 
+/// Read-port aggregate: one position lot with its originating recommendation.
+///
+/// The lot row (`PositionInfo`) carries only `order_intent_id`; the read path
+/// joins in `recommendation_id` so the operator can deep-link a lot straight to
+/// its recommendation attribution without a second hop through the intent.
+#[derive(Debug, Clone)]
+pub struct PositionSummary {
+    pub position: PositionInfo,
+    pub recommendation_id: RecommendationId,
+}
+
 /// Outbound projection of one per-intent position lot.
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionView {
@@ -147,6 +159,8 @@ pub struct PositionView {
     pub position_plane: &'static str,
     pub position_id: PositionId,
     pub order_intent_id: OrderIntentId,
+    /// Originating recommendation (attribution deep-link target).
+    pub recommendation_id: RecommendationId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub state: PositionLedgerState,
@@ -159,12 +173,17 @@ pub struct PositionView {
     pub closed_at: Option<DateTime<Utc>>,
 }
 
-impl From<PositionInfo> for PositionView {
-    fn from(info: PositionInfo) -> Self {
+impl From<PositionSummary> for PositionView {
+    fn from(summary: PositionSummary) -> Self {
+        let PositionSummary {
+            position: info,
+            recommendation_id,
+        } = summary;
         Self {
             position_plane: "system_lot",
             position_id: info.position_id,
             order_intent_id: info.order_intent_id,
+            recommendation_id,
             token_id: info.token_id,
             market_id: info.market_id,
             state: info.state,
@@ -222,9 +241,17 @@ pub struct SubmitIntentRequest {
 ///
 /// `from` / `to` bound `created_at`; the pagination window is the shared
 /// [`PageRequest`], flattened so the query string stays flat.
+///
+/// `statuses` is a comma-separated multi-status filter driving the queue
+/// console's triage presets (e.g. `approved,approved_by_policy`). When present
+/// it supersedes the single `status`. `approval_status` narrows the ledger by
+/// human/policy approval provenance.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OrderIntentListQuery {
     pub status: Option<OrderIntentStatus>,
+    #[serde(default, deserialize_with = "deserialize_statuses_csv")]
+    pub statuses: Option<Vec<OrderIntentStatus>>,
+    pub approval_status: Option<ApprovalStatus>,
     pub runtime_mode: Option<QuantRuntimeMode>,
     pub recommendation_id: Option<RecommendationId>,
     pub from: Option<DateTime<Utc>>,
@@ -242,6 +269,35 @@ impl OrderIntentListQuery {
             ..self
         }
     }
+}
+
+/// Decode a comma-separated `statuses` query value (`a,b,c`) into a
+/// `Vec<OrderIntentStatus>` via each variant's canonical wire label.
+///
+/// `web::Query` (`serde_urlencoded`) cannot decode repeated keys, so the queue
+/// console sends one CSV field. An empty or whitespace-only value decodes to
+/// `None`; an unknown label fails the request (fail-closed).
+fn deserialize_statuses_csv<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<OrderIntentStatus>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let mut statuses = Vec::new();
+    for token in raw.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let status = token
+            .parse::<OrderIntentStatus>()
+            .map_err(D::Error::custom)?;
+        statuses.push(status);
+    }
+    Ok((!statuses.is_empty()).then_some(statuses))
 }
 
 /// Paginated filter for listing execution orders.
@@ -326,4 +382,57 @@ pub struct RejectIntentRequest {
 pub struct CancelIntentRequest {
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OrderIntentListQuery;
+    use crate::enums::quant::OrderIntentStatus;
+
+    fn parse_statuses(csv: &str) -> Option<Vec<OrderIntentStatus>> {
+        let query: OrderIntentListQuery =
+            serde_json::from_value(serde_json::json!({ "statuses": csv })).unwrap();
+        query.statuses
+    }
+
+    #[test]
+    fn statuses_csv_decodes_each_wire_label() {
+        assert_eq!(
+            parse_statuses("approved,approved_by_policy"),
+            Some(vec![
+                OrderIntentStatus::Approved,
+                OrderIntentStatus::ApprovedByPolicy,
+            ]),
+        );
+    }
+
+    #[test]
+    fn statuses_csv_trims_and_skips_blanks() {
+        assert_eq!(
+            parse_statuses(" submitted , , partially_filled "),
+            Some(vec![
+                OrderIntentStatus::Submitted,
+                OrderIntentStatus::PartiallyFilled,
+            ]),
+        );
+    }
+
+    #[test]
+    fn statuses_csv_empty_is_none() {
+        assert_eq!(parse_statuses(""), None);
+        assert_eq!(parse_statuses("   "), None);
+    }
+
+    #[test]
+    fn statuses_csv_rejects_unknown_label() {
+        let result: Result<OrderIntentListQuery, _> =
+            serde_json::from_value(serde_json::json!({ "statuses": "approved,bogus" }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn absent_statuses_defaults_to_none() {
+        let query: OrderIntentListQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(query.statuses, None);
+    }
 }

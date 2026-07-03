@@ -45,6 +45,17 @@ impl From<SettlementRedeemLotInfo> for SettlementRedeemLotView {
     }
 }
 
+/// Read-port aggregate: one redeem batch with its lot-allocation count.
+///
+/// The batch header alone (`SettlementRedeemInfo`) carries no lot cardinality;
+/// the list read joins in `lot_count` so operators can gauge batch size without
+/// opening every detail view.
+#[derive(Debug, Clone)]
+pub struct SettlementRedeemSummary {
+    pub redeem: SettlementRedeemInfo,
+    pub lot_count: i64,
+}
+
 /// Outbound projection of one settlement redeem batch.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettlementRedeemView {
@@ -53,6 +64,8 @@ pub struct SettlementRedeemView {
     pub funder_address: String,
     pub wallet_kind: ExecutionWalletKind,
     pub state: SettlementRedeemState,
+    /// Number of redeemed lots in this single-market batch.
+    pub lot_count: i64,
     pub tx_hash: Option<String>,
     pub payout_usd: Usd,
     pub gas_fee_pol: Option<Decimal>,
@@ -66,25 +79,27 @@ pub struct SettlementRedeemView {
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<SettlementRedeemInfo> for SettlementRedeemView {
-    fn from(info: SettlementRedeemInfo) -> Self {
+impl From<SettlementRedeemSummary> for SettlementRedeemView {
+    fn from(summary: SettlementRedeemSummary) -> Self {
+        let SettlementRedeemSummary { redeem, lot_count } = summary;
         Self {
-            settlement_redeem_id: info.settlement_redeem_id,
-            market_id: info.market_id,
-            funder_address: info.funder_address,
-            wallet_kind: info.wallet_kind,
-            state: info.state,
-            tx_hash: info.tx_hash,
-            payout_usd: info.payout_usd,
-            gas_fee_pol: info.gas_fee_pol,
-            attempt_count: info.attempt_count,
-            next_attempt_at: info.next_attempt_at,
-            last_error: info.last_error,
-            submitted_at: info.submitted_at,
-            confirmed_at: info.confirmed_at,
-            failed_at: info.failed_at,
-            created_at: info.created_at,
-            updated_at: info.updated_at,
+            settlement_redeem_id: redeem.settlement_redeem_id,
+            market_id: redeem.market_id,
+            funder_address: redeem.funder_address,
+            wallet_kind: redeem.wallet_kind,
+            state: redeem.state,
+            lot_count,
+            tx_hash: redeem.tx_hash,
+            payout_usd: redeem.payout_usd,
+            gas_fee_pol: redeem.gas_fee_pol,
+            attempt_count: redeem.attempt_count,
+            next_attempt_at: redeem.next_attempt_at,
+            last_error: redeem.last_error,
+            submitted_at: redeem.submitted_at,
+            confirmed_at: redeem.confirmed_at,
+            failed_at: redeem.failed_at,
+            created_at: redeem.created_at,
+            updated_at: redeem.updated_at,
         }
     }
 }

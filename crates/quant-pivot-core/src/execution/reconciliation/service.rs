@@ -31,7 +31,8 @@ use quant_pivot_models::{
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        ExecutionOrderId, Price, ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
+        ExecutionOrderId, OrderIntentId, Price, ReconciliationEvidence,
+        ReconciliationEvidenceChain, Shares, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -41,7 +42,7 @@ use quant_pivot_repository::traits::{
 
 use super::{CollectedReconciliation, EvidenceCollector, VenuePresence, decide};
 use crate::{
-    execution::{ExecutionBreaker, PolymarketOrderClient},
+    execution::{ExecutionBreaker, IntentLifecyclePublisher, PolymarketOrderClient},
     observability::{
         capital_allocation_fact_writer::CapitalAllocationEventWriter,
         execution_fact_writer::ExecutionEventWriter,
@@ -77,6 +78,8 @@ pub struct ReconciliationServiceDeps {
     pub execution_events: Arc<ExecutionEventWriter>,
     pub capital_events: Arc<CapitalAllocationEventWriter>,
     pub position_events: Arc<PositionEventWriter>,
+    /// Fans out the settled `quant.intent` status after a reconciliation write.
+    pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
 }
 
 /// An operator's manual resolution of an unresolvable reconciliation.
@@ -225,6 +228,8 @@ impl ReconciliationService {
             now,
         )
         .await?;
+        self.publish_intent_transition(&order.order_intent_id, intent.status, now)
+            .await?;
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
         }
@@ -315,6 +320,8 @@ impl ReconciliationService {
             now,
         )
         .await?;
+        self.publish_intent_transition(&order.order_intent_id, intent.status, now)
+            .await?;
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
         }
@@ -357,6 +364,23 @@ impl ReconciliationService {
                 StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
         Ok((intent, recommendation))
+    }
+
+    /// Fan out the settled `quant.intent` status after a reconciliation write.
+    /// A no-op for exit-order reconciliations (the entry intent stays terminal)
+    /// and unresolvable verdicts (status unchanged), gated by `prior_status`.
+    async fn publish_intent_transition(
+        &self,
+        order_intent_id: &OrderIntentId,
+        prior_status: OrderIntentStatus,
+        at: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        if let Some(settled) = self.deps.intents.find_by_id(order_intent_id).await? {
+            self.deps
+                .intent_lifecycle
+                .publish_transition(prior_status, &settled, at);
+        }
+        Ok(())
     }
 
     async fn mirror_ledger_events(

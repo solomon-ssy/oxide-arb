@@ -3,6 +3,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         ExitTrainingLotRow, Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery,
+        PositionSummary,
     },
     types::{MarketId, OrderIntentId, PositionId, TokenId, Usd},
 };
@@ -27,13 +28,17 @@ pub trait PositionRepository: Send + Sync {
         order_intent_id: &OrderIntentId,
     ) -> Result<Option<PositionInfo>, StorageError>;
 
+    /// Read-view lookup: the lot joined with its originating recommendation.
     async fn find_by_id(
         &self,
         position_id: &PositionId,
-    ) -> Result<Option<PositionInfo>, StorageError>;
+    ) -> Result<Option<PositionSummary>, StorageError>;
 
-    async fn page(&self, query: PositionListQuery)
-    -> Result<Paginated<PositionInfo>, StorageError>;
+    /// Read-view page: each lot joined with its originating recommendation.
+    async fn page(
+        &self,
+        query: PositionListQuery,
+    ) -> Result<Paginated<PositionSummary>, StorageError>;
 
     /// All open (`Open`/`Closing`) lots — the exit monitor's scan source.
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError>;

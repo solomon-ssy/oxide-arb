@@ -19,8 +19,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalSettlement, ExecutionOrderInfo, ExecutionSubmitPort, NewExecutionOrder,
-        NewReconciliation, OrderIntentInfo, PositionFill, RecommendationInfo,
+        CapitalSettlement, ExecutionOrderInfo, ExecutionSubmitPort, IntentEventKind,
+        NewExecutionOrder, NewReconciliation, OrderIntentInfo, PositionFill, RecommendationInfo,
         SubmissionLedgerWrite,
     },
     enums::{
@@ -42,6 +42,7 @@ use crate::{
     execution::{
         admission::{AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine},
         breaker::ExecutionBreaker,
+        intent_lifecycle::IntentLifecyclePublisher,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
     observability::metrics_hub::MetricsHub,
@@ -61,6 +62,8 @@ pub struct ExecutionDispatcherDeps {
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
     pub execution_events: Arc<ExecutionEventWriter>,
+    /// Fans out `quant.intent` lifecycle events as the venue truth settles.
+    pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
 }
 
 /// Production [`ExecutionSubmitPort`]: the single bridge from an admitted intent
@@ -95,6 +98,10 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
                 state: "not_found".to_owned(),
             })?;
         ensure_submittable(&intent, now)?;
+        // Pre-claim approval status; the post-settle lifecycle event is emitted
+        // relative to this so a resting `Submitted` or an immediate `Filled`
+        // fans out on `quant.intent`.
+        let prior_status = intent.status;
 
         // 2. Claim (atomic double-submit guard): Approved -> AdmissionPending. A
         //    lost race / state change surfaces as a non-submittable conflict.
@@ -107,9 +114,23 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             return Err(submission_storage_failure(intent_id, error));
         }
 
-        // 3. Build the admission input from the *pre-claim* approval snapshot
-        //    (`intent`), so the approval-state checks see Approved/ApprovedByPolicy.
-        let input = match self.deps.admission_builder.build(&intent, now).await {
+        // 3–7. Admission gate, write-ahead, venue call, and ledger settle.
+        let recommendation = self.evaluate_admission(intent_id, &intent, now).await?;
+        self.venue_submit_and_settle(intent_id, &intent, &recommendation, prior_status, now)
+            .await
+    }
+}
+
+impl CoreExecutionDispatcher {
+    /// Build admission input from the pre-claim snapshot, evaluate, and map
+    /// `Deny`/`Defer` into terminal errors (reverting the claim on defer).
+    async fn evaluate_admission(
+        &self,
+        intent_id: &OrderIntentId,
+        intent: &OrderIntentInfo,
+        now: DateTime<Utc>,
+    ) -> QuantResult<RecommendationInfo> {
+        let input = match self.deps.admission_builder.build(intent, now).await {
             Ok(input) => input,
             Err(error) => return Err(self.revert_and(intent_id, error).await),
         };
@@ -120,31 +141,46 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         };
 
         match decision.outcome {
-            AdmissionOutcome::Allow => {}
+            AdmissionOutcome::Allow => Ok(recommendation),
             AdmissionOutcome::Deny => {
                 let reason = decision
                     .denial_reason
                     .clone()
                     .unwrap_or_else(|| "admission denied".to_owned());
-                self.deps
+                let rejected = self
+                    .deps
                     .submission
                     .reject_admission(intent_id, reason.clone(), denial_trace_ref(&decision))
                     .await?;
-                return Err(ExecutionError::AdmissionDenied { reason }.into());
+                self.deps.intent_lifecycle.publish(
+                    &rejected,
+                    IntentEventKind::AdmissionRejected,
+                    now,
+                );
+                Err(ExecutionError::AdmissionDenied { reason }.into())
             }
             AdmissionOutcome::Defer => {
                 self.deps.submission.revert_claim(intent_id).await?;
-                return Err(ExecutionError::AdmissionDeferred {
+                Err(ExecutionError::AdmissionDeferred {
                     reason: defer_reason(&decision),
                 }
-                .into());
+                .into())
             }
         }
+    }
 
-        // 4. Write-ahead: create the execution order (Submitted) + lock capital +
-        //    advance intent (AdmissionPending -> Submitted) + recommendation.
+    /// Write-ahead persist, submit to the venue (no DB lock), observe breaker
+    /// health, settle the ledger, and fan out the post-settle intent lifecycle.
+    async fn venue_submit_and_settle(
+        &self,
+        intent_id: &OrderIntentId,
+        intent: &OrderIntentInfo,
+        recommendation: &RecommendationInfo,
+        prior_status: OrderIntentStatus,
+        now: DateTime<Utc>,
+    ) -> QuantResult<ExecutionOrderInfo> {
         let spec = intent.entry_order_json.clone();
-        let new_order = build_new_execution_order(&intent, &recommendation, &spec);
+        let new_order = build_new_execution_order(intent, recommendation, &spec);
         let execution_order = match self
             .deps
             .submission
@@ -162,31 +198,26 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             now,
         ));
 
-        // 5. Venue submission — NO DB lock held across this network call.
         let result = self
             .deps
             .order_client
-            .submit(build_venue_order(&recommendation, &spec))
+            .submit(build_venue_order(recommendation, &spec))
             .await
             .with_order_type_semantics(&spec.order_type);
 
-        // 6. Feed venue health (unconfirmed == failure for breaker purposes).
         let venue_ok = result.outcome != VenueOutcome::Ambiguous;
         self.deps
             .breaker
             .observe_venue(venue_ok, result.detail.as_deref().unwrap_or("venue submit"))
             .await;
 
-        // 7. Settle the ledger in one transaction. After the write-ahead commit
-        //    we never revert: a failure here leaves a `Submitted`/`Ambiguous`
-        //    row that boot recovery hands to reconciliation (capital stays held).
         if matches!(
             result.outcome,
             VenueOutcome::Filled | VenueOutcome::PartiallyFilled
         ) {
             self.deps.metrics.inc_execution_fill();
         }
-        let write = build_ledger_write(&result, &recommendation, &spec, &execution_order);
+        let write = build_ledger_write(&result, recommendation, &spec, &execution_order);
         let recorded = self
             .deps
             .submission
@@ -198,11 +229,14 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             ChQuantLedgerEventKind::SubmissionResult,
             now,
         ));
+        if let Some(settled) = self.deps.intents.find_by_id(intent_id).await? {
+            self.deps
+                .intent_lifecycle
+                .publish_transition(prior_status, &settled, now);
+        }
         Ok(recorded)
     }
-}
 
-impl CoreExecutionDispatcher {
     /// Best-effort release the claim (`AdmissionPending -> Approved`) before
     /// propagating a pre-submission error, so the intent stays retryable.
     async fn revert_and(&self, intent_id: &OrderIntentId, error: QuantError) -> QuantError {

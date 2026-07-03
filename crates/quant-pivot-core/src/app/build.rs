@@ -20,6 +20,8 @@ use quant_pivot_models::{config::DeployConfig, domain::CoreEventPublisher};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::execution::IntentLifecyclePublisher;
+
 impl AppContext {
     /// Build all subsystems from deploy config.
     pub async fn build(
@@ -30,6 +32,7 @@ impl AppContext {
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
         let runtime = RuntimeSnapshot::bootstrap(&infra.repos).await?;
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
+        let intent_lifecycle = Arc::new(IntentLifecyclePublisher::new(events.clone()));
         let data = DataBundle::assemble(&DataBundleDeps {
             deploy: &deploy,
             shutdown: &shutdown,
@@ -74,6 +77,7 @@ impl AppContext {
             governance: &governance,
             research: &research,
             account: &account,
+            intent_lifecycle: Arc::clone(&intent_lifecycle),
             clob,
             signer,
             wallet,
@@ -106,6 +110,7 @@ impl AppContext {
             config: deploy,
             shutdown,
             events,
+            intent_lifecycle,
             event_rx: Mutex::new(Some(event_rx)),
             infra,
             data,

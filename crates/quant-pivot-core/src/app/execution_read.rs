@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionReadPort, Paginated, PositionInfo,
-        PositionListQuery, RecommendationAttributionInfo, ReconciliationInfo,
-        ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemInfo,
-        SettlementRedeemListQuery,
+        ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionReadPort, Paginated,
+        PositionListQuery, PositionSummary, RecommendationAttributionInfo, ReconciliationInfo,
+        ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemListQuery,
+        SettlementRedeemSummary,
     },
     types::{ExecutionOrderId, PositionId, RecommendationId, ReconciliationId, SettlementRedeemId},
 };
@@ -67,11 +67,11 @@ impl ExecutionReadPort for CoreExecutionReadPort {
     async fn list_positions(
         &self,
         query: PositionListQuery,
-    ) -> QuantResult<Paginated<PositionInfo>> {
+    ) -> QuantResult<Paginated<PositionSummary>> {
         self.positions.page(query).await.map_err(Into::into)
     }
 
-    async fn get_position(&self, id: &PositionId) -> QuantResult<Option<PositionInfo>> {
+    async fn get_position(&self, id: &PositionId) -> QuantResult<Option<PositionSummary>> {
         self.positions.find_by_id(id).await.map_err(Into::into)
     }
 
@@ -102,7 +102,7 @@ impl ExecutionReadPort for CoreExecutionReadPort {
     async fn list_settlement_redeems(
         &self,
         query: SettlementRedeemListQuery,
-    ) -> QuantResult<Paginated<SettlementRedeemInfo>> {
+    ) -> QuantResult<Paginated<SettlementRedeemSummary>> {
         self.settlement_redeem.page(query).await.map_err(Into::into)
     }
 

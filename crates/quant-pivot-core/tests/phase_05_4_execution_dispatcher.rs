@@ -18,8 +18,8 @@ use quant_pivot_core::{
     execution::{
         AdmissionCheckTrace, AdmissionDecision, AdmissionInput, AdmissionInputBuilder,
         AdmissionInputBuilderDeps, AdmissionSeams, DefaultAdmissionEngine,
-        ExecutionAdmissionEngine, ExecutionDispatcherDeps, ExitMonitorHealthHandle, StateVersion,
-        VenueHealth, VenueHealthHandle,
+        ExecutionAdmissionEngine, ExecutionDispatcherDeps, ExitMonitorHealthHandle,
+        IntentLifecyclePublisher, StateVersion, VenueHealth, VenueHealthHandle,
         breaker::ExecutionBreaker,
         dispatcher::CoreExecutionDispatcher,
         order_client::{
@@ -40,16 +40,17 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome, BookLevel,
-        BookSnapshot, CapitalAllocationInfo, CapitalSettlement, DataQualityPort,
-        DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch, ExecutionSubmitPort,
-        ExitLedgerWrite, KillSwitchPort, KillSwitchView, MarketInfo, MarketPageQuery,
-        ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder, NewModelSpec,
-        NewModelVersion, NewOperationLog, NewOrderIntent, NewReconciliation, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OperationLogInfo, OperationLogQuery,
-        OrderIntentInfo, OrderIntentListQuery, Paginated, QuantReportListQuery, RecommendationInfo,
-        RecommendationReportInfo, ReconciliationInfo, ReconciliationLedgerWrite,
-        ReconciliationListQuery, ReconciliationPatch, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo, SetKillSwitchCommand, SubmissionLedgerWrite, UpsertMarket,
+        BookSnapshot, CapitalAllocationInfo, CapitalSettlement, CoreEventPublisher,
+        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch,
+        ExecutionSubmitPort, ExitLedgerWrite, KillSwitchPort, KillSwitchView, MarketInfo,
+        MarketPageQuery, ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder,
+        NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent, NewReconciliation,
+        NewReportTransaction, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
+        OperationLogInfo, OperationLogQuery, OrderIntentInfo, OrderIntentListQuery, Paginated,
+        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
+        ReconciliationLedgerWrite, ReconciliationListQuery, ReconciliationPatch,
+        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, SetKillSwitchCommand,
+        SubmissionLedgerWrite, UpsertMarket,
     },
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
@@ -1331,6 +1332,9 @@ fn build_harness_with_result(
         breaker,
         metrics: Arc::clone(&metrics),
         execution_events: noop_execution_writer(),
+        intent_lifecycle: Arc::new(IntentLifecyclePublisher::new(
+            CoreEventPublisher::bounded(16).0,
+        )),
     });
     Harness {
         dispatcher,

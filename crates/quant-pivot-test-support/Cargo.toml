@@ -31,6 +31,13 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 uuid = { workspace = true, features = ["v5"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tracing-subscriber = { workspace = true }
+
+[[bin]]
+name = "seed-ui-demo"
+path = "src/bin/seed_ui_demo.rs"
 
 [lints]
 workspace = true

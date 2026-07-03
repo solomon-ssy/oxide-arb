@@ -454,11 +454,21 @@ impl OrderIntentRepository for PgOrderIntentRepository {
 }
 
 fn page_condition(query: &OrderIntentListQuery) -> Condition {
+    // A multi-status queue preset (`statuses`) supersedes the single `status`.
+    let status_filter = match query.statuses.as_deref() {
+        Some(statuses) if !statuses.is_empty() => {
+            Some(quant_order_intent::Column::Status.is_in(statuses.iter().copied()))
+        }
+        _ => query
+            .status
+            .map(|status| quant_order_intent::Column::Status.eq(status)),
+    };
     Condition::all()
+        .add_option(status_filter)
         .add_option(
             query
-                .status
-                .map(|status| quant_order_intent::Column::Status.eq(status)),
+                .approval_status
+                .map(|approval| quant_order_intent::Column::ApprovalStatus.eq(approval)),
         )
         .add_option(
             query
