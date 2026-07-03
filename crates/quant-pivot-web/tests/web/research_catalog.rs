@@ -122,7 +122,10 @@ async fn training_dataset_plan_and_build_match_post_handlers_not_id_route() {
         "reason": "route registration regression",
     });
 
-    for path in ["/api/research/training-datasets/plan", "/api/research/training-datasets/build"] {
+    for path in [
+        "/api/research/training-datasets/plan",
+        "/api/research/training-datasets/build",
+    ] {
         let req = TestRequest::post()
             .uri(path)
             .insert_header(API_VERSION)

@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 10`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 11`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -30,7 +30,11 @@ use quant_pivot_error::{
 use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(10);
+///
+/// Bumped to 11 as the Phase 11 frozen baseline (added reserved `research` /
+/// `feedback` sections). v10 and earlier are rejected with zero compatibility;
+/// deployments migrate `config/quant-pivot.toml` in place (no shim).
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(11);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -61,6 +65,12 @@ pub struct RuntimeConfig {
     pub execution: ExecutionConfig,
     /// Operator notification channels.
     pub notification: NotificationConfig,
+    /// Research plane: training objective + validation methodology (reserved
+    /// skeleton; 11.4/11.5 fill fields without a further schema bump).
+    pub research: ResearchConfig,
+    /// Research-feedback plane: attribution feedback + auto-retraining (reserved
+    /// skeleton; 11.9 fills fields without a further schema bump).
+    pub feedback: FeedbackConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -78,6 +88,8 @@ impl Default for RuntimeConfig {
             portfolio: PortfolioConfig::default(),
             execution: ExecutionConfig::default(),
             notification: NotificationConfig::default(),
+            research: ResearchConfig::default(),
+            feedback: FeedbackConfig::default(),
         }
     }
 }
@@ -263,18 +275,19 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 10);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 10);
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 11);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 11);
     }
 
     #[test]
     fn rejects_prior_schema_documents() {
+        // The immediately-prior baseline (v10) is rejected with zero compatibility.
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(6);
-        let error = RuntimeConfig::from_json(&document).expect_err("v6 must be rejected");
+        document["schema_version"] = json!(10);
+        let error = RuntimeConfig::from_json(&document).expect_err("v10 must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 6
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 10
         ));
     }
 

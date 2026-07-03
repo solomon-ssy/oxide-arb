@@ -11,15 +11,17 @@ name = "quant-pivot"
 path = "src/main.rs"
 
 [features]
-# Production ML profile: links the classical (smartcore) trainer + runtime so a
-# deployed binary can train and load registered classical Candidate versions, and
-# the argmin weight-refinement step for the weighted trainer. Enabled by the
-# deploy/CI profile (kept off the default build so a `report_only` binary stays
-# free of the heavy native-adjacent ML stack).
-default = ["lp-solver"]
+# The default profile IS the production profile (Phase 11.0): `report_only` is
+# not dry-run — report sizing runs the real portfolio optimizer and classical
+# model runtime, so a deployed binary must always link them. `dataframe` is
+# always linked transitively via quant-pivot-core's research dependency.
+#   - lp-solver:   portfolio LP/MILP allocator (pure-Rust microlp; required for
+#                  report generation).
+#   - optimize:    argmin weight-refinement for the weighted trainer.
+#   - ml-classical: smartcore classical trainer + runtime for shadow candidates.
+default = ["lp-solver", "optimize", "ml-classical"]
 ml-classical = ["quant-pivot-core/ml-classical"]
 optimize = ["quant-pivot-core/optimize"]
-# Portfolio LP/MILP allocator (pure-Rust microlp; required for report generation).
 lp-solver = ["quant-pivot-core/lp-solver"]
 
 [dependencies]

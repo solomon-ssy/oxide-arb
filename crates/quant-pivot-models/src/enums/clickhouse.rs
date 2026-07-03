@@ -160,12 +160,11 @@ pub enum ChOutcomeSide {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChCapitalAllocationState {
-    Planned = 1,
-    Allocated = 2,
-    Locked = 3,
-    Spent = 4,
-    Released = 5,
-    Impaired = 6,
+    Allocated = 1,
+    Locked = 2,
+    Spent = 3,
+    Released = 4,
+    Impaired = 5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]

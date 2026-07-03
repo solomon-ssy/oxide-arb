@@ -132,6 +132,14 @@ fn walk_schema(schema: &Value, default: &Value, path: &str, fields: &mut Vec<Sch
         return;
     }
 
+    // TEMPORARY (Phase 11.0): empty reserved sections (`research` / `feedback`) are closed
+    // objects with no properties — skip leaf emission until fields exist (11.4/11.5 fill
+    // `research`; 11.9 fills `feedback` and MUST DELETE this block + `is_empty_closed_object`
+    // below — see docs/plans/quant-pivot/phase-11/11.9 §2).
+    if is_empty_closed_object(schema) {
+        return;
+    }
+
     let (value_type, format, constraints) = classify_leaf(schema, path, default);
     let group = path.split('.').next().unwrap_or("root").to_owned();
 
@@ -151,6 +159,22 @@ fn walk_schema(schema: &Value, default: &Value, path: &str, fields: &mut Vec<Sch
         schema: schema.clone(),
         array_item_type: infer_array_item_type(schema, value_type),
     });
+}
+
+/// A closed object schema (`additionalProperties: false`) with no properties —
+/// i.e. a reserved section awaiting fields. Open map objects (whose
+/// `additionalProperties` is a schema) are not matched.
+///
+/// Phase 11.0 temporary helper — delete in 11.9 when `FeedbackConfig` gains fields
+/// (see `docs/plans/quant-pivot/phase-11/11.9` §2).
+fn is_empty_closed_object(schema: &Value) -> bool {
+    let is_object = schema.get("type").and_then(Value::as_str) == Some("object");
+    let no_properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_none_or(serde_json::Map::is_empty);
+    let closed = schema.get("additionalProperties") == Some(&Value::Bool(false));
+    is_object && no_properties && closed
 }
 
 pub(crate) fn classify_leaf(

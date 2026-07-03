@@ -596,8 +596,6 @@ crate::wire_enum! {
         DrawdownCap => "drawdown_cap",
         /// Confidence-floor cap.
         ConfidenceCap => "confidence_cap",
-        /// Operator manual cap.
-        ManualCap => "manual_cap",
         /// Fractional-Kelly upper bound.
         KellyCap => "kelly_cap",
         /// No hard cap bound the size.
@@ -608,22 +606,25 @@ crate::wire_enum! {
 
 crate::wire_enum! {
     /// Why a report could not publish any recommendation (empty report).
+    ///
+    /// Every variant has an independent producer in the report builder — there
+    /// are no wire-only placeholders (zero dead semantics).
     @derive(Default)
-    pub enum EmptyReason {
+    pub enum EmptyReportReason {
         /// The market selection was empty.
         #[default]
         EmptySelection => "empty_selection",
         /// Data quality was insufficient for inference.
         InsufficientDataQuality => "insufficient_data_quality",
-        /// The active model failed its quality gate.
-        ModelQualityGateFailed => "model_quality_gate_failed",
         /// The portfolio budget was already exhausted.
         PortfolioBudgetExhausted => "portfolio_budget_exhausted",
+        /// Available cash (collateral − reserved) was exhausted before any
+        /// candidate could be funded — distinct from "no signal".
+        AvailableCashExhausted => "available_cash_exhausted",
         /// No candidate carried a positive signal.
         NoPositiveSignal => "no_positive_signal",
-        /// The runtime mode disabled report generation.
-        RuntimeModeDisabled => "runtime_mode_disabled",
-        /// The system was degraded below the generation threshold.
+        /// The system was degraded below the generation threshold (readiness
+        /// gate not `Operational`, or the portfolio solver was unavailable).
         SystemDegraded => "system_degraded",
     }
 }

@@ -567,3 +567,21 @@ pub struct WebhookNotificationConfig {
     #[schemars(extend("x-sensitive" = true))]
     pub url: String,
 }
+
+/// Research plane configuration (training objective + validation methodology).
+///
+/// Reserved skeleton frozen at schema v11. Later Phase 11 sub-phases add fields
+/// here without a further schema bump:
+/// - 11.4 adds the training-objective (learning-to-rank + downside/turnover) knobs;
+/// - 11.5 adds the leakage-aware validation (purged/embargo/CPCV, DSR/PBO) knobs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchConfig {}
+
+/// Research-feedback plane configuration (attribution feedback + auto-retraining).
+///
+/// Reserved skeleton frozen at schema v11; 11.9 adds the attribution-feedback,
+/// drift-triggered retraining, and champion-challenger knobs without a bump.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeedbackConfig {}

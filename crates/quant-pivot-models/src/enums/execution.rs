@@ -39,7 +39,6 @@ crate::pg_enum! {
 crate::pg_enum! {
     type_name = "qp_capital_allocation_state",
     pub enum CapitalAllocationState {
-        Planned => "planned",
         Allocated => "allocated",
         Locked => "locked",
         Spent => "spent",

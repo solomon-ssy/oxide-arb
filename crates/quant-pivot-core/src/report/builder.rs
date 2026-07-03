@@ -9,7 +9,7 @@ use quant_pivot_models::{
         PointInTimeDataSource, RuntimeConfigVersionInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
-    enums::quant::{EmptyReason, RejectionReason},
+    enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
     runtime_config::RuntimeConfig,
     types::{
         Bps, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
@@ -182,30 +182,12 @@ impl DefaultReportBuilder {
         }
 
         let features = self.build_features(&context, &selection).await?;
-        let model_outcome = {
-            let stage = FeatureStageRefs {
-                request: &request,
-                context: &context,
-                selection: &selection,
-                account: &account,
-                equity: &equity,
-                features: &features,
-            };
-            if let Some(report) = self.compose_if_no_accepted_features(&stage)? {
-                return Ok(report);
-            }
-
-            let model_outcome = self.run_model(&context, &selection, &features).await?;
-            let artifacts = FeatureStageArtifacts {
-                captures: features.captures.clone(),
-                data_quality_snapshot: features.data_quality_snapshot.clone(),
-            };
-            if let Some(report) =
-                self.compose_if_no_model_signals(&stage, &model_outcome, artifacts)?
-            {
-                return Ok(report);
-            }
-            model_outcome
+        let model_outcome = match self
+            .run_model_stage(&request, &context, &selection, &account, &equity, &features)
+            .await?
+        {
+            Err(report) => return Ok(report),
+            Ok(outcome) => outcome,
         };
         let artifacts = FeatureStageArtifacts {
             captures: features.captures.clone(),
@@ -231,7 +213,10 @@ impl DefaultReportBuilder {
                 account: &account,
                 equity: &equity,
                 empty: EmptyReportContext {
-                    reason: empty_reason_from_planner_rejections(&plan.rejected),
+                    reason: empty_reason_from_planner_rejections(
+                        &plan.rejected,
+                        plan.plan_row.optimizer_meta_json.status,
+                    ),
                     candidate_count: model_outcome.emitted,
                     rejected_count: u32::try_from(plan.rejected.len()).unwrap_or(u32::MAX),
                     warnings: Vec::new(),
@@ -261,6 +246,38 @@ impl DefaultReportBuilder {
         })
     }
 
+    async fn run_model_stage(
+        &self,
+        request: &BuildReportRequest,
+        context: &BuildContext,
+        selection: &MarketSelectionSnapshot,
+        account: &AccountSnapshot,
+        equity: &ReportEquitySnapshot,
+        features: &FeaturePipelineResult,
+    ) -> QuantResult<Result<ModelRunOutcome, ComposedReport>> {
+        let stage = FeatureStageRefs {
+            request,
+            context,
+            selection,
+            account,
+            equity,
+            features,
+        };
+        if let Some(report) = self.compose_if_no_accepted_features(&stage)? {
+            return Ok(Err(report));
+        }
+
+        let model_outcome = self.run_model(context, selection, features).await?;
+        let artifacts = FeatureStageArtifacts {
+            captures: features.captures.clone(),
+            data_quality_snapshot: features.data_quality_snapshot.clone(),
+        };
+        if let Some(report) = self.compose_if_no_model_signals(&stage, &model_outcome, artifacts)? {
+            return Ok(Err(report));
+        }
+        Ok(Ok(model_outcome))
+    }
+
     fn compose_if_system_degraded(
         &self,
         request: &BuildReportRequest,
@@ -279,7 +296,7 @@ impl DefaultReportBuilder {
             account,
             equity,
             empty: EmptyReportContext {
-                reason: EmptyReason::SystemDegraded,
+                reason: EmptyReportReason::SystemDegraded,
                 candidate_count: 0,
                 rejected_count: 0,
                 warnings: vec!["operational phase is not Operational".to_owned()],
@@ -313,7 +330,7 @@ impl DefaultReportBuilder {
             account,
             equity,
             empty: EmptyReportContext {
-                reason: EmptyReason::EmptySelection,
+                reason: EmptyReportReason::EmptySelection,
                 candidate_count: 0,
                 rejected_count: u32::try_from(selection.excluded.len()).unwrap_or(u32::MAX),
                 warnings: Vec::new(),
@@ -343,7 +360,7 @@ impl DefaultReportBuilder {
             account: stage.account,
             equity: stage.equity,
             empty: EmptyReportContext {
-                reason: EmptyReason::InsufficientDataQuality,
+                reason: EmptyReportReason::InsufficientDataQuality,
                 candidate_count: 0,
                 rejected_count: u32::try_from(stage.features.rejected.len()).unwrap_or(u32::MAX),
                 warnings: vec!["feature pipeline accepted zero markets".to_owned()],
@@ -375,7 +392,7 @@ impl DefaultReportBuilder {
             account: stage.account,
             equity: stage.equity,
             empty: EmptyReportContext {
-                reason: EmptyReason::NoPositiveSignal,
+                reason: EmptyReportReason::NoPositiveSignal,
                 candidate_count: model_outcome.emitted,
                 rejected_count: 0,
                 warnings: vec!["active model emitted no positive candidate".to_owned()],
@@ -729,7 +746,9 @@ impl DefaultReportBuilder {
             data_quality_snapshot: input.data_quality_snapshot,
             model_run_id: input.model_run_id,
             candidate_count: input.empty.candidate_count,
-            feature_rejected_count: if input.empty.reason == EmptyReason::InsufficientDataQuality {
+            feature_rejected_count: if input.empty.reason
+                == EmptyReportReason::InsufficientDataQuality
+            {
                 input.empty.rejected_count
             } else {
                 0
@@ -949,22 +968,40 @@ fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Usd> {
     Ok(Usd::new(Decimal::from(10_000)))
 }
 
-/// Map planner rejections to the report-level empty reason (04.2 §4 step 8).
-fn empty_reason_from_planner_rejections(rejected: &[RejectedCandidate]) -> EmptyReason {
+/// Map planner rejections + solver provenance to the report-level empty reason
+/// (04.2 §4 step 8). Each reason has an independent, non-collapsed trigger:
+///
+/// 1. `SolverUnavailable` (no solver could produce a plan) -> `SystemDegraded`;
+/// 2. any `BudgetExhausted` -> `PortfolioBudgetExhausted`;
+/// 3. any `AvailableCashExhausted` -> `AvailableCashExhausted` (distinct from
+///    "no signal" so operators can tell "out of cash" from "no edge");
+/// 4. otherwise -> `NoPositiveSignal`.
+fn empty_reason_from_planner_rejections(
+    rejected: &[RejectedCandidate],
+    solver_status: OptimizerSolverStatus,
+) -> EmptyReportReason {
+    if solver_status == OptimizerSolverStatus::SolverUnavailable {
+        return EmptyReportReason::SystemDegraded;
+    }
     if rejected
         .iter()
         .any(|rejected| matches!(rejected.reason, RejectionReason::BudgetExhausted))
     {
-        EmptyReason::PortfolioBudgetExhausted
-    } else {
-        EmptyReason::NoPositiveSignal
+        return EmptyReportReason::PortfolioBudgetExhausted;
     }
+    if rejected
+        .iter()
+        .any(|rejected| matches!(rejected.reason, RejectionReason::AvailableCashExhausted))
+    {
+        return EmptyReportReason::AvailableCashExhausted;
+    }
+    EmptyReportReason::NoPositiveSignal
 }
 
 #[cfg(test)]
 mod tests {
     use quant_pivot_models::{
-        enums::quant::{EmptyReason, RejectionReason},
+        enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
         types::{MarketId, SignalCandidateId},
     };
     use quant_pivot_research::portfolio::RejectedCandidate;
@@ -983,18 +1020,40 @@ mod tests {
     #[test]
     fn empty_reason_uses_portfolio_budget_only_for_budget_exhausted() {
         assert_eq!(
-            empty_reason_from_planner_rejections(&[rejected(RejectionReason::BudgetExhausted)]),
-            EmptyReason::PortfolioBudgetExhausted
+            empty_reason_from_planner_rejections(
+                &[rejected(RejectionReason::BudgetExhausted)],
+                OptimizerSolverStatus::Optimal
+            ),
+            EmptyReportReason::PortfolioBudgetExhausted
         );
         assert_eq!(
-            empty_reason_from_planner_rejections(&[rejected(
-                RejectionReason::AvailableCashExhausted
-            )]),
-            EmptyReason::NoPositiveSignal
+            empty_reason_from_planner_rejections(
+                &[rejected(RejectionReason::MarketCapExhausted)],
+                OptimizerSolverStatus::Optimal
+            ),
+            EmptyReportReason::NoPositiveSignal
         );
+    }
+
+    #[test]
+    fn empty_reason_keeps_available_cash_distinct_from_no_signal() {
         assert_eq!(
-            empty_reason_from_planner_rejections(&[rejected(RejectionReason::MarketCapExhausted)]),
-            EmptyReason::NoPositiveSignal
+            empty_reason_from_planner_rejections(
+                &[rejected(RejectionReason::AvailableCashExhausted)],
+                OptimizerSolverStatus::Optimal
+            ),
+            EmptyReportReason::AvailableCashExhausted
+        );
+    }
+
+    #[test]
+    fn empty_reason_maps_solver_unavailable_to_system_degraded() {
+        assert_eq!(
+            empty_reason_from_planner_rejections(
+                &[rejected(RejectionReason::BeyondTopN)],
+                OptimizerSolverStatus::SolverUnavailable
+            ),
+            EmptyReportReason::SystemDegraded
         );
     }
 }

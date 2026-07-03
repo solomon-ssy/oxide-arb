@@ -9,8 +9,8 @@
 use crate::{
     domain::{RecommendationDelta, RecommendationReportInfo, ReportDiff, pagination::PageRequest},
     enums::quant::{
-        AccountSource, EmptyReason, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
-        ReportKind, ReportTriggerKind,
+        AccountSource, EmptyReportReason, OutcomeSide, QuantRuntimeMode,
+        RecommendationReportStatus, ReportKind, ReportTriggerKind,
     },
     types::{
         AccountSnapshotId, EligibilitySummary, MarketSelectionId, ModelVersionId, RecommendationId,
@@ -36,7 +36,7 @@ pub struct QuantReportView {
     pub capital_base_usd: Usd,
     pub published_recommendation_count: u32,
     pub total_suggested_usd: Usd,
-    pub empty_reason: Option<EmptyReason>,
+    pub empty_reason: Option<EmptyReportReason>,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expired_at: Option<DateTime<Utc>>,

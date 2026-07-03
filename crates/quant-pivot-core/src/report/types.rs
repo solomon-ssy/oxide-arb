@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     clickhouse::QuantRecommendationEventRow,
     domain::NewReportTransaction,
-    enums::quant::{EmptyReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind},
+    enums::quant::{
+        EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
+    },
     runtime_config::ReportDeliveryPolicy,
     types::{Probability, RecommendationReportId, Usd},
 };
@@ -52,7 +54,7 @@ pub struct BuildReportRequest {
 /// Context carried when a report is intentionally empty.
 #[derive(Debug, Clone)]
 pub struct EmptyReportContext {
-    pub reason: EmptyReason,
+    pub reason: EmptyReportReason,
     pub candidate_count: u32,
     pub rejected_count: u32,
     pub warnings: Vec<String>,
@@ -78,7 +80,7 @@ pub struct ReportNotificationPayload {
     pub total_suggested_usd: Usd,
     pub top3: Vec<NotificationRecommendation>,
     pub warnings: Vec<String>,
-    pub empty_reason: Option<EmptyReason>,
+    pub empty_reason: Option<EmptyReportReason>,
 }
 
 /// Complete report artifact ready for atomic PG write and post-commit publish.

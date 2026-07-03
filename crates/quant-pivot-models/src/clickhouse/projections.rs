@@ -33,7 +33,6 @@ impl From<OutcomeSide> for ChOutcomeSide {
 impl From<CapitalAllocationState> for ChCapitalAllocationState {
     fn from(value: CapitalAllocationState) -> Self {
         match value {
-            CapitalAllocationState::Planned => Self::Planned,
             CapitalAllocationState::Allocated => Self::Allocated,
             CapitalAllocationState::Locked => Self::Locked,
             CapitalAllocationState::Spent => Self::Spent,

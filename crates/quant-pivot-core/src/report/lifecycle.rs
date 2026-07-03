@@ -9,7 +9,7 @@ use quant_pivot_models::{
     enums::{
         execution::ApprovalInvalidation,
         operation_log::{OperationCategory, OperationOutcome},
-        quant::{EmptyReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+        quant::{EmptyReportReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
         rbac::ResourceType,
     },
     runtime_config::RuntimeConfig,
@@ -397,11 +397,11 @@ fn should_suppress_empty_report(composed: &ComposedReport, config: &RuntimeConfi
         && composed.transaction.report.status == RecommendationReportStatus::PublishedEmpty
 }
 
-fn empty_reason_from_composed(composed: &ComposedReport) -> EmptyReason {
+fn empty_reason_from_composed(composed: &ComposedReport) -> EmptyReportReason {
     composed
         .notification
         .empty_reason
-        .unwrap_or(EmptyReason::EmptySelection)
+        .unwrap_or(EmptyReportReason::EmptySelection)
 }
 
 fn recommendation_operation_log(

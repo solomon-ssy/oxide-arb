@@ -7,8 +7,8 @@ use crate::{
     enums::common::{AlertCategory, AlertLevel, AlertSource},
     enums::execution::{ReconciliationResult, SettlementRedeemState},
     enums::quant::{
-        EmptyReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
-        TrainingDatasetStatus,
+        EmptyReportReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
+        ReportKind, TrainingDatasetStatus,
     },
     types::MarketId,
 };
@@ -87,7 +87,7 @@ pub struct ReportLifecycleEvent {
     pub as_of: DateTime<Utc>,
     pub published_at: Option<DateTime<Utc>>,
     pub recommendation_count: u32,
-    pub empty_reason: Option<EmptyReason>,
+    pub empty_reason: Option<EmptyReportReason>,
     pub error_code: Option<String>,
     pub status_reason: Option<String>,
 }
@@ -173,7 +173,7 @@ impl ReportLifecycleEvent {
         report_kind: ReportKind,
         runtime_mode: QuantRuntimeMode,
         as_of: DateTime<Utc>,
-        empty_reason: EmptyReason,
+        empty_reason: EmptyReportReason,
     ) -> Self {
         Self {
             event: ReportEventKind::Empty,

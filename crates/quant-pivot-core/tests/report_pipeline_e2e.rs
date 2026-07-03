@@ -5,7 +5,9 @@ use quant_pivot_core::report::AdHocReportRequest;
 use quant_pivot_error::{QuantError, account::AccountError};
 use quant_pivot_models::{
     domain::{NewEquitySnapshot, OperationLogQuery},
-    enums::quant::{AccountSource, EmptyReason, RecommendationReportStatus, RecommendationStatus},
+    enums::quant::{
+        AccountSource, EmptyReportReason, RecommendationReportStatus, RecommendationStatus,
+    },
     types::{EquitySnapshotId, Usd},
 };
 use quant_pivot_repository::{
@@ -126,7 +128,7 @@ async fn empty_selection_publishes_published_empty() {
     assert_eq!(report.summary_json.published_recommendation_count, 0);
     assert_eq!(
         report.status_reason.as_deref(),
-        Some(EmptyReason::EmptySelection.as_str())
+        Some(EmptyReportReason::EmptySelection.as_str())
     );
 
     let recs = harness

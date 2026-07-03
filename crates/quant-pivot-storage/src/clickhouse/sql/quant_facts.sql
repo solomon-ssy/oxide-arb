@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS quant_capital_allocation_event
     order_intent_id String,
     recommendation_id String,
     event_kind Enum8('submitted' = 1, 'submission_result' = 2, 'exit_submitted' = 3, 'exit_submission_result' = 4, 'reconciled' = 5, 'operator_resolved' = 6, 'unresolvable' = 7, 'settlement_redeem_confirmed' = 8, 'opened' = 9),
-    state Enum8('planned' = 1, 'allocated' = 2, 'locked' = 3, 'spent' = 4, 'released' = 5, 'impaired' = 6),
+    state Enum8('allocated' = 1, 'locked' = 2, 'spent' = 3, 'released' = 4, 'impaired' = 5),
     allocated_usd Decimal128(18),
     locked_usd Decimal128(18),
     spent_usd Decimal128(18),

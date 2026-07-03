@@ -19,7 +19,7 @@ use sea_orm::{
 
 /// Allocation rows included in the reserved-capital aggregate.
 ///
-/// Excludes terminal rows (`Spent`, `Released`) and pre-reserve `Planned`.
+/// Excludes terminal rows (`Spent`, `Released`).
 const RESERVED_STATES: [CapitalAllocationState; 3] = [
     CapitalAllocationState::Allocated,
     CapitalAllocationState::Locked,
@@ -88,7 +88,7 @@ impl ReservedCapitalRepository for PgCapitalAllocationRepository {
 /// - **`Allocated` / `Locked`**: counts intent-reserved budget not yet spent or released.
 /// - **`Impaired`**: still included (fail-closed) until manually resolved — corrupted
 ///   invariants must not free budget for new entries.
-/// - **`Planned` / `Spent` / `Released`**: excluded.
+/// - **`Spent` / `Released`**: excluded.
 pub async fn sum_reserved_usd(db: &DatabaseConnection) -> Result<Usd, StorageError> {
     let row = quant_capital_allocation::Entity::find()
         .filter(quant_capital_allocation::Column::State.is_in(RESERVED_STATES))

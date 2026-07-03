@@ -25,8 +25,9 @@ use crate::{
         common::MarketCategory,
         factor::FactorFamily,
         quant::{
-            BindingConstraint, EmptyReason, EntryTriggerKind, ExitSettlementMode, ExitTriggerKind,
-            FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
+            BindingConstraint, EmptyReportReason, EntryTriggerKind, ExitSettlementMode,
+            ExitTriggerKind, FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
+            SizingModelKind,
         },
     },
     hashing::CanonicalDigest,
@@ -379,7 +380,7 @@ pub struct ReportSummary {
     /// Execution-eligibility roll-up.
     pub execution_eligibility_summary: EligibilitySummary,
     /// Reason the report is empty, when `published_recommendation_count == 0`.
-    pub empty_reason: Option<EmptyReason>,
+    pub empty_reason: Option<EmptyReportReason>,
     /// Report-level warnings.
     pub warnings: Vec<String>,
 }

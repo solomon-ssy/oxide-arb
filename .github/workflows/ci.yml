@@ -31,6 +31,10 @@ jobs:
         run: bash scripts/lint-architecture.sh
       - name: Quant pivot boundary gate
         run: bash scripts/lint-quant-pivot-boundary.sh
+      - name: Quant pivot error-layer gate
+        run: bash scripts/lint-quant-pivot-errors.sh
+      - name: Dead-semantics gate
+        run: bash scripts/lint-dead-semantics.sh
 
       - name: Build
         run: cargo build --workspace
@@ -73,6 +77,24 @@ jobs:
 
       - name: Production binary links the classical ML stack
         run: cargo build -p quant-pivot-bin --features ml-classical,optimize
+
+  production-profile:
+    name: Production profile (feature completeness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `report_only` is not dry-run: the deployed binary must always link the
+      # portfolio optimizer + classical model runtime. The default profile is the
+      # production profile (Phase 11.0), so a plain default build must succeed and
+      # the explicit full feature set must match it.
+      - name: Default binary links the full research stack
+        run: cargo build -p quant-pivot-bin
+
+      - name: Explicit production feature set builds
+        run: cargo build -p quant-pivot-bin --features lp-solver,optimize,ml-classical
 
   bench:
     name: Benchmarks

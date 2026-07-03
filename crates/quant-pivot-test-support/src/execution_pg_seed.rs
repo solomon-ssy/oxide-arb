@@ -26,7 +26,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EmptyReason, EntryTriggerKind,
+            AccountSource, ApprovalStatus, BindingConstraint, EmptyReportReason, EntryTriggerKind,
             ExecutionOrderState, ExitSettlementMode, ModelRunKind, ModelRunStatus,
             OrderIntentStatus, OutcomeSide, PublicationStatus, QuantRuntimeMode,
             RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
@@ -1116,7 +1116,7 @@ pub fn empty_report_summary() -> ReportSummary {
         data_quality_summary: DataQualitySummary::default(),
         top_rejection_reasons: Vec::new(),
         execution_eligibility_summary: EligibilitySummary::default(),
-        empty_reason: Some(EmptyReason::NoPositiveSignal),
+        empty_reason: Some(EmptyReportReason::NoPositiveSignal),
         warnings: vec!["ui-demo: no positive signal above threshold".to_owned()],
     }
 }

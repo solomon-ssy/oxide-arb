@@ -15,7 +15,7 @@ use quant_pivot_models::{
         common::MarketCategory,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EmptyReason, ExitSettlementMode, IneligibilityReason, QuantRuntimeMode,
+            EmptyReportReason, ExitSettlementMode, IneligibilityReason, QuantRuntimeMode,
             RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
         },
         rbac::ResourceType,
@@ -642,7 +642,7 @@ fn report_summary(
         .unwrap_or_default();
 
     let empty_rejected_count = input.empty.as_ref().map_or(0, |empty| {
-        if empty.reason == EmptyReason::InsufficientDataQuality {
+        if empty.reason == EmptyReportReason::InsufficientDataQuality {
             0
         } else {
             empty.rejected_count
@@ -699,14 +699,18 @@ fn confidence_summary(recommendations: &[NewRecommendation]) -> ConfidenceSummar
 fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount> {
     let mut counts: BTreeMap<String, u32> = BTreeMap::new();
     if let Some(empty) = &input.empty
-        && empty.reason != EmptyReason::InsufficientDataQuality
+        && empty.reason != EmptyReportReason::InsufficientDataQuality
         && empty.rejected_count > 0
     {
         counts.insert(empty.reason.as_str().to_owned(), empty.rejected_count);
     }
     if input.feature_rejected_count > 0 {
         *counts
-            .entry(EmptyReason::InsufficientDataQuality.as_str().to_owned())
+            .entry(
+                EmptyReportReason::InsufficientDataQuality
+                    .as_str()
+                    .to_owned(),
+            )
             .or_default() += input.feature_rejected_count;
     }
     for rejected in input.planner_rejected {
@@ -875,7 +879,7 @@ pub(super) fn empty_plan_for_report(
     as_of: DateTime<Utc>,
     account: &AccountSnapshot,
     config: &RuntimeConfig,
-    reason: EmptyReason,
+    reason: EmptyReportReason,
     rejected_count: u32,
 ) -> NewPortfolioPlan {
     empty_portfolio_plan(
@@ -925,8 +929,8 @@ mod tests {
     use quant_pivot_models::{
         domain::quant::{NewAccountSnapshot, NewEquitySnapshot, NewReportDataQualitySnapshot},
         enums::quant::{
-            AccountSource, BindingConstraint, EmptyReason, ExitSettlementMode, IneligibilityReason,
-            OutcomeSide, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
+            AccountSource, BindingConstraint, EmptyReportReason, ExitSettlementMode,
+            IneligibilityReason, OutcomeSide, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
         },
         runtime_config::RuntimeConfig,
         types::{
@@ -1206,7 +1210,7 @@ mod tests {
             as_of,
             &account,
             &config,
-            EmptyReason::NoPositiveSignal,
+            EmptyReportReason::NoPositiveSignal,
             0,
         );
         let data_quality_snapshot = NewReportDataQualitySnapshot {

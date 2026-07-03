@@ -17,8 +17,9 @@ use quant_pivot_models::{
         api::{QuantRecommendationView, QuantReportDetailView, RecommendationViewContext},
     },
     enums::quant::{
-        EntryTriggerKind, ExitSettlementMode, ExitTriggerKind, IneligibilityReason, OutcomeSide,
-        QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
+        EmptyReportReason, EntryTriggerKind, ExitSettlementMode, ExitTriggerKind,
+        IneligibilityReason, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
+        RedeemPolicy, ReportKind,
     },
     types::{
         BookSnapshotRef, Bps, EligibilitySummary, EntryPlan, EquitySnapshotId, EvidenceRefs,
@@ -250,7 +251,7 @@ pub fn empty_report() -> QuantReportDetailView {
     summary.category_allocation = BTreeMap::new();
     summary.event_allocation = BTreeMap::new();
     summary.execution_eligibility_summary = EligibilitySummary::default();
-    summary.empty_reason = Some(quant_pivot_models::enums::quant::EmptyReason::NoPositiveSignal);
+    summary.empty_reason = Some(EmptyReportReason::NoPositiveSignal);
     summary.warnings = vec!["no candidates passed score floor".to_owned()];
     QuantReportDetailView::from(base_report(
         "snapshot-report-empty",
