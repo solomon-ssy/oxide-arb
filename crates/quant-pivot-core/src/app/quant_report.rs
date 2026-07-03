@@ -111,7 +111,7 @@ impl QuantReportPort for CoreQuantReportPort {
         };
         let blocking = self
             .order_intent_repo
-            .find_active_by_report(report_id)
+            .find_blocking_by_report(report_id)
             .await?
             .into_iter()
             .map(|intent| (intent.recommendation_id, intent.order_intent_id))

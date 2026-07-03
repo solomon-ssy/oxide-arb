@@ -31,13 +31,16 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalAllocationInfo, ConfirmSettlementRedeem, ExitTrainingLotRow, MarketInfo,
-        NewSettlementRedeem, Paginated, PositionInfo, SettlementRedeemInfo,
-        SettlementRedeemListQuery, SettlementRedeemLotInfo,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalAllocationInfo,
+        ConfirmSettlementRedeem, ExitTrainingLotRow, MarketInfo, NewCapitalAllocation,
+        NewOperationLog, NewOrderIntent, NewSettlementRedeem, OrderIntentInfo,
+        OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
+        PositionListQuery, RecommendationInfo, SettlementRedeemInfo, SettlementRedeemListQuery,
+        SettlementRedeemLotInfo,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
-        execution::{ExitState, OrderIntentKind, PositionLedgerState},
+        execution::{ApprovalInvalidation, ExitState, OrderIntentKind, PositionLedgerState},
         quant::{
             AccountSource, ApprovalStatus, ExecutionWalletKind, ExitSettlementMode,
             OrderIntentStatus, OutcomeSide, QuantRuntimeMode, RedeemPolicy,
@@ -66,7 +69,7 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(NOW_SECS, 0).unwrap()
 }
 
-fn recommendation() -> quant_pivot_models::domain::RecommendationInfo {
+fn recommendation() -> RecommendationInfo {
     report_fixtures::recommendation(
         RecommendationReportId::from_v7(),
         RecommendationId::from_v7(),
@@ -77,9 +80,9 @@ fn recommendation() -> quant_pivot_models::domain::RecommendationInfo {
     )
 }
 
-fn intent(redeem_policy: RedeemPolicy) -> quant_pivot_models::domain::OrderIntentInfo {
+fn intent(redeem_policy: RedeemPolicy) -> OrderIntentInfo {
     let rec = recommendation();
-    quant_pivot_models::domain::OrderIntentInfo {
+    OrderIntentInfo {
         order_intent_id: OrderIntentId::from_v7(),
         recommendation_id: rec.recommendation_id.clone(),
         runtime_mode: QuantRuntimeMode::AutoExecution,
@@ -162,17 +165,14 @@ struct StubPositions {
 
 #[async_trait]
 impl PositionRepository for StubPositions {
-    async fn apply_fill(
-        &self,
-        _: quant_pivot_models::domain::PositionFill,
-    ) -> Result<PositionInfo, StorageError> {
+    async fn apply_fill(&self, _: PositionFill) -> Result<PositionInfo, StorageError> {
         unimplemented!()
     }
 
     async fn apply_exit(
         &self,
         _: &OrderIntentId,
-        _: quant_pivot_models::domain::PositionExit,
+        _: PositionExit,
     ) -> Result<PositionInfo, StorageError> {
         unimplemented!()
     }
@@ -190,7 +190,7 @@ impl PositionRepository for StubPositions {
 
     async fn page(
         &self,
-        query: quant_pivot_models::domain::PositionListQuery,
+        query: PositionListQuery,
     ) -> Result<Paginated<PositionInfo>, StorageError> {
         Ok(Paginated::from_request(
             Vec::new(),
@@ -226,16 +226,16 @@ impl PositionRepository for StubPositions {
 }
 
 struct StubIntents {
-    by_id: HashMap<OrderIntentId, quant_pivot_models::domain::OrderIntentInfo>,
+    by_id: HashMap<OrderIntentId, OrderIntentInfo>,
 }
 
 #[async_trait]
 impl OrderIntentRepository for StubIntents {
     async fn create_with_allocation(
         &self,
-        _: quant_pivot_models::domain::NewOrderIntent,
-        _: quant_pivot_models::domain::NewCapitalAllocation,
-    ) -> Result<quant_pivot_models::domain::OrderIntentInfo, StorageError> {
+        _: NewOrderIntent,
+        _: NewCapitalAllocation,
+    ) -> Result<OrderIntentInfo, StorageError> {
         Err(StorageError::state_conflict(
             entity::QUANT_ORDER_INTENT,
             None::<&str>,
@@ -246,58 +246,50 @@ impl OrderIntentRepository for StubIntents {
     async fn approve(
         &self,
         _: &OrderIntentId,
-        _: quant_pivot_models::domain::ApproveOrderIntent,
-        _: Option<quant_pivot_models::types::EntryOrderSpec>,
+        _: ApproveOrderIntent,
+        _: Option<EntryOrderSpec>,
         _: Option<Usd>,
         _: chrono::DateTime<Utc>,
-    ) -> Result<quant_pivot_models::domain::ApproveOrderIntentOutcome, StorageError> {
+    ) -> Result<ApproveOrderIntentOutcome, StorageError> {
         unimplemented!()
     }
 
-    async fn reject(
-        &self,
-        _: &OrderIntentId,
-        _: String,
-    ) -> Result<quant_pivot_models::domain::OrderIntentInfo, StorageError> {
+    async fn reject(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
         unimplemented!()
     }
 
-    async fn cancel(
-        &self,
-        _: &OrderIntentId,
-        _: String,
-    ) -> Result<quant_pivot_models::domain::OrderIntentInfo, StorageError> {
+    async fn cancel(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
         unimplemented!()
     }
 
     async fn expire(
         &self,
         _: &OrderIntentId,
-        _: quant_pivot_models::domain::NewOperationLog,
-    ) -> Result<quant_pivot_models::domain::OrderIntentInfo, StorageError> {
+        _: NewOperationLog,
+    ) -> Result<OrderIntentInfo, StorageError> {
         unimplemented!()
     }
 
     async fn invalidate(
         &self,
         _: &OrderIntentId,
-        _: quant_pivot_models::enums::execution::ApprovalInvalidation,
-        _: quant_pivot_models::domain::NewOperationLog,
-    ) -> Result<quant_pivot_models::domain::OrderIntentInfo, StorageError> {
+        _: ApprovalInvalidation,
+        _: NewOperationLog,
+    ) -> Result<OrderIntentInfo, StorageError> {
         unimplemented!()
     }
 
     async fn find_by_id(
         &self,
         intent_id: &OrderIntentId,
-    ) -> Result<Option<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+    ) -> Result<Option<OrderIntentInfo>, StorageError> {
         Ok(self.by_id.get(intent_id).cloned())
     }
 
     async fn page(
         &self,
-        query: quant_pivot_models::domain::OrderIntentListQuery,
-    ) -> Result<Paginated<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+        query: OrderIntentListQuery,
+    ) -> Result<Paginated<OrderIntentInfo>, StorageError> {
         Ok(Paginated::from_request(
             Vec::new(),
             0,
@@ -308,7 +300,7 @@ impl OrderIntentRepository for StubIntents {
     async fn find_expired(
         &self,
         _: chrono::DateTime<Utc>,
-    ) -> Result<Vec<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -323,21 +315,28 @@ impl OrderIntentRepository for StubIntents {
     async fn find_active_by_recommendation(
         &self,
         _: &RecommendationId,
-    ) -> Result<Option<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+    ) -> Result<Option<OrderIntentInfo>, StorageError> {
         Ok(None)
     }
 
     async fn find_active_intents_by_recommendation(
         &self,
         _: &RecommendationId,
-    ) -> Result<Vec<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         Ok(Vec::new())
     }
 
     async fn find_active_by_report(
         &self,
         _: &RecommendationReportId,
-    ) -> Result<Vec<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_blocking_by_report(
+        &self,
+        _: &RecommendationReportId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -347,9 +346,9 @@ impl OrderIntentRepository for StubIntents {
 
     async fn find_attribution_candidates(
         &self,
-        _: Vec<quant_pivot_models::enums::quant::OrderIntentStatus>,
+        _: Vec<OrderIntentStatus>,
         _: u64,
-    ) -> Result<Vec<quant_pivot_models::domain::OrderIntentInfo>, StorageError> {
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         Ok(Vec::new())
     }
 }

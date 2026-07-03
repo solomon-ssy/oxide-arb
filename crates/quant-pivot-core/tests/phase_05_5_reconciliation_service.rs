@@ -392,6 +392,13 @@ impl OrderIntentRepository for MemoryIntents {
         Ok(Vec::new())
     }
 
+    async fn find_blocking_by_report(
+        &self,
+        _: &RecommendationReportId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn count_open(&self) -> Result<u64, StorageError> {
         Ok(0)
     }

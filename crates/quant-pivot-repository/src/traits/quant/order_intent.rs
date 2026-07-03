@@ -116,6 +116,13 @@ pub trait OrderIntentRepository: Send + Sync {
         report_id: &RecommendationReportId,
     ) -> Result<Vec<OrderIntentInfo>, StorageError>;
 
+    /// Blocking intents for a report's recommendations (create dedup + outbound
+    /// view assembly — includes in-flight submission statuses).
+    async fn find_blocking_by_report(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError>;
+
     /// Count intents currently open (capital-holding or in-flight, i.e.
     /// [`OrderIntentStatus::OPEN`]). Feeds the admission concurrency cap (`#21`).
     async fn count_open(&self) -> Result<u64, StorageError>;

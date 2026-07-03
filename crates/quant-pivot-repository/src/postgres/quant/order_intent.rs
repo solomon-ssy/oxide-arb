@@ -394,19 +394,24 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Vec<OrderIntentInfo>, StorageError> {
-        quant_order_intent::Entity::find()
-            .filter(
-                quant_order_intent::Column::Status.is_in(OrderIntentStatus::PRE_SUBMISSION_ACTIVE),
-            )
-            .join(
-                JoinType::InnerJoin,
-                quant_order_intent::Relation::Recommendation.def(),
-            )
-            .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
+        intents_for_report(
+            &self.db,
+            report_id,
+            OrderIntentStatus::PRE_SUBMISSION_ACTIVE,
+        )
+        .await
+    }
+
+    async fn find_blocking_by_report(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        intents_for_report(
+            &self.db,
+            report_id,
+            OrderIntentStatus::SIBLING_INTENT_BLOCKING,
+        )
+        .await
     }
 
     async fn count_open(&self) -> Result<u64, StorageError> {
@@ -546,6 +551,24 @@ async fn load_kill_switch_allows_entry(db: &impl ConnectionTrait) -> Result<bool
             .map_err(StorageError::from)?
             .is_some_and(|row| row.state.allows_new_entry()),
     )
+}
+
+async fn intents_for_report<const N: usize>(
+    db: &impl ConnectionTrait,
+    report_id: &RecommendationReportId,
+    statuses: [OrderIntentStatus; N],
+) -> Result<Vec<OrderIntentInfo>, StorageError> {
+    quant_order_intent::Entity::find()
+        .filter(quant_order_intent::Column::Status.is_in(statuses))
+        .join(
+            JoinType::InnerJoin,
+            quant_order_intent::Relation::Recommendation.def(),
+        )
+        .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|rows| rows.into_iter().map(Into::into).collect())
 }
 
 async fn find_blocking_intent_for_recommendation(
