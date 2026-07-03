@@ -97,6 +97,17 @@ impl GateIntent {
     pub const fn requires_backtest(self) -> bool {
         matches!(self, Self::Candidate | Self::Publish | Self::AutoExecution)
     }
+
+    /// Stable `snake_case` wire name (matches the serde representation).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::DatasetReady => "dataset_ready",
+            Self::Candidate => "candidate",
+            Self::Publish => "publish",
+            Self::AutoExecution => "auto_execution",
+        }
+    }
 }
 
 /// Stable, queryable identity of one gate. Append-only wire labels.
@@ -131,6 +142,28 @@ pub enum GateId {
     SellFallbackRatio,
 }
 
+impl GateId {
+    /// Stable `snake_case` wire name (matches the serde representation).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::SampleCount => "sample_count",
+            Self::LabelCoverage => "label_coverage",
+            Self::CriticalFeatureCoverage => "critical_feature_coverage",
+            Self::NoPitLeakage => "no_pit_leakage",
+            Self::MaxDrawdown => "max_drawdown",
+            Self::LiquidityExitFeasible => "liquidity_exit_feasible",
+            Self::ShadowOverlapStability => "shadow_overlap_stability",
+            Self::BacktestRequired => "backtest_required",
+            Self::RankIc => "rank_ic",
+            Self::HitRate => "hit_rate",
+            Self::CategoryConcentration => "category_concentration",
+            Self::SellL2BookFidelity => "sell_l2_book_fidelity",
+            Self::SellFallbackRatio => "sell_fallback_ratio",
+        }
+    }
+}
+
 /// One failed gate, carrying the observed value and the threshold it missed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityGateFailure {
@@ -142,6 +175,171 @@ pub struct QualityGateFailure {
     pub threshold: String,
     /// Human-readable failure detail.
     pub detail: String,
+}
+
+/// Whether a gate blocks the advance (`Hard`) or is advisory only (`Soft`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateClass {
+    /// A blocking gate — any failure denies the advance.
+    Hard,
+    /// An advisory gate — a miss is recorded as a warning, never blocking.
+    Soft,
+}
+
+impl GateClass {
+    /// Stable `snake_case` wire name (matches the serde representation).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Hard => "hard",
+            Self::Soft => "soft",
+        }
+    }
+}
+
+/// The evaluated state of one gate against its threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateStatus {
+    /// The gate cleared its threshold.
+    Pass,
+    /// A hard gate missed its threshold (blocking).
+    Fail,
+    /// A soft gate missed its threshold (advisory).
+    Warn,
+    /// The gate does not apply to the evaluated intent (e.g. shadow stability
+    /// under a `Candidate` evaluation).
+    NotApplicable,
+}
+
+impl GateStatus {
+    /// Stable `snake_case` wire name (matches the serde representation).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Warn => "warn",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// One evaluated gate — the complete, self-describing scorecard row.
+///
+/// Unlike [`QualityGateFailure`] (only failures / warnings), this records
+/// *every* gate the evaluation touched, including passing and not-applicable
+/// ones, so a UI can render the full readiness picture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateOutcome {
+    /// Which gate this row describes.
+    pub gate: GateId,
+    /// Whether the gate is blocking (`Hard`) or advisory (`Soft`).
+    pub class: GateClass,
+    /// The evaluated state.
+    pub status: GateStatus,
+    /// The observed value (rendered).
+    pub observed: String,
+    /// The threshold compared against (rendered).
+    pub threshold: String,
+    /// Human-readable description of the failing/advisory condition.
+    pub detail: String,
+}
+
+impl GateOutcome {
+    /// Project a failing / warning outcome onto the legacy failure shape.
+    fn as_failure(&self) -> QualityGateFailure {
+        QualityGateFailure {
+            gate: self.gate,
+            observed: self.observed.clone(),
+            threshold: self.threshold.clone(),
+            detail: self.detail.clone(),
+        }
+    }
+}
+
+/// Accumulator that records every evaluated gate as a [`GateOutcome`].
+///
+/// The blocking / advisory / not-applicable helpers keep each `evaluate_*`
+/// site declarative — the ledger owns the pass/fail/warn mapping so the full
+/// scorecard and the derived failure projections come from a single source.
+#[derive(Debug, Default)]
+struct GateLedger {
+    outcomes: Vec<GateOutcome>,
+}
+
+impl GateLedger {
+    /// Record a blocking gate: `cleared == false` ⇒ [`GateStatus::Fail`].
+    fn hard(
+        &mut self,
+        gate: GateId,
+        cleared: bool,
+        observed: impl Into<String>,
+        threshold: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        let status = if cleared {
+            GateStatus::Pass
+        } else {
+            GateStatus::Fail
+        };
+        self.push(gate, GateClass::Hard, status, observed, threshold, detail);
+    }
+
+    /// Record an advisory gate: `cleared == false` ⇒ [`GateStatus::Warn`].
+    fn soft(
+        &mut self,
+        gate: GateId,
+        cleared: bool,
+        observed: impl Into<String>,
+        threshold: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        let status = if cleared {
+            GateStatus::Pass
+        } else {
+            GateStatus::Warn
+        };
+        self.push(gate, GateClass::Soft, status, observed, threshold, detail);
+    }
+
+    /// Record a gate that does not apply to the evaluated intent.
+    fn not_applicable(
+        &mut self,
+        gate: GateId,
+        class: GateClass,
+        threshold: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        self.push(
+            gate,
+            class,
+            GateStatus::NotApplicable,
+            "n/a",
+            threshold,
+            detail,
+        );
+    }
+
+    fn push(
+        &mut self,
+        gate: GateId,
+        class: GateClass,
+        status: GateStatus,
+        observed: impl Into<String>,
+        threshold: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        self.outcomes.push(GateOutcome {
+            gate,
+            class,
+            status,
+            observed: observed.into(),
+            threshold: threshold.into(),
+            detail: detail.into(),
+        });
+    }
 }
 
 /// Governed quality-gate thresholds (assembled from `QualityGateConfig` + spec).
@@ -245,6 +443,9 @@ pub struct QualityGateReport {
     pub intent: GateIntent,
     /// When the gate ran (drives the load-time staleness deny).
     pub evaluated_at: DateTime<Utc>,
+    /// Every evaluated gate (pass / fail / warn / not-applicable) — the complete
+    /// scorecard. `hard_failures` / `soft_warnings` are derived projections.
+    pub gates: Vec<GateOutcome>,
     /// Hard gate failures (any ⇒ `passed = false`).
     pub hard_failures: Vec<QualityGateFailure>,
     /// Soft gate warnings (never blocking).
@@ -279,38 +480,54 @@ impl DefaultModelQualityGate {
 
 impl ModelQualityGate for DefaultModelQualityGate {
     fn evaluate(&self, input: QualityGateInput) -> QuantResult<QualityGateDecision> {
-        let mut hard: Vec<QualityGateFailure> = Vec::new();
-        let mut soft: Vec<QualityGateFailure> = Vec::new();
+        let mut ledger = GateLedger::default();
 
         let is_exit = input.model_family.is_some_and(ModelFamily::is_exit_scorer);
-        evaluate_coverage_gates(&input, is_exit, &mut hard);
+        evaluate_coverage_gates(&input, is_exit, &mut ledger);
         if is_exit {
-            evaluate_sell_gates(&input, &mut hard, &mut soft);
+            evaluate_sell_gates(&input, &mut ledger);
             // Sell publish is still gated on shadow overlap stability (the buy
             // liquidity-feasibility/backtest gates do not apply to exit scorers).
-            evaluate_shadow_stability_gate(&input, &mut hard);
+            evaluate_shadow_stability_gate(&input, &mut ledger);
         } else {
-            evaluate_backtest_presence(&input, &mut hard);
+            evaluate_backtest_presence(&input, &mut ledger);
             if let Some(report) = &input.backtest {
-                evaluate_backtest_gates(report, &input.thresholds, &mut hard, &mut soft);
+                evaluate_backtest_gates(report, &input.thresholds, &mut ledger);
             }
-            evaluate_intent_gates(&input, &mut hard);
+            evaluate_intent_gates(&input, &mut ledger);
         }
 
-        let passed = hard.is_empty();
+        let gates = ledger.outcomes;
+        let hard_failures: Vec<QualityGateFailure> = gates
+            .iter()
+            .filter(|outcome| {
+                outcome.class == GateClass::Hard && outcome.status == GateStatus::Fail
+            })
+            .map(GateOutcome::as_failure)
+            .collect();
+        let soft_warnings: Vec<QualityGateFailure> = gates
+            .iter()
+            .filter(|outcome| {
+                outcome.class == GateClass::Soft && outcome.status == GateStatus::Warn
+            })
+            .map(GateOutcome::as_failure)
+            .collect();
+
+        let passed = hard_failures.is_empty();
         let report_hash = ResearchHasher::canonical(&ReportHashInput {
             subject: &input.subject,
             intent: input.intent,
-            hard_failures: &hard,
-            soft_warnings: &soft,
+            hard_failures: &hard_failures,
+            soft_warnings: &soft_warnings,
             passed,
         })?;
         let report = QualityGateReport {
             subject: input.subject,
             intent: input.intent,
             evaluated_at: Utc::now(),
-            hard_failures: hard.clone(),
-            soft_warnings: soft,
+            gates,
+            hard_failures: hard_failures.clone(),
+            soft_warnings,
             passed,
             report_hash,
         };
@@ -320,7 +537,7 @@ impl ModelQualityGate for DefaultModelQualityGate {
         } else {
             Ok(QualityGateDecision::Fail {
                 report,
-                hard_failures: hard,
+                hard_failures,
             })
         }
     }
@@ -332,11 +549,7 @@ impl ModelQualityGate for DefaultModelQualityGate {
 /// scorers the Sell gate owns them (against the `sell.*` thresholds), so they are
 /// skipped here to avoid double-applying the Buy `min_sample_count` bar to a
 /// sell-only dataset. Feature coverage and PIT leakage are universal.
-fn evaluate_coverage_gates(
-    input: &QualityGateInput,
-    is_exit: bool,
-    hard: &mut Vec<QualityGateFailure>,
-) {
+fn evaluate_coverage_gates(input: &QualityGateInput, is_exit: bool, ledger: &mut GateLedger) {
     let t = &input.thresholds;
     if !is_exit {
         // Sample count: prefer the backtest's resolved samples, else the dataset's
@@ -345,213 +558,208 @@ fn evaluate_coverage_gates(
             .backtest
             .as_ref()
             .map_or(input.dataset.built_examples, |report| report.sample_count);
-        if samples < t.min_sample_count {
-            hard.push(QualityGateFailure {
-                gate: GateId::SampleCount,
-                observed: samples.to_string(),
-                threshold: t.min_sample_count.to_string(),
-                detail: "insufficient resolved samples".to_owned(),
-            });
-        }
+        ledger.hard(
+            GateId::SampleCount,
+            samples >= t.min_sample_count,
+            samples.to_string(),
+            t.min_sample_count.to_string(),
+            "insufficient resolved samples",
+        );
 
         let label_coverage = input.dataset.label_coverage();
-        if label_coverage < t.min_label_coverage {
-            hard.push(QualityGateFailure {
-                gate: GateId::LabelCoverage,
-                observed: label_coverage.to_string(),
-                threshold: t.min_label_coverage.to_string(),
-                detail: "label coverage below minimum".to_owned(),
-            });
-        }
+        ledger.hard(
+            GateId::LabelCoverage,
+            label_coverage >= t.min_label_coverage,
+            label_coverage.to_string(),
+            t.min_label_coverage.to_string(),
+            "label coverage below minimum",
+        );
     }
 
     let feature_coverage = input.dataset.feature_build_coverage();
-    if feature_coverage < t.min_critical_feature_coverage {
-        hard.push(QualityGateFailure {
-            gate: GateId::CriticalFeatureCoverage,
-            observed: feature_coverage.to_string(),
-            threshold: t.min_critical_feature_coverage.to_string(),
-            detail: "critical-feature coverage below minimum".to_owned(),
-        });
-    }
+    ledger.hard(
+        GateId::CriticalFeatureCoverage,
+        feature_coverage >= t.min_critical_feature_coverage,
+        feature_coverage.to_string(),
+        t.min_critical_feature_coverage.to_string(),
+        "critical-feature coverage below minimum",
+    );
 
-    if !input.leakage.is_clean() {
-        hard.push(QualityGateFailure {
-            gate: GateId::NoPitLeakage,
-            observed: input.leakage.violation_count().to_string(),
-            threshold: "0".to_owned(),
-            detail: "point-in-time leakage detected in training features".to_owned(),
-        });
-    }
+    ledger.hard(
+        GateId::NoPitLeakage,
+        input.leakage.is_clean(),
+        input.leakage.violation_count().to_string(),
+        "0",
+        "point-in-time leakage detected in training features",
+    );
 }
 
 /// Sell-side hold-vs-exit hard/soft gates (Phase 06.1).
-fn evaluate_sell_gates(
-    input: &QualityGateInput,
-    hard: &mut Vec<QualityGateFailure>,
-    soft: &mut Vec<QualityGateFailure>,
-) {
+fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     let t = &input.sell_thresholds;
     let samples = input
         .dataset
         .exit_decision_built
         .max(input.dataset.built_examples);
-    if samples < t.min_sample_count {
-        hard.push(QualityGateFailure {
-            gate: GateId::SampleCount,
-            observed: samples.to_string(),
-            threshold: t.min_sample_count.to_string(),
-            detail: "insufficient ExitDecision training samples".to_owned(),
-        });
-    }
+    ledger.hard(
+        GateId::SampleCount,
+        samples >= t.min_sample_count,
+        samples.to_string(),
+        t.min_sample_count.to_string(),
+        "insufficient ExitDecision training samples",
+    );
     let label_coverage = input.dataset.label_coverage();
-    if label_coverage < t.min_label_coverage {
-        hard.push(QualityGateFailure {
-            gate: GateId::LabelCoverage,
-            observed: label_coverage.to_string(),
-            threshold: t.min_label_coverage.to_string(),
-            detail: "sell label coverage below minimum".to_owned(),
-        });
-    }
+    ledger.hard(
+        GateId::LabelCoverage,
+        label_coverage >= t.min_label_coverage,
+        label_coverage.to_string(),
+        t.min_label_coverage.to_string(),
+        "sell label coverage below minimum",
+    );
     let l2_ratio = input.dataset.exit_l2_fidelity_ratio();
-    if l2_ratio < t.min_l2_book_fidelity_ratio {
-        hard.push(QualityGateFailure {
-            gate: GateId::SellL2BookFidelity,
-            observed: l2_ratio.to_string(),
-            threshold: t.min_l2_book_fidelity_ratio.to_string(),
-            detail: "ExitDecision L2 book fidelity below minimum".to_owned(),
-        });
-    }
+    ledger.hard(
+        GateId::SellL2BookFidelity,
+        l2_ratio >= t.min_l2_book_fidelity_ratio,
+        l2_ratio.to_string(),
+        t.min_l2_book_fidelity_ratio.to_string(),
+        "ExitDecision L2 book fidelity below minimum",
+    );
     let fallback_ratio = input.dataset.exit_fallback_ratio();
-    if fallback_ratio > t.max_fallback_ratio {
-        hard.push(QualityGateFailure {
-            gate: GateId::SellFallbackRatio,
-            observed: fallback_ratio.to_string(),
-            threshold: t.max_fallback_ratio.to_string(),
-            detail: "ExitDecision microstructure fallback ratio above maximum".to_owned(),
-        });
-    }
-    if let Some(report) = &input.backtest
-        && report.rank_ic < t.min_exit_alpha_rank_ic
-    {
-        soft.push(QualityGateFailure {
-            gate: GateId::RankIc,
-            observed: report.rank_ic.to_string(),
-            threshold: t.min_exit_alpha_rank_ic.to_string(),
-            detail: "exit-alpha rank IC below soft minimum".to_owned(),
-        });
+    ledger.hard(
+        GateId::SellFallbackRatio,
+        fallback_ratio <= t.max_fallback_ratio,
+        fallback_ratio.to_string(),
+        t.max_fallback_ratio.to_string(),
+        "ExitDecision microstructure fallback ratio above maximum",
+    );
+    if let Some(report) = &input.backtest {
+        ledger.soft(
+            GateId::RankIc,
+            report.rank_ic >= t.min_exit_alpha_rank_ic,
+            report.rank_ic.to_string(),
+            t.min_exit_alpha_rank_ic.to_string(),
+            "exit-alpha rank IC below soft minimum",
+        );
     }
 }
 
 /// Hard gate: model intents that consume backtest metrics must carry a report.
-fn evaluate_backtest_presence(input: &QualityGateInput, hard: &mut Vec<QualityGateFailure>) {
+fn evaluate_backtest_presence(input: &QualityGateInput, ledger: &mut GateLedger) {
     if !input.intent.requires_backtest() {
         return;
     }
-    if input.backtest.is_some() {
-        return;
-    }
-    hard.push(QualityGateFailure {
-        gate: GateId::BacktestRequired,
-        observed: "none".to_owned(),
-        threshold: "required".to_owned(),
-        detail: "a frozen backtest report is required before advancing this model".to_owned(),
-    });
+    let present = input.backtest.is_some();
+    ledger.hard(
+        GateId::BacktestRequired,
+        present,
+        if present { "present" } else { "none" },
+        "required",
+        "a frozen backtest report is required before advancing this model",
+    );
 }
 
 /// Backtest-metric gates: drawdown (hard) + rank IC / hit rate / concentration (soft).
 fn evaluate_backtest_gates(
     report: &BacktestReport,
     t: &QualityGateThresholds,
-    hard: &mut Vec<QualityGateFailure>,
-    soft: &mut Vec<QualityGateFailure>,
+    ledger: &mut GateLedger,
 ) {
-    if report.max_drawdown > t.max_drawdown {
-        hard.push(QualityGateFailure {
-            gate: GateId::MaxDrawdown,
-            observed: report.max_drawdown.to_string(),
-            threshold: t.max_drawdown.to_string(),
-            detail: "max drawdown exceeds budget".to_owned(),
-        });
-    }
-    if report.rank_ic <= t.min_rank_ic {
-        soft.push(QualityGateFailure {
-            gate: GateId::RankIc,
-            observed: report.rank_ic.to_string(),
-            threshold: format!("> {}", t.min_rank_ic),
-            detail: "rank IC is not positive".to_owned(),
-        });
-    }
+    ledger.hard(
+        GateId::MaxDrawdown,
+        report.max_drawdown <= t.max_drawdown,
+        report.max_drawdown.to_string(),
+        t.max_drawdown.to_string(),
+        "max drawdown exceeds budget",
+    );
+    ledger.soft(
+        GateId::RankIc,
+        report.rank_ic > t.min_rank_ic,
+        report.rank_ic.to_string(),
+        format!("> {}", t.min_rank_ic),
+        "rank IC is not positive",
+    );
     let hit_rate = report.hit_rate.inner();
-    if hit_rate < Decimal::new(5, 1) {
-        soft.push(QualityGateFailure {
-            gate: GateId::HitRate,
-            observed: hit_rate.to_string(),
-            threshold: "0.5".to_owned(),
-            detail: "directional hit rate below 0.5".to_owned(),
-        });
-    }
+    ledger.soft(
+        GateId::HitRate,
+        hit_rate >= Decimal::new(5, 1),
+        hit_rate.to_string(),
+        "0.5",
+        "directional hit rate below 0.5",
+    );
     let concentration = max_category_concentration(report);
-    if concentration > t.max_category_concentration {
-        soft.push(QualityGateFailure {
-            gate: GateId::CategoryConcentration,
-            observed: concentration.to_string(),
-            threshold: t.max_category_concentration.to_string(),
-            detail: "samples concentrated in a single category".to_owned(),
-        });
-    }
+    ledger.soft(
+        GateId::CategoryConcentration,
+        concentration <= t.max_category_concentration,
+        concentration.to_string(),
+        t.max_category_concentration.to_string(),
+        "samples concentrated in a single category",
+    );
 }
 
 /// Intent-specific hard gates: liquidity feasibility (auto) + shadow stability
 /// (publish / auto).
-fn evaluate_intent_gates(input: &QualityGateInput, hard: &mut Vec<QualityGateFailure>) {
+fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     let t = &input.thresholds;
     if input.intent.requires_liquidity_feasibility() {
         match &input.backtest {
             Some(report) => {
                 let feasible = report.liquidity_feasibility.inner();
-                if feasible < t.min_liquidity_exit_feasibility {
-                    hard.push(QualityGateFailure {
-                        gate: GateId::LiquidityExitFeasible,
-                        observed: feasible.to_string(),
-                        threshold: t.min_liquidity_exit_feasibility.to_string(),
-                        detail: "liquidity-exit feasibility below minimum".to_owned(),
-                    });
-                }
+                ledger.hard(
+                    GateId::LiquidityExitFeasible,
+                    feasible >= t.min_liquidity_exit_feasibility,
+                    feasible.to_string(),
+                    t.min_liquidity_exit_feasibility.to_string(),
+                    "liquidity-exit feasibility below minimum",
+                );
             }
-            None => hard.push(QualityGateFailure {
-                gate: GateId::LiquidityExitFeasible,
-                observed: "none".to_owned(),
-                threshold: t.min_liquidity_exit_feasibility.to_string(),
-                detail: "auto-execution gate requires a backtest report".to_owned(),
-            }),
+            None => ledger.hard(
+                GateId::LiquidityExitFeasible,
+                false,
+                "none",
+                t.min_liquidity_exit_feasibility.to_string(),
+                "auto-execution gate requires a backtest report",
+            ),
         }
+    } else {
+        ledger.not_applicable(
+            GateId::LiquidityExitFeasible,
+            GateClass::Hard,
+            t.min_liquidity_exit_feasibility.to_string(),
+            "only evaluated for auto-execution",
+        );
     }
 
-    evaluate_shadow_stability_gate(input, hard);
+    evaluate_shadow_stability_gate(input, ledger);
 }
 
 /// Hard gate: publish / auto intents require an established shadow-overlap
 /// stability. Family-agnostic, so both Buy and Sell publishes are gated on it.
-fn evaluate_shadow_stability_gate(input: &QualityGateInput, hard: &mut Vec<QualityGateFailure>) {
+fn evaluate_shadow_stability_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
+    let t = &input.thresholds;
     if !input.intent.requires_shadow_stability() {
+        ledger.not_applicable(
+            GateId::ShadowOverlapStability,
+            GateClass::Hard,
+            t.min_shadow_overlap_stability.to_string(),
+            "only evaluated for publish / auto-execution",
+        );
         return;
     }
-    let t = &input.thresholds;
     match input.shadow_stability {
-        Some(stability) if stability.inner() >= t.min_shadow_overlap_stability => {}
-        Some(stability) => hard.push(QualityGateFailure {
-            gate: GateId::ShadowOverlapStability,
-            observed: stability.inner().to_string(),
-            threshold: t.min_shadow_overlap_stability.to_string(),
-            detail: "shadow overlap stability below minimum".to_owned(),
-        }),
-        None => hard.push(QualityGateFailure {
-            gate: GateId::ShadowOverlapStability,
-            observed: "none".to_owned(),
-            threshold: t.min_shadow_overlap_stability.to_string(),
-            detail: "shadow stability not established over the required window".to_owned(),
-        }),
+        Some(stability) => ledger.hard(
+            GateId::ShadowOverlapStability,
+            stability.inner() >= t.min_shadow_overlap_stability,
+            stability.inner().to_string(),
+            t.min_shadow_overlap_stability.to_string(),
+            "shadow overlap stability below minimum",
+        ),
+        None => ledger.hard(
+            GateId::ShadowOverlapStability,
+            false,
+            "none",
+            t.min_shadow_overlap_stability.to_string(),
+            "shadow stability not established over the required window",
+        ),
     }
 }
 

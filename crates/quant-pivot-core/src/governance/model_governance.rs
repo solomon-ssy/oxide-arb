@@ -29,16 +29,20 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
-        BacktestReportInfo, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
-        NewModelGovernanceAudit, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
-        RollbackModelCommand, RuntimeConfigPort, ShadowStabilitySummary, TrainingDatasetInfo,
+        BacktestReportInfo, GateOutcomeView, GatePreviewIntent, GovernanceActor,
+        ModelGovernancePort, ModelVersionInfo, NewModelGovernanceAudit, PromoteDatasetRequest,
+        PublishModelCommand, QualityGateReportView, RetireModelCommand, RollbackModelCommand,
+        RuntimeConfigPort, ShadowStabilitySummary, TrainingDatasetInfo,
     },
     enums::{
         model::ModelFamily,
         quant::{ModelGovernanceAction, PublicationStatus, TrainingDatasetStatus},
     },
     runtime_config::QualityGateConfig,
-    types::{AuditEventId, ModelGovernanceAuditId, ModelSpecId, ModelVersionId, Probability},
+    types::{
+        AuditEventId, BacktestReportId, ModelGovernanceAuditId, ModelSpecId, ModelVersionId,
+        Probability,
+    },
 };
 use quant_pivot_repository::traits::{
     BacktestReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
@@ -47,8 +51,9 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     backtest::BacktestReport,
     gates::{
-        GateId, GateIntent, GateSubject, ModelQualityGate, QualityGateDecision, QualityGateFailure,
-        QualityGateInput, QualityGateReport, QualityGateThresholds, SellQualityGateThresholds,
+        GateId, GateIntent, GateOutcome, GateSubject, ModelQualityGate, QualityGateDecision,
+        QualityGateFailure, QualityGateInput, QualityGateReport, QualityGateThresholds,
+        SellQualityGateThresholds,
     },
     training::{DatasetCoverage, LeakageFindings},
 };
@@ -86,6 +91,14 @@ pub struct ModelGovernanceDeps {
 /// Offline model-governance orchestration service.
 pub struct ModelGovernanceService {
     deps: ModelGovernanceDeps,
+}
+
+/// A shared gate evaluation: the report plus the shadow summary, which is
+/// present only for shadow-gated intents (`Publish` / `AutoExecution`) and
+/// feeds the publish audit's shadow-overlap evidence.
+struct GateEvaluation {
+    report: QualityGateReport,
+    shadow_summary: Option<ShadowStabilitySummary>,
 }
 
 impl ModelGovernanceService {
@@ -204,32 +217,23 @@ impl ModelGovernancePort for ModelGovernanceService {
             .into());
         }
 
-        let config = self.deps.runtime_config.current();
-        let required_window = config.quality_gate.required_shadow_window_secs;
-        let thresholds = thresholds_from_config(&config.quality_gate)?;
-        let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
-        let model_family = self.model_family_for_version(&version).await?;
-
-        let backtest = self.latest_backtest(&version.model_version_id).await?;
-        let dataset = self.dataset_coverage(&version).await?;
-        let (shadow_stability, summary) = self
-            .shadow_stability(&version.model_version_id, required_window)
+        let required_window = self
+            .deps
+            .runtime_config
+            .current()
+            .quality_gate
+            .required_shadow_window_secs;
+        let evaluation = self
+            .evaluate_gate(&version, GateIntent::Publish, None)
             .await?;
-
-        let decision = self.deps.gate.evaluate(QualityGateInput {
-            subject: GateSubject::ModelVersion(version.model_version_id.clone()),
-            intent: GateIntent::Publish,
-            backtest,
-            dataset,
-            // Built ⇒ leakage-clean (enforced at dataset build); the gate's
-            // leakage arm is unit-tested directly.
-            leakage: LeakageFindings::default(),
-            shadow_stability,
-            thresholds,
-            sell_thresholds,
-            model_family: Some(model_family),
+        let report = evaluation.report;
+        // Publish requires shadow stability, so the evaluation always carries the
+        // summary; keep the publish audit's shadow evidence honest.
+        let summary = evaluation.shadow_summary.ok_or_else(|| {
+            QuantError::from(GovernanceError::IllegalTransition {
+                detail: "publish gate did not evaluate shadow stability".to_owned(),
+            })
         })?;
-        let report = decision.report().clone();
 
         // Persist the gate evaluation onto the version regardless of outcome —
         // it is the durable evidence for both a pass and a blocked attempt.
@@ -238,9 +242,9 @@ impl ModelGovernancePort for ModelGovernanceService {
             .set_quality_gate_report(&version.model_version_id, gate_report_json(&report)?)
             .await?;
 
-        if let QualityGateDecision::Fail { hard_failures, .. } = &decision {
+        if !report.passed {
             return Err(map_publish_gate_failure(
-                hard_failures,
+                &report.hard_failures,
                 &version.model_version_id,
             ));
         }
@@ -533,9 +537,76 @@ impl ModelGovernancePort for ModelGovernanceService {
 
         Ok(promoted)
     }
+
+    async fn preview_gate(
+        &self,
+        model_version_id: &ModelVersionId,
+        intent: GatePreviewIntent,
+        backtest_report_id: Option<&BacktestReportId>,
+    ) -> QuantResult<QualityGateReportView> {
+        let version = self.find_version(model_version_id).await?;
+        let gate_intent = match intent {
+            GatePreviewIntent::Candidate => GateIntent::Candidate,
+            GatePreviewIntent::Publish => GateIntent::Publish,
+            GatePreviewIntent::AutoExecution => GateIntent::AutoExecution,
+        };
+        let evaluation = self
+            .evaluate_gate(&version, gate_intent, backtest_report_id)
+            .await?;
+        Ok(gate_report_view(&evaluation.report))
+    }
 }
 
 impl ModelGovernanceService {
+    /// Evaluate the quality gate for a model version against the active
+    /// thresholds. The single evaluation path shared by `publish` (which then
+    /// persists + advances) and `preview_gate` (read-only dry-run). Shadow
+    /// stability is fetched only when the intent gates on it.
+    async fn evaluate_gate(
+        &self,
+        version: &ModelVersionInfo,
+        intent: GateIntent,
+        backtest_report_id: Option<&BacktestReportId>,
+    ) -> QuantResult<GateEvaluation> {
+        let config = self.deps.runtime_config.current();
+        let required_window = config.quality_gate.required_shadow_window_secs;
+        let thresholds = thresholds_from_config(&config.quality_gate)?;
+        let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
+        let model_family = self.model_family_for_version(version).await?;
+
+        let backtest = match backtest_report_id {
+            Some(id) => self.backtest_by_id(id).await?,
+            None => self.latest_backtest(&version.model_version_id).await?,
+        };
+        let dataset = self.dataset_coverage(version).await?;
+        let (shadow_stability, shadow_summary) = if intent.requires_shadow_stability() {
+            let (stability, summary) = self
+                .shadow_stability(&version.model_version_id, required_window)
+                .await?;
+            (stability, Some(summary))
+        } else {
+            (None, None)
+        };
+
+        let decision = self.deps.gate.evaluate(QualityGateInput {
+            subject: GateSubject::ModelVersion(version.model_version_id.clone()),
+            intent,
+            backtest,
+            // Built ⇒ leakage-clean (enforced at dataset build); the gate's
+            // leakage arm is unit-tested directly.
+            leakage: LeakageFindings::default(),
+            dataset,
+            shadow_stability,
+            thresholds,
+            sell_thresholds,
+            model_family: Some(model_family),
+        })?;
+        Ok(GateEvaluation {
+            report: decision.report().clone(),
+            shadow_summary,
+        })
+    }
+
     /// Reconstruct the most recent backtest report for a version, if any.
     async fn latest_backtest(
         &self,
@@ -547,6 +618,22 @@ impl ModelGovernanceService {
             .list_by_model_version(version_id)
             .await?;
         match reports.into_iter().next() {
+            Some(info) => Ok(Some(backtest_report_from_info(info)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Reconstruct a specific frozen backtest report by id, if it exists.
+    async fn backtest_by_id(
+        &self,
+        backtest_report_id: &BacktestReportId,
+    ) -> QuantResult<Option<BacktestReport>> {
+        match self
+            .deps
+            .backtest_report_repo
+            .find_by_id(backtest_report_id)
+            .await?
+        {
             Some(info) => Ok(Some(backtest_report_from_info(info)?)),
             None => Ok(None),
         }
@@ -620,6 +707,31 @@ impl ModelGovernanceService {
                 }
                 .into()
             })
+    }
+}
+
+/// Project a research [`QualityGateReport`] onto the read-only wire view. Lives
+/// in core because it is the only layer that sees both the research report and
+/// the models-crate view (models must not depend on research).
+fn gate_report_view(report: &QualityGateReport) -> QualityGateReportView {
+    QualityGateReportView {
+        intent: report.intent.wire_name().to_owned(),
+        evaluated_at: report.evaluated_at,
+        passed: report.passed,
+        gates: report.gates.iter().map(gate_outcome_view).collect(),
+        report_hash: report.report_hash.as_str().to_owned(),
+    }
+}
+
+/// Project one [`GateOutcome`] onto its wire row (stable `snake_case` strings).
+fn gate_outcome_view(outcome: &GateOutcome) -> GateOutcomeView {
+    GateOutcomeView {
+        gate: outcome.gate.wire_name().to_owned(),
+        class: outcome.class.wire_name().to_owned(),
+        status: outcome.status.wire_name().to_owned(),
+        observed: outcome.observed.clone(),
+        threshold: outcome.threshold.clone(),
+        detail: outcome.detail.clone(),
     }
 }
 

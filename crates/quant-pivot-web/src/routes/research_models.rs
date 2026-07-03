@@ -25,8 +25,9 @@ use quant_pivot_models::{
     domain::{
         BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery,
         MaterializationRunKind, MaterializationRunStatus, ModelComparisonReportView,
-        ModelSpecListQuery, ModelVersionListQuery, Paginated, QuantModelSpecView,
-        RunBacktestRequest, TrainModelRequest, TrainedModelView,
+        ModelSpecListQuery, ModelVersionListQuery, Paginated, QualityGatePreviewQuery,
+        QualityGateReportView, QuantModelSpecView, RunBacktestRequest, TrainModelRequest,
+        TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -71,6 +72,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models/{id}",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             get_version,
+        ),
+        spec(
+            Method::GET,
+            "/research/models/{id}/quality-gate",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            preview_quality_gate,
         ),
         spec(
             Method::GET,
@@ -240,6 +247,23 @@ pub async fn get_version(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("model version not found: {id}")))?;
     Ok(WebResponse::ok(TrainedModelView::from(info)))
+}
+
+/// `GET /api/research/models/{id}/quality-gate` — read-only publish-readiness dry-run.
+///
+/// Runs the same quality gate as `publish` (no persistence, no state change) and
+/// returns the full per-gate scorecard so operators can judge readiness before acting.
+pub async fn preview_quality_gate(
+    state: web::Data<AppState>,
+    id: web::Path<ModelVersionId>,
+    query: web::Query<QualityGatePreviewQuery>,
+) -> Result<WebResponse<QualityGateReportView>, WebError> {
+    let query = query.into_inner();
+    let view = state
+        .model_governance
+        .preview_gate(&id, query.intent, query.backtest_report_id.as_ref())
+        .await?;
+    Ok(WebResponse::ok(view))
 }
 
 /// `POST /api/research/models/{id}/backtest` — PIT backtest over a dataset.

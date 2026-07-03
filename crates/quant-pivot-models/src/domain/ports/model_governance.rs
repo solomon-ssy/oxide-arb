@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{ModelVersionInfo, TrainingDatasetInfo},
-    types::{ModelVersionId, TrainingDatasetId},
+    domain::{GatePreviewIntent, ModelVersionInfo, QualityGateReportView, TrainingDatasetInfo},
+    types::{BacktestReportId, ModelVersionId, TrainingDatasetId},
 };
 
 /// Who initiated a governance action. Recorded for audit provenance.
@@ -106,4 +106,15 @@ pub trait ModelGovernancePort: Send + Sync {
         request: PromoteDatasetRequest,
         actor: GovernanceActor,
     ) -> QuantResult<TrainingDatasetInfo>;
+
+    /// Evaluate the quality gate for a version as a read-only dry-run — the same
+    /// evaluator `publish` uses, but with no persistence and no state change.
+    /// Drives the SPA publish-readiness scorecard. `backtest_report_id` selects
+    /// a specific frozen report; `None` uses the version's most recent one.
+    async fn preview_gate(
+        &self,
+        model_version_id: &ModelVersionId,
+        intent: GatePreviewIntent,
+        backtest_report_id: Option<&BacktestReportId>,
+    ) -> QuantResult<QualityGateReportView>;
 }
