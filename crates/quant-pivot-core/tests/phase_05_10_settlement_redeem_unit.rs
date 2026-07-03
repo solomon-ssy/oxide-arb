@@ -32,9 +32,9 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalAllocationInfo,
-        ConfirmSettlementRedeem, ExitTrainingLotRow, MarketInfo, NewCapitalAllocation,
-        NewOperationLog, NewOrderIntent, NewSettlementRedeem, OrderIntentInfo,
-        OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
+        ConfirmSettlementRedeem, CoreEventPublisher, ExitTrainingLotRow, MarketInfo,
+        NewCapitalAllocation, NewOperationLog, NewOrderIntent, NewSettlementRedeem,
+        OrderIntentInfo, OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
         PositionListQuery, PositionSummary, RecommendationInfo, SettlementRedeemInfo,
         SettlementRedeemListQuery, SettlementRedeemLotInfo, SettlementRedeemSummary,
     },
@@ -192,11 +192,7 @@ impl PositionRepository for StubPositions {
         &self,
         query: PositionListQuery,
     ) -> Result<Paginated<PositionSummary>, StorageError> {
-        Ok(Paginated::from_request(
-            Vec::new(),
-            0,
-            &query.normalized().page,
-        ))
+        Ok(Paginated::empty_for(&query))
     }
 
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {
@@ -290,11 +286,7 @@ impl OrderIntentRepository for StubIntents {
         &self,
         query: OrderIntentListQuery,
     ) -> Result<Paginated<OrderIntentInfo>, StorageError> {
-        Ok(Paginated::from_request(
-            Vec::new(),
-            0,
-            &query.normalized().page,
-        ))
+        Ok(Paginated::empty_for(&query))
     }
 
     async fn find_expired(
@@ -369,11 +361,7 @@ impl MarketRepository for EmptyMarkets {
         &self,
         query: quant_pivot_models::domain::MarketPageQuery,
     ) -> Result<Paginated<MarketInfo>, StorageError> {
-        Ok(Paginated::from_request(
-            Vec::new(),
-            0,
-            &query.normalized().page,
-        ))
+        Ok(Paginated::empty_for(&query))
     }
 
     async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
@@ -439,11 +427,7 @@ impl SettlementRedeemRepository for EmptySettlementRedeems {
         &self,
         query: SettlementRedeemListQuery,
     ) -> Result<Paginated<SettlementRedeemSummary>, StorageError> {
-        Ok(Paginated::from_request(
-            Vec::new(),
-            0,
-            &query.normalized().page,
-        ))
+        Ok(Paginated::empty_for(&query))
     }
 
     async fn list_lots_by_redeem(
@@ -586,6 +570,7 @@ fn settlement_service(positions: StubPositions, intents: StubIntents) -> Settlem
         wallet_kind: ExecutionWalletKind::Eoa,
         capital_events: noop_capital_writer(),
         position_events: noop_position_writer(),
+        events: CoreEventPublisher::bounded(16).0,
     })
 }
 

@@ -3,7 +3,9 @@
 use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{ChangeUserPassword, NewUser, Paginated, UserInfo, UserPageQuery, UserPatch},
+    domain::{
+        ChangeUserPassword, NewUser, PageWindow, Paginated, UserInfo, UserPageQuery, UserPatch,
+    },
     entities::{user, user_role},
     enums::rbac::UserStatus,
     schema::column,
@@ -166,7 +168,7 @@ async fn do_page(
             .filter(page_condition(&query))
             .order_by_desc(user::Column::CreatedAt),
         db,
-        &query.page,
+        PageWindow::from_query(&query),
         Into::into,
     )
     .await

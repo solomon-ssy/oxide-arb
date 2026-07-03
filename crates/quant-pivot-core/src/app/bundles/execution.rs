@@ -176,6 +176,7 @@ impl ExecutionBundle {
             capital_events: Arc::clone(&infra.capital_allocation_event_writer),
             position_events: Arc::clone(&infra.position_event_writer),
             intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
+            events: deps.intent_lifecycle.publisher(),
         }));
 
         // Exit-monitor engine (05.6): model-driven signal seam + exit dispatcher
@@ -238,6 +239,7 @@ fn build_settlement_redeem_service(
             wallet_kind: deps.deploy.quant.account.wallet_kind,
             capital_events: Arc::clone(&deps.infra.capital_allocation_event_writer),
             position_events: Arc::clone(&deps.infra.position_event_writer),
+            events: deps.intent_lifecycle.publisher(),
         },
     )))
 }

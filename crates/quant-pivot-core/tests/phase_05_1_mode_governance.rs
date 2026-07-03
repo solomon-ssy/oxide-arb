@@ -17,10 +17,10 @@ use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, CapitalAllocationInfo, CoreEventPublisher, DataQualityPort,
         DataQualitySnapshot, KillSwitchPort, KillSwitchStateInfo, KillSwitchView, ModelSpecInfo,
-        ModelVersionInfo, NewModelSpec, NewModelVersion, NewReconciliation, NewShadowComparison,
-        Paginated, PreflightReport, ReconciliationInfo, ReconciliationListQuery,
-        ReconciliationPatch, SetKillSwitchCommand, ShadowComparisonInfo, ShadowStabilitySummary,
-        UpsertKillSwitchState,
+        ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewModelSpec, NewModelVersion,
+        NewReconciliation, NewShadowComparison, Paginated, PreflightReport, ReconciliationInfo,
+        ReconciliationListQuery, ReconciliationPatch, SetKillSwitchCommand, ShadowComparisonInfo,
+        ShadowStabilitySummary, UpsertKillSwitchState,
     },
     enums::{
         execution::KillSwitchState,
@@ -72,6 +72,18 @@ impl ModelRegistryRepository for MockModelRegistry {
         _model_version_id: &ModelVersionId,
     ) -> Result<Option<ModelVersionInfo>, StorageError> {
         Ok(self.version.clone())
+    }
+    async fn page_specs(
+        &self,
+        _query: ModelSpecListQuery,
+    ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
+        unimplemented!()
+    }
+    async fn page_versions(
+        &self,
+        _query: ModelVersionListQuery,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+        unimplemented!()
     }
     async fn list_published_for_spec(
         &self,

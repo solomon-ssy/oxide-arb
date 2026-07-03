@@ -43,14 +43,14 @@ use quant_pivot_models::{
         BookSnapshot, CapitalAllocationInfo, CapitalSettlement, CoreEventPublisher,
         DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch,
         ExecutionSubmitPort, ExitLedgerWrite, KillSwitchPort, KillSwitchView, MarketInfo,
-        MarketPageQuery, ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder,
-        NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent, NewReconciliation,
-        NewReportTransaction, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
-        OperationLogInfo, OperationLogQuery, OrderIntentInfo, OrderIntentListQuery, Paginated,
-        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
-        ReconciliationLedgerWrite, ReconciliationListQuery, ReconciliationPatch,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, SetKillSwitchCommand,
-        SubmissionLedgerWrite, UpsertMarket,
+        MarketPageQuery, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+        ModelVersionListQuery, NewCapitalAllocation, NewExecutionOrder, NewModelSpec,
+        NewModelVersion, NewOperationLog, NewOrderIntent, NewReconciliation, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OperationLogInfo, OperationLogQuery,
+        OrderIntentInfo, OrderIntentListQuery, Paginated, QuantReportListQuery, RecommendationInfo,
+        RecommendationReportInfo, ReconciliationInfo, ReconciliationLedgerWrite,
+        ReconciliationListQuery, ReconciliationPatch, RuntimeConfigActivationInfo,
+        RuntimeConfigVersionInfo, SetKillSwitchCommand, SubmissionLedgerWrite, UpsertMarket,
     },
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
@@ -973,6 +973,20 @@ impl ModelRegistryRepository for StubModelRegistry {
             retired_at: None,
             created_at: now(),
         }))
+    }
+
+    async fn page_specs(
+        &self,
+        _query: ModelSpecListQuery,
+    ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn page_versions(
+        &self,
+        _query: ModelVersionListQuery,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+        unimplemented!()
     }
 
     async fn list_published_for_spec(

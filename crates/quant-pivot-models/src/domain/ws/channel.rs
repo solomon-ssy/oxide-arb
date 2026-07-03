@@ -60,11 +60,18 @@ pub enum WsChannel {
     QuantIntent,
     /// Materialization / replay run lifecycle update for dashboard clients.
     MaterializationRunUpdate,
+    /// Reconciliation row detect/update lifecycle (worker + operator resolve),
+    /// discriminated by the payload; a revision hint for the reconciliation
+    /// queue + recovery panel (the list is always re-fetched over REST).
+    QuantReconciliation,
+    /// Settlement-redeem state transition (submitted / confirmed / failed /
+    /// `manual_required`); a revision hint for the settlement ledger.
+    QuantSettlement,
 }
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::MarketResolved,
@@ -73,6 +80,8 @@ impl WsChannel {
         Self::QuantReport,
         Self::QuantIntent,
         Self::MaterializationRunUpdate,
+        Self::QuantReconciliation,
+        Self::QuantSettlement,
     ];
 
     /// The on-the-wire channel name.
@@ -87,6 +96,8 @@ impl WsChannel {
             Self::QuantReport => "quant.report",
             Self::QuantIntent => "quant.intent",
             Self::MaterializationRunUpdate => "materialization.run_update",
+            Self::QuantReconciliation => "quant.reconciliation",
+            Self::QuantSettlement => "quant.settlement",
         }
     }
 
@@ -103,6 +114,8 @@ impl WsChannel {
             Self::QuantIntent => ResourceType::OrderIntent,
             Self::MaterializationRunUpdate => ResourceType::Materialization,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
+            Self::QuantReconciliation => ResourceType::Reconciliation,
+            Self::QuantSettlement => ResourceType::SettlementRedeem,
         }
     }
 

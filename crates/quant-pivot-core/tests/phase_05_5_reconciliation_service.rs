@@ -719,8 +719,7 @@ impl PositionRepository for StubPositions {
         &self,
         query: PositionListQuery,
     ) -> Result<Paginated<PositionSummary>, StorageError> {
-        let query = query.normalized();
-        Ok(Paginated::from_request(Vec::new(), 0, &query.page))
+        Ok(Paginated::empty_for(&query))
     }
 
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {
@@ -911,6 +910,7 @@ fn service_harness(
         intent_lifecycle: Arc::new(IntentLifecyclePublisher::new(
             CoreEventPublisher::bounded(16).0,
         )),
+        events: CoreEventPublisher::bounded(16).0,
     });
     ServiceHarness {
         service,

@@ -20,8 +20,9 @@ use quant_pivot_models::{
     config::RelayerConfig,
     constants::COLLATERAL_SCALE,
     domain::{
-        ConfirmSettlementRedeem, MarketInfo, NewSettlementRedeem, NewSettlementRedeemLot,
-        OrderIntentInfo, PositionExit, PositionInfo, SettlementRedeemLotWrite,
+        ConfirmSettlementRedeem, CoreEvent, CoreEventPublisher, MarketInfo, NewSettlementRedeem,
+        NewSettlementRedeemLot, OrderIntentInfo, PositionExit, PositionInfo,
+        SettlementRedeemLifecycleEvent, SettlementRedeemLotWrite,
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -429,6 +430,8 @@ pub struct SettlementRedeemServiceDeps {
     pub wallet_kind: ExecutionWalletKind,
     pub capital_events: Arc<CapitalAllocationEventWriter>,
     pub position_events: Arc<PositionEventWriter>,
+    /// Fans out `quant.settlement` revision hints after a state transition.
+    pub events: CoreEventPublisher,
 }
 
 /// One settlement redeem sweep summary.
@@ -573,6 +576,7 @@ impl SettlementRedeemService {
                 {
                     self.mark_failed(
                         &existing.settlement_redeem_id,
+                        market_id,
                         existing.attempt_count,
                         "settlement redeem retry budget exhausted".to_owned(),
                         now,
@@ -610,6 +614,7 @@ impl SettlementRedeemService {
         let Some(tx_hash) = tx_hash else {
             self.mark_failed(
                 settlement_redeem_id,
+                &market.market_id,
                 attempt_count,
                 "submitted settlement redeem row has no tx_hash".to_owned(),
                 now,
@@ -638,6 +643,7 @@ impl SettlementRedeemService {
             SettlementCtfSubmittedRedeemReceipt::Reverted { tx_hash } => {
                 self.mark_failed(
                     settlement_redeem_id,
+                    &market.market_id,
                     attempt_count,
                     format!("submitted settlement redeem transaction {tx_hash} reverted"),
                     now,
@@ -690,6 +696,7 @@ impl SettlementRedeemService {
         {
             self.mark_failed(
                 &redeem.settlement_redeem_id,
+                &market.market_id,
                 redeem.attempt_count,
                 error.to_string(),
                 now,
@@ -709,6 +716,7 @@ impl SettlementRedeemService {
             Err(error) => {
                 self.mark_failed(
                     &redeem.settlement_redeem_id,
+                    &market.market_id,
                     redeem.attempt_count,
                     error.to_string(),
                     now,
@@ -723,6 +731,11 @@ impl SettlementRedeemService {
             .settlement_redeems
             .mark_submitted(&redeem.settlement_redeem_id, tx_hash.clone(), now)
             .await?;
+        self.publish_settlement(
+            &redeem.settlement_redeem_id,
+            &market.market_id,
+            SettlementRedeemState::Submitted,
+        );
         tracing::info!(
             market_id = %market.market_id,
             tx_hash,
@@ -900,6 +913,11 @@ impl SettlementRedeemService {
             })
             .await?;
         self.mirror_settlement_confirm(&allocation, now).await?;
+        self.publish_settlement(
+            settlement_redeem_id,
+            &market.market_id,
+            SettlementRedeemState::Confirmed,
+        );
         tracing::info!(
             market_id = %market.market_id,
             tx_hash = receipt.tx_hash,
@@ -937,6 +955,7 @@ impl SettlementRedeemService {
     async fn mark_failed(
         &self,
         settlement_redeem_id: &SettlementRedeemId,
+        market_id: &MarketId,
         prior_attempt_count: i32,
         error: String,
         now: DateTime<Utc>,
@@ -967,7 +986,30 @@ impl SettlementRedeemService {
                 manual_required,
             )
             .await?;
+        let state = if manual_required {
+            SettlementRedeemState::ManualRequired
+        } else {
+            SettlementRedeemState::Failed
+        };
+        self.publish_settlement(settlement_redeem_id, market_id, state);
         Ok(())
+    }
+
+    /// Fan out a `quant.settlement` revision hint after a state transition.
+    /// Consumers re-fetch the settlement ledger over REST on any bump.
+    fn publish_settlement(
+        &self,
+        settlement_redeem_id: &SettlementRedeemId,
+        market_id: &MarketId,
+        state: SettlementRedeemState,
+    ) {
+        self.deps
+            .events
+            .publish(CoreEvent::Settlement(SettlementRedeemLifecycleEvent {
+                settlement_redeem_id: settlement_redeem_id.to_string(),
+                market_id: market_id.clone(),
+                state,
+            }));
     }
 }
 

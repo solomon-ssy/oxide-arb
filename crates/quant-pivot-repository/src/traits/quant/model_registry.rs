@@ -1,6 +1,9 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
+    domain::{
+        ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewModelSpec,
+        NewModelVersion, Paginated,
+    },
     types::{ModelSpecId, ModelVersionId},
 };
 
@@ -31,6 +34,19 @@ pub trait ModelRegistryRepository: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Option<ModelVersionInfo>, StorageError>;
+
+    /// Page the model-spec catalog for the operator console, newest first.
+    async fn page_specs(
+        &self,
+        query: ModelSpecListQuery,
+    ) -> Result<Paginated<ModelSpecInfo>, StorageError>;
+
+    /// Page the trained-model version registry for the operator console, newest
+    /// (`created_at`) first.
+    async fn page_versions(
+        &self,
+        query: ModelVersionListQuery,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError>;
 
     /// All currently `Published` versions of a spec, most recent first. Used by
     /// the governance layer to capture a rollback target when publishing and to

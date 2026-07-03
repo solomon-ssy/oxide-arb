@@ -3,13 +3,18 @@
 use crate::traits::BacktestReportRepository;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{BacktestReportInfo, NewBacktestReport},
+    domain::{
+        BacktestReportInfo, BacktestReportListQuery, NewBacktestReport, PageWindow, Paginated,
+    },
     entities::quant_backtest_report,
     types::{BacktestReportId, ModelVersionId},
 };
-use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder,
+};
 
-use crate::postgres::query::list_by_fk_ordered_desc;
+use crate::postgres::query::{list_by_fk_ordered_desc, paginate_mapped};
 
 /// Postgres-backed backtest-report ledger repository.
 pub struct PgBacktestReportRepository {
@@ -52,6 +57,38 @@ impl BacktestReportRepository for PgBacktestReportRepository {
             quant_backtest_report::Column::ModelVersionId,
             model_version_id.clone(),
             quant_backtest_report::Column::CreatedAt,
+            Into::into,
+        )
+        .await
+    }
+
+    async fn page(
+        &self,
+        query: BacktestReportListQuery,
+    ) -> Result<Paginated<BacktestReportInfo>, StorageError> {
+        let condition = Condition::all()
+            .add_option(
+                query
+                    .model_version_id
+                    .clone()
+                    .map(|id| quant_backtest_report::Column::ModelVersionId.eq(id)),
+            )
+            .add_option(
+                query
+                    .from
+                    .map(|from| quant_backtest_report::Column::CreatedAt.gte(from)),
+            )
+            .add_option(
+                query
+                    .to
+                    .map(|to| quant_backtest_report::Column::CreatedAt.lt(to)),
+            );
+        paginate_mapped(
+            quant_backtest_report::Entity::find()
+                .filter(condition)
+                .order_by_desc(quant_backtest_report::Column::CreatedAt),
+            &self.db,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

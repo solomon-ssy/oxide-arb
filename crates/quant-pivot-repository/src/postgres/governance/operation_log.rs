@@ -6,7 +6,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, Paginated},
+    domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, PageWindow, Paginated},
     entities::operation_log::{Column, Entity},
 };
 use sea_orm::{
@@ -96,7 +96,7 @@ async fn do_page(
             .filter(page_condition(&query))
             .order_by_desc(Column::OccurredAt),
         db,
-        &query.page,
+        PageWindow::from_query(&query),
         Into::into,
     )
     .await

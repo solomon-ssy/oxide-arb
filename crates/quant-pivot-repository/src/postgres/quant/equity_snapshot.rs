@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot, Paginated, capital_drawdown,
-        hwm_merge,
+        EquitySnapshotInfo, EquitySnapshotQuery, NewEquitySnapshot, PageWindow, Paginated,
+        capital_drawdown, hwm_merge,
     },
     entities::quant_equity_snapshot,
     types::EquitySnapshotId,
@@ -78,14 +78,13 @@ impl EquitySnapshotRepository for PgEquitySnapshotRepository {
         &self,
         query: EquitySnapshotQuery,
     ) -> Result<Paginated<EquitySnapshotInfo>, StorageError> {
-        let query = query.normalized();
         paginate_mapped(
             quant_equity_snapshot::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_equity_snapshot::Column::AsOf)
                 .order_by_desc(quant_equity_snapshot::Column::CreatedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

@@ -30,6 +30,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -246,7 +247,7 @@ pub struct SubmitIntentRequest {
 /// console's triage presets (e.g. `approved,approved_by_policy`). When present
 /// it supersedes the single `status`. `approval_status` narrows the ledger by
 /// human/policy approval provenance.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct OrderIntentListQuery {
     pub status: Option<OrderIntentStatus>,
     #[serde(default, deserialize_with = "deserialize_statuses_csv")]
@@ -256,19 +257,9 @@ pub struct OrderIntentListQuery {
     pub recommendation_id: Option<RecommendationId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl OrderIntentListQuery {
-    /// Return a copy with the embedded pagination window normalized.
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }
 
 /// Decode a comma-separated `statuses` query value (`a,b,c`) into a
@@ -301,7 +292,7 @@ where
 }
 
 /// Paginated filter for listing execution orders.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct ExecutionOrderListQuery {
     pub state: Option<ExecutionOrderState>,
     pub order_phase: Option<ExecutionOrderPhase>,
@@ -310,22 +301,13 @@ pub struct ExecutionOrderListQuery {
     pub token_id: Option<TokenId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
 }
 
-impl ExecutionOrderListQuery {
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
-}
-
 /// Paginated filter for listing position lots.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct PositionListQuery {
     pub state: Option<PositionLedgerState>,
     pub order_intent_id: Option<OrderIntentId>,
@@ -333,18 +315,9 @@ pub struct PositionListQuery {
     pub token_id: Option<TokenId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl PositionListQuery {
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }
 
 /// Inbound body for `POST /quant/intents` (create from a recommendation).

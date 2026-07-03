@@ -1,17 +1,23 @@
 //! Postgres-backed model registry repository.
 
-use crate::{postgres::error, traits::ModelRegistryRepository};
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::ModelRegistryRepository,
+};
 use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
+    domain::{
+        ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewModelSpec,
+        NewModelVersion, PageWindow, Paginated,
+    },
     entities::{quant_model_spec, quant_model_version},
     enums::quant::PublicationStatus,
     types::{ModelSpecId, ModelVersionId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
 };
 
 /// Postgres-backed model registry repository.
@@ -81,6 +87,63 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn page_specs(
+        &self,
+        query: ModelSpecListQuery,
+    ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
+        let condition = Condition::all().add_option(
+            query
+                .status
+                .map(|status| quant_model_spec::Column::Status.eq(status)),
+        );
+        paginate_mapped(
+            quant_model_spec::Entity::find()
+                .filter(condition)
+                .order_by_desc(quant_model_spec::Column::CreatedAt),
+            &self.db,
+            PageWindow::from_query(&query),
+            Into::into,
+        )
+        .await
+    }
+
+    async fn page_versions(
+        &self,
+        query: ModelVersionListQuery,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+        let condition = Condition::all()
+            .add_option(
+                query
+                    .model_spec_id
+                    .clone()
+                    .map(|id| quant_model_version::Column::ModelSpecId.eq(id)),
+            )
+            .add_option(
+                query
+                    .publication_status
+                    .map(|status| quant_model_version::Column::PublicationStatus.eq(status)),
+            )
+            .add_option(
+                query
+                    .from
+                    .map(|from| quant_model_version::Column::CreatedAt.gte(from)),
+            )
+            .add_option(
+                query
+                    .to
+                    .map(|to| quant_model_version::Column::CreatedAt.lt(to)),
+            );
+        paginate_mapped(
+            quant_model_version::Entity::find()
+                .filter(condition)
+                .order_by_desc(quant_model_version::Column::CreatedAt),
+            &self.db,
+            PageWindow::from_query(&query),
+            Into::into,
+        )
+        .await
     }
 
     async fn list_published_for_spec(

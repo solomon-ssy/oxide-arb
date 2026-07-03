@@ -9,7 +9,7 @@ use crate::{
 };
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
+    domain::{MarketInfo, MarketPageQuery, PageWindow, Paginated, UpsertMarket},
     entities::market::{
         ActiveModel as MarketActiveModel, Column as MarketColumn, Entity as MarketEntity,
     },
@@ -270,14 +270,13 @@ async fn do_page(
     db: &impl ConnectionTrait,
     query: MarketPageQuery,
 ) -> Result<Paginated<MarketInfo>, StorageError> {
-    let normalized = query.normalized();
     paginate_mapped(
         MarketEntity::find()
-            .filter(page_condition(&normalized))
+            .filter(page_condition(&query))
             .order_by_desc(MarketColumn::UpdatedAt)
             .order_by_asc(MarketColumn::MarketId),
         db,
-        &normalized.page,
+        PageWindow::from_query(&query),
         Into::into,
     )
     .await

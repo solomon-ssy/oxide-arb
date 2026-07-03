@@ -9,6 +9,7 @@ use crate::{
     enums::rbac::UserStatus,
     types::RoleId,
 };
+use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use serde_with::rust::double_option;
 use validator::Validate;
@@ -83,21 +84,11 @@ pub struct AssignRolesRequest {
 /// `keyword` is a case-insensitive substring match against `username` and
 /// `nickname`. The pagination window is the shared [`PageRequest`], flattened
 /// so the query string stays flat (`?keyword=&status=&page=&size=`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, NormalizePageQuery)]
 pub struct UserPageQuery {
     pub keyword: Option<String>,
     pub status: Option<UserStatus>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl UserPageQuery {
-    /// Return a copy with the embedded pagination window normalized.
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }

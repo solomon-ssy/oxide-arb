@@ -108,10 +108,9 @@ pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<MarketPageQuery>,
 ) -> Result<WebResponse<Paginated<MarketView>>, WebError> {
-    let mut query = query.into_inner().normalized();
-    if query.subscribed.is_some() {
-        query.resolved_subscribed_tokens = Some(state.market_data.all_subscribed_tokens());
-    }
+    let query = query
+        .into_inner()
+        .prepare(state.market_data.all_subscribed_tokens());
     let page = state.markets.page(query).await?;
     let tokens: Vec<_> = page
         .items

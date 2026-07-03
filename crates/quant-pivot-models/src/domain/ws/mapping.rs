@@ -51,6 +51,21 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::to_value(payload).ok()?,
         ),
+        CoreEvent::MaterializationRun(payload) => (
+            WsChannel::MaterializationRunUpdate,
+            None,
+            serde_json::to_value(payload).ok()?,
+        ),
+        CoreEvent::Reconciliation(payload) => (
+            WsChannel::QuantReconciliation,
+            None,
+            serde_json::to_value(payload).ok()?,
+        ),
+        CoreEvent::Settlement(payload) => (
+            WsChannel::QuantSettlement,
+            None,
+            serde_json::to_value(payload).ok()?,
+        ),
     };
 
     let key = SubscriptionKey::new(channel, market);
@@ -93,5 +108,52 @@ mod tests {
         let (key, envelope) = event_envelope(&event).expect("status maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::SystemStatus));
         assert_eq!(envelope.kind.as_str(), "system.status");
+    }
+
+    #[test]
+    fn materialization_run_maps_to_global_channel() {
+        use crate::domain::{
+            MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
+        };
+        let event = CoreEvent::MaterializationRun(MaterializationRunEvent {
+            run_id: "run-1".to_owned(),
+            kind: MaterializationRunKind::Training,
+            status: MaterializationRunStatus::Completed,
+        });
+        let (key, envelope) = event_envelope(&event).expect("materialization maps");
+        assert_eq!(
+            key,
+            SubscriptionKey::global(WsChannel::MaterializationRunUpdate)
+        );
+        assert_eq!(envelope.kind.as_str(), "materialization.run_update");
+    }
+
+    #[test]
+    fn reconciliation_maps_to_global_channel() {
+        use crate::{domain::ReconciliationLifecycleEvent, enums::execution::ReconciliationResult};
+        let event = CoreEvent::Reconciliation(ReconciliationLifecycleEvent {
+            execution_order_id: "eo-1".to_owned(),
+            order_intent_id: "oi-1".to_owned(),
+            result: ReconciliationResult::Filled,
+            operator_resolved: true,
+        });
+        let (key, envelope) = event_envelope(&event).expect("reconciliation maps");
+        assert_eq!(key, SubscriptionKey::global(WsChannel::QuantReconciliation));
+        assert_eq!(envelope.kind.as_str(), "quant.reconciliation");
+    }
+
+    #[test]
+    fn settlement_maps_to_global_channel() {
+        use crate::{
+            domain::SettlementRedeemLifecycleEvent, enums::execution::SettlementRedeemState,
+        };
+        let event = CoreEvent::Settlement(SettlementRedeemLifecycleEvent {
+            settlement_redeem_id: "sr-1".to_owned(),
+            market_id: MarketId::new("0xabc"),
+            state: SettlementRedeemState::Confirmed,
+        });
+        let (key, envelope) = event_envelope(&event).expect("settlement maps");
+        assert_eq!(key, SubscriptionKey::global(WsChannel::QuantSettlement));
+        assert_eq!(envelope.kind.as_str(), "quant.settlement");
     }
 }

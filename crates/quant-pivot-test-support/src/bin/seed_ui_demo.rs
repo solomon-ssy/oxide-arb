@@ -1,4 +1,4 @@
-//! Seed Postgres + `ClickHouse` demo data for Phase 10.4 execution-plane UI validation.
+//! Seed Postgres + `ClickHouse` demo data for Phase 10.4/10.5 UI validation.
 //!
 //! ```bash
 //! cargo run -p quant-pivot-test-support --bin seed-ui-demo -- --config-dir config
@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "seed-ui-demo")]
-#[command(about = "Seed Postgres + ClickHouse demo data for execution-plane UI")]
+#[command(about = "Seed Postgres + ClickHouse demo data for execution + research UI")]
 struct Cli {
     /// Directory containing quant-pivot.toml (+ optional quant-pivot.local.toml)
     #[arg(long, env = "QUANT_PIVOT_CONFIG_DIR", default_value = "config")]
@@ -56,6 +56,12 @@ async fn main() -> Result<()> {
         reconciliations = summary.reconciliations,
         settlement_redeems = summary.settlement_redeems,
         attributions = summary.attributions,
+        research_datasets = summary.research.datasets,
+        research_models = summary.research.model_versions,
+        research_backtests = summary.research.backtest_reports,
+        research_comparisons = summary.research.comparison_reports,
+        research_factors = summary.research.factors,
+        research_skipped = summary.research.skipped,
         "Postgres seed complete"
     );
 
@@ -85,6 +91,7 @@ fn print_summary(summary: &UiDemoSeedSummary) {
     eprintln!("reconciliations:    {}", summary.reconciliations);
     eprintln!("settlement_redeems: {}", summary.settlement_redeems);
     eprintln!("attributions:       {}", summary.attributions);
+    print_research_summary(&summary.research);
     eprintln!("\nFilter tips:");
     eprintln!("  - Reports trigger_key prefix: ui-demo:");
     eprintln!("  - Market ids prefix:          ui-demo-");
@@ -119,3 +126,55 @@ fn print_summary(summary: &UiDemoSeedSummary) {
 }
 
 const SETTLE_MARKET: &str = "ui-demo-settle-mkt";
+
+fn print_research_summary(
+    research: &quant_pivot_test_support::research_ui_seed::ResearchUiSeedSummary,
+) {
+    eprintln!("\n--- 10.5 research catalog ---");
+    if research.skipped {
+        eprintln!("(skipped — fixtures already present)");
+    }
+    eprintln!("datasets:           {}", research.datasets);
+    eprintln!("model_specs:        {}", research.model_specs);
+    eprintln!("model_versions:     {}", research.model_versions);
+    eprintln!("backtest_reports:   {}", research.backtest_reports);
+    eprintln!("comparison_reports: {}", research.comparison_reports);
+    eprintln!("factors:            {}", research.factors);
+    eprintln!("\n10.5 deep links:");
+    if let Some(id) = &research.dataset_ready_id {
+        eprintln!("  trainable dataset (ready):  {id}");
+        eprintln!("  open: /research/datasets?open={id}");
+    }
+    if let Some(id) = &research.candidate_model_version_id {
+        eprintln!("  candidate model (publish):  {id}");
+        eprintln!("  open: /research/models?open={id}");
+    }
+    if let Some(id) = &research.shadow_model_version_id {
+        eprintln!("  shadow model (publish):     {id}");
+    }
+    if let Some(id) = &research.retired_model_version_id {
+        eprintln!("  retired model (rollback):   {id}");
+    }
+    if let Some(id) = &research.candidate_backtest_report_id {
+        eprintln!("  candidate backtest:         {id}");
+        eprintln!("  open: /research/backtests?open={id}");
+    }
+    if let Some(id) = &research.comparison_report_id {
+        eprintln!("  comparison detail:          {id}");
+        eprintln!("  open: /research/comparisons/{id}");
+    }
+    if let Some(id) = &research.draft_factor_id {
+        eprintln!("  draft factor (publish):     {id}");
+        eprintln!("  open: /research/factors?open={id}");
+    }
+    if let Some(id) = &research.published_factor_id {
+        eprintln!("  published factor (retire):  {id}");
+    }
+    if let Some(id) = &research.retired_factor_id {
+        eprintln!("  retired factor:             {id}");
+    }
+    eprintln!("\nResearch filter tips:");
+    eprintln!("  - Dataset parquet prefix:   file:///tmp/ui-demo-research-");
+    eprintln!("  - Secondary model spec:     ui-demo-research-spec-secondary");
+    eprintln!("  - Factor name prefix:       ui-demo-research-");
+}

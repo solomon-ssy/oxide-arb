@@ -5,11 +5,12 @@
 //! when a backtest runs in pair mode.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::ModelComparisonReportInfo,
+    domain::{ModelComparisonReportInfo, pagination::PageRequest},
     types::{BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId},
 };
 
@@ -31,6 +32,21 @@ pub struct ModelComparisonReportView {
     pub category_breakdown_diff: serde_json::Value,
     pub comparison_hash: ContentHash,
     pub created_at: DateTime<Utc>,
+}
+
+/// Paginated filter for the append-only comparison-report ledger catalog.
+///
+/// `from` / `to` bound `created_at`; `candidate_model_version_id` scopes to the
+/// comparisons for one candidate version. The pagination window is the shared
+/// [`PageRequest`].
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct ComparisonReportListQuery {
+    pub candidate_model_version_id: Option<ModelVersionId>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 impl From<ModelComparisonReportInfo> for ModelComparisonReportView {

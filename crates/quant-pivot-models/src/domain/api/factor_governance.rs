@@ -6,10 +6,17 @@
 //! | POST | `/research/factors/{id}/retire` | `factor_definition:retire` | Retire a published definition |
 
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
-use crate::domain::FactorDefinitionInfo;
+use crate::{
+    domain::{FactorDefinitionInfo, pagination::PageRequest},
+    enums::{
+        factor::{FactorDefinitionScope, FactorFamily},
+        quant::PublicationStatus,
+    },
+};
 
 /// Inbound body for `POST /research/factors/{id}/publish`.
 #[derive(Debug, Clone, Deserialize, Validate)]
@@ -39,6 +46,20 @@ pub struct FactorDefinitionView {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Paginated filter for the factor-definition governance catalog.
+///
+/// `factor_family` / `scope` slice the taxonomy; `status` narrows the
+/// publication lifecycle. The pagination window is the shared [`PageRequest`].
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct FactorDefinitionListQuery {
+    pub factor_family: Option<FactorFamily>,
+    pub scope: Option<FactorDefinitionScope>,
+    pub status: Option<PublicationStatus>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 impl From<FactorDefinitionInfo> for FactorDefinitionView {

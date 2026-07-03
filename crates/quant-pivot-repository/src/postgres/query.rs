@@ -12,7 +12,7 @@
 //! [`paginate_mapped`] so count + fetch share one code path.
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{PageRequest, Paginated};
+use quant_pivot_models::domain::{PageWindow, Paginated};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
     QueryOrder, Select,
@@ -26,11 +26,11 @@ pub fn non_empty(value: Option<&str>) -> Option<&str> {
 }
 
 /// Paginate a select query, map models to domain types, and return a
-/// [`Paginated`] envelope using the normalized [`PageRequest`] window.
+/// [`Paginated`] envelope using the hardened [`PageWindow`].
 pub async fn paginate_mapped<'db, E, D, F>(
     select: Select<E>,
     db: &'db impl ConnectionTrait,
-    page: &PageRequest,
+    window: PageWindow,
     map: F,
 ) -> Result<Paginated<D>, StorageError>
 where
@@ -38,15 +38,14 @@ where
     E::Model: FromQueryResult + Send + Sync + 'db,
     F: FnMut(E::Model) -> D,
 {
-    let window = page.normalized();
-    let paginator = select.paginate(db, window.size);
+    let paginator = select.paginate(db, window.size());
     let total = paginator.num_items().await.map_err(StorageError::from)?;
     let rows = paginator
-        .fetch_page(window.page.saturating_sub(1))
+        .fetch_page(window.seaorm_index())
         .await
         .map_err(StorageError::from)?;
     let items = rows.into_iter().map(map).collect();
-    Ok(Paginated::from_request(items, total, &window))
+    Ok(Paginated::from_window(items, total, window))
 }
 
 /// List rows for a foreign-key value, newest [`created_at_column`] first.

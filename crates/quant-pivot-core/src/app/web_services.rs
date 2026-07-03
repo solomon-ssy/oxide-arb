@@ -6,8 +6,8 @@ use crate::{
         account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
         execution_read::CoreExecutionReadPort, execution_recovery_port::CoreExecutionRecoveryPort,
         model_training::CoreModelTrainingPort, quant_report::CoreQuantReportPort,
-        reconciliation_port::CoreReconciliationPort, task_id::TaskId, task_registry::AppRunner,
-        training_dataset::CoreTrainingDatasetPort,
+        reconciliation_port::CoreReconciliationPort, research_catalog::CoreResearchCatalogPort,
+        task_id::TaskId, task_registry::AppRunner, training_dataset::CoreTrainingDatasetPort,
     },
     pipeline::book_store::BookStore,
 };
@@ -148,6 +148,7 @@ async fn build_app_state(
         )),
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
+        research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         quant_reports: Arc::new(CoreQuantReportPort::new(
             Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,
             Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,

@@ -1,6 +1,9 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{FactorDefinitionInfo, FactorValueInfo, NewFactorDefinition, NewFactorValue},
+    domain::{
+        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo, NewFactorDefinition,
+        NewFactorValue, Paginated,
+    },
     types::{FactorDefinitionId, ModelRunId},
 };
 
@@ -26,6 +29,12 @@ pub trait FactorRepository: Send + Sync {
         &self,
         factor_definition_ids: &[FactorDefinitionId],
     ) -> Result<Vec<FactorDefinitionInfo>, StorageError>;
+
+    /// Page the factor-definition governance catalog, newest (`created_at`) first.
+    async fn page_definitions(
+        &self,
+        query: FactorDefinitionListQuery,
+    ) -> Result<Paginated<FactorDefinitionInfo>, StorageError>;
 
     async fn publish_definition(
         &self,

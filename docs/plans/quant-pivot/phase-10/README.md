@@ -1,6 +1,6 @@
 # Phase 10 — Frontend Refactor 子phase索引
 
-> 状态：10.0 契约冻结（含后端破坏式对齐）已完成；**10.1 types/API/WS/store 地基**、**10.2 导航/首屏/markets/account**、**10.3 Report Plane**、**10.4 Execution Plane** 已落地并通过质量门禁（前端 typecheck/build/unit/eslint/oxlint 全绿；后端 fmt/clippy/boundary/errors/architecture + models/repository/web/core 单测全绿）；10.5–10.6 为设计计划，未进入代码落地。
+> 状态：10.0 契约冻结（含后端破坏式对齐）已完成；**10.1 types/API/WS/store 地基**、**10.2 导航/首屏/markets/account**、**10.3 Report Plane**、**10.4 Execution Plane**、**10.5 Research Catalog & Realtime** 已落地并通过质量门禁（前端 typecheck/build/unit/eslint 全绿；后端 fmt/clippy/boundary/errors/architecture + models/repository/web/core 单测全绿）；10.6 hardening、10.7 deploy-config、10.8 admin 为设计计划，未进入代码落地。
 >
 > 父文档（概念规格）：[`../10-frontend-refactor.md`](../10-frontend-refactor.md)、
 > [`../04-topn-report-and-recommendation.md`](../04-topn-report-and-recommendation.md)、
@@ -46,9 +46,10 @@
 | 10.2 | Navigation / Dashboard / Markets / Account | **操作台首屏闭环** | [`10.2-navigation-dashboard-markets-account.md`](10.2-navigation-dashboard-markets-account.md) |
 | 10.3 | Report Plane | **RecommendationReport 主产物 UI** | [`10.3-report-plane.md`](10.3-report-plane.md) |
 | 10.4 | Execution Plane | **Intent -> ledger 执行闭环** | [`10.4-execution-plane.md`](10.4-execution-plane.md) |
-| 10.5 | Research & Governance | **研究 + 治理工作台** | [`10.5-research-and-governance.md`](10.5-research-and-governance.md) |
+| 10.5 | Research Catalog & Realtime | **研究全闭环 catalog + 实时 WS + Recovery 收敛** | [`10.5-research-and-governance.md`](10.5-research-and-governance.md) |
 | 10.6 | Hardening | **防回流 + 测试 + 删除证明** | [`10.6-hardening.md`](10.6-hardening.md) |
-| 10.7 | Deploy Config & Preferences | **部署/运行配置 UI 分离** | [`10.7-deploy-config-and-preferences.md`](10.7-deploy-config-and-preferences.md) |
+| 10.7 | Deploy Config & Preferences | **部署/运行配置 UI 分离**（含 runtime-config） | [`10.7-deploy-config-and-preferences.md`](10.7-deploy-config-and-preferences.md) |
+| 10.8 | Admin & Access Control | **users/roles/menus 管理台 + 防菜单漂移** | [`10.8-admin-and-access-control.md`](10.8-admin-and-access-control.md) |
 
 ## 2. 依赖图
 
@@ -70,7 +71,9 @@ flowchart TD
     P104 --> P106
     P105 --> P106
     P105 --> P107["10.7 Deploy Config & Preferences"]
+    P105 --> P108["10.8 Admin & Access Control"]
     P107 --> P106
+    P108 --> P106
 ```
 
 执行原则：
@@ -138,9 +141,9 @@ Pinia 仅承担状态协调职责。表格主数据由页面 query 拉取，**�
 
 | Gap | 前端降级原则 | 归属 |
 |---|---|---|
-| Research 无 model/dataset/comparison list | ID-driven workbench only | 10.5 |
-| Factor/model publication 无 catalog | workbench 内 governed ID action | 10.5 |
-| Account snapshot 无 list | 只展示 live + equity snapshot list | 10.2 |
+| ~~Research 无 model/dataset/comparison list~~ | **已补齐**：`GET /research/*` 分页 list + catalog 页 | 10.5 ✓ |
+| ~~Factor/model publication 无 catalog~~ | **已补齐**：factors/models catalog 页 + governed 行动作 | 10.5 ✓ |
+| Account snapshot 无 list | 只展示 live + equity snapshot list | 10.2（历史 list 延后 10.8） |
 | Data quality 仅当前快照 | dashboard snapshot，无趋势图 | 10.2 |
 
 补齐 list/catalog 后，必须先更新 10.0 契约与 API matrix，再进入页面实现。

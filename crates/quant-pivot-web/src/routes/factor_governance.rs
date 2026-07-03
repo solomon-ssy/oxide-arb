@@ -3,8 +3,8 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        FactorDefinitionView, GovernanceActor, PublishFactorCommand, PublishFactorRequest,
-        RetireFactorCommand, RetireFactorRequest,
+        FactorDefinitionListQuery, FactorDefinitionView, GovernanceActor, Paginated,
+        PublishFactorCommand, PublishFactorRequest, RetireFactorCommand, RetireFactorRequest,
     },
     enums::{
         operation_log::OperationCategory,
@@ -29,6 +29,18 @@ use crate::{
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
+            Method::GET,
+            "/research/factors",
+            Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+            list,
+        ),
+        spec(
+            Method::GET,
+            "/research/factors/{id}",
+            Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+            get_by_id,
+        ),
+        spec(
             Method::POST,
             "/research/factors/{id}/publish",
             Rule::ActingRoleGoverned(ResourceType::FactorDefinition, Operation::Publish),
@@ -41,6 +53,32 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             retire,
         ),
     ]
+}
+
+/// `GET /api/research/factors` — paginated factor-definition governance catalog.
+pub async fn list(
+    state: web::Data<AppState>,
+    query: web::Query<FactorDefinitionListQuery>,
+) -> Result<WebResponse<Paginated<FactorDefinitionView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_factors(query.into_inner())
+        .await?
+        .map(FactorDefinitionView::from);
+    Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/factors/{id}` — single factor definition (detail drawer).
+pub async fn get_by_id(
+    state: web::Data<AppState>,
+    id: web::Path<FactorDefinitionId>,
+) -> Result<WebResponse<FactorDefinitionView>, WebError> {
+    let info = state
+        .research_catalog
+        .find_factor(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("factor_definition not found: {id}")))?;
+    Ok(WebResponse::ok(FactorDefinitionView::from(info)))
 }
 
 /// `POST /api/research/factors/{id}/publish` — promote a draft/retired definition.

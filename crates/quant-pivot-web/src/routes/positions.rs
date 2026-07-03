@@ -38,7 +38,7 @@ async fn list_positions(
 ) -> Result<WebResponse<Paginated<PositionView>>, WebError> {
     let page = state
         .execution_read
-        .list_positions(query.into_inner().normalized())
+        .list_positions(query.into_inner())
         .await?;
     Ok(WebResponse::ok(page.map(PositionView::from)))
 }

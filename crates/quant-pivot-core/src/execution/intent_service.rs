@@ -400,7 +400,7 @@ impl OrderIntentPort for CoreOrderIntentService {
     }
 
     async fn list(&self, query: OrderIntentListQuery) -> QuantResult<Paginated<OrderIntentInfo>> {
-        Ok(self.intents.page(query.normalized()).await?)
+        Ok(self.intents.page(query).await?)
     }
 
     async fn find(&self, id: &OrderIntentId) -> QuantResult<Option<OrderIntentInfo>> {

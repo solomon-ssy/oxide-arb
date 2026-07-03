@@ -32,18 +32,21 @@ use quant_pivot_models::{
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
-        BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
-        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionReadPort,
-        ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort, FactorGovernancePort,
+        BacktestPort, BacktestReportInfo, BacktestReportListQuery, BacktestReportView,
+        BookSnapshot, BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort,
+        ComparisonReportListQuery, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
+        ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
+        ExecutionSubmitPort, FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort,
         GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort,
-        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
-        ModelVersionInfo, PromoteDatasetRequest, PublishFactorCommand, PublishModelCommand,
-        QuantModeTransitionReport, ReconciliationPort, ResolveReconciliationCommand,
-        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
-        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
-        SetKillSwitchCommand, SystemStatus, TrainModelRequest, TrainedModelView,
-        TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo,
+        ModelSpecListQuery, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        PromoteDatasetRequest, PublishFactorCommand, PublishModelCommand,
+        QuantModeTransitionReport, ReconciliationPort, ResearchCatalogPort,
+        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
+        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
+        RuntimeControlPort, SetKillSwitchCommand, SystemStatus, TrainModelRequest,
+        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
@@ -158,7 +161,6 @@ impl TestEnv {
         let data_quality = Arc::new(MockDataQuality);
         let core_report =
             crate::core_report_port::build_core_report_stack(&db, events.clone()).await;
-        let ad_hoc_enqueued = Arc::clone(&core_report.enqueued);
         let order_intents = build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
         let state = AppState {
             deploy: Arc::new(test_deploy_config()),
@@ -196,6 +198,7 @@ impl TestEnv {
             backtests: Arc::new(MockBacktestPort),
             model_governance: Arc::new(MockModelGovernancePort),
             factor_governance: Arc::new(MockFactorGovernancePort),
+            research_catalog: Arc::new(MockResearchCatalogPort),
             quant_reports: core_report.port.clone(),
             account_read: core_account_read_port(
                 &db,
@@ -222,8 +225,8 @@ impl TestEnv {
         Self {
             state,
             db,
+            ad_hoc_enqueued: Arc::clone(&core_report.enqueued),
             core_report,
-            ad_hoc_enqueued,
             pg_container,
             redis: Some(redis_container),
             ws_shutdown,
@@ -666,6 +669,61 @@ impl BacktestPort for MockBacktestPort {
         &self,
         _comparison_report_id: &ModelComparisonReportId,
     ) -> QuantResult<Option<ModelComparisonReportInfo>> {
+        Ok(None)
+    }
+}
+
+/// No-op research catalog port for web integration tests (empty pages).
+pub struct MockResearchCatalogPort;
+
+#[async_trait]
+impl ResearchCatalogPort for MockResearchCatalogPort {
+    async fn list_training_datasets(
+        &self,
+        query: TrainingDatasetListQuery,
+    ) -> QuantResult<Paginated<TrainingDatasetInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn list_models(
+        &self,
+        query: ModelVersionListQuery,
+    ) -> QuantResult<Paginated<ModelVersionInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn list_model_specs(
+        &self,
+        query: ModelSpecListQuery,
+    ) -> QuantResult<Paginated<ModelSpecInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn list_backtest_reports(
+        &self,
+        query: BacktestReportListQuery,
+    ) -> QuantResult<Paginated<BacktestReportInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn list_comparison_reports(
+        &self,
+        query: ComparisonReportListQuery,
+    ) -> QuantResult<Paginated<ModelComparisonReportInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn list_factors(
+        &self,
+        query: FactorDefinitionListQuery,
+    ) -> QuantResult<Paginated<FactorDefinitionInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn find_factor(
+        &self,
+        _factor_definition_id: &FactorDefinitionId,
+    ) -> QuantResult<Option<FactorDefinitionInfo>> {
         Ok(None)
     }
 }

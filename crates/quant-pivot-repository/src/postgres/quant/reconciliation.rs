@@ -7,7 +7,7 @@ use crate::{
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        AppendReconciliationEvidence, NewReconciliation, Paginated, ReconciliationInfo,
+        AppendReconciliationEvidence, NewReconciliation, PageWindow, Paginated, ReconciliationInfo,
         ReconciliationListQuery, ReconciliationPatch,
     },
     entities::quant_reconciliation,
@@ -127,13 +127,12 @@ impl ReconciliationRepository for PgReconciliationRepository {
         &self,
         query: ReconciliationListQuery,
     ) -> Result<Paginated<ReconciliationInfo>, StorageError> {
-        let query = query.normalized();
         paginate_mapped(
             quant_reconciliation::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_reconciliation::Column::CreatedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

@@ -28,8 +28,7 @@ pub trait ExecutionOrderRepository: Send + Sync {
         &self,
         query: ExecutionOrderListQuery,
     ) -> Result<Paginated<ExecutionOrderInfo>, StorageError> {
-        let query = query.normalized();
-        Ok(Paginated::from_request(Vec::new(), 0, &query.page))
+        Ok(Paginated::empty_for(&query))
     }
 
     /// Whether any execution order is in the `Ambiguous` state (submitted but

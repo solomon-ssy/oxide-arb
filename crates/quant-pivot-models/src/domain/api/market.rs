@@ -3,7 +3,10 @@
 
 use crate::{
     clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd, TickEventRow},
-    domain::{BookLevel, MarketInfo, market::book::BookSnapshot, pagination::PageRequest},
+    domain::{
+        BookLevel, MarketInfo, NormalizePageQuery, market::book::BookSnapshot,
+        pagination::PageRequest,
+    },
     enums::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
@@ -12,6 +15,7 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::query::QueryError;
+use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -20,9 +24,10 @@ use validator::Validate;
 /// Filter + pagination query for the markets list endpoint.
 ///
 /// `keyword` matches the question or slug (case-insensitive substring); the
-/// other filters are exact and AND-combined. The window is hardened via
-/// [`MarketPageQuery::normalized`] before reaching SQL.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// other filters are exact and AND-combined. Call [`MarketPageQuery::prepare`]
+/// at the HTTP boundary before persistence when `subscribed` filtering is used;
+/// SQL pagination is hardened separately via [`PageWindow`](crate::domain::PageWindow).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, NormalizePageQuery)]
 pub struct MarketPageQuery {
     pub keyword: Option<String>,
     pub status: Option<MarketStatus>,
@@ -36,18 +41,21 @@ pub struct MarketPageQuery {
     pub subscribed: Option<bool>,
     #[serde(skip)]
     pub resolved_subscribed_tokens: Option<HashSet<TokenId>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
 }
 
 impl MarketPageQuery {
-    /// Return a copy with a normalized (safe) pagination window.
+    /// Harden pagination and inject the live WS subscription union when
+    /// `subscribed` is set. Wire callers must never set `resolved_subscribed_tokens`.
     #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
+    pub fn prepare(self, live_subscribed: HashSet<TokenId>) -> Self {
+        let mut query = self.normalized();
+        if query.subscribed.is_some() {
+            query.resolved_subscribed_tokens = Some(live_subscribed);
         }
+        query
     }
 }
 

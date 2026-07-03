@@ -108,10 +108,7 @@ pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<OrderIntentListQuery>,
 ) -> Result<WebResponse<Paginated<OrderIntentView>>, WebError> {
-    let page = state
-        .order_intents
-        .list(query.into_inner().normalized())
-        .await?;
+    let page = state.order_intents.list(query.into_inner()).await?;
     Ok(WebResponse::ok(page.map(OrderIntentView::from)))
 }
 

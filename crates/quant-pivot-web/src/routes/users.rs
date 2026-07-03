@@ -92,7 +92,7 @@ pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<UserPageQuery>,
 ) -> Result<WebResponse<Paginated<UserView>>, WebError> {
-    let result = state.users.page(query.into_inner().normalized()).await?;
+    let result = state.users.page(query.into_inner()).await?;
     Ok(WebResponse::ok(project_page(result)))
 }
 

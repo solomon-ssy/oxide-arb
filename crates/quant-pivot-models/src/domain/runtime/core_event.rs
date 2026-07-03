@@ -5,6 +5,7 @@ use crate::{
         MarketBookView, OrderIntentInfo, RecommendationReportInfo, governance::system::SystemStatus,
     },
     enums::common::{AlertCategory, AlertLevel, AlertSource},
+    enums::execution::{ReconciliationResult, SettlementRedeemState},
     enums::quant::{
         EmptyReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
     },
@@ -371,6 +372,75 @@ impl IntentLifecycleEvent {
     }
 }
 
+/// Which materialization job a [`MaterializationRunEvent`] describes, so the
+/// workbench can scope its re-fetch (dataset build vs model train vs backtest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationRunKind {
+    /// Offline training-dataset plan → build.
+    Dataset,
+    /// Offline model training run.
+    Training,
+    /// Point-in-time backtest run.
+    Backtest,
+}
+
+/// Terminal-or-progress status of a materialization run.
+///
+/// Normalized across the dataset builder (`TrainingDatasetStatus`) and model-run
+/// (`ModelRunStatus`) state machines into the single wire vocabulary the
+/// workbench renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializationRunStatus {
+    /// Enqueued, not yet started (reserved for a future async job queue).
+    Queued,
+    /// In progress.
+    Running,
+    /// Finished successfully.
+    Completed,
+    /// Finished with an error.
+    Failed,
+    /// Cancelled before completion.
+    Cancelled,
+}
+
+/// Materialization run lifecycle event fanned out on `materialization.run_update`.
+///
+/// A revision hint only: the workbench re-fetches the dataset / model / report
+/// by id (WS never carries catalog rows).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializationRunEvent {
+    /// The run subject id (`training_dataset_id` for datasets, `model_run_id`
+    /// for training / backtest runs).
+    pub run_id: String,
+    pub kind: MaterializationRunKind,
+    pub status: MaterializationRunStatus,
+}
+
+/// Reconciliation row lifecycle event fanned out on `quant.reconciliation`.
+///
+/// A revision hint only: the reconciliation queue + recovery panel re-fetch over
+/// REST on any bump. Carries the correlation ids + terminal verdict for logging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationLifecycleEvent {
+    pub execution_order_id: String,
+    pub order_intent_id: String,
+    pub result: ReconciliationResult,
+    /// Whether an operator (vs the worker) drove this resolution.
+    pub operator_resolved: bool,
+}
+
+/// Settlement-redeem state transition fanned out on `quant.settlement`.
+///
+/// A revision hint only: the settlement ledger re-fetches over REST on any bump.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementRedeemLifecycleEvent {
+    pub settlement_redeem_id: String,
+    pub market_id: MarketId,
+    pub state: SettlementRedeemState,
+}
+
 /// Cross-subsystem runtime events consumed by web and observability layers.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
@@ -389,6 +459,9 @@ pub enum CoreEvent {
     Report(ReportLifecycleEvent),
     Intent(IntentLifecycleEvent),
     Alert(SystemAlertEvent),
+    MaterializationRun(MaterializationRunEvent),
+    Reconciliation(ReconciliationLifecycleEvent),
+    Settlement(SettlementRedeemLifecycleEvent),
 }
 
 impl CoreEvent {
@@ -402,6 +475,9 @@ impl CoreEvent {
             Self::Report(event) => event.event.wire(),
             Self::Intent(event) => event.event.wire(),
             Self::Alert(_) => "system.alert",
+            Self::MaterializationRun(_) => "materialization.run_update",
+            Self::Reconciliation(_) => "quant.reconciliation",
+            Self::Settlement(_) => "quant.settlement",
         }
     }
 }

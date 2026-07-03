@@ -29,6 +29,15 @@ impl IntentLifecyclePublisher {
         Self { events }
     }
 
+    /// A cheap clone of the underlying core event publisher, so sibling
+    /// execution services (reconciliation / settlement) can fan out their own
+    /// lifecycle channels without threading a second publisher through the boot
+    /// wiring.
+    #[must_use]
+    pub fn publisher(&self) -> CoreEventPublisher {
+        self.events.clone()
+    }
+
     /// Publish the explicit lifecycle event for a committed transition.
     pub fn publish(&self, intent: &OrderIntentInfo, kind: IntentEventKind, at: DateTime<Utc>) {
         self.events

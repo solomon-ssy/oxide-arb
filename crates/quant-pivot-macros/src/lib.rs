@@ -6,8 +6,11 @@
 //!   (internal, system-generated identifiers persisted as native `uuid`).
 //! - [`IntoActiveValue`]: Generates `IntoActiveValue` impl for enums stored as
 //!   strings in `SeaORM`.
+//! - [`NormalizePageQuery`]: Generates `normalized(self)` for list query DTOs
+//!   that embed a `PageRequest` via `#[normalize_page]`.
 
 mod into_active_value;
+mod normalize_page_query;
 mod quant_schema;
 mod str_id;
 mod uuid_id;
@@ -84,6 +87,39 @@ pub fn derive_uuid_id(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(IntoActiveValue)]
 pub fn derive_into_active_value(input: TokenStream) -> TokenStream {
     into_active_value::expand(input.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Derive `normalized(self) -> Self` for paginated list query DTOs.
+///
+/// Requires exactly one field annotated with `#[normalize_page]` whose type is
+/// `PageRequest`. The generated method delegates to
+/// [`PageRequest::normalized`].
+///
+/// # Usage
+///
+/// ```ignore
+/// use quant_pivot_macros::NormalizePageQuery;
+///
+/// #[derive(Deserialize, NormalizePageQuery)]
+/// pub struct ModelVersionListQuery {
+///     pub model_spec_id: Option<ModelSpecId>,
+///     #[normalize_page]
+///     #[serde(flatten)]
+///     pub page: PageRequest,
+/// }
+/// ```
+///
+/// # Compile-time errors
+///
+/// - Struct without exactly one `#[normalize_page]` field
+/// - Multiple `#[normalize_page]` fields
+/// - `#[normalize_page]` on a non-`PageRequest` field
+/// - Derived on enums or tuple/unit structs
+#[proc_macro_derive(NormalizePageQuery, attributes(normalize_page))]
+pub fn derive_normalize_page_query(input: TokenStream) -> TokenStream {
+    normalize_page_query::expand(input.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

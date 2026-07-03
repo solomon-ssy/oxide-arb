@@ -36,10 +36,7 @@ pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<OperationLogQuery>,
 ) -> Result<WebResponse<Paginated<OperationLogView>>, WebError> {
-    let result = state
-        .operation_logs
-        .page(query.into_inner().normalized())
-        .await?;
+    let result = state.operation_logs.page(query.into_inner()).await?;
     Ok(WebResponse::ok(project_page(result)))
 }
 

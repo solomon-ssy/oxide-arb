@@ -27,12 +27,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 11,
+    version: 12,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v10",
+    checksum: "rbac.menus.bootstrap.v11",
     loader: load_boxed,
 };
 
@@ -445,66 +445,107 @@ fn build_execution(t: &mut MenuTree) {
     });
 }
 
-/// Research plane: a single ID-driven workbench (dataset plan/build, train,
-/// backtest, model + factor governance). No伪列表 — the backend exposes no
-/// list/catalog endpoints (see 10.0 §3.5).
+/// Research plane: real catalog pages backing the operator workbench —
+/// training-dataset ledger, trained-model registry, backtest reports, and factor
+/// governance. Each page pages a `GET /research/*` list endpoint (10.5 §2);
+/// governed mutations (plan/build/train/backtest/publish/rollback/retire) are
+/// button permissions on the page they belong to. The pairwise comparison report
+/// is a deep-linkable detail reached from a backtest (hidden from the sidebar).
 fn build_research(t: &mut MenuTree) {
     let research = t.dir(
         "research",
         "page.menu.group.research",
         "lucide:flask-conical",
     );
-    let workbench = t.page(PageSpec {
+    let datasets = t.page(PageSpec {
         parent: &research,
-        name: "research-workbench",
-        title: "page.menu.researchWorkbench",
-        path: "/research/workbench",
-        component: "research/workbench/index",
+        name: "research-datasets",
+        title: "page.menu.researchDatasets",
+        path: "/research/datasets",
+        component: "research/datasets/index",
         permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
-        icon: "lucide:microscope",
+        icon: "lucide:database",
     });
     t.button(
-        &workbench,
+        &datasets,
         "materialization:create",
-        "Plan / Build Dataset & Train Model",
+        "Plan / Build Dataset",
         perm(ResourceType::Materialization, Operation::Create),
     );
+    let models = t.page(PageSpec {
+        parent: &research,
+        name: "research-models",
+        title: "page.menu.researchModels",
+        path: "/research/models",
+        component: "research/models/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:brain-circuit",
+    });
     t.button(
-        &workbench,
+        &models,
         "replay:create",
         "Run Backtest",
         perm(ResourceType::Replay, Operation::Create),
     );
     t.button(
-        &workbench,
+        &models,
         "publication:publish",
         "Publish Model",
         perm(ResourceType::Publication, Operation::Publish),
     );
     t.button(
-        &workbench,
+        &models,
         "publication:rollback",
         "Rollback Model",
         perm(ResourceType::Publication, Operation::Rollback),
     );
     t.button(
-        &workbench,
+        &models,
         "publication:retire",
         "Retire Model",
         perm(ResourceType::Publication, Operation::Retire),
     );
+    t.page(PageSpec {
+        parent: &research,
+        name: "research-backtests",
+        title: "page.menu.researchBacktests",
+        path: "/research/backtests",
+        component: "research/backtests/index",
+        permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
+        icon: "lucide:line-chart",
+    });
+    let factors = t.page(PageSpec {
+        parent: &research,
+        name: "research-factors",
+        title: "page.menu.researchFactors",
+        path: "/research/factors",
+        component: "research/factors/index",
+        permission_code: Some(perm(ResourceType::FactorDefinition, Operation::Read)),
+        icon: "lucide:sigma",
+    });
     t.button(
-        &workbench,
+        &factors,
         "factor_definition:publish",
         "Publish Factor",
         perm(ResourceType::FactorDefinition, Operation::Publish),
     );
     t.button(
-        &workbench,
+        &factors,
         "factor_definition:retire",
         "Retire Factor",
         perm(ResourceType::FactorDefinition, Operation::Retire),
     );
+    // Pairwise comparison report — deep-linkable from a backtest, hidden from
+    // the sidebar (parented under the directory, not another page).
+    t.page_hidden(PageSpec {
+        parent: &research,
+        name: "research-comparison-detail",
+        title: "page.menu.researchComparisonDetail",
+        path: "/research/comparisons/:id",
+        component: "research/comparisons/detail",
+        permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
+        icon: "lucide:git-compare",
+    });
 }
 
 /// Governance plane: runtime-config version lifecycle (hot-activatable config).
@@ -746,6 +787,8 @@ mod tests {
         // Stale button name replaced by the canonical permission code.
         assert!(!names.contains("quant_report:run"));
         assert!(!names.contains("quant_model:reject"));
+        // Phase 10.5: the single ID-driven workbench is replaced by real catalogs.
+        assert!(!names.contains("research-workbench"));
     }
 
     #[test]
@@ -770,7 +813,10 @@ mod tests {
             "reconciliations",
             "settlement-redeems",
             "account",
-            "research-workbench",
+            "research-datasets",
+            "research-models",
+            "research-backtests",
+            "research-factors",
             "report-detail",
             "recommendation-detail",
             "quant_report:enqueue",

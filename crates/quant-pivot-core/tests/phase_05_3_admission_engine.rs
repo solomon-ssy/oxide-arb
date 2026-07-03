@@ -26,12 +26,13 @@ use quant_pivot_models::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome, BookLevel,
         BookSnapshot, CapitalAllocationInfo, DataQualityPort, DataQualitySnapshot,
         ExecutionOrderInfo, ExecutionOrderPatch, MarketInfo, MarketPageQuery, ModelSpecInfo,
-        ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewOrderIntent, NewReconciliation, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, OrderIntentListQuery,
-        Paginated, QuantReportListQuery, RecommendationInfo, RecommendationReportInfo,
-        ReconciliationInfo, ReconciliationListQuery, ReconciliationPatch,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
+        ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewCapitalAllocation,
+        NewExecutionOrder, NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent,
+        NewReconciliation, NewReportTransaction, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, OrderIntentInfo, OrderIntentListQuery, Paginated,
+        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
+        ReconciliationListQuery, ReconciliationPatch, RuntimeConfigActivationInfo,
+        RuntimeConfigVersionInfo, UpsertMarket,
     },
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
@@ -916,6 +917,20 @@ impl ModelRegistryRepository for StubModelRegistry {
         _model_version_id: &ModelVersionId,
     ) -> Result<Option<ModelVersionInfo>, StorageError> {
         Ok(None)
+    }
+
+    async fn page_specs(
+        &self,
+        _query: ModelSpecListQuery,
+    ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn page_versions(
+        &self,
+        _query: ModelVersionListQuery,
+    ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+        unimplemented!()
     }
 
     async fn list_published_for_spec(

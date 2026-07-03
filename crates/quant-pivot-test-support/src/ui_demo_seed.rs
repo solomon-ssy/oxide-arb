@@ -1,4 +1,4 @@
-//! Full-stack demo seed for Phase 10.4 execution-plane UI validation.
+//! Full-stack demo seed for Phase 10.4 execution-plane + 10.5 research-catalog UI validation.
 //!
 //! Populates Postgres ledger tables and matching `ClickHouse` quant facts using
 //! repository code paths (not raw SQL). Trigger keys are prefixed with
@@ -68,11 +68,15 @@ use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
 
-use crate::execution_pg_seed::{
-    EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
-    build_custom_report_transaction, close_position_full, demo_recommendation,
-    entry_execution_order, fill_entry_lot, report_operation_log, seed_approved_intent,
-    seed_manual_approved_intent, seed_pending_intent, seed_report_on_infra, seed_shared_demo_infra,
+use crate::{
+    execution_pg_seed::{
+        EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
+        build_custom_report_transaction, close_position_full, demo_recommendation,
+        entry_execution_order, fill_entry_lot, report_operation_log, seed_approved_intent,
+        seed_manual_approved_intent, seed_pending_intent, seed_report_on_infra,
+        seed_shared_demo_infra,
+    },
+    research_ui_seed::{ResearchUiSeedSummary, seed_research_ui_demo_pg},
 };
 
 const DEMO_TAG: &str = "ui-demo";
@@ -106,6 +110,7 @@ pub struct UiDemoSeedSummary {
     pub settlement_redeems: usize,
     pub attributions: usize,
     pub clickhouse_rows: usize,
+    pub research: ResearchUiSeedSummary,
     pub records: Vec<DemoSeedRecord>,
     /// Diff tab: older baseline report (filter `ui-demo:report:diff-base`).
     pub diff_base_report_id: Option<RecommendationReportId>,
@@ -154,6 +159,7 @@ pub async fn seed_ui_demo_pg(db: &DatabaseConnection, funder: &str) -> UiDemoSee
     seed_settlement_redeems(db, &infra, &submission, funder, &mut summary).await;
     seed_report_plane_scenarios(db, &infra, &mut summary).await;
     seed_filled_closed_attribution(db, &mut summary).await;
+    summary.research = seed_research_ui_demo_pg(db, &infra).await;
 
     summary
 }

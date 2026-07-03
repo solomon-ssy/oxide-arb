@@ -23,8 +23,8 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
-        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated, RecommendationInfo,
-        RecommendationReportInfo, evaluate_intent_approval_invalidation,
+        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, PageWindow, Paginated,
+        RecommendationInfo, RecommendationReportInfo, evaluate_intent_approval_invalidation,
     },
     entities::{
         operation_log, quant_capital_allocation, quant_order_intent, quant_recommendation,
@@ -329,7 +329,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
                 .filter(page_condition(&query))
                 .order_by_desc(quant_order_intent::Column::CreatedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

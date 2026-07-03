@@ -19,12 +19,14 @@
 //! Parquet artifact for inspection.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
 use crate::{
-    domain::TrainingDatasetInfo,
+    domain::{TrainingDatasetInfo, pagination::PageRequest},
+    enums::quant::TrainingDatasetStatus,
     types::{
         ContentHash, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
         TrainingSampleSource, default_sample_sources,
@@ -105,6 +107,22 @@ pub struct TrainingDatasetView {
     pub coverage_json: Value,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub created_at: DateTime<Utc>,
+}
+
+/// Paginated filter for the training-dataset ledger catalog.
+///
+/// `from` / `to` bound `created_at`; `status` narrows the lifecycle state; the
+/// pagination window is the shared [`PageRequest`], flattened so the query
+/// string stays flat (`?page=&size=`).
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct TrainingDatasetListQuery {
+    pub model_spec_id: Option<ModelSpecId>,
+    pub status: Option<TrainingDatasetStatus>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 impl From<TrainingDatasetInfo> for TrainingDatasetView {

@@ -2,7 +2,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{BacktestReportInfo, NewBacktestReport},
+    domain::{BacktestReportInfo, BacktestReportListQuery, NewBacktestReport, Paginated},
     types::{BacktestReportId, ModelVersionId},
 };
 
@@ -23,4 +23,10 @@ pub trait BacktestReportRepository: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestReportInfo>, StorageError>;
+
+    /// Page the ledger for the operator catalog, newest (`created_at`) first.
+    async fn page(
+        &self,
+        query: BacktestReportListQuery,
+    ) -> Result<Paginated<BacktestReportInfo>, StorageError>;
 }

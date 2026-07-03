@@ -2,8 +2,7 @@
 //!
 //! - [`ValidatedJson`] — JSON body deserialization followed by
 //!   `validator::Validate`, surfacing failures as `400`.
-//! - [`Pagination`] — flat `?page=&size=` query window, normalized (size capped
-//!   at the shared [`PageRequest`] maximum).
+//! - [`Pagination`] — flat `?page=&size=` query window, hardened via [`PageWindow`].
 //! - [`AuthedActor`] — the authenticated [`Claims`] plus the actor's
 //!   [`ActorRoles`], injected by the authn middleware; absence is `401`.
 //! - [`RequestId`] — the correlation id injected by the request-id middleware.
@@ -21,7 +20,7 @@ use actix_web::{
 };
 use quant_pivot_error::auth::AuthError;
 use quant_pivot_models::{
-    domain::{PageRequest, RoleInfo},
+    domain::{PageRequest, PageWindow, RoleInfo},
     enums::rbac::RoleStatus,
     types::RoleId,
 };
@@ -62,19 +61,19 @@ where
     }
 }
 
-/// A normalized pagination window parsed from the query string.
-pub struct Pagination(pub PageRequest);
+/// A hardened pagination window parsed from the query string.
+pub struct Pagination(pub PageWindow);
 
 impl Pagination {
-    /// Borrow the normalized [`PageRequest`].
+    /// Borrow the hardened [`PageWindow`].
     #[must_use]
-    pub const fn page_request(&self) -> &PageRequest {
-        &self.0
+    pub const fn page_window(&self) -> PageWindow {
+        self.0
     }
 
-    /// Consume and return the normalized [`PageRequest`].
+    /// Consume and return the hardened [`PageWindow`].
     #[must_use]
-    pub const fn into_inner(self) -> PageRequest {
+    pub const fn into_inner(self) -> PageWindow {
         self.0
     }
 }
@@ -85,7 +84,7 @@ impl FromRequest for Pagination {
 
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         match Query::<PageRequest>::from_query(req.query_string()) {
-            Ok(query) => ready(Ok(Self(query.into_inner().normalized()))),
+            Ok(query) => ready(Ok(Self(PageWindow::harden(query.into_inner())))),
             Err(error) => ready(Err(WebError::BadRequest(format!(
                 "invalid pagination: {error}"
             ))

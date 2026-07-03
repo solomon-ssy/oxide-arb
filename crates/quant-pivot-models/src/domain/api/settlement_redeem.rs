@@ -8,6 +8,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -120,22 +121,13 @@ pub struct SettlementRedeemDetailView {
 }
 
 /// Paginated filter for listing settlement redeem batches.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct SettlementRedeemListQuery {
     pub state: Option<SettlementRedeemState>,
     pub market_id: Option<MarketId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl SettlementRedeemListQuery {
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }

@@ -23,8 +23,10 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BacktestReportView, ModelComparisonReportView, RunBacktestRequest, TrainModelRequest,
-        TrainedModelView,
+        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery, CoreEvent,
+        MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
+        ModelComparisonReportView, ModelSpecListQuery, ModelVersionListQuery, Paginated,
+        QuantModelSpecView, RunBacktestRequest, TrainModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -47,6 +49,18 @@ use crate::{
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
+            Method::GET,
+            "/research/model-specs",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list_model_specs,
+        ),
+        spec(
+            Method::GET,
+            "/research/models",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list_models,
+        ),
+        spec(
             Method::POST,
             "/research/models/train",
             Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
@@ -57,6 +71,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models/{id}",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             get_version,
+        ),
+        spec(
+            Method::GET,
+            "/research/backtest-reports",
+            Rule::ResourceOp(ResourceType::Replay, Operation::Read),
+            list_backtest_reports,
+        ),
+        spec(
+            Method::GET,
+            "/research/comparison-reports",
+            Rule::ResourceOp(ResourceType::Replay, Operation::Read),
+            list_comparison_reports,
         ),
         spec(
             Method::POST,
@@ -79,6 +105,59 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
+/// `GET /api/research/model-specs` — paginated model-spec catalog (the
+/// dataset/training selector source).
+pub async fn list_model_specs(
+    state: web::Data<AppState>,
+    query: web::Query<ModelSpecListQuery>,
+) -> Result<WebResponse<Paginated<QuantModelSpecView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_model_specs(query.into_inner())
+        .await?
+        .map(QuantModelSpecView::from);
+    Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/models` — paginated trained-model registry catalog.
+pub async fn list_models(
+    state: web::Data<AppState>,
+    query: web::Query<ModelVersionListQuery>,
+) -> Result<WebResponse<Paginated<TrainedModelView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_models(query.into_inner())
+        .await?
+        .map(TrainedModelView::from);
+    Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/backtest-reports` — paginated backtest-report ledger catalog.
+pub async fn list_backtest_reports(
+    state: web::Data<AppState>,
+    query: web::Query<BacktestReportListQuery>,
+) -> Result<WebResponse<Paginated<BacktestReportView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_backtest_reports(query.into_inner())
+        .await?
+        .map(BacktestReportView::from);
+    Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/comparison-reports` — paginated comparison-report catalog.
+pub async fn list_comparison_reports(
+    state: web::Data<AppState>,
+    query: web::Query<ComparisonReportListQuery>,
+) -> Result<WebResponse<Paginated<ModelComparisonReportView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_comparison_reports(query.into_inner())
+        .await?
+        .map(ModelComparisonReportView::from);
+    Ok(WebResponse::ok(page))
+}
+
 /// `POST /api/research/models/train` — train + register a Candidate version.
 pub async fn train(
     state: web::Data<AppState>,
@@ -90,6 +169,13 @@ pub async fn train(
     let request = body.into_inner();
     let reason = request.reason.clone();
     let view = state.model_training.train(request).await?;
+    state
+        .events
+        .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
+            run_id: view.model_version_id.to_string(),
+            kind: MaterializationRunKind::Training,
+            status: MaterializationRunStatus::Completed,
+        }));
     op_ctx.set_action(OperationCategory::Other, "model.train");
     op_ctx.set_resource(
         ResourceType::Materialization,
@@ -132,6 +218,13 @@ pub async fn backtest(
     let reason = request.reason.clone();
     let model_version_id = id.into_inner();
     let view = state.backtests.run(model_version_id, request).await?;
+    state
+        .events
+        .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
+            run_id: view.model_run_id.to_string(),
+            kind: MaterializationRunKind::Backtest,
+            status: MaterializationRunStatus::Completed,
+        }));
     op_ctx.set_action(OperationCategory::Other, "model.backtest");
     op_ctx.set_resource(ResourceType::Replay, view.backtest_report_id.to_string());
     op_ctx.set_detail(serde_json::json!({

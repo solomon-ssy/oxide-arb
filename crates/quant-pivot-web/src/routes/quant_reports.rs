@@ -98,10 +98,7 @@ pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<QuantReportListQuery>,
 ) -> Result<WebResponse<Paginated<QuantReportView>>, WebError> {
-    let page = state
-        .quant_reports
-        .list_reports(query.into_inner().normalized())
-        .await?;
+    let page = state.quant_reports.list_reports(query.into_inner()).await?;
     Ok(WebResponse::ok(page.map(QuantReportView::from)))
 }
 

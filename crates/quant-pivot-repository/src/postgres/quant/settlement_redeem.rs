@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use quant_pivot_models::{
     domain::{
-        ConfirmSettlementRedeem, NewSettlementRedeem, Paginated, SettlementRedeemInfo,
+        ConfirmSettlementRedeem, NewSettlementRedeem, PageWindow, Paginated, SettlementRedeemInfo,
         SettlementRedeemListQuery, SettlementRedeemLotInfo, SettlementRedeemSummary,
     },
     entities::{quant_order_intent, quant_settlement_redeem, quant_settlement_redeem_lot},
@@ -54,13 +54,12 @@ impl SettlementRedeemRepository for PgSettlementRedeemRepository {
         &self,
         query: SettlementRedeemListQuery,
     ) -> Result<Paginated<SettlementRedeemSummary>, StorageError> {
-        let query = query.normalized();
         let page: Paginated<SettlementRedeemInfo> = paginate_mapped(
             quant_settlement_redeem::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_settlement_redeem::Column::CreatedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await?;

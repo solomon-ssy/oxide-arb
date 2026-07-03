@@ -53,7 +53,7 @@ async fn list(
 ) -> Result<WebResponse<Paginated<ReconciliationView>>, WebError> {
     let page = state
         .execution_read
-        .list_reconciliations(query.into_inner().normalized())
+        .list_reconciliations(query.into_inner())
         .await?;
     Ok(WebResponse::ok(page.map(ReconciliationView::from)))
 }

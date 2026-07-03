@@ -8,7 +8,7 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionOrderPatch, NewExecutionOrder,
-        Paginated,
+        PageWindow, Paginated,
     },
     entities::quant_execution_order,
     enums::quant::ExecutionOrderState,
@@ -67,13 +67,12 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
         &self,
         query: ExecutionOrderListQuery,
     ) -> Result<Paginated<ExecutionOrderInfo>, StorageError> {
-        let query = query.normalized();
         paginate_mapped(
             quant_execution_order::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_execution_order::Column::CreatedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

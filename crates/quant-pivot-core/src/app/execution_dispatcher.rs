@@ -207,8 +207,7 @@ async fn auto_dispatch_pass(
         status: Some(OrderIntentStatus::ApprovedByPolicy),
         page: PageRequest::new(PageRequest::DEFAULT_PAGE, AUTO_DISPATCH_BATCH),
         ..Default::default()
-    }
-    .normalized();
+    };
     let page = intents.page(query).await?;
     for intent in page.items {
         if let Err(error) = dispatcher.submit_if_admitted(&intent.order_intent_id).await {

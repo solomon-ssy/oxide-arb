@@ -1,7 +1,88 @@
 //! Generic pagination envelope shared by the repository layer and the web API.
+//!
+//! Three layers:
+//! 1. **Wire** — [`PageRequest`] embedded in list query DTOs (untrusted).
+//! 2. **Contract** — [`NormalizePageQuery`] hardens the full query; domain enrich
+//!    hooks like `MarketPageQuery::prepare()` live on specific query types.
+//! 3. **SQL boundary** — [`PageWindow`] is the only type accepted by
+//!    `paginate_mapped`; it is always hardened via [`PageWindow::harden`].
 
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, PickFirst, serde_as};
+
+pub(crate) mod sealed {
+    /// Marks list queries registered by `#[derive(NormalizePageQuery)]`.
+    pub trait Sealed {}
+}
+
+/// Inbound list-query contract for DTOs embedding a `#[normalize_page]` field.
+pub trait NormalizePageQuery: sealed::Sealed + Sized {
+    /// Embedded pagination parameters (may be caller-supplied / unnormalized).
+    fn page(&self) -> &PageRequest;
+
+    /// Return a copy whose embedded page has been hardened.
+    #[must_use]
+    fn normalized(self) -> Self;
+}
+
+/// Hardened pagination window — safe for SQL `LIMIT`/`OFFSET` and outbound
+/// [`Paginated`] metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageWindow {
+    page: u64,
+    size: u64,
+}
+
+impl PageWindow {
+    /// Harden raw request parameters.
+    #[must_use]
+    pub const fn harden(raw: PageRequest) -> Self {
+        let raw = raw.normalized();
+        Self {
+            page: raw.page,
+            size: raw.size,
+        }
+    }
+
+    /// Harden the embedded page of any list query.
+    #[must_use]
+    pub fn from_query<Q: NormalizePageQuery>(query: &Q) -> Self {
+        Self::harden(*query.page())
+    }
+
+    /// 1-based page index (always >= 1).
+    #[must_use]
+    pub const fn page(&self) -> u64 {
+        self.page
+    }
+
+    /// Effective page size (always 1..=[`PageRequest::MAX_SIZE`]).
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// SQL `OFFSET`: `(page - 1) * size`.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        (self.page - 1).saturating_mul(self.size)
+    }
+
+    /// 0-based page index for `SeaORM` `fetch_page`.
+    #[must_use]
+    pub const fn seaorm_index(&self) -> u64 {
+        self.page.saturating_sub(1)
+    }
+}
+
+/// Empty catalog page for mock/stub ports.
+#[must_use]
+pub fn empty_catalog_page<Q, I>(query: &Q) -> Paginated<I>
+where
+    Q: NormalizePageQuery,
+{
+    Paginated::empty_for(query)
+}
 
 /// Reusable pagination request parameters embedded by every list query DTO.
 ///
@@ -12,7 +93,9 @@ use serde_with::{DisplayFromStr, PickFirst, serde_as};
 /// [`PageRequest::MAX_SIZE`] so a single request can never demand an unbounded
 /// result set. List DTOs compose this with `#[serde(flatten)]` so the
 /// query string stays flat (`?page=&size=`), which the web `Query` extractor
-/// consumes directly.
+/// consumes directly. Pair with `#[normalize_page]` and
+/// [`NormalizePageQuery`](quant_pivot_macros::NormalizePageQuery) on list query
+/// DTOs.
 ///
 /// `PickFirst<(_, DisplayFromStr)>`: `#[serde(flatten)]` buffers all fields
 /// through serde's internal `Content` tree, which preserves query-string values
@@ -75,14 +158,13 @@ impl PageRequest {
     /// SQL `OFFSET` for the normalized window: `(page - 1) * size`.
     #[must_use]
     pub const fn offset(&self) -> u64 {
-        let normalized = self.normalized();
-        (normalized.page - 1).saturating_mul(normalized.size)
+        PageWindow::harden(*self).offset()
     }
 
     /// SQL `LIMIT` for the normalized window (the effective page size).
     #[must_use]
     pub const fn limit(&self) -> u64 {
-        self.normalized().size
+        PageWindow::harden(*self).size()
     }
 }
 
@@ -129,12 +211,17 @@ impl<T> Paginated<T> {
         }
     }
 
-    /// Build a page from a [`PageRequest`], reporting the normalized window so
-    /// `page`/`size`/`has_next` reflect what was actually queried.
+    /// Build a page from a hardened [`PageWindow`].
     #[must_use]
-    pub const fn from_request(items: Vec<T>, total: u64, request: &PageRequest) -> Self {
-        let window = request.normalized();
-        Self::new(items, total, window.page, window.size)
+    pub const fn from_window(items: Vec<T>, total: u64, window: PageWindow) -> Self {
+        Self::new(items, total, window.page(), window.size())
+    }
+
+    /// Empty page using the hardened window implied by `query`.
+    #[must_use]
+    pub fn empty_for<Q: NormalizePageQuery>(query: &Q) -> Self {
+        let window = PageWindow::from_query(query);
+        Self::empty(window.page(), window.size())
     }
 
     /// Project every item through `f`, preserving the paging metadata.
@@ -167,7 +254,48 @@ impl<T> Paginated<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PageRequest, Paginated};
+    use quant_pivot_macros::NormalizePageQuery;
+
+    use super::{NormalizePageQuery as _, PageRequest, PageWindow, Paginated};
+
+    #[derive(NormalizePageQuery)]
+    struct SmokeQuery {
+        filter: Option<u32>,
+        #[normalize_page]
+        page: PageRequest,
+    }
+
+    #[test]
+    fn normalize_page_query_derive_hardens_page() {
+        let query = SmokeQuery {
+            filter: Some(1),
+            page: PageRequest::new(0, 9999),
+        };
+        let normalized = query.normalized();
+        assert_eq!(normalized.page.page, 1);
+        assert_eq!(normalized.page.size, PageRequest::MAX_SIZE);
+        assert_eq!(normalized.filter, Some(1));
+    }
+
+    #[test]
+    fn page_window_hardens_raw_request() {
+        let window = PageWindow::harden(PageRequest::new(0, 9999));
+        assert_eq!(window.page(), 1);
+        assert_eq!(window.size(), PageRequest::MAX_SIZE);
+        assert_eq!(window.seaorm_index(), 0);
+    }
+
+    #[test]
+    fn empty_for_uses_query_window() {
+        let query = SmokeQuery {
+            filter: None,
+            page: PageRequest::new(2, 50),
+        };
+        let page = Paginated::<i32>::empty_for(&query);
+        assert_eq!(page.page, 2);
+        assert_eq!(page.size, 50);
+        assert!(page.items.is_empty());
+    }
 
     #[test]
     fn deserializes_string_query_params() {
@@ -248,14 +376,16 @@ mod tests {
     }
 
     #[test]
-    fn from_request_reports_the_normalized_window_and_has_next() {
-        let page = Paginated::from_request(vec![1, 2], 5, &PageRequest::new(0, 0));
+    fn from_window_reports_the_hardened_window_and_has_next() {
+        let window = PageWindow::harden(PageRequest::new(0, 0));
+        let page = Paginated::from_window(vec![1, 2], 5, window);
         assert_eq!(page.page, 1);
         assert_eq!(page.size, PageRequest::DEFAULT_SIZE);
         // total (5) <= consumed (1 * 20) -> no further page.
         assert!(!page.has_next);
 
-        let windowed = Paginated::from_request(vec![1, 2], 5, &PageRequest::new(1, 2));
-        assert!(windowed.has_next);
+        let windowed = PageWindow::harden(PageRequest::new(1, 2));
+        let windowed_page = Paginated::from_window(vec![1, 2], 5, windowed);
+        assert!(windowed_page.has_next);
     }
 }

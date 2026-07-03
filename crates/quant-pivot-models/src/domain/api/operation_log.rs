@@ -14,6 +14,7 @@ use crate::{
     types::{AuditEventId, OperationLogId, UserId},
 };
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 
 /// Outbound view of one append-only operation-log row.
@@ -81,7 +82,7 @@ impl From<OperationLogInfo> for OperationLogView {
 ///
 /// The pagination window is the shared [`PageRequest`], flattened so the query
 /// string stays flat alongside the filters.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, NormalizePageQuery)]
 pub struct OperationLogQuery {
     pub actor_user_id: Option<UserId>,
     pub category: Option<OperationCategory>,
@@ -91,17 +92,7 @@ pub struct OperationLogQuery {
     pub governance_audit_event_id: Option<AuditEventId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl OperationLogQuery {
-    /// Return a copy with the embedded pagination window normalized.
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }

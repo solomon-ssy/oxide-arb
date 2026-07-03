@@ -2,7 +2,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewTrainingDataset, TrainingDatasetInfo},
+    domain::{NewTrainingDataset, Paginated, TrainingDatasetInfo, TrainingDatasetListQuery},
     enums::quant::TrainingDatasetStatus,
     types::TrainingDatasetId,
 };
@@ -21,6 +21,12 @@ pub trait TrainingDatasetRepository: Send + Sync {
         &self,
         training_dataset_id: &TrainingDatasetId,
     ) -> Result<Option<TrainingDatasetInfo>, StorageError>;
+
+    /// Page the ledger for the operator catalog, newest (`created_at`) first.
+    async fn page(
+        &self,
+        query: TrainingDatasetListQuery,
+    ) -> Result<Paginated<TrainingDatasetInfo>, StorageError>;
 
     /// Transition a training dataset to `next`, enforcing the lifecycle state
     /// machine. Returns [`StorageError::IllegalTransition`] on an illegal transition or

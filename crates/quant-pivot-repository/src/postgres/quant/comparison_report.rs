@@ -3,13 +3,19 @@
 use crate::traits::ModelComparisonReportRepository;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ModelComparisonReportInfo, NewModelComparisonReport},
+    domain::{
+        ComparisonReportListQuery, ModelComparisonReportInfo, NewModelComparisonReport, PageWindow,
+        Paginated,
+    },
     entities::quant_model_comparison_report,
     types::{ModelComparisonReportId, ModelVersionId},
 };
-use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder,
+};
 
-use crate::postgres::query::list_by_fk_ordered_desc;
+use crate::postgres::query::{list_by_fk_ordered_desc, paginate_mapped};
 
 /// Postgres-backed comparison-report ledger repository.
 pub struct PgModelComparisonReportRepository {
@@ -55,6 +61,36 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
             quant_model_comparison_report::Column::CandidateModelVersionId,
             candidate_model_version_id.clone(),
             quant_model_comparison_report::Column::CreatedAt,
+            Into::into,
+        )
+        .await
+    }
+
+    async fn page(
+        &self,
+        query: ComparisonReportListQuery,
+    ) -> Result<Paginated<ModelComparisonReportInfo>, StorageError> {
+        let condition =
+            Condition::all()
+                .add_option(query.candidate_model_version_id.clone().map(|id| {
+                    quant_model_comparison_report::Column::CandidateModelVersionId.eq(id)
+                }))
+                .add_option(
+                    query
+                        .from
+                        .map(|from| quant_model_comparison_report::Column::CreatedAt.gte(from)),
+                )
+                .add_option(
+                    query
+                        .to
+                        .map(|to| quant_model_comparison_report::Column::CreatedAt.lt(to)),
+                );
+        paginate_mapped(
+            quant_model_comparison_report::Entity::find()
+                .filter(condition)
+                .order_by_desc(quant_model_comparison_report::Column::CreatedAt),
+            &self.db,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

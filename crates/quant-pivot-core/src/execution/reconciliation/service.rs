@@ -19,8 +19,9 @@ use quant_pivot_error::{
 use quant_pivot_models::types::RecommendationId;
 use quant_pivot_models::{
     domain::{
-        CapitalReconcileSettlement, ExecutionOrderInfo, OrderIntentInfo, PositionExit,
-        PositionFill, PositionInfo, RecommendationInfo, ReconciliationLedgerWrite,
+        CapitalReconcileSettlement, CoreEvent, CoreEventPublisher, ExecutionOrderInfo,
+        OrderIntentInfo, PositionExit, PositionFill, PositionInfo, RecommendationInfo,
+        ReconciliationLedgerWrite, ReconciliationLifecycleEvent,
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -80,6 +81,8 @@ pub struct ReconciliationServiceDeps {
     pub position_events: Arc<PositionEventWriter>,
     /// Fans out the settled `quant.intent` status after a reconciliation write.
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
+    /// Fans out `quant.reconciliation` revision hints after a reconciliation write.
+    pub events: CoreEventPublisher,
 }
 
 /// An operator's manual resolution of an unresolvable reconciliation.
@@ -230,6 +233,7 @@ impl ReconciliationService {
         .await?;
         self.publish_intent_transition(&order.order_intent_id, intent.status, now)
             .await?;
+        self.publish_reconciliation(order, decision.result, false);
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
         }
@@ -322,6 +326,7 @@ impl ReconciliationService {
         .await?;
         self.publish_intent_transition(&order.order_intent_id, intent.status, now)
             .await?;
+        self.publish_reconciliation(&order, resolution.result, true);
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
         }
@@ -470,7 +475,26 @@ impl ReconciliationService {
 
         self.deps.breaker.trip_kill_switch("recon", &detail).await;
         self.deps.metrics.inc_reconciliation_unresolvable();
+        self.publish_reconciliation(order, ReconciliationResult::Unresolvable, false);
         Ok(())
+    }
+
+    /// Fan out a `quant.reconciliation` revision hint after a reconciliation
+    /// write commits. Consumers re-fetch the queue + recovery panel over REST.
+    fn publish_reconciliation(
+        &self,
+        order: &ExecutionOrderInfo,
+        result: ReconciliationResult,
+        operator_resolved: bool,
+    ) {
+        self.deps
+            .events
+            .publish(CoreEvent::Reconciliation(ReconciliationLifecycleEvent {
+                execution_order_id: order.execution_order_id.to_string(),
+                order_intent_id: order.order_intent_id.to_string(),
+                result,
+                operator_resolved,
+            }));
     }
 
     /// The open position lot backing an exit order (its cost basis prices the

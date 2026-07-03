@@ -27,7 +27,7 @@ use quant_pivot_core::{
 use quant_pivot_error::rpc::RpcError;
 use quant_pivot_models::{
     constants::COLLATERAL_SCALE,
-    domain::NewSettlementRedeem,
+    domain::{CoreEventPublisher, NewSettlementRedeem},
     entities::{market, quant_order_intent, quant_position, quant_settlement_redeem},
     enums::{
         execution::{
@@ -303,6 +303,7 @@ fn settlement_service(
         wallet_kind: ExecutionWalletKind::Eoa,
         capital_events: noop_capital_writer(),
         position_events: noop_position_writer(),
+        events: CoreEventPublisher::bounded(16).0,
     })
 }
 

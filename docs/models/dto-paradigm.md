@@ -73,9 +73,15 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `quant-pivot-mo
 ### 入站查询 `*Query`
 
 - 分页 + 过滤参数（如 `MarketPageQuery`），或时间窗口参数（如 `TimeWindowQuery`）。分页类复用共享的 `PageRequest`，用 `#[serde(flatten)]` 保持 query string 扁平（`?keyword=&status=&page=&size=`）。
-- 提供 `normalized(self) -> Self` 收敛分页窗口；时间窗口类提供 `resolve(...)`，把 `from`/`to`/默认回看/最大跨度等校验收敛在契约类型内，返回**领域错误**（不依赖 `quant-pivot-web` 的 `WebError`），web 侧通过 `From<_> for WebError` 翻译。
+- **三层分页职责**：
+  1. **Wire** — `PageRequest` 承载不可信 `page`/`size`。
+  2. **Contract** — `#[normalize_page]` + `#[derive(NormalizePageQuery)]`（sealed trait，`quant-pivot-macros`）提供 `normalized(self)`；需 server-side enrich 的 query 用具名 domain 方法（如 `MarketPageQuery::prepare()`，与 `resolve()` 同级）。**禁止手写**等价 impl。
+  3. **SQL 边界** — `PageWindow::from_query` / `PageWindow::harden` 是 `paginate_mapped` 唯一接受的窗口类型；分页 clamp 逻辑唯一实现在 `PageRequest::normalized()`。
+- 时间窗口类提供 `resolve(...)`，把 `from`/`to`/默认回看/最大跨度等校验收敛在契约类型内，返回**领域错误**（不依赖 `quant-pivot-web` 的 `WebError`），web 侧通过 `From<_> for WebError` 翻译。
 - `*Query` 是 repository 读方法（`page` / 窗口查询）的入参契约；尽管被持久层消费，它仍是"外部不可信入参"，归 `domain/api/`。
 - 跨资源复用的读过滤领域类型（`TimeWindow` / `MarketFilter`）住在 `domain/query.rs`，被 `domain/api` 的 `*Query::resolve()` 与 repository 读方法共用。
+
+**Forbidden（分页）**：repository 内 `query.normalized()`；`paginate_mapped(..., &PageRequest)`；`Paginated::from_request`；业务代码 `query.page.normalized()` 绕过 trait；handler 内裸 mutate enrich（用 `prepare` / `resolve`）。
 
 ### 入站 `*Request`
 

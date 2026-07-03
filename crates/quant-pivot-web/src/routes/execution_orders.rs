@@ -38,7 +38,7 @@ async fn list_execution_orders(
 ) -> Result<WebResponse<Paginated<ExecutionOrderView>>, WebError> {
     let page = state
         .execution_read
-        .list_execution_orders(query.into_inner().normalized())
+        .list_execution_orders(query.into_inner())
         .await?;
     Ok(WebResponse::ok(page.map(ExecutionOrderView::from)))
 }

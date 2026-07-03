@@ -1,14 +1,22 @@
 //! Postgres-backed training-dataset ledger repository.
 
-use crate::{postgres::error, traits::TrainingDatasetRepository};
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::TrainingDatasetRepository,
+};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{NewTrainingDataset, TrainingDatasetInfo},
+    domain::{
+        NewTrainingDataset, PageWindow, Paginated, TrainingDatasetInfo, TrainingDatasetListQuery,
+    },
     entities::quant_training_dataset,
     enums::quant::TrainingDatasetStatus,
     types::TrainingDatasetId,
 };
-use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder,
+};
 
 /// Postgres-backed training-dataset ledger repository.
 pub struct PgTrainingDatasetRepository {
@@ -45,6 +53,21 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn page(
+        &self,
+        query: TrainingDatasetListQuery,
+    ) -> Result<Paginated<TrainingDatasetInfo>, StorageError> {
+        paginate_mapped(
+            quant_training_dataset::Entity::find()
+                .filter(page_condition(&query))
+                .order_by_desc(quant_training_dataset::Column::CreatedAt),
+            &self.db,
+            PageWindow::from_query(&query),
+            Into::into,
+        )
+        .await
+    }
+
     async fn mark_status(
         &self,
         training_dataset_id: &TrainingDatasetId,
@@ -76,6 +99,31 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .map_err(StorageError::from)
             .map(Into::into)
     }
+}
+
+fn page_condition(query: &TrainingDatasetListQuery) -> Condition {
+    Condition::all()
+        .add_option(
+            query
+                .model_spec_id
+                .clone()
+                .map(|id| quant_training_dataset::Column::ModelSpecId.eq(id)),
+        )
+        .add_option(
+            query
+                .status
+                .map(|status| quant_training_dataset::Column::Status.eq(status)),
+        )
+        .add_option(
+            query
+                .from
+                .map(|from| quant_training_dataset::Column::CreatedAt.gte(from)),
+        )
+        .add_option(
+            query
+                .to
+                .map(|to| quant_training_dataset::Column::CreatedAt.lt(to)),
+        )
 }
 
 /// The training-dataset lifecycle state machine.

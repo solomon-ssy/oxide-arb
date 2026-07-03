@@ -19,6 +19,7 @@ pub mod quant_report;
 pub mod reconciliation_port;
 pub mod reconciliation_worker;
 pub mod report_scheduler;
+pub mod research_catalog;
 pub mod runtime_tasks;
 pub mod settlement_redeem_worker;
 pub mod system_status_broadcaster;

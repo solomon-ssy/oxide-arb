@@ -2,7 +2,9 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ModelComparisonReportInfo, NewModelComparisonReport},
+    domain::{
+        ComparisonReportListQuery, ModelComparisonReportInfo, NewModelComparisonReport, Paginated,
+    },
     types::{ModelComparisonReportId, ModelVersionId},
 };
 
@@ -26,4 +28,10 @@ pub trait ModelComparisonReportRepository: Send + Sync {
         &self,
         candidate_model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelComparisonReportInfo>, StorageError>;
+
+    /// Page the ledger for the operator catalog, newest (`created_at`) first.
+    async fn page(
+        &self,
+        query: ComparisonReportListQuery,
+    ) -> Result<Paginated<ModelComparisonReportInfo>, StorageError>;
 }

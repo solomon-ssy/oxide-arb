@@ -1,16 +1,22 @@
 //! Postgres-backed factor definition + value repository.
 
-use crate::{postgres::error, traits::FactorRepository};
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::FactorRepository,
+};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{FactorDefinitionInfo, FactorValueInfo, NewFactorDefinition, NewFactorValue},
+    domain::{
+        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo, NewFactorDefinition,
+        NewFactorValue, PageWindow, Paginated,
+    },
     entities::{quant_factor_definition, quant_factor_value},
     enums::quant::PublicationStatus,
     types::{FactorDefinitionId, ModelRunId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder, sea_query::OnConflict,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, sea_query::OnConflict,
 };
 
 /// Postgres-backed factor repository: governed definitions (idempotent on the
@@ -99,6 +105,37 @@ impl FactorRepository for PgFactorRepository {
             .await
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn page_definitions(
+        &self,
+        query: FactorDefinitionListQuery,
+    ) -> Result<Paginated<FactorDefinitionInfo>, StorageError> {
+        let condition = Condition::all()
+            .add_option(
+                query
+                    .factor_family
+                    .map(|family| quant_factor_definition::Column::FactorFamily.eq(family)),
+            )
+            .add_option(
+                query
+                    .scope
+                    .map(|scope| quant_factor_definition::Column::Scope.eq(scope)),
+            )
+            .add_option(
+                query
+                    .status
+                    .map(|status| quant_factor_definition::Column::Status.eq(status)),
+            );
+        paginate_mapped(
+            quant_factor_definition::Entity::find()
+                .filter(condition)
+                .order_by_desc(quant_factor_definition::Column::CreatedAt),
+            &self.db,
+            PageWindow::from_query(&query),
+            Into::into,
+        )
+        .await
     }
 
     async fn publish_definition(

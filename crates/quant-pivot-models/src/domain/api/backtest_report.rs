@@ -8,12 +8,13 @@
 //! 2. `GET /research/backtest-reports/{id}` — fetch a stored report.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::BacktestReportInfo,
+    domain::{BacktestReportInfo, pagination::PageRequest},
     types::{
         BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
         Probability, RuntimeConfigVersionId, TrainingDatasetId,
@@ -73,6 +74,20 @@ pub struct BacktestReportView {
     /// Set in pair mode: the persisted comparison of this candidate vs. baseline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison_report_id: Option<ModelComparisonReportId>,
+}
+
+/// Paginated filter for the append-only backtest-report ledger catalog.
+///
+/// `from` / `to` bound `created_at`; `model_version_id` scopes to the reports
+/// for one trained version. The pagination window is the shared [`PageRequest`].
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct BacktestReportListQuery {
+    pub model_version_id: Option<ModelVersionId>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 impl From<BacktestReportInfo> for BacktestReportView {

@@ -38,5 +38,7 @@ mod quant_reports;
 mod readiness;
 #[path = "web/reconciliations.rs"]
 mod reconciliations;
+#[path = "web/research_catalog.rs"]
+mod research_catalog;
 #[path = "web/ws.rs"]
 mod ws;

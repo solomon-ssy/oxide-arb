@@ -1,15 +1,23 @@
 //! Quant model registry HTTP contract types.
 
-use crate::domain::{ModelSpecInfo, ModelVersionInfo};
-use serde::Serialize;
+use crate::{
+    domain::{ModelSpecInfo, pagination::PageRequest},
+    enums::quant::PublicationStatus,
+};
+use quant_pivot_macros::NormalizePageQuery;
+use serde::{Deserialize, Serialize};
 
-/// Outbound projection for a model specification row.
+/// Outbound projection for a model specification row (the training entry point:
+/// the operator picks a spec before planning a dataset or training a version).
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantModelSpecView {
     pub model_spec_id: String,
     pub name: String,
     pub model_family: String,
+    pub prediction_horizon_secs: i64,
     pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl From<ModelSpecInfo> for QuantModelSpecView {
@@ -18,27 +26,20 @@ impl From<ModelSpecInfo> for QuantModelSpecView {
             model_spec_id: info.model_spec_id.to_string(),
             name: info.name,
             model_family: info.model_family.as_str().to_owned(),
+            prediction_horizon_secs: info.prediction_horizon_secs,
             status: info.status.as_str().to_owned(),
+            created_at: info.created_at,
+            updated_at: info.updated_at,
         }
     }
 }
 
-/// Outbound projection for a model version row.
-#[derive(Debug, Clone, Serialize)]
-pub struct QuantModelVersionView {
-    pub model_version_id: String,
-    pub model_spec_id: String,
-    pub version: i32,
-    pub publication_status: String,
-}
-
-impl From<ModelVersionInfo> for QuantModelVersionView {
-    fn from(info: ModelVersionInfo) -> Self {
-        Self {
-            model_version_id: info.model_version_id.to_string(),
-            model_spec_id: info.model_spec_id.to_string(),
-            version: info.version,
-            publication_status: info.publication_status.as_str().to_owned(),
-        }
-    }
+/// Paginated filter for the model-spec catalog (training/dataset selector source).
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct ModelSpecListQuery {
+    /// Narrow by publication lifecycle (`draft`/`published`/`retired`/…).
+    pub status: Option<PublicationStatus>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }

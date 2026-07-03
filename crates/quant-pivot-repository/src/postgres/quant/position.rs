@@ -13,8 +13,8 @@ use crate::{
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        ExitTrainingLotRow, LotExitEventRow, NewPosition, Paginated, PositionExit, PositionFill,
-        PositionInfo, PositionListQuery, PositionSummary,
+        ExitTrainingLotRow, LotExitEventRow, NewPosition, PageWindow, Paginated, PositionExit,
+        PositionFill, PositionInfo, PositionListQuery, PositionSummary,
     },
     entities::{quant_execution_order, quant_order_intent, quant_position},
     enums::{
@@ -112,13 +112,12 @@ impl PositionRepository for PgPositionRepository {
         &self,
         query: PositionListQuery,
     ) -> Result<Paginated<PositionSummary>, StorageError> {
-        let query = query.normalized();
         let page: Paginated<PositionInfo> = paginate_mapped(
             quant_position::Entity::find()
                 .filter(page_condition(&query))
                 .order_by_desc(quant_position::Column::OpenedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await?;

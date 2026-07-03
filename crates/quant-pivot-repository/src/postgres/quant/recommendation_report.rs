@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        NewOperationLog, NewReportTransaction, Paginated, QuantReportListQuery,
+        NewOperationLog, NewReportTransaction, PageWindow, Paginated, QuantReportListQuery,
         RecommendationReportInfo,
     },
     entities::{
@@ -116,7 +116,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 .order_by_desc(quant_recommendation_report::Column::PublishedAt)
                 .order_by_desc(quant_recommendation_report::Column::CreatedAt),
             &self.db,
-            &query.page,
+            PageWindow::from_query(&query),
             Into::into,
         )
         .await

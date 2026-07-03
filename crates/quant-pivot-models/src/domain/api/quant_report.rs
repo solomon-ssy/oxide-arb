@@ -18,6 +18,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -130,7 +131,7 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
 ///
 /// `from` / `to` bound `created_at`; the pagination window is the shared
 /// [`PageRequest`], flattened so the query string stays flat.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct QuantReportListQuery {
     pub kind: Option<ReportKind>,
     pub status: Option<RecommendationReportStatus>,
@@ -138,19 +139,9 @@ pub struct QuantReportListQuery {
     pub runtime_mode: Option<QuantRuntimeMode>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl QuantReportListQuery {
-    /// Return a copy with the embedded pagination window normalized.
-    #[must_use]
-    pub const fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }
 
 /// Inbound body for `POST /quant/reports/run` (ad-hoc report generation).

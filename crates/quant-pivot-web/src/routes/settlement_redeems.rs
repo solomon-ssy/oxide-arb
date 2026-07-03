@@ -41,7 +41,7 @@ async fn list(
 ) -> Result<WebResponse<Paginated<SettlementRedeemView>>, WebError> {
     let page = state
         .execution_read
-        .list_settlement_redeems(query.into_inner().normalized())
+        .list_settlement_redeems(query.into_inner())
         .await?;
     Ok(WebResponse::ok(page.map(SettlementRedeemView::from)))
 }

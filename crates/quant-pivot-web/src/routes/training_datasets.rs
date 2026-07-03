@@ -24,7 +24,11 @@
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
-    domain::{BuildTrainingDatasetRequest, TrainingDatasetPlanView, TrainingDatasetView},
+    domain::{
+        BuildTrainingDatasetRequest, CoreEvent, MaterializationRunEvent, MaterializationRunKind,
+        MaterializationRunStatus, Paginated, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        TrainingDatasetView,
+    },
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
@@ -47,6 +51,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
             Method::GET,
+            "/research/training-datasets",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list,
+        ),
+        spec(
+            Method::GET,
             "/research/training-datasets/{id}",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             get_by_id,
@@ -64,6 +74,19 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             build,
         ),
     ]
+}
+
+/// `GET /api/research/training-datasets` — paginated ledger catalog.
+pub async fn list(
+    state: web::Data<AppState>,
+    query: web::Query<TrainingDatasetListQuery>,
+) -> Result<WebResponse<Paginated<TrainingDatasetView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_training_datasets(query.into_inner())
+        .await?
+        .map(TrainingDatasetView::from);
+    Ok(WebResponse::ok(page))
 }
 
 /// `GET /api/research/training-datasets/{id}` — ledger row for UI polling.
@@ -114,6 +137,19 @@ pub async fn build(
     let request = body.into_inner();
     let reason = request.reason.clone();
     let view = state.training_datasets.build(request).await?;
+    // Fan out a `materialization.run_update` revision hint so other operators'
+    // open workbench catalogs re-fetch (the build itself is synchronous here).
+    let run_status = match view.status.as_str() {
+        "failed" | "insufficient_labels" => MaterializationRunStatus::Failed,
+        _ => MaterializationRunStatus::Completed,
+    };
+    state
+        .events
+        .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
+            run_id: view.training_dataset_id.to_string(),
+            kind: MaterializationRunKind::Dataset,
+            status: run_status,
+        }));
     op_ctx.set_action(OperationCategory::Other, "research.training_dataset.build");
     op_ctx.set_resource(
         ResourceType::Materialization,

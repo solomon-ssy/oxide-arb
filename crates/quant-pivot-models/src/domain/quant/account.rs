@@ -14,6 +14,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -161,23 +162,13 @@ pub struct NewEquitySnapshot {
 }
 
 /// Equity snapshot history filters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, NormalizePageQuery)]
 pub struct EquitySnapshotQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
-}
-
-impl EquitySnapshotQuery {
-    #[must_use]
-    pub const fn normalized(&self) -> Self {
-        Self {
-            from: self.from,
-            to: self.to,
-            page: self.page.normalized(),
-        }
-    }
 }
 
 /// Monotonic high-water mark over strategy `capital_base_usd`.

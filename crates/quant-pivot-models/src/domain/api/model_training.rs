@@ -13,11 +13,13 @@
 //! is governed separately (Phase 3.7).
 
 use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::ModelVersionInfo,
+    domain::{ModelVersionInfo, pagination::PageRequest},
+    enums::quant::PublicationStatus,
     types::{ContentHash, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
 };
 
@@ -68,6 +70,22 @@ pub struct TrainedModelView {
     /// Trainer metrics (in-sample + validation objective report).
     pub metrics: serde_json::Value,
     pub created_at: DateTime<Utc>,
+}
+
+/// Paginated filter for the trained-model registry catalog.
+///
+/// `from` / `to` bound `created_at`; `model_spec_id` scopes to one spec and
+/// `publication_status` narrows the governance lifecycle. The pagination window
+/// is the shared [`PageRequest`], flattened so the query string stays flat.
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct ModelVersionListQuery {
+    pub model_spec_id: Option<ModelSpecId>,
+    pub publication_status: Option<PublicationStatus>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 impl From<ModelVersionInfo> for TrainedModelView {
