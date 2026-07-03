@@ -3,7 +3,7 @@
 //! Runtime configuration changes only through immutable, audited versions —
 //! there is no bare in-place mutation. The full activation pipeline:
 //!
-//! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 5`,
+//! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 10`,
 //!    unknown fields rejected) + semantic validation, canonical JSON, content
 //!    hash, immutable row.
 //! 2. `POST .../activate` (or `.../rollback`) — re-parse + validate, audited
@@ -24,6 +24,7 @@ use quant_pivot_models::{
         CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
         RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
+        SchedulePreviewRequest, SchedulePreviewView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -33,7 +34,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::{
         RuntimeConfig, apply_runtime_config_patch, build_preferences_schema, mask_config_json,
-        unmask_with, validate_runtime_config,
+        preview_fire_times, unmask_with, validate_runtime_config,
     },
     types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
@@ -66,6 +67,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/runtime-config/schema",
             Rule::ResourceOp(ResourceType::RuntimeConfig, Operation::Read),
             schema,
+        ),
+        spec(
+            Method::POST,
+            "/runtime-config/schedule-preview",
+            Rule::ResourceOp(ResourceType::RuntimeConfig, Operation::Read),
+            schedule_preview,
         ),
         spec(
             Method::GET,
@@ -115,6 +122,19 @@ pub async fn current(
 /// `GET /api/runtime-config/schema` — preferences envelope for the UI form renderer.
 pub async fn schema() -> Result<WebResponse<RuntimeConfigSchemaView>, WebError> {
     Ok(WebResponse::ok(build_preferences_schema()))
+}
+
+/// `POST /api/runtime-config/schedule-preview` — next fire times for a cadence.
+///
+/// Stateless dry-run using the same cron parser as the report scheduler; a bad
+/// cadence (zero interval, malformed cron, unknown timezone) fails as 400.
+pub async fn schedule_preview(
+    body: ValidatedJson<SchedulePreviewRequest>,
+) -> Result<WebResponse<SchedulePreviewView>, WebError> {
+    let body = body.into_inner();
+    let next_fire_times = preview_fire_times(&body.cadence, Utc::now(), usize::from(body.count))
+        .map_err(|error| WebError::BadRequest(error.to_string()))?;
+    Ok(WebResponse::ok(SchedulePreviewView { next_fire_times }))
 }
 
 /// `GET /api/runtime-config/versions` — the immutable version catalog (masked).

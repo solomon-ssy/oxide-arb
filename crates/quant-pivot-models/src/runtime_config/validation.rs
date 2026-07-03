@@ -5,7 +5,8 @@
 //! runtime configuration).
 
 use super::{
-    DecimalString, RuntimeConfig, ScheduleCadence, SizingModelConfig, sections::FeaturesConfig,
+    DecimalString, RuntimeConfig, SizingModelConfig, sections::FeaturesConfig,
+    validate_schedule_cadence,
 };
 use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
@@ -66,11 +67,6 @@ fn validate_selection(config: &RuntimeConfig, report: &mut ConfigValidationRepor
 }
 
 fn validate_data_quality(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
-    decimal(
-        "data_quality.min_book_depth_usd",
-        &config.data_quality.min_book_depth_usd,
-        report,
-    );
     if config.data_quality.max_book_age_ms == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "data_quality.max_book_age_ms",
@@ -197,12 +193,6 @@ fn validate_model(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
         &config.model.shadow_diff_threshold,
         report,
     );
-    if config.model.prediction_horizon_secs == 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "model.prediction_horizon_secs",
-            detail: "must be greater than zero".to_owned(),
-        });
-    }
 }
 
 fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -303,7 +293,7 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
             });
         }
         if schedule.enabled {
-            validate_cadence(&schedule.cadence, report);
+            validate_schedule_cadence(&schedule.cadence, report);
         }
         if schedule.top_n == 0 || schedule.top_n > config.reports.max_top_n {
             report.errors.push(ConfigValidationError::InvalidValue {
@@ -312,27 +302,17 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
             });
         }
     }
-}
-
-/// Validate a schedule cadence. Cron expressions get a structural check only;
-/// full parsing happens in the 04.3 scheduler runner.
-fn validate_cadence(cadence: &ScheduleCadence, report: &mut ConfigValidationReport) {
-    match cadence {
-        ScheduleCadence::Interval { interval_secs } => {
-            if *interval_secs == 0 {
-                report.errors.push(ConfigValidationError::InvalidValue {
-                    field: "reports.schedules.cadence.interval_secs",
-                    detail: "enabled interval schedules must have a positive interval".to_owned(),
-                });
-            }
+    let mut seen_schedule_ids = HashSet::new();
+    for schedule in &config.reports.schedules {
+        let id = schedule.schedule_id.trim();
+        if id.is_empty() {
+            continue;
         }
-        ScheduleCadence::Cron { expr, .. } => {
-            if expr.split_whitespace().count() != 6 {
-                report.errors.push(ConfigValidationError::InvalidValue {
-                    field: "reports.schedules.cadence.expr",
-                    detail: "cron expression must have 6 whitespace-separated fields".to_owned(),
-                });
-            }
+        if !seen_schedule_ids.insert(id.to_owned()) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "reports.schedules.schedule_id",
+                detail: format!("duplicate schedule_id `{id}`"),
+            });
         }
     }
 }
@@ -448,6 +428,11 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     non_negative_decimal(
         "execution.capital.max_reserved_usd",
         &config.execution.capital.max_reserved_usd,
+        report,
+    );
+    non_negative_decimal(
+        "execution.entry_order_policy.min_entry_book_depth_usd",
+        &config.execution.entry_order_policy.min_entry_book_depth_usd,
         report,
     );
     if config.execution.kill_switch.emergency_exit.max_slippage_bps == 0 {
@@ -610,7 +595,10 @@ mod tests {
     use super::{RuntimeConfig, validate_runtime_config};
     use crate::{
         enums::factor::FactorFamily,
-        runtime_config::{DecimalString, FeatureNameRef, RUNTIME_CONFIG_SCHEMA_VERSION},
+        runtime_config::{
+            DecimalString, FeatureNameRef, RUNTIME_CONFIG_SCHEMA_VERSION, ReportScheduleConfig,
+            ScheduleCadence,
+        },
     };
 
     #[test]
@@ -677,6 +665,34 @@ mod tests {
     fn empty_required_feature_name_is_rejected() {
         let mut config = RuntimeConfig::default();
         config.features.required_features = vec![FeatureNameRef::new("   ")];
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn invalid_enabled_cron_schedule_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config.reports.schedules = vec![ReportScheduleConfig {
+            schedule_id: "bad".to_owned(),
+            enabled: true,
+            top_n: 10,
+            source_delay_secs: 0,
+            cadence: ScheduleCadence::Cron {
+                expr: "not-a-cron".to_owned(),
+                timezone: None,
+            },
+        }];
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn duplicate_schedule_id_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config.reports.schedules = vec![
+            ReportScheduleConfig::default(),
+            ReportScheduleConfig::default(),
+        ];
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }

@@ -66,8 +66,6 @@ pub struct DataQualityConfig {
     /// bucket at decision time. Governs offline/online feature staleness
     /// (`StalenessRule::MaxFeatureBucketAge`) — independent of live ingest lag.
     pub max_feature_bucket_age_secs: u64,
-    /// Minimum visible book depth in USD.
-    pub min_book_depth_usd: DecimalString,
     /// Reject crossed books before feature generation.
     pub reject_crossed_books: bool,
     /// Reject empty books before feature generation.
@@ -88,7 +86,6 @@ impl Default for DataQualityConfig {
             max_book_age_ms: 5_000,
             max_ingest_lag_ms: 10_000,
             max_feature_bucket_age_secs: 30,
-            min_book_depth_usd: DecimalString::new("0"),
             reject_crossed_books: true,
             reject_empty_books: true,
             feature_staleness_policy: FeatureStalenessPolicy::RejectStaleRequired,
@@ -190,10 +187,6 @@ pub struct ModelConfig {
     /// Consumed by Phase 3.7 governance (`ModelQualityGate` / load-time deny), not by
     /// the 3.4 `ModelRunner` inference path.
     pub min_quality_gate_age_secs: u64,
-    /// Prediction horizon used when authoring / training artifacts
-    /// (`WeightedFactorModelArtifact.prediction_horizon_secs`). Online inference reads
-    /// the frozen artifact field, not this config value (Phase 3.6 trainer writes it).
-    pub prediction_horizon_secs: u64,
     /// Minimum candidate score to enter portfolio pruning.
     pub candidate_score_floor: DecimalString,
     /// Shadow/live diff threshold.
@@ -208,7 +201,6 @@ impl Default for ModelConfig {
             active_exit_model_version_id: None,
             min_model_confidence: DecimalString::new("0.50"),
             min_quality_gate_age_secs: 86_400,
-            prediction_horizon_secs: 86_400,
             candidate_score_floor: DecimalString::new("0.00"),
             shadow_diff_threshold: DecimalString::new("0.10"),
         }

@@ -1,7 +1,8 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 9`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 10`).
 
 pub mod json_schema;
 pub mod preferences_schema;
+pub mod schedule_preview;
 pub mod sections;
 pub mod validation;
 pub mod wire;
@@ -11,6 +12,9 @@ pub use json_schema::{
     sensitive_leaf_paths,
 };
 pub use preferences_schema::{build_preferences_schema, preferences_schema_ui_gaps};
+pub use schedule_preview::{
+    MAX_PREVIEW_OCCURRENCES, preview_fire_times, validate_schedule_cadence,
+};
 pub use sections::*;
 pub use validation::validate_runtime_config;
 pub use wire::*;
@@ -26,7 +30,7 @@ use quant_pivot_error::{
 use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(9);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(10);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -259,8 +263,8 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 9);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 9);
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 10);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 10);
     }
 
     #[test]

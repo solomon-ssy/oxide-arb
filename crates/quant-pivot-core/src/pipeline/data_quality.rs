@@ -10,8 +10,10 @@
 //! healthy; only connection failure plus an aged book yields [`DataQualityStatus::Stale`].
 //! The aggregate snapshot feeds the operator API and Prometheus.
 //!
-//! TODO(phase-3): gate on `min_book_depth_usd` once feature builders consume
-//! per-level notionals; depth-in-USD is intentionally out of scope here.
+//! Depth-in-USD is intentionally out of scope here: the entry depth floor is
+//! `execution.entry_order_policy.min_entry_book_depth_usd`, frozen onto each
+//! recommendation's entry plan and enforced by execution admission — not a live
+//! book-quality gate.
 
 use std::sync::Arc;
 

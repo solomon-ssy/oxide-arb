@@ -309,6 +309,12 @@ pub struct EntryOrderPolicy {
     pub max_slippage_bps: u32,
     /// Whether entry orders may use marketable order types.
     pub allow_market_orders: bool,
+    /// Minimum visible book depth (USD) required at entry. Frozen onto every
+    /// recommendation's `EntryPlan.min_depth_usd` at report build and enforced
+    /// by execution admission (`LiquidityDepthCheck`): an intent is deferred
+    /// when the fillable ask notional up to the limit price is below this
+    /// floor. `0` disables the depth floor.
+    pub min_entry_book_depth_usd: DecimalString,
 }
 
 impl Default for EntryOrderPolicy {
@@ -316,6 +322,7 @@ impl Default for EntryOrderPolicy {
         Self {
             max_slippage_bps: 50,
             allow_market_orders: false,
+            min_entry_book_depth_usd: DecimalString::new("0"),
         }
     }
 }

@@ -8,6 +8,7 @@ use crate::{
     enums::execution::{ReconciliationResult, SettlementRedeemState},
     enums::quant::{
         EmptyReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
+        TrainingDatasetStatus,
     },
     types::MarketId,
 };
@@ -403,6 +404,20 @@ pub enum MaterializationRunStatus {
     Failed,
     /// Cancelled before completion.
     Cancelled,
+}
+
+impl From<TrainingDatasetStatus> for MaterializationRunStatus {
+    fn from(status: TrainingDatasetStatus) -> Self {
+        match status {
+            TrainingDatasetStatus::Failed | TrainingDatasetStatus::InsufficientLabels => {
+                Self::Failed
+            }
+            TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => Self::Running,
+            TrainingDatasetStatus::Built
+            | TrainingDatasetStatus::Ready
+            | TrainingDatasetStatus::Expired => Self::Completed,
+        }
+    }
 }
 
 /// Materialization run lifecycle event fanned out on `materialization.run_update`.

@@ -64,11 +64,11 @@
 
 根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 9`（以代码为准；本节结构文字仍以 v7 基线书写，后续 bump 只增段不改既有语义）。
 
-> **schema 版本历史**：v7 基线 → … → **v9**（Phase 06.1：新增 `model.active_exit_model_version_id`、`quality_gate.sell.*`、`execution.exit_monitor.opportunistic_sell.min_p_exit_better`）。
+> **schema 版本历史**：v7 基线 → … → v9（Phase 06.1）→ **v10**（Phase 10.7：移除线上死配置 `model.prediction_horizon_secs`→训练 API；`data_quality.min_book_depth_usd` 迁移正名为 `execution.entry_order_policy.min_entry_book_depth_usd`）。
 
 ```text
 RuntimeConfig {
-  schema_version: 9,
+  schema_version: 10,
   selection,
   data_quality,
   features,
@@ -91,7 +91,9 @@ RuntimeConfig {
 
 ### 2.2 `data_quality`
 
-`max_book_age_ms`, `max_ingest_lag_ms`, `max_feature_bucket_age_secs`, `min_book_depth_usd`, `reject_crossed_books`, `reject_empty_books`, `feature_staleness_policy`, `max_stale_book_ratio_bps`。
+`max_book_age_ms`, `max_ingest_lag_ms`, `max_feature_bucket_age_secs`, `reject_crossed_books`, `reject_empty_books`, `feature_staleness_policy`, `max_stale_book_ratio_bps`。
+
+> **v10 迁移**：`min_book_depth_usd` 语义错位（不参与 live 订单簿质量，仅经冻结 `entry_plan.min_depth_usd` 在准入 `LiquidityDepthCheck` 生效），已迁移正名为 `execution.entry_order_policy.min_entry_book_depth_usd`（见 §2.10）。
 
 `max_ingest_lag_ms` 衡量入库管道 enqueue→ClickHouse flush-ack 背压（实时数据质量 / 执行准入 / 选市）；`max_feature_bucket_age_secs` 衡量物化特征桶陈旧度（训练 / 回测 / 在线特征）。二者语义独立，不可混用。
 
@@ -110,7 +112,9 @@ RuntimeConfig {
 
 ### 2.5 `model`
 
-`active_model_version_id`, `shadow_model_version_id`, `min_model_confidence`, `min_quality_gate_age_secs`, `prediction_horizon_secs`, `candidate_score_floor`, `shadow_diff_threshold`。在线推断读冻结 artifact 的 horizon，不读 config。
+`active_model_version_id`, `shadow_model_version_id`, `active_exit_model_version_id`, `min_model_confidence`, `min_quality_gate_age_secs`, `candidate_score_floor`, `shadow_diff_threshold`。
+
+> **v10 移除**：`prediction_horizon_secs` 是线上死配置（仅训练产物 authoring 用，在线推断读冻结 artifact 的 horizon），已从 runtime-config 移除并迁到训练 API `TrainModelRequest.prediction_horizon_secs`（校验 + 默认 86400），由 trainer 写入 artifact。
 
 ### 2.6 `quality_gate`
 
@@ -143,7 +147,7 @@ Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs
 
 - `semi_auto`：`approval_ttl_secs`、`allow_size_reduction`。
 - `auto_execution`：`enabled`、`max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence`。
-- `entry_order_policy`：`max_slippage_bps`、`allow_market_orders`。
+- `entry_order_policy`：`max_slippage_bps`、`allow_market_orders`、`min_entry_book_depth_usd`（**v10 从 `data_quality.min_book_depth_usd` 迁移正名**；冻结进 `entry_plan.min_depth_usd`，准入 `LiquidityDepthCheck` 消费）。
 - `exit_monitor`：`enabled`、`monitor_secs`、`signal_recheck_secs`、`signal_invalidation_ratio`、`signal_reinference{enabled, shadow_mode}`。
 - `capital`：`max_reserved_usd`、`max_open_intents`（**v7 起真正生效**，见 §3.3）。
 - `reconciliation`：`enabled`、`interval_secs`、`stale_open_secs`。
@@ -163,7 +167,7 @@ Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs
 
 ### 3.1 Common validation（[`validation.rs`](../../../crates/quant-pivot-models/src/runtime_config/validation.rs)）
 
-- `schema_version` 必须为 9；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
+- `schema_version` 必须为 10；unknown fields reject；Decimal string parse；USD ≥ 0；比例在合法区间；schedule id 非空；cadence 结构合法。
 
 ### 3.2 Mode-aware validation（deploy + preflight）
 

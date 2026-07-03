@@ -48,7 +48,7 @@ use quant_pivot_models::{
     },
     runtime_config::{
         DataQualityConfig, FactorWeights, FactorsConfig, FeatureFamily, FeaturesConfig,
-        ModelConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints, wire::DecimalString,
+        PortfolioBudget, PortfolioConfig, PortfolioConstraints, wire::DecimalString,
     },
     types::{
         ContentHash, FactorDefinitionId, MarketId, ModelSpecId, Price, Probability,
@@ -548,7 +548,6 @@ fn trainer_config() -> ModelTrainerConfig {
             factor_weights: FactorWeights { weights },
             ..FactorsConfig::default()
         },
-        model: ModelConfig::default(),
     }
 }
 
@@ -662,6 +661,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
                 name: settlement(),
                 horizon_secs: 0,
             },
+            prediction_horizon_secs: 86_400,
             validation_folds: 3,
         })
         .await

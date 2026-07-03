@@ -111,6 +111,29 @@ mod tests {
     }
 
     #[test]
+    fn dataset_build_status_maps_to_materialization_run_status() {
+        use crate::domain::MaterializationRunStatus;
+        use crate::enums::quant::TrainingDatasetStatus;
+
+        assert_eq!(
+            MaterializationRunStatus::from(TrainingDatasetStatus::Failed),
+            MaterializationRunStatus::Failed
+        );
+        assert_eq!(
+            MaterializationRunStatus::from(TrainingDatasetStatus::InsufficientLabels),
+            MaterializationRunStatus::Failed
+        );
+        assert_eq!(
+            MaterializationRunStatus::from(TrainingDatasetStatus::Built),
+            MaterializationRunStatus::Completed
+        );
+        assert_eq!(
+            MaterializationRunStatus::from(TrainingDatasetStatus::Building),
+            MaterializationRunStatus::Running
+        );
+    }
+
+    #[test]
     fn materialization_run_maps_to_global_channel() {
         use crate::domain::{
             MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,

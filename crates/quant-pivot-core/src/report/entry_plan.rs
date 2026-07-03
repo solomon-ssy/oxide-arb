@@ -43,7 +43,7 @@ pub fn derive_entry_plan(
         valid_from: as_of,
         valid_until,
         min_depth_usd: Usd::new(parse_decimal_lossless(
-            &config.data_quality.min_book_depth_usd.value,
+            &policy.min_entry_book_depth_usd.value,
         )),
         max_book_age_ms: config.data_quality.max_book_age_ms,
         cancel_if_not_triggered,

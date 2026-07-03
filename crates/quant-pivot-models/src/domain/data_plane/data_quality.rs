@@ -2,8 +2,9 @@
 //!
 //! The dominant data-quality signals are book **staleness** (age against the
 //! runtime staleness ladder) and structural validity (**empty** / **crossed**
-//! books). Depth-in-USD gating against `min_book_depth_usd` is a Phase 3
-//! refinement (TODO) once feature builders consume per-level notionals.
+//! books). Depth-in-USD is not gated here: the entry depth floor
+//! (`execution.entry_order_policy.min_entry_book_depth_usd`) is enforced at
+//! execution admission against the frozen entry plan, not the live book plane.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;

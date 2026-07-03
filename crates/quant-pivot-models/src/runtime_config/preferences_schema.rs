@@ -1,4 +1,10 @@
 //! Preferences UI schema projection (`GET /runtime-config/schema`).
+//!
+//! Merges the JSON-Schema-derived leaf data (types, defaults, constraints,
+//! sensitivity) with the hand-authored UI overlay in [`crate::schema::ui`] into
+//! a normalized field dictionary plus a layout tree. `preferences_schema_ui_gaps`
+//! enforces the two stay consistent: every schema leaf is covered by exactly one
+//! tree node and one dictionary entry that carries real, bilingual `help`.
 
 use crate::{
     domain::{
@@ -8,44 +14,26 @@ use crate::{
     runtime_config::RuntimeConfig,
 };
 
-use crate::schema::ui::{field_ui, field_ui_map, groups_ui};
+use crate::schema::ui::{enum_label, field_ui, field_ui_map, schema_tree, tree_field_paths};
 
-use super::json_schema::fields::walk_schema_leaves;
+use super::json_schema::fields::{SchemaLeaf, walk_schema_leaves};
+use serde_json::Value;
 
 /// Build the preferences envelope for `GET /runtime-config/schema`.
 #[must_use]
 pub fn build_preferences_schema() -> RuntimeConfigSchemaView {
     let schema = RuntimeConfig::json_schema();
     let defaults = RuntimeConfig::default().to_json();
-    let leaves = walk_schema_leaves(&schema, &defaults, "", false);
-
-    let mut groups = groups_ui();
-    groups.sort_by_key(|group| group.order);
+    let leaves = walk_schema_leaves(&schema, &defaults, "");
 
     let mut fields = leaves
         .into_iter()
         .filter(|leaf| leaf.path != "schema_version")
-        .enumerate()
-        .map(|(index, leaf)| {
+        .map(|leaf| {
             let ui = field_ui(&leaf.path);
-            let enum_items = leaf.constraints.as_ref().and_then(|constraints| {
-                constraints.enum_values.as_ref().map(|values| {
-                    values
-                        .iter()
-                        .map(|value| EnumItemView {
-                            key: value.clone(),
-                            label: UiText::plain(value.as_str().unwrap_or_default()),
-                        })
-                        .collect()
-                })
-            });
+            let enum_items = resolve_enum_items(&leaf, ui);
             RuntimeConfigSchemaFieldView {
                 path: leaf.path.clone(),
-                group: leaf.group.clone(),
-                order: ui.map_or_else(
-                    || u16::try_from(index).unwrap_or(u16::MAX),
-                    |entry| entry.order,
-                ),
                 label: ui.map_or_else(
                     || UiText::plain(title(leaf.path.rsplit('.').next().unwrap_or(&leaf.path))),
                     |entry| entry.label.clone(),
@@ -56,36 +44,41 @@ pub fn build_preferences_schema() -> RuntimeConfigSchemaView {
                 ),
                 value_type: leaf.value_type,
                 format: leaf.format,
+                ui_props: ui.and_then(|entry| entry.ui_props.clone()),
                 widget: ui
                     .and_then(|entry| entry.widget)
                     .or_else(|| Some(infer_widget(leaf.value_type, leaf.sensitive))),
                 semantics: ui.and_then(|entry| entry.semantics),
                 default: leaf.default,
                 description: leaf.description,
-                money_critical: leaf.money_critical,
                 sensitive: leaf.sensitive,
                 constraints: leaf.constraints,
                 enum_items,
-                when: None,
+                when: ui
+                    .map(|entry| entry.when.clone())
+                    .filter(|rules| !rules.is_empty()),
+                array_item_type: leaf.array_item_type,
             }
         })
         .collect::<Vec<_>>();
-    fields.sort_by(|left, right| {
-        left.group
-            .cmp(&right.group)
-            .then_with(|| left.order.cmp(&right.order))
-            .then_with(|| left.path.cmp(&right.path))
-    });
+    fields.sort_by(|left, right| left.path.cmp(&right.path));
 
-    RuntimeConfigSchemaView { groups, fields }
+    RuntimeConfigSchemaView {
+        tree: schema_tree(),
+        fields,
+    }
 }
 
 /// Validate hand-maintained runtime-config UI metadata against the current schema.
+///
+/// Reports any drift between the JSON-Schema leaves, the field dictionary, and
+/// the layout tree — including missing/hidden entries, missing bilingual text,
+/// `help` that merely duplicates `label`, and tree coverage gaps.
 #[must_use]
 pub fn preferences_schema_ui_gaps() -> Vec<String> {
     let schema = RuntimeConfig::json_schema();
     let defaults = RuntimeConfig::default().to_json();
-    let leaves = walk_schema_leaves(&schema, &defaults, "", false);
+    let leaves = walk_schema_leaves(&schema, &defaults, "");
     let schema_paths = leaves
         .iter()
         .filter(|leaf| leaf.path != "schema_version")
@@ -102,9 +95,17 @@ pub fn preferences_schema_ui_gaps() -> Vec<String> {
         if !entry.visible {
             gaps.push(format!("schema field `{path}` is registered as hidden"));
         }
-        if !entry.label.has_en_and_zh() || !entry.help.has_en_and_zh() {
+        if !entry.label.has_en_and_zh() {
             gaps.push(format!(
-                "schema field `{path}` is missing bilingual UI text"
+                "schema field `{path}` label missing bilingual text"
+            ));
+        }
+        if !entry.help.has_en_and_zh() {
+            gaps.push(format!("schema field `{path}` help missing bilingual text"));
+        }
+        if entry.help.locales == entry.label.locales {
+            gaps.push(format!(
+                "schema field `{path}` help merely duplicates label (author a real help)"
             ));
         }
     }
@@ -115,6 +116,32 @@ pub fn preferences_schema_ui_gaps() -> Vec<String> {
             ));
         }
     }
+
+    // Layout-tree coverage: every schema leaf appears exactly once in the tree,
+    // and the tree references no unknown paths.
+    let tree_paths = tree_field_paths();
+    let mut seen = std::collections::BTreeMap::<String, u32>::new();
+    for path in &tree_paths {
+        *seen.entry(path.clone()).or_default() += 1;
+    }
+    for (path, count) in &seen {
+        if *count > 1 {
+            gaps.push(format!(
+                "tree references `{path}` {count} times (must be once)"
+            ));
+        }
+        if !schema_paths.contains(path.as_str()) {
+            gaps.push(format!("tree references unknown path `{path}`"));
+        }
+    }
+    for path in &schema_paths {
+        if !seen.contains_key(*path) {
+            gaps.push(format!(
+                "schema field `{path}` is not placed in the layout tree"
+            ));
+        }
+    }
+
     gaps.sort();
     gaps
 }
@@ -130,9 +157,37 @@ const fn infer_widget(value_type: JsonValueType, sensitive: bool) -> FieldWidget
         JsonValueType::EnumArray => FieldWidget::EnumSet,
         JsonValueType::StringArray => FieldWidget::StringList,
         JsonValueType::EnumDecimalMap => FieldWidget::EnumDecimalMap,
+        JsonValueType::DecimalMap => FieldWidget::DecimalMap,
         JsonValueType::String => FieldWidget::PlainString,
         _ => FieldWidget::JsonTree,
     }
+}
+
+fn resolve_enum_items(
+    leaf: &SchemaLeaf,
+    ui: Option<&crate::schema::ui::FieldUiEntry>,
+) -> Option<Vec<EnumItemView>> {
+    if let Some(keys) = ui.and_then(|entry| entry.static_map_keys) {
+        return Some(
+            keys.iter()
+                .map(|name| EnumItemView {
+                    key: Value::String((*name).to_owned()),
+                    label: enum_label(name),
+                })
+                .collect(),
+        );
+    }
+    leaf.constraints.as_ref().and_then(|constraints| {
+        constraints.enum_values.as_ref().map(|values| {
+            values
+                .iter()
+                .map(|value| EnumItemView {
+                    label: enum_label(value.as_str().unwrap_or_default()),
+                    key: value.clone(),
+                })
+                .collect()
+        })
+    })
 }
 
 fn title(raw: &str) -> String {
@@ -151,28 +206,34 @@ fn title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_preferences_schema, preferences_schema_ui_gaps};
+    use crate::domain::SchemaNode;
+
+    fn walk_sections(node: &SchemaNode, gaps: &mut Vec<String>) {
+        if let SchemaNode::Section(section) = node {
+            if !section.label.has_en_and_zh() {
+                gaps.push(format!("section {}.label", section.id));
+            }
+            if let Some(description) = &section.description
+                && !description.has_en_and_zh()
+            {
+                gaps.push(format!("section {}.description", section.id));
+            }
+            for child in &section.children {
+                walk_sections(child, gaps);
+            }
+        }
+    }
 
     #[test]
     fn preferences_schema_has_no_ui_gaps() {
         let gaps = preferences_schema_ui_gaps();
-        assert!(gaps.is_empty(), "missing field UI metadata: {gaps:?}");
+        assert!(gaps.is_empty(), "runtime-config UI metadata gaps: {gaps:?}");
     }
 
     #[test]
     fn preferences_schema_has_full_locale_coverage() {
         let view = build_preferences_schema();
         let mut gaps = Vec::new();
-
-        for group in &view.groups {
-            if !group.label.has_en_and_zh() {
-                gaps.push(format!("group.{}.label", group.id));
-            }
-            if let Some(description) = &group.description
-                && !description.has_en_and_zh()
-            {
-                gaps.push(format!("group.{}.description", group.id));
-            }
-        }
 
         for field in &view.fields {
             if !field.label.has_en_and_zh() {
@@ -190,7 +251,41 @@ mod tests {
             }
         }
 
+        for node in &view.tree {
+            walk_sections(node, &mut gaps);
+        }
+
         assert!(gaps.is_empty(), "missing en-US/zh-CN UI text: {gaps:?}");
+    }
+
+    #[test]
+    fn factor_weights_field_has_catalog_keys() {
+        let view = build_preferences_schema();
+        let field = view
+            .fields
+            .iter()
+            .find(|field| field.path == "factors.factor_weights")
+            .expect("factor_weights field");
+        assert_eq!(field.value_type, crate::domain::JsonValueType::DecimalMap);
+        assert_eq!(field.widget, Some(crate::domain::FieldWidget::WeightMap));
+        let items = field.enum_items.as_ref().expect("enum_items");
+        assert_eq!(items.len(), 9);
+        assert!(items.iter().any(|item| item.key.as_str() == Some("momentum")));
+    }
+
+    #[test]
+    fn help_is_never_a_copy_of_label() {
+        let view = build_preferences_schema();
+        let duplicates = view
+            .fields
+            .iter()
+            .filter(|field| field.help.locales == field.label.locales)
+            .map(|field| field.path.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            duplicates.is_empty(),
+            "fields whose help duplicates label: {duplicates:?}"
+        );
     }
 
     #[test]

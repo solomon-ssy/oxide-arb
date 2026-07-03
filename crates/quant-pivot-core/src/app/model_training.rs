@@ -75,7 +75,6 @@ impl CoreModelTrainingPort {
             },
             ModelTrainerConfig {
                 factors: runtime.factors.clone(),
-                model: runtime.model,
             },
             ReplayConfig {
                 features: runtime.features,
@@ -120,6 +119,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
                     name: LabelName::new(request.label_name),
                     horizon_secs: request.label_horizon_secs,
                 },
+                prediction_horizon_secs: request.prediction_horizon_secs,
                 validation_folds: request.validation_folds,
             })
             .await?;

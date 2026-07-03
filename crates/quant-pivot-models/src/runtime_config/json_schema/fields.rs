@@ -4,7 +4,7 @@
 //! default from [`RuntimeConfig::default`].
 
 use crate::{
-    domain::{JsonValueType, SchemaFieldConstraints, SchemaFieldFormat},
+    domain::{ArrayItemType, JsonValueType, SchemaFieldConstraints, SchemaFieldFormat},
     runtime_config::{MASKED_SECRET, RuntimeConfig, RuntimeConfigError},
 };
 use serde_json::Value;
@@ -19,22 +19,17 @@ pub struct SchemaLeaf {
     pub format: Option<SchemaFieldFormat>,
     pub default: Value,
     pub description: String,
-    pub money_critical: bool,
     pub sensitive: bool,
     pub constraints: Option<SchemaFieldConstraints>,
     pub schema: Value,
+    pub array_item_type: Option<ArrayItemType>,
 }
 
 /// Walk all schema leaves (including hidden / non-preferences fields).
 #[must_use]
-pub fn walk_schema_leaves(
-    schema: &Value,
-    default: &Value,
-    path: &str,
-    inherited_money_critical: bool,
-) -> Vec<SchemaLeaf> {
+pub fn walk_schema_leaves(schema: &Value, default: &Value, path: &str) -> Vec<SchemaLeaf> {
     let mut leaves = Vec::with_capacity(128);
-    walk_schema(schema, default, path, inherited_money_critical, &mut leaves);
+    walk_schema(schema, default, path, &mut leaves);
     leaves
 }
 
@@ -43,7 +38,7 @@ pub fn walk_schema_leaves(
 pub fn build_schema_fields() -> Vec<SchemaLeaf> {
     let schema = RuntimeConfig::json_schema();
     let defaults = RuntimeConfig::default().to_json();
-    walk_schema_leaves(&schema, &defaults, "", false)
+    walk_schema_leaves(&schema, &defaults, "")
 }
 
 /// Known schema leaf paths (for sparse patch validation).
@@ -123,14 +118,7 @@ fn validate_sensitive_patch_value(
     Ok(())
 }
 
-fn walk_schema(
-    schema: &Value,
-    default: &Value,
-    path: &str,
-    inherited_money_critical: bool,
-    fields: &mut Vec<SchemaLeaf>,
-) {
-    let money_critical = inherited_money_critical || schema_flag(schema, "x-money-critical");
+fn walk_schema(schema: &Value, default: &Value, path: &str, fields: &mut Vec<SchemaLeaf>) {
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (key, child_schema) in properties {
             let child_path = if path.is_empty() {
@@ -139,13 +127,7 @@ fn walk_schema(
                 format!("{path}.{key}")
             };
             let child_default = default.get(key).cloned().unwrap_or(Value::Null);
-            walk_schema(
-                child_schema,
-                &child_default,
-                &child_path,
-                money_critical,
-                fields,
-            );
+            walk_schema(child_schema, &child_default, &child_path, fields);
         }
         return;
     }
@@ -164,10 +146,10 @@ fn walk_schema(
             .and_then(|d| d.as_str())
             .unwrap_or_default()
             .to_owned(),
-        money_critical,
         sensitive: schema_flag(schema, "x-sensitive"),
         constraints,
         schema: schema.clone(),
+        array_item_type: infer_array_item_type(schema, value_type),
     });
 }
 
@@ -226,6 +208,19 @@ fn is_open_map_object(schema: &Value) -> bool {
     schema.get("properties").is_none() && schema.get("additionalProperties").is_some()
 }
 
+fn infer_array_item_type(schema: &Value, value_type: JsonValueType) -> Option<ArrayItemType> {
+    if value_type != JsonValueType::Array {
+        return None;
+    }
+    let items = schema.get("items")?;
+    let type_name = items.get("type").and_then(Value::as_str)?;
+    Some(match type_name {
+        "integer" => ArrayItemType::Integer,
+        "string" => ArrayItemType::String,
+        _ => ArrayItemType::Unknown,
+    })
+}
+
 fn classify_array_leaf(
     schema: &Value,
 ) -> (
@@ -259,25 +254,36 @@ fn classify_map_leaf(
     Option<SchemaFieldConstraints>,
 )> {
     let additional = schema.get("additionalProperties")?;
-    schema.get("x-map-key-enum").and_then(Value::as_str)?;
     if additional.get("type") != Some(&Value::String(String::from("string"))) {
         return None;
     }
-    let value_format = schema
+    let value_format = decimal_format_on_schema(additional);
+    if value_format != Some(SchemaFieldFormat::Decimal) {
+        return None;
+    }
+    if schema.get("x-map-key-enum").is_some() {
+        return Some((
+            JsonValueType::EnumDecimalMap,
+            Some(SchemaFieldFormat::Decimal),
+            None,
+        ));
+    }
+    Some((
+        JsonValueType::DecimalMap,
+        Some(SchemaFieldFormat::Decimal),
+        None,
+    ))
+}
+
+fn decimal_format_on_schema(schema: &Value) -> Option<SchemaFieldFormat> {
+    schema
         .get("x-value-format")
+        .or_else(|| schema.get("x-format"))
         .and_then(Value::as_str)
         .and_then(|raw| match raw {
             "decimal" => Some(SchemaFieldFormat::Decimal),
             _ => None,
-        });
-    if value_format != Some(SchemaFieldFormat::Decimal) {
-        return None;
-    }
-    Some((
-        JsonValueType::EnumDecimalMap,
-        Some(SchemaFieldFormat::Decimal),
-        None,
-    ))
+        })
 }
 
 fn extract_enum_values(schema: &Value) -> Option<Vec<Value>> {

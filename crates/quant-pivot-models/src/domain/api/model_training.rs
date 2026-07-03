@@ -47,6 +47,14 @@ pub struct TrainModelRequest {
     /// Horizon of the target label in seconds (`0` for horizon-independent
     /// labels such as settlement outcome).
     pub label_horizon_secs: u64,
+    /// Model-intrinsic prediction horizon in seconds, frozen into the trained
+    /// artifact (`WeightedFactorModelArtifact.prediction_horizon_secs`) and used
+    /// online for the horizon score multiplier and each candidate's
+    /// `suggested_horizon_secs`. This is a training-authoring parameter — online
+    /// inference reads the frozen artifact value, never runtime config.
+    #[validate(range(min = 1))]
+    #[serde(default = "default_prediction_horizon_secs")]
+    pub prediction_horizon_secs: u64,
     /// Number of rolling validation folds (`>= 2`).
     #[validate(range(min = 2, max = 20))]
     #[serde(default = "default_validation_folds")]
@@ -58,6 +66,10 @@ pub struct TrainModelRequest {
 
 const fn default_validation_folds() -> u32 {
     3
+}
+
+const fn default_prediction_horizon_secs() -> u64 {
+    86_400
 }
 
 /// Registered model version returned after training and on poll.

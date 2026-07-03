@@ -25,9 +25,8 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BuildTrainingDatasetRequest, CoreEvent, MaterializationRunEvent, MaterializationRunKind,
-        MaterializationRunStatus, Paginated, TrainingDatasetListQuery, TrainingDatasetPlanView,
-        TrainingDatasetView,
+        BuildTrainingDatasetRequest, MaterializationRunKind, Paginated, TrainingDatasetListQuery,
+        TrainingDatasetPlanView, TrainingDatasetView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -139,24 +138,18 @@ pub async fn build(
     let view = state.training_datasets.build(request).await?;
     // Fan out a `materialization.run_update` revision hint so other operators'
     // open workbench catalogs re-fetch (the build itself is synchronous here).
-    let run_status = match view.status.as_str() {
-        "failed" | "insufficient_labels" => MaterializationRunStatus::Failed,
-        _ => MaterializationRunStatus::Completed,
-    };
-    state
-        .events
-        .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
-            run_id: view.training_dataset_id.to_string(),
-            kind: MaterializationRunKind::Dataset,
-            status: run_status,
-        }));
+    state.publish_materialization_run(
+        view.training_dataset_id.to_string(),
+        MaterializationRunKind::Dataset,
+        view.status.into(),
+    );
     op_ctx.set_action(OperationCategory::Other, "research.training_dataset.build");
     op_ctx.set_resource(
         ResourceType::Materialization,
         view.training_dataset_id.to_string(),
     );
     op_ctx.set_detail(serde_json::json!({
-        "status": view.status,
+        "status": view.status.as_str(),
         "sample_count": view.sample_count,
         "dataset_hash": view.dataset_hash,
         "acting_role": acting_role.0,

@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use crate::{
     domain::governance::{RuntimeConfigActivationInfo, RuntimeConfigVersionInfo},
     enums::runtime_config::RuntimeConfigVersionSource,
+    runtime_config::ScheduleCadence,
     types::{ContentHash, RuntimeConfigVersionId, SchemaVersion},
 };
 use chrono::{DateTime, Utc};
@@ -21,34 +22,42 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
-/// Localized UI text payload.
+/// Locale identifier used as a key in [`UiText::locales`] (matches the SPA i18n).
+pub const LOCALE_EN: &str = "en-US";
+/// Locale identifier used as a key in [`UiText::locales`] (matches the SPA i18n).
+pub const LOCALE_ZH_CN: &str = "zh-CN";
+
+/// Localized UI text payload keyed by SPA locale id (`en-US`, `zh-CN`).
+///
+/// Extensible: adding a locale is a data change, not a schema change.
 #[derive(Debug, Clone, Serialize)]
 pub struct UiText {
-    pub zh_cn: String,
-    pub en: String,
+    pub locales: BTreeMap<String, String>,
 }
 
 impl UiText {
     #[must_use]
     pub fn plain(value: impl Into<String>) -> Self {
         let text = value.into();
-        Self {
-            zh_cn: text.clone(),
-            en: text,
-        }
+        Self::localized(text.clone(), text)
     }
 
     #[must_use]
     pub fn localized(en: impl Into<String>, zh_cn: impl Into<String>) -> Self {
-        Self {
-            zh_cn: zh_cn.into(),
-            en: en.into(),
-        }
+        let mut locales = BTreeMap::new();
+        locales.insert(LOCALE_EN.to_owned(), en.into());
+        locales.insert(LOCALE_ZH_CN.to_owned(), zh_cn.into());
+        Self { locales }
     }
 
     #[must_use]
     pub fn has_en_and_zh(&self) -> bool {
-        !self.en.trim().is_empty() && !self.zh_cn.trim().is_empty()
+        let non_empty = |key: &str| {
+            self.locales
+                .get(key)
+                .is_some_and(|text| !text.trim().is_empty())
+        };
+        non_empty(LOCALE_EN) && non_empty(LOCALE_ZH_CN)
     }
 }
 
@@ -66,16 +75,70 @@ pub enum FieldWidget {
     EnumSet,
     StringList,
     EnumDecimalMap,
+    /// Open string→decimal map (e.g. factor weights keyed by factor name).
+    DecimalMap,
+    /// `[0, 1]` ratio decimal with slider control.
+    RatioSlider,
+    /// Normalized weight map (sliders + sum-to-one UX).
+    WeightMap,
+    /// Structured report-schedule list editor (row add/remove + cadence union).
+    ScheduleList,
     JsonTree,
 }
 
-/// Optional field semantics for client-side rendering.
+/// Presentation hints for a field, independent of its data type / widget.
+///
+/// Purely cosmetic guidance for the form renderer (unit suffixes, grid width,
+/// read-only display). Never affects validation or the submitted value.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UiProps {
+    /// Localized placeholder text for empty inputs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<UiText>,
+    /// Static leading adornment (e.g. `$`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Static trailing adornment / unit (e.g. `USD`, `bps`, `secs`, `%`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    /// Grid width in 24-column units (`1..=24`); `None` ⇒ full row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col_span: Option<u8>,
+    /// Render the value read-only (display only; never submitted as an edit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
+    /// Slider minimum (inclusive) for [`FieldWidget::RatioSlider`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_min: Option<f64>,
+    /// Slider maximum (inclusive) for [`FieldWidget::RatioSlider`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_max: Option<f64>,
+    /// Slider step for [`FieldWidget::RatioSlider`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slider_step: Option<f64>,
+}
+
+impl UiProps {
+    /// A unit-suffix-only props (the common case for money / bps / secs fields).
+    #[must_use]
+    pub fn suffix(unit: impl Into<String>) -> Self {
+        Self {
+            suffix: Some(unit.into()),
+            ..Self::default()
+        }
+    }
+}
+
+/// Optional field behavior/governance hint (distinct from the render `widget`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldSemantics {
-    Money,
+    /// Reads mask the value; empty patch keeps the stored secret.
     Credential,
+    /// Empty selection means "all" (do not treat as an empty allow-list).
     EmptyMeansAll,
+    /// Mutation bounds money/behavior at risk; the UI forces a danger confirmation.
+    GovernanceCritical,
 }
 
 /// Enum item metadata for schema fields.
@@ -85,11 +148,44 @@ pub struct EnumItemView {
     pub label: UiText,
 }
 
-/// Conditional display or validation rule.
+/// Effect applied to a schema field when a [`FieldWhen`] rule matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenEffect {
+    /// Field is visible only while every `if` rule matches.
+    If,
+    /// Field is required only while the rule matches.
+    Require,
+}
+
+/// Comparison operator evaluated by a [`FieldWhen`] rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhenOperator {
+    Eq,
+    Ne,
+}
+
+/// Conditional display or validation rule referencing another schema leaf.
 #[derive(Debug, Clone, Serialize)]
 pub struct FieldWhen {
+    pub effect: WhenEffect,
+    pub operator: WhenOperator,
     pub target_path: String,
     pub value: Value,
+}
+
+impl FieldWhen {
+    /// Visible only while `target_path == value`.
+    #[must_use]
+    pub fn visible_when_eq(target_path: impl Into<String>, value: Value) -> Self {
+        Self {
+            effect: WhenEffect::If,
+            operator: WhenOperator::Eq,
+            target_path: target_path.into(),
+            value,
+        }
+    }
 }
 
 /// Create a new immutable runtime-config version.
@@ -136,6 +232,31 @@ pub struct RollbackRuntimeConfigRequest {
 #[derive(Debug, Deserialize)]
 pub struct RuntimeConfigVersionListQuery {
     pub limit: Option<u64>,
+}
+
+/// Preview the next fire times for a report-schedule cadence.
+///
+/// Stateless dry-run against the same cron parser the scheduler uses; drives the
+/// schedule-list editor's "next runs" hint without mutating anything.
+#[derive(Debug, Deserialize, Validate)]
+pub struct SchedulePreviewRequest {
+    /// Cadence to evaluate (fixed interval or 6-field cron with optional IANA tz).
+    pub cadence: ScheduleCadence,
+    /// Number of upcoming fire times to return (`1..=20`).
+    #[validate(range(min = 1, max = 20))]
+    #[serde(default = "default_preview_count")]
+    pub count: u8,
+}
+
+const fn default_preview_count() -> u8 {
+    5
+}
+
+/// The next fire times (UTC) for a previewed cadence.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchedulePreviewView {
+    /// Upcoming fire instants in ascending order, in UTC.
+    pub next_fire_times: Vec<DateTime<Utc>>,
 }
 
 /// Catalog/read projection of a runtime-config version with sensitive
@@ -202,6 +323,17 @@ pub enum JsonValueType {
     StringArray,
     /// Enum-keyed map with decimal string values (e.g. category scoring weights).
     EnumDecimalMap,
+    /// Open string-keyed map with decimal string values (e.g. factor weights).
+    DecimalMap,
+}
+
+/// Homogeneous JSON-array element type hint for compact table editors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArrayItemType {
+    Integer,
+    String,
+    Unknown,
 }
 
 /// Wire format hint for string leaves (decimal money fields, durations, etc.).
@@ -234,20 +366,86 @@ pub struct SchemaFieldConstraints {
     pub enum_values: Option<Vec<Value>>,
 }
 
-/// One preferences group in `GET /runtime-config/schema`.
+/// One node of the runtime-config layout tree.
+///
+/// The schema is delivered as a **normalized field dictionary**
+/// ([`RuntimeConfigSchemaView::fields`], keyed by dotted path) plus this
+/// **layout tree** describing how those fields are grouped and gated. A node is
+/// one of: a nested [`SchemaSection`], a [`SchemaFieldRef`] pointing at a field
+/// in the dictionary, or a discriminated [`SchemaUnion`].
 #[derive(Debug, Clone, Serialize)]
-pub struct RuntimeConfigSchemaGroupView {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SchemaNode {
+    Section(SchemaSection),
+    Field(SchemaFieldRef),
+    Union(SchemaUnion),
+}
+
+/// A (possibly nested) group of nodes rendered as a collapsible card.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaSection {
+    /// Stable section id (dotted, e.g. `execution.exit_monitor`).
     pub id: String,
+    /// Localized section title.
     pub label: UiText,
+    /// Localized section description / purpose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<UiText>,
+    /// Iconify icon id (same convention as RBAC menu `icon`, e.g. `lucide:wallet`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Whether the section renders collapsed-capable.
+    pub collapsible: bool,
+    /// Display order among sibling nodes.
+    pub order: u16,
+    /// Child nodes (fields, sub-sections, unions).
+    pub children: Vec<SchemaNode>,
+}
+
+/// A reference to one field in [`RuntimeConfigSchemaView::fields`].
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaFieldRef {
+    /// Dotted path key into the field dictionary.
+    pub path: String,
+    /// Display order among sibling nodes.
     pub order: u16,
 }
 
-/// Envelope returned by `GET /runtime-config/schema` for the preferences UI.
+/// A discriminated group.
+///
+/// Only the case matching the live discriminator value renders. Models genuinely
+/// variant config shapes (e.g. an emergency-exit action whose parameters only
+/// apply to one action kind).
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaUnion {
+    /// Display order among sibling nodes.
+    pub order: u16,
+    /// Dotted path of the discriminator field (whose value selects the case).
+    pub discriminator: String,
+    /// Localized union title (rendered above the active case).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<UiText>,
+    /// The candidate cases; the one whose `case_value` equals the live
+    /// discriminator value is rendered.
+    pub cases: Vec<SchemaUnionCase>,
+}
+
+/// One case of a [`SchemaUnion`].
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaUnionCase {
+    /// Discriminator value that activates this case.
+    pub case_value: Value,
+    /// Nodes rendered when this case is active.
+    pub children: Vec<SchemaNode>,
+}
+
+/// Envelope returned by `GET /runtime-config/schema` for the preferences UI:
+/// a normalized field dictionary plus the layout tree over it.
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeConfigSchemaView {
-    pub groups: Vec<RuntimeConfigSchemaGroupView>,
+    /// Layout tree (nested sections / field refs / unions).
+    pub tree: Vec<SchemaNode>,
+    /// Field metadata dictionary, keyed by `path`.
     pub fields: Vec<RuntimeConfigSchemaFieldView>,
 }
 
@@ -255,20 +453,20 @@ pub struct RuntimeConfigSchemaView {
 /// rendered by the UI as a typed form.
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeConfigSchemaFieldView {
-    /// Dotted path within the document (e.g. `risk.max_daily_loss_usd`).
+    /// Dotted path within the document (e.g. `portfolio.budget.total_budget_usd`).
+    /// This is the dictionary key; layout / grouping is owned by the tree.
     pub path: String,
-    /// Root document section (e.g. `risk`, `detection`).
-    pub group: String,
-    /// Display order within the group.
-    pub order: u16,
     /// Localized field title.
     pub label: UiText,
-    /// Localized helper / tooltip body.
+    /// Localized helper / tooltip body (authored, distinct from `label`).
     pub help: UiText,
     /// JSON value type.
     pub value_type: JsonValueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<SchemaFieldFormat>,
+    /// Presentation hints (unit suffix, grid width, read-only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_props: Option<UiProps>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub widget: Option<FieldWidget>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,9 +475,6 @@ pub struct RuntimeConfigSchemaFieldView {
     pub default: Value,
     /// Human-readable purpose of the field (from Rustdoc; audit fallback only).
     pub description: String,
-    /// Whether the field directly bounds money at risk (UI renders a
-    /// confirmation affordance for these).
-    pub money_critical: bool,
     /// Whether reads mask the value (notification credentials).
     pub sensitive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,4 +483,7 @@ pub struct RuntimeConfigSchemaFieldView {
     pub enum_items: Option<Vec<EnumItemView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when: Option<Vec<FieldWhen>>,
+    /// When `value_type` is [`JsonValueType::Array`], the JSON Schema `items.type`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub array_item_type: Option<ArrayItemType>,
 }

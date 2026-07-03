@@ -6,11 +6,12 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::ExecutionRecoveryPort,
     domain::{
-        AccountReadPort, BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort,
-        ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort,
-        MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, OrderIntentPort,
-        QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort, RuntimeConfigPort,
-        RuntimeControlPort, TrainingDatasetPort,
+        AccountReadPort, BacktestPort, CatalogStatusPort, CoreEvent, CoreEventPublisher,
+        DataQualityPort, ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort,
+        KillSwitchPort, MarketDataPort, MaterializationRunEvent, MaterializationRunKind,
+        MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort,
+        OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
+        RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -85,4 +86,21 @@ pub struct AppState {
     pub reconciliation: Arc<dyn ReconciliationPort>,
     /// Execution recovery playbook detail (Phase 05.5 closeout).
     pub execution_recovery: Arc<dyn ExecutionRecoveryPort>,
+}
+
+impl AppState {
+    /// Fan out a `materialization.run_update` revision hint so open research catalogs re-fetch.
+    pub fn publish_materialization_run(
+        &self,
+        run_id: impl Into<String>,
+        kind: MaterializationRunKind,
+        status: MaterializationRunStatus,
+    ) {
+        self.events
+            .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
+                run_id: run_id.into(),
+                kind,
+                status,
+            }));
+    }
 }

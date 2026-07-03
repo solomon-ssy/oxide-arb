@@ -96,7 +96,7 @@ pub struct TrainingDatasetView {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
-    pub status: String,
+    pub status: TrainingDatasetStatus,
     pub feature_schema_hash: ContentHash,
     pub factor_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,
@@ -132,7 +132,7 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             model_spec_id: info.model_spec_id,
             window_start: info.window_start,
             window_end: info.window_end,
-            status: info.status.as_str().to_owned(),
+            status: info.status,
             feature_schema_hash: info.feature_schema_hash,
             factor_schema_hash: info.factor_schema_hash,
             label_schema_hash: info.label_schema_hash,

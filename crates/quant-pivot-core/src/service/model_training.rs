@@ -19,7 +19,7 @@ use quant_pivot_models::{
     enums::quant::{
         ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
     },
-    runtime_config::sections::{FactorsConfig, ModelConfig},
+    runtime_config::sections::FactorsConfig,
     types::{
         ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId,
         training::TrainingSampleSource,
@@ -84,8 +84,6 @@ pub struct ModelTrainerServiceDeps {
 pub struct ModelTrainerConfig {
     /// Factor config (the `factor_weights` training seed).
     pub factors: FactorsConfig,
-    /// Model config (prediction horizon).
-    pub model: ModelConfig,
 }
 
 /// A training request resolved by the admin port.
@@ -100,6 +98,8 @@ pub struct TrainModelInput {
     pub model_family: ModelFamily,
     /// Supervised target label.
     pub label: LabelSelector,
+    /// Model-intrinsic prediction horizon (seconds), frozen into the artifact.
+    pub prediction_horizon_secs: u64,
     /// Rolling validation folds.
     pub validation_folds: u32,
 }
@@ -259,7 +259,7 @@ impl ModelTrainerService {
         };
 
         let (artifact, metrics_json) = if input.model_family.is_exit_scorer() {
-            self.train_sell_scorer(header, input, dataset, examples)?
+            Self::train_sell_scorer(header, input, dataset, examples)?
         } else {
             match input.model_family.classical_kind() {
                 None => self.train_weighted(header, input, examples).await?,
@@ -319,7 +319,7 @@ impl ModelTrainerService {
                 folds: input.validation_folds.max(2),
             },
             header,
-            prediction_horizon_secs: self.config.model.prediction_horizon_secs,
+            prediction_horizon_secs: input.prediction_horizon_secs,
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
@@ -344,7 +344,6 @@ impl ModelTrainerService {
     /// factors plus the position-state pseudo-factors and fits the shared rank-IC
     /// simplex against the `hold_vs_exit_alpha_bps` label.
     fn train_sell_scorer(
-        &self,
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
@@ -369,7 +368,7 @@ impl ModelTrainerService {
                 folds: input.validation_folds.max(2),
             },
             header,
-            prediction_horizon_secs: self.config.model.prediction_horizon_secs,
+            prediction_horizon_secs: input.prediction_horizon_secs,
             output_spec: SellScorerOutputSpec::conservative(),
             label_schema_hash: dataset.label_schema_hash.clone(),
             required_features: Vec::new(),

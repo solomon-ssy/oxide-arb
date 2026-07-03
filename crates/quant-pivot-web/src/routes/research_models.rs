@@ -23,10 +23,10 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery, CoreEvent,
-        MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
-        ModelComparisonReportView, ModelSpecListQuery, ModelVersionListQuery, Paginated,
-        QuantModelSpecView, RunBacktestRequest, TrainModelRequest, TrainedModelView,
+        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery,
+        MaterializationRunKind, MaterializationRunStatus, ModelComparisonReportView,
+        ModelSpecListQuery, ModelVersionListQuery, Paginated, QuantModelSpecView,
+        RunBacktestRequest, TrainModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -190,32 +190,43 @@ pub async fn train(
 ) -> Result<WebResponse<TrainedModelView>, WebError> {
     let request = body.into_inner();
     let reason = request.reason.clone();
-    let view = state.model_training.train(request).await?;
-    let materialization_run_id = view
-        .model_run_id
-        .as_ref()
-        .map_or_else(|| view.model_version_id.to_string(), ToString::to_string);
-    state
-        .events
-        .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
-            run_id: materialization_run_id,
-            kind: MaterializationRunKind::Training,
-            status: MaterializationRunStatus::Completed,
-        }));
-    op_ctx.set_action(OperationCategory::Other, "model.train");
-    op_ctx.set_resource(
-        ResourceType::Materialization,
-        view.model_version_id.to_string(),
-    );
-    op_ctx.set_detail(serde_json::json!({
-        "model_version_id": view.model_version_id.to_string(),
-        "artifact_hash": view.artifact_hash,
-        "publication_status": view.publication_status,
-        "acting_role": acting_role.0,
-        "request_id": request_id.0,
-        "reason": reason,
-    }));
-    Ok(WebResponse::ok(view))
+    let training_dataset_id = request.training_dataset_id.clone();
+    match state.model_training.train(request).await {
+        Ok(view) => {
+            let materialization_run_id = view
+                .model_run_id
+                .as_ref()
+                .map_or_else(|| view.model_version_id.to_string(), ToString::to_string);
+            state.publish_materialization_run(
+                materialization_run_id,
+                MaterializationRunKind::Training,
+                MaterializationRunStatus::Completed,
+            );
+            op_ctx.set_action(OperationCategory::Other, "model.train");
+            op_ctx.set_resource(
+                ResourceType::Materialization,
+                view.model_version_id.to_string(),
+            );
+            op_ctx.set_detail(serde_json::json!({
+                "model_version_id": view.model_version_id.to_string(),
+                "artifact_hash": view.artifact_hash,
+                "publication_status": view.publication_status,
+                "acting_role": acting_role.0,
+                "request_id": request_id.0,
+                "reason": reason,
+            }));
+            Ok(WebResponse::ok(view))
+        }
+        Err(error) => {
+            // Failure still bumps open catalogs so peer operators see the attempt.
+            state.publish_materialization_run(
+                training_dataset_id.to_string(),
+                MaterializationRunKind::Training,
+                MaterializationRunStatus::Failed,
+            );
+            Err(error.into())
+        }
+    }
 }
 
 /// `GET /api/research/models/{id}` — registered version (UI polling).
@@ -243,27 +254,36 @@ pub async fn backtest(
     let request = body.into_inner();
     let reason = request.reason.clone();
     let model_version_id = id.into_inner();
-    let view = state.backtests.run(model_version_id, request).await?;
-    state
-        .events
-        .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
-            run_id: view.model_run_id.to_string(),
-            kind: MaterializationRunKind::Backtest,
-            status: MaterializationRunStatus::Completed,
-        }));
-    op_ctx.set_action(OperationCategory::Other, "model.backtest");
-    op_ctx.set_resource(ResourceType::Replay, view.backtest_report_id.to_string());
-    op_ctx.set_detail(serde_json::json!({
-        "backtest_report_id": view.backtest_report_id.to_string(),
-        "model_version_id": view.model_version_id.to_string(),
-        "rank_ic": view.rank_ic,
-        "hit_rate": view.hit_rate,
-        "sample_count": view.sample_count,
-        "acting_role": acting_role.0,
-        "request_id": request_id.0,
-        "reason": reason,
-    }));
-    Ok(WebResponse::ok(view))
+    match state.backtests.run(model_version_id.clone(), request).await {
+        Ok(view) => {
+            state.publish_materialization_run(
+                view.model_run_id.to_string(),
+                MaterializationRunKind::Backtest,
+                MaterializationRunStatus::Completed,
+            );
+            op_ctx.set_action(OperationCategory::Other, "model.backtest");
+            op_ctx.set_resource(ResourceType::Replay, view.backtest_report_id.to_string());
+            op_ctx.set_detail(serde_json::json!({
+                "backtest_report_id": view.backtest_report_id.to_string(),
+                "model_version_id": view.model_version_id.to_string(),
+                "rank_ic": view.rank_ic,
+                "hit_rate": view.hit_rate,
+                "sample_count": view.sample_count,
+                "acting_role": acting_role.0,
+                "request_id": request_id.0,
+                "reason": reason,
+            }));
+            Ok(WebResponse::ok(view))
+        }
+        Err(error) => {
+            state.publish_materialization_run(
+                model_version_id.to_string(),
+                MaterializationRunKind::Backtest,
+                MaterializationRunStatus::Failed,
+            );
+            Err(error.into())
+        }
+    }
 }
 
 /// `GET /api/research/backtest-reports/{id}` — stored report.
