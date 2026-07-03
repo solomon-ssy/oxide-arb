@@ -54,12 +54,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             list,
         ),
-        spec(
-            Method::GET,
-            "/research/training-datasets/{id}",
-            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
-            get_by_id,
-        ),
+        // Literal segments before `{id}` so `plan` / `build` are not captured as IDs.
         spec(
             Method::POST,
             "/research/training-datasets/plan",
@@ -71,6 +66,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/training-datasets/build",
             Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
             build,
+        ),
+        spec(
+            Method::GET,
+            "/research/training-datasets/{id}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            get_by_id,
         ),
     ]
 }

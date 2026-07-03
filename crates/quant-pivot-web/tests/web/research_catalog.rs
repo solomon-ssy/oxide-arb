@@ -108,6 +108,42 @@ async fn factor_detail_not_found_returns_404() {
 }
 
 #[tokio::test]
+async fn training_dataset_plan_and_build_match_post_handlers_not_id_route() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let body = json!({
+        "model_spec_id": "019f2964-d6e3-7711-aa6c-1dbb87257e9e",
+        "runtime_config_version_id": "019f2964-d5f4-7740-aa85-9a65e487aab2",
+        "window_start": "2026-07-02T00:00:00.000+08:00",
+        "window_end": "2026-07-05T23:59:59.000+08:00",
+        "sample_interval_secs": 60,
+        "horizons_secs": [3600],
+        "source_delay_secs": 1,
+        "reason": "route registration regression",
+    });
+
+    for path in ["/api/research/training-datasets/plan", "/api/research/training-datasets/build"] {
+        let req = TestRequest::post()
+            .uri(path)
+            .insert_header(API_VERSION)
+            .insert_header(bearer(&admin))
+            .insert_header(("X-Acting-Role", "quant"))
+            .set_json(&body);
+        let res = harness::call(&env.state, req).await;
+        assert_ne!(
+            res.status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "POST {path} must not match GET-only {{id}} route"
+        );
+        assert_eq!(
+            res.status,
+            StatusCode::NOT_IMPLEMENTED,
+            "POST {path} should reach the handler (mock port)"
+        );
+    }
+}
+
+#[tokio::test]
 async fn research_catalog_requires_authentication() {
     let env = TestEnv::start().await;
     let req = TestRequest::get()
