@@ -3,13 +3,13 @@
 pub mod catalog;
 pub mod column;
 pub mod dependency;
+pub mod factor_names;
 pub mod graph;
 pub mod index;
 pub mod pg_enum;
 pub mod seed;
 pub mod table;
 pub mod trigger;
-pub mod factor_names;
 pub mod ui;
 
 use sea_orm::sea_query::{ColumnDef, Expr, IntoIden, SimpleExpr};

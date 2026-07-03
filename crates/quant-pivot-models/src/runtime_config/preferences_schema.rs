@@ -270,7 +270,11 @@ mod tests {
         assert_eq!(field.widget, Some(crate::domain::FieldWidget::WeightMap));
         let items = field.enum_items.as_ref().expect("enum_items");
         assert_eq!(items.len(), 9);
-        assert!(items.iter().any(|item| item.key.as_str() == Some("momentum")));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.key.as_str() == Some("momentum"))
+        );
     }
 
     #[test]

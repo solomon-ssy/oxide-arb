@@ -114,27 +114,24 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
     async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
         Self::preflight_internal(&config)?;
         let arc = Arc::new(config);
+
+        // Rebuild report jobs before mutating the live snapshot so a schedule
+        // sync failure leaves store + subscribers untouched and the HTTP
+        // activation path can record a compensating rollback.
+        let scheduler = self.report_scheduler.lock().clone();
+        if let Some(scheduler) = scheduler {
+            scheduler
+                .sync_from_config(&arc.reports)
+                .await
+                .map_err(ControlError::from)?;
+        }
+
         self.propagate(&arc);
         let breaker = self.execution_breaker.lock().clone();
         if let Some(breaker) = breaker {
             breaker.reload(&arc.execution.breaker);
         }
-        let scheduler = self.report_scheduler.lock().clone();
         self.store.swap(Arc::clone(&arc));
-
-        // Rebuild report jobs from the just-activated snapshot. Best-effort:
-        // runtime-config is the schedule truth source, so a transient rebuild
-        // failure is logged and retried on the next activation / restart rather
-        // than rolling back an already-validated, already-stored activation.
-        if let Some(scheduler) = scheduler
-            && let Err(error) = scheduler.sync_from_config(&arc.reports).await
-        {
-            tracing::warn!(
-                %error,
-                "report schedule rebuild after activation failed; \
-                 will retry on next activation or restart"
-            );
-        }
         Ok(())
     }
 }

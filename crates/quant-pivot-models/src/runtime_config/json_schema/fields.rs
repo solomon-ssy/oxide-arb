@@ -464,6 +464,31 @@ mod tests {
         let error = apply_runtime_config_patch(&current, &patch).expect_err("old path rejected");
         assert!(matches!(error, RuntimeConfigPatchError::UnknownPath(_)));
     }
+
+    #[test]
+    fn patch_merge_invalid_schedule_top_n_fails_semantic_validation() {
+        use crate::runtime_config::validate_runtime_config;
+
+        let current = RuntimeConfig::default();
+        let max_top_n = current.reports.max_top_n;
+        let mut patch = BTreeMap::new();
+        patch.insert(
+            "reports.schedules".into(),
+            json!([{
+                "schedule_id": "invalid-top-n",
+                "enabled": true,
+                "top_n": max_top_n + 1,
+                "source_delay_secs": 10,
+                "cadence": { "kind": "interval", "interval_secs": 300 }
+            }]),
+        );
+        let merged = apply_runtime_config_patch(&current, &patch).expect("patch merge");
+        let report = validate_runtime_config(&merged);
+        assert!(
+            report.has_errors(),
+            "schedule top_n above max_top_n must fail validation"
+        );
+    }
 }
 
 #[cfg(test)]

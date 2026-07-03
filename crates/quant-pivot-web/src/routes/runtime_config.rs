@@ -38,6 +38,8 @@ use quant_pivot_models::{
     },
     types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::{
     audit::OperationCtx,
@@ -176,14 +178,7 @@ pub async fn create_version(
     let body = body.into_inner();
     body.ensure_payload().map_err(WebError::BadRequest)?;
     let current = state.runtime_config_apply.current();
-    let config = if let Some(patch) = body.config_patch {
-        apply_runtime_config_patch(&current, &patch)
-            .map_err(|error| WebError::BadRequest(error.to_string()))?
-    } else {
-        let mut config_json = body.config_json.expect("validated payload");
-        unmask_with(&mut config_json, &current);
-        parse_and_validate(&config_json)?
-    };
+    let config = resolve_create_config(&current, body.config_patch, body.config_json)?;
 
     let config_json = config.to_json();
     let config_hash = CanonicalDigest::content_hash_json(&config_json)
@@ -305,14 +300,39 @@ pub async fn rollback_version(
     Ok(WebResponse::ok(audited))
 }
 
+/// Fail-closed semantic validation shared by create (patch + json) and activate.
+fn validate_runtime_config_struct(config: &RuntimeConfig) -> Result<(), WebError> {
+    let report = validate_runtime_config(config);
+    if report.has_errors() {
+        return Err(WebError::BadRequest(report.to_string()));
+    }
+    Ok(())
+}
+
+/// Merge or parse a create payload, then validate before persistence.
+fn resolve_create_config(
+    current: &RuntimeConfig,
+    config_patch: Option<BTreeMap<String, Value>>,
+    config_json: Option<Value>,
+) -> Result<RuntimeConfig, WebError> {
+    let config = if let Some(patch) = config_patch {
+        apply_runtime_config_patch(current, &patch)
+            .map_err(|error| WebError::BadRequest(error.to_string()))?
+    } else {
+        let mut config_json = config_json.expect("validated payload");
+        unmask_with(&mut config_json, current);
+        RuntimeConfig::from_json(&config_json)
+            .map_err(|error| WebError::BadRequest(error.to_string()))?
+    };
+    validate_runtime_config_struct(&config)?;
+    Ok(config)
+}
+
 /// Typed parse + semantic validation (fail-closed, HTTP 400 on any error).
 fn parse_and_validate(config_json: &serde_json::Value) -> Result<RuntimeConfig, WebError> {
     let config = RuntimeConfig::from_json(config_json)
         .map_err(|error| WebError::BadRequest(error.to_string()))?;
-    let report = validate_runtime_config(&config);
-    if report.has_errors() {
-        return Err(WebError::BadRequest(report.to_string()));
-    }
+    validate_runtime_config_struct(&config)?;
     Ok(config)
 }
 
