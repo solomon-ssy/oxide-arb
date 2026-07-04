@@ -11,7 +11,7 @@ use quant_pivot_models::{
         KillSwitchPort, MarketDataPort, MaterializationRunEvent, MaterializationRunKind,
         MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort,
         OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
-        RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        ResearchJobPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -72,6 +72,9 @@ pub struct AppState {
     /// Read-only research catalog paging (datasets / models / backtests /
     /// comparisons / factors) for the operator workbench (Phase 10.5).
     pub research_catalog: Arc<dyn ResearchCatalogPort>,
+    /// Durable async research-job engine (dataset build / model train / backtest):
+    /// enqueue + task-center list/get/cancel/retry.
+    pub research_jobs: Arc<dyn ResearchJobPort>,
     /// Recommendation report read + governed mutation (Phase 04.4 API).
     pub quant_reports: Arc<dyn QuantReportPort>,
     /// Venue account live + snapshot read surface.
@@ -96,11 +99,8 @@ impl AppState {
         kind: MaterializationRunKind,
         status: MaterializationRunStatus,
     ) {
-        self.events
-            .publish(CoreEvent::MaterializationRun(MaterializationRunEvent {
-                run_id: run_id.into(),
-                kind,
-                status,
-            }));
+        self.events.publish(CoreEvent::MaterializationRun(
+            MaterializationRunEvent::revision(run_id, kind, status),
+        ));
     }
 }

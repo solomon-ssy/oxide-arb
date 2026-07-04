@@ -45,6 +45,7 @@ pub mod quant_recommendations;
 pub mod quant_reports;
 pub mod reconciliations;
 pub mod registry;
+pub mod research_jobs;
 pub mod research_models;
 pub mod roles;
 pub mod runtime_config;
@@ -86,6 +87,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(data_quality::route_specs());
     specs.extend(training_datasets::route_specs());
     specs.extend(research_models::route_specs());
+    specs.extend(research_jobs::route_specs());
     specs.extend(model_governance::route_specs());
     specs.extend(factor_governance::route_specs());
     specs.extend(quant_reports::route_specs());

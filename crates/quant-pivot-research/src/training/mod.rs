@@ -28,12 +28,13 @@ pub use lot_hold_value::{
     LotExitEvent, LotTerminalSnapshot, hold_terminal_proceeds, proceeds_before, remaining_shares_at,
 };
 pub use matrix::{
-    FeatureColumnSpec, FeatureMatrixSpec, MatrixCoverageProbe, MatrixScale, TrainingMatrix,
-    build_training_matrix, probe_matrix_coverage,
+    FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
+    probe_matrix_coverage,
 };
 #[cfg(feature = "dataframe")]
 pub use parquet::DatasetParquetCodec;
-pub use planner::{plan_lot_timeline_samples, plan_samples};
+pub use planner::{count_samples, plan_lot_timeline_samples, plan_samples};
+pub use quant_pivot_models::types::{DatasetCoverage, MatrixCoverageProbe};
 
 use std::sync::Arc;
 
@@ -58,7 +59,6 @@ use crate::{
     hashing::ResearchHasher,
     model::sell_scorer::PositionStateFeatures,
     naming::stable_name,
-    precision::RESEARCH_DECIMAL_SCALE,
 };
 
 stable_name! {
@@ -343,104 +343,6 @@ pub struct TrainingExample {
     /// Exit-fill simulation fidelity (`ExitDecision` rows only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub book_fidelity: Option<BookFidelity>,
-}
-
-/// Per-sample coverage accounting for a built dataset.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DatasetCoverage {
-    /// Sample instants the plan produced.
-    pub planned_samples: u64,
-    /// Examples actually materialized (passed feature build + leakage).
-    pub built_examples: u64,
-    /// Distinct markets represented.
-    pub markets: u64,
-    /// Labels resolved to a value.
-    pub labels_available: u64,
-    /// Labels deferred as not-yet-mature.
-    pub labels_not_mature: u64,
-    /// Labels that can never be produced.
-    pub labels_unavailable: u64,
-    /// Samples dropped because feature inputs were insufficient.
-    pub samples_dropped_insufficient: u64,
-    /// Live attribution rows considered for dataset materialization.
-    #[serde(default)]
-    pub live_attribution_candidates: u64,
-    /// Live attribution rows dropped because frozen recommendation evidence was incomplete.
-    #[serde(default)]
-    pub live_attribution_dropped_missing_evidence: u64,
-    /// Book snapshot rows skipped due to malformed JSON or invalid level pairs.
-    pub book_decode_failures: u64,
-    /// `ExitDecision` lot-timeline candidates considered.
-    #[serde(default)]
-    pub exit_decision_candidates: u64,
-    /// `ExitDecision` examples materialized.
-    #[serde(default)]
-    pub exit_decision_built: u64,
-    /// `ExitDecision` rows simulated from full L2 books.
-    #[serde(default)]
-    pub exit_fill_l2_rows: u64,
-    /// `ExitDecision` rows simulated from microstructure fallback.
-    #[serde(default)]
-    pub exit_fill_fallback_rows: u64,
-    /// Optional training-matrix probe (diagnostic only; does not gate build).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matrix_probe: Option<MatrixCoverageProbe>,
-}
-
-impl DatasetCoverage {
-    /// Fraction of label slots that resolved to a usable value, in `[0, 1]`.
-    ///
-    /// Denominator is every accounted label slot (`available + not_mature +
-    /// unavailable`); a dataset dominated by immature or unavailable labels has
-    /// low coverage and must not be promoted. Zero accounted labels ⇒ `0`
-    /// (fail-closed for the quality gate).
-    #[must_use]
-    pub fn label_coverage(&self) -> Decimal {
-        let total = self.labels_available + self.labels_not_mature + self.labels_unavailable;
-        if total == 0 {
-            return Decimal::ZERO;
-        }
-        (Decimal::from(self.labels_available) / Decimal::from(total))
-            .round_dp(RESEARCH_DECIMAL_SCALE)
-    }
-
-    /// Fraction of planned samples that materialized into examples, in `[0, 1]`.
-    ///
-    /// A proxy for critical-feature availability: a sample is dropped
-    /// (`samples_dropped_insufficient`) or never built (book decode failure)
-    /// when its critical feature inputs are missing, so a high build ratio means
-    /// the critical feature plane was present for almost every instant. Zero
-    /// planned samples ⇒ `0` (fail-closed).
-    #[must_use]
-    pub fn feature_build_coverage(&self) -> Decimal {
-        if self.planned_samples == 0 {
-            return Decimal::ZERO;
-        }
-        (Decimal::from(self.built_examples) / Decimal::from(self.planned_samples))
-            .round_dp(RESEARCH_DECIMAL_SCALE)
-    }
-
-    /// Fraction of `ExitDecision` rows simulated from full L2 books, in `[0, 1]`.
-    #[must_use]
-    pub fn exit_l2_fidelity_ratio(&self) -> Decimal {
-        let total = self.exit_fill_l2_rows + self.exit_fill_fallback_rows;
-        if total == 0 {
-            return Decimal::ZERO;
-        }
-        (Decimal::from(self.exit_fill_l2_rows) / Decimal::from(total))
-            .round_dp(RESEARCH_DECIMAL_SCALE)
-    }
-
-    /// Fraction of `ExitDecision` rows using microstructure fallback, in `[0, 1]`.
-    #[must_use]
-    pub fn exit_fallback_ratio(&self) -> Decimal {
-        let total = self.exit_fill_l2_rows + self.exit_fill_fallback_rows;
-        if total == 0 {
-            return Decimal::ZERO;
-        }
-        (Decimal::from(self.exit_fill_fallback_rows) / Decimal::from(total))
-            .round_dp(RESEARCH_DECIMAL_SCALE)
-    }
 }
 
 /// A frozen, content-addressed training dataset artifact.

@@ -26,6 +26,8 @@ mod reconciliation;
 mod report_data_quality;
 mod report_diff;
 mod report_txn;
+#[allow(clippy::needless_update)] // NewResearchJob omits DB-managed timestamps
+mod research_job;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
 #[allow(clippy::needless_update)] // NewSettlementRedeem* omit DB-managed timestamps
@@ -53,6 +55,7 @@ pub use reconciliation::*;
 pub use report_data_quality::*;
 pub use report_diff::*;
 pub use report_txn::*;
+pub use research_job::*;
 pub use selection::*;
 pub use settlement::*;
 pub use shadow::*;

@@ -411,6 +411,11 @@ fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport
         &config.training.min_exit_depth_usd,
         report,
     );
+    decimal(
+        "training.min_selection_depth_usd",
+        &config.training.min_selection_depth_usd,
+        report,
+    );
     if config.training.max_book_staleness_ms == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "training.max_book_staleness_ms",

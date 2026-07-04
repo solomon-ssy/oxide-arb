@@ -3,9 +3,13 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    domain::{ModelTrainingPort, ModelVersionInfo, TrainModelRequest, TrainedModelView},
+    domain::{
+        JobProgressSink, ModelTrainingPort, ModelVersionInfo, TrainModelRequest, TrainedModelView,
+    },
     runtime_config::RuntimeConfig,
     types::{ModelVersionId, RuntimeConfigVersionId},
 };
@@ -103,25 +107,48 @@ impl CoreModelTrainingPort {
 
 #[async_trait]
 impl ModelTrainingPort for CoreModelTrainingPort {
-    async fn train(&self, request: TrainModelRequest) -> QuantResult<TrainedModelView> {
+    async fn train(
+        &self,
+        request: TrainModelRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainedModelView> {
+        if let Some(model_version_id) = &request.model_version_id
+            && let Some(existing) = self
+                .model_registry_repo
+                .find_model_version_by_id(model_version_id)
+                .await
+                .map_err(QuantError::from)?
+        {
+            return Ok(TrainedModelView::from(existing));
+        }
+        let model_version_id = request
+            .model_version_id
+            .clone()
+            .unwrap_or_else(ModelVersionId::from_v7);
         let model_family = request
             .model_family
             .parse()
             .map_err(|error: ModelFamilyParseError| QuantError::config(error.to_string()))?;
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let outcome = service
-            .train(TrainModelInput {
-                model_spec_id: request.model_spec_id,
-                training_dataset_id: request.training_dataset_id,
-                runtime_config_version_id: request.runtime_config_version_id,
-                model_family,
-                label: LabelSelector {
-                    name: LabelName::new(request.label_name),
-                    horizon_secs: request.label_horizon_secs,
+            .train(
+                TrainModelInput {
+                    model_version_id,
+                    model_spec_id: request.model_spec_id,
+                    training_dataset_id: request.training_dataset_id,
+                    runtime_config_version_id: request.runtime_config_version_id,
+                    model_family,
+                    label: LabelSelector {
+                        name: LabelName::new(request.label_name),
+                        horizon_secs: request.label_horizon_secs,
+                    },
+                    prediction_horizon_secs: request.prediction_horizon_secs,
+                    validation_folds: request.validation_folds,
                 },
-                prediction_horizon_secs: request.prediction_horizon_secs,
-                validation_folds: request.validation_folds,
-            })
+                &*progress,
+                &cancel,
+            )
             .await?;
         let mut view = TrainedModelView::from(outcome.version);
         view.model_run_id = Some(outcome.model_run_id);

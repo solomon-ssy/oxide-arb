@@ -2,7 +2,7 @@
 //! maturity, and typed `training_dataset_id` FK wiring.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
 };
 
@@ -21,8 +21,8 @@ use quant_pivot_models::{
         MarketResolutionRow, MidPriceBucketRow, TickEventRow,
     },
     domain::{
-        NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset,
-        market::book::BookLevel,
+        JobProgressSink, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
+        NewTrainingDataset, NoopProgressSink, market::book::BookLevel,
     },
     entities::market::{Column as MarketColumn, Entity as MarketEntity},
     enums::{
@@ -35,12 +35,13 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     runtime_config::{
-        DataQualityConfig, FactorsConfig, FeatureFamily, FeaturesConfig, TrainingConfig,
+        DataQualityConfig, DecimalString, FactorsConfig, FeatureFamily, FeaturesConfig,
+        SelectionConfig, TrainingConfig,
     },
     types::{
-        ArtifactUri, ContentHash, MarketId, ModelSpecId, ModelVersionId, Price,
+        ArtifactUri, ContentHash, DatasetCoverage, MarketId, ModelSpecId, ModelVersionId, Price,
         RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
-        TrainingSampleSource, default_sample_sources,
+        TrainingHorizonsSecs, TrainingSampleSource, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -68,6 +69,7 @@ use quant_pivot_test_support::{
 };
 use rust_decimal::Decimal;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
+use tokio_util::sync::CancellationToken;
 
 const EVENT_ID: &str = "evt-dataset-e2e";
 const MARKET_ID: &str = "0xdatasete2e";
@@ -234,6 +236,24 @@ impl QuantFactReadRepository for ControllableFactRead {
             }
         }
         Ok(rows)
+    }
+
+    async fn observed_markets_between(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError> {
+        let markets: BTreeSet<MarketId> = {
+            let scenario = self.scenario.lock().expect("lock");
+            scenario
+                .books
+                .values()
+                .flatten()
+                .filter(|row| row.event_time >= from_ms && row.event_time <= to_ms)
+                .filter_map(|row| row.market_id.clone())
+                .collect()
+        };
+        Ok(markets.into_iter().collect())
     }
 
     async fn mid_price_series(
@@ -458,6 +478,25 @@ fn service(
     store: Arc<dyn ArtifactStore>,
     fact_read: Arc<dyn QuantFactReadRepository>,
 ) -> TrainingDatasetService {
+    service_with_selection(
+        db,
+        store,
+        fact_read,
+        SelectionConfig {
+            enabled_categories: vec![MarketCategory::Sports],
+            ..SelectionConfig::default()
+        },
+        DecimalString::new("0"),
+    )
+}
+
+fn service_with_selection(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    fact_read: Arc<dyn QuantFactReadRepository>,
+    selection: SelectionConfig,
+    min_selection_depth_usd: DecimalString,
+) -> TrainingDatasetService {
     TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             fact_read,
@@ -481,9 +520,17 @@ fn service(
                 max_feature_bucket_age_secs: 120,
                 ..DataQualityConfig::default()
             },
-            training: TrainingConfig::default(),
+            training: TrainingConfig {
+                // Offline PIT selection uses book depth as the liquidity proxy.
+                min_selection_depth_usd,
+                ..TrainingConfig::default()
+            },
+            // The point-in-time selection funnel replayed during the build uses
+            // this frozen selection policy.
+            selection,
             labelers: default_labelers(),
         },
+        2_000_000,
     )
     .expect("training dataset service")
 }
@@ -560,6 +607,156 @@ async fn historical_pit_no_look_ahead_via_dataset_build() {
     let artifact = svc.build(plan).await.expect("build");
     assert!(!artifact.examples.is_empty(), "expected built examples");
     assert_no_feature_leakage(&artifact, 10);
+    // The point-in-time selection funnel ran and kept the eligible fixture market.
+    assert!(
+        artifact.coverage.pit_selection_candidates > 0,
+        "expected the PIT selection funnel to evaluate candidates",
+    );
+    assert!(
+        artifact.coverage.pit_selection_included > 0,
+        "expected the eligible fixture market to survive PIT selection",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(scenario)),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let dataset_id = plan.training_dataset_id.clone();
+
+    // A cancel observed at the first cross-section boundary unwinds the build
+    // cooperatively (~one section): it fails closed with `Cancelled` and never
+    // persists a partial artifact or ledger row.
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let sink: Arc<dyn JobProgressSink> = Arc::new(NoopProgressSink);
+    let err = svc
+        .build_with_progress(plan, sink, cancel)
+        .await
+        .expect_err("cancelled build must fail closed");
+    assert!(
+        matches!(err, QuantError::Research(ResearchError::Cancelled { .. })),
+        "expected Cancelled, got {err:?}"
+    );
+    assert!(
+        PgTrainingDatasetRepository::new(db)
+            .find_by_id(&dataset_id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "a cancelled build must not persist a ledger row"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pit_selection_excludes_disabled_category_market() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    // The market passes the cheap plan prefilter (Sports + lifetime) so it enters
+    // the spine as a candidate, but the point-in-time FilterChain then rejects it:
+    // its ~100 USD book depth is below this liquidity floor.
+    let svc = service_with_selection(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+        SelectionConfig {
+            enabled_categories: vec![MarketCategory::Sports],
+            ..SelectionConfig::default()
+        },
+        DecimalString::new("1000000"),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(
+        artifact.coverage.pit_selection_candidates > 0,
+        "the market should be evaluated by the PIT funnel",
+    );
+    assert_eq!(
+        artifact.coverage.pit_selection_included, 0,
+        "a market below the book-depth floor must be excluded by the PIT funnel",
+    );
+    assert!(
+        artifact
+            .coverage
+            .pit_selection_excluded
+            .insufficient_liquidity_count
+            > 0,
+        "the exclusion must be attributed to insufficient liquidity",
+    );
+    assert!(
+        artifact.examples.is_empty(),
+        "no examples should be materialized when selection excludes every market",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_estimates_pit_keep_rate() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        store,
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let request = DatasetPlanRequest {
+        model_spec_id,
+        runtime_config_version_id: rc_id,
+        window_start,
+        window_end,
+        sample_interval_secs: 60,
+        horizons_secs: vec![60],
+        source_delay_secs: 10,
+        feature_schema_version: SchemaVersion::FIRST,
+        sample_sources: vec![TrainingSampleSource::HistoricalPit],
+        training_dataset_id: None,
+    };
+    // 3 as_of slices × the single eligible fixture market.
+    let counts = svc.count_plan(&request, 3, 50).await.expect("count plan");
+    assert!(counts.spine_upper_bound > 0, "expected a non-empty spine");
+    let keep_rate = counts.keep_rate.expect("keep-rate should be estimated");
+    assert!(
+        (keep_rate - 1.0).abs() < f64::EPSILON,
+        "eligible fixture market must pass at every slice, got {keep_rate}",
+    );
+    assert_eq!(counts.keep_rate_sample_size, 3, "3 slices × 1 market");
+    assert_eq!(
+        counts.estimated_eligible_samples, counts.spine_upper_bound,
+        "keep-rate 1.0 ⇒ estimate equals the upper bound",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -921,8 +1118,8 @@ async fn model_version_training_dataset_id_is_typed() {
             sample_count: 10,
             source_delay_secs: 10,
             sample_interval_secs: 3600,
-            horizons_secs: serde_json::json!([3600]),
-            coverage_json: serde_json::json!({}),
+            horizons_secs: TrainingHorizonsSecs(vec![3600]),
+            coverage_json: DatasetCoverage::default(),
             runtime_config_version_id: rc_id,
         })
         .await

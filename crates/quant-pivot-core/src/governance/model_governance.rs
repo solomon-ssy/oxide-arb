@@ -467,10 +467,7 @@ impl ModelGovernancePort for ModelGovernanceService {
                 id: request.training_dataset_id.to_string(),
             })?;
 
-        let coverage: DatasetCoverage = serde_json::from_value(dataset.coverage_json.clone())
-            .map_err(|error| GovernanceError::IllegalTransition {
-                detail: format!("dataset coverage is not decodable: {error}"),
-            })?;
+        let coverage = dataset.coverage_json.clone();
 
         let model_family = if coverage.exit_decision_built > 0 {
             Some(ModelFamily::HoldVsExitWeighted)
@@ -649,12 +646,7 @@ impl ModelGovernanceService {
         let Some(dataset) = self.deps.dataset_repo.find_by_id(dataset_id).await? else {
             return Ok(DatasetCoverage::default());
         };
-        serde_json::from_value(dataset.coverage_json).map_err(|error| {
-            GovernanceError::IllegalTransition {
-                detail: format!("dataset coverage is not decodable: {error}"),
-            }
-            .into()
-        })
+        Ok(dataset.coverage_json)
     }
 
     /// Resolve the governed model family for a version (via its spec).

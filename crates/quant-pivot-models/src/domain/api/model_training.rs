@@ -27,7 +27,10 @@ use crate::{
 };
 
 /// Inbound body for `POST /research/models/train`.
-#[derive(Debug, Clone, Deserialize, Validate)]
+///
+/// `Serialize` is derived so the request can be frozen into a durable research
+/// job's `params_json` and replayed on execute.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct TrainModelRequest {
     /// Target model specification the trained version is bound to.
     pub model_spec_id: ModelSpecId,
@@ -62,6 +65,10 @@ pub struct TrainModelRequest {
     /// Operator reason recorded on the operation log.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
+    /// Pre-assigned id frozen at async enqueue for effectively-once recovery;
+    /// omit on direct calls — the job engine mints one before persisting params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_version_id: Option<ModelVersionId>,
 }
 
 const fn default_validation_folds() -> u32 {

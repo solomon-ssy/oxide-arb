@@ -11,6 +11,7 @@ pub mod order_intent;
 pub mod quant_report;
 pub mod reconciliation;
 pub mod research_catalog;
+pub mod research_job;
 pub mod runtime_control;
 pub mod training_dataset;
 
@@ -25,5 +26,6 @@ pub use order_intent::*;
 pub use quant_report::*;
 pub use reconciliation::*;
 pub use research_catalog::*;
+pub use research_job::*;
 pub use runtime_control::*;
 pub use training_dataset::*;

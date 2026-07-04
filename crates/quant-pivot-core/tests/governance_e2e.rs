@@ -28,9 +28,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
     types::{
-        ArtifactUri, BacktestReportId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId,
-        Probability, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        ShadowComparisonId, TrainingDatasetId,
+        ArtifactUri, BacktestReportId, ContentHash, DatasetCoverage, ModelRunId, ModelSpecId,
+        ModelVersionId, Probability, RuntimeConfigActivationId, RuntimeConfigVersionId,
+        SchemaVersion, ShadowComparisonId, TrainingDatasetId, TrainingHorizonsSecs,
     },
 };
 use quant_pivot_repository::{
@@ -48,7 +48,6 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     backtest::{ExpectedVsRealized, PnlSimulation},
     gates::{DefaultModelQualityGate, ModelQualityGate},
-    training::DatasetCoverage,
 };
 use quant_pivot_test_support::pg::setup_pg;
 use rust_decimal_macros::dec;
@@ -189,8 +188,8 @@ async fn seed_spec(db: &DatabaseConnection) -> ModelSpecId {
 }
 
 /// A dataset coverage that clears the gate (label 0.90, build 0.99).
-fn healthy_coverage() -> serde_json::Value {
-    serde_json::to_value(DatasetCoverage {
+fn healthy_coverage() -> DatasetCoverage {
+    DatasetCoverage {
         planned_samples: 1_000,
         built_examples: 990,
         markets: 50,
@@ -202,9 +201,8 @@ fn healthy_coverage() -> serde_json::Value {
         live_attribution_candidates: 0,
         live_attribution_dropped_missing_evidence: 0,
         matrix_probe: None,
-        ..Default::default()
-    })
-    .expect("coverage json")
+        ..DatasetCoverage::default()
+    }
 }
 
 async fn seed_dataset(
@@ -212,7 +210,7 @@ async fn seed_dataset(
     spec: &ModelSpecId,
     rc_id: &RuntimeConfigVersionId,
     status: TrainingDatasetStatus,
-    coverage_json: serde_json::Value,
+    coverage_json: DatasetCoverage,
     dataset_hash_seed: char,
 ) -> TrainingDatasetId {
     let id = TrainingDatasetId::from_v7();
@@ -232,7 +230,7 @@ async fn seed_dataset(
             sample_count: 990,
             source_delay_secs: 10,
             sample_interval_secs: 3_600,
-            horizons_secs: serde_json::json!([3600]),
+            horizons_secs: TrainingHorizonsSecs(vec![3600]),
             coverage_json,
             runtime_config_version_id: rc_id.clone(),
         })

@@ -417,6 +417,70 @@ crate::pg_enum! {
 }
 
 crate::pg_enum! {
+    type_name = "qp_research_job_kind",
+    /// The kind of long-running research task a durable job carries.
+    ///
+    /// Each kind dispatches to the matching offline service (dataset build /
+    /// classical-ML trainer / point-in-time backtest); the executor is chosen
+    /// exhaustively so a new kind forces a compile error at the dispatch site.
+    pub enum ResearchJobKind {
+        DatasetBuild => "dataset_build",
+        ModelTrain => "model_train",
+        Backtest => "backtest",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_research_job_status",
+    /// Durable research-job lifecycle state.
+    ///
+    /// `Queued → Running → {Succeeded | Failed | Cancelled}`. A crashed/orphaned
+    /// `Running` job is reclaimed to `Queued` by the boot recovery sweep (bounded
+    /// by `recovery_attempt`); a graceful shutdown also returns an in-flight job to
+    /// `Queued`. `Cancelled` is an operator terminal state (never auto-resumed).
+    @derive(Default)
+    pub enum ResearchJobStatus {
+        #[default]
+        Queued => "queued",
+        Running => "running",
+        Succeeded => "succeeded",
+        Failed => "failed",
+        Cancelled => "cancelled",
+    }
+}
+
+impl ResearchJobStatus {
+    /// Whether the job has reached a terminal state (no further transitions).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    /// Whether the job is still pending or executing (occupies a concurrency slot).
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+crate::wire_enum! {
+    /// Stable machine code recorded on a research job's `error_json.code`.
+    ///
+    /// A wire-only enum (lives inside the `error_json` JSONB payload, not a
+    /// dedicated column), so it needs no Postgres `CREATE TYPE`.
+    pub enum ResearchJobErrorCode {
+        /// The offline service returned a business error.
+        ExecutionFailed => "execution_failed",
+        /// A boot recovery sweep re-queued this orphaned run.
+        InterruptedByRestart => "interrupted_by_restart",
+        /// Automatic recovery exceeded `max_recovery_attempts` (poison-pill quarantine).
+        InterruptedExceededAttempts => "interrupted_exceeded_attempts",
+        /// The operator cancelled the run.
+        Cancelled => "cancelled",
+    }
+}
+
+crate::pg_enum! {
     type_name = "qp_model_run_kind",
     /// Model run purpose.
     @derive(Default)

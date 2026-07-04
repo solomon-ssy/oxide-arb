@@ -138,11 +138,11 @@ mod tests {
         use crate::domain::{
             MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
         };
-        let event = CoreEvent::MaterializationRun(MaterializationRunEvent {
-            run_id: "run-1".to_owned(),
-            kind: MaterializationRunKind::Training,
-            status: MaterializationRunStatus::Completed,
-        });
+        let event = CoreEvent::MaterializationRun(MaterializationRunEvent::revision(
+            "run-1",
+            MaterializationRunKind::Training,
+            MaterializationRunStatus::Completed,
+        ));
         let (key, envelope) = event_envelope(&event).expect("materialization maps");
         assert_eq!(
             key,

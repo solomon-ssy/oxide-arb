@@ -25,7 +25,9 @@ use quant_pivot_models::domain::{FactorGovernancePort, ModelGovernancePort};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::RuntimeConfigPort,
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
+    runtime_config::{
+        DataQualityConfig, FactorsConfig, FeaturesConfig, SelectionConfig, TrainingConfig,
+    },
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, BacktestReportRepository, FactorRepository, FeatureRepository,
@@ -221,6 +223,8 @@ impl ResearchBundle {
         factors: FactorsConfig,
         data_quality: DataQualityConfig,
         training: TrainingConfig,
+        selection: SelectionConfig,
+        max_spine_samples: u64,
     ) -> QuantResult<TrainingDatasetService> {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
@@ -239,8 +243,10 @@ impl ResearchBundle {
                 factors,
                 data_quality,
                 training,
+                selection,
                 labelers: default_labelers(),
             },
+            max_spine_samples,
         )
     }
 

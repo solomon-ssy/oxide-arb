@@ -28,6 +28,7 @@ pub mod quant_recommendation_attribution;
 pub mod quant_recommendation_report;
 pub mod quant_reconciliation;
 pub mod quant_report_data_quality_snapshot;
+pub mod quant_research_job;
 pub mod quant_settlement_redeem;
 pub mod quant_settlement_redeem_lot;
 pub mod quant_shadow_comparison;

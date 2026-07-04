@@ -7231,6 +7231,7 @@ dependencies = [
  "sha2 0.11.0",
  "strum 0.28.0",
  "thiserror 2.0.18",
+ "tokio-util",
  "toml",
  "tracing",
  "url",

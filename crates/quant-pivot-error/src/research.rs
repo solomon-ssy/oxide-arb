@@ -169,6 +169,17 @@ pub enum ResearchError {
         /// Context describing the failure.
         detail: String,
     },
+
+    /// A long-running research job was cooperatively cancelled at a
+    /// section/phase boundary (operator cancel, lease loss, or graceful
+    /// shutdown). Terminal but distinct from a failure — the durable worker
+    /// records it as `Cancelled`, not `Failed`, and never persists a partial
+    /// artifact.
+    #[error("research job cancelled: {detail}")]
+    Cancelled {
+        /// Context describing where the cancellation was observed.
+        detail: String,
+    },
 }
 
 /// A storage failure surfaced during point-in-time resolution.

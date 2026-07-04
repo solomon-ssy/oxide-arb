@@ -260,4 +260,34 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .await?;
         Ok(rows)
     }
+
+    async fn observed_markets_between(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError> {
+        // `market_id` is Nullable in `book_snapshots`; `assumeNotNull` after the
+        // `IS NOT NULL` guard yields a non-nullable column the row can decode.
+        let rows = self
+            .pool
+            .client()
+            .query(
+                "SELECT DISTINCT assumeNotNull(market_id) AS market_id FROM book_snapshots \
+                 WHERE market_id IS NOT NULL \
+                 AND event_time >= fromUnixTimestamp64Milli(?) \
+                 AND event_time <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY market_id",
+            )
+            .bind(from_ms)
+            .bind(to_ms)
+            .fetch_all::<ObservedMarketRow>()
+            .await?;
+        Ok(rows.into_iter().map(|row| row.market_id).collect())
+    }
+}
+
+/// Single-column projection for [`ChQuantFactReadRepository::observed_markets_between`].
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct ObservedMarketRow {
+    market_id: MarketId,
 }

@@ -10,8 +10,8 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        ContentHash, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, SchemaVersion,
-        TrainingDatasetId,
+        ContentHash, DatasetCoverage, ModelSpecId, ModelVersionId, RuntimeConfigVersionId,
+        SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
     },
 };
 use quant_pivot_repository::{
@@ -93,8 +93,11 @@ fn new_dataset(
         sample_count: 42,
         source_delay_secs: 10,
         sample_interval_secs: 3600,
-        horizons_secs: serde_json::json!([3600]),
-        coverage_json: serde_json::json!({ "planned_samples": 42 }),
+        horizons_secs: TrainingHorizonsSecs(vec![3600]),
+        coverage_json: DatasetCoverage {
+            planned_samples: 42,
+            ..DatasetCoverage::default()
+        },
         runtime_config_version_id,
     }
 }

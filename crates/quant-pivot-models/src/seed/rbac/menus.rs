@@ -27,12 +27,15 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 12,
+    // v13 adds the research "Task Center" (`research-jobs`) node. The loader is
+    // idempotent (`on_conflict do_nothing`), so re-running on an existing DB
+    // inserts only the new node.
+    version: 13,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v11",
+    checksum: "rbac.menus.bootstrap.v13",
     loader: load_boxed,
 };
 
@@ -514,6 +517,7 @@ fn build_research(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
         icon: "lucide:line-chart",
     });
+    build_research_jobs(t, &research);
     let factors = t.page(PageSpec {
         parent: &research,
         name: "research-factors",
@@ -545,6 +549,20 @@ fn build_research(t: &mut MenuTree) {
         component: "research/comparisons/detail",
         permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
         icon: "lucide:git-compare",
+    });
+}
+
+/// Task center: the durable async research-job engine (dataset build / model
+/// train / backtest) — live progress, cancel, retry, and crash-recovery status.
+fn build_research_jobs(t: &mut MenuTree, research: &MenuId) {
+    t.page(PageSpec {
+        parent: research,
+        name: "research-jobs",
+        title: "page.menu.researchJobs",
+        path: "/research/jobs",
+        component: "research/jobs/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:list-checks",
     });
 }
 
@@ -816,6 +834,7 @@ mod tests {
             "research-datasets",
             "research-models",
             "research-backtests",
+            "research-jobs",
             "research-factors",
             "report-detail",
             "recommendation-detail",

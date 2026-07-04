@@ -16,11 +16,15 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
+
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        BacktestReportInfo, ModelComparisonReportInfo, ModelVersionInfo, NewBacktestReport,
-        NewModelComparisonReport, NewModelRun, NewModelVersion, TrainingDatasetInfo,
+        BacktestReportInfo, JobProgressSink, ModelComparisonReportInfo, ModelVersionInfo,
+        NewBacktestReport, NewModelComparisonReport, NewModelRun, NewModelVersion,
+        ResearchJobProgress, TrainingDatasetInfo,
     },
     enums::quant::{
         ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
@@ -54,7 +58,7 @@ use quant_pivot_research::{
 
 use crate::{
     pipeline::{
-        historical_window::{HistoricalWindowLoader, WindowSpec},
+        historical_window::{HistoricalWindow, HistoricalWindowLoader, WindowSpec},
         inference_batch::build_runtime_input,
         inference_context::build_market_inference_context,
     },
@@ -98,6 +102,8 @@ pub struct BacktestInput {
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Whether to fit a calibrated return curve and register a child candidate.
     pub calibrate: bool,
+    /// Pre-assigned candidate report id (async job engine); minted when absent.
+    pub backtest_report_id: Option<BacktestReportId>,
 }
 
 /// Offline backtest service, bound to one frozen runtime-config snapshot.
@@ -126,10 +132,18 @@ impl BacktestService {
     }
 
     /// Run a single backtest and persist its report.
-    pub async fn run(&self, input: BacktestInput) -> QuantResult<BacktestReportInfo> {
+    pub async fn run(
+        &self,
+        input: BacktestInput,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<BacktestReportInfo> {
         let version = self.find_version(&input.model_version_id).await?;
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
-        Ok(self.run_recorded(&version, &dataset, &input).await?.info)
+        Ok(self
+            .run_recorded(&version, &dataset, &input, &progress, &cancel)
+            .await?
+            .info)
     }
 
     /// Pair mode: replay the candidate (`input.model_version_id`) and the
@@ -140,22 +154,31 @@ impl BacktestService {
         &self,
         input: BacktestInput,
         baseline_version_id: ModelVersionId,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
     ) -> QuantResult<(BacktestReportInfo, ModelComparisonReportInfo)> {
         let candidate_version = self.find_version(&input.model_version_id).await?;
         let baseline_version = self.find_version(&baseline_version_id).await?;
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
 
         let candidate = self
-            .run_recorded(&candidate_version, &dataset, &input)
+            .run_recorded(&candidate_version, &dataset, &input, &progress, &cancel)
             .await?;
         let baseline_input = BacktestInput {
             model_version_id: baseline_version_id,
             training_dataset_id: input.training_dataset_id.clone(),
             runtime_config_version_id: input.runtime_config_version_id.clone(),
             calibrate: false,
+            backtest_report_id: None,
         };
         let baseline = self
-            .run_recorded(&baseline_version, &dataset, &baseline_input)
+            .run_recorded(
+                &baseline_version,
+                &dataset,
+                &baseline_input,
+                &progress,
+                &cancel,
+            )
             .await?;
 
         let comparison = compare_reports(&baseline.result, &candidate.result)?;
@@ -190,13 +213,28 @@ impl BacktestService {
         version: &ModelVersionInfo,
         dataset: &TrainingDatasetInfo,
         input: &BacktestInput,
+        progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
     ) -> QuantResult<RecordedRun> {
         let model_run_id = ModelRunId::from_v7();
-        let backtest_report_id = BacktestReportId::from_v7();
+        let backtest_report_id = input
+            .backtest_report_id
+            .clone()
+            .unwrap_or_else(BacktestReportId::from_v7);
         self.create_run(&model_run_id, input, dataset).await?;
 
         match self
-            .run_inner(&backtest_report_id, &model_run_id, version, dataset, input)
+            .run_inner(
+                RunInnerCtx {
+                    backtest_report_id: &backtest_report_id,
+                    model_run_id: &model_run_id,
+                    version,
+                    dataset,
+                    input,
+                },
+                progress,
+                cancel,
+            )
             .await
         {
             Ok((info, result)) => {
@@ -265,12 +303,17 @@ impl BacktestService {
     /// The core PIT replay + persistence (errors finalize the run as failed).
     async fn run_inner(
         &self,
-        backtest_report_id: &BacktestReportId,
-        model_run_id: &ModelRunId,
-        version: &ModelVersionInfo,
-        dataset: &TrainingDatasetInfo,
-        input: &BacktestInput,
+        ctx: RunInnerCtx<'_>,
+        progress: &Arc<dyn JobProgressSink>,
+        cancel: &CancellationToken,
     ) -> QuantResult<(BacktestReportInfo, BacktestRunResult)> {
+        let RunInnerCtx {
+            backtest_report_id,
+            model_run_id,
+            version,
+            dataset,
+            input,
+        } = ctx;
         // Load the model under test, bound to the dataset's frozen schema.
         let binding = ActiveSchemaBinding {
             feature_schema_hash: dataset.feature_schema_hash.clone(),
@@ -280,55 +323,14 @@ impl BacktestService {
         // Backtests are deterministic and never apply a config weight overlay.
         let model = factory.load(version, None).await?;
 
-        let ticks = self
-            .build_replay_ticks(model.as_ref(), model_run_id, dataset)
-            .await?;
-
-        let request = BacktestRequest {
-            backtest_report_id: backtest_report_id.clone(),
-            model_version_id: version.model_version_id.clone(),
-            runtime_config_version_id: input.runtime_config_version_id.clone(),
-            window_start: dataset.window_start,
-            window_end: dataset.window_end,
-        };
-        let result = PortfolioReplayBacktester::new()
-            .run(BacktestInputs {
-                request,
-                model: model.as_ref(),
-                ticks,
-                caps: self.caps.clone(),
-            })
-            .await?;
-
-        let info = self.persist_report(model_run_id, &result.report).await?;
-
-        if input.calibrate {
-            self.maybe_calibrate(version, dataset, &result.sample_outcomes)
-                .await?;
-        }
-        Ok((info, result))
-    }
-
-    /// Recompute every `as_of` cross-section point-in-time and assemble the
-    /// replay ticks (factor table + forward settlement truth + market metadata).
-    ///
-    /// The schedule and settlement come from the frozen dataset Parquet; the
-    /// factors are recomputed through the shared kernel (never read from Parquet).
-    async fn build_replay_ticks(
-        &self,
-        model: &dyn QuantModelRuntime,
-        model_run_id: &ModelRunId,
-        dataset: &TrainingDatasetInfo,
-    ) -> QuantResult<Vec<BacktestTick>> {
+        // Prefetch the replay window (real ClickHouse I/O) on the async runtime.
         let bytes = self.deps.artifact_store.get(&dataset.parquet_uri).await?;
         let examples = DatasetParquetCodec::decode(&bytes)?;
-
         let schedule = ReplaySchedule::from_examples(&examples);
         let source_delay =
             Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
         let lookback = Duration::from_secs(self.replay.features.max_lookback_secs());
         let max_horizon_secs = max_horizon(dataset);
-
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.market_repo),
@@ -345,35 +347,52 @@ impl BacktestService {
             })
             .await?;
 
-        let builder = ConfiguredFeatureBuilder::new(&self.replay.features);
-        let engine = FactorEngine::new(&self.replay.factors, &self.replay.features);
+        let request = BacktestRequest {
+            backtest_report_id: backtest_report_id.clone(),
+            model_version_id: version.model_version_id.clone(),
+            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            window_start: dataset.window_start,
+            window_end: dataset.window_end,
+        };
 
-        let mut ticks = Vec::with_capacity(schedule.by_as_of.len());
-        for (as_of, group) in &schedule.by_as_of {
-            let Some(cross) = materialize_cross_section(
-                &builder,
-                &engine,
-                &self.replay,
-                &CrossSectionRequest {
-                    pit: &window.pit,
-                    prefetched: &window.prefetched,
-                    as_of: *as_of,
-                    group,
-                    source_delay,
-                    lookback,
-                },
-            )
-            .await?
-            else {
-                continue;
-            };
-            if let Some(tick) =
-                build_tick(model, model_run_id, *as_of, &cross, &schedule.settlement)
-            {
-                ticks.push(tick);
+        // Offload the CPU-bound per-section factor recompute + portfolio replay
+        // to a blocking thread so it never occupies an async runtime worker,
+        // polling `cancel` at each cross-section boundary.
+        let inputs = BacktestReplayInputs {
+            model,
+            window,
+            schedule,
+            replay: self.replay.clone(),
+            caps: self.caps.clone(),
+            request,
+            model_run_id: model_run_id.clone(),
+            source_delay,
+            lookback,
+            sink: Arc::clone(progress),
+            cancel: cancel.clone(),
+        };
+        let result = task::spawn_blocking(move || run_backtest_replay_blocking(inputs))
+            .await
+            .map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!("backtest replay task join failed: {error}"),
+                })
+            })??;
+        let Some(result) = result else {
+            return Err(ResearchError::Cancelled {
+                detail: "backtest cancelled during the replay".to_owned(),
             }
+            .into());
+        };
+
+        progress.report(ResearchJobProgress::indeterminate("finalize", 0));
+        let info = self.persist_report(model_run_id, &result.report).await?;
+
+        if input.calibrate {
+            self.maybe_calibrate(version, dataset, &result.sample_outcomes)
+                .await?;
         }
-        Ok(ticks)
+        Ok((info, result))
     }
 
     /// Persist the backtest report ledger row.
@@ -543,12 +562,118 @@ impl BacktestService {
     }
 }
 
+/// Borrowed inputs for one recorded backtest replay (pre-assigned ids + the
+/// resolved model version, frozen dataset, and request).
+struct RunInnerCtx<'a> {
+    backtest_report_id: &'a BacktestReportId,
+    model_run_id: &'a ModelRunId,
+    version: &'a ModelVersionInfo,
+    dataset: &'a TrainingDatasetInfo,
+    input: &'a BacktestInput,
+}
+
 /// A completed, recorded single replay: the run id, persisted report info, and
 /// the in-memory result (sample outcomes) needed for a pairwise comparison.
 struct RecordedRun {
     model_run_id: ModelRunId,
     info: BacktestReportInfo,
     result: BacktestRunResult,
+}
+
+/// Owned inputs for the blocking backtest replay (moved into `spawn_blocking`).
+struct BacktestReplayInputs {
+    model: Box<dyn QuantModelRuntime>,
+    window: HistoricalWindow,
+    schedule: ReplaySchedule,
+    replay: ReplayConfig,
+    caps: PortfolioCaps,
+    request: BacktestRequest,
+    model_run_id: ModelRunId,
+    source_delay: Duration,
+    lookback: Duration,
+    sink: Arc<dyn JobProgressSink>,
+    cancel: CancellationToken,
+}
+
+/// Run the backtest replay on a blocking thread.
+///
+/// The per-section materialization is in-memory (`Ready` async), so `block_on`
+/// drives it on this blocking thread without occupying an async runtime worker.
+/// Returns `None` when cancelled at a cross-section boundary.
+fn run_backtest_replay_blocking(
+    inputs: BacktestReplayInputs,
+) -> QuantResult<Option<BacktestRunResult>> {
+    Handle::current().block_on(run_backtest_replay(inputs))
+}
+
+/// Recompute every `as_of` cross-section point-in-time, assemble the replay
+/// ticks (factor table + forward settlement truth + market metadata), and run
+/// the portfolio replay. The schedule + settlement come from the frozen dataset
+/// Parquet; the factors are recomputed through the shared kernel (never trusted
+/// from Parquet). Polls `cancel` per section for a ~one-section cancel latency.
+async fn run_backtest_replay(
+    inputs: BacktestReplayInputs,
+) -> QuantResult<Option<BacktestRunResult>> {
+    let builder = ConfiguredFeatureBuilder::new(&inputs.replay.features);
+    let engine = FactorEngine::new(&inputs.replay.factors, &inputs.replay.features);
+
+    let total_sections = inputs.schedule.by_as_of.len() as u64;
+    let mut processed_sections: u64 = 0;
+    let mut ticks = Vec::with_capacity(inputs.schedule.by_as_of.len());
+    for (as_of, group) in &inputs.schedule.by_as_of {
+        if inputs.cancel.is_cancelled() {
+            return Ok(None);
+        }
+        processed_sections += 1;
+        inputs.sink.report(ResearchJobProgress::with_total(
+            "materialize",
+            processed_sections,
+            total_sections,
+        ));
+        let Some(cross) = materialize_cross_section(
+            &builder,
+            &engine,
+            &inputs.replay,
+            &CrossSectionRequest {
+                pit: &inputs.window.pit,
+                prefetched: &inputs.window.prefetched,
+                as_of: *as_of,
+                group,
+                source_delay: inputs.source_delay,
+                lookback: inputs.lookback,
+            },
+        )
+        .await?
+        else {
+            continue;
+        };
+        if let Some(tick) = build_tick(
+            inputs.model.as_ref(),
+            &inputs.model_run_id,
+            *as_of,
+            &cross,
+            &inputs.schedule.settlement,
+        ) {
+            ticks.push(tick);
+        }
+    }
+    if inputs.cancel.is_cancelled() {
+        return Ok(None);
+    }
+
+    inputs.sink.report(ResearchJobProgress::indeterminate(
+        "replay",
+        ticks.len() as u64,
+    ));
+    let result = PortfolioReplayBacktester::new()
+        .run(BacktestInputs {
+            request: inputs.request,
+            model: inputs.model.as_ref(),
+            ticks,
+            caps: inputs.caps,
+        })
+        .await?;
+    Ok(Some(result))
 }
 
 /// Assemble one replay tick from a recomputed cross-section + forward settlement.

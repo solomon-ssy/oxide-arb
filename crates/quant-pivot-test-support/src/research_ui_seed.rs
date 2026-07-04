@@ -17,9 +17,9 @@ use quant_pivot_models::{
         quant::{ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus},
     },
     types::{
-        ArtifactUri, BacktestReportId, ContentHash, FactorDefinitionId, ModelComparisonReportId,
-        ModelRunId, ModelSpecId, ModelVersionId, Probability, RuntimeConfigVersionId,
-        SchemaVersion, TrainingDatasetId,
+        ArtifactUri, BacktestReportId, ContentHash, DatasetCoverage, FactorDefinitionId,
+        ModelComparisonReportId, ModelRunId, ModelSpecId, ModelVersionId, Probability,
+        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
     },
 };
 use quant_pivot_repository::{
@@ -338,8 +338,8 @@ async fn seed_training_datasets(
             sample_count: built_samples,
             source_delay_secs: 10,
             sample_interval_secs: 3_600,
-            horizons_secs: serde_json::json!([3_600, 86_400]),
-            coverage_json: dataset_coverage_json(slug, built_samples),
+            horizons_secs: TrainingHorizonsSecs(vec![3_600, 86_400]),
+            coverage_json: dataset_coverage(slug, built_samples),
             runtime_config_version_id: runtime_config_version_id.clone(),
         })
         .await
@@ -762,15 +762,15 @@ fn demo_metrics(
     })
 }
 
-fn dataset_coverage_json(slug: &str, built_samples: i64) -> serde_json::Value {
-    serde_json::json!({
-        "ui_demo_slug": slug,
-        "planned_samples": 12_000,
-        "built_samples": built_samples,
-        "label_coverage_pct": 0.96,
-        "markets": 42,
-        "feature_null_rate": 0.02,
-    })
+fn dataset_coverage(_slug: &str, built_samples: i64) -> DatasetCoverage {
+    let built = u64::try_from(built_samples).unwrap_or(0);
+    DatasetCoverage {
+        planned_samples: 12_000,
+        built_examples: built,
+        markets: 42,
+        labels_available: built,
+        ..DatasetCoverage::default()
+    }
 }
 
 fn expected_vs_realized_json(seed: &str) -> serde_json::Value {

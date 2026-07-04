@@ -13,9 +13,15 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use chrono::Utc;
-use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
+
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    domain::{ModelVersionInfo, NewModelRun, NewModelVersion, TrainingDatasetInfo},
+    domain::{
+        JobProgressSink, ModelVersionInfo, NewModelRun, NewModelVersion, ResearchJobProgress,
+        TrainingDatasetInfo,
+    },
     enums::quant::{
         ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
     },
@@ -64,6 +70,19 @@ use crate::service::{
     historical_replay::ReplayConfig,
 };
 
+/// Fail closed with a terminal [`ResearchError::Cancelled`] when the job was
+/// cooperatively cancelled (operator cancel, lease loss, or graceful shutdown),
+/// checked at each coarse phase boundary.
+fn ensure_not_cancelled(cancel: &CancellationToken, phase: &str) -> QuantResult<()> {
+    if cancel.is_cancelled() {
+        return Err(ResearchError::Cancelled {
+            detail: format!("model training cancelled at `{phase}`"),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// Repository + store dependencies for the trainer service.
 pub struct ModelTrainerServiceDeps {
     /// Frozen training-dataset ledger.
@@ -88,6 +107,8 @@ pub struct ModelTrainerConfig {
 
 /// A training request resolved by the admin port.
 pub struct TrainModelInput {
+    /// Pre-assigned registry id (async job engine) or minted for direct calls.
+    pub model_version_id: ModelVersionId,
     /// Target model spec.
     pub model_spec_id: ModelSpecId,
     /// Frozen dataset to train on.
@@ -136,9 +157,27 @@ impl ModelTrainerService {
     }
 
     /// Train a model and register it as a Candidate version.
-    pub async fn train(&self, input: TrainModelInput) -> QuantResult<TrainModelOutcome> {
+    ///
+    /// Reports coarse but honest phases (`load → decode → materialize → fit`) to
+    /// `progress`; the fit itself is a single opaque research-trainer call,
+    /// offloaded to a blocking thread. `cancel` is polled at each phase boundary.
+    pub async fn train(
+        &self,
+        input: TrainModelInput,
+        progress: &dyn JobProgressSink,
+        cancel: &CancellationToken,
+    ) -> QuantResult<TrainModelOutcome> {
+        ensure_not_cancelled(cancel, "load")?;
+        progress.report(ResearchJobProgress::indeterminate("load", 0));
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        progress.report(ResearchJobProgress::indeterminate("decode", 0));
         let parquet_examples = self.decode_examples(&dataset).await?;
+        // Rematerialize features/factors point-in-time (the dominant pre-fit cost).
+        ensure_not_cancelled(cancel, "materialize")?;
+        progress.report(ResearchJobProgress::indeterminate(
+            "materialize",
+            parquet_examples.len() as u64,
+        ));
         // Exit scorers train on per-lot `ExitDecision` rows: recompute market
         // factors PIT but preserve each lot's frozen labels + position-state
         // (the generic rematerialize would rewrite them to `HistoricalPit` and
@@ -165,10 +204,15 @@ impl ModelTrainerService {
             .await?
         };
 
-        let model_version_id = ModelVersionId::from_v7();
+        let model_version_id = input.model_version_id.clone();
         let model_run_id = ModelRunId::from_v7();
         self.create_run(&model_run_id, &input, &dataset).await?;
 
+        ensure_not_cancelled(cancel, "fit")?;
+        progress.report(ResearchJobProgress::indeterminate(
+            "fit",
+            examples.len() as u64,
+        ));
         match self
             .train_and_register(&model_version_id, &input, &dataset, &examples)
             .await
@@ -259,7 +303,7 @@ impl ModelTrainerService {
         };
 
         let (artifact, metrics_json) = if input.model_family.is_exit_scorer() {
-            Self::train_sell_scorer(header, input, dataset, examples)?
+            Self::train_sell_scorer(header, input, dataset, examples).await?
         } else {
             match input.model_family.classical_kind() {
                 None => self.train_weighted(header, input, examples).await?,
@@ -325,7 +369,17 @@ impl ModelTrainerService {
             return_model: ReturnModelSpec::heuristic_default(),
             required_features: Vec::new(),
         };
-        let trained: TrainedModelArtifact = WeightedFactorTrainer::new().train(request).await?;
+        // Offload the CPU-bound fit to a blocking thread so it never occupies an
+        // async runtime worker (starving other jobs' heartbeats).
+        let trained: TrainedModelArtifact = task::spawn_blocking(move || {
+            Handle::current().block_on(WeightedFactorTrainer::new().train(request))
+        })
+        .await
+        .map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("weighted-factor trainer task join failed: {error}"),
+            })
+        })??;
         let metrics_json = serde_json::json!({
             "in_sample": {
                 "objective_value": trained.in_sample_metrics.objective_value,
@@ -343,7 +397,7 @@ impl ModelTrainerService {
     /// Sell-side hold-vs-exit training path (Phase 06.1). Seeds over the market
     /// factors plus the position-state pseudo-factors and fits the shared rank-IC
     /// simplex against the `hold_vs_exit_alpha_bps` label.
-    fn train_sell_scorer(
+    async fn train_sell_scorer(
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
@@ -373,7 +427,15 @@ impl ModelTrainerService {
             label_schema_hash: dataset.label_schema_hash.clone(),
             required_features: Vec::new(),
         };
-        let trained = SellScorerTrainer::new().train_sell_scorer(&request)?;
+        // Offload the CPU-bound fit to a blocking thread (keeps the runtime free).
+        let trained =
+            task::spawn_blocking(move || SellScorerTrainer::new().train_sell_scorer(&request))
+                .await
+                .map_err(|error| {
+                    QuantError::from(ResearchError::DatasetBuild {
+                        detail: format!("sell-scorer trainer task join failed: {error}"),
+                    })
+                })??;
         let metrics_json = serde_json::json!({
             "in_sample": {
                 "objective_value": trained.in_sample_metrics.objective_value,
@@ -505,9 +567,21 @@ impl ModelTrainerService {
         kind: ClassicalKind,
     ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
         let matrix = build_classical_matrix(examples, &input.label)?;
-        let adapter = ClassicalAdapterRegistry::adapter_for(kind);
-        let output = adapter.train(&matrix)?;
-        let validation = adapter.validate(&matrix, input.validation_folds.max(2))?;
+        let folds = input.validation_folds.max(2);
+        // Offload the CPU-bound classical fit + rolling validation to a blocking
+        // thread (keeps the async runtime free for other jobs' heartbeats).
+        let (output, validation) = task::spawn_blocking(move || {
+            let adapter = ClassicalAdapterRegistry::adapter_for(kind);
+            let output = adapter.train(&matrix)?;
+            let validation = adapter.validate(&matrix, folds)?;
+            QuantResult::Ok((output, validation))
+        })
+        .await
+        .map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("classical trainer task join failed: {error}"),
+            })
+        })??;
 
         let model_key = ArtifactKey::new(
             ArtifactNamespace::Model,

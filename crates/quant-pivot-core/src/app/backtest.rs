@@ -3,9 +3,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    domain::{BacktestPort, BacktestReportView, ModelComparisonReportInfo, RunBacktestRequest},
+    domain::{
+        BacktestPort, BacktestReportView, JobProgressSink, ModelComparisonReportInfo,
+        RunBacktestRequest,
+    },
     runtime_config::RuntimeConfig,
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
 };
@@ -109,24 +114,32 @@ impl BacktestPort for CoreBacktestPort {
         &self,
         model_version_id: ModelVersionId,
         request: RunBacktestRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
     ) -> QuantResult<BacktestReportView> {
+        if let Some(backtest_report_id) = &request.backtest_report_id
+            && let Some(view) = self.find_report(backtest_report_id).await?
+        {
+            return Ok(view);
+        }
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let input = BacktestInput {
             model_version_id,
             training_dataset_id: request.training_dataset_id,
             runtime_config_version_id: request.runtime_config_version_id,
             calibrate: request.calibrate,
+            backtest_report_id: request.backtest_report_id,
         };
-        match request.comparison_model_version_id {
+        let result = match request.comparison_model_version_id {
             Some(baseline) => {
-                let (info, comparison) = service.run_comparison(input, baseline).await?;
-                Ok(BacktestReportView::from_info(
-                    info,
-                    Some(comparison.comparison_report_id),
-                ))
+                let (info, comparison) = service
+                    .run_comparison(input, baseline, Arc::clone(&progress), cancel)
+                    .await?;
+                BacktestReportView::from_info(info, Some(comparison.comparison_report_id))
             }
-            None => Ok(BacktestReportView::from(service.run(input).await?)),
-        }
+            None => BacktestReportView::from(service.run(input, progress, cancel).await?),
+        };
+        Ok(result)
     }
 
     async fn find_report(

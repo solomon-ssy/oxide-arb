@@ -39,22 +39,24 @@ use quant_pivot_models::{
         ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
         ExecutionSubmitPort, FactorCollinearitySource, FactorCollinearityView,
         FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort, GatePreviewIntent,
-        GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort,
-        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo,
-        ModelSpecListQuery, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
-        PromoteDatasetRequest, PublishFactorCommand, PublishModelCommand, QualityGateReportView,
-        QuantModeTransitionReport, ReconciliationPort, ResearchCatalogPort,
-        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
-        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
-        RuntimeControlPort, SetKillSwitchCommand, SystemStatus, TrainModelRequest,
-        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort,
+        KillSwitchView, MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo,
+        ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort,
+        ModelVersionInfo, ModelVersionListQuery, Paginated, PromoteDatasetRequest,
+        PublishFactorCommand, PublishModelCommand, QualityGateReportView,
+        QuantModeTransitionReport, ReconciliationPort, ResearchCatalogPort, ResearchJobListQuery,
+        ResearchJobPort, ResearchJobView, ResolveReconciliationCommand,
+        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
+        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
+        SetKillSwitchCommand, SystemStatus, TrainModelRequest, TrainedModelView,
+        TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
         TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
         BacktestReportId, FactorDefinitionId, MarketId, ModelComparisonReportId, ModelVersionId,
-        OrderIntentId, TokenId, TrainingDatasetId,
+        OrderIntentId, ResearchJobId, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -136,18 +138,15 @@ impl TestEnv {
         let jwt_blacklist = connect_blacklist(&redis_cfg).await;
         let blacklist = Arc::clone(&jwt_blacklist) as Arc<dyn TokenBlacklist>;
         let jwt = Arc::new(JwtService::new(&jwt_config(), Arc::clone(&blacklist)));
-
         let db = pool.connection().clone();
         let casbin = Arc::new(
             CasbinService::new(db.clone())
                 .await
                 .expect("casbin service"),
         );
-        let perm_checker = Arc::new(routes::init_rbac_rules());
         let repos = WebHarnessRepos::from_connection(&db);
 
         let operation_log = OperationLogBuffer::direct(Arc::clone(&repos.operation_logs));
-
         let (events, event_rx) = CoreEventPublisher::bounded(256);
         let intent_lifecycle = Arc::new(IntentLifecyclePublisher::new(events.clone()));
         let ws_sessions = SessionRegistry::default();
@@ -176,7 +175,7 @@ impl TestEnv {
             role_menus: Arc::clone(&repos.role_menus),
             role_permissions: Arc::clone(&repos.role_permissions),
             casbin,
-            perm_checker,
+            perm_checker: Arc::new(routes::init_rbac_rules()),
             runtime_config: Arc::clone(&repos.runtime_config),
             operation_logs: Arc::clone(&repos.operation_logs),
             operation_log,
@@ -201,6 +200,7 @@ impl TestEnv {
             model_governance: Arc::new(MockModelGovernancePort),
             factor_governance: Arc::new(MockFactorGovernancePort),
             research_catalog: Arc::new(MockResearchCatalogPort),
+            research_jobs: Arc::new(MockResearchJobPort),
             quant_reports: core_report.port.clone(),
             account_read: core_account_read_port(
                 &db,
@@ -445,6 +445,14 @@ impl QuantFactReadRepository for MockQuantFactRead {
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn observed_markets_between(
+        &self,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 struct MockMarketData;
@@ -635,7 +643,12 @@ pub struct MockModelTrainingPort;
 
 #[async_trait]
 impl ModelTrainingPort for MockModelTrainingPort {
-    async fn train(&self, _request: TrainModelRequest) -> QuantResult<TrainedModelView> {
+    async fn train(
+        &self,
+        _request: TrainModelRequest,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: CancellationToken,
+    ) -> QuantResult<TrainedModelView> {
         Err(QuantError::NotImplemented("model train".into()))
     }
 
@@ -656,6 +669,8 @@ impl BacktestPort for MockBacktestPort {
         &self,
         _model_version_id: ModelVersionId,
         _request: RunBacktestRequest,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: CancellationToken,
     ) -> QuantResult<BacktestReportView> {
         Err(QuantError::NotImplemented("backtest run".into()))
     }
@@ -855,8 +870,67 @@ impl TrainingDatasetPort for MockTrainingDatasetPort {
     async fn build(
         &self,
         _request: BuildTrainingDatasetRequest,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetView> {
         Err(QuantError::NotImplemented("training dataset build".into()))
+    }
+}
+
+/// No-op research-job engine port for web integration tests.
+pub struct MockResearchJobPort;
+
+#[async_trait]
+impl ResearchJobPort for MockResearchJobPort {
+    async fn enqueue_dataset_build(
+        &self,
+        _request: BuildTrainingDatasetRequest,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("enqueue dataset build".into()))
+    }
+
+    async fn enqueue_model_train(
+        &self,
+        _request: TrainModelRequest,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("enqueue model train".into()))
+    }
+
+    async fn enqueue_backtest(
+        &self,
+        _model_version_id: ModelVersionId,
+        _request: RunBacktestRequest,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("enqueue backtest".into()))
+    }
+
+    async fn list(&self, _query: ResearchJobListQuery) -> QuantResult<Paginated<ResearchJobView>> {
+        Err(QuantError::NotImplemented("research job list".into()))
+    }
+
+    async fn get(&self, _job_id: &ResearchJobId) -> QuantResult<Option<ResearchJobView>> {
+        Ok(None)
+    }
+
+    async fn cancel(
+        &self,
+        _job_id: &ResearchJobId,
+        _reason: String,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("research job cancel".into()))
+    }
+
+    async fn retry(
+        &self,
+        _job_id: &ResearchJobId,
+        _reason: String,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("research job retry".into()))
     }
 }
 

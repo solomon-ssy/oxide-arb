@@ -111,4 +111,19 @@ pub trait QuantFactReadRepository: Send + Sync {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError>;
+
+    /// Distinct market ids that had at least one book snapshot with `event_time`
+    /// in the inclusive range `[from_ms, to_ms]`.
+    ///
+    /// This is the **point-in-time honest** historical candidate set for
+    /// offline dataset builds: a market is a candidate iff it was actually
+    /// observable (had a book) during the window — independent of its *current*
+    /// catalog status. It therefore includes since-`Settled` / `Delisted`
+    /// markets (carrying mature settlement labels), eliminating the survivorship
+    /// bias of a currently-active-only catalog scan.
+    async fn observed_markets_between(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError>;
 }

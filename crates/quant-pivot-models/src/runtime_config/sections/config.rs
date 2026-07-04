@@ -471,6 +471,17 @@ pub struct TrainingConfig {
     pub max_book_staleness_ms: u64,
     /// Minimum forward top-1 depth (USD) for the `liquidity_exit_possible` label.
     pub min_exit_depth_usd: DecimalString,
+    /// Minimum book-derived liquidity (combined visible USD depth) a market must
+    /// show at an `as_of` to enter the point-in-time selection during an offline
+    /// dataset build.
+    ///
+    /// The offline plane has no Gamma `liquidity_usd`/`volume_24h` history, so the
+    /// online selection funnel is replayed with book depth as the liquidity proxy
+    /// (and the volume floor skipped). This is that depth floor — frozen with the
+    /// runtime config and captured in `dataset_hash` for reproducibility. It is a
+    /// book-depth quantity, deliberately distinct from the Gamma-calibrated online
+    /// `selection.min_liquidity_usd`.
+    pub min_selection_depth_usd: DecimalString,
 }
 
 impl Default for TrainingConfig {
@@ -478,6 +489,7 @@ impl Default for TrainingConfig {
         Self {
             max_book_staleness_ms: 300_000,
             min_exit_depth_usd: DecimalString::new("100"),
+            min_selection_depth_usd: DecimalString::new("500"),
         }
     }
 }
@@ -491,6 +503,18 @@ impl TrainingConfig {
             .parse::<Decimal>()
             .map(Usd::new)
             .map_err(|error| format!("training.min_exit_depth_usd is not a valid decimal: {error}"))
+    }
+
+    /// Resolve [`TrainingConfig::min_selection_depth_usd`] into a typed [`Usd`].
+    pub fn min_selection_depth_usd_typed(&self) -> Result<Usd, String> {
+        use rust_decimal::Decimal;
+        self.min_selection_depth_usd
+            .value
+            .parse::<Decimal>()
+            .map(Usd::new)
+            .map_err(|error| {
+                format!("training.min_selection_depth_usd is not a valid decimal: {error}")
+            })
     }
 }
 

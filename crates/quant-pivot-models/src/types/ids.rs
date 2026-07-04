@@ -128,6 +128,10 @@ pub struct ModelComparisonReportId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShadowComparisonId(Arc<Uuid>);
 
+/// Durable research job identifier (async dataset build / model train / backtest).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResearchJobId(Arc<Uuid>);
+
 /// Model-governance audit row identifier (publish / retire / rollback / promote).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelGovernanceAuditId(Arc<Uuid>);

@@ -4,11 +4,13 @@ use crate::{
     domain::{
         MarketBookView, OrderIntentInfo, RecommendationReportInfo, governance::system::SystemStatus,
     },
-    enums::common::{AlertCategory, AlertLevel, AlertSource},
-    enums::execution::{ReconciliationResult, SettlementRedeemState},
-    enums::quant::{
-        EmptyReportReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
-        ReportKind, TrainingDatasetStatus,
+    enums::{
+        common::{AlertCategory, AlertLevel, AlertSource},
+        execution::{ReconciliationResult, SettlementRedeemState},
+        quant::{
+            EmptyReportReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
+            ReportKind, ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
+        },
     },
     types::MarketId,
 };
@@ -406,6 +408,28 @@ pub enum MaterializationRunStatus {
     Cancelled,
 }
 
+impl From<ResearchJobKind> for MaterializationRunKind {
+    fn from(kind: ResearchJobKind) -> Self {
+        match kind {
+            ResearchJobKind::DatasetBuild => Self::Dataset,
+            ResearchJobKind::ModelTrain => Self::Training,
+            ResearchJobKind::Backtest => Self::Backtest,
+        }
+    }
+}
+
+impl From<ResearchJobStatus> for MaterializationRunStatus {
+    fn from(status: ResearchJobStatus) -> Self {
+        match status {
+            ResearchJobStatus::Queued => Self::Queued,
+            ResearchJobStatus::Running => Self::Running,
+            ResearchJobStatus::Succeeded => Self::Completed,
+            ResearchJobStatus::Failed => Self::Failed,
+            ResearchJobStatus::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 impl From<TrainingDatasetStatus> for MaterializationRunStatus {
     fn from(status: TrainingDatasetStatus) -> Self {
         match status {
@@ -424,13 +448,62 @@ impl From<TrainingDatasetStatus> for MaterializationRunStatus {
 ///
 /// A revision hint only: the workbench re-fetches the dataset / model / report
 /// by id (WS never carries catalog rows).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaterializationRunEvent {
     /// The run subject id (`training_dataset_id` for datasets, `model_run_id`
-    /// for training / backtest runs).
+    /// for training / backtest runs), or the durable job id when no result
+    /// artifact exists yet.
     pub run_id: String,
     pub kind: MaterializationRunKind,
     pub status: MaterializationRunStatus,
+    /// The durable research-job id driving this run (async job engine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Current execution phase (e.g. `prefetch`, `materialize`, `finalize`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Completion fraction in `[0, 1]` when a positive total is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pct: Option<f64>,
+}
+
+impl MaterializationRunEvent {
+    /// A minimal revision hint (no job/progress detail) — open catalogs re-fetch.
+    #[must_use]
+    pub fn revision(
+        run_id: impl Into<String>,
+        kind: MaterializationRunKind,
+        status: MaterializationRunStatus,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            kind,
+            status,
+            job_id: None,
+            phase: None,
+            pct: None,
+        }
+    }
+
+    /// A job-scoped progress/lifecycle event carrying phase + completion fraction.
+    #[must_use]
+    pub fn job(
+        job_id: impl Into<String>,
+        run_id: impl Into<String>,
+        kind: MaterializationRunKind,
+        status: MaterializationRunStatus,
+        phase: Option<String>,
+        pct: Option<f64>,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            kind,
+            status,
+            job_id: Some(job_id.into()),
+            phase,
+            pct,
+        }
+    }
 }
 
 /// Reconciliation row lifecycle event fanned out on `quant.reconciliation`.

@@ -93,6 +93,8 @@ pub enum TaskKind {
     AnalyticsWriter,
     PositionPersistence,
     ReportScheduler,
+    /// Durable async research-job worker (dataset build / model train / backtest).
+    ResearchJob,
 }
 
 impl TaskKind {
@@ -106,7 +108,7 @@ impl TaskKind {
             Self::Detection => ShutdownStage::Detection,
             Self::Execution | Self::ReportScheduler => ShutdownStage::Execution,
             Self::Audit => ShutdownStage::Audit,
-            Self::AnalyticsWriter => ShutdownStage::Analytics,
+            Self::AnalyticsWriter | Self::ResearchJob => ShutdownStage::Analytics,
             Self::PositionPersistence => ShutdownStage::Persistence,
         }
     }

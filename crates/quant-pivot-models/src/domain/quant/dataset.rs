@@ -2,7 +2,10 @@
 
 use crate::{
     enums::quant::TrainingDatasetStatus,
-    types::{ArtifactUri, ContentHash, ModelSpecId, RuntimeConfigVersionId, TrainingDatasetId},
+    types::{
+        ArtifactUri, ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId,
+        TrainingDatasetId, TrainingHorizonsSecs,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -29,8 +32,8 @@ pub struct TrainingDatasetInfo {
     /// Deterministic sampling cadence (seconds) the build grid used.
     pub sample_interval_secs: i64,
     /// Forward label horizons (seconds) the build materialized.
-    pub horizons_secs: serde_json::Value,
-    pub coverage_json: serde_json::Value,
+    pub horizons_secs: TrainingHorizonsSecs,
+    pub coverage_json: DatasetCoverage,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub created_at: DateTime<Utc>,
 }
@@ -78,7 +81,7 @@ pub struct NewTrainingDataset {
     pub sample_count: i64,
     pub source_delay_secs: i64,
     pub sample_interval_secs: i64,
-    pub horizons_secs: serde_json::Value,
-    pub coverage_json: serde_json::Value,
+    pub horizons_secs: TrainingHorizonsSecs,
+    pub coverage_json: DatasetCoverage,
     pub runtime_config_version_id: RuntimeConfigVersionId,
 }

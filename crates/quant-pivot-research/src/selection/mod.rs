@@ -86,6 +86,22 @@ pub struct ModelFeatureRequirements {
     pub required_features: Vec<FeatureName>,
 }
 
+/// The included / excluded partition produced by the filter chain + cap, before
+/// a snapshot id or canonical hash is attached.
+///
+/// This is the shared selection core: the online snapshot builder wraps it with
+/// an id + hash, while the offline point-in-time dataset selector consumes it
+/// per `as_of` cross-section (no persisted snapshot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionResult {
+    /// Markets that passed every filter (already capped + stably ordered).
+    pub included: Vec<SelectedMarket>,
+    /// Excluded markets with their deciding reason.
+    pub excluded: Vec<ExcludedMarket>,
+    /// Aggregate exclusion summary.
+    pub exclusion_summary: SelectionExclusionSummary,
+}
+
 /// A deterministic, hashable snapshot of selected and excluded markets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketSelectionSnapshot {

@@ -26,7 +26,10 @@ use crate::{
 ///
 /// The replay window and tick grid are defined by the frozen training dataset
 /// (PIT-materialized), so the request only selects the dataset + config.
-#[derive(Debug, Clone, Deserialize, Validate)]
+///
+/// `Serialize` is derived so the request can be frozen into a durable research
+/// job's `params_json` and replayed on execute.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct RunBacktestRequest {
     /// Frozen, PIT-materialized dataset to replay the model over.
     pub training_dataset_id: TrainingDatasetId,
@@ -45,6 +48,11 @@ pub struct RunBacktestRequest {
     /// Operator reason recorded on the operation log.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
+    /// Pre-assigned candidate report id frozen at async enqueue for
+    /// effectively-once recovery; omit on direct calls — the job engine mints
+    /// one before persisting params (pair mode attaches comparison on execute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backtest_report_id: Option<BacktestReportId>,
 }
 
 /// Stored backtest report returned after a run and on fetch.

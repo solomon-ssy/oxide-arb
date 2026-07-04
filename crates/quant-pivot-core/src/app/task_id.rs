@@ -107,6 +107,11 @@ pub enum TaskId {
     IntentExpireSweep,
     /// Precise per-intent TTL wake (`DelayQueue`); `IntentExpireSweep` is its backstop.
     IntentDeadlineScheduler,
+
+    // ── Research (async long-task engine) ─────────────────────────────
+    /// Leases + executes durable research jobs (dataset build / model train /
+    /// backtest) off the HTTP hot path, with crash recovery.
+    ResearchJobWorker,
 }
 
 impl TaskId {
@@ -162,6 +167,7 @@ impl TaskId {
             | Self::PositionEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
+            Self::ResearchJobWorker => TaskKind::ResearchJob,
         }
     }
 

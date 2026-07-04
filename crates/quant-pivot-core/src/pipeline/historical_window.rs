@@ -27,7 +27,7 @@ use quant_pivot_models::{
         MarketResolutionRow,
     },
     domain::MarketInfo,
-    enums::{common::MarketCategory, market::MarketStatus},
+    enums::market::MarketStatus,
     types::{MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
@@ -278,11 +278,7 @@ pub fn selected_market(info: &MarketInfo) -> SelectedMarket {
     SelectedMarket {
         market_id: info.market_id.clone(),
         event_id: info.event_id.clone(),
-        category: info
-            .categories
-            .first()
-            .copied()
-            .unwrap_or(MarketCategory::Other),
+        category: info.fee_category(),
         primary_token_id: info.yes_token_id.clone(),
         secondary_token_id: Some(info.no_token_id.clone()),
         liquidity_usd: None,

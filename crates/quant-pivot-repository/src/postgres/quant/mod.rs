@@ -21,6 +21,7 @@ mod position;
 mod recommendation;
 mod recommendation_report;
 mod reconciliation;
+mod research_job;
 mod reserved_capital;
 mod settlement_redeem;
 mod shadow_comparison;
@@ -37,7 +38,7 @@ pub use {
     portfolio_plan::PgPortfolioPlanRepository, position::PgPositionRepository,
     recommendation::PgRecommendationRepository,
     recommendation_report::PgRecommendationReportRepository,
-    reconciliation::PgReconciliationRepository, reserved_capital::PgReservedCapitalRepository,
-    settlement_redeem::PgSettlementRedeemRepository,
+    reconciliation::PgReconciliationRepository, research_job::PgResearchJobRepository,
+    reserved_capital::PgReservedCapitalRepository, settlement_redeem::PgSettlementRedeemRepository,
     shadow_comparison::PgShadowComparisonRepository,
 };

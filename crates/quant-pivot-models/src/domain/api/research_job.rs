@@ -1,0 +1,131 @@
+//! Durable research-job admin HTTP contract.
+//!
+//! The async job ledger is the single UI surface for long-running research tasks
+//! (dataset build / model train / backtest). The SPA:
+//!
+//! 1. `POST` the existing build/train/backtest endpoints → receives a
+//!    [`ResearchJobView`] (HTTP 202, `status = queued`).
+//! 2. Tracks progress live over the `materialization.run_update` WS channel and
+//!    falls back to `GET /research/jobs/{id}` polling.
+//! 3. May `POST /research/jobs/{id}/cancel` (cooperative) or
+//!    `/retry` (clone params into a fresh job, recording lineage).
+
+use chrono::{DateTime, Utc};
+use quant_pivot_macros::NormalizePageQuery;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+use validator::Validate;
+
+use crate::{
+    domain::{ResearchJobInfo, RunBacktestRequest, pagination::PageRequest},
+    enums::quant::{ResearchJobKind, ResearchJobStatus},
+    types::{
+        DatasetCoverage, ModelSpecId, ModelVersionId, ResearchJobError, ResearchJobId,
+        ResearchJobProgress, RuntimeConfigVersionId,
+    },
+};
+
+/// Frozen params for a `backtest` job: the path model version + the replay body.
+///
+/// Dataset-build and model-train jobs freeze their request bodies directly;
+/// backtest additionally needs the model version taken from the route path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestJobParams {
+    pub model_version_id: ModelVersionId,
+    #[serde(flatten)]
+    pub request: RunBacktestRequest,
+}
+
+/// Outbound projection of one durable research job.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResearchJobView {
+    pub job_id: ResearchJobId,
+    pub kind: ResearchJobKind,
+    pub status: ResearchJobStatus,
+    pub model_spec_id: Option<ModelSpecId>,
+    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    /// Frozen request body (for the detail drawer / retry preview).
+    pub params: Value,
+    /// Live progress snapshot (phase + processed/total), when the run has ticked.
+    pub progress: Option<ResearchJobProgress>,
+    /// Completion fraction in `[0, 1]`, when a positive total is known.
+    pub progress_pct: Option<f64>,
+    /// Terminal result id (dataset / model version / backtest report).
+    pub result_ref: Option<Uuid>,
+    /// Structured failure payload on terminal `failed`.
+    pub error: Option<ResearchJobError>,
+    /// Build/backtest coverage diagnostics.
+    pub coverage_json: Option<DatasetCoverage>,
+    pub requested_by: Option<String>,
+    pub acting_role: String,
+    pub parent_job_id: Option<ResearchJobId>,
+    /// Number of automatic crash-recovery re-queues so far.
+    pub recovery_attempt: i32,
+    pub max_recovery_attempts: i32,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ResearchJobInfo> for ResearchJobView {
+    fn from(info: ResearchJobInfo) -> Self {
+        let progress = info.progress_json.clone();
+        let progress_pct = progress.as_ref().and_then(ResearchJobProgress::pct);
+        let error = info.error_json.clone();
+        Self {
+            job_id: info.job_id,
+            kind: info.kind,
+            status: info.status,
+            model_spec_id: info.model_spec_id,
+            runtime_config_version_id: info.runtime_config_version_id,
+            params: info.params_json,
+            progress,
+            progress_pct,
+            result_ref: info.result_ref,
+            error,
+            coverage_json: info.coverage_json,
+            requested_by: info.requested_by,
+            acting_role: info.acting_role,
+            parent_job_id: info.parent_job_id,
+            recovery_attempt: info.recovery_attempt,
+            max_recovery_attempts: info.max_recovery_attempts,
+            lease_expires_at: info.lease_expires_at,
+            started_at: info.started_at,
+            finished_at: info.finished_at,
+            heartbeat_at: info.heartbeat_at,
+            created_at: info.created_at,
+            updated_at: info.updated_at,
+        }
+    }
+}
+
+/// Paginated filter for the research-job ledger catalog.
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct ResearchJobListQuery {
+    pub kind: Option<ResearchJobKind>,
+    pub status: Option<ResearchJobStatus>,
+    pub model_spec_id: Option<ModelSpecId>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+/// Governed body for cooperative job cancellation.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct CancelResearchJobRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
+}
+
+/// Governed body for re-enqueuing a terminal job with its frozen params.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct RetryResearchJobRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
+}

@@ -36,6 +36,7 @@ use crate::pipeline::historical_window::{
 };
 
 /// Frozen feature/factor/data-quality config governing a replay.
+#[derive(Clone)]
 pub struct ReplayConfig {
     /// Feature builder configuration.
     pub features: FeaturesConfig,

@@ -12,7 +12,11 @@
 //! points use [`Bps`]. Schema evolution happens through additive fields guarded
 //! by `#[serde(default)]`, never through a bare `serde_json::Value`.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    iter::Sum,
+    ops::{Add, AddAssign},
+};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::hashing::CanonicalDigestError;
@@ -419,6 +423,33 @@ pub struct DataQualitySummary {
     pub insufficient_count: u32,
 }
 
+impl Add for DataQualitySummary {
+    type Output = Self;
+
+    #[inline]
+    fn add(mut self, rhs: Self) -> Self {
+        self += rhs;
+        self
+    }
+}
+
+impl AddAssign for DataQualitySummary {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        self.fresh_count += rhs.fresh_count;
+        self.acceptable_count += rhs.acceptable_count;
+        self.degraded_count += rhs.degraded_count;
+        self.stale_count += rhs.stale_count;
+        self.insufficient_count += rhs.insufficient_count;
+    }
+}
+
+impl Sum for DataQualitySummary {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), Add::add)
+    }
+}
+
 /// One rejection-reason tally.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectionReasonCount {
@@ -437,6 +468,31 @@ pub struct EligibilitySummary {
     pub eligible_semi_auto: u32,
     /// Eligible under auto-execution.
     pub eligible_auto_execution: u32,
+}
+
+impl Add for EligibilitySummary {
+    type Output = Self;
+
+    #[inline]
+    fn add(mut self, rhs: Self) -> Self {
+        self += rhs;
+        self
+    }
+}
+
+impl AddAssign for EligibilitySummary {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        self.eligible_report_only += rhs.eligible_report_only;
+        self.eligible_semi_auto += rhs.eligible_semi_auto;
+        self.eligible_auto_execution += rhs.eligible_auto_execution;
+    }
+}
+
+impl Sum for EligibilitySummary {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), Add::add)
+    }
 }
 
 jsonb_active!(

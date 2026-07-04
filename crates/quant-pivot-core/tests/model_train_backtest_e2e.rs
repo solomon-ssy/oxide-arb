@@ -10,13 +10,15 @@
 //! so train and backtest share the same PIT-resolved `liquidity_depth` cross-section.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+use tokio_util::sync::CancellationToken;
+
 use quant_pivot_core::service::{
     backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
     historical_replay::ReplayConfig,
@@ -30,7 +32,10 @@ use quant_pivot_models::{
         BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
         MarketResolutionRow, MidPriceBucketRow, TickEventRow,
     },
-    domain::{ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion, NewTrainingDataset},
+    domain::{
+        ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion, NewTrainingDataset,
+        NoopProgressSink,
+    },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
         quant_model_run,
@@ -51,9 +56,9 @@ use quant_pivot_models::{
         PortfolioBudget, PortfolioConfig, PortfolioConstraints, wire::DecimalString,
     },
     types::{
-        ContentHash, FactorDefinitionId, MarketId, ModelSpecId, Price, Probability,
-        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, Usd,
+        ContentHash, DatasetCoverage, FactorDefinitionId, MarketId, ModelSpecId, ModelVersionId,
+        Price, Probability, RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -322,6 +327,24 @@ impl QuantFactReadRepository for ControllableFactRead {
         Ok(rows)
     }
 
+    async fn observed_markets_between(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError> {
+        let markets: BTreeSet<MarketId> = {
+            let scenario = self.scenario.lock().expect("lock");
+            scenario
+                .books
+                .values()
+                .flatten()
+                .filter(|row| row.event_time >= from_ms && row.event_time <= to_ms)
+                .filter_map(|row| row.market_id.clone())
+                .collect()
+        };
+        Ok(markets.into_iter().collect())
+    }
+
     async fn mid_price_series(
         &self,
         _token_ids: Vec<TokenId>,
@@ -528,8 +551,8 @@ async fn seed_dataset(
         sample_count: TICKS * i64::try_from(MARKETS_PER_TICK).expect("count"),
         source_delay_secs: SOURCE_DELAY_SECS,
         sample_interval_secs: TICK_INTERVAL_SECS,
-        horizons_secs: serde_json::json!([0]),
-        coverage_json: serde_json::json!({}),
+        horizons_secs: TrainingHorizonsSecs(vec![0]),
+        coverage_json: DatasetCoverage::default(),
         runtime_config_version_id: rc_id.clone(),
     };
     PgTrainingDatasetRepository::new(db.clone())
@@ -617,6 +640,7 @@ async fn assert_training_run_ledger(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
 async fn train_then_backtest_then_calibrate_e2e() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -651,18 +675,23 @@ async fn train_then_backtest_then_calibrate_e2e() {
 
     // ── Train ────────────────────────────────────────────────────────────
     let outcome = trainer
-        .train(TrainModelInput {
-            model_spec_id: model_spec_id.clone(),
-            training_dataset_id: dataset_id.clone(),
-            runtime_config_version_id: rc_id.clone(),
-            model_family: ModelFamily::WeightedFactor,
-            label: LabelSelector {
-                name: settlement(),
-                horizon_secs: 0,
+        .train(
+            TrainModelInput {
+                model_version_id: ModelVersionId::from_v7(),
+                model_spec_id: model_spec_id.clone(),
+                training_dataset_id: dataset_id.clone(),
+                runtime_config_version_id: rc_id.clone(),
+                model_family: ModelFamily::WeightedFactor,
+                label: LabelSelector {
+                    name: settlement(),
+                    horizon_secs: 0,
+                },
+                prediction_horizon_secs: 86_400,
+                validation_folds: 3,
             },
-            prediction_horizon_secs: 86_400,
-            validation_folds: 3,
-        })
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        )
         .await
         .expect("train");
     let version = outcome.version;
@@ -707,12 +736,17 @@ async fn train_then_backtest_then_calibrate_e2e() {
     );
 
     let report = backtester
-        .run(BacktestInput {
-            model_version_id: version.model_version_id.clone(),
-            training_dataset_id: dataset_id.clone(),
-            runtime_config_version_id: rc_id.clone(),
-            calibrate: true,
-        })
+        .run(
+            BacktestInput {
+                model_version_id: version.model_version_id.clone(),
+                training_dataset_id: dataset_id.clone(),
+                runtime_config_version_id: rc_id.clone(),
+                calibrate: true,
+                backtest_report_id: None,
+            },
+            Arc::new(NoopProgressSink),
+            CancellationToken::new(),
+        )
         .await
         .expect("backtest");
     assert!(report.sample_count > 0, "resolved samples");

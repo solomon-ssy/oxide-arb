@@ -1,8 +1,13 @@
 //! Application bootstrap — build subsystems and run the lifecycle.
 
-use crate::app::{AppContext, task_registry::AppRunner};
+use crate::app::{
+    AppContext,
+    research_job::{CoreResearchJobPort, ResearchJobEngine},
+    task_registry::AppRunner,
+};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::config::DeployConfig;
+use quant_pivot_models::{config::DeployConfig, domain::ResearchJobPort};
+use quant_pivot_repository::traits::ResearchJobRepository;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -26,8 +31,22 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     ctx.register_exit_monitor_worker(&mut runner);
     ctx.register_settlement_redeem_worker(&mut runner);
     ctx.register_attribution_worker(&mut runner);
+
+    // Durable async research-job engine: the enqueue port (HTTP) and the worker
+    // (execution + crash recovery) share one engine so cancellation tokens, the
+    // ledger, and the boot epoch id are common.
+    let job_engine = ResearchJobEngine::new(
+        Arc::clone(&ctx.infra.repos.research_job) as Arc<dyn ResearchJobRepository>,
+        ctx.events.clone(),
+    );
+    let research_jobs: Arc<dyn ResearchJobPort> = Arc::new(CoreResearchJobPort::new(
+        job_engine.clone(),
+        ctx.config.quant.research_jobs.max_recovery_attempts,
+    ));
+    ctx.register_research_job_worker(&mut runner, job_engine);
+
     let order_intents = ctx.register_execution_services(&mut runner);
-    ctx.register_web_services(&mut runner, order_intents)
+    ctx.register_web_services(&mut runner, order_intents, research_jobs)
         .await?;
     ctx.register_fact_writer_tasks(&mut runner);
 

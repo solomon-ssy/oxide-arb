@@ -285,6 +285,14 @@ impl QuantFactReadRepository for EmptyFactRead {
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn observed_markets_between(
+        &self,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 impl ReportPipelineHarness {

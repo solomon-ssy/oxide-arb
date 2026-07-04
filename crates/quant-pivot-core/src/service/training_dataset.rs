@@ -11,28 +11,40 @@
 //! strictly forward; the dataset hash makes the whole thing reproducible.
 
 use crate::{
-    pipeline::historical_window::{
-        HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
+    pipeline::{
+        historical_pit::ChHistoricalPitSource,
+        historical_window::{
+            HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
+        },
     },
-    service::historical_replay::{
-        CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
+    service::{
+        historical_replay::{
+            CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
+        },
+        pit_selection::OfflinePitSelector,
     },
 };
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChPrice, ChUsd},
     domain::{
-        ExitTrainingLotRow, FeatureVectorInfo, NewTrainingDataset, RecommendationAttributionInfo,
-        RecommendationInfo,
+        ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo, NewTrainingDataset,
+        NoopProgressSink, RecommendationAttributionInfo, RecommendationInfo, ResearchJobProgress,
     },
-    enums::quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
+    enums::{
+        common::MarketCategory,
+        quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
+    },
+    runtime_config::{
+        DataQualityConfig, DecimalString, FactorsConfig, FeaturesConfig, SelectionConfig,
+        TrainingConfig,
+    },
     types::{
         Bps, MarketId, Price, Shares, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingSampleSource, Usd,
+        TrainingHorizonsSecs, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -61,8 +73,8 @@ use quant_pivot_research::{
         LotTrainingContext, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, PlanMarket,
         ReturnToHorizonLabeler, SamplePlan, SettlementOutcomeLabeler, TrainingDatasetArtifact,
         TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample, TrainingLabel,
-        assert_no_future_leakage, label_names_for_sources, plan_lot_timeline_samples, plan_samples,
-        probe_matrix_coverage, remaining_shares_at,
+        assert_no_future_leakage, count_samples, label_names_for_sources,
+        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
     },
 };
 use rust_decimal::Decimal;
@@ -71,8 +83,31 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::{runtime::Handle, task};
+use tokio_util::sync::CancellationToken;
 
 const LIVE_ATTRIBUTION_SAMPLE_LIMIT: u64 = 10_000;
+
+/// Non-materializing dry-run counts for the `plan` endpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct PlanCounts {
+    /// Deterministic historical spine size (selection × alive instants) — an
+    /// upper bound before point-in-time eligibility is applied.
+    pub spine_upper_bound: u64,
+    /// Total samples across all requested sources (spine + attribution + exit),
+    /// before point-in-time selection eligibility.
+    pub total: u64,
+    /// Whether the plan exceeds the configured `max_spine_samples` hard cap.
+    pub hard_cap_exceeded: bool,
+    /// Estimated total samples after PIT selection: `total` scaled by the sampled
+    /// keep-rate (falls back to `total` when the estimate is disabled/unavailable).
+    pub estimated_eligible_samples: u64,
+    /// Sampled fraction of candidate markets that pass the PIT selection funnel,
+    /// in `[0, 1]`. `None` when the estimate is disabled or has no candidates.
+    pub keep_rate: Option<f64>,
+    /// Number of `(market, slice)` eligibility trials backing [`Self::keep_rate`].
+    pub keep_rate_sample_size: u64,
+}
 
 /// The default labeler set materialized by a dataset build.
 #[must_use]
@@ -127,6 +162,10 @@ pub struct TrainingDatasetBuildConfig {
     pub data_quality: DataQualityConfig,
     /// Offline training-dataset build parameters (from runtime `training` section).
     pub training: TrainingConfig,
+    /// Selection config — the enabled-category selection gate is applied to the
+    /// candidate market set so offline training mirrors the online funnel's
+    /// category scope (train/serve consistency), not the entire active catalog.
+    pub selection: SelectionConfig,
     /// Labelers materialized per example.
     pub labelers: Vec<Box<dyn Labeler>>,
 }
@@ -147,14 +186,30 @@ pub struct TrainingDatasetService {
     data_quality: DataQualityConfig,
     max_book_staleness: Duration,
     min_exit_depth_usd: Usd,
-    labelers: Vec<Box<dyn Labeler>>,
+    /// Frozen selection policy (drives the offline point-in-time selection funnel).
+    selection: SelectionConfig,
+    /// Enabled-category set (derived from [`Self::selection`]) for the cheap
+    /// upper-bound candidate prefilter.
+    enabled_categories: HashSet<MarketCategory>,
+    /// Frozen book-depth floor for offline point-in-time selection.
+    min_selection_depth: DecimalString,
+    /// Deploy guard: hard cap on the deterministic historical spine.
+    max_spine_samples: u64,
+    /// Shared so the historical spine can be built inside a `spawn_blocking`
+    /// closure (labelers are `Send + Sync` but not `Clone`).
+    labelers: Arc<Vec<Box<dyn Labeler>>>,
 }
 
 impl TrainingDatasetService {
     /// Wire the service from boot-time dependencies and a frozen config snapshot.
+    ///
+    /// `max_spine_samples` is a deploy-level resource guard (not part of the
+    /// reproducible `dataset_hash`): a `plan` beyond it flags `hard_cap_exceeded`
+    /// and a `build` beyond it fails closed.
     pub fn new(
         deps: TrainingDatasetServiceDeps,
         config: TrainingDatasetBuildConfig,
+        max_spine_samples: u64,
     ) -> QuantResult<Self> {
         let min_exit_depth_usd = config
             .training
@@ -176,9 +231,271 @@ impl TrainingDatasetService {
             data_quality: config.data_quality,
             max_book_staleness,
             min_exit_depth_usd,
-            labelers: config.labelers,
+            enabled_categories: config
+                .selection
+                .enabled_categories
+                .iter()
+                .copied()
+                .collect(),
+            min_selection_depth: config.training.min_selection_depth_usd.clone(),
+            selection: config.selection,
+            max_spine_samples,
+            labelers: Arc::new(config.labelers),
         })
     }
+
+    /// The historical candidate set for a window, sourced point-in-time
+    /// honestly from `ClickHouse` facts (not the currently-active catalog).
+    ///
+    /// A market is a candidate iff it had at least one observable book snapshot
+    /// during `[window_start - max_book_staleness, window_end]` — the same
+    /// staleness slack the PIT `book_at` lookup honors. This candidate set
+    /// therefore **includes since-`Settled`/`Delisted` markets** (which carry mature
+    /// settlement labels), eliminating the survivorship bias of a
+    /// `status = 'active'` catalog scan. Metadata (category, tokens, lifetime) is
+    /// hydrated from Postgres via a status-agnostic `find_by_ids`.
+    async fn historical_candidate_markets(
+        &self,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> QuantResult<Vec<MarketInfo>> {
+        let staleness = ChronoDuration::milliseconds(
+            i64::try_from(self.max_book_staleness.as_millis()).unwrap_or(i64::MAX),
+        );
+        let from_ms = (window_start - staleness).timestamp_millis();
+        let to_ms = window_end.timestamp_millis();
+        let ids = self
+            .fact_read
+            .observed_markets_between(from_ms, to_ms)
+            .await
+            .map_err(QuantError::from)?;
+        let markets = self
+            .market_repo
+            .find_by_ids(&ids)
+            .await
+            .map_err(QuantError::from)?;
+        Ok(markets.into_iter().map(|info| (*info).clone()).collect())
+    }
+
+    /// Whether a market belongs to this build's point-in-time selection.
+    ///
+    /// Survivorship-aware: a market qualifies when its lifetime **overlaps** the
+    /// window (`created_at < window_end` and it had not resolved before
+    /// `window_start`), so markets that were tradable during the window but have
+    /// since resolved are included — not just the currently-active catalog. The
+    /// enabled-category gate mirrors the online [`CategoryFilter`] (fee-dominant
+    /// category), not the raw Postgres `categories[]` membership list.
+    fn in_selection(
+        &self,
+        info: &MarketInfo,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> bool {
+        if info.created_at >= window_end {
+            return false;
+        }
+        if info.end_date.is_some_and(|end| end <= window_start) {
+            return false;
+        }
+        self.enabled_categories.is_empty() || self.enabled_categories.contains(&info.fee_category())
+    }
+
+    /// The deterministic candidate selection for a plan window.
+    fn candidate_plan_markets(
+        &self,
+        markets: &[MarketInfo],
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+    ) -> Vec<PlanMarket> {
+        markets
+            .iter()
+            .filter(|info| self.in_selection(info, window_start, window_end))
+            .map(|info| PlanMarket {
+                market_id: info.market_id.clone(),
+                token_id: info.yes_token_id.clone(),
+                created_at: info.created_at,
+                end_date: info.end_date,
+            })
+            .collect()
+    }
+
+    /// Cheap, non-materializing dry-run counts for the `plan` endpoint.
+    ///
+    /// Computes the historical spine size arithmetically (no grid allocation) and
+    /// adds bounded live-attribution + exit-decision counts, so a plan over the
+    /// full catalog returns in milliseconds instead of allocating millions of rows.
+    pub async fn count_plan(
+        &self,
+        request: &DatasetPlanRequest,
+        sample_slices: u32,
+        sample_markets: u32,
+    ) -> QuantResult<PlanCounts> {
+        if request.window_start >= request.window_end {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "window_start {} must precede window_end {}",
+                    request.window_start, request.window_end
+                ),
+            }
+            .into());
+        }
+        let mut total: u64 = 0;
+        let wants_historical = wants_sample_source(request, TrainingSampleSource::HistoricalPit);
+        // Candidate `MarketInfo` set (category + lifetime), reused for both the
+        // arithmetic spine upper bound and the sampled keep-rate estimate. Sourced
+        // from ClickHouse-observed markets so since-resolved markets are included.
+        let markets = if wants_historical {
+            self.historical_candidate_markets(request.window_start, request.window_end)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let candidate_infos: Vec<&MarketInfo> = markets
+            .iter()
+            .filter(|info| self.in_selection(info, request.window_start, request.window_end))
+            .collect();
+        let spine_upper_bound = if wants_historical {
+            let plan_markets: Vec<PlanMarket> = candidate_infos
+                .iter()
+                .map(|info| PlanMarket {
+                    market_id: info.market_id.clone(),
+                    token_id: info.yes_token_id.clone(),
+                    created_at: info.created_at,
+                    end_date: info.end_date,
+                })
+                .collect();
+            count_samples(request, &plan_markets, self.max_spine_samples)
+        } else {
+            0
+        };
+        total += spine_upper_bound;
+
+        if wants_sample_source(request, TrainingSampleSource::LiveAttribution) {
+            let attributions = self
+                .attribution_repo
+                .find_label_available_between(
+                    request.window_start,
+                    request.window_end,
+                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+                )
+                .await
+                .map_err(QuantError::from)?;
+            total += attributions.len() as u64;
+        }
+        if wants_sample_source(request, TrainingSampleSource::ExitDecision) {
+            let lots = self
+                .position_repo
+                .find_exit_training_lots(
+                    request.window_start,
+                    request.window_end,
+                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+                )
+                .await
+                .map_err(QuantError::from)?;
+            let lot_samples = plan_lot_timeline_samples(
+                request.sample_interval_secs,
+                request.window_start,
+                &lots,
+            );
+            total += lot_samples.len() as u64;
+        }
+
+        // Bounded point-in-time keep-rate estimate: sample K `as_of` slices × M
+        // candidate markets, replay the selection funnel, and scale the spine.
+        let (keep_rate, keep_rate_sample_size) = if wants_historical
+            && spine_upper_bound > 0
+            && sample_slices > 0
+            && sample_markets > 0
+            && !candidate_infos.is_empty()
+        {
+            self.estimate_keep_rate(request, &candidate_infos, sample_slices, sample_markets)
+                .await?
+        } else {
+            (None, 0)
+        };
+        let estimated_eligible_samples = keep_rate.map_or(total, |rate| {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_sign_loss,
+                clippy::cast_possible_truncation
+            )]
+            let scaled = (spine_upper_bound as f64 * rate).round() as u64;
+            // Non-historical sources (attribution / exit) are not selection-gated.
+            scaled + (total - spine_upper_bound)
+        });
+
+        Ok(PlanCounts {
+            spine_upper_bound,
+            total,
+            hard_cap_exceeded: total > self.max_spine_samples,
+            estimated_eligible_samples,
+            keep_rate,
+            keep_rate_sample_size,
+        })
+    }
+
+    /// Estimate the point-in-time selection keep-rate by replaying the funnel
+    /// over a bounded `slices × markets` sample.
+    ///
+    /// Returns `(keep_rate, trials)`: the fraction of `(market, slice)` pairs that
+    /// pass `FilterChain::standard()`, and the number of trials. The market sample
+    /// is stride-selected across the id-sorted candidate set for representativeness;
+    /// slices are the midpoints of `slices` equal sub-intervals of the window.
+    async fn estimate_keep_rate(
+        &self,
+        request: &DatasetPlanRequest,
+        candidates: &[&MarketInfo],
+        slices: u32,
+        markets: u32,
+    ) -> QuantResult<(Option<f64>, u64)> {
+        let sampled = stride_sample(candidates, markets as usize);
+        if sampled.is_empty() {
+            return Ok((None, 0));
+        }
+        let pit = ChHistoricalPitSource::new(
+            Arc::clone(&self.fact_read),
+            Arc::clone(&self.market_repo),
+            self.max_book_staleness,
+        );
+        let selector = self.offline_pit_selector(request);
+        let span_secs = (request.window_end - request.window_start)
+            .num_seconds()
+            .max(1);
+        let mut included: u64 = 0;
+        let mut trials: u64 = 0;
+        for index in 0..slices {
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let offset = ((f64::from(index) + 0.5) / f64::from(slices) * span_secs as f64) as i64;
+            let as_of = request.window_start + ChronoDuration::seconds(offset);
+            let result = selector.select_at(as_of, &sampled, &pit).await?;
+            included += result.included.len() as u64;
+            trials += sampled.len() as u64;
+        }
+        if trials == 0 {
+            return Ok((None, 0));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let keep_rate = included as f64 / trials as f64;
+        Ok((Some(keep_rate), trials))
+    }
+}
+
+/// Deterministically stride-sample up to `limit` markets across the id-sorted set.
+fn stride_sample<'a>(candidates: &[&'a MarketInfo], limit: usize) -> Vec<&'a MarketInfo> {
+    if candidates.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut ordered: Vec<&MarketInfo> = candidates.to_vec();
+    ordered.sort_by(|a, b| a.market_id.as_str().cmp(b.market_id.as_str()));
+    if ordered.len() <= limit {
+        return ordered;
+    }
+    let step = ordered.len() / limit;
+    ordered
+        .into_iter()
+        .step_by(step.max(1))
+        .take(limit)
+        .collect()
 }
 
 #[async_trait]
@@ -193,24 +510,16 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             }
             .into());
         }
-        // Candidate markets created before the window end. (A time-ranged market
-        // query for fully-historical backfill of long-resolved markets is a
-        // follow-up; `find_active` covers the live + recently-resolved set.)
+        // Point-in-time candidate selection: markets observed (had a book) in the
+        // window whose fee-dominant category is in the enabled set (mirrors the
+        // online [`CategoryFilter`]; per-`as_of` liquidity/data-quality eligibility
+        // is enforced during materialization). Sourced from ClickHouse facts so
+        // since-resolved markets are not survivorship-filtered out.
         let markets = self
-            .market_repo
-            .find_active()
-            .await
-            .map_err(QuantError::from)?;
-        let plan_markets: Vec<PlanMarket> = markets
-            .iter()
-            .filter(|info| info.created_at < request.window_end)
-            .map(|info| PlanMarket {
-                market_id: info.market_id.clone(),
-                token_id: info.yes_token_id.clone(),
-                created_at: info.created_at,
-                end_date: info.end_date,
-            })
-            .collect();
+            .historical_candidate_markets(request.window_start, request.window_end)
+            .await?;
+        let plan_markets =
+            self.candidate_plan_markets(&markets, request.window_start, request.window_end);
         let samples = plan_samples(&request, &plan_markets);
         let mut lot_samples = Vec::new();
         let mut exit_training_lots = Vec::new();
@@ -272,31 +581,111 @@ impl TrainingDatasetService {
 #[async_trait]
 impl TrainingDatasetBuilder for TrainingDatasetService {
     async fn build(&self, plan: DatasetPlan) -> QuantResult<TrainingDatasetArtifact> {
-        self.ensure_factors_enabled()?;
-        let context = ReplayContext::new(&plan, &self.features);
-        let loader = self.window_loader();
-        let window = loader.load(&context.window_spec(&plan)).await?;
-        let mut coverage = DatasetCoverage {
-            planned_samples: planned_historical_samples(&plan),
-            book_decode_failures: window.book_decode_failures,
-            ..DatasetCoverage::default()
-        };
-        self.build_from_prefetched(
-            plan,
-            &window.pit,
-            &window.prefetched,
-            &context,
-            &mut coverage,
-        )
-        .await
+        self.build_inner(plan, Arc::new(NoopProgressSink), CancellationToken::new())
+            .await
     }
 }
 
 impl TrainingDatasetService {
+    /// Build a dataset, streaming per-cross-section progress to `sink` and
+    /// polling `cancel` at each cross-section boundary.
+    pub async fn build_with_progress(
+        &self,
+        plan: DatasetPlan,
+        sink: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        self.build_inner(plan, sink, cancel).await
+    }
+
+    async fn build_inner(
+        &self,
+        plan: DatasetPlan,
+        sink: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        self.ensure_factors_enabled()?;
+        // Fail closed on an oversized spine: a build this large would exhaust
+        // memory/time; the operator must narrow the window / interval / selection
+        // (the dry-run plan flags this as `hard_cap_exceeded` first).
+        let max_spine_samples = self.max_spine_samples;
+        if plan.samples.len() as u64 > max_spine_samples {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "planned spine {} exceeds hard cap {max_spine_samples}: narrow the window, \
+                     widen the sample interval, or scope the selection",
+                    plan.samples.len()
+                ),
+            }
+            .into());
+        }
+        sink.report(ResearchJobProgress::indeterminate("prefetch", 0));
+        let context = ReplayContext::new(&plan, &self.features);
+        let loader = self.window_loader();
+        // Prefetch is real ClickHouse I/O — stays on the async runtime.
+        let window = loader.load(&context.window_spec(&plan)).await?;
+        let coverage = DatasetCoverage {
+            planned_samples: planned_historical_samples(&plan),
+            book_decode_failures: window.book_decode_failures,
+            ..DatasetCoverage::default()
+        };
+        let pit: Arc<dyn PitQueryEngine> = Arc::new(window.pit);
+        let prefetched = Arc::new(window.prefetched);
+
+        // Offload the unbounded historical PIT loop to a blocking thread so it
+        // never occupies an async runtime worker (CPU-bound in-memory scoring
+        // that would otherwise starve other jobs' heartbeats / lease renewals),
+        // polling `cancel` at each cross-section boundary for a ~one-section
+        // cooperative cancel latency.
+        let mut spine = HistoricalSpine::default();
+        let mut coverage = coverage;
+        if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+            let inputs = self.historical_inputs(
+                &plan,
+                Arc::clone(&pit),
+                Arc::clone(&prefetched),
+                Arc::clone(&sink),
+                cancel.clone(),
+                coverage,
+            );
+            let output = task::spawn_blocking(move || run_historical_spine_blocking(inputs))
+                .await
+                .map_err(|error| {
+                    QuantError::from(ResearchError::DatasetBuild {
+                        detail: format!("historical spine task join failed: {error}"),
+                    })
+                })??;
+            if output.cancelled {
+                return Err(ResearchError::Cancelled {
+                    detail: "dataset build cancelled during the historical spine".to_owned(),
+                }
+                .into());
+            }
+            coverage = output.coverage;
+            spine.examples = output.examples;
+            spine.market_set = output.market_set;
+        }
+
+        self.assemble_and_finalize(
+            plan,
+            BuildTail {
+                pit: &*pit,
+                prefetched: &prefetched,
+                context: &context,
+                sink: &*sink,
+            },
+            coverage,
+            spine,
+        )
+        .await
+    }
+
     /// Build a dataset using a caller-supplied PIT engine (integration tests only).
     ///
     /// Prefetch still runs against the configured fact reader; only point-in-time
-    /// book/market resolution is overridden.
+    /// book/market resolution is overridden. Runs the historical spine inline on
+    /// the async runtime (the borrowed PIT source is not `'static`, so it cannot
+    /// be moved into `spawn_blocking`) — acceptable for the leakage-probe tests.
     #[doc(hidden)]
     pub async fn build_with_pit_source(
         &self,
@@ -311,7 +700,144 @@ impl TrainingDatasetService {
             planned_samples: planned_historical_samples(&plan),
             ..DatasetCoverage::default()
         };
-        self.build_from_prefetched(plan, pit, &prefetched, &context, &mut coverage)
+        let cancel = CancellationToken::new();
+        let mut spine = HistoricalSpine::default();
+        if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+            let output = run_historical_spine(
+                self.historical_params(&plan, pit, &prefetched, &NoopProgressSink, &cancel),
+                coverage,
+            )
+            .await?;
+            coverage = output.coverage;
+            spine.examples = output.examples;
+            spine.market_set = output.market_set;
+        }
+        self.assemble_and_finalize(
+            plan,
+            BuildTail {
+                pit,
+                prefetched: &prefetched,
+                context: &context,
+                sink: &NoopProgressSink,
+            },
+            coverage,
+            spine,
+        )
+        .await
+    }
+
+    /// Owned inputs for the blocking historical spine (moved into `spawn_blocking`).
+    fn historical_inputs(
+        &self,
+        plan: &DatasetPlan,
+        pit: Arc<dyn PitQueryEngine>,
+        prefetched: Arc<Prefetched>,
+        sink: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+        coverage: DatasetCoverage,
+    ) -> HistoricalSpineInputs {
+        HistoricalSpineInputs {
+            pit,
+            prefetched,
+            sink,
+            cancel,
+            samples: plan.samples.clone(),
+            request: plan.request.clone(),
+            features: self.features.clone(),
+            factors: self.factors.clone(),
+            data_quality: self.data_quality.clone(),
+            selection: self.selection.clone(),
+            min_selection_depth: self.min_selection_depth.clone(),
+            labelers: Arc::clone(&self.labelers),
+            min_exit_depth_usd: self.min_exit_depth_usd,
+            context: ReplayContext::new(plan, &self.features),
+            coverage,
+        }
+    }
+
+    /// Borrowed params for the historical spine (async/inline callers).
+    fn historical_params<'a>(
+        &'a self,
+        plan: &'a DatasetPlan,
+        pit: &'a dyn PitQueryEngine,
+        prefetched: &'a Prefetched,
+        sink: &'a dyn JobProgressSink,
+        cancel: &'a CancellationToken,
+    ) -> HistoricalSpineParams<'a> {
+        HistoricalSpineParams {
+            pit,
+            prefetched,
+            sink,
+            cancel,
+            samples: &plan.samples,
+            request: &plan.request,
+            features: &self.features,
+            factors: &self.factors,
+            data_quality: &self.data_quality,
+            selection: &self.selection,
+            min_selection_depth: &self.min_selection_depth,
+            labelers: &self.labelers,
+            min_exit_depth_usd: self.min_exit_depth_usd,
+            context: ReplayContext::new(plan, &self.features),
+        }
+    }
+
+    /// Append the live-attribution + exit-decision sources (bounded DB reads,
+    /// kept on the async runtime), then assert leakage-freedom, materialize the
+    /// Parquet artifact, and persist the ledger row.
+    async fn assemble_and_finalize(
+        &self,
+        plan: DatasetPlan,
+        tail: BuildTail<'_>,
+        mut coverage: DatasetCoverage,
+        mut spine: HistoricalSpine,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        let BuildTail {
+            pit,
+            prefetched,
+            context,
+            sink,
+        } = tail;
+        let builder = ConfiguredFeatureBuilder::new(&self.features);
+        let engine = FactorEngine::new(&self.factors, &self.features);
+
+        if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
+            self.append_live_attribution_examples(
+                &plan,
+                &mut coverage,
+                &mut spine.examples,
+                &mut spine.market_set,
+            )
+            .await?;
+        }
+
+        if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
+            coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
+            coverage.planned_samples += plan.lot_samples.len() as u64;
+            self.append_exit_decision_examples(
+                ExitDecisionAppendInput {
+                    plan: &plan,
+                    pit,
+                    prefetched,
+                    context,
+                },
+                &mut ExampleBuildSink {
+                    coverage: &mut coverage,
+                    examples: &mut spine.examples,
+                    market_set: &mut spine.market_set,
+                },
+            )
+            .await?;
+        }
+
+        coverage.built_examples = spine.examples.len() as u64;
+        coverage.markets = spine.market_set.len() as u64;
+
+        sink.report(ResearchJobProgress::indeterminate(
+            "finalize",
+            spine.examples.len() as u64,
+        ));
+        self.finalize(&builder, &engine, plan, spine.examples, coverage)
             .await
     }
 
@@ -337,160 +863,25 @@ impl TrainingDatasetService {
         )
     }
 
+    /// The offline point-in-time selection funnel for a build/plan, wired from
+    /// the frozen selection/data-quality/feature config + the book-depth floor.
+    fn offline_pit_selector(&self, request: &DatasetPlanRequest) -> OfflinePitSelector {
+        OfflinePitSelector::new(
+            &self.selection,
+            &self.data_quality,
+            &self.features,
+            &self.min_selection_depth,
+            request.runtime_config_version_id.clone(),
+            request.source_delay_secs,
+        )
+    }
+
     /// The frozen replay config (feature/factor/data-quality) for this build.
     fn replay_config(&self) -> ReplayConfig {
         ReplayConfig {
             features: self.features.clone(),
             factors: self.factors.clone(),
             data_quality: self.data_quality.clone(),
-        }
-    }
-
-    async fn build_from_prefetched(
-        &self,
-        plan: DatasetPlan,
-        pit: &dyn PitQueryEngine,
-        prefetched: &Prefetched,
-        context: &ReplayContext,
-        coverage: &mut DatasetCoverage,
-    ) -> QuantResult<TrainingDatasetArtifact> {
-        let builder = ConfiguredFeatureBuilder::new(&self.features);
-        let engine = FactorEngine::new(&self.factors, &self.features);
-        let replay_config = self.replay_config();
-
-        let mut examples: Vec<TrainingExample> = Vec::new();
-        let mut market_set: HashSet<MarketId> = HashSet::new();
-
-        if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
-            for (as_of, group) in group_samples(&plan.samples) {
-                let replay_group: Vec<ReplaySample> = group
-                    .iter()
-                    .map(|sample| ReplaySample {
-                        market_id: sample.market_id.clone(),
-                        token_id: sample.token_id.clone(),
-                    })
-                    .collect();
-                let Some(cross_section) = materialize_cross_section(
-                    &builder,
-                    &engine,
-                    &replay_config,
-                    &CrossSectionRequest {
-                        pit,
-                        prefetched,
-                        as_of,
-                        group: &replay_group,
-                        source_delay: context.source_delay,
-                        lookback: context.lookback,
-                    },
-                )
-                .await?
-                else {
-                    continue;
-                };
-                coverage.samples_dropped_insufficient += cross_section.dropped_insufficient;
-                self.append_examples(
-                    &CrossSectionAppendInput {
-                        cross_section: &cross_section,
-                        prefetched,
-                        request: &plan.request,
-                        max_horizon_secs: context.max_horizon_secs,
-                    },
-                    &mut ExampleBuildSink {
-                        coverage,
-                        examples: &mut examples,
-                        market_set: &mut market_set,
-                    },
-                );
-            }
-        }
-
-        if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
-            self.append_live_attribution_examples(&plan, coverage, &mut examples, &mut market_set)
-                .await?;
-        }
-
-        if wants_sample_source(&plan.request, TrainingSampleSource::ExitDecision) {
-            coverage.exit_decision_candidates = plan.lot_samples.len() as u64;
-            coverage.planned_samples += plan.lot_samples.len() as u64;
-            self.append_exit_decision_examples(
-                ExitDecisionAppendInput {
-                    plan: &plan,
-                    pit,
-                    prefetched,
-                    context,
-                },
-                &mut ExampleBuildSink {
-                    coverage,
-                    examples: &mut examples,
-                    market_set: &mut market_set,
-                },
-            )
-            .await?;
-        }
-
-        coverage.built_examples = examples.len() as u64;
-        coverage.markets = market_set.len() as u64;
-
-        self.finalize(&builder, &engine, plan, examples, std::mem::take(coverage))
-            .await
-    }
-
-    /// Append training examples (factors + forward labels) for one PIT-resolved
-    /// cross-section.
-    fn append_examples(
-        &self,
-        input: &CrossSectionAppendInput<'_>,
-        sink: &mut ExampleBuildSink<'_>,
-    ) {
-        for (index, vector) in input.cross_section.vectors.iter().enumerate() {
-            let market = &input.cross_section.markets[index];
-            let entry_mid = input.cross_section.entry_mids[index];
-            let outcome = &input.cross_section.outcomes[index];
-            let factor_values = match &outcome.eligibility {
-                FactorEligibility::Eligible => outcome
-                    .factors
-                    .iter()
-                    .map(|scored| scored.value.clone())
-                    .collect(),
-                FactorEligibility::RejectCandidate { .. } => Vec::new(),
-            };
-            let forward = forward_window(
-                input.cross_section.as_of,
-                input.max_horizon_secs,
-                input
-                    .prefetched
-                    .micro
-                    .get(&market.primary_token_id)
-                    .map_or(&[][..], Vec::as_slice),
-                input
-                    .prefetched
-                    .resolutions
-                    .get(&market.market_id)
-                    .map_or(&[][..], Vec::as_slice),
-            );
-            let labels = self.build_labels(
-                market,
-                input.cross_section.as_of,
-                entry_mid,
-                input.request,
-                &forward,
-                sink.coverage,
-            );
-            sink.market_set.insert(market.market_id.clone());
-            sink.examples.push(TrainingExample {
-                example_id: TrainingExampleId::from_v7(),
-                market_id: market.market_id.clone(),
-                token_id: market.primary_token_id.clone(),
-                as_of: input.cross_section.as_of,
-                sample_source: TrainingSampleSource::HistoricalPit,
-                feature_vector: vector.clone(),
-                factor_values,
-                labels,
-                source_refs: vector.source_refs.clone(),
-                lot_context: None,
-                position_state: None,
-                book_fidelity: None,
-            });
         }
     }
 
@@ -716,7 +1107,7 @@ impl TrainingDatasetService {
                 .get(&input.sample.market_id)
                 .map_or(&[][..], Vec::as_slice),
         );
-        let labels = self.build_labels_for(
+        let labels = build_labels_for(
             &LabelBuildParams {
                 labelers: input.labelers,
                 market,
@@ -726,6 +1117,7 @@ impl TrainingDatasetService {
                 forward: &forward,
                 exit_decision: Some(&label_ctx),
             },
+            self.min_exit_depth_usd,
             sink.coverage,
         );
         record_exit_fill_fidelity(sink.coverage, book_fidelity);
@@ -805,7 +1197,7 @@ impl TrainingDatasetService {
             coverage.matrix_probe = Some(probe_matrix_coverage(
                 &examples,
                 builder.schema(),
-                ReturnToHorizonLabeler.label_name(),
+                &ReturnToHorizonLabeler.label_name(),
                 horizon_secs,
             )?);
         }
@@ -834,10 +1226,6 @@ impl TrainingDatasetService {
         } else {
             TrainingDatasetStatus::Built
         };
-        let coverage_json =
-            serde_json::to_value(&coverage).map_err(|error| ResearchError::Serialization {
-                detail: format!("dataset coverage serialization failed: {error}"),
-            })?;
         self.dataset_repo
             .create(NewTrainingDataset {
                 training_dataset_id: plan.training_dataset_id.clone(),
@@ -855,9 +1243,8 @@ impl TrainingDatasetService {
                     .unwrap_or(i64::MAX),
                 sample_interval_secs: i64::try_from(plan.request.sample_interval_secs)
                     .unwrap_or(i64::MAX),
-                horizons_secs: serde_json::to_value(&plan.request.horizons_secs)
-                    .unwrap_or_else(|_| serde_json::json!([])),
-                coverage_json,
+                horizons_secs: TrainingHorizonsSecs(plan.request.horizons_secs.clone()),
+                coverage_json: coverage.clone(),
                 runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
             })
             .await
@@ -877,66 +1264,334 @@ impl TrainingDatasetService {
             coverage,
         })
     }
+}
 
-    /// Build every label (labeler × horizon) for one example, accounting coverage.
-    fn build_labels(
-        &self,
-        market: &SelectedMarket,
-        as_of: DateTime<Utc>,
-        entry_mid: Option<Price>,
-        request: &DatasetPlanRequest,
-        forward: &ForwardWindow,
-        coverage: &mut DatasetCoverage,
-    ) -> Vec<TrainingLabel> {
-        self.build_labels_for(
-            &LabelBuildParams {
-                labelers: &self.labelers,
-                market,
-                as_of,
-                entry_mid,
-                request,
-                forward,
-                exit_decision: None,
-            },
-            coverage,
-        )
-    }
-
-    fn build_labels_for(
-        &self,
-        params: &LabelBuildParams<'_>,
-        coverage: &mut DatasetCoverage,
-    ) -> Vec<TrainingLabel> {
-        let mut labels = Vec::new();
-        for labeler in params.labelers {
-            let horizons: Vec<u64> = if labeler.is_horizon_dependent() {
-                params.request.horizons_secs.clone()
-            } else {
-                vec![0]
+/// Build every label (labeler × horizon) for one example, accounting coverage.
+/// Free function so the historical spine can call it from a `spawn_blocking`
+/// closure (no `&self` borrow).
+fn build_labels_for(
+    params: &LabelBuildParams<'_>,
+    min_exit_depth_usd: Usd,
+    coverage: &mut DatasetCoverage,
+) -> Vec<TrainingLabel> {
+    let mut labels = Vec::new();
+    for labeler in params.labelers {
+        let horizons: Vec<u64> = if labeler.is_horizon_dependent() {
+            params.request.horizons_secs.clone()
+        } else {
+            vec![0]
+        };
+        for horizon_secs in horizons {
+            let input = LabelBuildInput {
+                market_id: &params.market.market_id,
+                token_id: &params.market.primary_token_id,
+                yes_token_id: &params.market.primary_token_id,
+                as_of: params.as_of,
+                entry_mid: params.entry_mid,
+                horizon_secs,
+                min_exit_depth_usd,
+                forward: params.forward,
+                exit_decision: params.exit_decision,
             };
-            for horizon_secs in horizons {
-                let input = LabelBuildInput {
-                    market_id: &params.market.market_id,
-                    token_id: &params.market.primary_token_id,
-                    yes_token_id: &params.market.primary_token_id,
-                    as_of: params.as_of,
-                    entry_mid: params.entry_mid,
-                    horizon_secs,
-                    min_exit_depth_usd: self.min_exit_depth_usd,
-                    forward: params.forward,
-                    exit_decision: params.exit_decision,
-                };
-                match labeler.build_label(&input) {
-                    LabelBuildOutput::Available(label) => {
-                        coverage.labels_available += 1;
-                        labels.push(label);
-                    }
-                    LabelBuildOutput::NotMature { .. } => coverage.labels_not_mature += 1,
-                    LabelBuildOutput::Unavailable { .. } => coverage.labels_unavailable += 1,
+            match labeler.build_label(&input) {
+                LabelBuildOutput::Available(label) => {
+                    coverage.labels_available += 1;
+                    labels.push(label);
                 }
+                LabelBuildOutput::NotMature { .. } => coverage.labels_not_mature += 1,
+                LabelBuildOutput::Unavailable { .. } => coverage.labels_unavailable += 1,
             }
         }
-        labels
+    }
+    labels
+}
+
+/// Accumulated examples + distinct markets from the historical spine, merged
+/// with the live-attribution / exit-decision sources before finalization.
+#[derive(Default)]
+struct HistoricalSpine {
+    examples: Vec<TrainingExample>,
+    market_set: HashSet<MarketId>,
+}
+
+/// Result of the historical PIT loop: examples/markets, the updated coverage,
+/// and whether the loop unwound early on cooperative cancellation.
+struct HistoricalSpineOutput {
+    examples: Vec<TrainingExample>,
+    market_set: HashSet<MarketId>,
+    coverage: DatasetCoverage,
+    cancelled: bool,
+}
+
+/// Borrowed inputs for the historical PIT loop (async/inline callers).
+struct HistoricalSpineParams<'a> {
+    pit: &'a dyn PitQueryEngine,
+    prefetched: &'a Prefetched,
+    sink: &'a dyn JobProgressSink,
+    cancel: &'a CancellationToken,
+    samples: &'a [SamplePlan],
+    request: &'a DatasetPlanRequest,
+    features: &'a FeaturesConfig,
+    factors: &'a FactorsConfig,
+    data_quality: &'a DataQualityConfig,
+    selection: &'a SelectionConfig,
+    min_selection_depth: &'a DecimalString,
+    labelers: &'a [Box<dyn Labeler>],
+    min_exit_depth_usd: Usd,
+    context: ReplayContext,
+}
+
+/// Owned inputs for the historical PIT loop, moved into a `spawn_blocking`
+/// closure (every field is `Send + 'static`; `Arc` shares the PIT engine,
+/// prefetched facts, progress sink, and labelers with the async parent).
+struct HistoricalSpineInputs {
+    pit: Arc<dyn PitQueryEngine>,
+    prefetched: Arc<Prefetched>,
+    sink: Arc<dyn JobProgressSink>,
+    cancel: CancellationToken,
+    samples: Vec<SamplePlan>,
+    request: DatasetPlanRequest,
+    features: FeaturesConfig,
+    factors: FactorsConfig,
+    data_quality: DataQualityConfig,
+    selection: SelectionConfig,
+    min_selection_depth: DecimalString,
+    labelers: Arc<Vec<Box<dyn Labeler>>>,
+    min_exit_depth_usd: Usd,
+    context: ReplayContext,
+    coverage: DatasetCoverage,
+}
+
+/// Run the historical PIT spine on a blocking thread.
+///
+/// The per-section materialization is in-memory (the `MaterializedPitEngine`
+/// resolves books/markets without I/O), so its `async` entrypoints resolve
+/// immediately — we drive them with `block_on` on this blocking thread rather
+/// than occupying an async runtime worker. `cancel` is polled per section.
+fn run_historical_spine_blocking(
+    inputs: HistoricalSpineInputs,
+) -> QuantResult<HistoricalSpineOutput> {
+    Handle::current().block_on(run_historical_spine(
+        HistoricalSpineParams {
+            pit: &*inputs.pit,
+            prefetched: &inputs.prefetched,
+            sink: &*inputs.sink,
+            cancel: &inputs.cancel,
+            samples: &inputs.samples,
+            request: &inputs.request,
+            features: &inputs.features,
+            factors: &inputs.factors,
+            data_quality: &inputs.data_quality,
+            selection: &inputs.selection,
+            min_selection_depth: &inputs.min_selection_depth,
+            labelers: &inputs.labelers,
+            min_exit_depth_usd: inputs.min_exit_depth_usd,
+            context: inputs.context,
+        },
+        inputs.coverage,
+    ))
+}
+
+/// Replay the online selection funnel per `as_of` and materialize the surviving
+/// cross-sections into training examples (train/serve selection consistency).
+///
+/// Polls `cancel` at each cross-section boundary: a cancelled build returns
+/// early with `cancelled = true` and the partial (discarded) accumulation.
+async fn run_historical_spine(
+    params: HistoricalSpineParams<'_>,
+    mut coverage: DatasetCoverage,
+) -> QuantResult<HistoricalSpineOutput> {
+    let builder = ConfiguredFeatureBuilder::new(params.features);
+    let engine = FactorEngine::new(params.factors, params.features);
+    let replay_config = ReplayConfig {
+        features: params.features.clone(),
+        factors: params.factors.clone(),
+        data_quality: params.data_quality.clone(),
+    };
+    let pit_selector = OfflinePitSelector::new(
+        params.selection,
+        params.data_quality,
+        params.features,
+        params.min_selection_depth,
+        params.request.runtime_config_version_id.clone(),
+        params.request.source_delay_secs,
+    );
+    let mut examples: Vec<TrainingExample> = Vec::new();
+    let mut market_set: HashSet<MarketId> = HashSet::new();
+    let sections = group_samples(params.samples);
+    let total_sections = sections.len() as u64;
+    let mut processed_sections: u64 = 0;
+    for (as_of, group) in sections {
+        // Cooperative cancel at the section boundary → ~one-section latency.
+        if params.cancel.is_cancelled() {
+            return Ok(HistoricalSpineOutput {
+                examples,
+                market_set,
+                coverage,
+                cancelled: true,
+            });
+        }
+        processed_sections += 1;
+        params.sink.report(ResearchJobProgress::with_total(
+            "materialize",
+            processed_sections,
+            total_sections,
+        ));
+        let replay_group = pit_selected_replay_group(
+            &pit_selector,
+            as_of,
+            &group,
+            params.pit,
+            params.prefetched,
+            &mut coverage,
+        )
+        .await?;
+        if replay_group.is_empty() {
+            continue;
+        }
+        let Some(cross_section) = materialize_cross_section(
+            &builder,
+            &engine,
+            &replay_config,
+            &CrossSectionRequest {
+                pit: params.pit,
+                prefetched: params.prefetched,
+                as_of,
+                group: &replay_group,
+                source_delay: params.context.source_delay,
+                lookback: params.context.lookback,
+            },
+        )
+        .await?
+        else {
+            continue;
+        };
+        coverage.samples_dropped_insufficient += cross_section.dropped_insufficient;
+        append_historical_examples(
+            &CrossSectionAppendInput {
+                cross_section: &cross_section,
+                prefetched: params.prefetched,
+                request: params.request,
+                max_horizon_secs: params.context.max_horizon_secs,
+            },
+            params.labelers,
+            params.min_exit_depth_usd,
+            &mut ExampleBuildSink {
+                coverage: &mut coverage,
+                examples: &mut examples,
+                market_set: &mut market_set,
+            },
+        );
+    }
+    Ok(HistoricalSpineOutput {
+        examples,
+        market_set,
+        coverage,
+        cancelled: false,
+    })
+}
+
+/// Replay the point-in-time selection funnel over one `as_of` cross-section,
+/// folding exclusions into `coverage` and returning the surviving samples.
+async fn pit_selected_replay_group(
+    pit_selector: &OfflinePitSelector,
+    as_of: DateTime<Utc>,
+    group: &[&SamplePlan],
+    pit: &dyn PitQueryEngine,
+    prefetched: &Prefetched,
+    coverage: &mut DatasetCoverage,
+) -> QuantResult<Vec<ReplaySample>> {
+    let market_infos: Vec<&MarketInfo> = group
+        .iter()
+        .filter_map(|sample| {
+            prefetched
+                .markets_by_id
+                .get(&sample.market_id)
+                .map(AsRef::as_ref)
+        })
+        .collect();
+    let selection = pit_selector.select_at(as_of, &market_infos, pit).await?;
+    coverage.pit_selection_candidates += market_infos.len() as u64;
+    coverage.pit_selection_included += selection.included.len() as u64;
+    coverage.pit_selection_excluded += selection.exclusion_summary;
+    let kept: HashSet<MarketId> = selection
+        .included
+        .iter()
+        .map(|market| market.market_id.clone())
+        .collect();
+    Ok(group
+        .iter()
+        .filter(|sample| kept.contains(&sample.market_id))
+        .map(|sample| ReplaySample {
+            market_id: sample.market_id.clone(),
+            token_id: sample.token_id.clone(),
+        })
+        .collect())
+}
+
+/// Append training examples (factors + forward labels) for one PIT-resolved
+/// cross-section. Free function so the historical spine can run inside a
+/// `spawn_blocking` closure without borrowing the service.
+fn append_historical_examples(
+    input: &CrossSectionAppendInput<'_>,
+    labelers: &[Box<dyn Labeler>],
+    min_exit_depth_usd: Usd,
+    sink: &mut ExampleBuildSink<'_>,
+) {
+    for (index, vector) in input.cross_section.vectors.iter().enumerate() {
+        let market = &input.cross_section.markets[index];
+        let entry_mid = input.cross_section.entry_mids[index];
+        let outcome = &input.cross_section.outcomes[index];
+        let factor_values = match &outcome.eligibility {
+            FactorEligibility::Eligible => outcome
+                .factors
+                .iter()
+                .map(|scored| scored.value.clone())
+                .collect(),
+            FactorEligibility::RejectCandidate { .. } => Vec::new(),
+        };
+        let forward = forward_window(
+            input.cross_section.as_of,
+            input.max_horizon_secs,
+            input
+                .prefetched
+                .micro
+                .get(&market.primary_token_id)
+                .map_or(&[][..], Vec::as_slice),
+            input
+                .prefetched
+                .resolutions
+                .get(&market.market_id)
+                .map_or(&[][..], Vec::as_slice),
+        );
+        let labels = build_labels_for(
+            &LabelBuildParams {
+                labelers,
+                market,
+                as_of: input.cross_section.as_of,
+                entry_mid,
+                request: input.request,
+                forward: &forward,
+                exit_decision: None,
+            },
+            min_exit_depth_usd,
+            sink.coverage,
+        );
+        sink.market_set.insert(market.market_id.clone());
+        sink.examples.push(TrainingExample {
+            example_id: TrainingExampleId::from_v7(),
+            market_id: market.market_id.clone(),
+            token_id: market.primary_token_id.clone(),
+            as_of: input.cross_section.as_of,
+            sample_source: TrainingSampleSource::HistoricalPit,
+            feature_vector: vector.clone(),
+            factor_values,
+            labels,
+            source_refs: vector.source_refs.clone(),
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
+        });
     }
 }
 
@@ -1191,6 +1846,15 @@ struct CrossSectionAppendInput<'a> {
     max_horizon_secs: u64,
 }
 
+/// The post-spine tail shared by both build paths: point-in-time source,
+/// prefetched facts, replay context, and progress sink.
+struct BuildTail<'a> {
+    pit: &'a dyn PitQueryEngine,
+    prefetched: &'a Prefetched,
+    context: &'a ReplayContext,
+    sink: &'a dyn JobProgressSink,
+}
+
 struct LabelBuildParams<'a> {
     labelers: &'a [Box<dyn Labeler>],
     market: &'a SelectedMarket,
@@ -1238,6 +1902,7 @@ struct ExampleBuildSink<'a> {
 }
 
 /// Derived replay parameters for one dataset build (shared across cross-sections).
+#[derive(Clone, Copy)]
 struct ReplayContext {
     source_delay: Duration,
     lookback: Duration,

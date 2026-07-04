@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
 use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        BuildTrainingDatasetRequest, TrainingDatasetInfo, TrainingDatasetPlanView,
+        BuildTrainingDatasetRequest, JobProgressSink, TrainingDatasetInfo, TrainingDatasetPlanView,
         TrainingDatasetPort, TrainingDatasetView,
     },
     runtime_config::RuntimeConfig,
@@ -20,7 +22,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    training::{DatasetPlanRequest, TrainingDatasetBuilder, TrainingDatasetPlanner},
+    training::{DatasetPlanRequest, TrainingDatasetPlanner},
 };
 
 use crate::{
@@ -43,14 +45,23 @@ pub struct CoreTrainingDatasetPort {
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    /// Deploy guard: hard cap on the deterministic historical spine.
+    max_spine_samples: u64,
+    /// Deploy tunable: `as_of` slices sampled during `plan` to estimate keep-rate.
+    plan_sample_slices: u32,
+    /// Deploy tunable: candidate markets sampled per slice for the keep-rate estimate.
+    plan_sample_markets: u32,
 }
 
 impl CoreTrainingDatasetPort {
-    /// Assemble the port from an already-wired research bundle.
+    /// Assemble the port from an already-wired research bundle + deploy tunables.
     #[must_use]
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        max_spine_samples: u64,
+        plan_sample_slices: u32,
+        plan_sample_markets: u32,
     ) -> Self {
         Self {
             fact_read: Arc::clone(&research.quant_fact_read),
@@ -63,6 +74,9 @@ impl CoreTrainingDatasetPort {
             position_repo: Arc::clone(&research.position_repo),
             fee_calculator: Arc::clone(&research.fee_calculator),
             runtime_config,
+            max_spine_samples,
+            plan_sample_slices,
+            plan_sample_markets,
         }
     }
 
@@ -96,8 +110,10 @@ impl CoreTrainingDatasetPort {
                 factors: runtime.factors,
                 data_quality: runtime.data_quality,
                 training: runtime.training,
+                selection: runtime.selection,
                 labelers: default_labelers(),
             },
+            self.max_spine_samples,
         )
     }
 
@@ -149,26 +165,50 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         request: BuildTrainingDatasetRequest,
     ) -> QuantResult<TrainingDatasetPlanView> {
         let service = self.service_for(&request.runtime_config_version_id).await?;
-        let plan = service.plan(Self::plan_request(&request)).await?;
-        let planned_samples = service.count_planned_samples(&plan).await?;
+        // Cheap dry-run: arithmetic spine upper bound + a bounded K×M point-in-time
+        // keep-rate sample (no grid materialization).
+        let counts = service
+            .count_plan(
+                &Self::plan_request(&request),
+                self.plan_sample_slices,
+                self.plan_sample_markets,
+            )
+            .await?;
         Ok(TrainingDatasetPlanView {
-            training_dataset_id: plan.training_dataset_id,
+            training_dataset_id: TrainingDatasetId::from_v7(),
             model_spec_id: request.model_spec_id,
             runtime_config_version_id: request.runtime_config_version_id,
             window_start: request.window_start,
             window_end: request.window_end,
-            planned_samples,
+            planned_samples: counts.total,
+            spine_upper_bound: counts.spine_upper_bound,
+            hard_cap_exceeded: counts.hard_cap_exceeded,
+            estimated_eligible_samples: counts.estimated_eligible_samples,
+            keep_rate: counts.keep_rate,
+            keep_rate_sample_size: counts.keep_rate_sample_size,
         })
     }
 
     async fn build(
         &self,
         request: BuildTrainingDatasetRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetView> {
+        // Idempotent recovery (effectively-once): a re-run of an async job whose
+        // artifact + ledger row already persisted returns the existing row rather
+        // than rebuilding or double-inserting. The result id is pre-assigned at
+        // enqueue and frozen in the job's `params_json`, so a deterministic re-run
+        // reproduces the identical content-addressed dataset.
+        if let Some(training_dataset_id) = &request.training_dataset_id
+            && let Some(existing) = self.dataset_repo.find_by_id(training_dataset_id).await?
+        {
+            return Ok(TrainingDatasetView::from(existing));
+        }
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let plan = service.plan(Self::build_plan_request(&request)).await?;
         let training_dataset_id = plan.training_dataset_id.clone();
-        service.build(plan).await?;
+        service.build_with_progress(plan, progress, cancel).await?;
         let info = self
             .dataset_repo
             .find_by_id(&training_dataset_id)

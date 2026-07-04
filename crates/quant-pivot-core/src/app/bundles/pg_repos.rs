@@ -13,10 +13,10 @@ use quant_pivot_repository::postgres::{
     PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
     PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
     PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-    PgReservedCapitalRepository, PgRoleMenuRepository, PgRolePermissionRepository,
-    PgRoleRepository, PgRuntimeConfigVersionRepository, PgSettlementRedeemRepository,
-    PgShadowComparisonRepository, PgSystemRuntimeStateRepository, PgTrainingDatasetRepository,
-    PgUserRepository, PgUserRoleRepository, arc_repo,
+    PgResearchJobRepository, PgReservedCapitalRepository, PgRoleMenuRepository,
+    PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
+    PgSettlementRedeemRepository, PgShadowComparisonRepository, PgSystemRuntimeStateRepository,
+    PgTrainingDatasetRepository, PgUserRepository, PgUserRoleRepository, arc_repo,
 };
 use quant_pivot_storage::postgres::PostgresPool;
 use std::sync::Arc;
@@ -50,6 +50,7 @@ pub struct PgRepositories {
     pub backtest_report: Arc<PgBacktestReportRepository>,
     pub comparison_report: Arc<PgModelComparisonReportRepository>,
     pub governance_audit: Arc<PgModelGovernanceAuditRepository>,
+    pub research_job: Arc<PgResearchJobRepository>,
     pub reserved_capital: Arc<PgReservedCapitalRepository>,
     pub user: Arc<PgUserRepository>,
     pub role: Arc<PgRoleRepository>,
@@ -93,6 +94,7 @@ impl PgRepositories {
             backtest_report: arc_repo(&db, PgBacktestReportRepository::new),
             comparison_report: arc_repo(&db, PgModelComparisonReportRepository::new),
             governance_audit: arc_repo(&db, PgModelGovernanceAuditRepository::new),
+            research_job: arc_repo(&db, PgResearchJobRepository::new),
             reserved_capital: arc_repo(&db, PgReservedCapitalRepository::new),
             user: arc_repo(&db, PgUserRepository::new),
             role: arc_repo(&db, PgRoleRepository::new),

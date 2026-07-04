@@ -23,11 +23,10 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery,
-        MaterializationRunKind, MaterializationRunStatus, ModelComparisonReportView,
-        ModelSpecListQuery, ModelVersionListQuery, Paginated, QualityGatePreviewQuery,
-        QualityGateReportView, QuantModelSpecView, RunBacktestRequest, TrainModelRequest,
-        TrainedModelView,
+        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery, JobSubmitContext,
+        ModelComparisonReportView, ModelSpecListQuery, ModelVersionListQuery, Paginated,
+        QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
+        RunBacktestRequest, TrainModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -187,53 +186,39 @@ pub async fn list_comparison_reports(
     Ok(WebResponse::ok(page))
 }
 
-/// `POST /api/research/models/train` — train + register a Candidate version.
+/// `POST /api/research/models/train` — enqueue an async training job.
+///
+/// Returns `202 Accepted` with the queued [`ResearchJobView`]; training runs on
+/// the `ResearchJobWorker`. Poll the job / listen on `materialization.run_update`.
 pub async fn train(
     state: web::Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<TrainModelRequest>,
-) -> Result<WebResponse<TrainedModelView>, WebError> {
+) -> Result<WebResponse<ResearchJobView>, WebError> {
     let request = body.into_inner();
     let reason = request.reason.clone();
-    let training_dataset_id = request.training_dataset_id.clone();
-    match state.model_training.train(request).await {
-        Ok(view) => {
-            let materialization_run_id = view
-                .model_run_id
-                .as_ref()
-                .map_or_else(|| view.model_version_id.to_string(), ToString::to_string);
-            state.publish_materialization_run(
-                materialization_run_id,
-                MaterializationRunKind::Training,
-                MaterializationRunStatus::Completed,
-            );
-            op_ctx.set_action(OperationCategory::Other, "model.train");
-            op_ctx.set_resource(
-                ResourceType::Materialization,
-                view.model_version_id.to_string(),
-            );
-            op_ctx.set_detail(serde_json::json!({
-                "model_version_id": view.model_version_id.to_string(),
-                "artifact_hash": view.artifact_hash,
-                "publication_status": view.publication_status,
-                "acting_role": acting_role.0,
-                "request_id": request_id.0,
-                "reason": reason,
-            }));
-            Ok(WebResponse::ok(view))
-        }
-        Err(error) => {
-            // Failure still bumps open catalogs so peer operators see the attempt.
-            state.publish_materialization_run(
-                training_dataset_id.to_string(),
-                MaterializationRunKind::Training,
-                MaterializationRunStatus::Failed,
-            );
-            Err(error.into())
-        }
-    }
+    let job = state
+        .research_jobs
+        .enqueue_model_train(
+            request,
+            JobSubmitContext {
+                acting_role: acting_role.0.clone(),
+                requested_by: None,
+            },
+        )
+        .await?;
+    op_ctx.set_action(OperationCategory::Other, "model.train");
+    op_ctx.set_resource(ResourceType::Materialization, job.job_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "job_id": job.job_id.to_string(),
+        "kind": "model_train",
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": reason,
+    }));
+    Ok(WebResponse::accepted(job))
 }
 
 /// `GET /api/research/models/{id}` — registered version (UI polling).
@@ -266,7 +251,10 @@ pub async fn preview_quality_gate(
     Ok(WebResponse::ok(view))
 }
 
-/// `POST /api/research/models/{id}/backtest` — PIT backtest over a dataset.
+/// `POST /api/research/models/{id}/backtest` — enqueue an async PIT backtest job.
+///
+/// Returns `202 Accepted` with the queued [`ResearchJobView`]; the replay runs on
+/// the `ResearchJobWorker`. Poll the job / listen on `materialization.run_update`.
 pub async fn backtest(
     state: web::Data<AppState>,
     id: web::Path<ModelVersionId>,
@@ -274,40 +262,31 @@ pub async fn backtest(
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<RunBacktestRequest>,
-) -> Result<WebResponse<BacktestReportView>, WebError> {
+) -> Result<WebResponse<ResearchJobView>, WebError> {
     let request = body.into_inner();
     let reason = request.reason.clone();
     let model_version_id = id.into_inner();
-    match state.backtests.run(model_version_id.clone(), request).await {
-        Ok(view) => {
-            state.publish_materialization_run(
-                view.model_run_id.to_string(),
-                MaterializationRunKind::Backtest,
-                MaterializationRunStatus::Completed,
-            );
-            op_ctx.set_action(OperationCategory::Other, "model.backtest");
-            op_ctx.set_resource(ResourceType::Replay, view.backtest_report_id.to_string());
-            op_ctx.set_detail(serde_json::json!({
-                "backtest_report_id": view.backtest_report_id.to_string(),
-                "model_version_id": view.model_version_id.to_string(),
-                "rank_ic": view.rank_ic,
-                "hit_rate": view.hit_rate,
-                "sample_count": view.sample_count,
-                "acting_role": acting_role.0,
-                "request_id": request_id.0,
-                "reason": reason,
-            }));
-            Ok(WebResponse::ok(view))
-        }
-        Err(error) => {
-            state.publish_materialization_run(
-                model_version_id.to_string(),
-                MaterializationRunKind::Backtest,
-                MaterializationRunStatus::Failed,
-            );
-            Err(error.into())
-        }
-    }
+    let job = state
+        .research_jobs
+        .enqueue_backtest(
+            model_version_id,
+            request,
+            JobSubmitContext {
+                acting_role: acting_role.0.clone(),
+                requested_by: None,
+            },
+        )
+        .await?;
+    op_ctx.set_action(OperationCategory::Other, "model.backtest");
+    op_ctx.set_resource(ResourceType::Replay, job.job_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "job_id": job.job_id.to_string(),
+        "kind": "backtest",
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": reason,
+    }));
+    Ok(WebResponse::accepted(job))
 }
 
 /// `GET /api/research/backtest-reports/{id}` — stored report.

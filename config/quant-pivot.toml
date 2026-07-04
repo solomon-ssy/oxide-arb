@@ -171,6 +171,45 @@ execution_breaker_tick_secs = 5
 # Default: 300.
 equity_snapshot_secs = 300
 
+[quant.research_jobs]
+# Async research-job engine (dataset build / model train / backtest). These are
+# operational/infra knobs, distinct from the frozen per-dataset runtime config
+# that governs modeling semantics (captured in dataset_hash).
+# Max jobs executing concurrently across all kinds. Default: 2.
+global_concurrency = 2
+# Per-kind concurrency caps (dataset builds are heaviest — serialize them).
+dataset_build_concurrency = 1
+model_train_concurrency = 1
+backtest_concurrency = 2
+# Lease TTL (seconds): a lease not renewed within this window is reclaimable by
+# the boot recovery sweep. Default: 90.
+lease_ttl_secs = 90
+# Running-job lease-renew + liveness heartbeat cadence (seconds). Default: 30.
+heartbeat_secs = 30
+# Idle poll cadence when the queue is empty or capacity is saturated. Default: 3.
+poll_secs = 3
+# Bounded automatic crash-recovery re-queues before a job is quarantined to
+# failed (poison-pill guard). Default: 3.
+max_recovery_attempts = 3
+# Hard cap on the deterministic historical spine (selection x instants): a
+# dry-run plan beyond this flags hard_cap_exceeded; a build fails closed.
+# Default: 2000000.
+max_spine_samples = 2000000
+# Number of as_of slices sampled during plan to estimate the PIT selection
+# keep-rate (0 disables the estimate). Default: 5.
+plan_sample_slices = 5
+# Candidate markets sampled per slice for the keep-rate estimate; bounds the
+# point-in-time reads a plan issues to slices x markets. Default: 200.
+plan_sample_markets = 200
+# Minimum interval between throttled progress writes (DB heartbeat + WS push), ms.
+# Default: 500.
+progress_min_interval_ms = 500
+# Bounded grace period (seconds) a graceful shutdown waits for in-flight jobs to
+# cooperatively unwind at a section/phase boundary before their rows are
+# explicitly re-queued for the next epoch. Keep short: a build restarts from
+# scratch on re-lease, so draining only lets near-complete work finish. Default: 5.
+shutdown_drain_secs = 5
+
 [quant.account]
 # Purpose: Polymarket funder address for keyless Data API position reads
 # (user=<funder>). Required to generate reports in ALL modes — report_only is not

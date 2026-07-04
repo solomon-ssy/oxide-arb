@@ -1,9 +1,12 @@
 //! Admin port for offline model training (Phase 3.6).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    domain::{ModelVersionInfo, TrainModelRequest, TrainedModelView},
+    domain::{JobProgressSink, ModelVersionInfo, TrainModelRequest, TrainedModelView},
     types::ModelVersionId,
 };
 use quant_pivot_error::QuantResult;
@@ -14,7 +17,16 @@ use quant_pivot_error::QuantResult;
 #[async_trait]
 pub trait ModelTrainingPort: Send + Sync {
     /// Train a model from a frozen dataset and register a Candidate version.
-    async fn train(&self, request: TrainModelRequest) -> QuantResult<TrainedModelView>;
+    ///
+    /// `progress` receives phase-level snapshots (`load → train → finalize`);
+    /// `cancel` is polled at phase boundaries so a cancelled train unwinds
+    /// promptly ([`quant_pivot_error::research::ResearchError::Cancelled`]).
+    async fn train(
+        &self,
+        request: TrainModelRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainedModelView>;
 
     /// Load a registered model version (UI poll target after train).
     async fn find_version(

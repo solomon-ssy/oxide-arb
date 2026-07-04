@@ -18,7 +18,7 @@ use quant_pivot_models::{
     domain::{
         BookSnapshot, CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
         MarketDataPort, MetricsScrapePort, NewOperationLog, OrderIntentPort, ReconciliationPort,
-        RuntimeConfigPort,
+        ResearchJobPort, RuntimeConfigPort,
     },
     types::TokenId,
 };
@@ -50,9 +50,10 @@ impl AppContext {
         &self,
         runner: &mut AppRunner,
         order_intents: Arc<dyn OrderIntentPort>,
+        research_jobs: Arc<dyn ResearchJobPort>,
     ) -> QuantResult<()> {
         let (operation_log, op_log_worker) = build_operation_log_writer(self);
-        let state = build_app_state(self, order_intents, operation_log).await?;
+        let state = build_app_state(self, order_intents, research_jobs, operation_log).await?;
 
         let event_rx = self
             .event_rx
@@ -91,6 +92,7 @@ impl AppContext {
 async fn build_app_state(
     ctx: &AppContext,
     order_intents: Arc<dyn OrderIntentPort>,
+    research_jobs: Arc<dyn ResearchJobPort>,
     operation_log: OperationLogBuffer,
 ) -> QuantResult<AppState> {
     let repos = &ctx.infra.repos;
@@ -137,6 +139,9 @@ async fn build_app_state(
         training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
             &ctx.research,
             Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+            ctx.config.quant.research_jobs.max_spine_samples,
+            ctx.config.quant.research_jobs.plan_sample_slices,
+            ctx.config.quant.research_jobs.plan_sample_markets,
         )),
         model_training: Arc::new(CoreModelTrainingPort::from_research(
             &ctx.research,
@@ -149,6 +154,7 @@ async fn build_app_state(
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
+        research_jobs,
         quant_reports: Arc::new(CoreQuantReportPort::new(
             Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,
             Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,

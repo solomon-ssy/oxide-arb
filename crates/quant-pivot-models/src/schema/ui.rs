@@ -953,6 +953,13 @@ fn training_fields() -> Vec<FieldUiEntry> {
             "Minimum forward top-1 depth (USD) required for the liquidity_exit_possible label to be true. Sets how much exit liquidity a training example must show to count as exitable.",
             "liquidity_exit_possible 标签为真所需的前瞻 top-1 深度（USD）下限。决定训练样本需展示多少退出流动性才算『可退出』。",
         ),
+        usd(
+            "training.min_selection_depth_usd",
+            "Minimum PIT selection depth",
+            "PIT 选择最低深度",
+            "Book-derived liquidity floor (combined visible USD depth) a market must show at an as_of to enter the offline point-in-time selection funnel. The offline plane replays the online selection with book depth as the liquidity proxy (no Gamma liquidity/volume history), so this is a book-depth quantity distinct from selection.min_liquidity_usd; frozen with the config and captured in dataset_hash.",
+            "市场在某个 as_of 进入离线 point-in-time 选择漏斗所需的书本派生流动性下限（合计可见 USD 深度）。离线平面用书本深度作为流动性代理复现线上选择（无 Gamma 流动性/量能历史），因此这是与 selection.min_liquidity_usd 不同的书本深度量纲；随配置冻结并计入 dataset_hash。",
+        ),
     ]
 }
 
@@ -1890,6 +1897,7 @@ fn training_section() -> SchemaNode {
         fields_in_order(&[
             "training.max_book_staleness_ms",
             "training.min_exit_depth_usd",
+            "training.min_selection_depth_usd",
         ]),
     )
 }

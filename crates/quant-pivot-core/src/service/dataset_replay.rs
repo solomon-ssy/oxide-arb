@@ -342,9 +342,5 @@ pub fn settlement_outcome(example: &TrainingExample, label: &LabelName) -> (bool
 
 /// The maximum forward horizon (seconds) the dataset materialized.
 pub fn max_horizon(dataset: &TrainingDatasetInfo) -> u64 {
-    serde_json::from_value::<Vec<u64>>(dataset.horizons_secs.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .max()
-        .unwrap_or(0)
+    dataset.horizons_secs.0.iter().copied().max().unwrap_or(0)
 }

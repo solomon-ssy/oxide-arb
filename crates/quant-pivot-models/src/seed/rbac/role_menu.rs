@@ -32,12 +32,14 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const ROLE_MENU_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 1,
+    // v2 re-grants role→menu visibility after the `research-jobs` node was added
+    // (idempotent `on_conflict do_nothing` inserts only the new grants).
+    version: 2,
     target_table: role_menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.role_menu.bootstrap.v1",
+    checksum: "rbac.role_menu.bootstrap.v2",
     loader: load_boxed,
 };
 

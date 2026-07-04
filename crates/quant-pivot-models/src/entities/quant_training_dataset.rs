@@ -2,7 +2,10 @@
 
 use crate::{
     enums::quant::TrainingDatasetStatus,
-    types::{ArtifactUri, ContentHash, ModelSpecId, RuntimeConfigVersionId, TrainingDatasetId},
+    types::{
+        ArtifactUri, ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId,
+        TrainingDatasetId, TrainingHorizonsSecs,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -25,9 +28,9 @@ pub struct Model {
     pub source_delay_secs: i64,
     pub sample_interval_secs: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub horizons_secs: Json,
+    pub horizons_secs: TrainingHorizonsSecs,
     #[sea_orm(column_type = "JsonBinary")]
-    pub coverage_json: Json,
+    pub coverage_json: DatasetCoverage,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub created_at: DateTime<Utc>,
 }

@@ -1,10 +1,13 @@
 //! Admin port for offline training-dataset plan/build (Phase 3.5).
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     domain::{
-        BuildTrainingDatasetRequest, TrainingDatasetInfo, TrainingDatasetPlanView,
+        BuildTrainingDatasetRequest, JobProgressSink, TrainingDatasetInfo, TrainingDatasetPlanView,
         TrainingDatasetView,
     },
     types::TrainingDatasetId,
@@ -29,6 +32,16 @@ pub trait TrainingDatasetPort: Send + Sync {
     ) -> QuantResult<TrainingDatasetPlanView>;
 
     /// Plan + materialize Parquet + persist ledger row (may take minutes).
-    async fn build(&self, request: BuildTrainingDatasetRequest)
-    -> QuantResult<TrainingDatasetView>;
+    ///
+    /// `progress` receives per-cross-section snapshots as the historical spine is
+    /// materialized (the durable worker throttles + surfaces them). `cancel` is
+    /// polled at each cross-section boundary: a cancelled build unwinds within
+    /// ~one section and never persists a partial artifact (returns
+    /// [`quant_pivot_error::research::ResearchError::Cancelled`]).
+    async fn build(
+        &self,
+        request: BuildTrainingDatasetRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetView>;
 }

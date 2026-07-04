@@ -40,6 +40,35 @@ pub fn plan_samples(request: &DatasetPlanRequest, markets: &[PlanMarket]) -> Vec
     samples
 }
 
+/// Count the deterministic `(market, token, as_of)` samples **without**
+/// materializing the grid, iterating the identical instants as [`plan_samples`].
+///
+/// This is the cheap dry-run count path: a full window × selection grid can be
+/// millions of rows, and allocating that just to report a count is what made the
+/// synchronous `plan` endpoint time out. Iteration stops early once `cap` is
+/// exceeded (the caller flags `hard_cap_exceeded`), bounding pathological
+/// window/interval combinations to `~cap` arithmetic steps.
+#[must_use]
+pub fn count_samples(request: &DatasetPlanRequest, markets: &[PlanMarket], cap: u64) -> u64 {
+    let interval_secs = i64::try_from(request.sample_interval_secs.max(1)).unwrap_or(i64::MAX);
+    let step = Duration::seconds(interval_secs);
+    let mut total: u64 = 0;
+    for market in markets {
+        let mut as_of = request.window_start;
+        while as_of < request.window_end {
+            let alive = as_of >= market.created_at && market.end_date.is_none_or(|end| as_of < end);
+            if alive {
+                total += 1;
+                if total > cap {
+                    return total;
+                }
+            }
+            as_of += step;
+        }
+    }
+    total
+}
+
 /// Generate hold-vs-exit decision instants along each closed lot's life.
 ///
 /// Decision instants start at `max(opened_at, window_start)`: ticks before the
@@ -167,6 +196,27 @@ mod tests {
         assert_eq!(samples[1].as_of, start + Duration::seconds(60));
         // The true lifetime is still carried for position-state computation.
         assert_eq!(samples[0].opened_at, start - Duration::seconds(100));
+    }
+
+    #[test]
+    fn count_samples_matches_plan_samples_len() {
+        let req = request(60);
+        let markets = vec![market("aaa", -100, None), market("m", 120, Some(240))];
+        let expected = plan_samples(&req, &markets).len() as u64;
+        assert_eq!(count_samples(&req, &markets, u64::MAX), expected);
+    }
+
+    #[test]
+    fn count_samples_stops_past_cap() {
+        let req = request(60);
+        // Single market alive for all 5 window instants; cap of 2 must short-circuit.
+        let markets = vec![market("aaa", -100, None)];
+        let counted = count_samples(&req, &markets, 2);
+        assert!(counted > 2, "count must exceed the cap to flag overflow");
+        assert!(
+            counted <= 3,
+            "count must stop shortly after exceeding the cap"
+        );
     }
 
     #[test]

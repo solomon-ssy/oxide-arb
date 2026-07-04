@@ -19,7 +19,7 @@ use crate::{
     selection::{
         ExcludedMarket, ExclusionReason, FilterChain, FilterOutcome, MarketCandidateCtx,
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
-        SelectionThresholds, SelectorHashInput, accumulate_exclusion,
+        SelectionResult, SelectionThresholds, SelectorHashInput, accumulate_exclusion,
     },
 };
 
@@ -36,21 +36,19 @@ impl ConfiguredMarketSelector {
             chain: FilterChain::standard(),
         }
     }
-}
 
-impl Default for ConfiguredMarketSelector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl MarketSelector for ConfiguredMarketSelector {
-    async fn build_snapshot(
+    /// Run the filter chain + stable cap over `candidates`, returning the
+    /// included / excluded partition — the pure selection core, with no snapshot
+    /// id or canonical hash.
+    ///
+    /// Both the online snapshot builder ([`Self::build_snapshot`]) and the
+    /// offline point-in-time dataset selector share this one code path, so the
+    /// training funnel is byte-for-byte the same filter policy as production.
+    pub fn select_markets(
         &self,
-        request: MarketSelectionBuildRequest,
-        candidates: Vec<MarketCandidate>,
-    ) -> QuantResult<MarketSelectionSnapshot> {
+        request: &MarketSelectionBuildRequest,
+        candidates: &[MarketCandidate],
+    ) -> QuantResult<SelectionResult> {
         let thresholds = SelectionThresholds::resolve(&request.selection, &request.data_quality)?;
         let feature_schema = FeatureSchema::build(&request.features);
 
@@ -58,7 +56,7 @@ impl MarketSelector for ConfiguredMarketSelector {
         let mut excluded = Vec::new();
         let mut exclusion_summary = SelectionExclusionSummary::default();
 
-        for candidate in &candidates {
+        for candidate in candidates {
             let ctx = MarketCandidateCtx {
                 candidate,
                 thresholds: &thresholds,
@@ -99,6 +97,33 @@ impl MarketSelector for ConfiguredMarketSelector {
                 });
             }
         }
+
+        Ok(SelectionResult {
+            included,
+            excluded,
+            exclusion_summary,
+        })
+    }
+}
+
+impl Default for ConfiguredMarketSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl MarketSelector for ConfiguredMarketSelector {
+    async fn build_snapshot(
+        &self,
+        request: MarketSelectionBuildRequest,
+        candidates: Vec<MarketCandidate>,
+    ) -> QuantResult<MarketSelectionSnapshot> {
+        let SelectionResult {
+            included,
+            excluded,
+            exclusion_summary,
+        } = self.select_markets(&request, &candidates)?;
 
         let included_ids = included
             .iter()

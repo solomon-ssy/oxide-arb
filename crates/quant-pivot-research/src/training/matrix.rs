@@ -11,7 +11,7 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use super::{LabelName, TrainingExample};
 use crate::features::{FeatureName, FeatureSchema, FeatureUnit, FeatureValue, FeatureValueKind};
-use serde::{Deserialize, Serialize};
+use quant_pivot_models::types::MatrixCoverageProbe;
 
 /// How a column's decimal value is scaled before the `f64` cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,21 +173,6 @@ pub fn build_training_matrix(
     })
 }
 
-/// Row counts from an optional [`build_training_matrix`] probe at build time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MatrixCoverageProbe {
-    /// Rows that would enter the dense matrix.
-    pub accepted_rows: u64,
-    /// Rows rejected (missing label, critical feature, or non-finite cell).
-    pub rejected_rows: u64,
-    /// Supervised label used for the probe.
-    pub label_name: LabelName,
-    /// Horizon of the probed label column.
-    pub label_horizon_secs: u64,
-    /// Number of numeric feature columns in the probe spec.
-    pub feature_columns: u64,
-}
-
 /// Build a diagnostic matrix spec from the governed feature schema (numeric
 /// columns only; categoricals excluded).
 #[must_use]
@@ -223,7 +208,7 @@ pub fn matrix_spec_from_schema(
 pub fn probe_matrix_coverage(
     examples: &[TrainingExample],
     schema: &FeatureSchema,
-    label_name: LabelName,
+    label_name: &LabelName,
     label_horizon_secs: u64,
 ) -> QuantResult<MatrixCoverageProbe> {
     let spec = matrix_spec_from_schema(schema, label_name.clone(), label_horizon_secs);
@@ -232,7 +217,7 @@ pub fn probe_matrix_coverage(
         return Ok(MatrixCoverageProbe {
             accepted_rows: 0,
             rejected_rows: examples.len() as u64,
-            label_name,
+            label_name: label_name.as_str().to_owned(),
             label_horizon_secs,
             feature_columns,
         });
@@ -241,7 +226,7 @@ pub fn probe_matrix_coverage(
     Ok(MatrixCoverageProbe {
         accepted_rows: matrix.features.nrows() as u64,
         rejected_rows: matrix.rejected_rows as u64,
-        label_name,
+        label_name: label_name.as_str().to_owned(),
         label_horizon_secs,
         feature_columns,
     })

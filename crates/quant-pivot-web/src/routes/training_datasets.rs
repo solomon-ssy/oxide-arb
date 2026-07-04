@@ -25,8 +25,8 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BuildTrainingDatasetRequest, MaterializationRunKind, Paginated, TrainingDatasetListQuery,
-        TrainingDatasetPlanView, TrainingDatasetView,
+        BuildTrainingDatasetRequest, JobSubmitContext, Paginated, ResearchJobView,
+        TrainingDatasetListQuery, TrainingDatasetPlanView, TrainingDatasetView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -126,36 +126,39 @@ pub async fn plan(
     Ok(WebResponse::ok(view))
 }
 
-/// `POST /api/research/training-datasets/build` — full offline materialization.
+/// `POST /api/research/training-datasets/build` — enqueue an async build job.
+///
+/// Returns `202 Accepted` with the queued [`ResearchJobView`]; the actual
+/// materialization runs on the `ResearchJobWorker` off the HTTP hot path. The
+/// SPA tracks progress over the `materialization.run_update` WS channel and the
+/// `GET /research/jobs/{id}` poll.
 pub async fn build(
     state: web::Data<AppState>,
     acting_role: ActingRole,
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<BuildTrainingDatasetRequest>,
-) -> Result<WebResponse<TrainingDatasetView>, WebError> {
+) -> Result<WebResponse<ResearchJobView>, WebError> {
     let request = body.into_inner();
     let reason = request.reason.clone();
-    let view = state.training_datasets.build(request).await?;
-    // Fan out a `materialization.run_update` revision hint so other operators'
-    // open workbench catalogs re-fetch (the build itself is synchronous here).
-    state.publish_materialization_run(
-        view.training_dataset_id.to_string(),
-        MaterializationRunKind::Dataset,
-        view.status.into(),
-    );
+    let job = state
+        .research_jobs
+        .enqueue_dataset_build(
+            request,
+            JobSubmitContext {
+                acting_role: acting_role.0.clone(),
+                requested_by: None,
+            },
+        )
+        .await?;
     op_ctx.set_action(OperationCategory::Other, "research.training_dataset.build");
-    op_ctx.set_resource(
-        ResourceType::Materialization,
-        view.training_dataset_id.to_string(),
-    );
+    op_ctx.set_resource(ResourceType::Materialization, job.job_id.to_string());
     op_ctx.set_detail(serde_json::json!({
-        "status": view.status.as_str(),
-        "sample_count": view.sample_count,
-        "dataset_hash": view.dataset_hash,
+        "job_id": job.job_id.to_string(),
+        "kind": "dataset_build",
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": reason,
     }));
-    Ok(WebResponse::ok(view))
+    Ok(WebResponse::accepted(job))
 }

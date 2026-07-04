@@ -21,15 +21,14 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use validator::Validate;
 
 use crate::{
     domain::{TrainingDatasetInfo, pagination::PageRequest},
     enums::quant::TrainingDatasetStatus,
     types::{
-        ContentHash, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
-        TrainingSampleSource, default_sample_sources,
+        ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId, SchemaVersion,
+        TrainingDatasetId, TrainingSampleSource, default_sample_sources,
     },
 };
 
@@ -37,7 +36,10 @@ use crate::{
 ///
 /// **Plan** ignores [`Self::training_dataset_id`] (always mints a fresh id).
 /// **Build** should pass the id returned by plan so polling and artifacts align.
-#[derive(Debug, Clone, Deserialize, Validate)]
+///
+/// `Serialize` is derived so the request can be frozen verbatim into a durable
+/// research-job's `params_json` (the async job ledger replays it on execute).
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct BuildTrainingDatasetRequest {
     /// Target model specification (trainer binds artifacts to this spec).
     pub model_spec_id: ModelSpecId,
@@ -84,8 +86,26 @@ pub struct TrainingDatasetPlanView {
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
-    /// Number of `(as_of, market)` samples the build would iterate.
+    /// Number of `(as_of, market)` samples the build would iterate (spine size
+    /// plus live-attribution + exit-decision rows). An **upper bound**: the exact
+    /// eligible count only emerges from the build's coverage (per-`as_of`
+    /// liquidity/data-quality eligibility is applied during materialization).
     pub planned_samples: u64,
+    /// Deterministic historical spine size (selection × alive instants), the
+    /// dominant term of [`Self::planned_samples`], exposed for UI transparency.
+    pub spine_upper_bound: u64,
+    /// Whether the plan exceeds the global hard cap — the UI must block build and
+    /// prompt the operator to narrow the window / interval / selection.
+    pub hard_cap_exceeded: bool,
+    /// Estimated samples after point-in-time selection eligibility:
+    /// [`Self::planned_samples`] scaled by the sampled keep-rate (falls back to
+    /// the upper bound when the estimate is disabled/unavailable).
+    pub estimated_eligible_samples: u64,
+    /// Sampled fraction of candidate markets passing the PIT selection funnel, in
+    /// `[0, 1]`. `None` when the estimate is disabled or has no candidates.
+    pub keep_rate: Option<f64>,
+    /// Number of `(market, slice)` eligibility trials backing [`Self::keep_rate`].
+    pub keep_rate_sample_size: u64,
 }
 
 /// Ledger projection returned to the UI after build and on poll.
@@ -104,7 +124,7 @@ pub struct TrainingDatasetView {
     pub parquet_uri: String,
     pub sample_count: i64,
     /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
-    pub coverage_json: Value,
+    pub coverage_json: DatasetCoverage,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub created_at: DateTime<Utc>,
 }
