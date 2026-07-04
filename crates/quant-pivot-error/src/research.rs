@@ -73,17 +73,6 @@ pub enum ResearchError {
         detail: String,
     },
 
-    /// A cross-sectional factor was requested through the single-market path.
-    ///
-    /// `ZScore` / `Rank` normalization needs the full same-`as_of` selection, so
-    /// the engine refuses to fabricate a pseudo cross-section from one market and
-    /// requires the batch interface instead.
-    #[error("factor `{factor}` requires the batch (cross-sectional) interface")]
-    FactorRequiresBatch {
-        /// The factor whose normalization is cross-sectional.
-        factor: String,
-    },
-
     /// A factor's raw computation failed irrecoverably (not a missing input,
     /// which is modeled as `RawFactor { raw_value: None }`).
     #[error("factor computation failed: {detail}")]

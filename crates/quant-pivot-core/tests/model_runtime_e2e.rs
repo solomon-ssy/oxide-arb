@@ -347,6 +347,220 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     (result.accepted, ids)
 }
 
+/// Peer markets forming a real cross-section alongside the primary market, so
+/// the cross-sectional factors (`liquidity_depth` rank, `spread_efficiency`
+/// z-score) are *scored* rather than indeterminate. Overlay-reweighting tests
+/// need a cross-section ≥ `cross_section.min_size` (5) with dispersion.
+const PEER_COUNT: usize = 5;
+
+fn peer_market_id(index: usize) -> String {
+    format!("0xmodele2epeer{index}")
+}
+
+fn peer_yes(index: usize) -> String {
+    format!("7000{index}")
+}
+
+fn peer_no(index: usize) -> String {
+    format!("8000{index}")
+}
+
+fn peer_registry_market(index: usize) -> MarketRegistryInfo {
+    let yes = peer_yes(index);
+    let no = peer_no(index);
+    let step = i64::try_from(index).expect("index fits i64");
+    MarketRegistryInfo {
+        market_id: MarketId::new(peer_market_id(index)),
+        event_id: EventId::new(EVENT_ID),
+        token_yes: TokenId::new(&yes),
+        token_no: TokenId::new(&no),
+        question: format!("Model E2E peer {index}?"),
+        slug: format!("model-e2e-peer-{index}"),
+        categories: CategorySet::from(MarketCategory::Sports),
+        status: MarketStatus::Active,
+        outcome: None,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![
+            TokenInfo {
+                token_id: TokenId::new(&yes),
+                outcome: "Yes".into(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: TokenId::new(&no),
+                outcome: "No".into(),
+                neg_risk: false,
+            },
+        ],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: Decimal::ONE,
+        liquidity_usd: Some(Usd::new(Decimal::from(40_000 + 8_000 * step))),
+        volume_24h: Some(Usd::new(Decimal::from(9_000))),
+        fee_schedule: None,
+        end_date: Some(Utc::now() + ChronoDuration::days(2)),
+        resolved_at: None,
+        created_at: Utc::now() - ChronoDuration::days(2),
+        updated_at: Utc::now(),
+    }
+}
+
+fn peer_selected_market(index: usize) -> SelectedMarket {
+    let step = i64::try_from(index).expect("index fits i64");
+    SelectedMarket {
+        market_id: MarketId::new(peer_market_id(index)),
+        event_id: EventId::new(EVENT_ID),
+        category: MarketCategory::Sports,
+        primary_token_id: TokenId::new(peer_yes(index)),
+        secondary_token_id: Some(TokenId::new(peer_no(index))),
+        liquidity_usd: Some(Usd::new(Decimal::from(40_000 + 8_000 * step))),
+        volume_24h_usd: Some(Usd::new(Decimal::from(9_000))),
+        source_refs: Vec::new(),
+    }
+}
+
+/// Recover the `SelectedMarket` for a computed vector's market id (keeps the
+/// selection index-aligned with the pipeline's accepted-vector order).
+fn selected_for(market_id: &MarketId) -> SelectedMarket {
+    let id = market_id.as_str();
+    if id == MARKET_ID {
+        return selected_market();
+    }
+    for index in 0..PEER_COUNT {
+        if id == peer_market_id(index) {
+            return peer_selected_market(index);
+        }
+    }
+    panic!("unknown market id in cross-section: {id}");
+}
+
+/// Seed the peer markets (FK targets for their feature vectors / factor values).
+async fn seed_peer_markets(db: &DatabaseConnection) {
+    let repo = PgMarketRepository::new(db.clone());
+    for index in 0..PEER_COUNT {
+        repo.upsert(make_market(
+            &peer_market_id(index),
+            EVENT_ID,
+            "Model E2E peer?",
+            &format!("model-e2e-peer-{index}"),
+            MarketCategory::Sports,
+            Some(Utc::now() + ChronoDuration::days(2)),
+        ))
+        .await
+        .expect("seed peer market");
+    }
+}
+
+/// Apply one market's book snapshot to the store.
+fn apply_book(
+    book_store: &BookStore,
+    token: &str,
+    bid_px: Decimal,
+    bid_shares: i64,
+    ask_px: Decimal,
+    ask_shares: i64,
+    ts_ms: u64,
+) {
+    book_store.apply_snapshot(
+        &TokenId::new(token),
+        Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(bid_px),
+            Shares::new(Decimal::from(bid_shares)),
+        )]),
+        Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(ask_px),
+            Shares::new(Decimal::from(ask_shares)),
+        )]),
+        ts_ms,
+        None,
+    );
+}
+
+/// Build + persist feature vectors for the primary market plus dispersed peers,
+/// yielding a real cross-section (order-aligned `vectors` / `ids` / `selection`).
+async fn build_cross_section_features(
+    db: &DatabaseConnection,
+) -> (
+    Vec<FeatureVector>,
+    Vec<FeatureVectorId>,
+    Vec<SelectedMarket>,
+) {
+    let registry = Arc::new(MarketRegistry::new());
+    let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
+    let ts_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+
+    registry.register_market(registry_market());
+    apply_book(
+        &book_store,
+        YES_TOKEN,
+        Decimal::new(47, 2),
+        150,
+        Decimal::new(53, 2),
+        140,
+        ts_ms,
+    );
+    for index in 0..PEER_COUNT {
+        registry.register_market(peer_registry_market(index));
+        let step = i64::try_from(index).expect("index fits i64");
+        // Dispersed prices / depths so the cross-section carries real variance.
+        apply_book(
+            &book_store,
+            &peer_yes(index),
+            Decimal::new(40 + 3 * step, 2),
+            120 + 40 * step,
+            Decimal::new(46 + 4 * step, 2),
+            110 + 30 * step,
+            ts_ms,
+        );
+    }
+    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
+
+    let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
+    let pipeline = FeaturePipelineService::new(
+        FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
+        feature_repo,
+        noop_feature_writer(),
+    );
+
+    let features = FeaturesConfig::default();
+    let included: Vec<SelectedMarket> = std::iter::once(selected_market())
+        .chain((0..PEER_COUNT).map(peer_selected_market))
+        .collect();
+    let result = pipeline
+        .run(FeaturePipelineRequest {
+            included: &included,
+            as_of: Utc::now(),
+            features: &features,
+            data_quality: &DataQualityConfig::default(),
+            model_requirements: &ModelFeatureRequirements::default(),
+            source_delay_secs: 0,
+            pit: PitView::Live(&live_pit),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
+        })
+        .await
+        .expect("feature pipeline");
+
+    assert_eq!(
+        result.accepted.len(),
+        1 + PEER_COUNT,
+        "every cross-section market must produce a vector"
+    );
+    let ids = result
+        .persisted
+        .iter()
+        .map(|info| info.feature_vector_id.clone())
+        .collect();
+    let selection = result
+        .accepted
+        .iter()
+        .map(|vector| selected_for(&vector.market_id))
+        .collect();
+    (result.accepted, ids, selection)
+}
+
 /// Author a weighted artifact bound to the active schema, weighting every enabled
 /// factor equally, and persist its bytes + registry rows. Returns the version id.
 async fn publish_weighted_model(
@@ -715,10 +929,14 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db).await;
+    seed_peer_markets(&db).await;
 
     let base_factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids) = build_features(&db).await;
+    // A real multi-market cross-section: the overlay reweights *scored*
+    // cross-sectional factors, so shadow scores must shift when weights change
+    // (a single-market cross-section would leave them all indeterminate).
+    let (vectors, ids, selection) = build_cross_section_features(&db).await;
 
     let store = artifact_store();
     let published = publish_weighted_model(&db, &store, &base_factors, &features).await;
@@ -735,7 +953,6 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
     );
 
     let model = model_config(&published, Some(&candidate.to_string()));
-    let selection = vec![selected_market()];
     let as_of = Utc::now();
 
     overlay.reload(

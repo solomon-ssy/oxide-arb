@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     enums::quant::DataQualityStatus,
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig},
+    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
     types::{Price, Usd},
 };
 use quant_pivot_research::{
@@ -97,6 +97,24 @@ pub async fn materialize_cross_section(
     config: &ReplayConfig,
     request: &CrossSectionRequest<'_>,
 ) -> QuantResult<Option<ReplayCrossSection>> {
+    // Offline replay (training / backtest) shares the online engine entrypoint,
+    // but the `HistoricalQuantile` fallback needs a PIT-correct rolling factor
+    // history — which the online plane prefetches from persisted factor values.
+    // Reconstructing that offline without look-ahead is 11.6's job. Until then we
+    // fail closed rather than silently normalize offline with an empty history
+    // (which would produce indeterminate factors offline while the online plane
+    // scores them — a hidden train-serve skew). The default policy is
+    // `Indeterminate`, under which offline and online are byte-identical.
+    if config.factors.cross_section.small_cross_section_policy
+        == SmallCrossSectionPolicy::HistoricalQuantile
+    {
+        return Err(QuantError::config(
+            "offline replay does not support the HistoricalQuantile small-cross-section policy \
+             (PIT-correct offline factor history lands in 11.6); train and backtest under the \
+             Indeterminate policy to preserve training-serving parity",
+        ));
+    }
+
     let as_of = request.as_of;
     let (selected, windows) = cross_section_inputs(
         request.group,

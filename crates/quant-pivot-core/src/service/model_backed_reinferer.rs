@@ -14,11 +14,13 @@ use quant_pivot_models::{
     domain::{ModelVersionInfo, OrderIntentInfo, PointInTimeDataSource, PositionInfo},
     enums::quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
-    types::{Bps, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd},
+    types::{Bps, MarketId, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd},
 };
-use quant_pivot_repository::traits::{ModelRegistryRepository, RuntimeConfigVersionRepository};
+use quant_pivot_repository::traits::{
+    ModelRegistryRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+};
 use quant_pivot_research::{
-    factors::{FactorEngine, MarketFactorOutcome},
+    factors::{FactorEngine, MarketFactorOutcome, frozen_factor_outcome},
     features::{
         ConfiguredFeatureBuilder, FeatureSchema, FeatureVector, MarketWindowSnapshot, PitView,
         merged_required_features,
@@ -47,6 +49,9 @@ pub struct ModelBackedExitSignalReinfererDeps {
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     pub weight_overlay: Arc<crate::governance::WeightOverlayApplicator>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
+    /// Source of the entry recommendation's frozen factor breakdown, replayed as
+    /// the exit-side factor plane (reproducing the entry thesis).
+    pub recommendations: Arc<dyn RecommendationRepository>,
     pub pit_source: Arc<dyn PointInTimeDataSource>,
     pub market_registry: Arc<MarketRegistry>,
     pub window_provider: FeatureWindowProvider,
@@ -173,14 +178,19 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             return Ok(None);
         };
 
-        let outcome = factor_outcome(&vector, &config)?;
-        if !outcome.eligibility.is_eligible() {
-            tracing::debug!(
-                market_id = %lot.market_id,
-                "exit signal re-inference: factor-ineligible market"
-            );
+        // Reproduce the entry factor thesis: replay the recommendation's frozen
+        // cross-sectional breakdown rather than recompute on a peerless single
+        // market (which would be all-indeterminate post-11.1).
+        let Some(outcome) = frozen_exit_outcome(
+            self.deps.recommendations.as_ref(),
+            intent,
+            vector.market_id.clone(),
+            as_of,
+        )
+        .await?
+        else {
             return Ok(None);
-        }
+        };
 
         let output = infer_lot(runtime.as_ref(), &market, &vector, &outcome, as_of).await?;
         let Some(candidate) = find_lot_candidate(&output.candidates, lot) else {
@@ -229,16 +239,42 @@ async fn infer_lot(
     runtime.infer_batch(input).await
 }
 
-pub(crate) fn factor_outcome(
-    vector: &FeatureVector,
-    config: &RuntimeConfig,
-) -> QuantResult<MarketFactorOutcome> {
-    let factor_engine = FactorEngine::new(&config.factors, &config.features);
-    let outcomes =
-        factor_engine.compute_all_batch(std::slice::from_ref(vector), &config.factors)?;
-    outcomes.into_iter().next().ok_or_else(|| {
-        QuantError::config("exit signal re-inference: factor engine produced no outcome")
-    })
+/// Replay the entry recommendation's frozen factor breakdown as the exit-side
+/// [`MarketFactorOutcome`].
+///
+/// Exit re-inference must reproduce the *entry* thesis. A market has no
+/// cross-sectional peers at exit time, so recomputing factors on the single lot
+/// would make every cross-sectional factor `Indeterminate` (post-11.1) and the
+/// exit model would score a degenerate plane. Instead we load the recommendation
+/// the intent was minted from and rebuild the outcome from its persisted
+/// breakdown. Fail closed (`Ok(None)`, logged) when the recommendation or its
+/// breakdown is absent — never fabricate a neutral factor plane.
+pub(crate) async fn frozen_exit_outcome(
+    recommendations: &dyn RecommendationRepository,
+    intent: &OrderIntentInfo,
+    market_id: MarketId,
+    as_of: DateTime<Utc>,
+) -> QuantResult<Option<MarketFactorOutcome>> {
+    let Some(recommendation) = recommendations
+        .find_by_id(&intent.recommendation_id)
+        .await
+        .map_err(QuantError::from)?
+    else {
+        tracing::warn!(
+            recommendation_id = %intent.recommendation_id,
+            "exit signal re-inference: frozen recommendation not found"
+        );
+        return Ok(None);
+    };
+    let Some(outcome) = frozen_factor_outcome(market_id, as_of, &recommendation.factor_breakdown.0)
+    else {
+        tracing::warn!(
+            recommendation_id = %intent.recommendation_id,
+            "exit signal re-inference: recommendation has an empty factor breakdown"
+        );
+        return Ok(None);
+    };
+    Ok(Some(outcome))
 }
 
 /// Resolve the runtime-config snapshot frozen on the intent.

@@ -69,7 +69,7 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
         for secs in &momentum.slope_windows_secs {
             out.push(decimal_or_missing(
                 format!("ts.ema_slope_{secs}s"),
-                stats::ema_slope(&mids(window, *secs), momentum.ema_fast_secs),
+                stats::ema_slope_time(&mids_ts(window, *secs), momentum.ema_fast_secs),
                 &evidence,
             ));
         }
@@ -89,8 +89,8 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
         // Vol-normalized MACD over the slow-EMA window (long enough for both legs).
         out.push(decimal_or_missing(
             "ts.macd_norm".to_owned(),
-            stats::macd_normalized(
-                &mids(window, momentum.ema_slow_secs),
+            stats::macd_time(
+                &mids_ts(window, momentum.ema_slow_secs),
                 momentum.ema_fast_secs,
                 momentum.ema_slow_secs,
             ),
@@ -119,6 +119,17 @@ fn mids(window: &MarketWindowSnapshot, secs: u64) -> Vec<Decimal> {
         .mids_in(Duration::from_secs(secs))
         .into_iter()
         .map(Price::inner)
+        .collect()
+}
+
+/// `(epoch_ms, mid)` samples within the trailing `secs` window — the time-native
+/// input for the duration-based EMA / MACD estimators (weighted by real elapsed
+/// time, so a sparse book smooths over the same horizon as a dense one).
+fn mids_ts(window: &MarketWindowSnapshot, secs: u64) -> Vec<(i64, Decimal)> {
+    window
+        .mids_ts_in(Duration::from_secs(secs))
+        .into_iter()
+        .map(|(at, mid)| (at.timestamp_millis(), mid.inner()))
         .collect()
 }
 

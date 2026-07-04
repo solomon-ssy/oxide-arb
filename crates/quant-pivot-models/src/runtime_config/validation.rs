@@ -154,13 +154,14 @@ fn validate_momentum_features(config: &RuntimeConfig, report: &mut ConfigValidat
     if momentum.ema_fast_secs == 0 || momentum.ema_slow_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "features.momentum.ema_fast_secs",
-            detail: "EMA spans must be greater than zero".to_owned(),
+            detail: "EMA half-lives (seconds) must be greater than zero".to_owned(),
         });
     }
     if momentum.ema_fast_secs >= momentum.ema_slow_secs {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "features.momentum.ema_fast_secs",
-            detail: "fast EMA span must be strictly less than the slow EMA span".to_owned(),
+            detail: "fast EMA half-life must be strictly less than the slow EMA half-life"
+                .to_owned(),
         });
     }
     // The lag-skipped ROC needs a base older than the lag, so every ROC window

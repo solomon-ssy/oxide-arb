@@ -113,11 +113,16 @@ pub struct MomentumFeaturesConfig {
     /// Seconds skipped at the near edge of each ROC window (classic 12-1
     /// momentum: exclude the most recent reversal-prone segment).
     pub roc_lag_secs: u64,
-    /// Fast EMA span in seconds (MACD fast leg + EMA-slope base).
+    /// Fast EMA **half-life in seconds** (MACD fast leg + EMA-slope base): an
+    /// observation's weight halves every `ema_fast_secs` of elapsed time. This
+    /// is a true duration, applied by the time-decayed EMA regardless of how
+    /// densely the book is sampled — never a fixed point count.
     pub ema_fast_secs: u64,
-    /// Slow EMA span in seconds (MACD slow leg).
+    /// Slow EMA **half-life in seconds** (MACD slow leg); same duration
+    /// semantics as `ema_fast_secs`.
     pub ema_slow_secs: u64,
-    /// EMA-slope estimator windows in seconds (`ts.ema_slope_{W}s`).
+    /// EMA-slope estimator windows in seconds (`ts.ema_slope_{W}s`): the trailing
+    /// span of book samples the slope's time-decayed EMA is computed over.
     pub slope_windows_secs: Vec<u64>,
 }
 

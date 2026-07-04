@@ -27,7 +27,7 @@ use quant_pivot_models::{
     },
     types::{ModelVersionId, Price},
 };
-use quant_pivot_repository::traits::ModelRegistryRepository;
+use quant_pivot_repository::traits::{ModelRegistryRepository, RecommendationRepository};
 use quant_pivot_research::{
     model::{
         LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput,
@@ -45,8 +45,8 @@ use crate::{
     pipeline::{feature_window_provider::FeatureWindowProvider, market_registry::MarketRegistry},
     runtime_config::RuntimeConfigStore,
     service::model_backed_reinferer::{
-        LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok, factor_outcome,
-        liquidity_score_cap, schema_binding, selected_market_for_lot,
+        LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok,
+        frozen_exit_outcome, liquidity_score_cap, schema_binding, selected_market_for_lot,
     },
 };
 
@@ -74,6 +74,9 @@ pub struct ModelBackedOpportunisticSellScorerDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     pub config: Arc<RuntimeConfigStore>,
+    /// Source of the entry recommendation's frozen factor breakdown, replayed as
+    /// the exit-side factor plane (reproducing the entry thesis).
+    pub recommendations: Arc<dyn RecommendationRepository>,
     pub pit_source: Arc<dyn PointInTimeDataSource>,
     pub market_registry: Arc<MarketRegistry>,
     pub window_provider: FeatureWindowProvider,
@@ -160,10 +163,18 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         let Some(vector) = build_live_feature_vector(&request).await? else {
             return Ok(None);
         };
-        let outcome = factor_outcome(&vector, config.as_ref())?;
-        if !outcome.eligibility.is_eligible() {
+        // Reproduce the entry factor thesis from the recommendation's frozen
+        // breakdown rather than recompute on a peerless single market.
+        let Some(outcome) = frozen_exit_outcome(
+            self.deps.recommendations.as_ref(),
+            intent,
+            vector.market_id.clone(),
+            as_of,
+        )
+        .await?
+        else {
             return Ok(None);
-        }
+        };
         let market_factors = outcome
             .factors
             .iter()

@@ -21,7 +21,7 @@ mod null_policy;
 mod persistence;
 mod resolved;
 mod schema;
-mod stats;
+pub(crate) mod stats;
 mod timeseries;
 mod value;
 mod writer;

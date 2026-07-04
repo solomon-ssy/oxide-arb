@@ -1,6 +1,8 @@
 # Phase 11 — Alpha Quality & Closed-Loop Hardening 子phase索引
 
-> 状态：生产级破坏式重构设计（**规划/设计冻结阶段，未进入代码落地**）
+> 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
+> 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
+> 离线 replay 在 HistoricalQuantile 下 fail-closed）；11.0/11.2–11.11 仍在设计/规划阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、

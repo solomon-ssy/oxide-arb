@@ -13,9 +13,10 @@ use async_trait::async_trait;
 use crate::{
     domain::{
         BacktestReportInfo, BacktestReportListQuery, ComparisonReportListQuery,
-        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-        ModelVersionListQuery, Paginated, TrainingDatasetInfo, TrainingDatasetListQuery,
+        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
+        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery,
+        ModelVersionInfo, ModelVersionListQuery, Paginated, TrainingDatasetInfo,
+        TrainingDatasetListQuery,
     },
     types::FactorDefinitionId,
 };
@@ -71,9 +72,20 @@ pub trait ResearchCatalogPort: Send + Sync {
     ) -> QuantResult<Option<FactorDefinitionInfo>>;
 
     /// Analyze pairwise factor collinearity over the recent factor-value window.
+    ///
+    /// `source` selects the value plane: `Raw` correlates pre-normalization values
+    /// (the methodologically correct default for detecting same-signal factors),
+    /// `Normalized` correlates the post-normalization scores.
+    ///
+    /// When `neutralize_by_category` is set (the `factors.orthogonalize.neutralize_by`
+    /// operator), each factor is residualized against its market category before
+    /// correlating, so shared category composition does not masquerade as factor
+    /// redundancy.
     async fn factor_collinearity(
         &self,
         lookback_secs: u64,
         threshold: Decimal,
+        source: FactorCollinearitySource,
+        neutralize_by_category: bool,
     ) -> QuantResult<FactorCollinearityView>;
 }

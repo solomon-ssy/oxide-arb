@@ -7,6 +7,8 @@
 //! so `feature_hash` stays bit-identical across hardware (no unrounded `f64`
 //! value ever reaches the vector or its canonical digest).
 
+use std::f64::consts::LN_2;
+
 use ndarray::Array1;
 use rust_decimal::{
     Decimal,
@@ -100,42 +102,58 @@ pub fn vol_adjusted(simple_return_value: Decimal, realized_vol: Decimal) -> Opti
     Some((simple_return_value / realized_vol).round_dp(STAT_SCALE))
 }
 
-/// The exponential moving average series of `series` with the given span (in
-/// points). `alpha = 2 / (span + 1)`; seeded with the first observation.
+/// Time-decayed EMA over irregularly spaced `(epoch_ms, value)` samples.
 ///
-/// Fully exact `Decimal` (fixed-point, deterministic across platforms), quantized
-/// each step. `None` for an empty series or a zero span.
+/// The smoothing horizon is a true **duration**, not a point count: a past
+/// observation's weight halves every `halflife_secs` of elapsed time
+/// (`decay_i = 2^(-Δt_i / halflife)`, i.e. `alpha_i = 1 - exp(-Δt_i / τ)` with
+/// `τ = halflife / ln 2`), so `ema_i = (1 - decay_i)·value_i + decay_i·ema_{i-1}`.
+/// This is the irregular-interval generalization of a fixed-span EMA and the
+/// correct estimator for sparse, unevenly sampled prediction-market books — a
+/// fixed point-count span would smooth over wildly different time horizons on a
+/// dense vs. a sparse book.
+///
+/// `samples` must be ascending by time (non-monotonic gaps clamp to zero). The
+/// transcendental (`exp`) crosses into `f64`, then every output is quantized to
+/// [`STAT_SCALE`] so the series is deterministic across platforms. `None` for an
+/// empty series or a zero half-life. The first sample seeds the series exactly.
 #[must_use]
-pub fn ema_series(series: &[Decimal], span_points: u64) -> Option<Vec<Decimal>> {
-    if series.is_empty() || span_points == 0 {
+pub fn ema_time_decayed(samples: &[(i64, Decimal)], halflife_secs: u64) -> Option<Vec<Decimal>> {
+    if samples.is_empty() || halflife_secs == 0 {
         return None;
     }
-    let alpha = (Decimal::from(2) / Decimal::from(span_points + 1)).round_dp(STAT_SCALE);
-    let one_minus_alpha = Decimal::ONE - alpha;
-    let mut out = Vec::with_capacity(series.len());
-    let mut previous = series[0];
-    out.push(previous);
-    for value in &series[1..] {
-        previous = (alpha * value + one_minus_alpha * previous).round_dp(STAT_SCALE);
-        out.push(previous);
+    let halflife = Decimal::from(halflife_secs).to_f64()?;
+    let mut out = Vec::with_capacity(samples.len());
+    let (seed_ms, seed_value) = samples[0];
+    out.push(seed_value.round_dp(STAT_SCALE));
+    let mut previous = seed_value.to_f64()?;
+    let mut previous_ms = seed_ms;
+    for &(ms, value) in &samples[1..] {
+        let value_f = value.to_f64()?;
+        let delta_ms = (ms - previous_ms).max(0);
+        let delta_secs = Decimal::from(delta_ms).to_f64()? / 1000.0;
+        let decay = (-delta_secs * LN_2 / halflife).exp();
+        let ema = decay.mul_add(previous, (1.0 - decay) * value_f);
+        if !ema.is_finite() {
+            return None;
+        }
+        let quantized = Decimal::from_f64(ema).map(|value| value.round_dp(STAT_SCALE))?;
+        out.push(quantized);
+        previous = ema;
+        previous_ms = ms;
     }
     Some(out)
 }
 
-/// The last value of the EMA series (the smoothed current level).
-#[must_use]
-pub fn ema_last(series: &[Decimal], span_points: u64) -> Option<Decimal> {
-    ema_series(series, span_points).and_then(|ema| ema.last().copied())
-}
-
-/// The normalized instantaneous EMA slope: `(ema_last - ema_prev) / ema_last`.
+/// The normalized instantaneous EMA slope: `(ema_last - ema_prev) / ema_last`
+/// over the time-decayed EMA (see [`ema_time_decayed`]).
 ///
 /// This is the *current smoothed velocity* of the price — distinct from the
 /// window's total return (`simple_return`), which is total displacement. `None`
 /// for fewer than two EMA points or a zero level.
 #[must_use]
-pub fn ema_slope(series: &[Decimal], span_points: u64) -> Option<Decimal> {
-    let ema = ema_series(series, span_points)?;
+pub fn ema_slope_time(samples: &[(i64, Decimal)], halflife_secs: u64) -> Option<Decimal> {
+    let ema = ema_time_decayed(samples, halflife_secs)?;
     if ema.len() < 2 {
         return None;
     }
@@ -149,17 +167,28 @@ pub fn ema_slope(series: &[Decimal], span_points: u64) -> Option<Decimal> {
 
 /// Volatility-normalized MACD: `((EMA_fast - EMA_slow) / EMA_slow) / realized_vol`.
 ///
-/// A vol-normalized trend-crossover estimator (Baz-style). `None` when either
-/// EMA is undefined, the slow EMA is zero, or realized volatility is non-positive.
+/// A vol-normalized trend-crossover estimator (Baz-style) built on the
+/// time-decayed EMA legs (half-lives in seconds), so its smoothing horizon is a
+/// duration independent of sampling density. `None` when either EMA is
+/// undefined, the slow EMA is zero, or realized volatility is non-positive.
 #[must_use]
-pub fn macd_normalized(series: &[Decimal], fast_span: u64, slow_span: u64) -> Option<Decimal> {
-    let fast = ema_last(series, fast_span)?;
-    let slow = ema_last(series, slow_span)?;
+pub fn macd_time(
+    samples: &[(i64, Decimal)],
+    fast_halflife_secs: u64,
+    slow_halflife_secs: u64,
+) -> Option<Decimal> {
+    let fast = ema_time_decayed(samples, fast_halflife_secs)?
+        .last()
+        .copied()?;
+    let slow = ema_time_decayed(samples, slow_halflife_secs)?
+        .last()
+        .copied()?;
     if slow.is_zero() {
         return None;
     }
     let macd_line = (fast - slow) / slow;
-    let vol = realized_volatility(series)?;
+    let values: Vec<Decimal> = samples.iter().map(|&(_, value)| value).collect();
+    let vol = realized_volatility(&values)?;
     if vol <= Decimal::ZERO {
         return None;
     }
@@ -169,10 +198,24 @@ pub fn macd_normalized(series: &[Decimal], fast_span: u64, slow_span: u64) -> Op
 #[cfg(test)]
 mod tests {
     use super::{
-        ema_last, ema_slope, macd_normalized, mean_reversion, rate_of_change, realized_volatility,
-        simple_return, vol_adjusted,
+        ema_slope_time, ema_time_decayed, macd_time, mean_reversion, rate_of_change,
+        realized_volatility, simple_return, vol_adjusted,
     };
     use rust_decimal::Decimal;
+
+    /// Build an ascending `(epoch_ms, value)` series on a fixed cadence.
+    fn timed(values: &[i64], cadence_secs: i64) -> Vec<(i64, Decimal)> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                (
+                    i64::try_from(index).unwrap() * cadence_secs * 1_000,
+                    Decimal::from(*value),
+                )
+            })
+            .collect()
+    }
 
     #[test]
     fn simple_return_is_exact() {
@@ -246,8 +289,10 @@ mod tests {
 
     #[test]
     fn ema_last_smooths_toward_recent() {
-        let series = [Decimal::from(100), Decimal::from(100), Decimal::from(130)];
-        let ema = ema_last(&series, 2).expect("ema");
+        let series = timed(&[100, 100, 130], 60);
+        let ema = ema_time_decayed(&series, 120)
+            .and_then(|ema| ema.last().copied())
+            .expect("ema");
         // The EMA of a step-up lands strictly between the old and new level.
         assert!(
             ema > Decimal::from(100) && ema < Decimal::from(130),
@@ -257,10 +302,45 @@ mod tests {
 
     #[test]
     fn ema_slope_is_signed_by_recent_move() {
-        let up = [Decimal::from(100), Decimal::from(101), Decimal::from(105)];
-        let down = [Decimal::from(105), Decimal::from(101), Decimal::from(100)];
-        assert!(ema_slope(&up, 2).expect("slope") > Decimal::ZERO);
-        assert!(ema_slope(&down, 2).expect("slope") < Decimal::ZERO);
+        let up = timed(&[100, 101, 105], 60);
+        let down = timed(&[105, 101, 100], 60);
+        assert!(ema_slope_time(&up, 120).expect("slope") > Decimal::ZERO);
+        assert!(ema_slope_time(&down, 120).expect("slope") < Decimal::ZERO);
+    }
+
+    #[test]
+    fn ema_horizon_is_time_native_not_point_count() {
+        // The same price path sampled at two different cadences (dense vs.
+        // sparse) must produce the same time-decayed EMA at matched elapsed
+        // times — a fixed point-count span could not. Here both series span the
+        // identical wall-clock duration with proportional decay.
+        let dense: Vec<(i64, Decimal)> = (0..=8)
+            .map(|i| (i * 30_000, Decimal::from(100 + i)))
+            .collect();
+        let sparse = [
+            (0_i64, Decimal::from(100)),
+            (120_000, Decimal::from(104)),
+            (240_000, Decimal::from(108)),
+        ];
+        // Both end at t=240s having risen 100→108; a duration-native EMA on the
+        // sparse series lands in the same neighborhood as the dense one, not at
+        // a point-count-dependent lag.
+        let dense_last = ema_time_decayed(&dense, 120)
+            .and_then(|ema| ema.last().copied())
+            .expect("dense ema");
+        let sparse_last = ema_time_decayed(&sparse, 120)
+            .and_then(|ema| ema.last().copied())
+            .expect("sparse ema");
+        let gap = (dense_last - sparse_last).abs();
+        assert!(gap < Decimal::from(2), "time-native EMAs agree: {gap}");
+    }
+
+    #[test]
+    fn ema_time_decayed_is_deterministic() {
+        let series = timed(&[100, 102, 101, 105, 103], 45);
+        let first = ema_time_decayed(&series, 90).expect("ema");
+        let second = ema_time_decayed(&series, 90).expect("ema");
+        assert_eq!(first, second, "must be deterministic");
     }
 
     #[test]
@@ -273,9 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn macd_normalized_defined_for_trending_series() {
-        let series: Vec<Decimal> = (0..30).map(|i| Decimal::from(100 + i)).collect();
-        let macd = macd_normalized(&series, 5, 15).expect("macd");
+    fn macd_time_defined_for_trending_series() {
+        let series: Vec<(i64, Decimal)> = (0..30)
+            .map(|i| (i * 30_000, Decimal::from(100 + i)))
+            .collect();
+        let macd = macd_time(&series, 150, 450).expect("macd");
         // A steady uptrend keeps the fast EMA above the slow EMA → positive MACD.
         assert!(macd > Decimal::ZERO, "{macd}");
     }

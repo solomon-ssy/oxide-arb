@@ -433,7 +433,7 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use quant_pivot_models::enums::factor::FactorFamily;
+    use quant_pivot_models::enums::factor::{FactorFamily, FactorIndeterminateReason};
 
     use crate::{
         factors::{
@@ -602,6 +602,76 @@ mod tests {
         assert!(
             output.candidates.is_empty(),
             "a neutral net signal must not emit a candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn indeterminate_factor_contributes_nothing() {
+        // A market whose momentum factor is indeterminate (no usable cross-section)
+        // still scores off the remaining scored factor; the indeterminate factor
+        // is surfaced in the breakdown with a zero contribution and no fabricated
+        // normalized score — never a silent neutral.
+        let runtime = WeightedFactorRuntime::new(artifact(), None).expect("runtime");
+        let indeterminate = FactorValue {
+            definition_id: FactorDefinitionId::from_v7(),
+            name: MOMENTUM_ROC,
+            family: FactorFamily::Momentum,
+            raw_value: Some(dec!(1)),
+            normalization: NormalizedFactor::Indeterminate {
+                reason: FactorIndeterminateReason::CrossSectionTooSmall,
+            },
+            direction: FactorDirection::Positive,
+            confidence: Probability::ZERO,
+            explanation: FactorExplanation {
+                headline: "indeterminate".to_owned(),
+                drivers: Vec::new(),
+            },
+            input_feature_refs: Vec::new(),
+        };
+        let row = FactorInferenceRow {
+            market_id: MarketId::new("0xmixed"),
+            token_id: TokenId::new("yes"),
+            factors: vec![
+                factor(
+                    LIQUIDITY_DEPTH,
+                    Probability::new(dec!(0.8)),
+                    FactorDirection::Positive,
+                ),
+                indeterminate,
+            ],
+            context: context(),
+        };
+        let table = FactorInferenceTable {
+            model_run_id: ModelRunId::from_v7(),
+            as_of: Utc::now(),
+            rows: vec![row],
+        };
+        let output = runtime
+            .infer_batch(ModelRuntimeInput::FactorTable(table))
+            .await
+            .expect("infer");
+        let candidate = output
+            .candidates
+            .iter()
+            .find(|c| c.market_id.as_str() == "0xmixed")
+            .expect("the scored factor still yields a candidate");
+        let momentum = candidate
+            .factor_breakdown
+            .iter()
+            .find(|entry| entry.name == MOMENTUM_ROC)
+            .expect("indeterminate factor is surfaced in the breakdown");
+        assert!(
+            momentum.normalized_score.is_none(),
+            "indeterminate factor carries no normalized score"
+        );
+        assert_eq!(
+            momentum.contribution,
+            dec!(0),
+            "indeterminate factor contributes nothing"
+        );
+        assert_eq!(
+            momentum.indeterminate_reason,
+            Some(FactorIndeterminateReason::CrossSectionTooSmall)
         );
     }
 }

@@ -9,19 +9,21 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::{
-        factor::{FactorFamily, FactorIndeterminateReason},
+        factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
         quant::DataQualityStatus,
     },
-    runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, MissingFactorPolicy},
+    runtime_config::{
+        DecimalString, FactorsConfig, FeaturesConfig, MissingFactorPolicy, SmallCrossSectionPolicy,
+    },
     types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::factors::{
-    CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorName,
-    FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
+    CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorHistory,
+    FactorName, FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
 };
-use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason};
+use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason, stats};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -566,10 +568,10 @@ fn compute_all_batch_preserves_input_order() {
 }
 
 #[test]
-fn online_and_batch_use_same_normalizer() {
+fn serial_and_parallel_normalizer_paths_are_bit_identical() {
     // The serial and rayon paths share one `CrossSectionalNormalizer`, so they
-    // must be bit-identical — the guarantee that online and backtest normalize
-    // through the same code (Phase 11.6 parity seam).
+    // must be bit-identical. (Online-vs-replay parity — both driving the same
+    // engine entrypoint — is asserted at the core pipeline level.)
     let config = factors_config(
         &[FactorFamily::Liquidity, FactorFamily::Momentum],
         MissingFactorPolicy::ZeroWeight,
@@ -586,6 +588,129 @@ fn online_and_batch_use_same_normalizer() {
         .compute_all_batch_inner(&vectors, &config, &history, true)
         .expect("parallel path");
     assert_eq!(serial, parallel, "serial and parallel paths must agree");
+}
+
+#[test]
+fn online_and_replay_entrypoints_agree_default_policy() {
+    // The replay path calls `compute_all_batch` and the online path calls
+    // `compute_all_batch_with_history`; under the default (`Indeterminate`) policy
+    // they must produce identical outcomes — the same normalizer serves both.
+    let config = factors_config(
+        &[FactorFamily::Liquidity, FactorFamily::Momentum],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
+    let features = FeaturesConfig::default();
+    let engine = FactorEngine::new(&config, &features);
+    let vectors = varied_batch(20);
+    let replay = engine
+        .compute_all_batch(&vectors, &config)
+        .expect("replay path");
+    let online = engine
+        .compute_all_batch_with_history(&vectors, &config, &FactorHistory::empty())
+        .expect("online path");
+    assert_eq!(
+        replay, online,
+        "replay and online entrypoints must agree under the default policy"
+    );
+}
+
+#[test]
+fn cross_sectional_zscore_mean_zero_std_one_per_as_of() {
+    // The winsorized z-score maps a standardized value `z = (x - μ) / σ` into
+    // `[0, 1]` via `(z + k) / 2k` (k = clamp_sigma). With no winsorizing/clamping,
+    // recovering `z = score·2k − k` across the cross-section must have population
+    // mean 0 and std 1 — the defining property of a per-as_of z-score.
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
+    let features = FeaturesConfig::default();
+    let engine = FactorEngine::new(&config, &features);
+    let vectors = varied_batch(9);
+    let outcomes = engine
+        .compute_all_batch(&vectors, &config)
+        .expect("batch compute");
+    // `spread_efficiency` is a WinsorizedZScore factor; k = default clamp_sigma.
+    let clamp_sigma = 3.0_f64;
+    let zs: Vec<f64> = outcomes
+        .iter()
+        .map(|outcome| {
+            scored(outcome, "spread_efficiency")
+                .value
+                .normalized_score()
+                .expect("scored")
+                .inner()
+                .to_f64()
+                .expect("f64")
+        })
+        .map(|score| score.mul_add(2.0 * clamp_sigma, -clamp_sigma))
+        .collect();
+    let n = f64::from(u32::try_from(zs.len()).unwrap_or(u32::MAX));
+    let mean = zs.iter().sum::<f64>() / n;
+    let variance = zs.iter().map(|z| (z - mean).powi(2)).sum::<f64>() / n;
+    let std = variance.sqrt();
+    assert!(
+        mean.abs() < 1e-6,
+        "cross-section z-score mean ≈ 0, got {mean}"
+    );
+    assert!(
+        (std - 1.0).abs() < 1e-6,
+        "cross-section z-score std ≈ 1, got {std}"
+    );
+}
+
+#[test]
+fn historical_quantile_scores_small_cross_section() {
+    // A single-market batch is below `min_size`, but under the HistoricalQuantile
+    // policy a pre-fetched rolling distribution normalizes it — the factor is
+    // scored with `source = HistoricalQuantile`, not indeterminate.
+    let mut config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
+    config.cross_section.min_size = 5;
+    config.cross_section.small_cross_section_policy = SmallCrossSectionPolicy::HistoricalQuantile;
+    let features = FeaturesConfig::default();
+    let engine = FactorEngine::new(&config, &features);
+
+    let mut history = FactorHistory::empty();
+    history.insert(
+        FactorName::from_static("liquidity_depth"),
+        (1..=8).map(|value| Decimal::from(value * 1_000)).collect(),
+    );
+
+    let vector = make_vector(
+        "0xlonely",
+        &[
+            ("book.visible_liquidity_usd", usd(4_500)),
+            ("book.spread_bps", bps(120)),
+        ],
+        DataQualityStatus::Fresh,
+        0,
+        Utc::now(),
+    );
+    let outcomes = engine
+        .compute_all_batch_with_history(std::slice::from_ref(&vector), &config, &history)
+        .expect("historical-quantile compute");
+    let factor = scored(&outcomes[0], "liquidity_depth");
+    assert!(
+        matches!(
+            factor.value.normalization,
+            NormalizedFactor::Scored {
+                source: NormalizationSource::HistoricalQuantile,
+                ..
+            }
+        ),
+        "small cross-section must score via history, got {:?}",
+        factor.value.normalization
+    );
+    assert!(
+        factor.contributes,
+        "a historically-scored factor contributes"
+    );
 }
 
 // ── #2 collinearity analysis ──────────────────────────────────────────────────
@@ -627,6 +752,141 @@ fn collinearity_analyzer_flags_rho_over_threshold() {
             .any(|pair| pair.correlation < Decimal::ZERO),
         "the anti-correlated pair must appear with negative ρ"
     );
+}
+
+/// Build a 24-sample mid-price path (30s cadence) from four per-segment slopes
+/// plus an independent volatility oscillation. Distinct slope vectors make the
+/// *timing* of the move differ across markets, so total return, lag-skipped ROC,
+/// and recent EMA slope rank markets differently — the four momentum estimators
+/// are genuinely different signals, not return clones.
+fn momentum_path(shape: [i64; 4], vol: i64) -> Vec<(i64, Decimal)> {
+    let mut price = 10_000_i64;
+    let mut out = Vec::with_capacity(24);
+    let mut k = 0_i64;
+    for slope in shape {
+        for _ in 0..6 {
+            price += slope;
+            let osc = if k % 2 == 0 { vol } else { -vol };
+            out.push((k * 30_000, Decimal::from(price + osc)));
+            k += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn default_momentum_estimators_not_mutually_collinear() {
+    // Closes audit #2 at the falsifiability level: on a heterogeneous panel the
+    // four default momentum estimators AND the simple return must all stay below
+    // the configured collinearity tolerance. A panel that only varied trend
+    // magnitude would make them near-identical; heterogeneity in the *timing*
+    // and volatility of the move is exactly what decouples them.
+    // Timing-diverse shapes: total return (full window), lag-skipped ROC
+    // (base→t-lag, i.e. ignores the last third) and recent EMA slope each rank
+    // these markets differently, so no pair collapses onto another.
+    const SHAPES: [[i64; 4]; 16] = [
+        [6, 0, 0, 0],     // early up: high ROC, ~flat recent slope
+        [-6, 0, 0, 0],    // early down
+        [0, 0, 0, 6],     // late up: ~zero ROC, high recent slope
+        [0, 0, 0, -6],    // late down
+        [6, 0, 0, -6],    // early up then late down: ~zero return, +ROC, -slope
+        [-6, 0, 0, 6],    // early down then late up: ~zero return, -ROC, +slope
+        [0, 6, 0, 0],     // mid-early up
+        [0, -6, 0, 0],    // mid-early down
+        [0, 0, 6, 0],     // mid-late up
+        [0, 0, -6, 0],    // mid-late down
+        [3, 3, 3, 3],     // monotone up (all estimators agree)
+        [-3, -3, -3, -3], // monotone down
+        [1, 2, 3, 4],     // accelerating up
+        [4, 3, 2, 1],     // decelerating up
+        [5, -5, 5, -5],   // choppy
+        [0, 0, 0, 0],     // flat (pure volatility)
+    ];
+    // Volatility amplitudes permuted to be uncorrelated with any trend metric.
+    const VOLS: [i64; 16] = [3, 40, 9, 60, 1, 25, 7, 50, 15, 2, 33, 5, 70, 12, 45, 20];
+    // Lag-skipped ROC base→(t-lag): 300s lag ≈ 10 samples at 30s cadence.
+    const LAG_POINTS: usize = 10;
+
+    let return_col = FactorName::from_static("simple_return");
+    let roc = FactorName::from_static("momentum_roc");
+    let ema_slope = FactorName::from_static("momentum_ema_slope");
+    let vol_adjusted = FactorName::from_static("momentum_vol_adjusted");
+    let macd = FactorName::from_static("momentum_macd");
+
+    let mut rows: Vec<Vec<Option<Decimal>>> = Vec::with_capacity(SHAPES.len());
+    for (shape, vol) in SHAPES.iter().zip(VOLS) {
+        let samples = momentum_path(*shape, vol);
+        let values: Vec<Decimal> = samples.iter().map(|&(_, value)| value).collect();
+        let simple = stats::simple_return(&values);
+        let at_lag = values[values.len() - 1 - LAG_POINTS];
+        rows.push(vec![
+            simple,
+            stats::rate_of_change(values[0], at_lag),
+            stats::ema_slope_time(&samples, 300),
+            simple.and_then(|ret| {
+                stats::realized_volatility(&values).and_then(|vol| stats::vol_adjusted(ret, vol))
+            }),
+            stats::macd_time(&samples, 300, 900),
+        ]);
+    }
+    // Column 0 is the reference simple return; columns 1..=4 are the registered
+    // momentum factors.
+    let momentum_names = [&roc, &ema_slope, &vol_adjusted, &macd];
+    let panel = FactorObservationMatrix {
+        factors: vec![
+            return_col,
+            roc.clone(),
+            ema_slope.clone(),
+            vol_adjusted.clone(),
+            macd.clone(),
+        ],
+        rows,
+    };
+    // The default orthogonalize tolerance (0.90).
+    let threshold = FactorsConfig::default()
+        .orthogonalize
+        .max_correlation
+        .value
+        .parse::<Decimal>()
+        .expect("default max_correlation parses");
+    let report = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+
+    // (a) Production orthogonality gate: the four *registered* momentum factors
+    //     must be mutually below the tolerance — no two collapse onto one signal.
+    for i in 1..=4 {
+        for j in (i + 1)..=4 {
+            let rho = report.matrix[i][j].abs();
+            assert!(
+                rho < threshold,
+                "momentum factors `{}` vs `{}` |ρ|={rho} must stay below {threshold}",
+                momentum_names[i - 1],
+                momentum_names[j - 1],
+            );
+        }
+    }
+    // (b) Audit #2 falsifiability: the old bug made momentum an *exact* clone of
+    //     the simple return (ρ = 1.0). Every estimator must be demonstrably
+    //     distinct — recent velocity co-moves with total return, but none is a
+    //     rank-identical copy.
+    let clone_ceiling = Decimal::new(98, 2);
+    for (index, name) in momentum_names.iter().enumerate() {
+        let rho = report.matrix[0][index + 1].abs();
+        assert!(
+            rho < clone_ceiling,
+            "momentum factor `{name}` vs simple_return |ρ|={rho} — must not be a return clone"
+        );
+    }
+    // (c) The risk/vol dimension adds genuinely orthogonal information: the
+    //     vol-adjusted and MACD estimators stay below the gate against the raw
+    //     return, not just below the clone ceiling.
+    for name in [&vol_adjusted, &macd] {
+        let index = momentum_names.iter().position(|n| *n == name).unwrap() + 1;
+        let rho = report.matrix[0][index].abs();
+        assert!(
+            rho < threshold,
+            "vol/risk momentum factor `{name}` vs simple_return |ρ|={rho} must stay below {threshold}"
+        );
+    }
 }
 
 // ── #3 no hardcoded normalization constants ───────────────────────────────────

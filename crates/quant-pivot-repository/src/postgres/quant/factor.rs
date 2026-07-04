@@ -17,7 +17,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, sea_query::OnConflict,
+    IntoActiveModel, QueryFilter, QueryOrder, TransactionTrait, sea_query::OnConflict,
 };
 
 /// Postgres-backed factor repository: governed definitions (idempotent on the
@@ -70,13 +70,24 @@ impl FactorRepository for PgFactorRepository {
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        let models = quant_factor_value::Entity::insert_many(
-            values.into_iter().map(IntoActiveModel::into_active_model),
-        )
-        .exec_with_returning_many(&self.db)
-        .await
-        .map_err(StorageError::from)?;
-        Ok(models.into_iter().map(Into::into).collect())
+        // Insert per row inside one transaction rather than a single multi-row
+        // `insert_many`: sea-query's batched VALUES drops the Postgres enum cast
+        // for the *nullable* native-enum columns (`normalization_source` /
+        // `indeterminate_reason`), binding them as `text` and failing the insert.
+        // A single-row insert carries the enum cast correctly; the transaction
+        // keeps the ledger write atomic.
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let mut inserted = Vec::with_capacity(values.len());
+        for value in values {
+            let model = value
+                .into_active_model()
+                .insert(&txn)
+                .await
+                .map_err(StorageError::from)?;
+            inserted.push(model.into());
+        }
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(inserted)
     }
 
     async fn find_definition(

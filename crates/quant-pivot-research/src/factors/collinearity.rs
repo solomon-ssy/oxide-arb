@@ -2,13 +2,17 @@
 //! matrix of a factor-value panel and the pairs that breach a tolerance.
 //!
 //! Two momentum factors that are really the same signal (audit #2) show up here
-//! as a high `|ρ|`. In 11.1 this is an **analyzer + offline/CI lint** (the
-//! acceptance suite asserts the default factor set is not collinear); wiring it
-//! as a hard model-publish gate is 11.5.
+//! as a high `|ρ|`. In 11.1 this is an **analyzer + offline/CI lint**: the
+//! acceptance suite (`default_momentum_estimators_not_mutually_collinear`)
+//! asserts the four momentum estimators and the simple return stay below the
+//! configured tolerance on a heterogeneous synthetic panel. Wiring `|ρ|` as a
+//! hard model-publish gate is 11.5.
 //!
 //! Spearman is Pearson correlation of average ranks, computed over the
 //! observations where **both** factors are present. The `f64` reductions are
 //! quantized to a fixed decimal scale so the report is deterministic.
+
+use std::collections::HashMap;
 
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::{Deserialize, Serialize};
@@ -107,6 +111,56 @@ impl FactorCollinearityAnalyzer {
     }
 }
 
+/// Residualize every factor column against a categorical grouping.
+///
+/// OLS on group dummies, which for a pure one-hot grouping reduces to subtracting
+/// the within-group mean (`residual = value − mean_group`).
+///
+/// This is sector/category-neutral collinearity (the `factors.orthogonalize.
+/// neutralize_by = [category]` operator): it removes correlation that is merely
+/// two factors both tracking the same category composition, so what remains is
+/// genuine same-signal redundancy. `groups` is row-aligned with `panel.rows`; a
+/// `None` group is its own bucket (unknown-category observations neutralize among
+/// themselves, never against a fabricated group). Missing cells stay missing.
+#[must_use]
+pub fn neutralize_by_group(
+    panel: &FactorObservationMatrix,
+    groups: &[Option<i64>],
+) -> FactorObservationMatrix {
+    let factor_count = panel.factors.len();
+    let mut rows = panel.rows.clone();
+    for factor in 0..factor_count {
+        // Within-group running sum/count over the present values of this factor.
+        let mut aggregate: HashMap<Option<i64>, (Decimal, u64)> = HashMap::new();
+        for (row_index, row) in panel.rows.iter().enumerate() {
+            if let Some(Some(value)) = row.get(factor).copied() {
+                let key = groups.get(row_index).copied().unwrap_or(None);
+                let entry = aggregate.entry(key).or_insert((Decimal::ZERO, 0));
+                entry.0 += value;
+                entry.1 += 1;
+            }
+        }
+        for (row_index, row) in rows.iter_mut().enumerate() {
+            let Some(cell) = row.get_mut(factor) else {
+                continue;
+            };
+            if let Some(value) = *cell {
+                let key = groups.get(row_index).copied().unwrap_or(None);
+                if let Some((sum, count)) = aggregate.get(&key)
+                    && *count > 0
+                {
+                    let mean = *sum / Decimal::from(*count);
+                    *cell = Some(value - mean);
+                }
+            }
+        }
+    }
+    FactorObservationMatrix {
+        factors: panel.factors.clone(),
+        rows,
+    }
+}
+
 /// Extract one factor's column as optional `f64`s (index-aligned with rows).
 fn column(panel: &FactorObservationMatrix, index: usize) -> Vec<Option<f64>> {
     use rust_decimal::prelude::ToPrimitive;
@@ -185,4 +239,83 @@ fn pearson(left: &[f64], right: &[f64]) -> f64 {
         return 0.0;
     }
     (covariance / denominator).clamp(-1.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal::Decimal;
+
+    use super::{FactorCollinearityAnalyzer, FactorObservationMatrix, neutralize_by_group};
+    use crate::factors::value::FactorName;
+
+    fn cell(value: i64, scale: u32) -> Decimal {
+        Decimal::new(value, scale)
+    }
+
+    #[test]
+    fn neutralize_by_category_removes_shared_category_level() {
+        // Two factors both step up with the category level (so their raw Spearman
+        // is inflated), but within each category their fine structure is not the
+        // same. Category-neutralizing strips the shared level, so the residual
+        // correlation is materially smaller — the category composition no longer
+        // masquerades as genuine factor redundancy.
+        let alpha = FactorName::from_static("alpha");
+        let beta = FactorName::from_static("beta");
+        let mut rows = Vec::new();
+        for category in 0..3_i64 {
+            let base = category * 100;
+            // Within-group: alpha rises 0,1,2; beta is a rotation (1,2,0).
+            rows.push(vec![Some(cell(base, 0)), Some(cell(base + 1, 0))]);
+            rows.push(vec![Some(cell(base + 1, 0)), Some(cell(base + 2, 0))]);
+            rows.push(vec![Some(cell(base + 2, 0)), Some(cell(base, 0))]);
+        }
+        let panel = FactorObservationMatrix {
+            factors: vec![alpha, beta],
+            rows,
+        };
+        let threshold = Decimal::new(9, 1);
+
+        let raw = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+        assert!(
+            raw.matrix[0][1] > Decimal::new(5, 1),
+            "raw factors are inflated by the shared category level (ρ={})",
+            raw.matrix[0][1]
+        );
+
+        let groups: Vec<Option<i64>> = (0..3_i64)
+            .flat_map(|category| [Some(category); 3])
+            .collect();
+        let neutralized = neutralize_by_group(&panel, &groups);
+        let report = FactorCollinearityAnalyzer::analyze(&neutralized, threshold);
+        assert!(
+            report.matrix[0][1].abs() < raw.matrix[0][1].abs(),
+            "neutralizing the category level shrinks the correlation (raw={}, neutralized={})",
+            raw.matrix[0][1],
+            report.matrix[0][1]
+        );
+    }
+
+    #[test]
+    fn neutralize_treats_missing_group_as_its_own_bucket() {
+        // A `None` group must not borrow another group's mean; it neutralizes
+        // among the other `None` rows only.
+        let alpha = FactorName::from_static("alpha");
+        let rows = vec![
+            vec![Some(cell(10, 0))],
+            vec![Some(cell(20, 0))],
+            vec![Some(cell(100, 0))],
+            vec![Some(cell(140, 0))],
+        ];
+        let panel = FactorObservationMatrix {
+            factors: vec![alpha],
+            rows,
+        };
+        let groups = [Some(0_i64), Some(0), None, None];
+        let neutralized = neutralize_by_group(&panel, &groups);
+        // Group 0 mean = 15 ⇒ residuals ±5; None group mean = 120 ⇒ residuals ±20.
+        assert_eq!(neutralized.rows[0][0], Some(Decimal::new(-5, 0)));
+        assert_eq!(neutralized.rows[1][0], Some(Decimal::new(5, 0)));
+        assert_eq!(neutralized.rows[2][0], Some(Decimal::new(-20, 0)));
+        assert_eq!(neutralized.rows[3][0], Some(Decimal::new(20, 0)));
+    }
 }

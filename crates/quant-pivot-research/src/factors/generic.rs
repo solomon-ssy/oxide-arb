@@ -93,25 +93,31 @@ pub fn generic_factors(
         ),
     ];
     factors.extend(momentum_factors(features));
-    factors.extend([
-        feature_factor(
-            &MEAN_REVERSION,
-            FactorFamily::MeanReversion,
-            ts::PRICE_REVERSAL,
-            FactorDirection::Positive,
-            FactorNormalization::WinsorizedZScore,
-            false,
-            "price reversal",
-        ),
-        feature_factor(
+    factors.push(feature_factor(
+        &MEAN_REVERSION,
+        FactorFamily::MeanReversion,
+        ts::PRICE_REVERSAL,
+        FactorDirection::Positive,
+        FactorNormalization::WinsorizedZScore,
+        false,
+        "price reversal",
+    ));
+    // The volatility-regime factor binds the primary (first) volatility window;
+    // additional configured windows remain feature-plane only. Config validation
+    // guarantees the list is non-empty, so this only elides the factor on a
+    // (rejected) empty config — fail-closed, never a fabricated `_0s` feature.
+    if let Some(realized_vol) = windowed_realized_vol(features) {
+        factors.push(feature_factor(
             &VOLATILITY_REGIME,
             FactorFamily::Volatility,
-            windowed_realized_vol(features),
+            realized_vol,
             FactorDirection::Negative,
             FactorNormalization::Rank,
             false,
             "realized volatility",
-        ),
+        ));
+    }
+    factors.extend([
         feature_factor(
             &MARKET_ACTIVITY,
             FactorFamily::Activity,
@@ -137,47 +143,62 @@ pub fn generic_factors(
 
 /// The independent momentum family: four distinct estimators (never a return
 /// clone), each vol/normalization-tuned via config.
+///
+/// The windowed estimators (ROC, EMA slope, vol-adjusted return) bind the
+/// **primary (first)** configured window; extra configured windows are computed
+/// as features but not registered as separate weighted factors (registering one
+/// factor per window would introduce intra-family collinearity). Config
+/// validation guarantees the window lists are non-empty, so a missing primary
+/// window elides the factor (fail-closed) rather than fabricating a `_0s` name.
 fn momentum_factors(
     features: &FeaturesConfig,
 ) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
-    vec![
-        feature_factor(
+    let mut factors = Vec::with_capacity(4);
+    if let Some(input) = momentum_roc_feature(features) {
+        factors.push(feature_factor(
             &MOMENTUM_ROC,
             FactorFamily::Momentum,
-            momentum_roc_feature(features),
+            input,
             FactorDirection::Positive,
             FactorNormalization::WinsorizedZScore,
             false,
             "lag-skipped rate of change",
-        ),
-        feature_factor(
+        ));
+    }
+    if let Some(input) = ema_slope_feature(features) {
+        factors.push(feature_factor(
             &MOMENTUM_EMA_SLOPE,
             FactorFamily::Momentum,
-            ema_slope_feature(features),
+            input,
             FactorDirection::Positive,
             FactorNormalization::WinsorizedZScore,
             false,
             "EMA slope",
-        ),
-        feature_factor(
+        ));
+    }
+    if let Some(input) = vol_adjusted_feature(features) {
+        factors.push(feature_factor(
             &MOMENTUM_VOL_ADJUSTED,
             FactorFamily::Momentum,
-            vol_adjusted_feature(features),
+            input,
             FactorDirection::Positive,
             FactorNormalization::WinsorizedZScore,
             false,
             "volatility-adjusted return",
-        ),
-        feature_factor(
-            &MOMENTUM_MACD,
-            FactorFamily::Momentum,
-            ts::MACD_NORM,
-            FactorDirection::Positive,
-            FactorNormalization::WinsorizedZScore,
-            false,
-            "vol-normalized MACD",
-        ),
-    ]
+        ));
+    }
+    // MACD binds fixed fast/slow half-lives (no window list), so it is always
+    // registered.
+    factors.push(feature_factor(
+        &MOMENTUM_MACD,
+        FactorFamily::Momentum,
+        ts::MACD_NORM,
+        FactorDirection::Positive,
+        FactorNormalization::WinsorizedZScore,
+        false,
+        "vol-normalized MACD",
+    ));
+    factors
 }
 
 /// Build a single-feature `(spec, computer)` pair.
@@ -239,50 +260,45 @@ fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     (spec, computer)
 }
 
-/// Resolve the ROC-momentum feature from the first configured ROC window.
-fn momentum_roc_feature(features: &FeaturesConfig) -> FeatureName {
-    FeatureName::ts_momentum_roc(
-        features
-            .momentum
-            .roc_windows_secs
-            .first()
-            .copied()
-            .unwrap_or(0),
-    )
+/// Resolve the ROC-momentum feature from the primary (first) ROC window.
+///
+/// `None` when no ROC window is configured — the factor is then elided rather
+/// than bound to a fabricated `ts.momentum_roc_0s` feature.
+fn momentum_roc_feature(features: &FeaturesConfig) -> Option<FeatureName> {
+    features
+        .momentum
+        .roc_windows_secs
+        .first()
+        .copied()
+        .map(FeatureName::ts_momentum_roc)
 }
 
-/// Resolve the EMA-slope feature from the first configured slope window.
-fn ema_slope_feature(features: &FeaturesConfig) -> FeatureName {
-    FeatureName::ts_ema_slope(
-        features
-            .momentum
-            .slope_windows_secs
-            .first()
-            .copied()
-            .unwrap_or(0),
-    )
+/// Resolve the EMA-slope feature from the primary (first) slope window.
+fn ema_slope_feature(features: &FeaturesConfig) -> Option<FeatureName> {
+    features
+        .momentum
+        .slope_windows_secs
+        .first()
+        .copied()
+        .map(FeatureName::ts_ema_slope)
 }
 
-/// Resolve the vol-adjusted-return feature from the first volatility window.
-fn vol_adjusted_feature(features: &FeaturesConfig) -> FeatureName {
-    FeatureName::ts_vol_adjusted_return(
-        features
-            .volatility_windows_secs
-            .first()
-            .copied()
-            .unwrap_or(0),
-    )
+/// Resolve the vol-adjusted-return feature from the primary volatility window.
+fn vol_adjusted_feature(features: &FeaturesConfig) -> Option<FeatureName> {
+    features
+        .volatility_windows_secs
+        .first()
+        .copied()
+        .map(FeatureName::ts_vol_adjusted_return)
 }
 
-/// Resolve the realized-volatility feature from the first volatility window.
-fn windowed_realized_vol(features: &FeaturesConfig) -> FeatureName {
-    FeatureName::ts_realized_vol(
-        features
-            .volatility_windows_secs
-            .first()
-            .copied()
-            .unwrap_or(0),
-    )
+/// Resolve the realized-volatility feature from the primary volatility window.
+fn windowed_realized_vol(features: &FeaturesConfig) -> Option<FeatureName> {
+    features
+        .volatility_windows_secs
+        .first()
+        .copied()
+        .map(FeatureName::ts_realized_vol)
 }
 
 /// A factor backed by one numeric feature, extracted via the feature's canonical
@@ -415,6 +431,13 @@ fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
 }
 
 /// Map an aggregate data-quality status to a `[0, 1]` confidence / score.
+///
+/// These are **definitional governance** anchors for the status enum (Fresh is
+/// full trust, Insufficient is none), not the tunable *normalization* heuristics
+/// audit #3 removed — those (winsor / clamp / min-max) are fully config-driven in
+/// [`crate::factors::normalize`]. Keeping this mapping fixed also preserves the
+/// factor engine's infallible construction (no per-compute `DecimalString`
+/// parse). Distributional tuning of the alpha itself is learned in 11.4.
 fn data_quality_confidence(status: DataQualityStatus) -> Decimal {
     match status {
         DataQualityStatus::Fresh => Decimal::ONE,

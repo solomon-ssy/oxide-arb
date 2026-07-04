@@ -6,7 +6,7 @@
 //! mutates state.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -16,23 +16,23 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
         BacktestReportInfo, BacktestReportListQuery, CollinearPairView, ComparisonReportListQuery,
-        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-        ModelVersionListQuery, Paginated, ResearchCatalogPort, TrainingDatasetInfo,
-        TrainingDatasetListQuery, pagination::PageRequest,
+        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
+        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery,
+        ModelVersionInfo, ModelVersionListQuery, Paginated, ResearchCatalogPort,
+        TrainingDatasetInfo, TrainingDatasetListQuery, pagination::PageRequest,
     },
-    enums::quant::PublicationStatus,
-    types::FactorDefinitionId,
+    enums::{common::MarketCategory, quant::PublicationStatus},
+    types::{FactorDefinitionId, MarketId, Probability},
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, FactorRepository, ModelComparisonReportRepository,
+    BacktestReportRepository, FactorRepository, MarketRepository, ModelComparisonReportRepository,
     ModelRegistryRepository, TrainingDatasetRepository,
 };
 use rust_decimal::Decimal;
 
 use crate::app::bundles::ResearchBundle;
 use quant_pivot_research::factors::{
-    FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix,
+    FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix, neutralize_by_group,
 };
 
 /// Ceiling on how many published factor definitions the collinearity analysis
@@ -46,6 +46,7 @@ pub struct CoreResearchCatalogPort {
     backtests: Arc<dyn BacktestReportRepository>,
     comparisons: Arc<dyn ModelComparisonReportRepository>,
     factors: Arc<dyn FactorRepository>,
+    markets: Arc<dyn MarketRepository>,
 }
 
 impl CoreResearchCatalogPort {
@@ -58,7 +59,42 @@ impl CoreResearchCatalogPort {
             backtests: Arc::clone(&research.backtest_report_repo),
             comparisons: Arc::clone(&research.comparison_report_repo),
             factors: Arc::clone(&research.factor_repo),
+            markets: Arc::clone(&research.market_repo),
         }
+    }
+
+    /// Resolve a per-row category group key for the collinearity panel: each
+    /// distinct market category is assigned a stable integer id; a market absent
+    /// from the registry (or with no category) is `None` (its own bucket, never
+    /// borrowing another category's mean).
+    async fn category_groups(&self, row_markets: &[String]) -> QuantResult<Vec<Option<i64>>> {
+        let ids: Vec<MarketId> = {
+            let mut seen: HashSet<&str> = HashSet::new();
+            row_markets
+                .iter()
+                .filter(|market| seen.insert(market.as_str()))
+                .map(|market| MarketId::new(market.as_str()))
+                .collect()
+        };
+        let infos = self
+            .markets
+            .find_by_ids(&ids)
+            .await
+            .map_err(QuantError::from)?;
+        let mut category_ids: HashMap<MarketCategory, i64> = HashMap::new();
+        let mut market_category: HashMap<String, i64> = HashMap::new();
+        for info in infos {
+            let Some(category) = info.categories.first().copied() else {
+                continue;
+            };
+            let next = i64::try_from(category_ids.len()).unwrap_or(i64::MAX);
+            let id = *category_ids.entry(category).or_insert(next);
+            market_category.insert(info.market_id.to_string(), id);
+        }
+        Ok(row_markets
+            .iter()
+            .map(|market| market_category.get(market).copied())
+            .collect())
     }
 }
 
@@ -129,6 +165,8 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         &self,
         lookback_secs: u64,
         threshold: Decimal,
+        source: FactorCollinearitySource,
+        neutralize_by_category: bool,
     ) -> QuantResult<FactorCollinearityView> {
         // The published factor definitions define the columns of the panel.
         let definitions = self
@@ -170,26 +208,48 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             .await
             .map_err(QuantError::from)?;
 
-        // Pivot into one observation row per (as_of, market): each column is the
-        // factor's normalized score (only scored values participate).
+        // Pivot into one observation row per (as_of, market). The panel source
+        // selects the plane: `Raw` uses the pre-normalization value (the correct
+        // plane for detecting same-signal factors, unbiased by mixing Rank vs
+        // z-score); `Normalized` uses the scored `[0, 1]` value.
         let mut observations: BTreeMap<(i64, String), Vec<Option<Decimal>>> = BTreeMap::new();
         for value in values {
             let Some(column) = column_index.get(&value.factor_definition_id) else {
                 continue;
             };
-            let Some(score) = value.normalized_score else {
+            let cell = match source {
+                FactorCollinearitySource::Raw => value.raw_value,
+                FactorCollinearitySource::Normalized => {
+                    value.normalized_score.map(Probability::inner)
+                }
+            };
+            let Some(cell) = cell else {
                 continue;
             };
             let key = (value.as_of.timestamp_millis(), value.market_id.to_string());
             let row = observations
                 .entry(key)
                 .or_insert_with(|| vec![None; factor_names.len()]);
-            row[*column] = Some(score.inner());
+            row[*column] = Some(cell);
         }
         let observation_count = observations.len();
+        // Keep each row's market alongside it so the category-neutralize operator
+        // can residualize against market category.
+        let mut rows = Vec::with_capacity(observation_count);
+        let mut row_markets = Vec::with_capacity(observation_count);
+        for ((_, market), row) in observations {
+            rows.push(row);
+            row_markets.push(market);
+        }
         let panel = FactorObservationMatrix {
             factors: factor_names,
-            rows: observations.into_values().collect(),
+            rows,
+        };
+        let panel = if neutralize_by_category {
+            let groups = self.category_groups(&row_markets).await?;
+            neutralize_by_group(&panel, &groups)
+        } else {
+            panel
         };
         let report = FactorCollinearityAnalyzer::analyze(&panel, threshold);
 
@@ -212,6 +272,7 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             threshold: report.threshold,
             observation_count,
             lookback_secs,
+            panel_source: source,
         })
     }
 }

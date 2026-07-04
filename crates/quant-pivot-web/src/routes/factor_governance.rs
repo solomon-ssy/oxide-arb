@@ -12,6 +12,7 @@ use quant_pivot_models::{
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
+    runtime_config::NeutralizeDimension,
     types::FactorDefinitionId,
 };
 use serde::Serialize;
@@ -80,6 +81,11 @@ pub async fn list(
 const DEFAULT_COLLINEARITY_LOOKBACK_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// `GET /api/research/factors/collinearity` — Spearman collinearity report.
+///
+/// The tolerance defaults to the **active** `factors.orthogonalize.max_correlation`
+/// so the report and the (future) publish gate share one threshold; an explicit
+/// `threshold` query param overrides it. The `source` param selects the raw
+/// (default) or normalized value plane.
 pub async fn collinearity(
     state: web::Data<AppState>,
     query: web::Query<FactorCollinearityQuery>,
@@ -88,16 +94,38 @@ pub async fn collinearity(
     let lookback_secs = query
         .lookback_secs
         .unwrap_or(DEFAULT_COLLINEARITY_LOOKBACK_SECS);
-    let threshold = match query.threshold {
-        Some(raw) => raw
+    let threshold = if let Some(raw) = query.threshold {
+        raw.trim()
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|error| WebError::BadRequest(format!("invalid threshold `{raw}`: {error}")))?
+    } else {
+        let config = state.runtime_config_apply.current();
+        config
+            .factors
+            .orthogonalize
+            .max_correlation
+            .value
             .trim()
             .parse::<rust_decimal::Decimal>()
-            .map_err(|error| WebError::BadRequest(format!("invalid threshold `{raw}`: {error}")))?,
-        None => rust_decimal::Decimal::new(9, 1),
+            .map_err(|error| {
+                WebError::BadRequest(format!(
+                    "runtime factors.orthogonalize.max_correlation is invalid: {error}"
+                ))
+            })?
     };
+    // Honor the runtime `factors.orthogonalize.neutralize_by` operator.
+    let neutralize_by_category = state
+        .runtime_config_apply
+        .current()
+        .factors
+        .orthogonalize
+        .neutralize_by
+        .iter()
+        .any(|dimension| matches!(dimension, NeutralizeDimension::Category));
+    let source = query.source.unwrap_or_default();
     let report = state
         .research_catalog
-        .factor_collinearity(lookback_secs, threshold)
+        .factor_collinearity(lookback_secs, threshold, source, neutralize_by_category)
         .await?;
     Ok(WebResponse::ok(report))
 }

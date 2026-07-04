@@ -22,7 +22,7 @@ use quant_pivot_models::{
         FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
-    types::{ContentHash, FactorDefinitionId},
+    types::{ContentHash, FactorDefinitionId, Probability},
 };
 use rust_decimal::Decimal;
 
@@ -452,8 +452,18 @@ fn assemble_market(
 /// indeterminate cross-sections never contribute — and are never coerced to a
 /// neutral placeholder score.
 fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> ScoredFactor {
-    let below_confidence_floor = raw.confidence.inner() < floor;
     let scored = matches!(normalized, NormalizedFactor::Scored { .. });
+    // A factor with no usable normalized score reports zero confidence: a missing
+    // input or an indeterminate cross-section is not "confident" about anything,
+    // and a non-zero confidence sitting next to an indeterminate reason misleads
+    // operators (and the persisted fact / report breakdown). Only a scored factor
+    // carries its raw confidence forward.
+    let confidence = if scored {
+        raw.confidence
+    } else {
+        Probability::ZERO
+    };
+    let below_confidence_floor = confidence.inner() < floor;
     let value = FactorValue {
         definition_id: raw.definition_id.clone(),
         name: raw.name.clone(),
@@ -461,7 +471,7 @@ fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> Sc
         raw_value: raw.raw_value,
         normalization: normalized,
         direction: raw.direction,
-        confidence: raw.confidence,
+        confidence,
         explanation: FactorExplanation {
             headline: raw.headline.clone(),
             drivers: raw.drivers.clone(),

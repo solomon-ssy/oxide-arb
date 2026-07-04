@@ -341,4 +341,16 @@ impl MarketWindowSnapshot {
             .filter_map(|bucket| bucket.mid_close)
             .collect()
     }
+
+    /// The `(bucket_time, mid)` samples present within the trailing `window`,
+    /// ascending — the time-native input for duration-based EMA / MACD
+    /// estimators (which must weight by real elapsed time, not point count,
+    /// because the book is sampled sparsely and unevenly).
+    #[must_use]
+    pub fn mids_ts_in(&self, window: Duration) -> Vec<(DateTime<Utc>, Price)> {
+        self.buckets_in(window)
+            .into_iter()
+            .filter_map(|bucket| bucket.mid_close.map(|mid| (bucket.bucket_time, mid)))
+            .collect()
+    }
 }

@@ -345,6 +345,7 @@ fn build_exit_monitor(
         weight_overlay: Arc::clone(&wiring.governance.weight_overlay),
         config_versions: Arc::clone(&repos.runtime_config)
             as Arc<dyn RuntimeConfigVersionRepository>,
+        recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
         pit_source: Arc::clone(&wiring.data.pit_source),
         market_registry: Arc::clone(&wiring.data.market_registry),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
@@ -365,6 +366,7 @@ fn build_exit_monitor(
             model_registry: Arc::clone(&wiring.research.model_registry_repo),
             factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
             config: Arc::clone(&wiring.governance.runtime_config),
+            recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             pit_source: Arc::clone(&wiring.data.pit_source),
             market_registry: Arc::clone(&wiring.data.market_registry),
             window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),

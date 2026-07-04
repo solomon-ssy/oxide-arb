@@ -99,6 +99,8 @@ expression: recommendation_immediate_entry()
       "family": "liquidity",
       "raw_value": "1234.5",
       "normalized_score": "0.8",
+      "normalization_source": "cross_section",
+      "indeterminate_reason": null,
       "weight": "0.4",
       "contribution": "0.32",
       "confidence": "0.75",

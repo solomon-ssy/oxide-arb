@@ -37,11 +37,11 @@ use quant_pivot_models::{
         BookSnapshot, BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort,
         ComparisonReportListQuery, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
         ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
-        ExecutionSubmitPort, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, FactorGovernancePort, GatePreviewIntent, GovernanceActor,
-        HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort,
-        ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery,
-        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        ExecutionSubmitPort, FactorCollinearitySource, FactorCollinearityView,
+        FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort, GatePreviewIntent,
+        GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort,
+        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo,
+        ModelSpecListQuery, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
         PromoteDatasetRequest, PublishFactorCommand, PublishModelCommand, QualityGateReportView,
         QuantModeTransitionReport, ReconciliationPort, ResearchCatalogPort,
         ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
@@ -740,6 +740,8 @@ impl ResearchCatalogPort for MockResearchCatalogPort {
         &self,
         lookback_secs: u64,
         threshold: rust_decimal::Decimal,
+        source: FactorCollinearitySource,
+        _neutralize_by_category: bool,
     ) -> QuantResult<FactorCollinearityView> {
         Ok(FactorCollinearityView {
             factors: Vec::new(),
@@ -748,6 +750,7 @@ impl ResearchCatalogPort for MockResearchCatalogPort {
             threshold,
             observation_count: 0,
             lookback_secs,
+            panel_source: source,
         })
     }
 }

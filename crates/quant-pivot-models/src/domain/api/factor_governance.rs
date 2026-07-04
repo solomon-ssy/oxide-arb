@@ -78,6 +78,23 @@ struct QualityGateProjection {
     name: String,
 }
 
+/// Which factor value plane the collinearity matrix is computed over.
+///
+/// `Raw` (the default) correlates the **pre-normalization** factor values — the
+/// methodologically correct plane for detecting the audit #2 root cause (two
+/// factors that are the same underlying signal), unbiased by mixing different
+/// normalization methods. `Normalized` correlates the post-normalization scores,
+/// offered as a secondary view of how the *scored* plane looks to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactorCollinearitySource {
+    /// Correlate raw (pre-normalization) factor values (default).
+    #[default]
+    Raw,
+    /// Correlate normalized `[0, 1]` scores.
+    Normalized,
+}
+
 /// One collinear factor pair in the analysis report.
 #[derive(Debug, Clone, Serialize)]
 pub struct CollinearPairView {
@@ -101,6 +118,8 @@ pub struct FactorCollinearityView {
     pub observation_count: usize,
     /// The lookback window (seconds) the sample was drawn from.
     pub lookback_secs: u64,
+    /// Which value plane (raw / normalized) the matrix was computed over.
+    pub panel_source: FactorCollinearitySource,
 }
 
 /// Query for `GET /research/factors/collinearity`.
@@ -108,8 +127,11 @@ pub struct FactorCollinearityView {
 pub struct FactorCollinearityQuery {
     /// Rolling lookback in seconds (defaults to 7 days when omitted).
     pub lookback_secs: Option<u64>,
-    /// Absolute-correlation tolerance (defaults to 0.9 when omitted).
+    /// Absolute-correlation tolerance (defaults to the runtime
+    /// `factors.orthogonalize.max_correlation` when omitted).
     pub threshold: Option<String>,
+    /// Which value plane to correlate (defaults to `raw`).
+    pub source: Option<FactorCollinearitySource>,
 }
 
 /// Paginated filter for the factor-definition governance catalog.

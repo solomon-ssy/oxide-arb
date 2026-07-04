@@ -16,6 +16,7 @@
 mod collinearity;
 mod computer;
 mod domain;
+mod frozen;
 mod generic;
 pub mod names;
 mod normalize;
@@ -29,9 +30,11 @@ mod acceptance;
 
 pub use collinearity::{
     CollinearPair, FactorCollinearityAnalyzer, FactorCollinearityReport, FactorObservationMatrix,
+    neutralize_by_group,
 };
 pub use computer::{FactorComputer, FactorEngine, FactorHistory};
 pub use domain::{DomainFactorComputer, DomainFactorRegistry};
+pub use frozen::frozen_factor_outcome;
 pub use generic::{factor_definition_id, generic_factors};
 pub use normalize::{
     CrossSectionalNormalizer, MinMaxNormalizer, NormalizationClampAudit, NormalizationStats,
