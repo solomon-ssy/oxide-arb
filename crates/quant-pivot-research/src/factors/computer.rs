@@ -448,22 +448,26 @@ fn assemble_market(
 /// Build a [`ScoredFactor`] from a raw factor and its normalization outcome.
 ///
 /// A factor contributes only when it carries a usable normalized score and its
-/// confidence meets the floor. Missing inputs (`confidence = 0`) and
-/// indeterminate cross-sections never contribute — and are never coerced to a
-/// neutral placeholder score.
+/// confidence meets the floor. Missing inputs (`confidence = 0`), scores below
+/// the floor (also zeroed), and indeterminate cross-sections never contribute —
+/// and are never coerced to a neutral placeholder score.
 fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> ScoredFactor {
     let scored = matches!(normalized, NormalizedFactor::Scored { .. });
     // A factor with no usable normalized score reports zero confidence: a missing
     // input or an indeterminate cross-section is not "confident" about anything,
     // and a non-zero confidence sitting next to an indeterminate reason misleads
     // operators (and the persisted fact / report breakdown). Only a scored factor
-    // carries its raw confidence forward.
-    let confidence = if scored {
+    // carries its raw confidence forward — unless it falls below the floor, in
+    // which case confidence is zeroed so downstream scorers cannot partially weight it.
+    let mut confidence = if scored {
         raw.confidence
     } else {
         Probability::ZERO
     };
-    let below_confidence_floor = confidence.inner() < floor;
+    let below_confidence_floor = scored && confidence.inner() < floor;
+    if below_confidence_floor {
+        confidence = Probability::ZERO;
+    }
     let value = FactorValue {
         definition_id: raw.definition_id.clone(),
         name: raw.name.clone(),
@@ -494,9 +498,8 @@ fn reject_reason(scored: &ScoredFactor, floor: Decimal) -> String {
             format!("required factor `{}` indeterminate ({reason})", value.name)
         }
         NormalizedFactor::Scored { .. } => format!(
-            "required factor `{}` confidence {} below floor {floor}",
+            "required factor `{}` confidence below floor {floor}",
             value.name,
-            value.confidence.inner()
         ),
     }
 }

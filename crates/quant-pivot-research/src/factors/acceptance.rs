@@ -329,6 +329,11 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
     assert!(outcomes[0].eligibility.is_eligible());
     let factor = scored(&outcomes[0], "book_imbalance");
     assert!(factor.below_confidence_floor);
+    assert_eq!(
+        factor.value.confidence,
+        Probability::ZERO,
+        "below-floor confidence must be zeroed for scorers and persistence"
+    );
     assert!(
         !factor.contributes,
         "below-floor factor must not contribute"
