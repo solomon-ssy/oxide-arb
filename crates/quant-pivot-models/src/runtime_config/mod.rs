@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 11`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 12`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -31,10 +31,12 @@ use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
 ///
-/// Bumped to 11 as the Phase 11 frozen baseline (added reserved `research` /
-/// `feedback` sections). v10 and earlier are rejected with zero compatibility;
-/// deployments migrate `config/quant-pivot.toml` in place (no shim).
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(11);
+/// Bumped to 12 for Phase 11.1: the `factors` section gained `normalization`,
+/// `cross_section`, and `orthogonalize`; the `features` section replaced the
+/// flat `momentum_windows_secs` with a structured `momentum` sub-config. Prior
+/// versions are rejected with zero compatibility (no shim, no migration —
+/// the database is reset).
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(12);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -275,19 +277,19 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 11);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 11);
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 12);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 12);
     }
 
     #[test]
     fn rejects_prior_schema_documents() {
-        // The immediately-prior baseline (v10) is rejected with zero compatibility.
+        // The immediately-prior baseline (v11) is rejected with zero compatibility.
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(10);
-        let error = RuntimeConfig::from_json(&document).expect_err("v10 must be rejected");
+        document["schema_version"] = json!(11);
+        let error = RuntimeConfig::from_json(&document).expect_err("v11 must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 10
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 11
         ));
     }
 

@@ -54,7 +54,7 @@ use quant_pivot_research::{
 
 use crate::{
     pipeline::{
-        historical_window::{HistoricalWindowLoader, WindowSpec, max_feature_lookback},
+        historical_window::{HistoricalWindowLoader, WindowSpec},
         inference_batch::build_runtime_input,
         inference_context::build_market_inference_context,
     },
@@ -326,7 +326,7 @@ impl BacktestService {
         let schedule = ReplaySchedule::from_examples(&examples);
         let source_delay =
             Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
-        let lookback = max_feature_lookback(&self.replay.features);
+        let lookback = Duration::from_secs(self.replay.features.max_lookback_secs());
         let max_horizon_secs = max_horizon(dataset);
 
         let loader = HistoricalWindowLoader::new(

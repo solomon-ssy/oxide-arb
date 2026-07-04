@@ -238,7 +238,7 @@ impl FeaturePipelineService {
         if !builder.schema().needs_window() {
             return Ok(empty_windows(request.included, request.as_of, source_delay));
         }
-        let lookback = max_feature_lookback(request.features);
+        let lookback = Duration::from_secs(request.features.max_lookback_secs());
         self.window_provider
             .load_windows(request.included, request.as_of, lookback, source_delay)
             .await
@@ -302,17 +302,4 @@ fn empty_windows(
             )
         })
         .collect()
-}
-
-/// Maximum trailing window any enabled time-series / microstructure feature needs.
-fn max_feature_lookback(config: &FeaturesConfig) -> Duration {
-    let max_secs = config
-        .bar_windows_secs
-        .iter()
-        .chain(config.momentum_windows_secs.iter())
-        .chain(config.volatility_windows_secs.iter())
-        .copied()
-        .max()
-        .unwrap_or(0);
-    Duration::from_secs(max_secs)
 }

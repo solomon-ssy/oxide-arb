@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::{
         common::MarketCategory,
-        factor::FactorFamily,
+        factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
         quant::{
             BindingConstraint, EmptyReportReason, EntryTriggerKind, ExitSettlementMode,
             ExitTriggerKind, FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
@@ -243,8 +243,16 @@ pub struct FactorBreakdownEntry {
     pub family: FactorFamily,
     /// Raw factor value before normalization.
     pub raw_value: Option<Decimal>,
-    /// Normalized factor score in `[0, 1]`.
-    pub normalized_score: Probability,
+    /// Normalized factor score in `[0, 1]`; `None` when the factor was missing
+    /// or indeterminate (never a fabricated neutral).
+    #[serde(default)]
+    pub normalized_score: Option<Probability>,
+    /// How the score was derived; `None` when missing / indeterminate.
+    #[serde(default)]
+    pub normalization_source: Option<NormalizationSource>,
+    /// Why the factor was indeterminate; `None` when scored / missing.
+    #[serde(default)]
+    pub indeterminate_reason: Option<FactorIndeterminateReason>,
     /// Weight applied by the model.
     pub weight: Decimal,
     /// Signed contribution to the composite score.

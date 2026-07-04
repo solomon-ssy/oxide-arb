@@ -18,14 +18,14 @@ use quant_pivot_models::{
         NewRuntimeConfigVersion, NullablePatch, OperationLogQuery, Patch, ReconciliationPatch,
         UpsertKillSwitchState,
     },
-    enums::market::MarketStatus,
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
             CapitalAllocationState, ExecutionOrderPhase, KillSwitchState, OrderIntentKind,
             OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
         },
-        factor::FactorFamily,
+        factor::{FactorFamily, NormalizationSource},
+        market::MarketStatus,
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
@@ -1092,7 +1092,9 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
         factor_name: "liquidity_depth".to_owned(),
         family: FactorFamily::Liquidity,
         raw_value: Some(dec!(1234.5)),
-        normalized_score: Probability::new(dec!(0.8)),
+        normalized_score: Some(Probability::new(dec!(0.8))),
+        normalization_source: Some(NormalizationSource::CrossSection),
+        indeterminate_reason: None,
         weight: dec!(0.4),
         contribution: dec!(0.32),
         confidence: Probability::new(dec!(0.75)),

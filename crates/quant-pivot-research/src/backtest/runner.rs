@@ -401,7 +401,7 @@ mod tests {
             BacktestInputs, BacktestMarketMeta, BacktestRequest, BacktestTick, Backtester,
             MarketOutcome, PortfolioCaps,
         },
-        factors::{FactorExplanation, FactorValue, names::MOMENTUM},
+        factors::{FactorExplanation, FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
         model::{
             ReturnModelSpec,
             artifact::{
@@ -430,7 +430,7 @@ mod tests {
                     factor_schema_hash: hash("bb"),
                 },
                 weights: vec![FactorWeight {
-                    factor: MOMENTUM,
+                    factor: MOMENTUM_ROC,
                     weight: dec!(1),
                 }],
                 prediction_horizon_secs: 86_400,
@@ -456,16 +456,15 @@ mod tests {
             token_id: TokenId::new("yes"),
             factors: vec![FactorValue {
                 definition_id: FactorDefinitionId::from_v7(),
-                name: MOMENTUM,
+                name: MOMENTUM_ROC,
                 family: FactorFamily::Momentum,
                 raw_value: Some(dec!(1)),
-                normalized_score: Probability::new(dec!(0.9)),
+                normalization: NormalizedFactor::cross_section(Probability::new(dec!(0.9))),
                 direction,
                 confidence: Probability::new(dec!(1)),
                 explanation: FactorExplanation {
                     headline: "t".to_owned(),
                     drivers: Vec::new(),
-                    clamp: None,
                 },
                 input_feature_refs: Vec::new(),
             }],

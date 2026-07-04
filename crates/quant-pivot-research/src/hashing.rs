@@ -127,9 +127,7 @@ impl ResearchHasher {
 mod tests {
     use super::ResearchHasher;
     use crate::{
-        factors::{
-            FactorDefinitionSpec, FactorName, FactorOutputKind, FactorSet, NormalizationSpec,
-        },
+        factors::{FactorDefinitionSpec, FactorName, FactorOutputKind, FactorSet},
         features::{
             FeatureName, FeatureSchema, FeatureSpec, FeatureUnit, FeatureValueKind, NullPolicy,
             PitRule, SourceRequirement, StalenessRule,
@@ -137,7 +135,10 @@ mod tests {
         selection::ModelFeatureRequirements,
     };
     use quant_pivot_models::{
-        enums::{factor::FactorFamily, quant::FactorDirection},
+        enums::{
+            factor::{FactorFamily, FactorNormalization},
+            quant::FactorDirection,
+        },
         runtime_config::FeatureFamily,
         types::SchemaVersion,
     };
@@ -149,7 +150,7 @@ mod tests {
             input_features: Vec::new(),
             output_kind: FactorOutputKind::NormalizedScore,
             default_direction: FactorDirection::Positive,
-            normalization: NormalizationSpec::Rank,
+            normalization: FactorNormalization::Rank,
             owner: "test".to_owned(),
             quality_gates: Vec::new(),
         }

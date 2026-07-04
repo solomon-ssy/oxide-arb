@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
@@ -49,5 +50,15 @@ pub trait FactorRepository: Send + Sync {
     async fn list_values_for_run(
         &self,
         model_run_id: &ModelRunId,
+    ) -> Result<Vec<FactorValueInfo>, StorageError>;
+
+    /// Factor values for the given definitions within `[from, until)`, ascending
+    /// by `as_of`. Backs the `HistoricalQuantile` small-cross-section normalization
+    /// and the factor-collinearity analysis.
+    async fn recent_values(
+        &self,
+        factor_definition_ids: &[FactorDefinitionId],
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
     ) -> Result<Vec<FactorValueInfo>, StorageError>;
 }

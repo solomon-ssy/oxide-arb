@@ -1,17 +1,19 @@
-//! Factor plane: the [`FactorComputer`] contract, the [`FactorEngine`], the nine
-//! generic factors, normalization, and the domain skeleton.
+//! Factor plane: the [`FactorComputer`] contract, the [`FactorEngine`], the
+//! generic factors, cross-sectional normalization, collinearity analysis, and
+//! the domain skeleton.
 //!
 //! A [`FactorComputer`] turns a [`FeatureVector`](crate::features::FeatureVector)
 //! into a per-market [`RawFactor`] (pure, no normalization, no cross-section).
-//! The [`FactorEngine`] owns the governed [`FactorRegistry`], applies the
-//! (possibly cross-sectional) [`NormalizationSpec`], and resolves the runtime
-//! confidence floor / `missing_factor_policy` into a [`MarketFactorOutcome`].
+//! The [`FactorEngine`] owns the governed [`FactorRegistry`], runs the
+//! cross-section normalization stage (or the small-cross-section policy), and
+//! resolves the runtime confidence floor / `missing_factor_policy` into a
+//! [`MarketFactorOutcome`].
 //!
 //! A factor score is **not** a recommendation score — it is an explainable model
-//! input. Cross-sectional normalization (`ZScore` / `Rank`) is only valid through
-//! [`FactorEngine::compute_all_batch`]; the single-market path refuses to
-//! fabricate a pseudo cross-section.
+//! input. There is no silent neutral: a too-small or degenerate cross-section
+//! yields [`NormalizedFactor::Indeterminate`] with a recorded reason.
 
+mod collinearity;
 mod computer;
 mod domain;
 mod generic;
@@ -25,15 +27,22 @@ mod writer;
 #[cfg(test)]
 mod acceptance;
 
-pub use computer::{FactorComputer, FactorEngine};
+pub use collinearity::{
+    CollinearPair, FactorCollinearityAnalyzer, FactorCollinearityReport, FactorObservationMatrix,
+};
+pub use computer::{FactorComputer, FactorEngine, FactorHistory};
 pub use domain::{DomainFactorComputer, DomainFactorRegistry};
 pub use generic::{factor_definition_id, generic_factors};
-pub use normalize::{Normalized, normalize_column, to_probability_clamped};
+pub use normalize::{
+    CrossSectionalNormalizer, MinMaxNormalizer, NormalizationClampAudit, NormalizationStats,
+    NormalizedFactor, RankNormalizer, RawFactorColumn, WinsorizedZScoreNormalizer,
+    resolve_normalizer,
+};
 pub use persistence::FactorValueInsertContext;
 pub use registry::FactorRegistry;
 pub use value::{
     FactorDefinitionSpec, FactorDriver, FactorEligibility, FactorExplanation, FactorName,
-    FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome,
-    NormalizationClampAudit, NormalizationSpec, RawFactor, ScoredFactor,
+    FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome, RawFactor,
+    ScoredFactor,
 };
 pub use writer::factor_events;

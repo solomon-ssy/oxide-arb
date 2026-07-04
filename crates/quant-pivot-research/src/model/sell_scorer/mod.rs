@@ -119,11 +119,15 @@ impl WeightedSellScorerRuntime {
             if weight.is_zero() {
                 continue;
             }
-            let signed = Decimal::from(factor.direction.as_i8())
-                * factor.normalized_score.inner()
-                * factor.confidence.inner();
+            // Only a scored factor contributes; missing / indeterminate factors
+            // add nothing (no fabricated neutral).
+            let Some(score) = factor.normalized_score() else {
+                continue;
+            };
+            let signed =
+                Decimal::from(factor.direction.as_i8()) * score.inner() * factor.confidence.inner();
             net += *weight * signed;
-            if factor.raw_value.is_some() && factor.confidence.inner() > Decimal::ZERO {
+            if factor.confidence.inner() > Decimal::ZERO {
                 confidence_mass += *weight;
                 confidence_weighted += *weight * factor.confidence.inner();
             }
@@ -215,7 +219,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use crate::{
-        factors::{FactorExplanation, FactorName, FactorValue, names},
+        factors::{FactorExplanation, FactorName, FactorValue, NormalizedFactor, names},
         model::{
             artifact::{
                 FactorWeight, ModelArtifactHeader, SellScorerArtifact, SellScorerOutputSpec,
@@ -239,7 +243,7 @@ mod tests {
             },
             weights: vec![
                 FactorWeight {
-                    factor: names::MOMENTUM,
+                    factor: names::MOMENTUM_ROC,
                     weight: dec!(0.5),
                 },
                 FactorWeight {
@@ -261,13 +265,12 @@ mod tests {
             name,
             family: FactorFamily::Momentum,
             raw_value: Some(dec!(1)),
-            normalized_score: Probability::new(dec!(0.8)),
+            normalization: NormalizedFactor::cross_section(Probability::new(dec!(0.8))),
             direction,
             confidence: Probability::new(dec!(0.9)),
             explanation: FactorExplanation {
                 headline: "t".to_owned(),
                 drivers: Vec::new(),
-                clamp: None,
             },
             input_feature_refs: Vec::new(),
         }
@@ -278,7 +281,10 @@ mod tests {
         let runtime = WeightedSellScorerRuntime::new(artifact()).expect("runtime");
         let score = runtime
             .score(&SellScoreInput {
-                market_factors: vec![market_factor(names::MOMENTUM, FactorDirection::Positive)],
+                market_factors: vec![market_factor(
+                    names::MOMENTUM_ROC,
+                    FactorDirection::Positive,
+                )],
                 position_state: PositionStateFeatures {
                     unrealized_pnl_pct: dec!(0.2),
                     time_in_trade_ratio: dec!(0.5),
@@ -297,7 +303,10 @@ mod tests {
         let runtime = WeightedSellScorerRuntime::new(artifact()).expect("runtime");
         let score = runtime
             .score(&SellScoreInput {
-                market_factors: vec![market_factor(names::MOMENTUM, FactorDirection::Negative)],
+                market_factors: vec![market_factor(
+                    names::MOMENTUM_ROC,
+                    FactorDirection::Negative,
+                )],
                 position_state: PositionStateFeatures {
                     unrealized_pnl_pct: dec!(-0.2),
                     time_in_trade_ratio: dec!(0.0),

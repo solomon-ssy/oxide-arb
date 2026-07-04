@@ -11,9 +11,18 @@ pub const SPREAD_EFFICIENCY: FactorName = FactorName::from_static("spread_effici
 /// Generic microstructure factors.
 pub const BOOK_IMBALANCE: FactorName = FactorName::from_static("book_imbalance");
 
-/// Generic momentum / mean-reversion factors.
-pub const MOMENTUM: FactorName = FactorName::from_static("momentum");
-/// Mean-reversion factor.
+/// Generic momentum factors — each a **distinct** estimator, not a return clone.
+///
+/// Lag-skipped rate of change (12-1 style).
+pub const MOMENTUM_ROC: FactorName = FactorName::from_static("momentum_roc");
+/// Smoothed EMA-slope momentum (current trend velocity).
+pub const MOMENTUM_EMA_SLOPE: FactorName = FactorName::from_static("momentum_ema_slope");
+/// Volatility-adjusted (Sharpe-like) momentum.
+pub const MOMENTUM_VOL_ADJUSTED: FactorName = FactorName::from_static("momentum_vol_adjusted");
+/// Volatility-normalized MACD (trend crossover) momentum.
+pub const MOMENTUM_MACD: FactorName = FactorName::from_static("momentum_macd");
+
+/// Mean-reversion (reversal) factor — independent of the momentum family.
 pub const MEAN_REVERSION: FactorName = FactorName::from_static("mean_reversion");
 
 /// Volatility-regime factor.

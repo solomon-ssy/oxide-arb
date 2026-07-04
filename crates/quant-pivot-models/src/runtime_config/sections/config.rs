@@ -1,18 +1,23 @@
 //! Runtime-config section structs grouped by document area.
 
 use crate::{
-    enums::{common::MarketCategory, factor::FactorFamily},
+    enums::{
+        common::MarketCategory,
+        factor::{FactorFamily, FactorNormalization},
+    },
     runtime_config::wire::{
         AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, EntryOrderPolicy,
         ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily, FeatureNameRef,
         FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
-        NotificationPolicies, PortfolioOptimizerConfig, ReconciliationPolicy, ReportDeliveryPolicy,
-        ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig,
+        NeutralizeDimension, NotificationPolicies, PortfolioOptimizerConfig, ReconciliationPolicy,
+        ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig,
+        SmallCrossSectionPolicy,
     },
     types::{SchemaVersion, Usd},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Market selection selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -94,6 +99,40 @@ impl Default for DataQualityConfig {
     }
 }
 
+/// Momentum feature-family windows and lags.
+///
+/// Momentum is deliberately **not** a plain windowed return (that would be
+/// collinear with `ts.return_{W}`). Each estimator is a distinct signal:
+/// lag-skipped rate-of-change, EMA slope, EMA-crossover (MACD), and
+/// volatility-adjusted return.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct MomentumFeaturesConfig {
+    /// Rate-of-change lookback windows in seconds (`ts.momentum_roc_{W}s`).
+    pub roc_windows_secs: Vec<u64>,
+    /// Seconds skipped at the near edge of each ROC window (classic 12-1
+    /// momentum: exclude the most recent reversal-prone segment).
+    pub roc_lag_secs: u64,
+    /// Fast EMA span in seconds (MACD fast leg + EMA-slope base).
+    pub ema_fast_secs: u64,
+    /// Slow EMA span in seconds (MACD slow leg).
+    pub ema_slow_secs: u64,
+    /// EMA-slope estimator windows in seconds (`ts.ema_slope_{W}s`).
+    pub slope_windows_secs: Vec<u64>,
+}
+
+impl Default for MomentumFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            roc_windows_secs: vec![900, 3_600],
+            roc_lag_secs: 300,
+            ema_fast_secs: 300,
+            ema_slow_secs: 900,
+            slope_windows_secs: vec![900],
+        }
+    }
+}
+
 /// Feature schema and enabled feature families.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -106,8 +145,8 @@ pub struct FeaturesConfig {
     pub required_features: Vec<FeatureNameRef>,
     /// Bar aggregation windows in seconds.
     pub bar_windows_secs: Vec<u64>,
-    /// Momentum windows in seconds.
-    pub momentum_windows_secs: Vec<u64>,
+    /// Momentum feature-family windows and lags.
+    pub momentum: MomentumFeaturesConfig,
     /// Volatility windows in seconds.
     pub volatility_windows_secs: Vec<u64>,
     /// Order-book depth levels to inspect.
@@ -116,15 +155,33 @@ pub struct FeaturesConfig {
     pub max_concurrent_market_resolves: u32,
 }
 
+impl FeaturesConfig {
+    /// The maximum trailing lookback (seconds) any enabled time-series feature
+    /// needs — the union of bar, momentum (ROC / slope / slow-EMA), and
+    /// volatility windows. Drives the microstructure-window prefetch.
+    #[must_use]
+    pub fn max_lookback_secs(&self) -> u64 {
+        self.bar_windows_secs
+            .iter()
+            .chain(self.momentum.roc_windows_secs.iter())
+            .chain(self.momentum.slope_windows_secs.iter())
+            .chain(std::iter::once(&self.momentum.ema_slow_secs))
+            .chain(self.volatility_windows_secs.iter())
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            // v2: `book.depth_imbalance` switched from full-book USD notional to
-            // top-N share-weighted queue imbalance. Bumping the schema version
-            // changes `feature_schema_hash`, so the model factory rejects
-            // artifacts trained under the old semantics (forcing rematerialize +
-            // retrain) instead of silently scoring a different feature.
-            feature_schema_version: SchemaVersion::new(2),
+            // v3: momentum features are now distinct estimators (ROC-with-lag,
+            // EMA slope, MACD, vol-adjusted return) instead of a plain return
+            // clone; the collinear `ts.momentum_{W}` feature is gone. Bumping the
+            // schema version changes `feature_schema_hash`, so the model factory
+            // rejects artifacts trained under the old feature set.
+            feature_schema_version: SchemaVersion::new(3),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
@@ -133,10 +190,109 @@ impl Default for FeaturesConfig {
             ],
             required_features: Vec::new(),
             bar_windows_secs: vec![60, 300, 900],
-            momentum_windows_secs: vec![300, 900, 3_600],
+            momentum: MomentumFeaturesConfig::default(),
             volatility_windows_secs: vec![900, 3_600],
             depth_levels: vec![1, 3, 5],
             max_concurrent_market_resolves: 32,
+        }
+    }
+}
+
+/// A per-factor normalization override.
+///
+/// The `method` is required; the distributional parameters are optional and, if
+/// omitted, fall back to [`FactorNormalizationConfig`] defaults. `MinMax`
+/// requires explicit `min`/`max` bounds (its semantic domain).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PerFactorNormalization {
+    /// The normalization method for this factor (overrides its default).
+    pub method: FactorNormalization,
+    /// Winsorize percentile in `(0, 0.5)` (`WinsorizedZScore` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winsor_p: Option<DecimalString>,
+    /// Sigma clamp bound (`WinsorizedZScore` only), `> 0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clamp_sigma: Option<DecimalString>,
+    /// Lower semantic bound mapped to 0 (`MinMax` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<DecimalString>,
+    /// Upper semantic bound mapped to 1 (`MinMax` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<DecimalString>,
+}
+
+/// Cross-sectional normalization parameters (no magic constants in code).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FactorNormalizationConfig {
+    /// Default winsorize percentile in `(0, 0.5)` for `WinsorizedZScore` factors.
+    pub default_winsor_p: DecimalString,
+    /// Default sigma clamp bound for `WinsorizedZScore` factors, `> 0`.
+    pub default_clamp_sigma: DecimalString,
+    /// Per-factor overrides keyed by stable factor name.
+    pub per_factor: BTreeMap<String, PerFactorNormalization>,
+}
+
+impl Default for FactorNormalizationConfig {
+    fn default() -> Self {
+        // data_quality is already a semantic [0, 1] score → MinMax identity.
+        let mut per_factor = BTreeMap::new();
+        per_factor.insert(
+            "data_quality".to_owned(),
+            PerFactorNormalization {
+                method: FactorNormalization::MinMax,
+                winsor_p: None,
+                clamp_sigma: None,
+                min: Some(DecimalString::new("0")),
+                max: Some(DecimalString::new("1")),
+            },
+        );
+        Self {
+            default_winsor_p: DecimalString::new("0.01"),
+            default_clamp_sigma: DecimalString::new("3"),
+            per_factor,
+        }
+    }
+}
+
+/// Small-cross-section / cross-section normalization policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FactorCrossSectionConfig {
+    /// Minimum present cross-section size for cross-sectional normalization.
+    pub min_size: u32,
+    /// What to do below `min_size` (never a silent neutral).
+    pub small_cross_section_policy: SmallCrossSectionPolicy,
+    /// Rolling lookback (seconds) for the `HistoricalQuantile` policy.
+    pub historical_lookback_secs: u64,
+}
+
+impl Default for FactorCrossSectionConfig {
+    fn default() -> Self {
+        Self {
+            min_size: 5,
+            small_cross_section_policy: SmallCrossSectionPolicy::Indeterminate,
+            historical_lookback_secs: 86_400,
+        }
+    }
+}
+
+/// Factor orthogonalization / collinearity policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FactorOrthogonalizeConfig {
+    /// Maximum tolerated absolute pairwise Spearman correlation between factors.
+    pub max_correlation: DecimalString,
+    /// Dimensions to neutralize each factor against before normalization.
+    pub neutralize_by: Vec<NeutralizeDimension>,
+}
+
+impl Default for FactorOrthogonalizeConfig {
+    fn default() -> Self {
+        Self {
+            max_correlation: DecimalString::new("0.90"),
+            neutralize_by: Vec::new(),
         }
     }
 }
@@ -156,15 +312,27 @@ pub struct FactorsConfig {
     pub min_factor_confidence: DecimalString,
     /// Missing factor handling policy.
     pub missing_factor_policy: MissingFactorPolicy,
+    /// Cross-sectional normalization parameters.
+    pub normalization: FactorNormalizationConfig,
+    /// Small-cross-section / cross-section policy.
+    pub cross_section: FactorCrossSectionConfig,
+    /// Orthogonalization / collinearity policy.
+    pub orthogonalize: FactorOrthogonalizeConfig,
 }
 
 impl Default for FactorsConfig {
     fn default() -> Self {
         Self {
-            enabled_factor_families: vec![FactorFamily::Liquidity, FactorFamily::Momentum],
+            // All generic factor families enabled by default: diversity is the
+            // baseline, weighting is learned (11.4). Domain families are routed
+            // by category and never appear here.
+            enabled_factor_families: FactorFamily::ALL_GENERIC.to_vec(),
             factor_weights: FactorWeights::default(),
             min_factor_confidence: DecimalString::new("0.50"),
             missing_factor_policy: MissingFactorPolicy::ZeroWeight,
+            normalization: FactorNormalizationConfig::default(),
+            cross_section: FactorCrossSectionConfig::default(),
+            orthogonalize: FactorOrthogonalizeConfig::default(),
         }
     }
 }

@@ -1,7 +1,10 @@
 //! `quant_factor_value` table entity.
 
 use crate::{
-    enums::quant::FactorDirection,
+    enums::{
+        factor::{FactorIndeterminateReason, NormalizationSource},
+        quant::FactorDirection,
+    },
     types::{
         FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
     },
@@ -21,7 +24,12 @@ pub struct Model {
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
     pub raw_value: Option<Decimal>,
-    pub normalized_score: Probability,
+    /// `None` when the factor was missing-input or indeterminate.
+    pub normalized_score: Option<Probability>,
+    /// How the score was derived (`None` when not scored).
+    pub normalization_source: Option<NormalizationSource>,
+    /// Why the factor was indeterminate (`None` unless indeterminate).
+    pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
     #[sea_orm(column_type = "JsonBinary")]

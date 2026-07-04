@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
     enums::{
-        factor::FactorFamily,
+        factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
         quant::{FactorDirection, OutcomeSide},
     },
     types::{
@@ -32,11 +32,15 @@ pub struct FactorContribution {
     pub family: FactorFamily,
     /// Raw factor value before normalization.
     pub raw_value: Option<Decimal>,
-    /// Normalized factor score in `[0, 1]`.
-    pub normalized_score: Probability,
+    /// Normalized factor score in `[0, 1]`; `None` when missing / indeterminate.
+    pub normalized_score: Option<Probability>,
+    /// How the score was derived; `None` when missing / indeterminate.
+    pub normalization_source: Option<NormalizationSource>,
+    /// Why the factor was indeterminate; `None` when scored / missing.
+    pub indeterminate_reason: Option<FactorIndeterminateReason>,
     /// Weight applied to the factor by the model.
     pub weight: Decimal,
-    /// Signed contribution (`weight × score × confidence`).
+    /// Signed contribution (`weight × score × confidence`); zero when not scored.
     pub contribution: Decimal,
     /// Confidence attached to this factor.
     pub confidence: Probability,

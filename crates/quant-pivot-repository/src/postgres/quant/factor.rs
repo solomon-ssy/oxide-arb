@@ -4,6 +4,7 @@ use crate::{
     postgres::{error, query::paginate_mapped},
     traits::FactorRepository,
 };
+use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
@@ -159,6 +160,29 @@ impl FactorRepository for PgFactorRepository {
         quant_factor_value::Entity::find()
             .filter(quant_factor_value::Column::ModelRunId.eq(model_run_id.clone()))
             .order_by_desc(quant_factor_value::Column::AsOf)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn recent_values(
+        &self,
+        factor_definition_ids: &[FactorDefinitionId],
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<FactorValueInfo>, StorageError> {
+        if factor_definition_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        quant_factor_value::Entity::find()
+            .filter(
+                quant_factor_value::Column::FactorDefinitionId
+                    .is_in(factor_definition_ids.iter().cloned()),
+            )
+            .filter(quant_factor_value::Column::AsOf.gte(from))
+            .filter(quant_factor_value::Column::AsOf.lt(until))
+            .order_by_asc(quant_factor_value::Column::AsOf)
             .all(&self.db)
             .await
             .map_err(StorageError::from)

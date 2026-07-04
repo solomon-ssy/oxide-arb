@@ -15,23 +15,24 @@
 //! Phase 4 / 3.4 `ModelRunner` reuses.
 
 use crate::observability::factor_fact_writer::FactorEventWriter;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
     domain::{FactorValueInfo, NewFactorValue},
     enums::quant::PublicationStatus,
-    runtime_config::{FactorsConfig, FeaturesConfig},
-    types::{FeatureVectorId, MarketId, ModelRunId},
+    runtime_config::{FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
+    types::{FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId},
 };
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::{
     factors::{
-        FactorEligibility, FactorEngine, FactorValueInsertContext, MarketFactorOutcome,
-        factor_definition_id, factor_events,
+        FactorEligibility, FactorEngine, FactorHistory, FactorValueInsertContext,
+        MarketFactorOutcome, factor_definition_id, factor_events,
     },
     features::FeatureVector,
 };
-use std::sync::Arc;
+use rust_decimal::Decimal;
+use std::{collections::HashMap, sync::Arc};
 
 /// Frozen inputs for one factor-plane round.
 pub struct FactorPipelineRequest<'a> {
@@ -122,13 +123,17 @@ impl FactorPipelineService {
         self.persist_definitions(&engine, request.features).await?;
         self.require_published_definitions(&engine).await?;
 
+        // Pre-fetch the rolling history for the small-cross-section HistoricalQuantile
+        // policy (a no-op empty history under the default Indeterminate policy).
+        let history = self.build_history(&engine, &request).await?;
+
         // Factor compute is pure CPU work; run it on the blocking pool so a large
         // cross-sectional batch never stalls the async runtime. The engine moves
         // in and back out so its registry is reused for definition persistence.
         let config = request.factors.clone();
         let vectors = request.vectors.to_vec();
         let (_engine, outcomes) = tokio::task::spawn_blocking(move || {
-            let outcomes = engine.compute_all_batch(&vectors, &config);
+            let outcomes = engine.compute_all_batch_with_history(&vectors, &config, &history);
             (engine, outcomes)
         })
         .await
@@ -183,6 +188,54 @@ impl FactorPipelineService {
             rejected,
             persisted,
         })
+    }
+
+    /// Build the rolling historical raw-value distribution for the
+    /// `HistoricalQuantile` small-cross-section policy (empty under `Indeterminate`).
+    async fn build_history(
+        &self,
+        engine: &FactorEngine,
+        request: &FactorPipelineRequest<'_>,
+    ) -> QuantResult<FactorHistory> {
+        if request.factors.cross_section.small_cross_section_policy
+            != SmallCrossSectionPolicy::HistoricalQuantile
+        {
+            return Ok(FactorHistory::empty());
+        }
+        let Some(as_of) = request.vectors.first().map(|vector| vector.as_of) else {
+            return Ok(FactorHistory::empty());
+        };
+        let lookback = Duration::seconds(
+            i64::try_from(request.factors.cross_section.historical_lookback_secs)
+                .unwrap_or(i64::MAX),
+        );
+        let specs = engine.factor_set().definitions;
+        let ids: Vec<_> = specs
+            .iter()
+            .map(|spec| factor_definition_id(spec.name.as_str()))
+            .collect();
+        let rows = self
+            .factor_repo
+            .recent_values(&ids, as_of - lookback, as_of)
+            .await
+            .map_err(QuantError::from)?;
+        let mut by_definition: HashMap<FactorDefinitionId, Vec<Decimal>> = HashMap::new();
+        for row in rows {
+            if let Some(raw) = row.raw_value {
+                by_definition
+                    .entry(row.factor_definition_id)
+                    .or_default()
+                    .push(raw);
+            }
+        }
+        let mut history = FactorHistory::empty();
+        for spec in &specs {
+            let id = factor_definition_id(spec.name.as_str());
+            if let Some(values) = by_definition.remove(&id) {
+                history.insert(spec.name.clone(), values);
+            }
+        }
+        Ok(history)
     }
 
     /// Upsert every enabled factor's governed definition (idempotent).

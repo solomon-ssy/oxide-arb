@@ -531,14 +531,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
             .build(),
         );
     }
-    for window in &config.momentum_windows_secs {
-        out.push(
-            spec(FeatureName::ts_momentum(*window), F, Dec, Src, Pit, Stale)
-                .unit(FeatureUnit::Ratio)
-                .null_policy(NullPolicy::Penalize)
-                .build(),
-        );
-    }
+    momentum_specs(config, out);
     for window in &config.volatility_windows_secs {
         out.push(
             spec(
@@ -554,9 +547,62 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
             .null_policy(NullPolicy::Penalize)
             .build(),
         );
+        out.push(
+            spec(
+                FeatureName::ts_vol_adjusted_return(*window),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
     }
     out.push(
         spec(ts::PRICE_REVERSAL, F, Dec, Src, Pit, Stale)
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+    );
+}
+
+/// Momentum-family time-series specs: lag-skipped ROC, EMA slope, and the
+/// vol-normalized MACD (distinct estimators, never a return clone).
+fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::TimeSeries as F;
+    use FeatureValueKind::Decimal as Dec;
+    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use SourceRequirement::MicrostructureWindow as Src;
+    use StalenessRule::MaxFeatureBucketAge as Stale;
+
+    for window in &config.momentum.roc_windows_secs {
+        out.push(
+            spec(
+                FeatureName::ts_momentum_roc(*window),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+    }
+    for window in &config.momentum.slope_windows_secs {
+        out.push(
+            spec(FeatureName::ts_ema_slope(*window), F, Dec, Src, Pit, Stale)
+                .unit(FeatureUnit::Ratio)
+                .null_policy(NullPolicy::Penalize)
+                .build(),
+        );
+    }
+    out.push(
+        spec(ts::MACD_NORM, F, Dec, Src, Pit, Stale)
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
             .build(),

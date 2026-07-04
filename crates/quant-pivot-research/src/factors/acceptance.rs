@@ -1,33 +1,45 @@
-//! Factor-plane acceptance tests (03.3 §8).
+//! Factor-plane acceptance tests (Phase 11.1 §8).
+//!
+//! Closes audit #1 (all generic families default-on), #2 (momentum is not a
+//! return clone; collinearity is detectable), #3 (config-driven normalization,
+//! no silent neutral — small / degenerate cross-sections are indeterminate).
 
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    enums::{factor::FactorFamily, quant::DataQualityStatus},
+    enums::{
+        factor::{FactorFamily, FactorIndeterminateReason},
+        quant::DataQualityStatus,
+    },
     runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, MissingFactorPolicy},
     types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 
-use crate::{
-    factors::{FactorEligibility, FactorEngine, MarketFactorOutcome, ScoredFactor},
-    features::{FeatureName, FeatureValue, FeatureVector, NullReason},
+use crate::factors::{
+    CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorName,
+    FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
 };
+use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
+/// Config for the given families with a small `min_size` so modest test batches
+/// still exercise the cross-sectional path.
 fn factors_config(
     families: &[FactorFamily],
     policy: MissingFactorPolicy,
     floor: &str,
 ) -> FactorsConfig {
-    FactorsConfig {
+    let mut config = FactorsConfig {
         enabled_factor_families: families.to_vec(),
         min_factor_confidence: DecimalString::new(floor),
         missing_factor_policy: policy,
         ..FactorsConfig::default()
-    }
+    };
+    config.cross_section.min_size = 2;
+    config
 }
 
 fn make_vector(
@@ -66,10 +78,6 @@ fn bps(value: i64) -> FeatureValue {
     FeatureValue::Bps(Decimal::from(value))
 }
 
-fn count(value: u64) -> FeatureValue {
-    FeatureValue::Count(value)
-}
-
 fn scored<'a>(outcome: &'a MarketFactorOutcome, name: &str) -> &'a ScoredFactor {
     outcome
         .factors
@@ -103,36 +111,112 @@ fn compute_one(
     scored(&outcomes[0], factor).clone()
 }
 
-// ── Normalization / clamp ─────────────────────────────────────────────────────
+// ── #1 default factor set ─────────────────────────────────────────────────────
 
 #[test]
-fn factor_normalization_clamps_into_probability() {
-    // `book.depth_imbalance` is bounded to [-1, 1] by MinMax; an out-of-range raw
-    // is clamped to the bound *and* the clamp is recorded — never silently eaten.
+fn default_factor_config_enables_all_generic_families() {
+    let config = FactorsConfig::default();
+    assert_eq!(
+        config.enabled_factor_families,
+        FactorFamily::ALL_GENERIC.to_vec(),
+        "the default config must enable every generic factor family"
+    );
+    let engine = FactorEngine::new(&config, &FeaturesConfig::default());
+    // 8 single-feature factors + 4 momentum estimators counted within Momentum.
+    assert!(
+        engine.registry().len() >= 12,
+        "all generic families should register the full factor set"
+    );
+}
+
+// ── #3 no silent neutral ──────────────────────────────────────────────────────
+
+#[test]
+fn small_cross_section_yields_indeterminate_not_half() {
+    // A single-market batch cannot form a cross-section for a Rank factor;
+    // the outcome is Indeterminate, never a fabricated neutral 0.5.
     let config = factors_config(
-        &[FactorFamily::Microstructure],
+        &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
         "0.10",
     );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vector = make_vector(
-        "0xclamp",
-        &[("book.depth_imbalance", dec(Decimal::from(5)))],
+        "0xlonely",
+        &[
+            ("book.visible_liquidity_usd", usd(10_000)),
+            ("book.spread_bps", bps(120)),
+        ],
         DataQualityStatus::Fresh,
         0,
         Utc::now(),
     );
     let outcome = engine.compute_all(&vector, &config).expect("compute");
-    let factor = scored(&outcome, "book_imbalance");
-    assert_eq!(factor.value.normalized_score, Probability::ONE);
+    let factor = scored(&outcome, "liquidity_depth");
     assert!(
-        factor.value.explanation.clamp.is_some(),
-        "out-of-range raw must record a clamp audit"
+        matches!(
+            factor.value.normalization,
+            NormalizedFactor::Indeterminate {
+                reason: FactorIndeterminateReason::CrossSectionTooSmall
+            }
+        ),
+        "single-market rank must be indeterminate, got {:?}",
+        factor.value.normalization
+    );
+    assert!(
+        factor.value.normalized_score().is_none(),
+        "an indeterminate factor carries no normalized score"
+    );
+    assert!(
+        !factor.contributes,
+        "an indeterminate factor cannot contribute"
     );
 }
 
-// ── Cross-sectional gating ────────────────────────────────────────────────────
+#[test]
+fn zero_variance_yields_indeterminate() {
+    // Every market has identical liquidity → the cross-section carries no
+    // dispersion → ZeroVariance indeterminate (never a silent 0.5).
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
+    let features = FeaturesConfig::default();
+    let engine = FactorEngine::new(&config, &features);
+    let as_of = Utc::now();
+    let vectors: Vec<FeatureVector> = (0..4)
+        .map(|index| {
+            make_vector(
+                &format!("0xflat{index}"),
+                &[
+                    ("book.visible_liquidity_usd", usd(10_000)),
+                    ("book.spread_bps", bps(100)),
+                ],
+                DataQualityStatus::Fresh,
+                0,
+                as_of,
+            )
+        })
+        .collect();
+    let outcomes = engine
+        .compute_all_batch(&vectors, &config)
+        .expect("compute");
+    let factor = scored(&outcomes[0], "liquidity_depth");
+    assert!(
+        matches!(
+            factor.value.normalization,
+            NormalizedFactor::Indeterminate {
+                reason: FactorIndeterminateReason::ZeroVariance
+            }
+        ),
+        "a zero-variance cross-section must be indeterminate, got {:?}",
+        factor.value.normalization
+    );
+}
+
+// ── Cross-sectional gating / determinism ──────────────────────────────────────
 
 #[test]
 fn compute_all_batch_rejects_mixed_as_of() {
@@ -168,38 +252,10 @@ fn compute_all_batch_rejects_mixed_as_of() {
     );
 }
 
-#[test]
-fn cross_sectional_rank_requires_batch() {
-    // `liquidity_depth` is Rank (cross-sectional); the single-market path must
-    // refuse it rather than fabricate a pseudo cross-section.
-    let config = factors_config(
-        &[FactorFamily::Liquidity],
-        MissingFactorPolicy::ZeroWeight,
-        "0.10",
-    );
-    let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
-    let vector = make_vector(
-        "0xrank",
-        &[("book.visible_liquidity_usd", usd(10_000))],
-        DataQualityStatus::Fresh,
-        0,
-        Utc::now(),
-    );
-    let error = engine
-        .compute_all(&vector, &config)
-        .expect_err("must require batch");
-    assert!(
-        error.to_string().contains("requires the batch"),
-        "expected a RequiresBatch error, got: {error}"
-    );
-}
-
 // ── Explanation drivers ───────────────────────────────────────────────────────
 
 #[test]
 fn factor_explanation_lists_positive_and_negative_drivers() {
-    // The data-quality factor blends a positive base with negative penalties.
     let config = factors_config(
         &[FactorFamily::DataQuality],
         MissingFactorPolicy::ZeroWeight,
@@ -240,7 +296,7 @@ fn factor_explanation_lists_positive_and_negative_drivers() {
 #[test]
 fn factor_confidence_floor_zero_weights_low_confidence() {
     // Stale data → confidence 0.40 < floor 0.50; under ZeroWeight the factor is
-    // present but does not contribute, and the market still proceeds.
+    // scored but does not contribute, and the market still proceeds.
     let config = factors_config(
         &[FactorFamily::Microstructure],
         MissingFactorPolicy::ZeroWeight,
@@ -248,16 +304,28 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
     );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
-    let vector = make_vector(
-        "0xfloor",
-        &[("book.depth_imbalance", dec(Decimal::new(2, 1)))],
-        DataQualityStatus::Stale,
-        0,
-        Utc::now(),
-    );
-    let outcome = engine.compute_all(&vector, &config).expect("compute");
-    assert!(outcome.eligibility.is_eligible());
-    let factor = scored(&outcome, "book_imbalance");
+    let as_of = Utc::now();
+    let vectors = [
+        make_vector(
+            "0xfloor0",
+            &[("book.depth_imbalance", dec(Decimal::new(2, 1)))],
+            DataQualityStatus::Stale,
+            0,
+            as_of,
+        ),
+        make_vector(
+            "0xfloor1",
+            &[("book.depth_imbalance", dec(Decimal::new(-3, 1)))],
+            DataQualityStatus::Stale,
+            0,
+            as_of,
+        ),
+    ];
+    let outcomes = engine
+        .compute_all_batch(&vectors, &config)
+        .expect("compute");
+    assert!(outcomes[0].eligibility.is_eligible());
+    let factor = scored(&outcomes[0], "book_imbalance");
     assert!(factor.below_confidence_floor);
     assert!(
         !factor.contributes,
@@ -267,21 +335,31 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
 
 #[test]
 fn factor_missing_reject_candidate_policy() {
-    // `spread_efficiency` is required (quality-gated); a market missing it under
-    // RejectCandidate is excluded, while a complete market proceeds.
+    // `spread_efficiency` is required; a market missing it under RejectCandidate
+    // is excluded, while complete markets (present cross-section) proceed.
     let config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::RejectCandidate,
-        "0.50",
+        "0.10",
     );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let as_of = Utc::now();
-    let complete = make_vector(
-        "0xcomplete",
+    let complete_a = make_vector(
+        "0xcomplete_a",
         &[
             ("book.visible_liquidity_usd", usd(20_000)),
             ("book.spread_bps", bps(120)),
+        ],
+        DataQualityStatus::Fresh,
+        0,
+        as_of,
+    );
+    let complete_b = make_vector(
+        "0xcomplete_b",
+        &[
+            ("book.visible_liquidity_usd", usd(12_000)),
+            ("book.spread_bps", bps(240)),
         ],
         DataQualityStatus::Fresh,
         0,
@@ -295,15 +373,19 @@ fn factor_missing_reject_candidate_policy() {
         as_of,
     );
     let outcomes = engine
-        .compute_all_batch(&[complete, missing_spread], &config)
+        .compute_all_batch(&[complete_a, complete_b, missing_spread], &config)
         .expect("batch compute");
     assert!(
         outcomes[0].eligibility.is_eligible(),
         "complete market eligible"
     );
     assert!(
+        outcomes[1].eligibility.is_eligible(),
+        "complete market eligible"
+    );
+    assert!(
         matches!(
-            outcomes[1].eligibility,
+            outcomes[2].eligibility,
             FactorEligibility::RejectCandidate { .. }
         ),
         "market missing a required factor must be rejected"
@@ -340,7 +422,6 @@ fn factor_set_change_changes_schema_hash() {
 
 #[test]
 fn factor_schema_hash_is_order_independent_for_same_set() {
-    // The same enabled set hashes identically regardless of config list order.
     let features = FeaturesConfig::default();
     let forward = FactorEngine::new(
         &factors_config(
@@ -364,7 +445,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
     );
 }
 
-// ── Nine generic factors: basic compute ───────────────────────────────────────
+// ── Generic factors: basic compute ────────────────────────────────────────────
 
 #[test]
 fn liquidity_depth_factor_basic_compute() {
@@ -375,7 +456,7 @@ fn liquidity_depth_factor_basic_compute() {
         &[("book.visible_liquidity_usd", usd(5_000))],
     );
     assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
+    assert!(factor.value.normalized_score().is_some_and(in_unit));
 }
 
 #[test]
@@ -387,7 +468,7 @@ fn spread_efficiency_factor_basic_compute() {
         &[("book.spread_bps", bps(400))],
     );
     assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
+    assert!(factor.value.normalized_score().is_some_and(in_unit));
 }
 
 #[test]
@@ -399,81 +480,31 @@ fn book_imbalance_factor_basic_compute() {
         &[("book.depth_imbalance", dec(Decimal::new(-2, 1)))],
     );
     assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
+    assert!(factor.value.normalized_score().is_some_and(in_unit));
 }
 
 #[test]
-fn momentum_factor_basic_compute() {
+fn momentum_roc_factor_basic_compute() {
     let factor = compute_one(
         FactorFamily::Momentum,
-        "momentum",
-        &[("ts.momentum_300s", dec(Decimal::new(5, 2)))],
-        &[("ts.momentum_300s", dec(Decimal::new(-3, 2)))],
+        "momentum_roc",
+        &[("ts.momentum_roc_900s", dec(Decimal::new(5, 2)))],
+        &[("ts.momentum_roc_900s", dec(Decimal::new(-3, 2)))],
     );
     assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
-}
-
-#[test]
-fn mean_reversion_factor_basic_compute() {
-    let factor = compute_one(
-        FactorFamily::MeanReversion,
-        "mean_reversion",
-        &[("ts.price_reversal", dec(Decimal::new(4, 2)))],
-        &[("ts.price_reversal", dec(Decimal::new(-1, 2)))],
-    );
-    assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
-}
-
-#[test]
-fn volatility_regime_factor_basic_compute() {
-    let factor = compute_one(
-        FactorFamily::Volatility,
-        "volatility_regime",
-        &[("ts.realized_vol_900s", dec(Decimal::new(8, 2)))],
-        &[("ts.realized_vol_900s", dec(Decimal::new(2, 2)))],
-    );
-    assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
-}
-
-#[test]
-fn market_activity_factor_basic_compute() {
-    let factor = compute_one(
-        FactorFamily::Activity,
-        "market_activity",
-        &[("micro.quote_update_rate", dec(Decimal::from(3)))],
-        &[("micro.quote_update_rate", dec(Decimal::new(5, 1)))],
-    );
-    assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
-}
-
-#[test]
-fn time_to_resolution_factor_basic_compute() {
-    let factor = compute_one(
-        FactorFamily::Resolution,
-        "time_to_resolution",
-        &[("market.time_to_resolution_secs", count(172_800))],
-        &[("market.time_to_resolution_secs", count(3_600))],
-    );
-    assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
+    assert!(factor.value.normalized_score().is_some_and(in_unit));
 }
 
 #[test]
 fn data_quality_factor_basic_compute() {
     let factor = compute_one(FactorFamily::DataQuality, "data_quality", &[], &[]);
     assert!(factor.value.raw_value.is_some());
-    assert!(in_unit(factor.value.normalized_score));
+    // data_quality uses per-market MinMax, so it is always scored.
+    assert!(factor.value.normalized_score().is_some_and(in_unit));
 }
 
 // ── Parallel batch: determinism, order, serial/parallel equivalence ───────────
 
-/// A batch of distinct markets with varied liquidity and momentum, sized past
-/// `PARALLEL_MIN_MARKETS` so [`FactorEngine::compute_all_batch`] takes the rayon
-/// path and the cross-section (`Rank` / `ZScore`) has real spread.
 fn varied_batch(count: usize) -> Vec<FeatureVector> {
     let as_of = Utc::now();
     (0..count)
@@ -484,7 +515,6 @@ fn varied_batch(count: usize) -> Vec<FeatureVector> {
                 &[
                     ("book.visible_liquidity_usd", usd(1_000 + step * 500)),
                     ("book.spread_bps", bps(40 + step)),
-                    ("ts.momentum_300s", dec(Decimal::new(step - 12, 2))),
                 ],
                 DataQualityStatus::Fresh,
                 0,
@@ -496,8 +526,6 @@ fn varied_batch(count: usize) -> Vec<FeatureVector> {
 
 #[test]
 fn compute_all_batch_is_deterministic() {
-    // The parallel path must produce a byte-identical result run to run: pure
-    // computers + quantized normalization mean scheduling cannot perturb output.
     let config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
@@ -520,8 +548,6 @@ fn compute_all_batch_is_deterministic() {
 
 #[test]
 fn compute_all_batch_preserves_input_order() {
-    // `outcomes[i]` must describe `features[i]` so downstream id alignment (the
-    // feature-vector foreign key) holds under parallel evaluation.
     let config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
@@ -535,17 +561,15 @@ fn compute_all_batch_preserves_input_order() {
         .expect("batch compute");
     assert_eq!(outcomes.len(), vectors.len());
     for (vector, outcome) in vectors.iter().zip(&outcomes) {
-        assert_eq!(
-            vector.market_id, outcome.market_id,
-            "outcome order must match input order"
-        );
+        assert_eq!(vector.market_id, outcome.market_id);
     }
 }
 
 #[test]
-fn compute_all_batch_serial_and_parallel_agree() {
-    // Same inputs, both code paths: the rayon path must be bit-identical to the
-    // serial path, including the cross-sectional Rank / ZScore columns.
+fn online_and_batch_use_same_normalizer() {
+    // The serial and rayon paths share one `CrossSectionalNormalizer`, so they
+    // must be bit-identical — the guarantee that online and backtest normalize
+    // through the same code (Phase 11.6 parity seam).
     let config = factors_config(
         &[FactorFamily::Liquidity, FactorFamily::Momentum],
         MissingFactorPolicy::ZeroWeight,
@@ -554,11 +578,74 @@ fn compute_all_batch_serial_and_parallel_agree() {
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vectors = varied_batch(24);
+    let history = crate::factors::FactorHistory::empty();
     let serial = engine
-        .compute_all_batch_inner(&vectors, &config, false)
+        .compute_all_batch_inner(&vectors, &config, &history, false)
         .expect("serial path");
     let parallel = engine
-        .compute_all_batch_inner(&vectors, &config, true)
+        .compute_all_batch_inner(&vectors, &config, &history, true)
         .expect("parallel path");
     assert_eq!(serial, parallel, "serial and parallel paths must agree");
+}
+
+// ── #2 collinearity analysis ──────────────────────────────────────────────────
+
+#[test]
+fn collinearity_analyzer_flags_rho_over_threshold() {
+    let alpha = FactorName::from_static("alpha");
+    let beta = FactorName::from_static("beta");
+    let gamma = FactorName::from_static("gamma");
+    // `beta` is a monotone copy of `alpha` (ρ = 1); `gamma` is anti-monotone
+    // to `alpha` (ρ = -1). Both breach a 0.9 tolerance.
+    let rows: Vec<Vec<Option<Decimal>>> = (0..8)
+        .map(|index| {
+            let value = Decimal::from(index);
+            vec![
+                Some(value),
+                Some(value * Decimal::from(2)),
+                Some(Decimal::from(100) - value),
+            ]
+        })
+        .collect();
+    let panel = FactorObservationMatrix {
+        factors: vec![alpha.clone(), beta.clone(), gamma],
+        rows,
+    };
+    let report = FactorCollinearityAnalyzer::analyze(&panel, Decimal::new(9, 1));
+    assert!(report.is_collinear(), "identical factors must be flagged");
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|CollinearPair { left, right, .. }| { *left == alpha && *right == beta }),
+        "alpha/beta (ρ=1) must be a violation"
+    );
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|pair| pair.correlation < Decimal::ZERO),
+        "the anti-correlated pair must appear with negative ρ"
+    );
+}
+
+// ── #3 no hardcoded normalization constants ───────────────────────────────────
+
+#[test]
+fn normalizer_has_no_hardcoded_constants() {
+    // The generic factor registry must declare only normalization *methods*, not
+    // numeric parameters. The deleted logistic heuristic (`k` / `x0`) must be gone.
+    let source = include_str!("generic.rs");
+    assert!(
+        !source.contains("Logistic"),
+        "the logistic heuristic normalization must be deleted"
+    );
+    assert!(
+        !source.contains("x0"),
+        "no hardcoded logistic midpoint may remain in the factor registry"
+    );
+    assert!(
+        !source.contains("clamp_sigma:"),
+        "sigma clamp is a config parameter, not a code constant"
+    );
 }

@@ -340,6 +340,11 @@ pub fn enum_label(value: &str) -> UiText {
         // MissingFactorPolicy
         "zero_weight" => UiText::localized("Treat as zero weight", "按零权重处理"),
         "reject_candidate" => UiText::localized("Reject candidate", "剔除候选"),
+        // SmallCrossSectionPolicy
+        "indeterminate" => UiText::localized("Indeterminate", "标记为不确定"),
+        "historical_quantile" => UiText::localized("Historical quantile", "历史分位归一化"),
+        // NeutralizeDimension
+        "category" => UiText::localized("Market category", "市场分类"),
         // ReportDeliveryPolicy
         "store_and_notify" => UiText::localized("Store & notify", "存储并通知"),
         "store_only" => UiText::localized("Store only", "仅存储"),
@@ -595,11 +600,40 @@ fn feature_fields() -> Vec<FieldUiEntry> {
         )
         .widget(FieldWidget::JsonTree),
         f(
-            "features.momentum_windows_secs",
-            "Momentum windows",
-            "动量窗口",
-            "Lookback windows (seconds) for momentum / trend features. Drives historical prefetch; must contain at least one positive value.",
-            "动量/趋势类特征的回看窗口（秒）。决定历史预取；至少包含一个正值。",
+            "features.momentum.roc_windows_secs",
+            "Momentum ROC windows",
+            "动量 ROC 窗口",
+            "Lookback windows (seconds) for the lag-skipped rate-of-change momentum. Each must exceed the ROC lag; more/longer windows increase prefetch cost.",
+            "跳过近端的变化率(ROC)动量的回看窗口（秒）。每个窗口都必须大于 ROC lag；更多/更长的窗口会增加预取成本。",
+        )
+        .widget(FieldWidget::JsonTree),
+        secs(
+            "features.momentum.roc_lag_secs",
+            "Momentum ROC lag",
+            "动量 ROC 跳过窗口",
+            "Seconds skipped at the near edge of each ROC window (classic 12-1 momentum: exclude the recent reversal-prone segment). Must be smaller than every ROC window.",
+            "每个 ROC 窗口近端跳过的秒数（经典 12-1 动量：排除近端易反转段）。必须小于所有 ROC 窗口。",
+        ),
+        secs(
+            "features.momentum.ema_fast_secs",
+            "MACD fast EMA span",
+            "MACD 快线 EMA 跨度",
+            "Fast EMA span (seconds) for the MACD fast leg and the EMA-slope estimator. Must be strictly less than the slow span.",
+            "MACD 快腿与 EMA 斜率估计的快 EMA 跨度（秒）。必须严格小于慢线跨度。",
+        ),
+        secs(
+            "features.momentum.ema_slow_secs",
+            "MACD slow EMA span",
+            "MACD 慢线 EMA 跨度",
+            "Slow EMA span (seconds) for the MACD slow leg. Must be strictly greater than the fast span.",
+            "MACD 慢腿的慢 EMA 跨度（秒）。必须严格大于快线跨度。",
+        ),
+        f(
+            "features.momentum.slope_windows_secs",
+            "EMA-slope windows",
+            "EMA 斜率窗口",
+            "Lookback windows (seconds) for the EMA-slope momentum estimator. Must contain at least one positive value.",
+            "EMA 斜率动量估计的回看窗口（秒）。至少包含一个正值。",
         )
         .widget(FieldWidget::JsonTree),
         f(
@@ -665,6 +699,64 @@ fn factor_fields() -> Vec<FieldUiEntry> {
             "How a missing factor is handled: 'Treat as zero weight' keeps the candidate with reduced signal; 'Reject candidate' drops any candidate missing the factor (stricter).",
             "缺失因子的处理方式：『按零权重处理』保留候选但信号减弱；『剔除候选』则丢弃任何缺失该因子的候选（更严格）。",
         ),
+        decimal(
+            "factors.normalization.default_winsor_p",
+            "Default winsorize percentile",
+            "默认 winsorize 分位",
+            "Cross-sectional winsorize tail fraction in (0, 0.5) applied before z-scoring (e.g. 0.01 clips the 1st / 99th percentiles). Larger values tame outliers more aggressively.",
+            "z-score 前对截面做 winsorize 的尾部占比，取值 (0, 0.5)（如 0.01 表示裁剪 1%/99% 分位）。调大对离群点抑制更强。",
+        ),
+        decimal(
+            "factors.normalization.default_clamp_sigma",
+            "Default sigma clamp",
+            "默认 sigma 截断",
+            "Standardized scores are clamped to ±this many standard deviations before mapping into [0, 1] (e.g. 3). Smaller values compress the tails harder.",
+            "标准化分数在映射到 [0,1] 前被截断到 ±该标准差数（如 3）。调小对尾部压缩更强。",
+        ),
+        f(
+            "factors.normalization.per_factor",
+            "Per-factor normalization overrides",
+            "逐因子归一化覆盖",
+            "Per-factor overrides of the normalization method and parameters, keyed by factor name (e.g. data_quality → min/max bounds). Factors without an entry use their declared method with the section defaults.",
+            "按因子名对归一化方法与参数的覆盖（如 data_quality 使用 min/max 界）。没有条目的因子使用其声明的方法与本段默认参数。",
+        )
+        .widget(FieldWidget::JsonTree),
+        integer(
+            "factors.cross_section.min_size",
+            "Cross-section minimum size",
+            "截面最小规模",
+            "Minimum number of present markets for cross-sectional normalization (winsorized z-score / rank). Below it the small-cross-section policy applies; never a silent neutral.",
+            "进行截面归一化（winsorized z-score / rank）所需的最小在场市场数。低于此值时启用小样本策略；绝不静默中性化。",
+        ),
+        enum_select(
+            "factors.cross_section.small_cross_section_policy",
+            "Small-cross-section policy",
+            "小样本策略",
+            "What to do when the present cross-section is below the minimum: 'Indeterminate' emits a reasoned no-score; 'Historical quantile' normalizes against the factor's rolling history.",
+            "在场截面低于最小规模时的处理：『不确定』给出带原因的无分数；『历史分位』则用该因子的滚动历史归一化。",
+        ),
+        secs(
+            "factors.cross_section.historical_lookback_secs",
+            "Historical quantile lookback",
+            "历史分位回看窗口",
+            "Rolling lookback (seconds) used by the 'Historical quantile' small-cross-section policy to build the factor's reference distribution.",
+            "『历史分位』小样本策略用于构建该因子参考分布的滚动回看窗口（秒）。",
+        ),
+        ratio(
+            "factors.orthogonalize.max_correlation",
+            "Max factor correlation",
+            "因子最大相关",
+            "Absolute Spearman correlation tolerance between factors ([0, 1]). Pairs above it are flagged as collinear in the analysis report (a hard publish gate lands in a later phase).",
+            "因子间 Spearman 绝对相关容忍度（[0,1]）。超过者在分析报告中被标记为共线（硬发布门禁在后续阶段落地）。",
+        ),
+        f(
+            "factors.orthogonalize.neutralize_by",
+            "Neutralize dimensions",
+            "中性化维度",
+            "Dimensions each factor is residualized against before normalization (e.g. market category) to remove structural exposure. Empty disables neutralization.",
+            "归一化前对每个因子做残差化的维度（如市场分类），以移除结构性暴露。留空则关闭中性化。",
+        )
+        .widget(FieldWidget::EnumSet),
     ]
 }
 
@@ -1718,7 +1810,11 @@ fn features_section() -> SchemaNode {
             "features.enabled_feature_families",
             "features.required_features",
             "features.bar_windows_secs",
-            "features.momentum_windows_secs",
+            "features.momentum.roc_windows_secs",
+            "features.momentum.roc_lag_secs",
+            "features.momentum.ema_fast_secs",
+            "features.momentum.ema_slow_secs",
+            "features.momentum.slope_windows_secs",
             "features.volatility_windows_secs",
             "features.depth_levels",
             "features.max_concurrent_market_resolves",
@@ -1743,6 +1839,14 @@ fn factors_section() -> SchemaNode {
             "factors.factor_weights",
             "factors.min_factor_confidence",
             "factors.missing_factor_policy",
+            "factors.normalization.default_winsor_p",
+            "factors.normalization.default_clamp_sigma",
+            "factors.normalization.per_factor",
+            "factors.cross_section.min_size",
+            "factors.cross_section.small_cross_section_policy",
+            "factors.cross_section.historical_lookback_secs",
+            "factors.orthogonalize.max_correlation",
+            "factors.orthogonalize.neutralize_by",
         ]),
     )
 }

@@ -35,8 +35,8 @@ use rust_decimal::Decimal;
 use crate::{
     governance::quality_gate_load::quality_gate_passed_ok,
     pipeline::{
-        feature_window_provider::FeatureWindowProvider, historical_window::max_feature_lookback,
-        inference_batch::build_runtime_input, market_registry::MarketRegistry,
+        feature_window_provider::FeatureWindowProvider, inference_batch::build_runtime_input,
+        market_registry::MarketRegistry,
     },
     service::signal_reinference::{ExitSignalReinferer, FreshSignal},
 };
@@ -388,7 +388,7 @@ async fn load_window(
             buckets: Vec::new(),
         });
     }
-    let lookback = max_feature_lookback(features);
+    let lookback = Duration::from_secs(features.max_lookback_secs());
     let mut windows = window_provider
         .load_windows(std::slice::from_ref(market), as_of, lookback, source_delay)
         .await?;

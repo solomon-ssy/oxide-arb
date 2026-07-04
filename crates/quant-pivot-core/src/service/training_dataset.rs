@@ -13,7 +13,6 @@
 use crate::{
     pipeline::historical_window::{
         HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
-        max_feature_lookback,
     },
     service::historical_replay::{
         CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
@@ -45,7 +44,7 @@ use quant_pivot_research::{
     execution_sim::BookFidelity,
     factors::{
         FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue,
-        MarketFactorOutcome,
+        MarketFactorOutcome, NormalizedFactor,
     },
     features::{
         ConfiguredFeatureBuilder, EvidenceSourceRef, FeatureName, FeatureValue, FeatureVector,
@@ -970,18 +969,30 @@ fn frozen_factor_values(recommendation: &RecommendationInfo) -> Option<Vec<Facto
             .factor_definition_versions
             .get(index)?
             .clone();
+        let normalization = match (
+            entry.normalized_score,
+            entry.normalization_source,
+            entry.indeterminate_reason,
+        ) {
+            (Some(score), Some(source), _) => NormalizedFactor::Scored {
+                score,
+                source,
+                clamp: None,
+            },
+            (_, _, Some(reason)) => NormalizedFactor::Indeterminate { reason },
+            _ => NormalizedFactor::MissingInput,
+        };
         values.push(FactorValue {
             definition_id,
             name: FactorName::new(entry.factor_name.clone()),
             family: entry.family,
             raw_value: entry.raw_value,
-            normalized_score: entry.normalized_score,
+            normalization,
             direction: entry.direction,
             confidence: entry.confidence,
             explanation: FactorExplanation {
                 headline: entry.explanation.clone(),
                 drivers: Vec::new(),
-                clamp: None,
             },
             input_feature_refs: Vec::new(),
         });
@@ -1238,7 +1249,7 @@ impl ReplayContext {
     fn new(plan: &DatasetPlan, features: &FeaturesConfig) -> Self {
         Self {
             source_delay: Duration::from_secs(plan.request.source_delay_secs),
-            lookback: max_feature_lookback(features),
+            lookback: Duration::from_secs(features.max_lookback_secs()),
             max_horizon_secs: plan
                 .request
                 .horizons_secs

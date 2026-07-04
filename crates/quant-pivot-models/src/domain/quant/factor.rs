@@ -2,7 +2,9 @@
 
 use crate::{
     enums::{
-        factor::{FactorDefinitionScope, FactorFamily},
+        factor::{
+            FactorDefinitionScope, FactorFamily, FactorIndeterminateReason, NormalizationSource,
+        },
         quant::{FactorDirection, PublicationStatus},
     },
     types::{
@@ -77,7 +79,12 @@ pub struct FactorValueInfo {
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
     pub raw_value: Option<Decimal>,
-    pub normalized_score: Probability,
+    /// `None` when the factor was missing-input or indeterminate.
+    pub normalized_score: Option<Probability>,
+    /// How the score was derived (`None` when not scored).
+    pub normalization_source: Option<NormalizationSource>,
+    /// Why the factor was indeterminate (`None` unless indeterminate).
+    pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
     pub explanation: serde_json::Value,
@@ -86,7 +93,8 @@ pub struct FactorValueInfo {
 
 info_from_model!(FactorValueInfo, crate::entities::quant_factor_value::Model, {
     factor_value_id, factor_definition_id, feature_vector_id, model_run_id, market_id, as_of,
-    raw_value, normalized_score, direction, confidence, explanation, created_at,
+    raw_value, normalized_score, normalization_source, indeterminate_reason, direction, confidence,
+    explanation, created_at,
 });
 
 /// Insert payload for `quant_factor_value`.
@@ -100,7 +108,12 @@ pub struct NewFactorValue {
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
     pub raw_value: Option<Decimal>,
-    pub normalized_score: Probability,
+    /// `None` when the factor was missing-input or indeterminate.
+    pub normalized_score: Option<Probability>,
+    /// How the score was derived (`None` when not scored).
+    pub normalization_source: Option<NormalizationSource>,
+    /// Why the factor was indeterminate (`None` unless indeterminate).
+    pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
     pub explanation: serde_json::Value,

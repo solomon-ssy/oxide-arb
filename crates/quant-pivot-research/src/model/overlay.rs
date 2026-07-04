@@ -149,7 +149,7 @@ mod tests {
 
     use crate::factors::{
         FactorName,
-        names::{LIQUIDITY_DEPTH, MOMENTUM},
+        names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
     };
 
     fn weights(pairs: &[(&str, &str)]) -> FactorWeights {
@@ -165,7 +165,7 @@ mod tests {
     fn parses_normalized_weights() {
         let overlay = WeightOverlay::from_config(&weights(&[
             (LIQUIDITY_DEPTH.as_str(), "0.5"),
-            (MOMENTUM.as_str(), "0.5"),
+            (MOMENTUM_ROC.as_str(), "0.5"),
         ]))
         .expect("overlay");
         assert_eq!(overlay.weights().len(), 2);
@@ -175,7 +175,7 @@ mod tests {
     fn rejects_unnormalized_overlay() {
         let err = WeightOverlay::from_config(&weights(&[
             (LIQUIDITY_DEPTH.as_str(), "0.5"),
-            (MOMENTUM.as_str(), "0.9"),
+            (MOMENTUM_ROC.as_str(), "0.9"),
         ]));
         assert!(err.is_err(), "overlay weights must sum to 1");
     }
@@ -186,7 +186,7 @@ mod tests {
             .expect("overlay");
 
         let mut artifact_weights: BTreeMap<FactorName, _> = BTreeMap::new();
-        artifact_weights.insert(MOMENTUM, dec!(1));
+        artifact_weights.insert(MOMENTUM_ROC, dec!(1));
         // Overlay names a factor the artifact does not weight → unknown.
         assert!(overlay.resolve_against(&artifact_weights).is_err());
 

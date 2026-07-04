@@ -28,7 +28,6 @@ use quant_pivot_models::{
     },
     domain::MarketInfo,
     enums::{common::MarketCategory, market::MarketStatus},
-    runtime_config::FeaturesConfig,
     types::{MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
@@ -381,20 +380,6 @@ fn forward_sample(row: &BookMicrostructureRow, at: DateTime<Utc>) -> ForwardSamp
         best_bid_low: row.best_bid_low.map(ChPrice::to_price),
         top1_depth_usd: row.top1_depth_usd_avg.map(ChUsd::to_usd),
     }
-}
-
-/// Maximum trailing window any enabled time-series / microstructure feature needs.
-#[must_use]
-pub fn max_feature_lookback(config: &FeaturesConfig) -> Duration {
-    let max_secs = config
-        .bar_windows_secs
-        .iter()
-        .chain(config.momentum_windows_secs.iter())
-        .chain(config.volatility_windows_secs.iter())
-        .copied()
-        .max()
-        .unwrap_or(0);
-    Duration::from_secs(max_secs)
 }
 
 /// Convert a `std::time::Duration` into a saturating `chrono::Duration`.

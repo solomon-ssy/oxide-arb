@@ -269,11 +269,11 @@ mod tests {
         assert_eq!(field.value_type, crate::domain::JsonValueType::DecimalMap);
         assert_eq!(field.widget, Some(crate::domain::FieldWidget::WeightMap));
         let items = field.enum_items.as_ref().expect("enum_items");
-        assert_eq!(items.len(), 9);
+        assert_eq!(items.len(), 12);
         assert!(
             items
                 .iter()
-                .any(|item| item.key.as_str() == Some("momentum"))
+                .any(|item| item.key.as_str() == Some("momentum_roc"))
         );
     }
 

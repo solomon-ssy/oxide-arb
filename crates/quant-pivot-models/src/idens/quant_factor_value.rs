@@ -7,7 +7,10 @@ use sea_orm::{
 };
 
 use crate::{
-    enums::quant::FactorDirection,
+    enums::{
+        factor::{FactorIndeterminateReason, NormalizationSource},
+        quant::FactorDirection,
+    },
     idens::{
         market::Market, quant_factor_definition::QuantFactorDefinition,
         quant_feature_vector::QuantFeatureVector, quant_model_run::QuantModelRun,
@@ -32,6 +35,8 @@ pub enum QuantFactorValue {
     AsOf,
     RawValue,
     NormalizedScore,
+    NormalizationSource,
+    IndeterminateReason,
     Direction,
     Confidence,
     Explanation,
@@ -60,7 +65,15 @@ pub fn table() -> TableCreateStatement {
                 .decimal_len(28, 12)
                 .null(),
         )
-        .col(column::probability(QuantFactorValue::NormalizedScore))
+        // Nullable: `NULL` when the factor was missing-input or indeterminate
+        // (never a silent neutral placeholder).
+        .col(column::probability_null(QuantFactorValue::NormalizedScore))
+        .col(column::pg_enum_null::<NormalizationSource>(
+            QuantFactorValue::NormalizationSource,
+        ))
+        .col(column::pg_enum_null::<FactorIndeterminateReason>(
+            QuantFactorValue::IndeterminateReason,
+        ))
         .col(column::pg_enum::<FactorDirection>(
             QuantFactorValue::Direction,
         ))

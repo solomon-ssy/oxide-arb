@@ -31,7 +31,14 @@ pub fn factor_events(
         }
         let as_of_ms = outcome.as_of.timestamp_millis();
         for scored in &outcome.factors {
-            let Some(raw) = scored.value.raw_value else {
+            // Present-only, scored-only: a factor that was missing-input or
+            // indeterminate carries no normalized score, so it emits no analytics
+            // row (its authoritative record — with the reason — is in Postgres).
+            let (Some(raw), Some(normalized_score), Some(source)) = (
+                scored.value.raw_value,
+                scored.value.normalized_score(),
+                scored.value.normalization_source(),
+            ) else {
                 continue;
             };
             rows.push(QuantFactorEventRow {
@@ -41,7 +48,8 @@ pub fn factor_events(
                 factor_name: scored.value.name.as_str().to_owned(),
                 factor_family: scored.value.family.as_str().to_owned(),
                 raw_value: ChDecimal64::from(raw),
-                normalized_score: ChProbability::from(scored.value.normalized_score),
+                normalized_score: ChProbability::from(normalized_score),
+                normalization_source: source.into(),
                 confidence: ChProbability::from(scored.value.confidence),
                 direction: scored.value.direction.into(),
                 model_run_id: model_run_id.clone(),

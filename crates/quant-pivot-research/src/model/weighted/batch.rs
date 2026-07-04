@@ -63,7 +63,12 @@ impl ScoringBatchLayout {
                 if self.weights[*column] == 0.0 {
                     continue;
                 }
-                let normalized = factor.normalized_score.inner().to_f64().unwrap_or(0.0);
+                // Only a scored factor contributes; missing / indeterminate
+                // factors leave their matrix cell at zero (no fabricated neutral).
+                let Some(score) = factor.normalized_score() else {
+                    continue;
+                };
+                let normalized = score.inner().to_f64().unwrap_or(0.0);
                 let confidence = factor.confidence.inner().to_f64().unwrap_or(0.0);
                 let direction = f64::from(factor.direction.as_i8());
                 signed_matrix[[row_index, *column]] = direction * normalized * confidence;
@@ -97,8 +102,8 @@ mod tests {
 
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue,
-            names::{LIQUIDITY_DEPTH, MOMENTUM},
+            FactorExplanation, FactorName, FactorValue, NormalizedFactor,
+            names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         model::runtime::{FactorInferenceRow, MarketInferenceContext},
         precision::RESEARCH_DECIMAL_SCALE,
@@ -116,13 +121,12 @@ mod tests {
             name,
             family: FactorFamily::Liquidity,
             raw_value: Some(dec!(1)),
-            normalized_score: normalized,
+            normalization: NormalizedFactor::cross_section(normalized),
             direction,
             confidence: Probability::new(dec!(0.9)),
             explanation: FactorExplanation {
                 headline: "t".to_owned(),
                 drivers: Vec::new(),
-                clamp: None,
             },
             input_feature_refs: Vec::new(),
         }
@@ -152,9 +156,11 @@ mod tests {
             if weight.is_zero() {
                 continue;
             }
-            let signed = Decimal::from(factor.direction.as_i8())
-                * factor.normalized_score.inner()
-                * factor.confidence.inner();
+            let Some(score) = factor.normalized_score() else {
+                continue;
+            };
+            let signed =
+                Decimal::from(factor.direction.as_i8()) * score.inner() * factor.confidence.inner();
             net += *weight * signed;
         }
         net.round_dp(RESEARCH_DECIMAL_SCALE)
@@ -164,7 +170,7 @@ mod tests {
     fn batch_scoring_matches_scalar_reference() {
         let mut weights = std::collections::BTreeMap::new();
         weights.insert(LIQUIDITY_DEPTH, dec!(0.5));
-        weights.insert(MOMENTUM, dec!(0.5));
+        weights.insert(MOMENTUM_ROC, dec!(0.5));
         let layout = ScoringBatchLayout::from_weights(&weights);
 
         let bullish = FactorInferenceRow {
@@ -177,7 +183,7 @@ mod tests {
                     FactorDirection::Positive,
                 ),
                 factor(
-                    MOMENTUM,
+                    MOMENTUM_ROC,
                     Probability::new(dec!(0.6)),
                     FactorDirection::Positive,
                 ),
@@ -194,7 +200,7 @@ mod tests {
                     FactorDirection::Negative,
                 ),
                 factor(
-                    MOMENTUM,
+                    MOMENTUM_ROC,
                     Probability::new(dec!(0.6)),
                     FactorDirection::Negative,
                 ),

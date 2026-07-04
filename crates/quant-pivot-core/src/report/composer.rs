@@ -516,6 +516,8 @@ fn factor_breakdown(candidate: &SignalCandidate) -> RecommendationFactorBreakdow
                 family: factor.family,
                 raw_value: factor.raw_value,
                 normalized_score: factor.normalized_score,
+                normalization_source: factor.normalization_source,
+                indeterminate_reason: factor.indeterminate_reason,
                 weight: factor.weight,
                 contribution: factor.contribution,
                 confidence: factor.confidence,

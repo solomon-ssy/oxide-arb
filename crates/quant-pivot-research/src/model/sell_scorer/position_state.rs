@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    factors::{FactorExplanation, FactorName, FactorValue, names},
+    factors::{FactorExplanation, FactorName, FactorValue, NormalizedFactor, names},
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
@@ -124,7 +124,7 @@ pub fn position_state_factor_values(state: &PositionStateFeatures) -> Vec<Factor
             name,
             family: FactorFamily::Momentum,
             raw_value: Some(signed),
-            normalized_score: Probability::new(signed.abs()),
+            normalization: NormalizedFactor::cross_section(Probability::new(signed.abs())),
             direction: if signed >= Decimal::ZERO {
                 FactorDirection::Positive
             } else {
@@ -134,7 +134,6 @@ pub fn position_state_factor_values(state: &PositionStateFeatures) -> Vec<Factor
             explanation: FactorExplanation {
                 headline: "position_state".to_owned(),
                 drivers: Vec::new(),
-                clamp: None,
             },
             input_feature_refs: Vec::new(),
         })

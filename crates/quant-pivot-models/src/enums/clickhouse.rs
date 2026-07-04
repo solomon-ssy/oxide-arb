@@ -207,6 +207,36 @@ pub enum ChFactorDirection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
+pub enum ChNormalizationSource {
+    CrossSection = 1,
+    PerMarket = 2,
+    HistoricalQuantile = 3,
+}
+
+impl ChNormalizationSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CrossSection => "cross_section",
+            Self::PerMarket => "per_market",
+            Self::HistoricalQuantile => "historical_quantile",
+        }
+    }
+
+    /// Decode a persisted `normalization_source` wire label.
+    #[must_use]
+    pub fn from_wire(label: &str) -> Option<Self> {
+        match label {
+            "cross_section" => Some(Self::CrossSection),
+            "per_market" => Some(Self::PerMarket),
+            "historical_quantile" => Some(Self::HistoricalQuantile),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
 pub enum ChFeatureValueKind {
     Decimal = 0,
     Probability = 1,
@@ -257,7 +287,7 @@ impl ChFeatureSourceKind {
 mod tests {
     use super::{
         ChExitSignalEvaluatorKind, ChExitSignalVerdict, ChFeatureSourceKind, ChFeatureValueKind,
-        ChQuantLedgerEventKind,
+        ChNormalizationSource, ChQuantLedgerEventKind,
     };
 
     #[test]
@@ -278,6 +308,18 @@ mod tests {
         assert_eq!(
             ChFeatureSourceKind::from_wire("clickhouse_fact"),
             Some(ChFeatureSourceKind::ClickHouseFact)
+        );
+    }
+
+    #[test]
+    fn normalization_source_wire_labels() {
+        assert_eq!(
+            ChNormalizationSource::CrossSection.as_str(),
+            "cross_section"
+        );
+        assert_eq!(
+            ChNormalizationSource::from_wire("historical_quantile"),
+            Some(ChNormalizationSource::HistoricalQuantile)
         );
     }
 

@@ -4,9 +4,9 @@ use crate::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
     enums::clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
-        ChFactorDirection, ChFeatureSourceKind, ChFeatureValueKind, ChOutcomeSide,
-        ChPositionLedgerState, ChQuantLedgerEventKind, ChRecommendationAttributionOutcome,
-        ChRecommendationStatus,
+        ChFactorDirection, ChFeatureSourceKind, ChFeatureValueKind, ChNormalizationSource,
+        ChOutcomeSide, ChPositionLedgerState, ChQuantLedgerEventKind,
+        ChRecommendationAttributionOutcome, ChRecommendationStatus,
     },
     types::{
         CapitalAllocationId, ExecutionOrderId, MarketId, ModelRunId, ModelVersionId, OrderId,
@@ -33,6 +33,11 @@ pub struct QuantFeatureEventRow {
 }
 
 /// Factor value fact emitted after feature normalization.
+///
+/// Only **scored** factors of eligible markets are projected (present-only,
+/// mirroring the feature-event projection); indeterminate / missing factors emit
+/// no row — the authoritative record with the indeterminate reason lives in
+/// Postgres `quant_factor_value`.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantFactorEventRow {
     pub event_time: i64,
@@ -42,6 +47,8 @@ pub struct QuantFactorEventRow {
     pub factor_family: String,
     pub raw_value: ChDecimal64,
     pub normalized_score: ChProbability,
+    /// How the score was derived.
+    pub normalization_source: ChNormalizationSource,
     pub confidence: ChProbability,
     pub direction: ChFactorDirection,
     pub model_run_id: ModelRunId,

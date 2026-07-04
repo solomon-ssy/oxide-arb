@@ -69,7 +69,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
-    factors::{FactorExplanation, FactorValue, names::LIQUIDITY_DEPTH},
+    factors::{FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
     features::{FeatureName, FeatureValue, FeatureVector, names},
     model::{
         DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact, ModelRuntimeFactoryBuilder,
@@ -162,13 +162,12 @@ fn examples() -> Vec<TrainingExample> {
                 name: LIQUIDITY_DEPTH,
                 family: FactorFamily::Liquidity,
                 raw_value: Some(liquidity_usd(i)),
-                normalized_score: Probability::new(strength),
+                normalization: NormalizedFactor::cross_section(Probability::new(strength)),
                 direction: FactorDirection::Positive,
                 confidence: Probability::new(dec!(1)),
                 explanation: FactorExplanation {
                     headline: "liquidity".to_owned(),
                     drivers: Vec::new(),
-                    clamp: None,
                 },
                 input_feature_refs: Vec::new(),
             };

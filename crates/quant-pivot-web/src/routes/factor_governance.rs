@@ -3,8 +3,9 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        FactorDefinitionListQuery, FactorDefinitionView, GovernanceActor, Paginated,
-        PublishFactorCommand, PublishFactorRequest, RetireFactorCommand, RetireFactorRequest,
+        FactorCollinearityQuery, FactorCollinearityView, FactorDefinitionListQuery,
+        FactorDefinitionView, GovernanceActor, Paginated, PublishFactorCommand,
+        PublishFactorRequest, RetireFactorCommand, RetireFactorRequest,
     },
     enums::{
         operation_log::OperationCategory,
@@ -33,6 +34,13 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/factors",
             Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
             list,
+        ),
+        // Registered before `{id}` so the literal path is not captured as an id.
+        spec(
+            Method::GET,
+            "/research/factors/collinearity",
+            Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
+            collinearity,
         ),
         spec(
             Method::GET,
@@ -66,6 +74,32 @@ pub async fn list(
         .await?
         .map(FactorDefinitionView::from);
     Ok(WebResponse::ok(page))
+}
+
+/// Default collinearity lookback: seven days of factor values.
+const DEFAULT_COLLINEARITY_LOOKBACK_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// `GET /api/research/factors/collinearity` — Spearman collinearity report.
+pub async fn collinearity(
+    state: web::Data<AppState>,
+    query: web::Query<FactorCollinearityQuery>,
+) -> Result<WebResponse<FactorCollinearityView>, WebError> {
+    let query = query.into_inner();
+    let lookback_secs = query
+        .lookback_secs
+        .unwrap_or(DEFAULT_COLLINEARITY_LOOKBACK_SECS);
+    let threshold = match query.threshold {
+        Some(raw) => raw
+            .trim()
+            .parse::<rust_decimal::Decimal>()
+            .map_err(|error| WebError::BadRequest(format!("invalid threshold `{raw}`: {error}")))?,
+        None => rust_decimal::Decimal::new(9, 1),
+    };
+    let report = state
+        .research_catalog
+        .factor_collinearity(lookback_secs, threshold)
+        .await?;
+    Ok(WebResponse::ok(report))
 }
 
 /// `GET /api/research/factors/{id}` — single factor definition (detail drawer).

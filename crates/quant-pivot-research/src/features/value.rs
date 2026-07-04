@@ -44,10 +44,22 @@ impl FeatureName {
         Self::new(format!("ts.depth_trend_{window_secs}s"))
     }
 
-    /// Momentum feature over a configured window: `ts.momentum_{window_secs}s`.
+    /// Lag-skipped rate-of-change momentum: `ts.momentum_roc_{window_secs}s`.
     #[must_use]
-    pub fn ts_momentum(window_secs: u64) -> Self {
-        Self::new(format!("ts.momentum_{window_secs}s"))
+    pub fn ts_momentum_roc(window_secs: u64) -> Self {
+        Self::new(format!("ts.momentum_roc_{window_secs}s"))
+    }
+
+    /// EMA-slope momentum over a configured window: `ts.ema_slope_{window_secs}s`.
+    #[must_use]
+    pub fn ts_ema_slope(window_secs: u64) -> Self {
+        Self::new(format!("ts.ema_slope_{window_secs}s"))
+    }
+
+    /// Volatility-adjusted return: `ts.vol_adjusted_return_{window_secs}s`.
+    #[must_use]
+    pub fn ts_vol_adjusted_return(window_secs: u64) -> Self {
+        Self::new(format!("ts.vol_adjusted_return_{window_secs}s"))
     }
 
     /// Realized-volatility feature: `ts.realized_vol_{window_secs}s`.

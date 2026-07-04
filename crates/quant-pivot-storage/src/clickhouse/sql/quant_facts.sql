@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS quant_factor_event
     factor_family LowCardinality(String),
     raw_value Decimal64(8),
     normalized_score Decimal64(8),
+    normalization_source Enum8('cross_section' = 1, 'per_market' = 2, 'historical_quantile' = 3),
     confidence Decimal64(8),
     direction Enum8('negative' = -1, 'neutral' = 0, 'positive' = 1),
     model_run_id String,

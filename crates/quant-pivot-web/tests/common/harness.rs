@@ -37,17 +37,18 @@ use quant_pivot_models::{
         BookSnapshot, BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort,
         ComparisonReportListQuery, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
         ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
-        ExecutionSubmitPort, FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort,
-        GatePreviewIntent, GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView,
-        MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort,
-        ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort, ModelVersionInfo,
-        ModelVersionListQuery, Paginated, PromoteDatasetRequest, PublishFactorCommand,
-        PublishModelCommand, QualityGateReportView, QuantModeTransitionReport, ReconciliationPort,
-        ResearchCatalogPort, ResolveReconciliationCommand, ResolveReconciliationOutcome,
-        RetireFactorCommand, RetireModelCommand, RollbackModelCommand, RunBacktestRequest,
-        RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand, SystemStatus,
-        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
-        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
+        ExecutionSubmitPort, FactorCollinearityView, FactorDefinitionInfo,
+        FactorDefinitionListQuery, FactorGovernancePort, GatePreviewIntent, GovernanceActor,
+        HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort,
+        ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery,
+        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        PromoteDatasetRequest, PublishFactorCommand, PublishModelCommand, QualityGateReportView,
+        QuantModeTransitionReport, ReconciliationPort, ResearchCatalogPort,
+        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
+        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
+        RuntimeControlPort, SetKillSwitchCommand, SystemStatus, TrainModelRequest,
+        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
@@ -733,6 +734,21 @@ impl ResearchCatalogPort for MockResearchCatalogPort {
         _factor_definition_id: &FactorDefinitionId,
     ) -> QuantResult<Option<FactorDefinitionInfo>> {
         Ok(None)
+    }
+
+    async fn factor_collinearity(
+        &self,
+        lookback_secs: u64,
+        threshold: rust_decimal::Decimal,
+    ) -> QuantResult<FactorCollinearityView> {
+        Ok(FactorCollinearityView {
+            factors: Vec::new(),
+            matrix: Vec::new(),
+            violations: Vec::new(),
+            threshold,
+            observation_count: 0,
+            lookback_secs,
+        })
     }
 }
 

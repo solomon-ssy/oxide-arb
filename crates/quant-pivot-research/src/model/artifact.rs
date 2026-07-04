@@ -807,7 +807,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use crate::{
-        factors::names::{LIQUIDITY_DEPTH, MOMENTUM},
+        factors::names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         model::artifact::{CalibratedReturnModel, FactorWeight, HeuristicReturnModel},
         model::runtime::ModelFamily,
     };
@@ -831,7 +831,7 @@ mod tests {
                     weight: dec!(0.6),
                 },
                 FactorWeight {
-                    factor: MOMENTUM,
+                    factor: MOMENTUM_ROC,
                     weight: dec!(0.4),
                 },
             ],
@@ -885,7 +885,7 @@ mod tests {
                     weight: dec!(0.6),
                 },
                 FactorWeight {
-                    factor: MOMENTUM,
+                    factor: MOMENTUM_ROC,
                     weight: dec!(0.4),
                 },
             ],

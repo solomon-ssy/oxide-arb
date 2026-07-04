@@ -3,11 +3,12 @@
 use crate::enums::{
     clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChFactorDirection, ChFeatureSourceKind,
-        ChFeatureValueKind, ChOutcomeSide, ChPositionLedgerState,
+        ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
         ChRecommendationAttributionOutcome, ChRecommendationStatus,
     },
     common::Side,
     execution::{CapitalAllocationState, PositionLedgerState},
+    factor::NormalizationSource,
     feature::{EvidenceSourceKind, FeatureValueKind},
     quant::{FactorDirection, OutcomeSide, RecommendationAttributionOutcome, RecommendationStatus},
 };
@@ -84,6 +85,16 @@ impl From<FactorDirection> for ChFactorDirection {
             FactorDirection::Positive => Self::Positive,
             FactorDirection::Neutral => Self::Neutral,
             FactorDirection::Negative => Self::Negative,
+        }
+    }
+}
+
+impl From<NormalizationSource> for ChNormalizationSource {
+    fn from(value: NormalizationSource) -> Self {
+        match value {
+            NormalizationSource::CrossSection => Self::CrossSection,
+            NormalizationSource::PerMarket => Self::PerMarket,
+            NormalizationSource::HistoricalQuantile => Self::HistoricalQuantile,
         }
     }
 }

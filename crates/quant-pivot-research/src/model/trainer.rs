@@ -566,10 +566,13 @@ pub(crate) fn signed_contribution(example: &TrainingExample, factor: &FactorName
         .factor_values
         .iter()
         .find(|value| value.name == *factor)
-        .map_or(Decimal::ZERO, |value| {
+        .and_then(|value| {
             let direction = Decimal::from(value.direction.as_i8());
-            direction * value.normalized_score.inner() * value.confidence.inner()
+            value
+                .normalized_score()
+                .map(|score| direction * score.inner() * value.confidence.inner())
         })
+        .unwrap_or(Decimal::ZERO)
 }
 
 /// A contiguous, time-ordered fold layout for rolling validation.
@@ -632,8 +635,8 @@ mod tests {
 
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue,
-            names::{LIQUIDITY_DEPTH, MOMENTUM},
+            FactorExplanation, FactorName, FactorValue, NormalizedFactor,
+            names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         features::FeatureVector,
         model::{
@@ -678,13 +681,12 @@ mod tests {
             name,
             family: FactorFamily::Liquidity,
             raw_value: Some(dec!(1)),
-            normalized_score: Probability::new(score),
+            normalization: NormalizedFactor::cross_section(Probability::new(score)),
             direction: dir,
             confidence: Probability::new(dec!(1)),
             explanation: FactorExplanation {
                 headline: "t".to_owned(),
                 drivers: Vec::new(),
-                clamp: None,
             },
             input_feature_refs: Vec::new(),
         };
@@ -695,7 +697,7 @@ mod tests {
             as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: fv,
-            factor_values: vec![mk(LIQUIDITY_DEPTH, liq), mk(MOMENTUM, mom)],
+            factor_values: vec![mk(LIQUIDITY_DEPTH, liq), mk(MOMENTUM_ROC, mom)],
             labels: vec![TrainingLabel {
                 label_name: label_name(),
                 horizon_secs: 0,
@@ -722,7 +724,7 @@ mod tests {
                     weight: dec!(0.5),
                 },
                 FactorWeight {
-                    factor: MOMENTUM,
+                    factor: MOMENTUM_ROC,
                     weight: dec!(0.5),
                 },
             ],
@@ -822,7 +824,7 @@ mod tests {
         let momentum = art
             .weights
             .iter()
-            .find(|w| w.factor == MOMENTUM)
+            .find(|w| w.factor == MOMENTUM_ROC)
             .expect("momentum weight");
         assert!(
             momentum.weight > dec!(0.5),

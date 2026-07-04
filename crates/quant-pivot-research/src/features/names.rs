@@ -59,6 +59,8 @@ pub mod ts {
 
     /// Price-reversal signal over the configured lookback.
     pub const PRICE_REVERSAL: FeatureName = FeatureName::from_static("ts.price_reversal");
+    /// Volatility-normalized MACD (trend-crossover) momentum.
+    pub const MACD_NORM: FeatureName = FeatureName::from_static("ts.macd_norm");
 }
 
 /// Microstructure features from `ClickHouse` tick windows.

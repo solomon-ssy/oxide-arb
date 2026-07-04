@@ -91,6 +91,31 @@ pub enum MissingFactorPolicy {
     RejectCandidate,
 }
 
+/// How a cross-sectional factor is normalized when the present same-`as_of`
+/// cross-section is smaller than `factors.cross_section.min_size`.
+///
+/// There is **no silent-neutral** option: either the factor is normalized
+/// against its own historical distribution, or it is explicitly indeterminate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SmallCrossSectionPolicy {
+    /// Emit an indeterminate factor (recorded reason, contributes nothing).
+    Indeterminate,
+    /// Normalize against the factor's historical rolling quantile.
+    HistoricalQuantile,
+}
+
+/// A dimension a factor can be neutralized (residualized) against before the
+/// cross-sectional normalization, to remove structural exposure (e.g. category).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NeutralizeDimension {
+    /// Regress the factor on market-category one-hot dummies; keep the residual.
+    Category,
+}
+
 /// Report delivery policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

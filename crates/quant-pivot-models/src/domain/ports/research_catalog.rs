@@ -13,13 +13,14 @@ use async_trait::async_trait;
 use crate::{
     domain::{
         BacktestReportInfo, BacktestReportListQuery, ComparisonReportListQuery,
-        FactorDefinitionInfo, FactorDefinitionListQuery, ModelComparisonReportInfo, ModelSpecInfo,
-        ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, Paginated,
-        TrainingDatasetInfo, TrainingDatasetListQuery,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+        ModelVersionListQuery, Paginated, TrainingDatasetInfo, TrainingDatasetListQuery,
     },
     types::FactorDefinitionId,
 };
 use quant_pivot_error::QuantResult;
+use rust_decimal::Decimal;
 
 /// Dependency-inversion boundary between the HTTP layer and the core research
 /// repositories for read-only catalog browsing.
@@ -68,4 +69,11 @@ pub trait ResearchCatalogPort: Send + Sync {
         &self,
         factor_definition_id: &FactorDefinitionId,
     ) -> QuantResult<Option<FactorDefinitionInfo>>;
+
+    /// Analyze pairwise factor collinearity over the recent factor-value window.
+    async fn factor_collinearity(
+        &self,
+        lookback_secs: u64,
+        threshold: Decimal,
+    ) -> QuantResult<FactorCollinearityView>;
 }

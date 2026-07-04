@@ -29,9 +29,7 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    pipeline::historical_window::{
-        HistoricalWindowLoader, ReplaySample, WindowSpec, max_feature_lookback,
-    },
+    pipeline::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
     service::historical_replay::{CrossSectionRequest, ReplayConfig, materialize_cross_section},
 };
 
@@ -105,7 +103,7 @@ pub async fn rematerialize_training_examples(
     let label_index = parquet_label_index(parquet_examples);
 
     let source_delay = Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
-    let lookback = max_feature_lookback(&replay.features);
+    let lookback = Duration::from_secs(replay.features.max_lookback_secs());
     let max_horizon_secs = max_horizon(dataset);
 
     let loader = HistoricalWindowLoader::new(fact_read, market_repo, max_book_staleness);
@@ -210,7 +208,7 @@ pub async fn rematerialize_exit_decision_examples(
 ) -> QuantResult<Vec<TrainingExample>> {
     let schedule = ReplaySchedule::from_examples(parquet_examples);
     let source_delay = Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
-    let lookback = max_feature_lookback(&replay.features);
+    let lookback = Duration::from_secs(replay.features.max_lookback_secs());
     let max_horizon_secs = max_horizon(dataset);
 
     let loader = HistoricalWindowLoader::new(fact_read, market_repo, max_book_staleness);

@@ -118,12 +118,16 @@ impl WeightedFactorRuntime {
             if weight.is_zero() {
                 continue;
             }
-            let normalized = factor.normalized_score.inner();
             let confidence = factor.confidence.inner();
-            let direction = Decimal::from(factor.direction.as_i8());
-            let signed = direction * normalized * confidence;
-            let contribution = (*weight * signed).round_dp(RESEARCH_DECIMAL_SCALE);
-            if factor.raw_value.is_some() && confidence > Decimal::ZERO {
+            // Only a scored factor contributes to net / confidence mass; a
+            // missing-input or indeterminate factor is surfaced in the breakdown
+            // with a zero contribution (never a fabricated neutral score).
+            let contribution = factor.normalized_score().map_or(Decimal::ZERO, |score| {
+                let direction = Decimal::from(factor.direction.as_i8());
+                let signed = direction * score.inner() * confidence;
+                (*weight * signed).round_dp(RESEARCH_DECIMAL_SCALE)
+            });
+            if factor.is_scored() && confidence > Decimal::ZERO {
                 confidence_mass += weight;
                 confidence_weighted += *weight * confidence;
             }
@@ -132,7 +136,9 @@ impl WeightedFactorRuntime {
                 name: factor.name.clone(),
                 family: factor.family,
                 raw_value: factor.raw_value,
-                normalized_score: factor.normalized_score,
+                normalized_score: factor.normalized_score(),
+                normalization_source: factor.normalization_source(),
+                indeterminate_reason: factor.indeterminate_reason(),
                 weight: *weight,
                 contribution,
                 confidence: factor.confidence,
@@ -431,8 +437,8 @@ mod tests {
 
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue,
-            names::{LIQUIDITY_DEPTH, MOMENTUM},
+            FactorExplanation, FactorName, FactorValue, NormalizedFactor,
+            names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         model::{
             ReturnModelSpec,
@@ -462,13 +468,12 @@ mod tests {
             name,
             family: FactorFamily::Liquidity,
             raw_value: Some(dec!(1)),
-            normalized_score: normalized,
+            normalization: NormalizedFactor::cross_section(normalized),
             direction,
             confidence: Probability::new(dec!(0.9)),
             explanation: FactorExplanation {
                 headline: "t".to_owned(),
                 drivers: Vec::new(),
-                clamp: None,
             },
             input_feature_refs: Vec::new(),
         }
@@ -488,7 +493,7 @@ mod tests {
                     weight: dec!(0.5),
                 },
                 FactorWeight {
-                    factor: MOMENTUM,
+                    factor: MOMENTUM_ROC,
                     weight: dec!(0.5),
                 },
             ],
@@ -524,7 +529,7 @@ mod tests {
             token_id: TokenId::new("yes"),
             factors: vec![
                 factor(LIQUIDITY_DEPTH, Probability::new(dec!(0.8)), direction),
-                factor(MOMENTUM, Probability::new(dec!(0.6)), direction),
+                factor(MOMENTUM_ROC, Probability::new(dec!(0.6)), direction),
             ],
             context: context(),
         }
@@ -578,7 +583,7 @@ mod tests {
                     FactorDirection::Neutral,
                 ),
                 factor(
-                    MOMENTUM,
+                    MOMENTUM_ROC,
                     Probability::new(dec!(0.5)),
                     FactorDirection::Neutral,
                 ),

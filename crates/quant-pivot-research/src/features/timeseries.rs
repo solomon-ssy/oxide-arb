@@ -58,20 +58,44 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
                 &evidence,
             ));
         }
-        for secs in &ctx.config.momentum_windows_secs {
+        let momentum = &ctx.config.momentum;
+        for secs in &momentum.roc_windows_secs {
             out.push(decimal_or_missing(
-                format!("ts.momentum_{secs}s"),
-                stats::simple_return(&mids(window, *secs)),
+                format!("ts.momentum_roc_{secs}s"),
+                lag_skipped_roc(window, *secs, momentum.roc_lag_secs),
+                &evidence,
+            ));
+        }
+        for secs in &momentum.slope_windows_secs {
+            out.push(decimal_or_missing(
+                format!("ts.ema_slope_{secs}s"),
+                stats::ema_slope(&mids(window, *secs), momentum.ema_fast_secs),
                 &evidence,
             ));
         }
         for secs in &ctx.config.volatility_windows_secs {
+            let series = mids(window, *secs);
             out.push(decimal_or_missing(
                 format!("ts.realized_vol_{secs}s"),
-                stats::realized_volatility(&mids(window, *secs)),
+                stats::realized_volatility(&series),
+                &evidence,
+            ));
+            out.push(decimal_or_missing(
+                format!("ts.vol_adjusted_return_{secs}s"),
+                vol_adjusted_return(&series),
                 &evidence,
             ));
         }
+        // Vol-normalized MACD over the slow-EMA window (long enough for both legs).
+        out.push(decimal_or_missing(
+            "ts.macd_norm".to_owned(),
+            stats::macd_normalized(
+                &mids(window, momentum.ema_slow_secs),
+                momentum.ema_fast_secs,
+                momentum.ema_slow_secs,
+            ),
+            &evidence,
+        ));
 
         let largest = ctx
             .config
@@ -96,6 +120,35 @@ fn mids(window: &MarketWindowSnapshot, secs: u64) -> Vec<Decimal> {
         .into_iter()
         .map(Price::inner)
         .collect()
+}
+
+/// Lag-skipped rate of change over `[t - window, t - lag]`.
+///
+/// The base is the mid at `t - window` (oldest mid in the window) and the recent
+/// value is the mid at `t - lag` (oldest mid within the trailing `lag`). Skipping
+/// the most recent `lag` seconds excludes the short-term reversal segment
+/// (classic 12-1 momentum), so this is **not** the endpoint simple return. `None`
+/// when either endpoint is unavailable.
+fn lag_skipped_roc(
+    window: &MarketWindowSnapshot,
+    window_secs: u64,
+    lag_secs: u64,
+) -> Option<Decimal> {
+    if window_secs <= lag_secs {
+        return None;
+    }
+    let full = mids(window, window_secs);
+    let recent = mids(window, lag_secs);
+    let base = *full.first()?;
+    let at_lag = *recent.first()?;
+    stats::rate_of_change(base, at_lag)
+}
+
+/// Volatility-adjusted return over a mid series: `simple_return / realized_vol`.
+fn vol_adjusted_return(series: &[Decimal]) -> Option<Decimal> {
+    let simple = stats::simple_return(series)?;
+    let vol = stats::realized_volatility(series)?;
+    stats::vol_adjusted(simple, vol)
 }
 
 /// Spread (bps) series within the trailing `secs` window.

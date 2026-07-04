@@ -1,23 +1,24 @@
-//! The nine generic factor computers.
+//! The generic factor computers.
 //!
 //! Each generic factor is a pure, per-market function over a
-//! [`FeatureVector`](crate::features::FeatureVector). Eight are single-feature
-//! factors backed by [`FeatureBackedFactor`]; the ninth
-//! ([`DataQualityFactor`]) reads the vector's aggregate quality metadata. Raw
-//! values are never silently zero — a missing input yields `raw_value = None`
-//! with `confidence = 0`.
+//! [`FeatureVector`](crate::features::FeatureVector). Single-feature factors are
+//! backed by [`FeatureBackedFactor`]; the [`DataQualityFactor`] reads the
+//! vector's aggregate quality metadata. Raw values are never silently zero — a
+//! missing input yields `raw_value = None` with `confidence = 0`.
 //!
-//! Normalization parameters here are deterministic heuristics; learned / tuned
-//! parameters are a 3.6 trainer concern. Two factors are marked **required**
-//! (they declare a quality gate): `liquidity_depth` and `spread_efficiency` —
-//! a market with no liquidity signal is not a candidate under `RejectCandidate`.
+//! Each factor declares only its normalization **method** (a semantic choice).
+//! The distributional parameters (winsorize percentile, sigma clamp, `MinMax`
+//! bounds) are resolved from runtime config by the
+//! [`FactorEngine`](crate::factors::FactorEngine) — **there are no hardcoded
+//! normalization constants in this file**. Two factors are marked **required**
+//! (they declare a quality gate): `liquidity_depth` and `spread_efficiency`.
 
 use std::sync::Arc;
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::{
-        factor::FactorFamily,
+        factor::{FactorFamily, FactorNormalization},
         quant::{DataQualityStatus, FactorDirection},
     },
     runtime_config::FeaturesConfig,
@@ -31,11 +32,12 @@ use crate::{
         computer::FactorComputer,
         names::{
             BOOK_IMBALANCE, DATA_QUALITY, LIQUIDITY_DEPTH, MARKET_ACTIVITY, MEAN_REVERSION,
-            MOMENTUM, SPREAD_EFFICIENCY, TIME_TO_RESOLUTION, VOLATILITY_REGIME,
+            MOMENTUM_EMA_SLOPE, MOMENTUM_MACD, MOMENTUM_ROC, MOMENTUM_VOL_ADJUSTED,
+            SPREAD_EFFICIENCY, TIME_TO_RESOLUTION, VOLATILITY_REGIME,
         },
         value::{
             FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, FactorQualityGate,
-            NormalizationSpec, RawFactor,
+            RawFactor,
         },
     },
     features::{
@@ -61,13 +63,13 @@ pub fn factor_definition_id(name: &str) -> FactorDefinitionId {
 pub fn generic_factors(
     features: &FeaturesConfig,
 ) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
-    vec![
+    let mut factors = vec![
         feature_factor(
             &LIQUIDITY_DEPTH,
             FactorFamily::Liquidity,
             book::VISIBLE_LIQUIDITY_USD,
             FactorDirection::Positive,
-            NormalizationSpec::Rank,
+            FactorNormalization::Rank,
             true,
             "visible liquidity",
         ),
@@ -76,10 +78,7 @@ pub fn generic_factors(
             FactorFamily::Liquidity,
             book::SPREAD_BPS,
             FactorDirection::Negative,
-            NormalizationSpec::Logistic {
-                k: Decimal::new(1, 2),
-                x0: Decimal::from(200),
-            },
+            FactorNormalization::WinsorizedZScore,
             true,
             "top-of-book spread",
         ),
@@ -88,32 +87,19 @@ pub fn generic_factors(
             FactorFamily::Microstructure,
             book::DEPTH_IMBALANCE,
             FactorDirection::Positive,
-            NormalizationSpec::MinMax {
-                lo: Decimal::NEGATIVE_ONE,
-                hi: Decimal::ONE,
-            },
+            FactorNormalization::WinsorizedZScore,
             false,
             "depth imbalance",
         ),
-        feature_factor(
-            &MOMENTUM,
-            FactorFamily::Momentum,
-            windowed_momentum(features),
-            FactorDirection::Positive,
-            NormalizationSpec::ZScore {
-                clamp_sigma: Decimal::from(3),
-            },
-            false,
-            "momentum",
-        ),
+    ];
+    factors.extend(momentum_factors(features));
+    factors.extend([
         feature_factor(
             &MEAN_REVERSION,
             FactorFamily::MeanReversion,
             ts::PRICE_REVERSAL,
             FactorDirection::Positive,
-            NormalizationSpec::ZScore {
-                clamp_sigma: Decimal::from(3),
-            },
+            FactorNormalization::WinsorizedZScore,
             false,
             "price reversal",
         ),
@@ -122,10 +108,7 @@ pub fn generic_factors(
             FactorFamily::Volatility,
             windowed_realized_vol(features),
             FactorDirection::Negative,
-            NormalizationSpec::Logistic {
-                k: Decimal::from(50),
-                x0: Decimal::new(5, 2),
-            },
+            FactorNormalization::Rank,
             false,
             "realized volatility",
         ),
@@ -134,10 +117,7 @@ pub fn generic_factors(
             FactorFamily::Activity,
             micro::QUOTE_UPDATE_RATE,
             FactorDirection::Positive,
-            NormalizationSpec::Logistic {
-                k: Decimal::ONE,
-                x0: Decimal::ONE,
-            },
+            FactorNormalization::WinsorizedZScore,
             false,
             "quote update rate",
         ),
@@ -146,14 +126,57 @@ pub fn generic_factors(
             FactorFamily::Resolution,
             market::TIME_TO_RESOLUTION_SECS,
             FactorDirection::Positive,
-            NormalizationSpec::Logistic {
-                k: Decimal::new(1, 5),
-                x0: Decimal::from(86_400),
-            },
+            FactorNormalization::Rank,
             false,
             "time to resolution",
         ),
         data_quality_factor(),
+    ]);
+    factors
+}
+
+/// The independent momentum family: four distinct estimators (never a return
+/// clone), each vol/normalization-tuned via config.
+fn momentum_factors(
+    features: &FeaturesConfig,
+) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+    vec![
+        feature_factor(
+            &MOMENTUM_ROC,
+            FactorFamily::Momentum,
+            momentum_roc_feature(features),
+            FactorDirection::Positive,
+            FactorNormalization::WinsorizedZScore,
+            false,
+            "lag-skipped rate of change",
+        ),
+        feature_factor(
+            &MOMENTUM_EMA_SLOPE,
+            FactorFamily::Momentum,
+            ema_slope_feature(features),
+            FactorDirection::Positive,
+            FactorNormalization::WinsorizedZScore,
+            false,
+            "EMA slope",
+        ),
+        feature_factor(
+            &MOMENTUM_VOL_ADJUSTED,
+            FactorFamily::Momentum,
+            vol_adjusted_feature(features),
+            FactorDirection::Positive,
+            FactorNormalization::WinsorizedZScore,
+            false,
+            "volatility-adjusted return",
+        ),
+        feature_factor(
+            &MOMENTUM_MACD,
+            FactorFamily::Momentum,
+            ts::MACD_NORM,
+            FactorDirection::Positive,
+            FactorNormalization::WinsorizedZScore,
+            false,
+            "vol-normalized MACD",
+        ),
     ]
 }
 
@@ -163,7 +186,7 @@ fn feature_factor(
     family: FactorFamily,
     input: FeatureName,
     direction: FactorDirection,
-    normalization: NormalizationSpec,
+    normalization: FactorNormalization,
     required: bool,
     headline_label: &'static str,
 ) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
@@ -196,7 +219,7 @@ fn feature_factor(
     (spec, computer)
 }
 
-/// Build the data-quality `(spec, computer)` pair.
+/// Build the data-quality `(spec, computer)` pair (`MinMax` bounds from config).
 fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     let definition_id = factor_definition_id(DATA_QUALITY.as_str());
     let spec = FactorDefinitionSpec {
@@ -205,10 +228,7 @@ fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
         input_features: Vec::new(),
         output_kind: FactorOutputKind::NormalizedScore,
         default_direction: FactorDirection::Positive,
-        normalization: NormalizationSpec::MinMax {
-            lo: Decimal::ZERO,
-            hi: Decimal::ONE,
-        },
+        normalization: FactorNormalization::MinMax,
         owner: "quant-research".to_owned(),
         quality_gates: Vec::new(),
     };
@@ -219,24 +239,50 @@ fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     (spec, computer)
 }
 
-/// Resolve the momentum feature from configured windows (first window, or 300s).
-fn windowed_momentum(features: &FeaturesConfig) -> FeatureName {
-    let window = features
-        .momentum_windows_secs
-        .first()
-        .copied()
-        .unwrap_or(300);
-    FeatureName::ts_momentum(window)
+/// Resolve the ROC-momentum feature from the first configured ROC window.
+fn momentum_roc_feature(features: &FeaturesConfig) -> FeatureName {
+    FeatureName::ts_momentum_roc(
+        features
+            .momentum
+            .roc_windows_secs
+            .first()
+            .copied()
+            .unwrap_or(0),
+    )
 }
 
-/// Resolve the realized-volatility feature from configured windows (first, or 900s).
+/// Resolve the EMA-slope feature from the first configured slope window.
+fn ema_slope_feature(features: &FeaturesConfig) -> FeatureName {
+    FeatureName::ts_ema_slope(
+        features
+            .momentum
+            .slope_windows_secs
+            .first()
+            .copied()
+            .unwrap_or(0),
+    )
+}
+
+/// Resolve the vol-adjusted-return feature from the first volatility window.
+fn vol_adjusted_feature(features: &FeaturesConfig) -> FeatureName {
+    FeatureName::ts_vol_adjusted_return(
+        features
+            .volatility_windows_secs
+            .first()
+            .copied()
+            .unwrap_or(0),
+    )
+}
+
+/// Resolve the realized-volatility feature from the first volatility window.
 fn windowed_realized_vol(features: &FeaturesConfig) -> FeatureName {
-    let window = features
-        .volatility_windows_secs
-        .first()
-        .copied()
-        .unwrap_or(900);
-    FeatureName::ts_realized_vol(window)
+    FeatureName::ts_realized_vol(
+        features
+            .volatility_windows_secs
+            .first()
+            .copied()
+            .unwrap_or(0),
+    )
 }
 
 /// A factor backed by one numeric feature, extracted via the feature's canonical

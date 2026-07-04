@@ -51,7 +51,7 @@ fn score_from_breakdown(
     breakdown
         .iter()
         .find(|contribution| &contribution.name == factor_name)
-        .map(|contribution| contribution.normalized_score)
+        .and_then(|contribution| contribution.normalized_score)
 }
 
 fn push_missing_warning(candidate: &mut SignalCandidate, factor: &str) {
@@ -77,7 +77,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{
-            factor::FactorFamily,
+            factor::{FactorFamily, NormalizationSource},
             quant::{FactorDirection, OutcomeSide},
         },
         types::{
@@ -94,7 +94,9 @@ mod tests {
             name,
             family: FactorFamily::Liquidity,
             raw_value: Some(score),
-            normalized_score: Probability::new(score),
+            normalized_score: Some(Probability::new(score)),
+            normalization_source: Some(NormalizationSource::CrossSection),
+            indeterminate_reason: None,
             weight: dec!(1),
             contribution: score,
             confidence: Probability::new(dec!(1)),

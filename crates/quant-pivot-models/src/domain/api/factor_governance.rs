@@ -13,8 +13,8 @@ use validator::Validate;
 use crate::{
     domain::{FactorDefinitionInfo, pagination::PageRequest},
     enums::{
-        factor::{FactorDefinitionScope, FactorFamily},
-        quant::PublicationStatus,
+        factor::{FactorDefinitionScope, FactorFamily, FactorNormalization},
+        quant::{FactorDirection, PublicationStatus},
     },
 };
 
@@ -35,6 +35,10 @@ pub struct RetireFactorRequest {
 }
 
 /// Outbound projection of a governed factor definition.
+///
+/// The normalization method, direction, input features, and quality gates are
+/// projected out of the governed `definition_json` so the catalog surfaces the
+/// factor's contract without shipping the raw blob.
 #[derive(Debug, Clone, Serialize)]
 pub struct FactorDefinitionView {
     pub factor_definition_id: String,
@@ -44,8 +48,68 @@ pub struct FactorDefinitionView {
     pub input_schema_version: String,
     pub output_schema_version: String,
     pub status: String,
+    /// Normalization method (`winsorized_zscore` / `rank` / `min_max`).
+    pub normalization: Option<String>,
+    /// Default contribution direction (`positive` / `negative` / `neutral`).
+    pub direction: Option<String>,
+    /// Stable feature names this factor consumes.
+    pub input_features: Vec<String>,
+    /// Whether the factor is required (declares at least one quality gate).
+    pub required: bool,
+    /// Names of the quality gates governing this factor.
+    pub quality_gates: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The subset of the governed `definition_json` surfaced in the catalog view.
+#[derive(Debug, Clone, Deserialize)]
+struct DefinitionSpecProjection {
+    normalization: FactorNormalization,
+    default_direction: FactorDirection,
+    #[serde(default)]
+    input_features: Vec<String>,
+    #[serde(default)]
+    quality_gates: Vec<QualityGateProjection>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QualityGateProjection {
+    name: String,
+}
+
+/// One collinear factor pair in the analysis report.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollinearPairView {
+    pub left: String,
+    pub right: String,
+    pub correlation: rust_decimal::Decimal,
+}
+
+/// Factor-collinearity analysis over a recent window of factor values.
+#[derive(Debug, Clone, Serialize)]
+pub struct FactorCollinearityView {
+    /// Factor names, index-aligned with `matrix` rows/columns.
+    pub factors: Vec<String>,
+    /// Symmetric Spearman rank-correlation matrix (`matrix[i][j]`), diagonal `1`.
+    pub matrix: Vec<Vec<rust_decimal::Decimal>>,
+    /// Pairs whose `|ρ|` exceeds the tolerance.
+    pub violations: Vec<CollinearPairView>,
+    /// The absolute-correlation tolerance applied.
+    pub threshold: rust_decimal::Decimal,
+    /// Number of joint observations the correlations were computed over.
+    pub observation_count: usize,
+    /// The lookback window (seconds) the sample was drawn from.
+    pub lookback_secs: u64,
+}
+
+/// Query for `GET /research/factors/collinearity`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FactorCollinearityQuery {
+    /// Rolling lookback in seconds (defaults to 7 days when omitted).
+    pub lookback_secs: Option<u64>,
+    /// Absolute-correlation tolerance (defaults to 0.9 when omitted).
+    pub threshold: Option<String>,
 }
 
 /// Paginated filter for the factor-definition governance catalog.
@@ -64,6 +128,22 @@ pub struct FactorDefinitionListQuery {
 
 impl From<FactorDefinitionInfo> for FactorDefinitionView {
     fn from(info: FactorDefinitionInfo) -> Self {
+        let spec: Option<DefinitionSpecProjection> =
+            serde_json::from_value(info.definition_json.clone()).ok();
+        let (normalization, direction, input_features, quality_gates) = spec.map_or_else(
+            || (None, None, Vec::new(), Vec::new()),
+            |spec| {
+                (
+                    Some(spec.normalization.as_str().to_owned()),
+                    Some(spec.default_direction.as_str().to_owned()),
+                    spec.input_features,
+                    spec.quality_gates
+                        .into_iter()
+                        .map(|gate| gate.name)
+                        .collect(),
+                )
+            },
+        );
         Self {
             factor_definition_id: info.factor_definition_id.to_string(),
             name: info.name,
@@ -72,6 +152,11 @@ impl From<FactorDefinitionInfo> for FactorDefinitionView {
             input_schema_version: info.input_schema_version.to_string(),
             output_schema_version: info.output_schema_version.to_string(),
             status: info.status.as_str().to_owned(),
+            required: !quality_gates.is_empty(),
+            normalization,
+            direction,
+            input_features,
+            quality_gates,
             created_at: info.created_at,
             updated_at: info.updated_at,
         }

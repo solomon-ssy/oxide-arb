@@ -105,11 +105,7 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
         &config.features.bar_windows_secs,
         report,
     );
-    non_empty_numbers(
-        "features.momentum_windows_secs",
-        &config.features.momentum_windows_secs,
-        report,
-    );
+    validate_momentum_features(config, report);
     non_empty_numbers(
         "features.volatility_windows_secs",
         &config.features.volatility_windows_secs,
@@ -134,6 +130,51 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
     }
     for validator in FEATURES_CONFIG_VALIDATORS {
         validator(&config.features, report);
+    }
+}
+
+fn validate_momentum_features(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let momentum = &config.features.momentum;
+    non_empty_numbers(
+        "features.momentum.roc_windows_secs",
+        &momentum.roc_windows_secs,
+        report,
+    );
+    non_empty_numbers(
+        "features.momentum.slope_windows_secs",
+        &momentum.slope_windows_secs,
+        report,
+    );
+    if momentum.roc_lag_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.momentum.roc_lag_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    if momentum.ema_fast_secs == 0 || momentum.ema_slow_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.momentum.ema_fast_secs",
+            detail: "EMA spans must be greater than zero".to_owned(),
+        });
+    }
+    if momentum.ema_fast_secs >= momentum.ema_slow_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.momentum.ema_fast_secs",
+            detail: "fast EMA span must be strictly less than the slow EMA span".to_owned(),
+        });
+    }
+    // The lag-skipped ROC needs a base older than the lag, so every ROC window
+    // must exceed the lag or it degenerates to an empty span.
+    for window in &momentum.roc_windows_secs {
+        if *window <= momentum.roc_lag_secs {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "features.momentum.roc_windows_secs",
+                detail: format!(
+                    "each ROC window must exceed roc_lag_secs ({}); got {window}",
+                    momentum.roc_lag_secs
+                ),
+            });
+        }
     }
 }
 
@@ -174,6 +215,116 @@ fn validate_factors(config: &RuntimeConfig, report: &mut ConfigValidationReport)
             });
         }
         decimal("factors.factor_weights", weight, report);
+    }
+    validate_factor_normalization(config, report);
+    validate_factor_cross_section(config, report);
+    validate_factor_orthogonalize(config, report);
+}
+
+fn validate_factor_normalization(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let normalization = &config.factors.normalization;
+    winsor_percentile(
+        "factors.normalization.default_winsor_p",
+        &normalization.default_winsor_p,
+        report,
+    );
+    positive_decimal(
+        "factors.normalization.default_clamp_sigma",
+        &normalization.default_clamp_sigma,
+        report,
+    );
+    for (name, override_spec) in &normalization.per_factor {
+        if name.trim().is_empty() {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.normalization.per_factor",
+                detail: "factor names must not be empty".to_owned(),
+            });
+        }
+        validate_per_factor_normalization(override_spec, report);
+    }
+}
+
+fn validate_per_factor_normalization(
+    spec: &super::PerFactorNormalization,
+    report: &mut ConfigValidationReport,
+) {
+    use crate::enums::factor::FactorNormalization;
+
+    if let Some(winsor_p) = &spec.winsor_p {
+        winsor_percentile(
+            "factors.normalization.per_factor.winsor_p",
+            winsor_p,
+            report,
+        );
+    }
+    if let Some(clamp_sigma) = &spec.clamp_sigma {
+        positive_decimal(
+            "factors.normalization.per_factor.clamp_sigma",
+            clamp_sigma,
+            report,
+        );
+    }
+    match spec.method {
+        FactorNormalization::MinMax => match (&spec.min, &spec.max) {
+            (Some(min), Some(max)) => {
+                decimal("factors.normalization.per_factor.min", min, report);
+                decimal("factors.normalization.per_factor.max", max, report);
+                if let (Ok(lo), Ok(hi)) =
+                    (min.value.parse::<Decimal>(), max.value.parse::<Decimal>())
+                    && hi <= lo
+                {
+                    report.errors.push(ConfigValidationError::InvalidValue {
+                        field: "factors.normalization.per_factor.max",
+                        detail: "MinMax max must be strictly greater than min".to_owned(),
+                    });
+                }
+            }
+            _ => report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.normalization.per_factor",
+                detail: "MinMax normalization requires both min and max bounds".to_owned(),
+            }),
+        },
+        FactorNormalization::WinsorizedZScore | FactorNormalization::Rank => {
+            if spec.min.is_some() || spec.max.is_some() {
+                report.errors.push(ConfigValidationError::InvalidValue {
+                    field: "factors.normalization.per_factor",
+                    detail: "min/max bounds are only valid for MinMax normalization".to_owned(),
+                });
+            }
+        }
+    }
+}
+
+fn validate_factor_cross_section(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let cross_section = &config.factors.cross_section;
+    if cross_section.min_size < 2 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.cross_section.min_size",
+            detail: "must be at least 2 (a cross-section of one has no dispersion)".to_owned(),
+        });
+    }
+    if cross_section.historical_lookback_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.cross_section.historical_lookback_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+}
+
+fn validate_factor_orthogonalize(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    unit_ratio(
+        "factors.orthogonalize.max_correlation",
+        &config.factors.orthogonalize.max_correlation,
+        report,
+    );
+    let mut seen = HashSet::new();
+    for dimension in &config.factors.orthogonalize.neutralize_by {
+        if !seen.insert(*dimension) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.orthogonalize.neutralize_by",
+                detail: format!("duplicate neutralize dimension `{dimension:?}`"),
+            });
+        }
     }
 }
 
@@ -573,6 +724,45 @@ fn half_open_unit(field: &'static str, value: &DecimalString, report: &mut Confi
         Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
             field,
             detail: format!("`{parsed}` must be within (0, 1]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
+/// Validate a strictly-positive decimal (parses and is `> 0`).
+fn positive_decimal(
+    field: &'static str,
+    value: &DecimalString,
+    report: &mut ConfigValidationReport,
+) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if parsed > Decimal::ZERO => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be > 0"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
+/// Validate a winsorize percentile: a decimal strictly within `(0, 0.5)`.
+fn winsor_percentile(
+    field: &'static str,
+    value: &DecimalString,
+    report: &mut ConfigValidationReport,
+) {
+    let half = Decimal::new(5, 1);
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if parsed > Decimal::ZERO && parsed < half => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within (0, 0.5)"),
         }),
         Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
             field,
