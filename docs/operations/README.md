@@ -5,6 +5,7 @@
 | 文档 | 读者 | 内容 |
 |------|------|------|
 | [runbook.md](./runbook.md) | 运维、量化、审批人 | **主手册**：运行前准备、API key/私钥/funder、充值、提现、报告、`semi_auto` / `auto_execution` 下单、卖出、赎回、事故处理 |
+| [model-spec-catalog-guide.md](./model-spec-catalog-guide.md) | 量化、研发 | **Model Spec 目录规划**：不同 `model_family` / 场景下要建几个 spec、何时用 version 迭代、冷启动到成熟的推荐 catalog |
 | [architecture-and-design.md](./architecture-and-design.md) | 研发、运维、量化 | **架构与详细设计**：从 Gamma/CLOB/Data API 到报告、组合、执行、reconciliation、exit、settlement、attribution 的完整闭环 |
 | [docker-integration.md](./docker-integration.md) | CI / 开发 | testcontainers 集成测试 |
 | [network-integration.md](./network-integration.md) | CI / 开发 | 需外网的 Polymarket / RPC 集成测试 |

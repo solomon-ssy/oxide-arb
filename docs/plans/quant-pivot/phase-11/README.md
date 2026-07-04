@@ -66,7 +66,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 |---|---|---|---|---|
 | 11.0 | Contract Freeze & Deletion Inventory | 语义精准地基 / 删除死语义 / build 硬化 | 12, 23 | [11.0](11.0-contract-freeze-and-deletion-inventory.md) |
 | 11.1 | Factor & Signal Redesign | 因子多样性 + 截面归一化 | 1, 2, 3 | [11.1](11.1-factor-and-signal-redesign.md) |
-| 11.2 | Polymarket Vertical Alpha | 领域/结构性信号闭环 | 4 | [11.2](11.2-polymarket-vertical-alpha.md) |
+| 11.2 | Polymarket Vertical Alpha | 结构因子 + neg-risk 全腿 + crypto 外部垂直 + favorite-longshot 偏差表(11.3 提前件) | 4 | [11.2](11.2-polymarket-vertical-alpha.md) |
 | 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
 | 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论 | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
@@ -119,7 +119,10 @@ flowchart TD
 - **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
 - **11.7 → 11.8** 是产物表达力:退出/入场结构 + 报告生命周期语义。
 - **11.9 → 11.10** 是研究闭环:归因反馈 + 自动再训练 + 反事实归因,闭合"开环"。
-- **11.2 / 11.11** 相对独立,可并行。
+- **11.2 / 11.11** 相对独立,可并行。**11.2 已破坏式接管并取代 [`../phase-03/03.8-vertical-domain-closed-loop.md`](../phase-03/03.8-vertical-domain-closed-loop.md)**
+  的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance");
+  并**提前**落地 11.3 的 `FavoriteLongshotBiasTable` 与 `CalibrationArtifactId`(favorite-longshot 因子所需),
+  11.3 正式落地时统一收敛治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2 破坏式 bump 至 **v13**。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 

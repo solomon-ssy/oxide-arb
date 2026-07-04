@@ -785,7 +785,7 @@ SPEC_ID=$(
 )
 ```
 
-> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。新建规格恒为 `draft`。UI 入口：研究 → 模型 → **新建模型规格**。
+> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。新建规格恒为 `draft`。UI 入口：研究 → 模型 → **新建模型规格**。要建几个 spec、同一 WeightedFactor 何时拆线，见 [model-spec-catalog-guide.md](./model-spec-catalog-guide.md)。
 
 **Step 0.6 — 注册并发布启用因子**
 
