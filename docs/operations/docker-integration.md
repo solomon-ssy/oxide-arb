@@ -4,7 +4,7 @@ Tests that spin up real Postgres, Redis, or ClickHouse via [testcontainers](http
 
 ## Prerequisites
 
-- Docker **daemon** running (Docker Desktop, Colima, etc.). Installing the CLI alone is not enough.
+- Docker **daemon** running (Docker Desktop, Colima, OrbStack, etc.). Installing the CLI alone is not enough.
 - Sufficient disk/RAM for container images on first run.
 
 ## Run all Docker integration tests
@@ -29,17 +29,27 @@ cargo test -p quant-pivot-core --test market_selection_e2e -- --ignored --test-t
 |-------|-------------|----------|
 | `quant-pivot-storage` | `migration_pg` | Postgres (native `qp_*` enum lane) |
 | `quant-pivot-repository` | `pg_account_capital` | Postgres |
+| `quant-pivot-repository` | `pg_equity_snapshot` | Postgres |
 | `quant-pivot-repository` | `pg_market_selection` | Postgres |
 | `quant-pivot-repository` | `pg_governance` | Postgres |
 | `quant-pivot-repository` | `pg_rbac` | Postgres |
 | `quant-pivot-repository` | `pg_training_dataset` | Postgres |
+| `quant-pivot-repository` | `pg_research_job` | Postgres (research job ledger FSM) |
 | `quant-pivot-repository` | `pg_backtest_report` | Postgres |
 | `quant-pivot-repository` | `pg_comparison_report` | Postgres |
+| `quant-pivot-repository` | `pg_execution_submission` | Postgres |
+| `quant-pivot-repository` | `portfolio_optimizer_meta` | Postgres |
 | `quant-pivot-repository` | `ch_fact_read_pit` | ClickHouse |
 | `quant-pivot-storage` | `redis_integration` | Redis |
 | `quant-pivot-storage` | `clickhouse_integration` | ClickHouse |
 | `quant-pivot-storage` | `cache_tiered_integration` | Redis |
+| `quant-pivot-core` | `health_checker` | Postgres (WS probe wiring) |
 | `quant-pivot-core` | `market_selection_e2e` | Postgres (typed selection member enums) |
+| `quant-pivot-core` | `equity_snapshot` | Postgres |
+| `quant-pivot-core` | `factor_plane_e2e` | Postgres + ClickHouse (ignored cases) |
+| `quant-pivot-core` | `governance_e2e` | Postgres |
+| `quant-pivot-core` | `model_train_backtest_e2e` | Postgres + ClickHouse |
+| `quant-pivot-core` | `report_pipeline_e2e` | Postgres |
 | `quant-pivot-web` | `web` | Postgres + Redis (full HTTP/RBAC/WS E2E) |
 
 Implementation lives in `crates/quant-pivot-xtask` (`cargo xtask test-docker`).
@@ -65,7 +75,7 @@ Docker Hub rate limits or stale credentials in Docker Desktop. Fix: `docker logo
 
 **`Docker daemon is not running`**
 
-Start Docker Desktop / Colima before running `cargo test-docker`.
+Start Docker Desktop / Colima / OrbStack before running `cargo test-docker`. On macOS with OrbStack, `orbctl start` if `orbctl status` shows `Stopped`.
 
 **`quant-pivot-web` auth tests: login 200 but refresh/logout 503**
 

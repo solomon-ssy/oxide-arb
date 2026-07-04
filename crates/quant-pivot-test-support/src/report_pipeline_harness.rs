@@ -61,9 +61,9 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DecimalString, FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef,
-        PortfolioBudget, PortfolioConfig, PortfolioConstraints, RUNTIME_CONFIG_SCHEMA_VERSION,
-        ReportsConfig, RuntimeConfig, SelectionConfig,
+        DecimalString, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, ModelConfig,
+        ModelVersionRef, PortfolioBudget, PortfolioConfig, PortfolioConstraints,
+        RUNTIME_CONFIG_SCHEMA_VERSION, ReportsConfig, RuntimeConfig, SelectionConfig,
     },
     types::{
         AccountPositions, ContentHash, EventId, ExposureBreakdown, MarketId, MarketSelectionId,
@@ -116,14 +116,17 @@ use crate::{factor_governance::publish_all_factor_definitions, ws::WsShardHealth
 /// Seeded catalog ids shared across report pipeline E2E tests.
 pub const EVENT_ID: &str = "evt-report-pipeline-e2e";
 pub const MARKET_ID: &str = "0xreportpipelinee2e";
+pub const MARKET_ID_2: &str = "0xreportpipelinee2e2";
 pub const YES_TOKEN: &str = "55555";
 pub const NO_TOKEN: &str = "66666";
+pub const YES_TOKEN_2: &str = "55556";
+pub const NO_TOKEN_2: &str = "66667";
 pub const STUB_FUNDER: &str = "0xfunder";
 
 /// How market selection is configured for a harness bootstrap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionPreset {
-    /// Sports category matching the seeded catalog market.
+    /// Sports category matching the seeded catalog markets (two markets for rank factors).
     Standard,
     /// Politics-only selection so the Sports market is excluded.
     Empty,
@@ -777,14 +780,22 @@ fn build_lifecycle_service(
     })
 }
 
-fn registry_market() -> MarketRegistryInfo {
+fn registry_market(
+    market_id: &str,
+    yes_token: &str,
+    no_token: &str,
+    question: &str,
+    slug: &str,
+    liquidity_usd: Usd,
+    volume_24h_usd: Usd,
+) -> MarketRegistryInfo {
     MarketRegistryInfo {
-        market_id: MarketId::new(MARKET_ID),
+        market_id: MarketId::new(market_id),
         event_id: EventId::new(EVENT_ID),
-        token_yes: TokenId::new(YES_TOKEN),
-        token_no: TokenId::new(NO_TOKEN),
-        question: "Report pipeline E2E?".into(),
-        slug: "report-pipeline-e2e".into(),
+        token_yes: TokenId::new(yes_token),
+        token_no: TokenId::new(no_token),
+        question: question.into(),
+        slug: slug.into(),
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -792,12 +803,12 @@ fn registry_market() -> MarketRegistryInfo {
         tick_size: TickSize::Hundredth,
         tokens: vec![
             TokenInfo {
-                token_id: TokenId::new(YES_TOKEN),
+                token_id: TokenId::new(yes_token),
                 outcome: "Yes".into(),
                 neg_risk: false,
             },
             TokenInfo {
-                token_id: TokenId::new(NO_TOKEN),
+                token_id: TokenId::new(no_token),
                 outcome: "No".into(),
                 neg_risk: false,
             },
@@ -806,14 +817,30 @@ fn registry_market() -> MarketRegistryInfo {
         best_ask: None,
         depth_usd: None,
         min_order_size: Decimal::ONE,
-        liquidity_usd: Some(Usd::new(Decimal::from(60_000))),
-        volume_24h: Some(Usd::new(Decimal::from(9_000))),
+        liquidity_usd: Some(liquidity_usd),
+        volume_24h: Some(volume_24h_usd),
         fee_schedule: None,
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,
         created_at: Utc::now() - ChronoDuration::days(2),
         updated_at: Utc::now(),
     }
+}
+
+fn apply_book_snapshot(book_store: &BookStore, yes_token: &str, bid_shares: i64, ask_shares: i64) {
+    book_store.apply_snapshot(
+        &TokenId::new(yes_token),
+        Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::new(47, 2)),
+            Shares::new(Decimal::from(bid_shares)),
+        )]),
+        Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::new(53, 2)),
+            Shares::new(Decimal::from(ask_shares)),
+        )]),
+        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        None,
+    );
 }
 
 async fn seed_catalog(db: &DatabaseConnection) {
@@ -837,23 +864,41 @@ async fn seed_catalog(db: &DatabaseConnection) {
         ))
         .await
         .expect("seed market");
+    PgMarketRepository::new(db.clone())
+        .upsert(make_market(
+            MARKET_ID_2,
+            EVENT_ID,
+            "Report pipeline E2E second?",
+            "report-pipeline-e2e-2",
+            MarketCategory::Sports,
+            Some(Utc::now() + ChronoDuration::days(2)),
+        ))
+        .await
+        .expect("seed second market");
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore) {
-    registry.register_market(registry_market());
-    book_store.apply_snapshot(
-        &TokenId::new(YES_TOKEN),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(47, 2)),
-            Shares::new(Decimal::from(150)),
-        )]),
-        Arc::from([BookLevel::from_decimal_unchecked(
-            Price::new(Decimal::new(53, 2)),
-            Shares::new(Decimal::from(140)),
-        )]),
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
-        None,
-    );
+    registry.register_market(registry_market(
+        MARKET_ID,
+        YES_TOKEN,
+        NO_TOKEN,
+        "Report pipeline E2E?",
+        "report-pipeline-e2e",
+        Usd::new(Decimal::from(60_000)),
+        Usd::new(Decimal::from(9_000)),
+    ));
+    registry.register_market(registry_market(
+        MARKET_ID_2,
+        YES_TOKEN_2,
+        NO_TOKEN_2,
+        "Report pipeline E2E second?",
+        "report-pipeline-e2e-2",
+        Usd::new(Decimal::from(25_000)),
+        Usd::new(Decimal::from(4_500)),
+    ));
+    // Distinct visible depth so rank-normalized liquidity_depth differs across the cross-section.
+    apply_book_snapshot(book_store, YES_TOKEN, 150, 140);
+    apply_book_snapshot(book_store, YES_TOKEN_2, 80, 60);
 }
 
 fn factors_config() -> FactorsConfig {
@@ -864,6 +909,10 @@ fn factors_config() -> FactorsConfig {
             FactorFamily::Resolution,
             FactorFamily::DataQuality,
         ],
+        cross_section: FactorCrossSectionConfig {
+            min_size: 2,
+            ..FactorCrossSectionConfig::default()
+        },
         ..FactorsConfig::default()
     }
 }

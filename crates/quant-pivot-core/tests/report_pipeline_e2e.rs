@@ -17,6 +17,7 @@ use quant_pivot_repository::{
         RecommendationRepository,
     },
 };
+use quant_pivot_research::precision::RESEARCH_DECIMAL_SCALE;
 use quant_pivot_test_support::{
     pg::setup_pg,
     report_pipeline_harness::{HarnessOptions, MARKET_ID, ReportPipelineHarness},
@@ -331,11 +332,9 @@ async fn report_persists_real_drawdown_from_equity_history() {
             .find_by_report(&report.recommendation_report_id)
             .await
             .expect("load neutral recommendations");
-        assert!(
-            !recs.is_empty(),
-            "neutral baseline must publish at least one recommendation"
-        );
-        recs[0]
+        recs.iter()
+            .find(|rec| rec.market_id.as_str() == MARKET_ID)
+            .expect("neutral baseline must publish primary market recommendation")
             .sizing_plan
             .kelly_fraction_applied
             .expect("neutral kelly fraction")
@@ -396,17 +395,23 @@ async fn report_persists_real_drawdown_from_equity_history() {
         .find_by_report(&report.recommendation_report_id)
         .await
         .expect("load drawdown recommendations");
-    assert!(
-        !drawdown_recs.is_empty(),
-        "drawdown report must publish at least one recommendation"
-    );
-    let drawdown_kelly = drawdown_recs[0]
+    let drawdown_rec = drawdown_recs
+        .iter()
+        .find(|rec| rec.market_id.as_str() == MARKET_ID)
+        .expect("drawdown report must publish primary market recommendation");
+    let drawdown_kelly = drawdown_rec
         .sizing_plan
         .kelly_fraction_applied
         .expect("drawdown kelly fraction");
+
+    // KellySizingModel persists `round_dp(RESEARCH_DECIMAL_SCALE)(kelly_fraction · shrink · drawdown_scale)`
+    // (see `portfolio/sizing.rs`). Drawdown enters linearly before that single canonical round.
+    // Comparing against the unrounded product `neutral_kelly · 0.8` fails because the neutral
+    // multiplier is already stored at research scale — the expected drawdown audit field is
+    // `round_12(neutral_kelly · (1 − dd))`, matching how the second run is computed.
+    let expected_drawdown_kelly = (neutral_kelly * dec!(0.8)).round_dp(RESEARCH_DECIMAL_SCALE);
     assert_eq!(
-        drawdown_kelly,
-        neutral_kelly * dec!(0.8),
-        "20% drawdown must shrink Kelly multiplier by (1 - drawdown)"
+        drawdown_kelly, expected_drawdown_kelly,
+        "Conservative drawdown scale must apply before research-scale rounding"
     );
 }
