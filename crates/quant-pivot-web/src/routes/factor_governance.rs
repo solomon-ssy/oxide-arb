@@ -5,7 +5,9 @@ use quant_pivot_models::{
     domain::{
         FactorCollinearityQuery, FactorCollinearityView, FactorDefinitionListQuery,
         FactorDefinitionView, GovernanceActor, Paginated, PublishFactorCommand,
-        PublishFactorRequest, RetireFactorCommand, RetireFactorRequest,
+        PublishFactorRequest, PublishFactorsBatchCommand, PublishFactorsBatchRequest,
+        RegisterFactorDefinitionsCommand, RegisterFactorDefinitionsRequest, RetireFactorCommand,
+        RetireFactorRequest,
     },
     enums::{
         operation_log::OperationCategory,
@@ -42,6 +44,19 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/factors/collinearity",
             Rule::ResourceOp(ResourceType::FactorDefinition, Operation::Read),
             collinearity,
+        ),
+        // Literal paths registered before `{id}` so they are not captured as ids.
+        spec(
+            Method::POST,
+            "/research/factors/register",
+            Rule::ActingRoleGoverned(ResourceType::FactorDefinition, Operation::Create),
+            register,
+        ),
+        spec(
+            Method::POST,
+            "/research/factors/publish-batch",
+            Rule::ActingRoleGoverned(ResourceType::FactorDefinition, Operation::Publish),
+            publish_batch,
         ),
         spec(
             Method::GET,
@@ -241,6 +256,84 @@ pub async fn retire(
         "reason": request.reason,
     }));
     Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/factors/register` — register the enabled factor set.
+///
+/// Idempotent upsert of every enabled factor definition as `Draft` (preserving
+/// the status of any already-registered definition). This is the explicit
+/// bootstrap step that seeds the factor catalog so the operator can then publish
+/// them — the online report path fails closed on non-`Published` definitions.
+pub async fn register(
+    state: web::Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RegisterFactorDefinitionsRequest>,
+) -> Result<WebResponse<Vec<FactorDefinitionView>>, WebError> {
+    let request = body.into_inner();
+    let config = state.runtime_config_apply.current();
+    let registered = state
+        .factor_governance
+        .register_enabled_definitions(
+            RegisterFactorDefinitionsCommand {
+                factors: config.factors.clone(),
+                features: config.features.clone(),
+                reason: request.reason.clone(),
+            },
+            governance_actor(&actor, &acting_role),
+        )
+        .await?;
+    let views: Vec<FactorDefinitionView> = registered
+        .into_iter()
+        .map(FactorDefinitionView::from)
+        .collect();
+    op_ctx.set_action(OperationCategory::Governance, "factor.register");
+    op_ctx.set_resource(ResourceType::FactorDefinition, "*".to_owned());
+    op_ctx.set_detail(serde_json::json!({
+        "registered_count": views.len(),
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": request.reason,
+    }));
+    Ok(WebResponse::ok(views))
+}
+
+/// `POST /api/research/factors/publish-batch` — publish a batch of definitions.
+pub async fn publish_batch(
+    state: web::Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<PublishFactorsBatchRequest>,
+) -> Result<WebResponse<Vec<FactorDefinitionView>>, WebError> {
+    let request = body.into_inner();
+    let published = state
+        .factor_governance
+        .publish_batch(
+            PublishFactorsBatchCommand {
+                factor_definition_ids: request.factor_definition_ids.clone(),
+                reason: request.reason.clone(),
+            },
+            governance_actor(&actor, &acting_role),
+        )
+        .await?;
+    let views: Vec<FactorDefinitionView> = published
+        .into_iter()
+        .map(FactorDefinitionView::from)
+        .collect();
+    op_ctx.set_action(OperationCategory::Governance, "factor.publish_batch");
+    op_ctx.set_resource(ResourceType::FactorDefinition, "*".to_owned());
+    op_ctx.set_detail(serde_json::json!({
+        "requested_count": request.factor_definition_ids.len(),
+        "published_count": views.len(),
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": request.reason,
+    }));
+    Ok(WebResponse::ok(views))
 }
 
 fn governance_actor(actor: &AuthedActor, acting_role: &ActingRole) -> GovernanceActor {

@@ -682,28 +682,33 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
 **出报告 ≠ 只要进程跑起来。** 当前实现中，每次报告构建（定时或 ad-hoc）在选市之前会 **fail-closed** 检查：
 
 1. **`model.active_model_version_id` 已配置** — 指向 registry 中 **`PublicationStatus::Published`** 的模型版本，且 artifact 可加载。
-2. **数据 ingest 就绪** — `operational_phase` 为 `operational`（或仅收紧型 degrade 仍允许报告）；实时 book 满足 data-quality 阈值。
-3. **账户可读** — 所有 mode 下 CLOB collateral + Data API positions 可用（ReportOnly 不是 dry-run）。
+2. **启用因子已注册且 Published** — 因子平面 fail-closed 要求每个启用因子在 `quant_factor_definition` 中 **存在且为 `Published`**；**未注册**（从未 register）或仍为 `Draft` 都会阻断（报错 `enabled definitions must be Published … must first be registered via POST /research/factors/register`）。因子定义**不再由报告热路径隐式注册**，必须显式走 register。
+3. **数据 ingest 就绪** — `operational_phase` 为 `operational`（或仅收紧型 degrade 仍允许报告）；实时 book 满足 data-quality 阈值。
+4. **账户可读** — 所有 mode 下 CLOB collateral + Data API positions 可用（ReportOnly 不是 dry-run）。
 
 因此 **第一次运行、库里没有任何模型时，报告必然失败** — 这是设计行为，不是 ingest 坏了。  
 默认 bootstrap runtime-config 会 **启用** `default_interval` 定时 schedule（每 300s），但 **`active_model_version_id = null`**，所以日志会出现：
 
 `report generation failed … model.active_model_version_id is not configured`
 
-**冷启动推荐做法**（详见 §8.2）：
+**冷启动推荐做法**（详见 §8.1）：
 
 1. 先确认 §6.4 数据采集正常。
 2. 用 runtime-config **关闭** `default_interval` schedule，避免无意义 ERROR 刷屏。
-3. 连续 ingest 直至 training-dataset **plan** 的 `planned_samples` 足够。
-4. 走 **train → backtest → publish** 治理链（publish 会自动写入 `active_model_version_id`）。
-5. 再开启 schedule 或手动触发 ad-hoc 报告。
+3. **创建 model_spec**（`POST /api/research/model-specs`）—— 离线研究生命周期的根，dataset/train 都要引用它。
+4. **注册并发布启用因子**（`POST /api/research/factors/register` → `POST /api/research/factors/publish-batch`）—— 满足报告因子平面的 fail-closed 门。
+5. 连续 ingest 直至 training-dataset **plan** 的 `planned_samples` 足够。
+6. 走 **train → backtest → publish** 治理链（publish 会自动写入 `active_model_version_id`）。
+7. 再开启 schedule 或手动触发 ad-hoc 报告。
 
 **训练集与报告的关系**：
 
 | 问题 | 答案 |
 |------|------|
 | 出报告是否必须有训练集？ | **不直接需要**；报告读的是 **已发布模型 artifact**，不是训练集 Parquet。 |
-| 那模型从哪来？ | 标准路径是 **训练集 build → train → backtest → publish**。没有 publish 就没有 active model。 |
+| 那模型从哪来？ | 标准路径是 **model_spec → 训练集 build → train → backtest → publish**。没有 publish 就没有 active model。 |
+| model_spec 从哪来？ | **`POST /api/research/model-specs`**（`materialization:create`，UI: 研究 → 模型 → 新建模型规格）。这是唯一的生产创建入口——**没有 seed、没有 DBA 预置**。 |
+| 因子定义从哪来？ | **`POST /api/research/factors/register`** 幂等把启用因子集登记为 `Draft`，再 `publish-batch` 发布。dataset build 只要求因子**启用**（不要求 Published），但**报告**要求 Published。 |
 | 能否跳过训练手动指模型？ | 可以 patch `model.active_model_version_id` 到已有 **Published** 版本，但版本仍须先注册 artifact。 |
 
 ### 8.1 从冷启动到第一份报告（完整流程）
@@ -712,7 +717,9 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$KNOWN_GOOD_VERSION_ID/rollb
 flowchart TD
     start[进程启动 ingest] --> verify[§6.4 验证 L1/L2]
     verify --> disable[关闭 default_interval schedule]
-    disable --> ingest[连续 ingest 数小时至数天]
+    disable --> spec[创建 model_spec]
+    spec --> factors[注册并发布启用因子]
+    factors --> ingest[连续 ingest 数小时至数天]
     ingest --> plan[training-datasets/plan]
     plan --> build[training-datasets/build]
     build --> train[models/train]
@@ -755,11 +762,67 @@ curl -sS -X POST "$BASE/api/runtime-config/versions/$VERSION_ID/activate" \
 
 > **注意**：`reports.schedules` 是 **整数组替换**，patch 时必须带上完整 schedule 对象，不能只改 `enabled` 字段。
 
+**Step 0.5 — 创建 model_spec（离线研究生命周期的根）**
+
+全新系统 `quant_model_spec` 为空，dataset/train 都要引用一个 `model_spec_id`。用治理写接口创建（**没有 seed / DBA 预置**）：
+
+```bash
+SPEC_ID=$(
+  curl -sS -X POST "$BASE/api/research/model-specs" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" \
+    -H "X-Acting-Role: risk_owner" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "buy-weighted-baseline",
+      "model_family": "weighted_factor",
+      "prediction_horizon_secs": 86400,
+      "feature_schema_version": 1,
+      "label_schema_version": 1,
+      "spec_json": {"notes": "day-1 cold-start Buy ranker"},
+      "reason": "bootstrap first model spec"
+    }' | jq -r '.data.model_spec_id'
+)
+```
+
+> `model_family` 取 `qp_model_family` 的 wire 值：`weighted_factor`（买方排序器，冷启动首选）、`hold_vs_exit_weighted`（卖方/退出，需先有平仓样本才可训练）、`classical_*`（需成熟 settlement label）。新建规格恒为 `draft`。UI 入口：研究 → 模型 → **新建模型规格**。
+
+**Step 0.6 — 注册并发布启用因子**
+
+报告因子平面 fail-closed 要求启用因子**已注册且 Published**；因子定义**不再由报告热路径隐式注册**。先幂等注册为 `Draft`，再批量发布：
+
+```bash
+# 注册当前 runtime-config 启用的因子集为 Draft（幂等）
+curl -sS -X POST "$BASE/api/research/factors/register" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: risk_owner" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"bootstrap register enabled factors"}' \
+  | jq '[.data[] | {name, status}]'
+
+# 收集全部 draft 因子 id 并批量发布
+DRAFT_IDS=$(
+  curl -sS "$BASE/api/research/factors?status=draft&size=500" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept-Api-Version: v1" | jq '[.data.items[].factor_definition_id]'
+)
+curl -sS -X POST "$BASE/api/research/factors/publish-batch" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept-Api-Version: v1" \
+  -H "X-Acting-Role: risk_owner" \
+  -H "Content-Type: application/json" \
+  -d "{\"factor_definition_ids\": $DRAFT_IDS, \"reason\": \"bootstrap publish factors\"}" \
+  | jq '[.data[] | {name, status}]'
+```
+
+> dataset build 只要求因子集**启用**（非空），不要求 Published；因此 Step 0.6 也可以在 train 之后、开报告之前再做。但报告一定要它。UI 入口：研究 → 因子 → **注册启用因子** / **发布全部草稿**。
+
 **Step 1 — Plan / Build 训练集**
 
 前提：
 
-- `quant_model_spec` 中已有目标 `model_spec_id`（Research Workbench 或 DBA 预置）；
+- 已有目标 `model_spec_id`（Step 0.5 创建）；
 - `runtime_config_version_id` 用当前 active 版本：
 
 ```bash

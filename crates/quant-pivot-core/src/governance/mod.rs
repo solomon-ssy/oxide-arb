@@ -6,6 +6,7 @@ pub mod kill_switch;
 pub mod mode_preflight;
 pub mod mode_transition;
 pub mod model_governance;
+pub mod model_spec;
 pub mod operational_phase;
 pub mod quality_gate_load;
 pub mod runtime_control;
@@ -19,6 +20,7 @@ pub use kill_switch::{KillSwitchControl, KillSwitchHandle};
 pub use mode_preflight::{DefaultModePreflight, ModePreflight, ModePreflightDeps};
 pub use mode_transition::{DefaultModeTransitionGate, ModeTransitionGate};
 pub use model_governance::{ModelGovernanceDeps, ModelGovernanceService};
+pub use model_spec::{ModelSpecDeps, ModelSpecService};
 pub use operational_phase::operational_phase_from_readiness;
 pub use quality_gate_load::{
     active_load_ok, active_publication_status_ok, quality_gate_passed_ok,

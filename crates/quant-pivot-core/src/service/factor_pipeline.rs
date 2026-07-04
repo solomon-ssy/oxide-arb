@@ -118,9 +118,9 @@ impl FactorPipelineService {
 
         FactorEngine::validate_batch_invariants(request.vectors)?;
 
-        // Register governed definitions first (idempotent upsert). Publication
-        // status is preserved on conflict; new rows start as Draft (05.7).
-        self.persist_definitions(&engine, request.features).await?;
+        // Definitions are registered out-of-band by the explicit factor-register
+        // governance action (not on this money-facing hot path). Fail closed if
+        // any enabled definition is not `Published` (05.7).
         self.require_published_definitions(&engine).await?;
 
         // Pre-fetch the rolling history for the small-cross-section HistoricalQuantile
@@ -238,27 +238,13 @@ impl FactorPipelineService {
         Ok(history)
     }
 
-    /// Upsert every enabled factor's governed definition (idempotent).
-    async fn persist_definitions(
-        &self,
-        engine: &FactorEngine,
-        features: &FeaturesConfig,
-    ) -> QuantResult<()> {
-        for spec in &engine.factor_set().definitions {
-            let definition = spec.try_to_new(features.feature_schema_version)?;
-            self.factor_repo
-                .create_definition(definition)
-                .await
-                .map_err(QuantError::from)?;
-        }
-        Ok(())
-    }
-
-    /// Fail closed when any enabled definition is not `Published`.
+    /// Fail closed when any enabled definition is missing (never registered) or
+    /// not `Published`. Definitions are registered out-of-band by the explicit
+    /// factor-register governance action, so a fresh system with an unregistered
+    /// factor set is a hard block here (never a silent pass).
     async fn require_published_definitions(&self, engine: &FactorEngine) -> QuantResult<()> {
-        let ids: Vec<_> = engine
-            .factor_set()
-            .definitions
+        let specs = engine.factor_set().definitions;
+        let ids: Vec<_> = specs
             .iter()
             .map(|spec| factor_definition_id(spec.name.as_str()))
             .collect();
@@ -267,10 +253,19 @@ impl FactorPipelineService {
             .find_definitions_by_ids(&ids)
             .await
             .map_err(QuantError::from)?;
+        let status_by_id: HashMap<FactorDefinitionId, PublicationStatus> = rows
+            .into_iter()
+            .map(|row| (row.factor_definition_id, row.status))
+            .collect();
         let mut violations = Vec::new();
-        for row in rows {
-            if row.status != PublicationStatus::Published {
-                violations.push(format!("{}={}", row.name, row.status.as_str()));
+        for spec in &specs {
+            let id = factor_definition_id(spec.name.as_str());
+            match status_by_id.get(&id) {
+                Some(PublicationStatus::Published) => {}
+                Some(status) => {
+                    violations.push(format!("{}={}", spec.name.as_str(), status.as_str()));
+                }
+                None => violations.push(format!("{}=unregistered", spec.name.as_str())),
             }
         }
         if violations.is_empty() {
@@ -279,7 +274,8 @@ impl FactorPipelineService {
         Err(ReportError::ContractViolation {
             detail: format!(
                 "factor pipeline blocked: enabled definitions must be Published before compute \
-                 ({})",
+                 (unregistered definitions must first be registered via \
+                 POST /research/factors/register, then published) ({})",
                 violations.join(", ")
             ),
         }

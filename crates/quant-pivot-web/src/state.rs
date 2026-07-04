@@ -9,9 +9,10 @@ use quant_pivot_models::{
         AccountReadPort, BacktestPort, CatalogStatusPort, CoreEvent, CoreEventPublisher,
         DataQualityPort, ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort,
         KillSwitchPort, MarketDataPort, MaterializationRunEvent, MaterializationRunKind,
-        MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort,
-        OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
-        ResearchJobPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelSpecPort,
+        ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort,
+        ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort, RuntimeControlPort,
+        TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -69,6 +70,8 @@ pub struct AppState {
     pub model_governance: Arc<dyn ModelGovernancePort>,
     /// Factor-definition publish / retire governance (Phase 05.7 Admin API).
     pub factor_governance: Arc<dyn FactorGovernancePort>,
+    /// Model-spec authoring — the offline research lifecycle root write path.
+    pub model_spec: Arc<dyn ModelSpecPort>,
     /// Read-only research catalog paging (datasets / models / backtests /
     /// comparisons / factors) for the operator workbench (Phase 10.5).
     pub research_catalog: Arc<dyn ResearchCatalogPort>,

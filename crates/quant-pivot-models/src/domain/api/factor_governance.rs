@@ -2,6 +2,8 @@
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
+//! | POST | `/research/factors/register` | `factor_definition:create` | Register enabled definitions as draft |
+//! | POST | `/research/factors/publish-batch` | `factor_definition:publish` | Publish a batch of definitions |
 //! | POST | `/research/factors/{id}/publish` | `factor_definition:publish` | Promote draft/retired definition |
 //! | POST | `/research/factors/{id}/retire` | `factor_definition:retire` | Retire a published definition |
 
@@ -16,6 +18,7 @@ use crate::{
         factor::{FactorDefinitionScope, FactorFamily, FactorNormalization},
         quant::{FactorDirection, PublicationStatus},
     },
+    types::FactorDefinitionId,
 };
 
 /// Inbound body for `POST /research/factors/{id}/publish`.
@@ -29,6 +32,28 @@ pub struct PublishFactorRequest {
 /// Inbound body for `POST /research/factors/{id}/retire`.
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct RetireFactorRequest {
+    /// Operator reason recorded on the HTTP operation log.
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+}
+
+/// Inbound body for `POST /research/factors/register`.
+///
+/// The enabled factor set is resolved server-side from the active runtime
+/// config; the operator only supplies the audit reason.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct RegisterFactorDefinitionsRequest {
+    /// Operator reason recorded on the HTTP operation log.
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+}
+
+/// Inbound body for `POST /research/factors/publish-batch`.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct PublishFactorsBatchRequest {
+    /// Factor definitions to publish (already-published ids are a no-op).
+    #[validate(length(min = 1))]
+    pub factor_definition_ids: Vec<FactorDefinitionId>,
     /// Operator reason recorded on the HTTP operation log.
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,

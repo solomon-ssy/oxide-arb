@@ -8,12 +8,13 @@ use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
         FactorDefinitionInfo, FactorGovernancePort, GovernanceActor, PublishFactorCommand,
-        RetireFactorCommand,
+        PublishFactorsBatchCommand, RegisterFactorDefinitionsCommand, RetireFactorCommand,
     },
     enums::quant::PublicationStatus,
     types::FactorDefinitionId,
 };
 use quant_pivot_repository::traits::FactorRepository;
+use quant_pivot_research::factors::FactorEngine;
 
 /// Dependencies for factor-definition governance.
 pub struct FactorGovernanceDeps {
@@ -109,6 +110,75 @@ impl FactorGovernancePort for FactorGovernanceService {
             .retire_definition(&command.factor_definition_id)
             .await
             .map_err(Into::into)
+    }
+
+    async fn register_enabled_definitions(
+        &self,
+        command: RegisterFactorDefinitionsCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<Vec<FactorDefinitionInfo>> {
+        let _reason = command.reason;
+        let engine = FactorEngine::new(&command.factors, &command.features);
+        if engine.registry().is_empty() {
+            return Err(QuantError::config(
+                "no factors enabled: factors.enabled_factor_families selects an empty factor set",
+            ));
+        }
+        let mut registered = Vec::new();
+        for spec in &engine.factor_set().definitions {
+            let definition = spec.try_to_new(command.features.feature_schema_version)?;
+            let row = self
+                .deps
+                .factor_repo
+                .create_definition(definition)
+                .await
+                .map_err(QuantError::from)?;
+            registered.push(row);
+        }
+        Ok(registered)
+    }
+
+    async fn publish_batch(
+        &self,
+        command: PublishFactorsBatchCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<Vec<FactorDefinitionInfo>> {
+        let _reason = command.reason;
+        // Validate every requested transition up front so a batch either fully
+        // applies or aborts before any mutation (already-published ids are a
+        // no-op, not a failure).
+        let mut to_publish = Vec::new();
+        for id in &command.factor_definition_ids {
+            let current = self.require_definition(id).await?;
+            if current.status == PublicationStatus::Published {
+                continue;
+            }
+            if !current
+                .status
+                .allows_transition_to(PublicationStatus::Published)
+            {
+                return Err(GovernanceError::IllegalTransition {
+                    detail: format!(
+                        "cannot publish factor definition {} from status {}",
+                        current.factor_definition_id,
+                        current.status.as_str()
+                    ),
+                }
+                .into());
+            }
+            to_publish.push(id.clone());
+        }
+        let mut published = Vec::new();
+        for id in &to_publish {
+            let row = self
+                .deps
+                .factor_repo
+                .publish_definition(id)
+                .await
+                .map_err(QuantError::from)?;
+            published.push(row);
+        }
+        Ok(published)
     }
 }
 

@@ -61,7 +61,7 @@ use quant_pivot_research::{
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
-    factor_governance::publish_all_factor_definitions,
+    factor_governance::{publish_all_factor_definitions, register_all_factor_definitions},
     pg::setup_pg,
 };
 use rust_decimal::Decimal;
@@ -457,7 +457,10 @@ async fn unpublished_factor_definitions_block_pipeline() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let error = service
+
+    // Definitions are no longer auto-registered on the hot path: a fresh,
+    // unregistered factor set must hard-block (never a silent pass).
+    let unregistered = service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
             vectors: &vectors,
@@ -466,7 +469,28 @@ async fn unpublished_factor_definitions_block_pipeline() {
             features: &features,
         })
         .await;
-    let Err(error) = error else {
+    let Err(error) = unregistered else {
+        panic!("unregistered definitions must block the factor plane");
+    };
+    assert!(
+        error.to_string().contains("must be Published"),
+        "unexpected error: {error}"
+    );
+
+    // Registered-but-Draft definitions must also block until published.
+    register_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
+        .await
+        .expect("register draft definitions");
+    let draft = service
+        .run(FactorPipelineRequest {
+            model_run_id: &model_run_id,
+            vectors: &vectors,
+            feature_vector_ids: &feature_vector_ids,
+            factors: &factors,
+            features: &features,
+        })
+        .await;
+    let Err(error) = draft else {
         panic!("draft definitions must block the factor plane");
     };
     assert!(

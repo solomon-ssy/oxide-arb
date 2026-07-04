@@ -23,7 +23,8 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery, JobSubmitContext,
+        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery,
+        CreateModelSpecCommand, CreateModelSpecRequest, GovernanceActor, JobSubmitContext,
         ModelComparisonReportView, ModelSpecListQuery, ModelVersionListQuery, Paginated,
         QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
         RunBacktestRequest, TrainModelRequest, TrainedModelView,
@@ -32,14 +33,14 @@ use quant_pivot_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
-    types::{BacktestReportId, ModelComparisonReportId, ModelVersionId},
+    types::{BacktestReportId, ModelComparisonReportId, ModelSpecId, ModelVersionId},
 };
 
 use crate::{
     audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
-    extractors::{ActingRole, RequestId, ValidatedJson},
+    extractors::{ActingRole, AuthedActor, RequestId, ValidatedJson},
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -53,6 +54,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/model-specs",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             list_model_specs,
+        ),
+        spec(
+            Method::POST,
+            "/research/model-specs",
+            Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
+            create_model_spec,
+        ),
+        spec(
+            Method::GET,
+            "/research/model-specs/{id}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            get_model_spec,
         ),
         spec(
             Method::GET,
@@ -123,6 +136,67 @@ pub async fn list_model_specs(
         .await?
         .map(QuantModelSpecView::from);
     Ok(WebResponse::ok(page))
+}
+
+/// `POST /api/research/model-specs` — author a new `draft` model specification.
+///
+/// The spec is the authoring root of the offline research lifecycle: an operator
+/// mints it before planning a training dataset or training a version. Returns
+/// `201 Created` with the persisted spec projection.
+pub async fn create_model_spec(
+    state: web::Data<AppState>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<CreateModelSpecRequest>,
+) -> Result<WebResponse<QuantModelSpecView>, WebError> {
+    let request = body.into_inner();
+    let reason = request.reason.clone();
+    let created = state
+        .model_spec
+        .create(
+            CreateModelSpecCommand {
+                name: request.name,
+                model_family: request.model_family,
+                prediction_horizon_secs: request.prediction_horizon_secs,
+                feature_schema_version: request.feature_schema_version,
+                label_schema_version: request.label_schema_version,
+                spec_json: request.spec_json,
+                reason: reason.clone(),
+            },
+            GovernanceActor {
+                username: actor.claims.username.clone(),
+                role: Some(acting_role.0.clone()),
+            },
+        )
+        .await?;
+    let view = QuantModelSpecView::from(created);
+    op_ctx.set_action(OperationCategory::Governance, "model_spec.create");
+    op_ctx.set_resource(ResourceType::Materialization, view.model_spec_id.clone());
+    op_ctx.set_detail(serde_json::json!({
+        "model_spec_id": view.model_spec_id,
+        "name": view.name,
+        "model_family": view.model_family,
+        "prediction_horizon_secs": view.prediction_horizon_secs,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": reason,
+    }));
+    Ok(WebResponse::ok(view))
+}
+
+/// `GET /api/research/model-specs/{id}` — single model specification (detail drawer).
+pub async fn get_model_spec(
+    state: web::Data<AppState>,
+    id: web::Path<ModelSpecId>,
+) -> Result<WebResponse<QuantModelSpecView>, WebError> {
+    let info = state
+        .model_spec
+        .find(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("model spec not found: {id}")))?;
+    Ok(WebResponse::ok(QuantModelSpecView::from(info)))
 }
 
 /// `GET /api/research/models` — paginated trained-model registry catalog.

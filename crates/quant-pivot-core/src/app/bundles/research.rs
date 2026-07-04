@@ -4,6 +4,7 @@ use super::{DataBundle, GovernanceBundle, InfraBundle};
 use crate::{
     governance::{
         FactorGovernanceDeps, FactorGovernanceService, ModelGovernanceDeps, ModelGovernanceService,
+        ModelSpecDeps, ModelSpecService,
     },
     pipeline::{
         feature_window_provider::FeatureWindowProvider,
@@ -21,7 +22,7 @@ use crate::{
 };
 use quant_pivot_api::{fees::FeeCalculator, ws::WsShardHealthPort};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::domain::{FactorGovernancePort, ModelGovernancePort};
+use quant_pivot_models::domain::{FactorGovernancePort, ModelGovernancePort, ModelSpecPort};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::RuntimeConfigPort,
@@ -98,6 +99,8 @@ pub struct ResearchBundle {
     pub model_governance: Arc<dyn ModelGovernancePort>,
     /// Factor-definition publish / retire orchestration (05.7).
     pub factor_governance: Arc<dyn FactorGovernancePort>,
+    /// Model-spec authoring (the offline research lifecycle root write path).
+    pub model_spec: Arc<dyn ModelSpecPort>,
     /// Schema-bound runtime factory builder (loads model artifacts) (3.4/3.6).
     pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
@@ -183,6 +186,9 @@ impl ResearchBundle {
             &offline.training_dataset,
         );
         let factor_governance = Self::assemble_factor_governance(&factor_repo);
+        let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
+            model_registry: Arc::clone(&model_registry_repo),
+        }));
 
         Self {
             artifact_store,
@@ -205,6 +211,7 @@ impl ResearchBundle {
             governance_audit_repo: offline.governance_audit,
             model_governance,
             factor_governance,
+            model_spec,
             model_runtime_factory_builder,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),

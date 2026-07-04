@@ -35,16 +35,17 @@ use quant_pivot_models::{
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportListQuery, BacktestReportView,
         BookSnapshot, BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort,
-        ComparisonReportListQuery, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
-        ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
-        ExecutionSubmitPort, FactorCollinearitySource, FactorCollinearityView,
-        FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort, GatePreviewIntent,
-        GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort,
-        KillSwitchView, MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo,
-        ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort,
-        ModelVersionInfo, ModelVersionListQuery, Paginated, PromoteDatasetRequest,
-        PublishFactorCommand, PublishModelCommand, QualityGateReportView,
-        QuantModeTransitionReport, ReconciliationPort, ResearchCatalogPort, ResearchJobListQuery,
+        ComparisonReportListQuery, CoreEventPublisher, CreateModelSpecCommand, DataQualityPort,
+        DataQualitySnapshot, ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort,
+        ExecutionRecoveryView, ExecutionSubmitPort, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        FactorGovernancePort, GatePreviewIntent, GovernanceActor, HealthReport, JobProgressSink,
+        JobSubmitContext, KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort,
+        ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery,
+        ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        PromoteDatasetRequest, PublishFactorCommand, PublishFactorsBatchCommand,
+        PublishModelCommand, QualityGateReportView, QuantModeTransitionReport, ReconciliationPort,
+        RegisterFactorDefinitionsCommand, ResearchCatalogPort, ResearchJobListQuery,
         ResearchJobPort, ResearchJobView, ResolveReconciliationCommand,
         ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
         RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
@@ -55,8 +56,8 @@ use quant_pivot_models::{
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, FactorDefinitionId, MarketId, ModelComparisonReportId, ModelVersionId,
-        OrderIntentId, ResearchJobId, TokenId, TrainingDatasetId,
+        BacktestReportId, FactorDefinitionId, MarketId, ModelComparisonReportId, ModelSpecId,
+        ModelVersionId, OrderIntentId, ResearchJobId, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -133,9 +134,7 @@ impl TestEnv {
     pub async fn start_with_core_report_port() -> Self {
         let (pool, pg_container) = pg::setup_pg().await;
         let (redis_port, redis_container) = redis::setup_redis().await;
-        let redis_cfg = redis::test_redis_config(redis_port);
-
-        let jwt_blacklist = connect_blacklist(&redis_cfg).await;
+        let jwt_blacklist = connect_blacklist(&redis::test_redis_config(redis_port)).await;
         let blacklist = Arc::clone(&jwt_blacklist) as Arc<dyn TokenBlacklist>;
         let jwt = Arc::new(JwtService::new(&jwt_config(), Arc::clone(&blacklist)));
         let db = pool.connection().clone();
@@ -199,6 +198,7 @@ impl TestEnv {
             backtests: Arc::new(MockBacktestPort),
             model_governance: Arc::new(MockModelGovernancePort),
             factor_governance: Arc::new(MockFactorGovernancePort),
+            model_spec: Arc::new(MockModelSpecPort),
             research_catalog: Arc::new(MockResearchCatalogPort),
             research_jobs: Arc::new(MockResearchJobPort),
             quant_reports: core_report.port.clone(),
@@ -827,7 +827,7 @@ impl FactorGovernancePort for MockFactorGovernancePort {
     async fn find_definition(
         &self,
         _factor_definition_id: &FactorDefinitionId,
-    ) -> QuantResult<Option<quant_pivot_models::domain::FactorDefinitionInfo>> {
+    ) -> QuantResult<Option<FactorDefinitionInfo>> {
         Ok(None)
     }
 
@@ -835,7 +835,7 @@ impl FactorGovernancePort for MockFactorGovernancePort {
         &self,
         _command: PublishFactorCommand,
         _actor: GovernanceActor,
-    ) -> QuantResult<quant_pivot_models::domain::FactorDefinitionInfo> {
+    ) -> QuantResult<FactorDefinitionInfo> {
         Err(QuantError::NotImplemented("factor publish".into()))
     }
 
@@ -843,8 +843,42 @@ impl FactorGovernancePort for MockFactorGovernancePort {
         &self,
         _command: RetireFactorCommand,
         _actor: GovernanceActor,
-    ) -> QuantResult<quant_pivot_models::domain::FactorDefinitionInfo> {
+    ) -> QuantResult<FactorDefinitionInfo> {
         Err(QuantError::NotImplemented("factor retire".into()))
+    }
+
+    async fn register_enabled_definitions(
+        &self,
+        _command: RegisterFactorDefinitionsCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<Vec<FactorDefinitionInfo>> {
+        Err(QuantError::NotImplemented("factor register".into()))
+    }
+
+    async fn publish_batch(
+        &self,
+        _command: PublishFactorsBatchCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<Vec<FactorDefinitionInfo>> {
+        Err(QuantError::NotImplemented("factor publish batch".into()))
+    }
+}
+
+/// No-op model-spec authoring port for web integration tests.
+pub struct MockModelSpecPort;
+
+#[async_trait]
+impl ModelSpecPort for MockModelSpecPort {
+    async fn create(
+        &self,
+        _command: CreateModelSpecCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<ModelSpecInfo> {
+        Err(QuantError::NotImplemented("model spec create".into()))
+    }
+
+    async fn find(&self, _model_spec_id: &ModelSpecId) -> QuantResult<Option<ModelSpecInfo>> {
+        Ok(None)
     }
 }
 

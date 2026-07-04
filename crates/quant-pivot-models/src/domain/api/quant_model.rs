@@ -2,10 +2,51 @@
 
 use crate::{
     domain::{ModelSpecInfo, pagination::PageRequest},
-    enums::quant::PublicationStatus,
+    enums::{model::ModelFamily, quant::PublicationStatus},
+    types::SchemaVersion,
 };
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
+use validator::Validate;
+
+/// Inbound body for `POST /research/model-specs`.
+///
+/// A model spec is the **authoring root** of the offline research lifecycle:
+/// the operator declares the model family, prediction horizon, and feature /
+/// label schema versions the downstream dataset build and training runs bind
+/// to. Specs are minted in `draft`; a trained version is what later gets
+/// published (see `TrainModelRequest` / model-governance).
+///
+/// `model_family` deserializes from its canonical wire label (`"weighted_factor"`,
+/// `"classical_random_forest"`, `"hold_vs_exit_weighted"`, …); an unknown label
+/// is rejected at the boundary with `400`.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct CreateModelSpecRequest {
+    /// Human-facing spec name (unique-ish label shown in the catalog picker).
+    #[validate(length(min = 1, max = 128))]
+    pub name: String,
+    /// Model family this spec authors (Buy ranker, Sell/exit scorer, classical).
+    pub model_family: ModelFamily,
+    /// Model-intrinsic prediction horizon in seconds (`>= 1`).
+    #[validate(range(min = 1))]
+    pub prediction_horizon_secs: i64,
+    /// Feature schema version the spec targets (defaults to the first version).
+    #[serde(default = "default_schema_version")]
+    pub feature_schema_version: SchemaVersion,
+    /// Label schema version the spec targets (defaults to the first version).
+    #[serde(default = "default_schema_version")]
+    pub label_schema_version: SchemaVersion,
+    /// Free-form authoring metadata (notes, tuning intent). Defaults to `{}`.
+    #[serde(default)]
+    pub spec_json: serde_json::Value,
+    /// Operator reason recorded on the operation log (UI should require non-empty).
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
+}
+
+const fn default_schema_version() -> SchemaVersion {
+    SchemaVersion::FIRST
+}
 
 /// Outbound projection for a model specification row (the training entry point:
 /// the operator picks a spec before planning a dataset or training a version).
@@ -15,6 +56,9 @@ pub struct QuantModelSpecView {
     pub name: String,
     pub model_family: String,
     pub prediction_horizon_secs: i64,
+    pub feature_schema_version: SchemaVersion,
+    pub label_schema_version: SchemaVersion,
+    pub spec_json: serde_json::Value,
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -27,6 +71,9 @@ impl From<ModelSpecInfo> for QuantModelSpecView {
             name: info.name,
             model_family: info.model_family.as_str().to_owned(),
             prediction_horizon_secs: info.prediction_horizon_secs,
+            feature_schema_version: info.feature_schema_version,
+            label_schema_version: info.label_schema_version,
+            spec_json: info.spec_json,
             status: info.status.as_str().to_owned(),
             created_at: info.created_at,
             updated_at: info.updated_at,

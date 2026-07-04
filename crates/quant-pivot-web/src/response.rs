@@ -42,6 +42,15 @@ impl<T> WebResponse<T> {
         }
     }
 
+    /// Wrap `data` in a `201 / "created"` envelope for resource-authoring endpoints.
+    pub fn created(data: T) -> Self {
+        Self {
+            code: StatusCode::CREATED.as_u16(),
+            message: "created".to_owned(),
+            data: Some(data),
+        }
+    }
+
     /// Wrap `data` in a `202 / "accepted"` envelope for async-enqueue endpoints.
     pub fn accepted(data: T) -> Self {
         Self {

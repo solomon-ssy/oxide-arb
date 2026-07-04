@@ -153,6 +153,7 @@ async fn build_app_state(
         )),
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
+        model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
         quant_reports: Arc::new(CoreQuantReportPort::new(

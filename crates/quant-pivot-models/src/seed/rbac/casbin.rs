@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 13,
+    version: 14,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v13",
+    checksum: "rbac.casbin.bootstrap.v14",
     loader: load_boxed,
 };
 
@@ -127,6 +127,8 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Publication, Operation::Publish),
         (ResourceType::Publication, Operation::Rollback),
         (ResourceType::Publication, Operation::Retire),
+        // Register the enabled factor set (bootstrap) alongside publish/retire.
+        (ResourceType::FactorDefinition, Operation::Create),
         (ResourceType::FactorDefinition, Operation::Publish),
         (ResourceType::FactorDefinition, Operation::Retire),
         // Risk owners revoke published reports (money-risk authority).
