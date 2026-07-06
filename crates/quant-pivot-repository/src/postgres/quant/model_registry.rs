@@ -34,10 +34,11 @@ impl PgModelRegistryRepository {
 #[async_trait::async_trait]
 impl ModelRegistryRepository for PgModelRegistryRepository {
     async fn create_model_spec(&self, spec: NewModelSpec) -> Result<ModelSpecInfo, StorageError> {
+        let name = spec.name.clone();
         quant_model_spec::Entity::insert(spec.into_active_model())
             .exec_with_returning(&self.db)
             .await
-            .map_err(StorageError::from)
+            .map_err(|err| error::map_unique(err, entity::QUANT_MODEL_SPEC, &name))
             .map(Into::into)
     }
 
@@ -56,10 +57,11 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         version: NewModelVersion,
     ) -> Result<ModelVersionInfo, StorageError> {
+        let duplicate_key = format!("{}:v{}", version.model_spec_id, version.version);
         quant_model_version::Entity::insert(version.into_active_model())
             .exec_with_returning(&self.db)
             .await
-            .map_err(StorageError::from)
+            .map_err(|err| error::map_unique(err, entity::QUANT_MODEL_VERSION, &duplicate_key))
             .map(Into::into)
     }
 
@@ -93,11 +95,17 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         query: ModelSpecListQuery,
     ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
-        let condition = Condition::all().add_option(
-            query
-                .status
-                .map(|status| quant_model_spec::Column::Status.eq(status)),
-        );
+        let condition = Condition::all()
+            .add_option(
+                query
+                    .model_family
+                    .map(|family| quant_model_spec::Column::ModelFamily.eq(family)),
+            )
+            .add_option(
+                query
+                    .status
+                    .map(|status| quant_model_spec::Column::Status.eq(status)),
+            );
         paginate_mapped(
             quant_model_spec::Entity::find()
                 .filter(condition)

@@ -448,6 +448,25 @@ fn build_execution(t: &mut MenuTree) {
     });
 }
 
+/// Model-spec catalog — the offline research lifecycle root (spec → dataset → version).
+fn build_research_model_specs(t: &mut MenuTree, research: &MenuId) {
+    let model_specs = t.page(PageSpec {
+        parent: research,
+        name: "research-model-specs",
+        title: "page.menu.researchModelSpecs",
+        path: "/research/model-specs",
+        component: "research/model-specs/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:file-cog",
+    });
+    t.button(
+        &model_specs,
+        "materialization:create",
+        "Create Model Spec",
+        perm(ResourceType::Materialization, Operation::Create),
+    );
+}
+
 /// Research plane: real catalog pages backing the operator workbench —
 /// training-dataset ledger, trained-model registry, backtest reports, and factor
 /// governance. Each page pages a `GET /research/*` list endpoint (10.5 §2);
@@ -460,6 +479,7 @@ fn build_research(t: &mut MenuTree) {
         "page.menu.group.research",
         "lucide:flask-conical",
     );
+    build_research_model_specs(t, &research);
     let datasets = t.page(PageSpec {
         parent: &research,
         name: "research-datasets",
@@ -831,6 +851,7 @@ mod tests {
             "reconciliations",
             "settlement-redeems",
             "account",
+            "research-model-specs",
             "research-datasets",
             "research-models",
             "research-backtests",

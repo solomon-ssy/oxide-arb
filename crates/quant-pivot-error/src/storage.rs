@@ -42,8 +42,14 @@ pub mod entity {
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
     /// `quant_model_registry`.
     pub const QUANT_MODEL_REGISTRY: &str = "quant_model_registry";
+    /// `quant_model_spec`.
+    pub const QUANT_MODEL_SPEC: &str = "quant_model_spec";
+    /// `quant_model_version`.
+    pub const QUANT_MODEL_VERSION: &str = "quant_model_version";
     /// `quant_model_run`.
     pub const QUANT_MODEL_RUN: &str = "quant_model_run";
+    /// `runtime_config_version`.
+    pub const RUNTIME_CONFIG_VERSION: &str = "runtime_config_version";
     /// `quant_factor`.
     pub const QUANT_FACTOR: &str = "quant_factor";
     /// `quant_kill_switch`.

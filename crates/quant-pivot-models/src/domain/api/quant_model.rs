@@ -84,6 +84,8 @@ impl From<ModelSpecInfo> for QuantModelSpecView {
 /// Paginated filter for the model-spec catalog (training/dataset selector source).
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct ModelSpecListQuery {
+    /// Narrow by model family (Buy ranker, exit scorer, classical, …).
+    pub model_family: Option<ModelFamily>,
     /// Narrow by publication lifecycle (`draft`/`published`/`retired`/…).
     pub status: Option<PublicationStatus>,
     #[normalize_page]

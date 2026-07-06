@@ -1,6 +1,6 @@
-use crate::traits::RuntimeConfigVersionRepository;
+use crate::{postgres::error, traits::RuntimeConfigVersionRepository};
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
@@ -41,11 +41,12 @@ async fn do_create_version(
     db: &impl ConnectionTrait,
     version: NewRuntimeConfigVersion,
 ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+    let config_hash = version.config_hash.to_string();
     VersionEntity::insert(version.into_active_model())
         .exec_with_returning(db)
         .await
         .map(Into::into)
-        .map_err(StorageError::from)
+        .map_err(|err| error::map_unique(err, entity::RUNTIME_CONFIG_VERSION, &config_hash))
 }
 
 async fn do_activate_version(
