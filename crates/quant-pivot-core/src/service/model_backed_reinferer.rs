@@ -14,7 +14,9 @@ use quant_pivot_models::{
     domain::{ModelVersionInfo, OrderIntentInfo, PointInTimeDataSource, PositionInfo},
     enums::quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
-    types::{Bps, MarketId, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd},
+    types::{
+        Bps, ContentHash, MarketId, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd,
+    },
 };
 use quant_pivot_repository::traits::{
     ModelRegistryRepository, RecommendationRepository, RuntimeConfigVersionRepository,
@@ -102,7 +104,7 @@ impl ModelBackedExitSignalReinferer {
         version: &ModelVersionInfo,
         config: &RuntimeConfig,
     ) -> QuantResult<Option<Box<dyn QuantModelRuntime>>> {
-        let binding = schema_binding(&config.features, &config.factors)?;
+        let binding = schema_binding(&config.features, &config.factors, None)?;
         let factory = self.deps.factory_builder.build(binding);
         let overlay = resolve_overlay(&self.deps.weight_overlay, version);
         match factory.load(version, overlay).await {
@@ -314,10 +316,12 @@ async fn resolve_frozen_config(
 pub(crate) fn schema_binding(
     features: &FeaturesConfig,
     factors: &FactorsConfig,
+    bias_table_hash: Option<ContentHash>,
 ) -> QuantResult<ActiveSchemaBinding> {
     Ok(ActiveSchemaBinding {
         feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(features))?,
-        factor_schema_hash: FactorEngine::new(factors, features).factor_schema_hash()?,
+        factor_schema_hash: FactorEngine::new(factors, features, None).factor_schema_hash()?,
+        bias_table_hash,
     })
 }
 
@@ -387,12 +391,15 @@ pub(crate) async fn build_live_feature_vector(
     )
     .await?;
 
+    let pit_view = PitView::Live(request.pit.as_ref());
+    let sibling = pit_view.neg_risk_leg_set(&request.market.event_id);
     let bundle = builder
         .resolve_inputs(
             request.market,
             request.as_of,
-            PitView::Live(request.pit.as_ref()),
+            pit_view,
             &window,
+            &sibling,
             request.liquidity_cap_usd,
         )
         .await?;

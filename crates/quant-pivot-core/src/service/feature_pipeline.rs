@@ -18,7 +18,10 @@ use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::{FeatureVectorInfo, NewFeatureVector, quant::NewReportDataQualitySnapshot},
+    domain::{
+        FeatureVectorInfo, NewFeatureVector, market::registry::NegRiskLegSet,
+        quant::NewReportDataQualitySnapshot,
+    },
     enums::quant::DataQualityStatus,
     runtime_config::{DataQualityConfig, FeaturesConfig},
     types::{MarketId, RuntimeConfigVersionId, TokenId, Usd},
@@ -150,25 +153,8 @@ impl FeaturePipelineService {
             })
             .collect::<QuantResult<Vec<_>>>()?;
 
-        let mut bundles = Vec::with_capacity(resolve_jobs.len());
-        for chunk in resolve_jobs.chunks(max_concurrent) {
-            let chunk_results = join_all(chunk.iter().map(|(_, market, window)| {
-                builder.resolve_inputs(
-                    market,
-                    request.as_of,
-                    request.pit,
-                    window,
-                    request.liquidity_cap_usd,
-                )
-            }))
-            .await;
-            for ((index, _, _), bundle) in chunk.iter().zip(chunk_results) {
-                bundles.push((*index, bundle?));
-            }
-        }
-        bundles.sort_by_key(|(index, _)| *index);
-        let bundles: Vec<ResolvedMarketBundle<'_>> =
-            bundles.into_iter().map(|(_, bundle)| bundle).collect();
+        let bundles =
+            Self::resolve_bundles(&builder, &request, &resolve_jobs, max_concurrent).await?;
 
         let required = &request.model_requirements.required_features;
         let vectors =
@@ -242,6 +228,49 @@ impl FeaturePipelineService {
         self.window_provider
             .load_windows(request.included, request.as_of, lookback, source_delay)
             .await
+    }
+
+    /// Resolve one PIT bundle per market with bounded concurrency, preserving
+    /// input order.
+    ///
+    /// Each neg-risk market's sibling YES legs are enumerated up front (a sync
+    /// registry read on the live source) and resolved at the SAME `as_of` inside
+    /// [`ConfiguredFeatureBuilder::resolve_inputs`], so the structural full-leg
+    /// aggregates are byte-identical online and offline. Binary markets yield an
+    /// empty leg list and skip sibling resolution entirely.
+    async fn resolve_bundles<'a>(
+        builder: &ConfiguredFeatureBuilder,
+        request: &FeaturePipelineRequest<'a>,
+        resolve_jobs: &[(usize, &'a SelectedMarket, &'a MarketWindowSnapshot)],
+        max_concurrent: usize,
+    ) -> QuantResult<Vec<ResolvedMarketBundle<'a>>> {
+        let mut bundles = Vec::with_capacity(resolve_jobs.len());
+        for chunk in resolve_jobs.chunks(max_concurrent) {
+            // Resolve sibling legs before the concurrent futures borrow them; the
+            // per-market `Vec<NegRiskLeg>` must outlive the `join_all` await.
+            let sibling_sets: Vec<NegRiskLegSet> = chunk
+                .iter()
+                .map(|(_, market, _)| request.pit.neg_risk_leg_set(&market.event_id))
+                .collect();
+            let chunk_results = join_all(chunk.iter().zip(&sibling_sets).map(
+                |((_, market, window), sibling)| {
+                    builder.resolve_inputs(
+                        market,
+                        request.as_of,
+                        request.pit,
+                        window,
+                        sibling,
+                        request.liquidity_cap_usd,
+                    )
+                },
+            ))
+            .await;
+            for ((index, _, _), bundle) in chunk.iter().zip(chunk_results) {
+                bundles.push((*index, bundle?));
+            }
+        }
+        bundles.sort_by_key(|(index, _)| *index);
+        Ok(bundles.into_iter().map(|(_, bundle)| bundle).collect())
     }
 }
 

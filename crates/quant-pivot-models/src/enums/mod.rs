@@ -413,7 +413,6 @@ macro_rules! __enum_from_str_impl {
 
 pub mod clickhouse;
 pub mod common;
-pub mod domain;
 pub mod execution;
 pub mod factor;
 pub mod feature;

@@ -57,13 +57,12 @@ const fn source_available(candidate: &MarketCandidate, requirement: SourceRequir
         // Gamma metadata is always present for a catalog-backed candidate.
         SourceRequirement::GammaMetadata => true,
         // Book-derived and windowed fact features need a live, two-sided book;
-        // facts only flow while a book is published.
-        SourceRequirement::PublishedL2Book | SourceRequirement::MicrostructureWindow => {
-            has_two_sided_book(candidate)
-        }
-        // External vertical sources are not wired yet (03.2 §10): a model that
-        // requires one cannot be served, so the market is ineligible.
-        SourceRequirement::DomainExternal { .. } => false,
+        // facts only flow while a book is published. Neg-risk sibling-leg
+        // aggregates are platform-computable from the same book plane (a binary
+        // market simply yields a `NotApplicable` value, not an ineligible market).
+        SourceRequirement::PublishedL2Book
+        | SourceRequirement::MicrostructureWindow
+        | SourceRequirement::NegRiskSiblingLegs => has_two_sided_book(candidate),
     }
 }
 

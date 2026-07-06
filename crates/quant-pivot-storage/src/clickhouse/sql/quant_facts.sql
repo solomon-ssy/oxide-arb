@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS quant_feature_event
     feature_name LowCardinality(String),
     feature_value Decimal64(8),
     value_kind Enum8('decimal' = 0, 'probability' = 1, 'bps' = 2, 'usd' = 3, 'count' = 4, 'bool' = 5, 'category' = 6),
-    source_kind Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'domain_external' = 4, 'derived' = 5),
+    source_kind Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'derived' = 5),
     staleness_ms UInt64,
     ingestion_time DateTime64(3, 'UTC')
 )
@@ -22,9 +22,10 @@ CREATE TABLE IF NOT EXISTS quant_factor_event
     market_id String,
     factor_name LowCardinality(String),
     factor_family LowCardinality(String),
-    raw_value Decimal64(8),
-    normalized_score Decimal64(8),
-    normalization_source Enum8('cross_section' = 1, 'per_market' = 2, 'historical_quantile' = 3),
+    value_state Enum8('scored' = 1, 'missing_input' = 2, 'not_applicable' = 3, 'indeterminate' = 4),
+    raw_value Nullable(Decimal64(8)),
+    normalized_score Nullable(Decimal64(8)),
+    normalization_source Nullable(Enum8('cross_section' = 1, 'per_market' = 2, 'historical_quantile' = 3)),
     confidence Decimal64(8),
     direction Enum8('negative' = -1, 'neutral' = 0, 'positive' = 1),
     model_run_id String,

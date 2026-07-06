@@ -245,7 +245,7 @@ mod tests {
             ingestion_time: 1_000_000,
             sequence: 1,
             source: ChFactSource::WsSnapshot,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         }
     }
 

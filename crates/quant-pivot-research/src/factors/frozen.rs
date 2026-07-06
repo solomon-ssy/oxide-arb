@@ -93,7 +93,9 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{
-            factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
+            factor::{
+                FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource,
+            },
             quant::FactorDirection,
         },
         types::{FactorBreakdownEntry, MarketId, Probability},
@@ -106,6 +108,7 @@ mod tests {
         FactorBreakdownEntry {
             factor_name: name.to_owned(),
             family: FactorFamily::Momentum,
+            value_state: FactorValueState::Scored,
             raw_value: Some(Decimal::from(score)),
             normalized_score: Some(Probability::new(Decimal::new(score, 1))),
             normalization_source: Some(NormalizationSource::CrossSection),
@@ -123,6 +126,7 @@ mod tests {
         FactorBreakdownEntry {
             factor_name: name.to_owned(),
             family: FactorFamily::Liquidity,
+            value_state: FactorValueState::Indeterminate,
             raw_value: Some(Decimal::from(3)),
             normalized_score: None,
             normalization_source: None,

@@ -135,6 +135,7 @@ impl WeightedFactorRuntime {
                 definition_id: factor.definition_id.clone(),
                 name: factor.name.clone(),
                 family: factor.family,
+                value_state: factor.value_state(),
                 raw_value: factor.raw_value,
                 normalized_score: factor.normalized_score(),
                 normalization_source: factor.normalization_source(),

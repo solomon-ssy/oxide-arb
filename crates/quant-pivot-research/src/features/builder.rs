@@ -16,12 +16,12 @@ use crate::{
             ResolvedMarketBundle, empty_book, market_decision_capture_from_resolved,
             stub_market_context,
         },
-        domain::DomainFeatureSkeleton,
         market::MarketMetadataFeatureBuilder,
         microstructure::MicrostructureFeatureBuilder,
         null_policy::{NullDecision, NullPolicyEngine},
         resolved::{MarketWindowSnapshot, ResolvedBook, ResolvedMarketContext},
         schema::{FeatureSchema, FeatureSpec, StalenessRule},
+        structural::StructuralFeatureBuilder,
         timeseries::TimeSeriesFeatureBuilder,
         value::{
             EvidenceSourceRef, FeatureName, FeatureValue, NullReason, SubstitutionAudit,
@@ -33,11 +33,11 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::types::{BookSnapshotRef, Usd};
 use quant_pivot_models::{
+    domain::{NegRiskLeg, market::registry::NegRiskLegSet},
     enums::{common::MarketCategory, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, FeatureFamily, FeaturesConfig},
-    types::SchemaVersion,
+    types::{BookSnapshotRef, MarketId, SchemaVersion, TokenId, Usd},
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashSet};
@@ -78,6 +78,19 @@ impl RawFeature {
     }
 }
 
+/// One neg-risk sibling leg resolved point-in-time at the SAME `as_of` as the
+/// primary market (Phase 11.2.1). Online and offline both resolve through
+/// [`PitView::resolve_book`], so the structural full-leg aggregates are
+/// byte-identical across backends.
+pub struct ResolvedLeg {
+    /// The sibling market that owns this YES leg.
+    pub market_id: MarketId,
+    /// The YES outcome token of the sibling leg.
+    pub token_id: TokenId,
+    /// The sibling YES-leg book resolved at `as_of`.
+    pub book: ResolvedBook,
+}
+
 /// Everything a group builder needs to compute its features, all borrowed.
 pub struct FeatureComputeCtx<'a> {
     /// Decision time.
@@ -90,6 +103,13 @@ pub struct FeatureComputeCtx<'a> {
     pub market: Option<&'a ResolvedMarketContext>,
     /// Pre-fetched windowed microstructure history for the primary token.
     pub window: &'a MarketWindowSnapshot,
+    /// Same-`as_of` neg-risk sibling YES legs whose book resolved (empty for
+    /// binary markets or when the schema declares no structural neg-risk aggregate).
+    pub sibling_legs: &'a [ResolvedLeg],
+    /// The number of event YES legs the resolver was asked to fetch — the
+    /// expected leg count. `sibling_legs.len() < sibling_leg_total` means at least
+    /// one leg's book was absent at `as_of` (fail-closed → `LegBookMissing`).
+    pub sibling_leg_total: usize,
     /// Frozen feature config.
     pub config: &'a FeaturesConfig,
     /// Frozen data-quality config.
@@ -122,6 +142,11 @@ pub struct ResolvedInputs<'a> {
     pub market_ctx: Option<ResolvedMarketContext>,
     /// Pre-fetched, PIT-bounded microstructure window for the primary token.
     pub window: &'a MarketWindowSnapshot,
+    /// Same-`as_of` neg-risk sibling YES legs whose book resolved (empty unless
+    /// the market is neg-risk and the schema declares a structural aggregate).
+    pub sibling_legs: Vec<ResolvedLeg>,
+    /// Expected event YES-leg count (resolved < expected ⇒ a leg was missing).
+    pub sibling_leg_total: usize,
 }
 
 /// The configured, composable feature builder.
@@ -132,6 +157,8 @@ pub struct ConfiguredFeatureBuilder {
     needs_book: bool,
     /// Precomputed PIT gating: whether any spec needs Gamma market metadata.
     needs_market: bool,
+    /// Precomputed PIT gating: whether any spec needs neg-risk sibling-leg books.
+    needs_sibling_legs: bool,
 }
 
 impl ConfiguredFeatureBuilder {
@@ -156,16 +183,18 @@ impl ConfiguredFeatureBuilder {
                 FeatureFamily::Microstructure => {
                     groups.push(Box::new(MicrostructureFeatureBuilder));
                 }
-                FeatureFamily::Domain => groups.push(Box::new(DomainFeatureSkeleton)),
+                FeatureFamily::Structural => groups.push(Box::new(StructuralFeatureBuilder)),
             }
         }
         let needs_book = schema.needs_book();
         let needs_market = schema.needs_market_metadata();
+        let needs_sibling_legs = schema.needs_sibling_legs();
         Self {
             schema,
             groups,
             needs_book,
             needs_market,
+            needs_sibling_legs,
         }
     }
 
@@ -190,6 +219,7 @@ impl ConfiguredFeatureBuilder {
         as_of: DateTime<Utc>,
         pit: PitView<'a>,
         window: &'a MarketWindowSnapshot,
+        sibling: &NegRiskLegSet,
         liquidity_cap_usd: Usd,
     ) -> QuantResult<ResolvedMarketBundle<'a>> {
         let capture_book = pit
@@ -219,6 +249,12 @@ impl ConfiguredFeatureBuilder {
         } else {
             None
         };
+        let sibling_leg_total = if self.needs_sibling_legs {
+            sibling.expected_legs
+        } else {
+            0
+        };
+        let sibling_legs = self.resolve_sibling_legs(pit, as_of, &sibling.legs).await?;
         Ok(ResolvedMarketBundle {
             inputs: ResolvedInputs {
                 market,
@@ -226,9 +262,39 @@ impl ConfiguredFeatureBuilder {
                 book,
                 market_ctx,
                 window,
+                sibling_legs,
+                sibling_leg_total,
             },
             capture,
         })
+    }
+
+    /// Resolve every neg-risk sibling YES leg's book at the SAME `as_of`.
+    ///
+    /// A leg whose book is absent at `as_of` is **dropped** from the resolved set
+    /// (never a fabricated empty book); the structural builder then reports the
+    /// missing coverage as [`NullReason::LegBookMissing`], and the factor plane
+    /// as `Indeterminate { LegBookMissing }` — never a silent zero.
+    async fn resolve_sibling_legs(
+        &self,
+        pit: PitView<'_>,
+        as_of: DateTime<Utc>,
+        legs: &[NegRiskLeg],
+    ) -> QuantResult<Vec<ResolvedLeg>> {
+        if !self.needs_sibling_legs || legs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut resolved = Vec::with_capacity(legs.len());
+        for leg in legs {
+            if let Some(book) = pit.resolve_book(&leg.yes_token_id, as_of).await? {
+                resolved.push(ResolvedLeg {
+                    market_id: leg.market_id.clone(),
+                    token_id: leg.yes_token_id.clone(),
+                    book,
+                });
+            }
+        }
+        Ok(resolved)
     }
 
     /// Compute the canonical [`FeatureVector`] from resolved inputs (pure).
@@ -247,6 +313,8 @@ impl ConfiguredFeatureBuilder {
             book: resolved.book.as_ref(),
             market: resolved.market_ctx.as_ref(),
             window: resolved.window,
+            sibling_legs: &resolved.sibling_legs,
+            sibling_leg_total: resolved.sibling_leg_total,
             config,
             data_quality,
             book_snapshot_ref: Some(&bundle.capture.book_snapshot_ref),
@@ -328,6 +396,7 @@ impl FeatureBuilder for ConfiguredFeatureBuilder {
                 input.as_of,
                 input.pit,
                 input.window,
+                input.sibling,
                 Usd::ZERO,
             )
             .await?;

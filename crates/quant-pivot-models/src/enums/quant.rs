@@ -427,6 +427,8 @@ crate::pg_enum! {
         DatasetBuild => "dataset_build",
         ModelTrain => "model_train",
         Backtest => "backtest",
+        /// Fit a favorite-longshot bias-table artifact (Phase 11.2.1).
+        BiasTableFit => "bias_table_fit",
     }
 }
 

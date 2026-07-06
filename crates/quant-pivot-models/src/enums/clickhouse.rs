@@ -199,6 +199,27 @@ pub enum ChRecommendationAttributionOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
+pub enum ChFactorValueState {
+    Scored = 1,
+    MissingInput = 2,
+    NotApplicable = 3,
+    Indeterminate = 4,
+}
+
+impl ChFactorValueState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scored => "scored",
+            Self::MissingInput => "missing_input",
+            Self::NotApplicable => "not_applicable",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
 pub enum ChFactorDirection {
     Positive = 1,
     Neutral = 0,
@@ -253,7 +274,6 @@ pub enum ChFeatureSourceKind {
     Book = 1,
     GammaMetadata = 2,
     ClickHouseFact = 3,
-    DomainExternal = 4,
     Derived = 5,
 }
 
@@ -264,7 +284,6 @@ impl ChFeatureSourceKind {
             Self::Book => "book",
             Self::GammaMetadata => "gamma_metadata",
             Self::ClickHouseFact => "clickhouse_fact",
-            Self::DomainExternal => "domain_external",
             Self::Derived => "derived",
         }
     }
@@ -276,7 +295,6 @@ impl ChFeatureSourceKind {
             "book" => Some(Self::Book),
             "gamma_metadata" => Some(Self::GammaMetadata),
             "clickhouse_fact" => Some(Self::ClickHouseFact),
-            "domain_external" => Some(Self::DomainExternal),
             "derived" => Some(Self::Derived),
             _ => None,
         }

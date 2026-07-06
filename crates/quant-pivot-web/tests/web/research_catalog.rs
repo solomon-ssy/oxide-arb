@@ -108,6 +108,29 @@ async fn factor_detail_not_found_returns_404() {
 }
 
 #[tokio::test]
+async fn training_dataset_plan_rejects_inverted_window() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let req = TestRequest::post()
+        .uri("/api/research/training-datasets/plan")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&admin))
+        .insert_header(("X-Acting-Role", "quant"))
+        .set_json(json!({
+            "model_spec_id": "019f2964-d6e3-7711-aa6c-1dbb87257e9e",
+            "runtime_config_version_id": "019f2964-d5f4-7740-aa85-9a65e487aab2",
+            "window_start": "2026-07-05T00:00:00.000Z",
+            "window_end": "2026-07-02T00:00:00.000Z",
+            "sample_interval_secs": 60,
+            "horizons_secs": [3600],
+            "source_delay_secs": 1,
+            "reason": "inverted window validation"
+        }));
+    let res = harness::call(&env.state, req).await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn training_dataset_plan_and_build_match_post_handlers_not_id_route() {
     let env = TestEnv::start().await;
     let admin = admin_token(&env).await;

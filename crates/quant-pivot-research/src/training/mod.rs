@@ -551,7 +551,7 @@ pub(crate) mod fixtures {
                 market_id: MarketId::new(market),
                 token_id: Some(TokenId::new(format!("{market}-yes"))),
                 as_of,
-                schema_version: SchemaVersion::new(1),
+                schema_version: SchemaVersion::FIRST,
                 values: BTreeMap::new(),
                 substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,

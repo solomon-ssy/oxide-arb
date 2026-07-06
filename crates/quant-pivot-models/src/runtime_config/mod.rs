@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 12`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 1`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -29,14 +29,14 @@ use quant_pivot_error::{
 
 use crate::types::SchemaVersion;
 
-/// The only supported runtime-config schema version.
+/// The current, only supported runtime-config schema version.
 ///
-/// Bumped to 12 for Phase 11.1: the `factors` section gained `normalization`,
-/// `cross_section`, and `orthogonalize`; the `features` section replaced the
-/// flat `momentum_windows_secs` with a structured `momentum` sub-config. Prior
-/// versions are rejected with zero compatibility (no shim, no migration —
-/// the database is reset).
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(12);
+/// This is a **monotonic** version: every schema-changing phase bumps it by one
+/// and the greenfield database is reset (zero compatibility — no shim, no
+/// migration; non-matching documents are rejected). It is currently
+/// [`SchemaVersion::FIRST`] because the schema was last reset here, NOT because
+/// the baseline is permanently pinned — future phases (11.2.2 / 11.3) bump it.
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::FIRST;
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -273,23 +273,26 @@ mod tests {
     use super::{
         RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig, RuntimeConfigError, sensitive_paths,
     };
+    use crate::types::SchemaVersion;
     use serde_json::json;
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 12);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 12);
+        assert_eq!(
+            RuntimeConfig::default().schema_version,
+            SchemaVersion::FIRST
+        );
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::FIRST);
     }
 
     #[test]
-    fn rejects_prior_schema_documents() {
-        // The immediately-prior baseline (v11) is rejected with zero compatibility.
+    fn rejects_non_current_schema_documents() {
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(11);
-        let error = RuntimeConfig::from_json(&document).expect_err("v11 must be rejected");
+        document["schema_version"] = json!(2);
+        let error = RuntimeConfig::from_json(&document).expect_err("non-current must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 11
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 2
         ));
     }
 

@@ -37,7 +37,7 @@ use crate::{
         },
         value::{
             FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, FactorQualityGate,
-            RawFactor,
+            RawFactor, RawFactorEligibility,
         },
     },
     features::{
@@ -345,6 +345,7 @@ impl FactorComputer for FeatureBackedFactor {
             name: self.spec.name.clone(),
             family: self.spec.family,
             raw_value: raw,
+            eligibility: RawFactorEligibility::Normalizable,
             direction: self.spec.default_direction,
             confidence,
             headline,
@@ -407,6 +408,7 @@ impl FactorComputer for DataQualityFactor {
             name: self.spec.name.clone(),
             family: self.spec.family,
             raw_value: Some(raw),
+            eligibility: RawFactorEligibility::Normalizable,
             direction: FactorDirection::Positive,
             // The quality assessment itself is always fully trusted; the score
             // is the subject, not the confidence.
@@ -422,7 +424,7 @@ impl FactorComputer for DataQualityFactor {
 }
 
 /// Extract a numeric value from a feature, treating `Missing` as absent.
-fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
+pub(super) fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
     if value.is_missing() {
         None
     } else {
@@ -438,7 +440,7 @@ fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
 /// [`crate::factors::normalize`]. Keeping this mapping fixed also preserves the
 /// factor engine's infallible construction (no per-compute `DecimalString`
 /// parse). Distributional tuning of the alpha itself is learned in 11.4.
-fn data_quality_confidence(status: DataQualityStatus) -> Decimal {
+pub(super) fn data_quality_confidence(status: DataQualityStatus) -> Decimal {
     match status {
         DataQualityStatus::Fresh => Decimal::ONE,
         DataQualityStatus::Acceptable => Decimal::new(85, 2),

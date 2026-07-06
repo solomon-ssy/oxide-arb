@@ -13,6 +13,8 @@ mod dataset;
 mod execution;
 mod exit_training;
 mod factor;
+#[allow(clippy::needless_update)] // NewFavoriteLongshotBiasTable omits DB-managed created_at
+mod favorite_longshot;
 mod feature;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
@@ -45,6 +47,7 @@ pub use dataset::*;
 pub use execution::*;
 pub use exit_training::*;
 pub use factor::*;
+pub use favorite_longshot::*;
 pub use feature::*;
 pub use governance_audit::*;
 pub use model::*;

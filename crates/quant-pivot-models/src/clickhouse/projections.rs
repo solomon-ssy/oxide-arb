@@ -2,13 +2,13 @@
 
 use crate::enums::{
     clickhouse::{
-        ChCapitalAllocationState, ChExecutionSide, ChFactorDirection, ChFeatureSourceKind,
-        ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
-        ChRecommendationAttributionOutcome, ChRecommendationStatus,
+        ChCapitalAllocationState, ChExecutionSide, ChFactorDirection, ChFactorValueState,
+        ChFeatureSourceKind, ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide,
+        ChPositionLedgerState, ChRecommendationAttributionOutcome, ChRecommendationStatus,
     },
     common::Side,
     execution::{CapitalAllocationState, PositionLedgerState},
-    factor::NormalizationSource,
+    factor::{FactorValueState, NormalizationSource},
     feature::{EvidenceSourceKind, FeatureValueKind},
     quant::{FactorDirection, OutcomeSide, RecommendationAttributionOutcome, RecommendationStatus},
 };
@@ -89,6 +89,17 @@ impl From<FactorDirection> for ChFactorDirection {
     }
 }
 
+impl From<FactorValueState> for ChFactorValueState {
+    fn from(value: FactorValueState) -> Self {
+        match value {
+            FactorValueState::Scored => Self::Scored,
+            FactorValueState::MissingInput => Self::MissingInput,
+            FactorValueState::NotApplicable => Self::NotApplicable,
+            FactorValueState::Indeterminate => Self::Indeterminate,
+        }
+    }
+}
+
 impl From<NormalizationSource> for ChNormalizationSource {
     fn from(value: NormalizationSource) -> Self {
         match value {
@@ -111,7 +122,6 @@ impl From<EvidenceSourceKind> for ChFeatureSourceKind {
             EvidenceSourceKind::Book => Self::Book,
             EvidenceSourceKind::GammaMetadata => Self::GammaMetadata,
             EvidenceSourceKind::ClickHouseFact => Self::ClickHouseFact,
-            EvidenceSourceKind::DomainExternal => Self::DomainExternal,
             EvidenceSourceKind::Derived => Self::Derived,
         }
     }

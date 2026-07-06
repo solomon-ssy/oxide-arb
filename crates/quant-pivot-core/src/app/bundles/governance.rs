@@ -4,8 +4,9 @@ use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
-        DefaultModePreflight, DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle,
-        ModePreflightDeps, RuntimeModeHandle, SystemStatusPublisher, WeightOverlayApplicator,
+        BiasTableApplicator, DefaultModePreflight, DefaultModeTransitionGate, KillSwitchControl,
+        KillSwitchHandle, ModePreflightDeps, RuntimeModeHandle, SystemStatusPublisher,
+        WeightOverlayApplicator,
         execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
         runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
     },
@@ -15,7 +16,7 @@ use crate::{
 };
 use chrono::Utc;
 use quant_pivot_api::ws::WsShardHealthPort;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
@@ -37,9 +38,9 @@ use quant_pivot_repository::{
         PgKillSwitchStateRepository, PgSystemRuntimeStateRepository, SYSTEM_KILL_SWITCH_ID,
     },
     traits::{
-        CapitalAllocationRepository, KillSwitchStateRepository, ModelRegistryRepository,
-        ReconciliationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-        SystemRuntimeStateRepository,
+        CapitalAllocationRepository, FavoriteLongshotBiasTableRepository,
+        KillSwitchStateRepository, ModelRegistryRepository, ReconciliationRepository,
+        RuntimeConfigVersionRepository, ShadowComparisonRepository, SystemRuntimeStateRepository,
     },
 };
 use std::sync::Arc;
@@ -102,6 +103,9 @@ pub struct GovernanceBundle {
     pub kill_switch: Arc<dyn KillSwitchPort>,
     /// Candidate / shadow factor-weight overlay snapshot, reloaded on activation.
     pub weight_overlay: Arc<WeightOverlayApplicator>,
+    /// Favorite-longshot bias-table snapshot bound to the factor plane (11.2.1),
+    /// reloaded + content-hash verified on activation.
+    pub bias_table: Arc<BiasTableApplicator>,
     /// Exit-monitor health (05.6): shared with the execution bundle's worker and
     /// read by admission `#20` + the auto-execution mode preflight.
     pub exit_monitor_health: ExitMonitorHealthHandle,
@@ -133,12 +137,17 @@ impl GovernanceBundle {
 
         let status_publisher = SystemStatusPublisher::new(events);
         let weight_overlay = seed_weight_overlay(&runtime_config);
+        let bias_table = Arc::new(BiasTableApplicator::new(Arc::clone(
+            &infra.repos.favorite_longshot_bias_table,
+        )
+            as Arc<dyn FavoriteLongshotBiasTableRepository>));
         let applicator = build_runtime_config_applicator(
             deploy,
             metrics,
             &runtime_config,
             &alerts,
             &weight_overlay,
+            &bias_table,
             data,
         );
         let health_checker = build_health_checker(infra, data, &runtime_mode);
@@ -174,6 +183,7 @@ impl GovernanceBundle {
             runtime_control,
             kill_switch,
             weight_overlay,
+            bias_table,
             exit_monitor_health,
             execution_recovery,
             status_publisher,
@@ -183,6 +193,23 @@ impl GovernanceBundle {
     /// Bootstrap the execution recovery summary from live reconciliation state.
     pub async fn bootstrap_execution_recovery(&self) -> QuantResult<()> {
         self.execution_recovery.refresh().await
+    }
+
+    /// Seed the favorite-longshot bias table from the active config on boot, so
+    /// the factor plane binds the pinned table before the first re-activation. A
+    /// pinned-but-unloadable table fails boot closed (never silently inert).
+    pub async fn bootstrap_bias_table(&self) -> QuantResult<()> {
+        self.bias_table
+            .reload(
+                &self
+                    .runtime_config
+                    .current()
+                    .factors
+                    .structural
+                    .favorite_longshot,
+            )
+            .await
+            .map_err(QuantError::from)
     }
 }
 
@@ -203,6 +230,7 @@ fn build_runtime_config_applicator(
     runtime_config: &Arc<RuntimeConfigStore>,
     alerts: &Arc<AlertDispatcher>,
     weight_overlay: &Arc<WeightOverlayApplicator>,
+    bias_table: &Arc<BiasTableApplicator>,
     data: &DataBundle,
 ) -> Arc<RuntimeConfigApplicator> {
     Arc::new(RuntimeConfigApplicator::new(
@@ -216,6 +244,7 @@ fn build_runtime_config_applicator(
             metrics: Arc::clone(metrics),
             alerts: Arc::clone(alerts),
             weight_overlay: Arc::clone(weight_overlay),
+            bias_table: Arc::clone(bias_table),
             subscription_window_hours: deploy
                 .market_data
                 .websocket

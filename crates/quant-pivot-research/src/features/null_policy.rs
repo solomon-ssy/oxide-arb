@@ -84,7 +84,7 @@ impl NullPolicyEngine {
                 reason,
                 degrade: true,
             },
-            NullPolicy::DomainMissing => NullDecision::KeepMissing {
+            NullPolicy::Optional => NullDecision::KeepMissing {
                 reason,
                 degrade: false,
             },

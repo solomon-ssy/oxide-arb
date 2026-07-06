@@ -10,10 +10,10 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        BuildTrainingDatasetRequest, Paginated, ResearchJobListQuery, ResearchJobView,
-        RunBacktestRequest, TrainModelRequest,
+        BuildTrainingDatasetRequest, FitBiasTableRequest, Paginated, ResearchJobListQuery,
+        ResearchJobView, RunBacktestRequest, TrainModelRequest,
     },
-    types::{ModelVersionId, ResearchJobId},
+    types::{ModelVersionId, ResearchJobId, RuntimeConfigVersionId},
 };
 
 /// Governance/attribution context captured when a job is submitted or mutated.
@@ -47,6 +47,18 @@ pub trait ResearchJobPort: Send + Sync {
         &self,
         model_version_id: ModelVersionId,
         request: RunBacktestRequest,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView>;
+
+    /// Enqueue a favorite-longshot bias-table fit (Phase 11.2.1).
+    ///
+    /// The active runtime-config version is frozen at enqueue so the fit reads
+    /// the exact `factors.structural.favorite_longshot` parameters that governed
+    /// the request on replay.
+    async fn enqueue_bias_table_fit(
+        &self,
+        request: FitBiasTableRequest,
+        runtime_config_version_id: RuntimeConfigVersionId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 

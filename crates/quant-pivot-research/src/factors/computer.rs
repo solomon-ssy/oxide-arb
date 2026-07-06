@@ -35,11 +35,12 @@ use crate::{
         registry::FactorRegistry,
         value::{
             FactorDefinitionSpec, FactorEligibility, FactorExplanation, FactorName, FactorSet,
-            FactorValue, MarketFactorOutcome, RawFactor, ScoredFactor,
+            FactorValue, MarketFactorOutcome, RawFactor, RawFactorEligibility, ScoredFactor,
         },
     },
     features::FeatureVector,
     hashing::ResearchHasher,
+    model::FavoriteLongshotBiasTable,
     parallel::{par_map_with_index, par_try_map},
 };
 
@@ -115,10 +116,17 @@ impl FactorEngine {
     /// feature schema, so a factor's declared input always matches a real feature
     /// name. Normalizers are resolved per compute call from
     /// `factors.normalization` so parameter tuning never re-keys the registry.
+    ///
+    /// `bias_table` binds the favorite-longshot factor; `None` keeps it inert.
+    /// The table is runtime data — it does not affect `factor_schema_hash`.
     #[must_use]
-    pub fn new(factors: &FactorsConfig, features: &FeaturesConfig) -> Self {
+    pub fn new(
+        factors: &FactorsConfig,
+        features: &FeaturesConfig,
+        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+    ) -> Self {
         Self {
-            registry: FactorRegistry::build(factors, features),
+            registry: FactorRegistry::build(factors, features, bias_table),
         }
     }
 
@@ -420,7 +428,7 @@ fn assemble_market(
     policy: MissingFactorPolicy,
 ) -> MarketFactorOutcome {
     let mut scored = Vec::with_capacity(factors.len());
-    let mut reject: Option<String> = None;
+    let mut reject: Option<FactorEligibility> = None;
     for (index, (spec, _)) in factors.iter().enumerate() {
         let raw = &raw_row[index];
         let normalized = norm_grid[index][market].clone();
@@ -430,13 +438,11 @@ fn assemble_market(
             && policy == MissingFactorPolicy::RejectCandidate
             && !scored_factor.contributes
         {
-            reject = Some(reject_reason(&scored_factor, floor));
+            reject = Some(reject_verdict(&scored_factor, floor));
         }
         scored.push(scored_factor);
     }
-    let eligibility = reject.map_or(FactorEligibility::Eligible, |reason| {
-        FactorEligibility::RejectCandidate { reason }
-    });
+    let eligibility = reject.unwrap_or(FactorEligibility::Eligible);
     MarketFactorOutcome {
         market_id: vector.market_id.clone(),
         as_of: vector.as_of,
@@ -452,6 +458,16 @@ fn assemble_market(
 /// the floor (also zeroed), and indeterminate cross-sections never contribute —
 /// and are never coerced to a neutral placeholder score.
 fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> ScoredFactor {
+    // A factor computer can short-circuit normalization for a cell that is
+    // structurally not applicable (binary market) or that should have computed
+    // but had a structurally-absent input (missing neg-risk leg book). Neither
+    // ever flows through the cross-section — the raw value for such a cell is
+    // `None`, so it never pollutes the column stats.
+    let normalized = match raw.eligibility {
+        RawFactorEligibility::Normalizable => normalized,
+        RawFactorEligibility::NotApplicable => NormalizedFactor::NotApplicable,
+        RawFactorEligibility::Indeterminate(reason) => NormalizedFactor::Indeterminate { reason },
+    };
     let scored = matches!(normalized, NormalizedFactor::Scored { .. });
     // A factor with no usable normalized score reports zero confidence: a missing
     // input or an indeterminate cross-section is not "confident" about anything,
@@ -489,18 +505,30 @@ fn assemble(raw: &RawFactor, normalized: NormalizedFactor, floor: Decimal) -> Sc
     }
 }
 
-/// The market-rejection reason for a required factor that did not contribute.
-fn reject_reason(scored: &ScoredFactor, floor: Decimal) -> String {
+/// The market-level verdict for a required factor that did not contribute.
+///
+/// A structurally not-applicable required factor excludes the market as
+/// [`FactorEligibility::NotApplicable`] (the signal cannot exist for this market's
+/// structure); every other non-contributing reason is a quality
+/// [`FactorEligibility::RejectCandidate`].
+fn reject_verdict(scored: &ScoredFactor, floor: Decimal) -> FactorEligibility {
     let value = &scored.value;
     match &value.normalization {
-        NormalizedFactor::MissingInput => format!("required factor `{}` missing", value.name),
-        NormalizedFactor::Indeterminate { reason } => {
-            format!("required factor `{}` indeterminate ({reason})", value.name)
-        }
-        NormalizedFactor::Scored { .. } => format!(
-            "required factor `{}` confidence below floor {floor}",
-            value.name,
-        ),
+        NormalizedFactor::NotApplicable => FactorEligibility::NotApplicable {
+            reason: format!("required factor `{}` not applicable", value.name),
+        },
+        NormalizedFactor::MissingInput => FactorEligibility::RejectCandidate {
+            reason: format!("required factor `{}` missing", value.name),
+        },
+        NormalizedFactor::Indeterminate { reason } => FactorEligibility::RejectCandidate {
+            reason: format!("required factor `{}` indeterminate ({reason})", value.name),
+        },
+        NormalizedFactor::Scored { .. } => FactorEligibility::RejectCandidate {
+            reason: format!(
+                "required factor `{}` confidence below floor {floor}",
+                value.name
+            ),
+        },
     }
 }
 

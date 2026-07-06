@@ -27,15 +27,16 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v13 adds the research "Task Center" (`research-jobs`) node. The loader is
-    // idempotent (`on_conflict do_nothing`), so re-running on an existing DB
-    // inserts only the new node.
-    version: 13,
+    // v14 (Phase 11.2.1) adds the favorite-longshot bias-table catalog
+    // (`research-bias-tables`) and the neg-risk structural-drift monitor
+    // (`structural-monitor`). The loader is idempotent (`on_conflict
+    // do_nothing`), so re-running on an existing DB inserts only the new nodes.
+    version: 14,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v13",
+    checksum: "rbac.menus.bootstrap.v14",
     loader: load_boxed,
 };
 
@@ -338,6 +339,17 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
         icon: "lucide:target",
     });
+    // Neg-risk structural-drift monitor (Phase 11.2.1): live per-event best-ask
+    // leg sum vs 1.0 — a platform-internal structural mispricing signal.
+    t.page(PageSpec {
+        parent: &trading,
+        name: "structural-monitor",
+        title: "page.menu.structuralMonitor",
+        path: "/quant/structural",
+        component: "quant/structural/index",
+        permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
+        icon: "lucide:git-compare-arrows",
+    });
 }
 
 /// Execution plane: intent审批台, CLOB submission ledger, system-lot positions,
@@ -559,6 +571,7 @@ fn build_research(t: &mut MenuTree) {
         "Retire Factor",
         perm(ResourceType::FactorDefinition, Operation::Retire),
     );
+    build_research_bias_tables(t, &research);
     // Pairwise comparison report — deep-linkable from a backtest, hidden from
     // the sidebar (parented under the directory, not another page).
     t.page_hidden(PageSpec {
@@ -570,6 +583,33 @@ fn build_research(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
         icon: "lucide:git-compare",
     });
+}
+
+/// Favorite-longshot bias-table catalog (Phase 11.2.1): a content-addressed
+/// calibration artifact fit via a governed research job and pinned into the
+/// runtime config as the `favorite_longshot` factor's bias source.
+fn build_research_bias_tables(t: &mut MenuTree, research: &MenuId) {
+    let bias_tables = t.page(PageSpec {
+        parent: research,
+        name: "research-bias-tables",
+        title: "page.menu.researchBiasTables",
+        path: "/research/bias-tables",
+        component: "research/bias-tables/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:scale",
+    });
+    t.button(
+        &bias_tables,
+        "materialization:create",
+        "Fit Bias Table",
+        perm(ResourceType::Materialization, Operation::Create),
+    );
+    t.button(
+        &bias_tables,
+        "runtime_config:create",
+        "Activate Bias Table",
+        perm(ResourceType::RuntimeConfig, Operation::Create),
+    );
 }
 
 /// Task center: the durable async research-job engine (dataset build / model

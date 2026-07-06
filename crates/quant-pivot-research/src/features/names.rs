@@ -84,23 +84,37 @@ pub mod micro {
         FeatureName::from_static("micro.stale_quote_frequency");
 }
 
-/// Vertical (domain) features — one representative per [`DomainFamily`].
-pub mod domain {
+/// Structural (prediction-market-aware) features — platform-computable from
+/// existing facts, no external data source (Phase 11.2.1).
+pub mod structural {
     use super::FeatureName;
 
-    /// Sports vertical pre-match move proxy.
-    pub const SPORTS_PRE_MATCH_MOVE: FeatureName =
-        FeatureName::from_static("domain.sports.pre_match_move");
-    /// Politics vertical poll momentum proxy.
-    pub const POLITICS_POLL_MOMENTUM: FeatureName =
-        FeatureName::from_static("domain.politics.poll_momentum");
-    /// Crypto vertical underlying beta proxy.
-    pub const CRYPTO_UNDERLYING_BETA: FeatureName =
-        FeatureName::from_static("domain.crypto.underlying_beta");
-    /// Weather vertical forecast revision proxy.
-    pub const WEATHER_FORECAST_REVISION: FeatureName =
-        FeatureName::from_static("domain.weather.forecast_revision");
-    /// Geopolitics vertical news-shock decay proxy.
-    pub const GEOPOLITICS_NEWS_SHOCK_DECAY: FeatureName =
-        FeatureName::from_static("domain.geopolitics.news_shock_decay");
+    /// Signed return over the shock window (drives reversal direction).
+    pub const SHORT_RETURN: FeatureName = FeatureName::from_static("struct.short_return");
+    /// Shock ratio `|short_return| / realized_vol_short` (gates reversal).
+    pub const SHOCK_RATIO: FeatureName = FeatureName::from_static("struct.shock_ratio");
+    /// Signed price extremity `mid − 0.5` (interacts with time-to-resolution).
+    ///
+    /// Signed (not `|mid − 0.5|`) so the resolution-proximity factor can push a
+    /// favorite (mid > 0.5) toward YES and a longshot (mid < 0.5) toward NO,
+    /// consistent with the favorite-longshot bias.
+    pub const PRICE_EXTREMITY: FeatureName = FeatureName::from_static("struct.price_extremity");
+    /// Book-churn intensity (delta-to-update ratio over the maker window).
+    ///
+    /// A book-derived liquidity-turnover proxy, NOT true maker concentration
+    /// (which needs trade-tape); see `11.2.1.1`.
+    pub const BOOK_CHURN_INTENSITY: FeatureName =
+        FeatureName::from_static("struct.book_churn_intensity");
+    /// Sum of best-ask across all neg-risk YES legs (drift = sum − 1).
+    pub const NEGRISK_LEG_ASK_SUM: FeatureName =
+        FeatureName::from_static("struct.negrisk_leg_ask_sum");
+    /// Sum of best-bid across all neg-risk YES legs (bid-side drift; the
+    /// ask/bid gap is the drift-confidence corroborant — tight legs ⇒ reliable).
+    pub const NEGRISK_LEG_BID_SUM: FeatureName =
+        FeatureName::from_static("struct.negrisk_leg_bid_sum");
+    /// Count of resolved neg-risk YES legs at `as_of`.
+    pub const NEGRISK_LEG_COUNT: FeatureName = FeatureName::from_static("struct.negrisk_leg_count");
+    /// Neg-risk conversion edge (buy YES basket of all-but-favorite vs NO-favorite).
+    pub const NEGRISK_CONVERT_EDGE: FeatureName =
+        FeatureName::from_static("struct.negrisk_convert_edge");
 }

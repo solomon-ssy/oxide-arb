@@ -21,7 +21,7 @@ pub async fn register_all_factor_definitions(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) -> QuantResult<()> {
-    let engine = FactorEngine::new(factors, features);
+    let engine = FactorEngine::new(factors, features, None);
     for spec in &engine.factor_set().definitions {
         let definition = spec.try_to_new(features.feature_schema_version)?;
         factor_repo
@@ -44,7 +44,7 @@ pub async fn publish_all_factor_definitions(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) -> QuantResult<()> {
-    let engine = FactorEngine::new(factors, features);
+    let engine = FactorEngine::new(factors, features, None);
     for spec in &engine.factor_set().definitions {
         let definition = spec.try_to_new(features.feature_schema_version)?;
         let row = factor_repo

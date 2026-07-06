@@ -1,6 +1,6 @@
 //! Factor plane: the [`FactorComputer`] contract, the [`FactorEngine`], the
-//! generic factors, cross-sectional normalization, collinearity analysis, and
-//! the domain skeleton.
+//! generic factors, the platform-internal structural factors, cross-sectional
+//! normalization, and collinearity analysis.
 //!
 //! A [`FactorComputer`] turns a [`FeatureVector`](crate::features::FeatureVector)
 //! into a per-market [`RawFactor`] (pure, no normalization, no cross-section).
@@ -15,13 +15,13 @@
 
 mod collinearity;
 mod computer;
-mod domain;
 mod frozen;
 mod generic;
 pub mod names;
 mod normalize;
 mod persistence;
 mod registry;
+mod structural;
 mod value;
 mod writer;
 
@@ -33,7 +33,6 @@ pub use collinearity::{
     neutralize_by_group,
 };
 pub use computer::{FactorComputer, FactorEngine, FactorHistory};
-pub use domain::{DomainFactorComputer, DomainFactorRegistry};
 pub use frozen::frozen_factor_outcome;
 pub use generic::{factor_definition_id, generic_factors};
 pub use normalize::{
@@ -43,9 +42,10 @@ pub use normalize::{
 };
 pub use persistence::FactorValueInsertContext;
 pub use registry::FactorRegistry;
+pub use structural::structural_factors;
 pub use value::{
     FactorDefinitionSpec, FactorDriver, FactorEligibility, FactorExplanation, FactorName,
     FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome, RawFactor,
-    ScoredFactor,
+    RawFactorEligibility, ScoredFactor,
 };
 pub use writer::factor_events;

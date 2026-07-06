@@ -10,7 +10,7 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
-    governance::WeightOverlayApplicator,
+    governance::{BiasTableApplicator, WeightOverlayApplicator},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub, signal_candidate_fact_writer::SignalCandidateEventWriter,
@@ -53,12 +53,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgFactorRepository, PgFeatureRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgModelRunRepository, PgShadowComparisonRepository,
+        PgEventRepository, PgFactorRepository, PgFavoriteLongshotBiasTableRepository,
+        PgFeatureRepository, PgMarketRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgShadowComparisonRepository,
     },
     traits::{
-        EventRepository, FactorRepository, FeatureRepository, MarketRepository,
-        ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        EventRepository, FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+        MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
         ShadowComparisonRepository,
     },
 };
@@ -577,7 +578,7 @@ async fn publish_weighted_model(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) -> ModelVersionId {
-    let engine = FactorEngine::new(factors, features);
+    let engine = FactorEngine::new(factors, features, None);
     let factor_set = engine.factor_set();
     let count = factor_set.definitions.len();
     assert!(count > 0, "the factor set must be non-empty");
@@ -721,7 +722,7 @@ fn factors_with_overlay_skew(
     features: &FeaturesConfig,
     lead_index: usize,
 ) -> FactorsConfig {
-    let engine = FactorEngine::new(base, features);
+    let engine = FactorEngine::new(base, features, None);
     let definitions = &engine.factor_set().definitions;
     assert!(
         definitions.len() >= 2,
@@ -762,9 +763,14 @@ fn build_runner(
     weight_overlay: Arc<WeightOverlayApplicator>,
 ) -> ModelRunner {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
+    let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
+        PgFavoriteLongshotBiasTableRepository::new(db.clone()),
+    )
+        as Arc<dyn FavoriteLongshotBiasTableRepository>));
     let factor_pipeline = Arc::new(FactorPipelineService::new(
         factor_repo,
         noop_factor_writer(),
+        Arc::clone(&bias_table),
     ));
     let model_run_repo =
         Arc::new(PgModelRunRepository::new(db.clone())) as Arc<dyn ModelRunRepository>;
@@ -781,6 +787,7 @@ fn build_runner(
         signal_writer: noop_signal_writer(),
         alerts: Arc::new(CountingAlertSink { critical }),
         weight_overlay,
+        bias_table,
     })
 }
 

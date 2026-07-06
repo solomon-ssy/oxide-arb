@@ -41,6 +41,10 @@ pub enum NormalizedFactor {
     },
     /// The factor's raw input was unavailable for this market.
     MissingInput,
+    /// The factor does not apply to this market's structure (e.g. a neg-risk
+    /// full-leg factor on a binary market). Structurally absent — distinct from a
+    /// missing input and from an indeterminate cross-section; never a fake `0.5`.
+    NotApplicable,
     /// The cross-section was too small or carried no dispersion. The factor
     /// contributes nothing and the reason is recorded (never a fake `0.5`).
     Indeterminate {

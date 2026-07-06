@@ -2,7 +2,7 @@
 
 use crate::{
     execution::breaker::ExecutionBreaker,
-    governance::WeightOverlayApplicator,
+    governance::{BiasTableApplicator, WeightOverlayApplicator},
     infra::schedule::ReportScheduleRunner,
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     pipeline::{
@@ -33,6 +33,10 @@ pub struct RuntimeConfigSubscribers {
     pub alerts: Arc<AlertDispatcher>,
     /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
     pub weight_overlay: Arc<WeightOverlayApplicator>,
+    /// Favorite-longshot bias-table snapshot bound to the factor plane (11.2.1).
+    /// Reloaded (and content-hash verified) on activation; a bad ref fails the
+    /// activation closed.
+    pub bias_table: Arc<BiasTableApplicator>,
     /// Deploy-time WS subscription look-ahead (hours); this is a structural
     /// (restart-bound) parameter from `market_data.websocket`, not runtime config.
     pub subscription_window_hours: u64,
@@ -125,6 +129,14 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
                 .await
                 .map_err(ControlError::from)?;
         }
+
+        // Resolve + hash-verify the favorite-longshot bias table before mutating
+        // the live snapshot: a config pinning a missing / corrupt table must fail
+        // the activation closed, never bind a stale table to the factor plane.
+        self.subscribers
+            .bias_table
+            .reload(&arc.factors.structural.favorite_longshot)
+            .await?;
 
         self.propagate(&arc);
         let breaker = self.execution_breaker.lock().clone();

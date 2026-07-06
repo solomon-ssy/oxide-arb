@@ -412,8 +412,9 @@ pub fn calibrate_substitution_rules(
         NullReason::SourceUnavailable,
         NullReason::StaleBeyondPolicy,
         NullReason::OutOfValidRange,
-        NullReason::DomainDataMissing,
         NullReason::InsufficientHistory,
+        NullReason::NotApplicable,
+        NullReason::LegBookMissing,
     ];
     let clean = stratum_mean(samples.iter().filter(|s| s.substitution_reasons.is_empty()));
     let reason_means: Vec<Option<Decimal>> = reasons
@@ -429,8 +430,9 @@ pub fn calibrate_substitution_rules(
         source_unavailable: fail_closed(baseline.source_unavailable, reason_means[0], best),
         stale_beyond_policy: fail_closed(baseline.stale_beyond_policy, reason_means[1], best),
         out_of_valid_range: fail_closed(baseline.out_of_valid_range, reason_means[2], best),
-        domain_data_missing: fail_closed(baseline.domain_data_missing, reason_means[3], best),
-        insufficient_history: fail_closed(baseline.insufficient_history, reason_means[4], best),
+        insufficient_history: fail_closed(baseline.insufficient_history, reason_means[3], best),
+        not_applicable: fail_closed(baseline.not_applicable, reason_means[4], best),
+        leg_book_missing: fail_closed(baseline.leg_book_missing, reason_means[5], best),
     };
     let mut fits: Vec<StratumFit> = reasons
         .iter()
@@ -523,8 +525,9 @@ const fn reason_label(reason: NullReason) -> &'static str {
         NullReason::SourceUnavailable => "source_unavailable",
         NullReason::StaleBeyondPolicy => "stale_beyond_policy",
         NullReason::OutOfValidRange => "out_of_valid_range",
-        NullReason::DomainDataMissing => "domain_data_missing",
         NullReason::InsufficientHistory => "insufficient_history",
+        NullReason::NotApplicable => "not_applicable",
+        NullReason::LegBookMissing => "leg_book_missing",
     }
 }
 
@@ -742,7 +745,7 @@ mod tests {
             "a money-losing substitution collapses to zero"
         );
         // Unobserved reasons keep the conservative baseline.
-        assert_eq!(calibrated.domain_data_missing, baseline.domain_data_missing);
+        assert_eq!(calibrated.leg_book_missing, baseline.leg_book_missing);
         assert!(fits.iter().any(|f| f.label == "substitution_none"));
     }
 

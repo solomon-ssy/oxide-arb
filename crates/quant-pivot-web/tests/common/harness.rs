@@ -19,7 +19,7 @@ use actix_web::{
 };
 use async_trait::async_trait;
 use quant_pivot_core::{
-    app::execution_read::CoreExecutionReadPort, execution::IntentLifecyclePublisher,
+    app::ports::execution_read::CoreExecutionReadPort, execution::IntentLifecyclePublisher,
     report::AdHocReportRequest,
 };
 use quant_pivot_error::{
@@ -34,30 +34,33 @@ use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportListQuery, BacktestReportView,
-        BookSnapshot, BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort,
-        ComparisonReportListQuery, CoreEventPublisher, CreateModelSpecCommand, DataQualityPort,
-        DataQualitySnapshot, ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort,
-        ExecutionRecoveryView, ExecutionSubmitPort, FactorCollinearitySource,
-        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        FactorGovernancePort, GatePreviewIntent, GovernanceActor, HealthReport, JobProgressSink,
-        JobSubmitContext, KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort,
+        BiasTableFitJobParams, BiasTableFitOutcome, BiasTableListQuery, BookSnapshot,
+        BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
+        CoreEventPublisher, CreateModelSpecCommand, DataQualityPort, DataQualitySnapshot,
+        ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
+        ExecutionSubmitPort, FactorCollinearitySource, FactorCollinearityView,
+        FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort,
+        FavoriteLongshotBiasTableInfo, FavoriteLongshotFitPort, FitBiasTableRequest,
+        GatePreviewIntent, GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext,
+        KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort,
         ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery,
-        ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
-        PromoteDatasetRequest, PublishFactorCommand, PublishFactorsBatchCommand,
-        PublishModelCommand, QualityGateReportView, QuantModeTransitionReport, ReconciliationPort,
-        RegisterFactorDefinitionsCommand, ResearchCatalogPort, ResearchJobListQuery,
-        ResearchJobPort, ResearchJobView, ResolveReconciliationCommand,
-        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
-        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
-        SetKillSwitchCommand, SystemStatus, TrainModelRequest, TrainedModelView,
-        TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
-        TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
+        ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery,
+        NegRiskEventDriftView, Paginated, PromoteDatasetRequest, PublishFactorCommand,
+        PublishFactorsBatchCommand, PublishModelCommand, QualityGateReportView,
+        QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
+        ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
+        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
+        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
+        RuntimeControlPort, SetKillSwitchCommand, StructuralMonitorPort, SystemStatus,
+        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
+        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, FactorDefinitionId, MarketId, ModelComparisonReportId, ModelSpecId,
-        ModelVersionId, OrderIntentId, ResearchJobId, TokenId, TrainingDatasetId,
+        BacktestReportId, FactorDefinitionId, FavoriteLongshotBiasTableId, MarketId,
+        ModelComparisonReportId, ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId,
+        RuntimeConfigVersionId, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -102,6 +105,88 @@ pub const API_VERSION: (&str, &str) = ("Accept-Api-Version", "v1");
 
 const TEST_JWT_SECRET: &str = "quant-pivot-integration-test-secret-not-for-production";
 const TEST_ISSUER: &str = "quant-pivot-test";
+
+struct WebHarnessAppStateInput<'a> {
+    db: &'a DatabaseConnection,
+    repos: &'a WebHarnessRepos,
+    jwt: Arc<JwtService>,
+    jwt_blacklist: Arc<RedisTokenBlacklist>,
+    token_blacklist: Arc<dyn TokenBlacklist>,
+    casbin: Arc<CasbinService>,
+    operation_log: OperationLogBuffer,
+    events: CoreEventPublisher,
+    ws_sessions: SessionRegistry,
+    runtime_config_apply: Arc<MockRuntimeConfigApply>,
+    catalog: Arc<MockCatalogStatus>,
+    data_quality: Arc<MockDataQuality>,
+    core_report: &'a CoreReportTestHandle,
+    order_intents: Arc<dyn OrderIntentPort>,
+}
+
+fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
+    AppState {
+        deploy: Arc::new(test_deploy_config()),
+        runtime_config_apply: Arc::clone(&input.runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
+        jwt: input.jwt,
+        jwt_blacklist: input.jwt_blacklist,
+        users: Arc::clone(&input.repos.users),
+        roles: Arc::clone(&input.repos.roles),
+        menus: Arc::clone(&input.repos.menus),
+        user_roles: Arc::clone(&input.repos.user_roles),
+        role_menus: Arc::clone(&input.repos.role_menus),
+        role_permissions: Arc::clone(&input.repos.role_permissions),
+        casbin: input.casbin,
+        perm_checker: Arc::new(routes::init_rbac_rules()),
+        runtime_config: Arc::clone(&input.repos.runtime_config),
+        operation_logs: Arc::clone(&input.repos.operation_logs),
+        operation_log: input.operation_log,
+        control: Arc::new(MockRuntimeControl::default()),
+        kill_switch: Arc::new(MockKillSwitch::default()),
+        market_data: Arc::new(MockMarketData),
+        catalog: Arc::clone(&input.catalog) as Arc<dyn CatalogStatusPort>,
+        data_quality: Arc::clone(&input.data_quality) as Arc<dyn DataQualityPort>,
+        events: input.events,
+        markets: Arc::clone(&input.repos.markets),
+        quant_facts: Arc::new(MockQuantFactRead),
+        ws_sessions: input.ws_sessions,
+        metrics: Arc::new(MockMetricsScrape),
+        readiness: Arc::new(PgRedisReadiness::new(
+            input.db.clone(),
+            input.token_blacklist,
+            Some(Arc::clone(&input.catalog) as Arc<dyn CatalogStatusPort>),
+        )),
+        training_datasets: Arc::new(MockTrainingDatasetPort),
+        model_training: Arc::new(MockModelTrainingPort),
+        backtests: Arc::new(MockBacktestPort),
+        model_governance: Arc::new(MockModelGovernancePort),
+        factor_governance: Arc::new(MockFactorGovernancePort),
+        model_spec: Arc::new(MockModelSpecPort),
+        research_catalog: Arc::new(MockResearchCatalogPort),
+        research_jobs: Arc::new(MockResearchJobPort),
+        favorite_longshot: Arc::new(MockFavoriteLongshotFitPort),
+        structural_monitor: Arc::new(MockStructuralMonitorPort),
+        quant_reports: input.core_report.port.clone(),
+        account_read: core_account_read_port(
+            input.db,
+            Arc::clone(&input.runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
+        ),
+        order_intents: input.order_intents,
+        execution_read: Arc::new(CoreExecutionReadPort::new(
+            Arc::new(PgExecutionOrderRepository::new(input.db.clone()))
+                as Arc<dyn ExecutionOrderRepository>,
+            Arc::new(PgPositionRepository::new(input.db.clone())) as Arc<dyn PositionRepository>,
+            Arc::new(PgAttributionRepository::new(input.db.clone()))
+                as Arc<dyn AttributionRepository>,
+            Arc::new(PgReconciliationRepository::new(input.db.clone()))
+                as Arc<dyn ReconciliationRepository>,
+            Arc::new(PgSettlementRedeemRepository::new(input.db.clone()))
+                as Arc<dyn SettlementRedeemRepository>,
+        )) as Arc<dyn ExecutionReadPort>,
+        execution_submit: Arc::new(MockExecutionSubmit) as Arc<dyn ExecutionSubmitPort>,
+        reconciliation: Arc::new(MockReconciliationPort) as Arc<dyn ReconciliationPort>,
+        execution_recovery: Arc::new(MockExecutionRecoveryPort) as Arc<dyn ExecutionRecoveryPort>,
+    }
+}
 
 pub struct TestEnv {
     pub state: AppState,
@@ -162,67 +247,22 @@ impl TestEnv {
         let core_report =
             crate::core_report_port::build_core_report_stack(&db, events.clone()).await;
         let order_intents = build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
-        let state = AppState {
-            deploy: Arc::new(test_deploy_config()),
-            runtime_config_apply: Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
+        let state = web_harness_app_state(WebHarnessAppStateInput {
+            db: &db,
+            repos: &repos,
             jwt,
             jwt_blacklist,
-            users: Arc::clone(&repos.users),
-            roles: Arc::clone(&repos.roles),
-            menus: Arc::clone(&repos.menus),
-            user_roles: Arc::clone(&repos.user_roles),
-            role_menus: Arc::clone(&repos.role_menus),
-            role_permissions: Arc::clone(&repos.role_permissions),
+            token_blacklist: blacklist,
             casbin,
-            perm_checker: Arc::new(routes::init_rbac_rules()),
-            runtime_config: Arc::clone(&repos.runtime_config),
-            operation_logs: Arc::clone(&repos.operation_logs),
             operation_log,
-            control: Arc::new(MockRuntimeControl::default()),
-            kill_switch: Arc::new(MockKillSwitch::default()),
-            market_data: Arc::new(MockMarketData),
-            catalog: Arc::clone(&catalog) as Arc<dyn CatalogStatusPort>,
-            data_quality: Arc::clone(&data_quality) as Arc<dyn DataQualityPort>,
             events,
-            markets: Arc::clone(&repos.markets),
-            quant_facts: Arc::new(MockQuantFactRead),
             ws_sessions,
-            metrics: Arc::new(MockMetricsScrape),
-            readiness: Arc::new(PgRedisReadiness::new(
-                db.clone(),
-                blacklist,
-                Some(Arc::clone(&catalog) as Arc<dyn CatalogStatusPort>),
-            )),
-            training_datasets: Arc::new(MockTrainingDatasetPort),
-            model_training: Arc::new(MockModelTrainingPort),
-            backtests: Arc::new(MockBacktestPort),
-            model_governance: Arc::new(MockModelGovernancePort),
-            factor_governance: Arc::new(MockFactorGovernancePort),
-            model_spec: Arc::new(MockModelSpecPort),
-            research_catalog: Arc::new(MockResearchCatalogPort),
-            research_jobs: Arc::new(MockResearchJobPort),
-            quant_reports: core_report.port.clone(),
-            account_read: core_account_read_port(
-                &db,
-                Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
-            ),
+            runtime_config_apply,
+            catalog,
+            data_quality,
+            core_report: &core_report,
             order_intents: order_intents as Arc<dyn OrderIntentPort>,
-            execution_read: Arc::new(CoreExecutionReadPort::new(
-                Arc::new(PgExecutionOrderRepository::new(db.clone()))
-                    as Arc<dyn ExecutionOrderRepository>,
-                Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
-                Arc::new(PgAttributionRepository::new(db.clone()))
-                    as Arc<dyn AttributionRepository>,
-                Arc::new(PgReconciliationRepository::new(db.clone()))
-                    as Arc<dyn ReconciliationRepository>,
-                Arc::new(PgSettlementRedeemRepository::new(db.clone()))
-                    as Arc<dyn SettlementRedeemRepository>,
-            )) as Arc<dyn ExecutionReadPort>,
-            execution_submit: Arc::new(MockExecutionSubmit) as Arc<dyn ExecutionSubmitPort>,
-            reconciliation: Arc::new(MockReconciliationPort) as Arc<dyn ReconciliationPort>,
-            execution_recovery: Arc::new(MockExecutionRecoveryPort)
-                as Arc<dyn ExecutionRecoveryPort>,
-        };
+        });
 
         Self {
             state,
@@ -941,6 +981,15 @@ impl ResearchJobPort for MockResearchJobPort {
         Err(QuantError::NotImplemented("enqueue backtest".into()))
     }
 
+    async fn enqueue_bias_table_fit(
+        &self,
+        _request: FitBiasTableRequest,
+        _runtime_config_version_id: RuntimeConfigVersionId,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("enqueue bias table fit".into()))
+    }
+
     async fn list(&self, _query: ResearchJobListQuery) -> QuantResult<Paginated<ResearchJobView>> {
         Err(QuantError::NotImplemented("research job list".into()))
     }
@@ -965,6 +1014,43 @@ impl ResearchJobPort for MockResearchJobPort {
         _ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         Err(QuantError::NotImplemented("research job retry".into()))
+    }
+}
+
+pub struct MockFavoriteLongshotFitPort;
+
+#[async_trait]
+impl FavoriteLongshotFitPort for MockFavoriteLongshotFitPort {
+    async fn fit(
+        &self,
+        _params: BiasTableFitJobParams,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> QuantResult<BiasTableFitOutcome> {
+        Err(QuantError::NotImplemented("bias table fit".into()))
+    }
+
+    async fn find(
+        &self,
+        _bias_table_id: &FavoriteLongshotBiasTableId,
+    ) -> QuantResult<Option<FavoriteLongshotBiasTableInfo>> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: BiasTableListQuery,
+    ) -> QuantResult<Paginated<FavoriteLongshotBiasTableInfo>> {
+        Ok(Paginated::empty_for(&query))
+    }
+}
+
+pub struct MockStructuralMonitorPort;
+
+#[async_trait]
+impl StructuralMonitorPort for MockStructuralMonitorPort {
+    async fn negrisk_events(&self) -> QuantResult<Vec<NegRiskEventDriftView>> {
+        Ok(Vec::new())
     }
 }
 

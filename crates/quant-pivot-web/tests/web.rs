@@ -24,6 +24,8 @@ mod account;
 mod auth;
 #[path = "web/authz.rs"]
 mod authz;
+#[path = "web/bias_tables.rs"]
+mod bias_tables;
 #[path = "web/metrics.rs"]
 mod metrics;
 #[path = "web/operation_log.rs"]
@@ -40,5 +42,7 @@ mod readiness;
 mod reconciliations;
 #[path = "web/research_catalog.rs"]
 mod research_catalog;
+#[path = "web/structural_monitor.rs"]
+mod structural_monitor;
 #[path = "web/ws.rs"]
 mod ws;

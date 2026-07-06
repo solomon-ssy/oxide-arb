@@ -105,6 +105,7 @@ impl AppContext {
             .applicator
             .attach_execution_breaker(Arc::clone(&execution.breaker));
         governance.bootstrap_execution_recovery().await?;
+        governance.bootstrap_bias_table().await?;
 
         Ok(Self {
             config: deploy,

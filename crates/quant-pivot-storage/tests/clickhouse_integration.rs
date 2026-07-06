@@ -223,7 +223,7 @@ fn sample_tick(token_id: &str, received_at: i64) -> TickEventRow {
         ingestion_time: received_at,
         sequence: 1,
         source: ChFactSource::WsBbo,
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 

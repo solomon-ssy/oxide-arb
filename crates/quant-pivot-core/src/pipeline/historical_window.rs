@@ -26,9 +26,9 @@ use quant_pivot_models::{
         BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice, ChUsd,
         MarketResolutionRow,
     },
-    domain::MarketInfo,
+    domain::market::registry::{MarketInfo, NegRiskLegSet},
     enums::market::MarketStatus,
-    types::{MarketId, TokenId},
+    types::{EventId, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
 use quant_pivot_research::{
@@ -75,6 +75,8 @@ pub struct Prefetched {
     pub resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     /// Market catalog metadata.
     pub markets_by_id: HashMap<MarketId, Arc<MarketInfo>>,
+    /// Per-event neg-risk leg enumeration (expected vs resolved), keyed by event.
+    pub neg_risk_leg_sets: HashMap<EventId, NegRiskLegSet>,
 }
 
 /// A fully prefetched + materialized historical window, ready for zero-DB replay.
@@ -141,6 +143,41 @@ impl HistoricalWindowLoader {
             }
         }
 
+        // Load sample market infos first, then — for neg-risk markets — expand to
+        // the full set of event YES legs so the offline structural full-leg
+        // aggregates resolve from the same books the online plane sees (Phase
+        // 11.2.1 train-serve parity). Sibling leg BOOKS are prefetched; sibling
+        // micro/resolutions are not needed by the structural plane.
+        let sample_infos = self
+            .market_repo
+            .find_by_ids(&markets)
+            .await
+            .map_err(QuantError::from)?;
+        let mut markets_by_id: HashMap<MarketId, Arc<MarketInfo>> = sample_infos
+            .iter()
+            .map(|info| (info.market_id.clone(), Arc::clone(info)))
+            .collect();
+        let mut book_tokens: Vec<TokenId> = tokens.clone();
+        let mut seen_book_tokens: HashSet<TokenId> = seen_tokens.clone();
+        for info in &sample_infos {
+            if !info.neg_risk {
+                continue;
+            }
+            let siblings = self
+                .market_repo
+                .find_by_event(info.event_id.as_str())
+                .await
+                .map_err(QuantError::from)?;
+            for sibling in siblings {
+                if seen_book_tokens.insert(sibling.yes_token_id.clone()) {
+                    book_tokens.push(sibling.yes_token_id.clone());
+                }
+                markets_by_id
+                    .entry(sibling.market_id.clone())
+                    .or_insert(sibling);
+            }
+        }
+
         let book_from = (spec.window_start - to_chrono(self.max_book_staleness)).timestamp_millis();
         let book_to = spec.window_end.timestamp_millis();
         let micro_from =
@@ -153,7 +190,7 @@ impl HistoricalWindowLoader {
 
         let book_rows = self
             .fact_read
-            .book_snapshots_between(tokens.clone(), book_from, book_to)
+            .book_snapshots_between(book_tokens, book_from, book_to)
             .await
             .map_err(QuantError::from)?;
         let micro_rows = self
@@ -164,11 +201,6 @@ impl HistoricalWindowLoader {
         let resolution_rows = self
             .fact_read
             .resolutions_between(markets.clone(), 0, resolution_to)
-            .await
-            .map_err(QuantError::from)?;
-        let market_infos = self
-            .market_repo
-            .find_by_ids(&markets)
             .await
             .map_err(QuantError::from)?;
 
@@ -187,18 +219,44 @@ impl HistoricalWindowLoader {
                 .or_default()
                 .push(row);
         }
-        let markets_by_id: HashMap<MarketId, Arc<MarketInfo>> = market_infos
-            .into_iter()
-            .map(|info| (info.market_id.clone(), info))
-            .collect();
+
+        let neg_risk_leg_sets =
+            build_neg_risk_leg_sets(self.market_repo.as_ref(), &sample_infos, &markets_by_id)
+                .await?;
 
         Ok(Prefetched {
             books,
             micro,
             resolutions,
             markets_by_id,
+            neg_risk_leg_sets,
         })
     }
+}
+
+/// Enumerate neg-risk leg sets for every event touched by the sample window.
+async fn build_neg_risk_leg_sets(
+    market_repo: &dyn MarketRepository,
+    sample_infos: &[Arc<MarketInfo>],
+    markets_by_id: &HashMap<MarketId, Arc<MarketInfo>>,
+) -> QuantResult<HashMap<EventId, NegRiskLegSet>> {
+    let mut neg_risk_events: HashSet<EventId> = sample_infos
+        .iter()
+        .filter(|info| info.neg_risk)
+        .map(|info| info.event_id.clone())
+        .collect();
+    for info in markets_by_id.values().filter(|info| info.neg_risk) {
+        neg_risk_events.insert(info.event_id.clone());
+    }
+    let mut neg_risk_leg_sets = HashMap::new();
+    for event_id in neg_risk_events {
+        let siblings = market_repo
+            .find_by_event(event_id.as_str())
+            .await
+            .map_err(QuantError::from)?;
+        neg_risk_leg_sets.insert(event_id, NegRiskLegSet::from_event_catalog(&siblings));
+    }
+    Ok(neg_risk_leg_sets)
 }
 
 /// Build the in-memory PIT engine from the prefetched window, returning the

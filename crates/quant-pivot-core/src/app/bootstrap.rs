@@ -1,8 +1,7 @@
 //! Application bootstrap — build subsystems and run the lifecycle.
 
 use crate::app::{
-    AppContext,
-    research_job::{CoreResearchJobPort, ResearchJobEngine},
+    AppContext, ports::research_job::CoreResearchJobPort, research_job::ResearchJobEngine,
     task_registry::AppRunner,
 };
 use quant_pivot_error::QuantResult;

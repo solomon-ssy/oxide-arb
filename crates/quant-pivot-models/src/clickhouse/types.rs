@@ -46,6 +46,9 @@ pub struct ChDecimal64(i64);
 pub struct ChSchemaVersion(pub u32);
 
 impl ChSchemaVersion {
+    /// The first valid `ClickHouse` fact-row schema version.
+    pub const FIRST: Self = Self(1);
+
     /// Fallible conversion from a domain [`SchemaVersion`], rejecting non-positive
     /// values and any `i32` that does not fit in `u32`.
     pub fn try_from_schema_version(value: SchemaVersion) -> Result<Self, CanonicalDigestError> {
@@ -64,7 +67,7 @@ impl From<SchemaVersion> for ChSchemaVersion {
     ///
     /// Prefer [`Self::try_from_schema_version`] for untrusted input.
     fn from(value: SchemaVersion) -> Self {
-        Self::try_from_schema_version(value).unwrap_or(Self(1))
+        Self::try_from_schema_version(value).unwrap_or(Self::FIRST)
     }
 }
 

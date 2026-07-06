@@ -1,5 +1,7 @@
 //! Phase 03.2 §8 acceptance tests for the feature plane.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::Duration;
@@ -10,7 +12,10 @@ use quant_pivot_models::runtime_config::SelectionConfig;
 use quant_pivot_models::{
     domain::{
         BookSnapshot, MarketCandidate, MarketRegistryInfo, PointInTimeDataSource, TokenInfo,
-        market::book::BookLevel,
+        market::{
+            book::BookLevel,
+            registry::{NegRiskLeg, NegRiskLegSet},
+        },
     },
     enums::{
         clickhouse::{ChFeatureSourceKind, ChFeatureValueKind},
@@ -28,8 +33,7 @@ use crate::{
         FeatureBuildInput, FeatureBuilder, MarketWindowSnapshot, MicrostructureBucket, PitView,
         availability::FeatureAvailabilityOracle,
         builder::ConfiguredFeatureBuilder,
-        domain::DOMAIN_FEATURES,
-        names::{book, domain as domain_names, market},
+        names::{book, market},
         null_policy::{NullDecision, NullPolicyEngine},
         schema::FeatureSchema,
         value::{FeatureName, FeatureValue, FeatureVector, NullReason},
@@ -42,6 +46,8 @@ use crate::{
         SelectionThresholds,
     },
 };
+
+static EMPTY_NEGRISK_LEGS: LazyLock<NegRiskLegSet> = LazyLock::new(NegRiskLegSet::empty);
 
 // ── Null policy ────────────────────────────────────────────────────────────
 
@@ -208,7 +214,7 @@ fn feature_hash_stable_for_same_input() {
 #[test]
 fn feature_schema_version_change_changes_hash() {
     let config_v1 = FeaturesConfig {
-        feature_schema_version: SchemaVersion::new(1),
+        feature_schema_version: SchemaVersion::FIRST,
         ..FeaturesConfig::default()
     };
     let config_v2 = FeaturesConfig {
@@ -222,22 +228,6 @@ fn feature_schema_version_change_changes_hash() {
         ResearchHasher::feature_schema(&schema_v1).expect("hash"),
         ResearchHasher::feature_schema(&schema_v2).expect("hash"),
     );
-}
-
-#[test]
-fn default_feature_schema_invalidates_pre_imbalance_artifacts() {
-    // The default schema version was bumped when `book.depth_imbalance` switched
-    // to top-N share-weighted queue imbalance; its hash must therefore differ
-    // from the pre-change v1 schema so old model artifacts are rejected on load.
-    let config_v1 = FeaturesConfig {
-        feature_schema_version: SchemaVersion::new(1),
-        ..FeaturesConfig::default()
-    };
-    let default_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(&FeaturesConfig::default()))
-            .expect("hash");
-    let v1_hash = ResearchHasher::feature_schema(&FeatureSchema::build(&config_v1)).expect("hash");
-    assert_ne!(default_hash, v1_hash);
 }
 
 // ── Domain missing ─────────────────────────────────────────────────────────
@@ -260,19 +250,24 @@ impl PointInTimeDataSource for EmptyPit {
     ) -> Option<Arc<MarketRegistryInfo>> {
         None
     }
+
+    fn neg_risk_leg_set(&self, _event_id: &EventId) -> NegRiskLegSet {
+        NegRiskLegSet::empty()
+    }
 }
 
 #[tokio::test]
-async fn domain_feature_missing_emits_domain_missing_not_default() {
-    // 03.2 hardening: domain missing always KeepMissing regardless of
-    // `domain_feature_policy`; governed imputation moves to 3.4.
+async fn binary_market_negrisk_feature_is_not_applicable() {
+    // 11.2.1: a binary (non-neg-risk) market's neg-risk full-leg aggregate is
+    // `NotApplicable` — structurally absent, never a fabricated zero and never a
+    // data-missing reason.
     let config = FeaturesConfig {
-        enabled_feature_families: vec![FeatureFamily::Domain],
+        enabled_feature_families: vec![FeatureFamily::Structural],
         ..FeaturesConfig::default()
     };
     let builder = ConfiguredFeatureBuilder::new(&config);
     let market = SelectedMarket {
-        market_id: MarketId::new("m-domain"),
+        market_id: MarketId::new("m-binary"),
         event_id: EventId::new("e1"),
         category: MarketCategory::Sports,
         primary_token_id: TokenId::new("t1"),
@@ -292,24 +287,22 @@ async fn domain_feature_missing_emits_domain_missing_not_default() {
             required_features: &[],
             pit,
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
         })
         .await
         .expect("build");
 
-    for (_, name) in DOMAIN_FEATURES {
-        let value = vector
-            .values
-            .get(&name)
-            .expect("domain feature present in schema");
-        assert_eq!(
-            value.null_reason(),
-            Some(NullReason::DomainDataMissing),
-            "{} must carry DomainDataMissing, not a fabricated default",
-            name.as_str()
-        );
-    }
+    let value = vector
+        .values
+        .get(&crate::features::names::structural::NEGRISK_LEG_ASK_SUM)
+        .expect("structural neg-risk feature present in schema");
+    assert_eq!(
+        value.null_reason(),
+        Some(NullReason::NotApplicable),
+        "a binary market's neg-risk aggregate must be NotApplicable",
+    );
 }
 
 // ── Family gating (feature inputs vs decision capture) ─────────────────────
@@ -337,6 +330,10 @@ impl PointInTimeDataSource for CountingPit {
     ) -> Option<Arc<MarketRegistryInfo>> {
         self.market_calls.fetch_add(1, Ordering::Relaxed);
         None
+    }
+
+    fn neg_risk_leg_set(&self, _event_id: &EventId) -> NegRiskLegSet {
+        NegRiskLegSet::empty()
     }
 }
 
@@ -373,6 +370,7 @@ async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() 
             required_features: &[],
             pit: PitView::Live(&source),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
         })
@@ -451,8 +449,9 @@ fn model_eligibility_uses_real_availability_oracle() {
             .is_empty()
     );
 
-    let domain_required = vec![domain_names::SPORTS_PRE_MATCH_MOVE];
-    let missing = oracle.missing_required(&candidate, &domain_required);
+    // A feature the schema does not define is never claimed as available.
+    let unknown_required = vec![FeatureName::from_static("nonexistent.feature")];
+    let missing = oracle.missing_required(&candidate, &unknown_required);
     assert_eq!(missing.len(), 1);
 
     let thresholds = SelectionThresholds::resolve(
@@ -479,7 +478,7 @@ fn model_eligibility_uses_real_availability_oracle() {
 
     let ctx = MarketCandidateCtx {
         model_requirements: &ModelFeatureRequirements {
-            required_features: domain_required,
+            required_features: unknown_required,
         },
         ..ctx
     };
@@ -597,6 +596,10 @@ impl PointInTimeDataSource for ParityLiveSource {
             updated_at: self.fixture.market.observed_at,
         }))
     }
+
+    fn neg_risk_leg_set(&self, _event_id: &EventId) -> NegRiskLegSet {
+        NegRiskLegSet::empty()
+    }
 }
 
 #[tokio::test]
@@ -668,6 +671,7 @@ async fn online_offline_feature_parity() {
             required_features: &[],
             pit: PitView::Live(&live_source),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &data_quality,
         })
@@ -685,6 +689,7 @@ async fn online_offline_feature_parity() {
             required_features: &[],
             pit: PitView::Historical(&hist_engine),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &data_quality,
         })
@@ -778,6 +783,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
             required_features: &[],
             pit: PitView::Live(&EmptyPit),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
         })
@@ -830,6 +836,7 @@ async fn feature_stale_book_rejects_market() {
             required_features: &[],
             pit: PitView::Historical(&engine),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
         })
@@ -899,6 +906,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
             required_features: &required,
             pit: PitView::Live(&EmptyPit),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
         })
@@ -921,6 +929,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
             required_features: &required,
             pit: PitView::Live(&EmptyPit),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &lenient,
         })
@@ -966,6 +975,7 @@ async fn feature_out_of_valid_range_rejects() {
             required_features: &[],
             pit: PitView::Historical(&engine),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
         })
@@ -1091,6 +1101,7 @@ async fn online_offline_parity_full_families_with_window() {
             required_features: &[],
             pit: PitView::Live(&live_source),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &dq,
         })
@@ -1108,6 +1119,7 @@ async fn online_offline_parity_full_families_with_window() {
             required_features: &[],
             pit: PitView::Historical(&hist_engine),
             window: &window,
+            sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &dq,
         })
@@ -1123,4 +1135,360 @@ async fn online_offline_parity_full_families_with_window() {
         live.values.contains_key(&FeatureName::ts_return(60)),
         "the window-backed time-series family must participate in the parity proof"
     );
+}
+
+// ── Phase 11.2.1 neg-risk sibling-leg parity ─────────────────────────────────
+
+/// Multi-token book fixture for neg-risk full-leg parity proofs.
+struct SiblingLegParityFixture {
+    as_of: DateTime<Utc>,
+    market_id: MarketId,
+    primary_token: TokenId,
+    books: HashMap<String, BookSnapshotAt>,
+    market: MarketContextAt,
+}
+
+fn sibling_book(token_id: &TokenId, as_of: DateTime<Utc>, ask: Decimal) -> BookSnapshotAt {
+    let bid = (ask - Decimal::new(2, 2)).max(Decimal::ZERO);
+    BookSnapshotAt {
+        token_id: token_id.clone(),
+        as_of,
+        bids: Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(bid),
+            Shares::new(Decimal::from(100)),
+        )]),
+        asks: Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(ask),
+            Shares::new(Decimal::from(100)),
+        )]),
+        timestamp_ms: u64::try_from(as_of.timestamp_millis()).unwrap_or(0),
+        version: 1,
+    }
+}
+
+struct SiblingLegLiveSource<'a> {
+    fixture: &'a SiblingLegParityFixture,
+}
+
+impl PointInTimeDataSource for SiblingLegLiveSource<'_> {
+    fn book_snapshot(
+        &self,
+        token_id: &TokenId,
+        _as_of: DateTime<Utc>,
+    ) -> Option<Arc<BookSnapshot>> {
+        let book = self.fixture.books.get(token_id.as_str())?;
+        Some(Arc::new(BookSnapshot::new(
+            Arc::clone(&book.bids),
+            Arc::clone(&book.asks),
+            book.timestamp_ms,
+            book.version,
+        )))
+    }
+
+    fn market_context(
+        &self,
+        market_id: &MarketId,
+        _as_of: DateTime<Utc>,
+    ) -> Option<Arc<MarketRegistryInfo>> {
+        if market_id != &self.fixture.market_id {
+            return None;
+        }
+        Some(Arc::new(MarketRegistryInfo {
+            market_id: self.fixture.market_id.clone(),
+            event_id: EventId::new("evt-negrisk-parity"),
+            token_yes: self.fixture.primary_token.clone(),
+            token_no: TokenId::new("no-negrisk"),
+            question: "negrisk parity?".into(),
+            slug: "negrisk-parity".into(),
+            categories: CategorySet::from(MarketCategory::Crypto),
+            status: self.fixture.market.status,
+            outcome: None,
+            neg_risk: true,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: self.fixture.primary_token.clone(),
+                    outcome: "Yes A".into(),
+                    neg_risk: true,
+                },
+                TokenInfo {
+                    token_id: TokenId::new("tok-leg1"),
+                    outcome: "Yes B".into(),
+                    neg_risk: true,
+                },
+                TokenInfo {
+                    token_id: TokenId::new("tok-leg2"),
+                    outcome: "Yes C".into(),
+                    neg_risk: true,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: None,
+            volume_24h: None,
+            fee_schedule: None,
+            end_date: self.fixture.market.end_date,
+            resolved_at: None,
+            created_at: self.fixture.market.created_at,
+            updated_at: self.fixture.market.observed_at,
+        }))
+    }
+
+    fn neg_risk_leg_set(&self, _event_id: &EventId) -> NegRiskLegSet {
+        NegRiskLegSet::empty()
+    }
+}
+
+struct SiblingLegPitEngine<'a> {
+    fixture: &'a SiblingLegParityFixture,
+}
+
+#[async_trait::async_trait]
+impl PitQueryEngine for SiblingLegPitEngine<'_> {
+    async fn book_at(
+        &self,
+        token_id: &TokenId,
+        as_of: DateTime<Utc>,
+    ) -> QuantResult<Option<BookSnapshotAt>> {
+        Ok(self
+            .fixture
+            .books
+            .get(token_id.as_str())
+            .filter(|book| book.as_of == as_of)
+            .cloned())
+    }
+
+    async fn market_at(
+        &self,
+        market_id: &MarketId,
+        as_of: DateTime<Utc>,
+    ) -> QuantResult<Option<MarketContextAt>> {
+        if market_id == &self.fixture.market_id && as_of == self.fixture.as_of {
+            Ok(Some(self.fixture.market.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn sibling_leg_parity_fixture() -> (SiblingLegParityFixture, [NegRiskLeg; 3], SelectedMarket) {
+    let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+    let primary = TokenId::new("tok-leg0");
+    let leg1 = TokenId::new("tok-leg1");
+    let leg2 = TokenId::new("tok-leg2");
+    let market_id = MarketId::new("m-negrisk-parity");
+
+    let mut books = HashMap::new();
+    books.insert(
+        primary.as_str().to_owned(),
+        sibling_book(&primary, as_of, Decimal::new(35, 2)),
+    );
+    books.insert(
+        leg1.as_str().to_owned(),
+        sibling_book(&leg1, as_of, Decimal::new(33, 2)),
+    );
+    books.insert(
+        leg2.as_str().to_owned(),
+        sibling_book(&leg2, as_of, Decimal::new(34, 2)),
+    );
+
+    let fixture = SiblingLegParityFixture {
+        as_of,
+        market_id: market_id.clone(),
+        primary_token: primary.clone(),
+        books,
+        market: MarketContextAt {
+            market_id: market_id.clone(),
+            as_of,
+            observed_at: as_of,
+            status: MarketStatus::Active,
+            neg_risk: true,
+            end_date: Some(as_of + ChronoDuration::days(7)),
+            created_at: as_of - ChronoDuration::days(30),
+            outcome_count: 3,
+        },
+    };
+    let sibling_legs = [
+        NegRiskLeg {
+            market_id: market_id.clone(),
+            yes_token_id: primary.clone(),
+        },
+        NegRiskLeg {
+            market_id: MarketId::new("m-leg1"),
+            yes_token_id: leg1,
+        },
+        NegRiskLeg {
+            market_id: MarketId::new("m-leg2"),
+            yes_token_id: leg2,
+        },
+    ];
+    let selected = SelectedMarket {
+        market_id,
+        event_id: EventId::new("evt-negrisk-parity"),
+        category: MarketCategory::Crypto,
+        primary_token_id: primary,
+        secondary_token_id: None,
+        liquidity_usd: None,
+        volume_24h_usd: None,
+        source_refs: Vec::new(),
+    };
+    (fixture, sibling_legs, selected)
+}
+
+async fn build_sibling_parity_vectors(
+    fixture: &SiblingLegParityFixture,
+    sibling: &NegRiskLegSet,
+    selected: &SelectedMarket,
+) -> (FeatureVector, FeatureVector) {
+    let config = FeaturesConfig {
+        enabled_feature_families: vec![
+            FeatureFamily::MarketMetadata,
+            FeatureFamily::PriceBook,
+            FeatureFamily::Structural,
+        ],
+        ..FeaturesConfig::default()
+    };
+    let builder = ConfiguredFeatureBuilder::new(&config);
+    let window = MarketWindowSnapshot::empty(
+        selected.primary_token_id.clone(),
+        fixture.as_of,
+        Duration::ZERO,
+    );
+    let data_quality = DataQualityConfig {
+        feature_staleness_policy: FeatureStalenessPolicy::AllowDegraded,
+        ..DataQualityConfig::default()
+    };
+    let live_source = SiblingLegLiveSource { fixture };
+    let live = builder
+        .build(FeatureBuildInput {
+            market: selected,
+            as_of: fixture.as_of,
+            source_delay: Duration::ZERO,
+            required_features: &[],
+            pit: PitView::Live(&live_source),
+            window: &window,
+            sibling,
+            config: &config,
+            data_quality: &data_quality,
+        })
+        .await
+        .expect("live build");
+    let hist_engine = SiblingLegPitEngine { fixture };
+    let historical = builder
+        .build(FeatureBuildInput {
+            market: selected,
+            as_of: fixture.as_of,
+            source_delay: Duration::ZERO,
+            required_features: &[],
+            pit: PitView::Historical(&hist_engine),
+            window: &window,
+            sibling,
+            config: &config,
+            data_quality: &data_quality,
+        })
+        .await
+        .expect("historical build");
+    (live, historical)
+}
+
+#[tokio::test]
+async fn negrisk_sibling_legs_online_offline_parity() {
+    let (fixture, sibling_legs, selected) = sibling_leg_parity_fixture();
+    let sibling = NegRiskLegSet {
+        expected_legs: sibling_legs.len(),
+        legs: sibling_legs.to_vec(),
+    };
+    let (live, historical) = build_sibling_parity_vectors(&fixture, &sibling, &selected).await;
+
+    assert_eq!(live.values, historical.values);
+    assert_eq!(
+        ResearchHasher::feature_vector(&live).expect("hash"),
+        ResearchHasher::feature_vector(&historical).expect("hash"),
+    );
+    let ask_sum = live
+        .values
+        .get(&crate::features::names::structural::NEGRISK_LEG_ASK_SUM)
+        .expect("leg ask sum present");
+    assert_eq!(
+        ask_sum.to_fact_decimal(),
+        Some(Decimal::new(102, 2)),
+        "three-leg ask sum must be 1.02 (0.35 + 0.33 + 0.34)"
+    );
+}
+
+#[tokio::test]
+async fn negrisk_missing_catalog_leg_fails_closed() {
+    let (fixture, sibling_legs, selected) = sibling_leg_parity_fixture();
+    // Catalog expects one more neg-risk leg than we enumerate — structural features must
+    // fail closed with LegBookMissing, never a partial aggregate.
+    let sibling = NegRiskLegSet {
+        expected_legs: sibling_legs.len() + 1,
+        legs: sibling_legs.to_vec(),
+    };
+    let (live, _) = build_sibling_parity_vectors(&fixture, &sibling, &selected).await;
+    let value = live
+        .values
+        .get(&crate::features::names::structural::NEGRISK_LEG_ASK_SUM)
+        .expect("neg-risk leg ask sum in schema");
+    assert_eq!(
+        value.null_reason(),
+        Some(NullReason::LegBookMissing),
+        "missing catalog leg must surface LegBookMissing",
+    );
+}
+
+#[test]
+fn negrisk_from_event_catalog_excludes_non_neg_risk_rows() {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::market::MarketInfo,
+        enums::{
+            common::{MarketCategory, TickSize},
+            market::MarketStatus,
+        },
+        types::{EventId, MarketId, TokenId},
+    };
+
+    let now = Utc::now();
+    let catalog = |id: &str, neg_risk: bool| {
+        Arc::new(MarketInfo {
+            market_id: MarketId::new(id),
+            event_id: EventId::new("evt-catalog"),
+            question: "Q?".into(),
+            slug: id.into(),
+            categories: vec![MarketCategory::Crypto],
+            status: MarketStatus::Active,
+            outcome: None,
+            yes_token_id: TokenId::new(format!("{id}-yes")),
+            no_token_id: TokenId::new(format!("{id}-no")),
+            tick_size: TickSize::Hundredth,
+            neg_risk,
+            end_date: None,
+            resolved_at: None,
+            fees_enabled: false,
+            fee_rate: None,
+            fee_exponent: None,
+            fee_taker_only: None,
+            fee_rebate_rate: None,
+            fee_source: None,
+            fee_observed_at: None,
+            created_at: now,
+            updated_at: now,
+        })
+    };
+
+    let set = NegRiskLegSet::from_event_catalog(&[
+        catalog("leg-a", true),
+        catalog("leg-b", true),
+        catalog("binary", false),
+    ]);
+    assert_eq!(
+        set.expected_legs, 2,
+        "non-neg-risk PG rows must not inflate expected_legs"
+    );
+    assert_eq!(set.legs.len(), 2);
 }

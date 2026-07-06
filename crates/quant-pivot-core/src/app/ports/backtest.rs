@@ -15,9 +15,9 @@ use quant_pivot_models::{
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, MarketRepository, ModelComparisonReportRepository,
-    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    BacktestReportRepository, FavoriteLongshotBiasTableRepository, MarketRepository,
+    ModelComparisonReportRepository, ModelRegistryRepository, ModelRunRepository,
+    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
 
@@ -25,6 +25,7 @@ use crate::{
     app::bundles::ResearchBundle,
     service::{
         backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
+        favorite_longshot_fit::resolve_frozen_bias_table,
         historical_replay::ReplayConfig,
     },
 };
@@ -41,6 +42,7 @@ pub struct CoreBacktestPort {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
 }
 
 impl CoreBacktestPort {
@@ -49,6 +51,7 @@ impl CoreBacktestPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     ) -> Self {
         Self {
             dataset_repo: Arc::clone(&research.training_dataset_repo),
@@ -61,6 +64,7 @@ impl CoreBacktestPort {
             fact_read: Arc::clone(&research.quant_fact_read),
             market_repo: Arc::clone(&research.market_repo),
             runtime_config,
+            bias_table_repo,
         }
     }
 
@@ -70,6 +74,8 @@ impl CoreBacktestPort {
     ) -> QuantResult<BacktestService> {
         let runtime = self.load_runtime_config(runtime_config_version_id).await?;
         let max_book_staleness = Duration::from_millis(runtime.training.max_book_staleness_ms);
+        let bias_table =
+            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
         Ok(BacktestService::new(
             BacktestServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
@@ -87,6 +93,7 @@ impl CoreBacktestPort {
                 features: runtime.features,
                 factors: runtime.factors,
                 data_quality: runtime.data_quality,
+                bias_table,
             },
             max_book_staleness,
         ))

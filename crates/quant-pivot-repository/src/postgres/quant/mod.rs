@@ -10,6 +10,7 @@ mod equity_snapshot;
 mod execution_order;
 mod execution_submission;
 mod factor;
+mod favorite_longshot;
 mod feature;
 mod governance_audit;
 mod market_selection;
@@ -32,7 +33,8 @@ pub use {
     comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
     equity_snapshot::PgEquitySnapshotRepository, execution_order::PgExecutionOrderRepository,
     execution_submission::PgExecutionSubmissionRepository, factor::PgFactorRepository,
-    feature::PgFeatureRepository, governance_audit::PgModelGovernanceAuditRepository,
+    favorite_longshot::PgFavoriteLongshotBiasTableRepository, feature::PgFeatureRepository,
+    governance_audit::PgModelGovernanceAuditRepository,
     market_selection::PgMarketSelectionRepository, model_registry::PgModelRegistryRepository,
     model_run::PgModelRunRepository, order_intent::PgOrderIntentRepository,
     portfolio_plan::PgPortfolioPlanRepository, position::PgPositionRepository,

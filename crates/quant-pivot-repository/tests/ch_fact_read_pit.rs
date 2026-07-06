@@ -92,7 +92,7 @@ fn book_row(
         ingestion_time: ingestion_time_ms,
         sequence,
         source: ChFactSource::WsSnapshot,
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 
@@ -162,7 +162,7 @@ async fn resolution_at_is_pit_bounded() {
             observed_at: early,
             source: ChFactSource::WsMarketResolved,
             sequence: 1,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         },
         MarketResolutionRow {
             market_id: market_id.clone(),
@@ -173,7 +173,7 @@ async fn resolution_at_is_pit_bounded() {
             observed_at: late,
             source: ChFactSource::WsMarketResolved,
             sequence: 2,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         },
     ];
     let mut insert = client

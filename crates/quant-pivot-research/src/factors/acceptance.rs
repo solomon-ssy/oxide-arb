@@ -5,25 +5,35 @@
 //! no silent neutral — small / degenerate cross-sections are indeterminate).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_models::{
+    domain::TimeWindow,
     enums::{
+        common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
         quant::DataQualityStatus,
     },
     runtime_config::{
         DecimalString, FactorsConfig, FeaturesConfig, MissingFactorPolicy, SmallCrossSectionPolicy,
     },
-    types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
+    types::{MarketId, Price, Probability, SchemaVersion, TokenId, Usd},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::factors::{
     CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorHistory,
     FactorName, FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
+    generic::generic_factors,
+    names::{MEAN_REVERSION, STRUCT_FAVORITE_LONGSHOT, STRUCT_REVERSAL_AFTER_SHOCK},
+    structural::structural_factors,
 };
 use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason, stats};
+use crate::model::favorite_longshot::{
+    BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
+    TtrBucketCurve,
+};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -101,7 +111,7 @@ fn compute_one(
 ) -> ScoredFactor {
     let config = factors_config(&[family], MissingFactorPolicy::ZeroWeight, "0.10");
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let as_of = Utc::now();
     let vectors = [
         make_vector("0xmarket0", market0, DataQualityStatus::Fresh, 0, as_of),
@@ -116,18 +126,27 @@ fn compute_one(
 // ── #1 default factor set ─────────────────────────────────────────────────────
 
 #[test]
-fn default_factor_config_enables_all_generic_families() {
+fn default_factor_config_enables_all_generic_and_structural_families() {
     let config = FactorsConfig::default();
-    assert_eq!(
-        config.enabled_factor_families,
-        FactorFamily::ALL_GENERIC.to_vec(),
-        "the default config must enable every generic factor family"
-    );
-    let engine = FactorEngine::new(&config, &FeaturesConfig::default());
-    // 8 single-feature factors + 4 momentum estimators counted within Momentum.
+    // The default enables every generic family plus the platform-internal
+    // structural plane (Phase 11.2.1).
+    for family in FactorFamily::ALL_GENERIC {
+        assert!(
+            config.enabled_factor_families.contains(&family),
+            "default config must enable generic family {family:?}"
+        );
+    }
     assert!(
-        engine.registry().len() >= 12,
-        "all generic families should register the full factor set"
+        config
+            .enabled_factor_families
+            .contains(&FactorFamily::Structural),
+        "default config must enable the structural family"
+    );
+    let engine = FactorEngine::new(&config, &FeaturesConfig::default(), None);
+    // 8 generic single-feature + 4 momentum estimators + 6 structural factors.
+    assert!(
+        engine.registry().len() >= 18,
+        "all generic + structural families should register the full factor set"
     );
 }
 
@@ -143,7 +162,7 @@ fn small_cross_section_yields_indeterminate_not_half() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vector = make_vector(
         "0xlonely",
         &[
@@ -186,7 +205,7 @@ fn zero_variance_yields_indeterminate() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let as_of = Utc::now();
     let vectors: Vec<FeatureVector> = (0..4)
         .map(|index| {
@@ -228,7 +247,7 @@ fn compute_all_batch_rejects_mixed_as_of() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let as_of = Utc::now();
     let first = make_vector(
         "0xa",
@@ -264,7 +283,7 @@ fn factor_explanation_lists_positive_and_negative_drivers() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vector = make_vector(
         "0xdq",
         &[
@@ -305,7 +324,7 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
         "0.50",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let as_of = Utc::now();
     let vectors = [
         make_vector(
@@ -350,7 +369,7 @@ fn factor_missing_reject_candidate_policy() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let as_of = Utc::now();
     let complete_a = make_vector(
         "0xcomplete_a",
@@ -411,6 +430,7 @@ fn factor_set_change_changes_schema_hash() {
             "0.50",
         ),
         &features,
+        None,
     );
     let two = FactorEngine::new(
         &factors_config(
@@ -419,6 +439,7 @@ fn factor_set_change_changes_schema_hash() {
             "0.50",
         ),
         &features,
+        None,
     );
     assert_ne!(
         one.factor_schema_hash().expect("hash"),
@@ -437,6 +458,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
             "0.50",
         ),
         &features,
+        None,
     );
     let reversed = FactorEngine::new(
         &factors_config(
@@ -445,6 +467,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
             "0.50",
         ),
         &features,
+        None,
     );
     assert_eq!(
         forward.factor_schema_hash().expect("hash"),
@@ -539,7 +562,7 @@ fn compute_all_batch_is_deterministic() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vectors = varied_batch(32);
     let first = engine
         .compute_all_batch(&vectors, &config)
@@ -561,7 +584,7 @@ fn compute_all_batch_preserves_input_order() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vectors = varied_batch(20);
     let outcomes = engine
         .compute_all_batch(&vectors, &config)
@@ -583,7 +606,7 @@ fn serial_and_parallel_normalizer_paths_are_bit_identical() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vectors = varied_batch(24);
     let history = crate::factors::FactorHistory::empty();
     let serial = engine
@@ -606,7 +629,7 @@ fn online_and_replay_entrypoints_agree_default_policy() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vectors = varied_batch(20);
     let replay = engine
         .compute_all_batch(&vectors, &config)
@@ -632,7 +655,7 @@ fn cross_sectional_zscore_mean_zero_std_one_per_as_of() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
     let vectors = varied_batch(9);
     let outcomes = engine
         .compute_all_batch(&vectors, &config)
@@ -679,7 +702,7 @@ fn historical_quantile_scores_small_cross_section() {
     config.cross_section.min_size = 5;
     config.cross_section.small_cross_section_policy = SmallCrossSectionPolicy::HistoricalQuantile;
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features);
+    let engine = FactorEngine::new(&config, &features, None);
 
     let mut history = FactorHistory::empty();
     history.insert(
@@ -912,5 +935,229 @@ fn normalizer_has_no_hardcoded_constants() {
     assert!(
         !source.contains("clamp_sigma:"),
         "sigma clamp is a config parameter, not a code constant"
+    );
+}
+
+// ── Phase 11.2.1 structural acceptance ─────────────────────────────────────
+
+#[test]
+fn reversal_after_shock_orthogonal_to_mean_reversion() {
+    let factors_config = FactorsConfig::default();
+    let features_config = FeaturesConfig::default();
+    let threshold = factors_config
+        .orthogonalize
+        .max_correlation
+        .value
+        .parse::<Decimal>()
+        .expect("default max_correlation parses");
+
+    let mean_rev = generic_factors(&features_config)
+        .into_iter()
+        .find(|(spec, _)| spec.name == MEAN_REVERSION)
+        .expect("mean_reversion registered")
+        .1;
+    let reversal = structural_factors(&factors_config, &features_config, None)
+        .into_iter()
+        .find(|(spec, _)| spec.name == STRUCT_REVERSAL_AFTER_SHOCK)
+        .expect("reversal_after_shock registered")
+        .1;
+
+    let as_of = Utc::now();
+    // Heterogeneous panel: monotonic price_reversal vs zig-zag short_return with
+    // shock always above the default k=2.5 gate — the conditional reversal must
+    // not collapse onto the linear mean-reversion signal (audit #4 / 11.2.1 §9).
+    let short_pattern: [i64; 16] = [3, -5, 2, -4, 6, -1, 4, -3, 5, -2, 1, -6, 3, -4, 2, -5];
+    let mut rows = Vec::with_capacity(short_pattern.len());
+    for (index, short_return) in short_pattern.into_iter().enumerate() {
+        let price_reversal = Decimal::new(i64::try_from(index + 1).expect("index"), 2);
+        let shock_ratio = Decimal::new(40 + i64::from(u32::try_from(index % 4).expect("mod")), 1);
+        let vector = make_vector(
+            &format!("0xstruct{index:02}"),
+            &[
+                ("ts.price_reversal", dec(price_reversal)),
+                ("struct.shock_ratio", dec(shock_ratio)),
+                ("struct.short_return", dec(Decimal::from(short_return))),
+            ],
+            DataQualityStatus::Fresh,
+            0,
+            as_of,
+        );
+        let mean_value = mean_rev
+            .compute_raw(&vector)
+            .expect("mean_reversion compute")
+            .raw_value;
+        let reversal_value = reversal
+            .compute_raw(&vector)
+            .expect("reversal compute")
+            .raw_value;
+        rows.push(vec![mean_value, reversal_value]);
+    }
+
+    let panel = FactorObservationMatrix {
+        factors: vec![MEAN_REVERSION, STRUCT_REVERSAL_AFTER_SHOCK],
+        rows,
+    };
+    let report = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+    let rho = report.matrix[0][1].abs();
+    assert!(
+        rho < threshold,
+        "struct.reversal_after_shock vs mean_reversion |ρ|={rho} must stay below {threshold}"
+    );
+}
+
+#[test]
+fn favorite_longshot_uses_bias_table_not_constant() {
+    let window = TimeWindow {
+        from: Utc.timestamp_opt(0, 0).unwrap(),
+        to: Utc.timestamp_opt(1_000, 0).unwrap(),
+    };
+    let split_hash = crate::hashing::ResearchHasher::canonical(&"acceptance-split").unwrap();
+    let fit_config = BiasFitConfig {
+        bins: 4,
+        ttr_bucket_bounds_secs: Vec::new(),
+        min_bin_samples: 10,
+        min_curve_samples: 20,
+        ci_confidence: Decimal::new(95, 2),
+        ic_significance_min: Decimal::new(1, 2),
+    };
+    let mut samples = Vec::new();
+    for i in 0..200 {
+        samples.push(BiasSample {
+            market_id: MarketId::new(format!("m-low-{i}")),
+            sampled_at: Utc.timestamp_opt(i64::from(i), 0).unwrap(),
+            category: MarketCategory::Crypto,
+            entry_mid: Price::new(Decimal::new(1, 1)),
+            ttr_secs: 3_600,
+            settled_yes: i % 20 == 0,
+        });
+    }
+    for i in 0..200 {
+        samples.push(BiasSample {
+            market_id: MarketId::new(format!("m-high-{i}")),
+            sampled_at: Utc.timestamp_opt(1_000 + i64::from(i), 0).unwrap(),
+            category: MarketCategory::Crypto,
+            entry_mid: Price::new(Decimal::new(9, 1)),
+            ttr_secs: 3_600,
+            settled_yes: i % 20 != 0,
+        });
+    }
+    let table = Arc::new(
+        FavoriteLongshotBiasTable::fit(&samples, window, split_hash, &fit_config)
+            .expect("fit")
+            .expect("qualifying samples yield an artifact"),
+    );
+
+    let factors_config = FactorsConfig::default();
+    let features_config = FeaturesConfig::default();
+    let favorite = structural_factors(&factors_config, &features_config, Some(Arc::clone(&table)))
+        .into_iter()
+        .find(|(spec, _)| spec.name == STRUCT_FAVORITE_LONGSHOT)
+        .expect("favorite_longshot registered")
+        .1;
+
+    let as_of = Utc::now();
+    let low_vector = make_vector(
+        "0xlow",
+        &[
+            (
+                "market.category",
+                FeatureValue::Category(MarketCategory::Crypto),
+            ),
+            ("book.mid", dec(Decimal::new(1, 1))),
+            ("market.time_to_resolution_secs", dec(Decimal::from(3_600))),
+        ],
+        DataQualityStatus::Fresh,
+        0,
+        as_of,
+    );
+    let high_vector = make_vector(
+        "0xhigh",
+        &[
+            (
+                "market.category",
+                FeatureValue::Category(MarketCategory::Crypto),
+            ),
+            ("book.mid", dec(Decimal::new(9, 1))),
+            ("market.time_to_resolution_secs", dec(Decimal::from(3_600))),
+        ],
+        DataQualityStatus::Fresh,
+        0,
+        as_of,
+    );
+
+    let low = favorite
+        .compute_raw(&low_vector)
+        .expect("low compute")
+        .raw_value
+        .expect("low bucket bias");
+    let high = favorite
+        .compute_raw(&high_vector)
+        .expect("high compute")
+        .raw_value
+        .expect("high bucket bias");
+    assert!(low < Decimal::ZERO, "low-price over-priced bias: {low}");
+    assert!(high > Decimal::ZERO, "high-price under-priced bias: {high}");
+    assert_ne!(
+        low, high,
+        "favorite_longshot must vary by price (not constant)"
+    );
+}
+
+#[test]
+fn structural_factor_ic_gate_disables_insignificant_category() {
+    use std::collections::BTreeMap;
+
+    use quant_pivot_models::types::{FavoriteLongshotBiasTableId, Price, Probability};
+
+    // A retained price bin carrying a bias, but the curve's IC is NOT
+    // significant — an insignificant category must be gated off when the IC
+    // gate is on (never served as a real edge), yet readable with the gate off.
+    let bin = PriceBiasBin {
+        price_lo: Price::new(Decimal::ZERO),
+        price_hi: Price::new(Decimal::new(5, 1)),
+        implied_mid: Price::new(Decimal::new(25, 2)),
+        realized_frequency: Probability::new(Decimal::new(10, 2)),
+        bias: Decimal::new(-15, 2),
+        bias_ci: (Decimal::new(5, 2), Decimal::new(15, 2)),
+        sample_count: 500,
+    };
+    let curve = TtrBucketCurve {
+        ttr_lo_secs: 0,
+        ttr_hi_secs: None,
+        bins: vec![bin],
+        ic: Decimal::new(1, 3), // 0.001 — not significant
+        ic_significant: false,
+        sample_count: 500,
+    };
+    let mut by_category = BTreeMap::new();
+    by_category.insert(
+        MarketCategory::Crypto,
+        CategoryBiasCurve {
+            by_ttr: vec![curve],
+            sample_count: 500,
+        },
+    );
+    let table = FavoriteLongshotBiasTable {
+        table_id: FavoriteLongshotBiasTableId::from_v7(),
+        content_hash: crate::hashing::ResearchHasher::canonical(&"ic-gate-test").unwrap(),
+        fit_window: TimeWindow {
+            from: Utc.timestamp_opt(0, 0).unwrap(),
+            to: Utc.timestamp_opt(1_000, 0).unwrap(),
+        },
+        calibration_split_hash: crate::hashing::ResearchHasher::canonical(&"split").unwrap(),
+        by_category,
+    };
+    let mid = Price::new(Decimal::new(25, 2));
+    assert!(
+        table
+            .bias_for(MarketCategory::Crypto, 3_600, mid, true)
+            .is_none(),
+        "IC-insignificant category must be gated off when the IC gate is on"
+    );
+    assert!(
+        table
+            .bias_for(MarketCategory::Crypto, 3_600, mid, false)
+            .is_some(),
+        "with the gate off the bias is still readable (observability)"
     );
 }

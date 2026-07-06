@@ -16,8 +16,11 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::{
-    domain::market::{book::BookSnapshot, registry::MarketRegistryInfo},
-    types::{MarketId, TokenId},
+    domain::market::{
+        book::BookSnapshot,
+        registry::{MarketRegistryInfo, NegRiskLegSet},
+    },
+    types::{EventId, MarketId, TokenId},
 };
 
 /// Resolves point-in-time book and market context.
@@ -35,4 +38,8 @@ pub trait PointInTimeDataSource: Send + Sync {
         market_id: &MarketId,
         as_of: DateTime<Utc>,
     ) -> Option<Arc<MarketRegistryInfo>>;
+
+    /// Expected vs resolved YES legs of a neg-risk event for structural full-leg
+    /// aggregates (Phase 11.2.1).
+    fn neg_risk_leg_set(&self, event_id: &EventId) -> NegRiskLegSet;
 }

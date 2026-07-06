@@ -16,9 +16,9 @@ use quant_pivot_models::{
     types::{RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, FeatureRepository, MarketRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    AttributionRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+    MarketRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -27,9 +27,12 @@ use quant_pivot_research::{
 
 use crate::{
     app::bundles::ResearchBundle,
-    service::training_dataset::{
-        TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
-        default_labelers,
+    service::{
+        favorite_longshot_fit::resolve_frozen_bias_table,
+        training_dataset::{
+            TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
+            default_labelers,
+        },
     },
 };
 
@@ -45,6 +48,7 @@ pub struct CoreTrainingDatasetPort {
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
     max_spine_samples: u64,
     /// Deploy tunable: `as_of` slices sampled during `plan` to estimate keep-rate.
@@ -59,6 +63,7 @@ impl CoreTrainingDatasetPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
         max_spine_samples: u64,
         plan_sample_slices: u32,
         plan_sample_markets: u32,
@@ -74,6 +79,7 @@ impl CoreTrainingDatasetPort {
             position_repo: Arc::clone(&research.position_repo),
             fee_calculator: Arc::clone(&research.fee_calculator),
             runtime_config,
+            bias_table_repo,
             max_spine_samples,
             plan_sample_slices,
             plan_sample_markets,
@@ -93,6 +99,8 @@ impl CoreTrainingDatasetPort {
                 id: runtime_config_version_id.to_string(),
             })?;
         let runtime = RuntimeConfig::from_json(&version.config_json)?;
+        let bias_table =
+            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.fact_read),
@@ -112,6 +120,7 @@ impl CoreTrainingDatasetPort {
                 training: runtime.training,
                 selection: runtime.selection,
                 labelers: default_labelers(),
+                bias_table,
             },
             self.max_spine_samples,
         )

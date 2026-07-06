@@ -386,6 +386,8 @@ pub enum MaterializationRunKind {
     Training,
     /// Point-in-time backtest run.
     Backtest,
+    /// Favorite-longshot bias-table fit (Phase 11.2.1).
+    BiasTableFit,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -414,6 +416,7 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::DatasetBuild => Self::Dataset,
             ResearchJobKind::ModelTrain => Self::Training,
             ResearchJobKind::Backtest => Self::Backtest,
+            ResearchJobKind::BiasTableFit => Self::BiasTableFit,
         }
     }
 }

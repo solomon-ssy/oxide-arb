@@ -14,8 +14,9 @@ use quant_pivot_models::{
     types::{ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    FavoriteLongshotBiasTableRepository, MarketRepository, ModelRegistryRepository,
+    ModelRunRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -26,6 +27,7 @@ use quant_pivot_research::{
 use crate::{
     app::bundles::ResearchBundle,
     service::{
+        favorite_longshot_fit::resolve_frozen_bias_table,
         historical_replay::ReplayConfig,
         model_training::{
             ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
@@ -42,6 +44,7 @@ pub struct CoreModelTrainingPort {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
 }
 
 impl CoreModelTrainingPort {
@@ -50,6 +53,7 @@ impl CoreModelTrainingPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     ) -> Self {
         Self {
             dataset_repo: Arc::clone(&research.training_dataset_repo),
@@ -59,6 +63,7 @@ impl CoreModelTrainingPort {
             fact_read: Arc::clone(&research.quant_fact_read),
             market_repo: Arc::clone(&research.market_repo),
             runtime_config,
+            bias_table_repo,
         }
     }
 
@@ -68,6 +73,8 @@ impl CoreModelTrainingPort {
     ) -> QuantResult<ModelTrainerService> {
         let runtime = self.load_runtime_config(runtime_config_version_id).await?;
         let max_book_staleness = Duration::from_millis(runtime.training.max_book_staleness_ms);
+        let bias_table =
+            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
         Ok(ModelTrainerService::new(
             ModelTrainerServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
@@ -84,6 +91,7 @@ impl CoreModelTrainingPort {
                 features: runtime.features,
                 factors: runtime.factors,
                 data_quality: runtime.data_quality,
+                bias_table,
             },
             max_book_staleness,
         ))

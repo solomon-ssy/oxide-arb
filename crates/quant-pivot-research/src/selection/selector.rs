@@ -363,11 +363,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_eligibility_excludes_unavailable_domain_feature() {
-        // Domain features have no wired external source, so a model requiring one
-        // makes the market ineligible — and only that feature is reported missing.
+    async fn model_eligibility_excludes_unavailable_feature() {
+        // A model requiring a feature the schema does not define makes the market
+        // ineligible — and only that feature is reported missing (the oracle never
+        // claims to provide a feature it does not declare).
         let model_requirements = ModelFeatureRequirements {
-            required_features: vec![names::domain::SPORTS_PRE_MATCH_MOVE],
+            required_features: vec![crate::features::FeatureName::from_static(
+                "nonexistent.feature",
+            )],
         };
         let snapshot = build(
             request_with_model(selection_config(), model_requirements),
@@ -379,7 +382,7 @@ mod tests {
         match &snapshot.excluded[0].reason {
             ExclusionReason::ModelFeatureUnavailable { missing } => {
                 assert_eq!(missing.len(), 1);
-                assert_eq!(missing[0].as_str(), "domain.sports.pre_match_move");
+                assert_eq!(missing[0].as_str(), "nonexistent.feature");
             }
             other => panic!("expected ModelFeatureUnavailable, got {other:?}"),
         }

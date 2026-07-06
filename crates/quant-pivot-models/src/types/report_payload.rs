@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::{
         common::MarketCategory,
-        factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
+        factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{
             BindingConstraint, EmptyReportReason, EntryTriggerKind, ExitSettlementMode,
             ExitTriggerKind, FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
@@ -245,6 +245,9 @@ pub struct FactorBreakdownEntry {
     pub factor_name: String,
     /// Factor family.
     pub family: FactorFamily,
+    /// Authoritative value state (scored / missing-input / not-applicable /
+    /// indeterminate) — drives the report's distinct "—" rendering.
+    pub value_state: FactorValueState,
     /// Raw factor value before normalization.
     pub raw_value: Option<Decimal>,
     /// Normalized factor score in `[0, 1]`; `None` when the factor was missing

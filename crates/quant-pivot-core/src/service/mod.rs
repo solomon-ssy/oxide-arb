@@ -5,6 +5,7 @@ pub mod catalog_readiness;
 pub mod dataset_replay;
 pub mod equity;
 pub mod factor_pipeline;
+pub mod favorite_longshot_fit;
 pub mod feature_pipeline;
 pub mod gamma;
 pub mod historical_replay;

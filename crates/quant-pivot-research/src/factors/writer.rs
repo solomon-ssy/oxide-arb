@@ -2,12 +2,15 @@
 //!
 //! Each present factor value of an **eligible** market becomes one
 //! [`QuantFactorEventRow`] (`quant_factor_event`), tagged with the owning
-//! `model_run_id`. Rejected markets emit nothing (their absence is the signal),
-//! and a missing factor (`raw_value = None`) emits no row — mirroring the
-//! present-only feature-event projection.
+//! `model_run_id`. Rejected markets emit nothing (their absence is the signal).
+//! Scored factors carry present raw/normalized values; structurally
+//! **not-applicable** factors also emit a row (tagged `not_applicable`) so
+//! neg-risk inapplicability is visible in analytics — missing-input and
+//! indeterminate outcomes remain Postgres-authoritative only.
 
 use quant_pivot_models::{
     clickhouse::{ChDecimal64, ChProbability, QuantFactorEventRow},
+    enums::factor::FactorValueState,
     types::ModelRunId,
 };
 
@@ -31,30 +34,51 @@ pub fn factor_events(
         }
         let as_of_ms = outcome.as_of.timestamp_millis();
         for scored in &outcome.factors {
-            // Present-only, scored-only: a factor that was missing-input or
-            // indeterminate carries no normalized score, so it emits no analytics
-            // row (its authoritative record — with the reason — is in Postgres).
-            let (Some(raw), Some(normalized_score), Some(source)) = (
-                scored.value.raw_value,
-                scored.value.normalized_score(),
-                scored.value.normalization_source(),
-            ) else {
-                continue;
-            };
-            rows.push(QuantFactorEventRow {
-                event_time: as_of_ms,
-                as_of: as_of_ms,
-                market_id: outcome.market_id.clone(),
-                factor_name: scored.value.name.as_str().to_owned(),
-                factor_family: scored.value.family.as_str().to_owned(),
-                raw_value: ChDecimal64::from(raw),
-                normalized_score: ChProbability::from(normalized_score),
-                normalization_source: source.into(),
-                confidence: ChProbability::from(scored.value.confidence),
-                direction: scored.value.direction.into(),
-                model_run_id: model_run_id.clone(),
-                ingestion_time,
-            });
+            let value_state = scored.value.value_state();
+            match value_state {
+                FactorValueState::Scored => {
+                    let (Some(raw), Some(normalized_score), Some(source)) = (
+                        scored.value.raw_value,
+                        scored.value.normalized_score(),
+                        scored.value.normalization_source(),
+                    ) else {
+                        continue;
+                    };
+                    rows.push(QuantFactorEventRow {
+                        event_time: as_of_ms,
+                        as_of: as_of_ms,
+                        market_id: outcome.market_id.clone(),
+                        factor_name: scored.value.name.as_str().to_owned(),
+                        factor_family: scored.value.family.as_str().to_owned(),
+                        value_state: value_state.into(),
+                        raw_value: Some(ChDecimal64::from(raw)),
+                        normalized_score: Some(ChProbability::from(normalized_score)),
+                        normalization_source: Some(source.into()),
+                        confidence: ChProbability::from(scored.value.confidence),
+                        direction: scored.value.direction.into(),
+                        model_run_id: model_run_id.clone(),
+                        ingestion_time,
+                    });
+                }
+                FactorValueState::NotApplicable => {
+                    rows.push(QuantFactorEventRow {
+                        event_time: as_of_ms,
+                        as_of: as_of_ms,
+                        market_id: outcome.market_id.clone(),
+                        factor_name: scored.value.name.as_str().to_owned(),
+                        factor_family: scored.value.family.as_str().to_owned(),
+                        value_state: value_state.into(),
+                        raw_value: None,
+                        normalized_score: None,
+                        normalization_source: None,
+                        confidence: ChProbability::from(scored.value.confidence),
+                        direction: scored.value.direction.into(),
+                        model_run_id: model_run_id.clone(),
+                        ingestion_time,
+                    });
+                }
+                FactorValueState::MissingInput | FactorValueState::Indeterminate => {}
+            }
         }
     }
     rows

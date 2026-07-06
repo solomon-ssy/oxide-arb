@@ -37,6 +37,35 @@ pub const TIME_TO_RESOLUTION: FactorName = FactorName::from_static("time_to_reso
 /// Aggregate data-quality factor.
 pub const DATA_QUALITY: FactorName = FactorName::from_static("data_quality");
 
+/// Structural (prediction-market-aware) factors (Phase 11.2.1).
+///
+/// Shock-gated reversal (conditional; orthogonal to the linear `mean_reversion`).
+pub const STRUCT_REVERSAL_AFTER_SHOCK: FactorName =
+    FactorName::from_static("struct.reversal_after_shock");
+/// Resolution-proximity × price-extremity interaction (orthogonal to the linear
+/// `time_to_resolution`).
+pub const STRUCT_RESOLUTION_PROXIMITY_REGIME: FactorName =
+    FactorName::from_static("struct.resolution_proximity_regime");
+/// Book-churn intensity (delta-to-update ratio over the maker window).
+///
+/// This is a **book-derived** liquidity-turnover proxy — NOT true maker
+/// participant concentration (Gini / top-1% share), which requires trade-tape
+/// (maker/taker address + fill size) the platform does not yet ingest. The
+/// honest concentration factor is designed in
+/// [`11.2.1.1-trade-tape-participant-concentration.md`] and will supersede this
+/// proxy; the name reflects exactly what the current facts can compute.
+pub const STRUCT_BOOK_CHURN_INTENSITY: FactorName =
+    FactorName::from_static("struct.book_churn_intensity");
+/// Neg-risk full-leg YES-ask-sum drift (`Σ ask − 1`); neg-risk markets only.
+pub const STRUCT_NEGRISK_LEG_SUM_DRIFT: FactorName =
+    FactorName::from_static("struct.negrisk_leg_sum_drift");
+/// Neg-risk conversion edge (basket vs NO-favorite); neg-risk markets only.
+pub const STRUCT_NEGRISK_CONVERT_EDGE: FactorName =
+    FactorName::from_static("struct.negrisk_convert_edge");
+/// Favorite-longshot bias correction (consumes the fitted bias table).
+pub const STRUCT_FAVORITE_LONGSHOT: FactorName =
+    FactorName::from_static("struct.favorite_longshot");
+
 /// Signed unrealized `PnL` as a fraction of cost basis (`(mark − avg) / avg`).
 ///
 /// Position-state pseudo-factors consumed only by the Sell-side hold-vs-exit

@@ -42,6 +42,7 @@ impl FactorValue {
             model_run_id: ctx.model_run_id.clone(),
             market_id: ctx.market_id.clone(),
             as_of: ctx.as_of,
+            value_state: self.value_state(),
             raw_value: self.raw_value,
             normalized_score: self.normalized_score(),
             normalization_source: self.normalization_source(),

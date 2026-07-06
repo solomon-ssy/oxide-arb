@@ -150,7 +150,7 @@ impl BookFactWriter {
             sequence: book_version,
             source: ChFactSource::WsSnapshot,
             feed_event_hash: snapshot_feed_event_hash(cmd),
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         };
         self.l2.write(l2);
         let snapshot = BookSnapshot::new(
@@ -231,7 +231,7 @@ impl BookFactWriter {
             sequence: book_version,
             source: ChFactSource::WsDelta,
             feed_event_hash: delta_feed_event_hash(cmd),
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         };
         self.l2.write(row);
         // Full-book microstructure must be generated from the published
@@ -280,7 +280,7 @@ impl BookFactWriter {
             ingestion_time: Utc::now().timestamp_millis(),
             sequence: timestamp_ms,
             source: ChFactSource::WsBbo,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         });
     }
 
@@ -314,7 +314,7 @@ impl BookFactWriter {
             ingestion_time: now_ms,
             sequence: u64::try_from(now_ms).unwrap_or(u64::MAX),
             source: ChFactSource::WsTickSize,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         });
     }
 
@@ -341,7 +341,7 @@ impl BookFactWriter {
             ingestion_time: Utc::now().timestamp_millis(),
             sequence: timestamp_ms,
             source: ChFactSource::WsLastTrade,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         });
     }
 
@@ -369,7 +369,7 @@ impl BookFactWriter {
             observed_at,
             sequence: timestamp_ms,
             source: ChFactSource::WsMarketResolved,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         });
     }
 
@@ -397,7 +397,7 @@ impl BookFactWriter {
             ingestion_time: now_ms,
             sequence: u64::try_from(now_ms).unwrap_or(u64::MAX),
             source: ChFactSource::WsShardStatus,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         });
     }
 
@@ -426,7 +426,7 @@ impl BookFactWriter {
             ingestion_time: input.ingestion_time,
             sequence: input.book_version,
             source: input.source,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         });
     }
 
@@ -698,9 +698,7 @@ fn microstructure_row(
         max_book_age_ms: u64::try_from(Utc::now().timestamp_millis())
             .unwrap_or(0)
             .saturating_sub(snapshot.timestamp_ms),
-        // v2: `imbalance_avg` switched from full-book USD notional to top-N
-        // share-weighted queue imbalance (and to a true intra-second mean).
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 

@@ -4,8 +4,8 @@ use crate::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
     enums::clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
-        ChFactorDirection, ChFeatureSourceKind, ChFeatureValueKind, ChNormalizationSource,
-        ChOutcomeSide, ChPositionLedgerState, ChQuantLedgerEventKind,
+        ChFactorDirection, ChFactorValueState, ChFeatureSourceKind, ChFeatureValueKind,
+        ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState, ChQuantLedgerEventKind,
         ChRecommendationAttributionOutcome, ChRecommendationStatus,
     },
     types::{
@@ -34,10 +34,11 @@ pub struct QuantFeatureEventRow {
 
 /// Factor value fact emitted after feature normalization.
 ///
-/// Only **scored** factors of eligible markets are projected (present-only,
-/// mirroring the feature-event projection); indeterminate / missing factors emit
-/// no row — the authoritative record with the indeterminate reason lives in
-/// Postgres `quant_factor_value`.
+/// Scored factors of eligible markets carry present raw/normalized values.
+/// Structurally **not-applicable** factors (e.g. neg-risk on a binary market)
+/// also emit a row tagged with `value_state = not_applicable` so analytics can
+/// distinguish structural absence from missing data — the authoritative record
+/// with full detail lives in Postgres `quant_factor_value`.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantFactorEventRow {
     pub event_time: i64,
@@ -45,10 +46,11 @@ pub struct QuantFactorEventRow {
     pub market_id: MarketId,
     pub factor_name: String,
     pub factor_family: String,
-    pub raw_value: ChDecimal64,
-    pub normalized_score: ChProbability,
-    /// How the score was derived.
-    pub normalization_source: ChNormalizationSource,
+    pub value_state: ChFactorValueState,
+    pub raw_value: Option<ChDecimal64>,
+    pub normalized_score: Option<ChProbability>,
+    /// How the score was derived (absent when not scored).
+    pub normalization_source: Option<ChNormalizationSource>,
     pub confidence: ChProbability,
     pub direction: ChFactorDirection,
     pub model_run_id: ModelRunId,

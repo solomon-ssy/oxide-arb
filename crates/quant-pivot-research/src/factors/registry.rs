@@ -14,10 +14,14 @@ use quant_pivot_models::{
     runtime_config::{FactorsConfig, FeaturesConfig},
 };
 
-use crate::factors::{
-    computer::FactorComputer,
-    generic::generic_factors,
-    value::{FactorDefinitionSpec, FactorSet},
+use crate::{
+    factors::{
+        computer::FactorComputer,
+        generic::generic_factors,
+        structural::structural_factors,
+        value::{FactorDefinitionSpec, FactorSet},
+    },
+    model::FavoriteLongshotBiasTable,
 };
 
 /// A frozen registry of enabled factors: their governed specs and the computers
@@ -27,17 +31,26 @@ pub struct FactorRegistry {
 }
 
 impl FactorRegistry {
-    /// Build the registry, selecting the generic factors whose family is enabled.
+    /// Build the registry, selecting the generic + structural factors whose
+    /// family is enabled by `enabled_factor_families`.
     ///
-    /// Domain (vertical) factors are routed by category, not by the
-    /// `enabled_factor_families` list, so they are never selected here (3.3 ships
-    /// only the generic plane; see [`crate::factors::domain`]).
+    /// `bias_table` binds the favorite-longshot factor; `None` keeps it inert
+    /// (fail-closed). The table is runtime data — it does not affect
+    /// `factor_schema_hash`.
+    ///
+    /// Vertical/domain factors route by category (not this list) and are
+    /// reintroduced by Phase 11.2.2.
     #[must_use]
-    pub fn build(factors: &FactorsConfig, features: &FeaturesConfig) -> Self {
+    pub fn build(
+        factors: &FactorsConfig,
+        features: &FeaturesConfig,
+        bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
+    ) -> Self {
         let enabled: HashSet<FactorFamily> =
             factors.enabled_factor_families.iter().copied().collect();
         let selected = generic_factors(features)
             .into_iter()
+            .chain(structural_factors(factors, features, bias_table))
             .filter(|(spec, _)| enabled.contains(&spec.family))
             .collect();
         Self { factors: selected }

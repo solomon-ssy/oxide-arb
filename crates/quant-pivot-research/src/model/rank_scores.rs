@@ -77,7 +77,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         enums::{
-            factor::{FactorFamily, NormalizationSource},
+            factor::{FactorFamily, FactorValueState, NormalizationSource},
             quant::{FactorDirection, OutcomeSide},
         },
         types::{
@@ -93,6 +93,7 @@ mod tests {
             definition_id: FactorDefinitionId::from_v7(),
             name,
             family: FactorFamily::Liquidity,
+            value_state: FactorValueState::Scored,
             raw_value: Some(score),
             normalized_score: Some(Probability::new(score)),
             normalization_source: Some(NormalizationSource::CrossSection),

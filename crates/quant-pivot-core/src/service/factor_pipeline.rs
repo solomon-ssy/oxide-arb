@@ -14,7 +14,9 @@
 //! also adds the factor-value foreign key. This service is the callable unit the
 //! Phase 4 / 3.4 `ModelRunner` reuses.
 
-use crate::observability::factor_fact_writer::FactorEventWriter;
+use crate::{
+    governance::BiasTableApplicator, observability::factor_fact_writer::FactorEventWriter,
+};
 use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
@@ -72,6 +74,7 @@ pub struct FactorPipelineResult {
 pub struct FactorPipelineService {
     factor_repo: Arc<dyn FactorRepository>,
     event_writer: Arc<FactorEventWriter>,
+    bias_table: Arc<BiasTableApplicator>,
 }
 
 impl FactorPipelineService {
@@ -80,10 +83,12 @@ impl FactorPipelineService {
     pub fn new(
         factor_repo: Arc<dyn FactorRepository>,
         event_writer: Arc<FactorEventWriter>,
+        bias_table: Arc<BiasTableApplicator>,
     ) -> Self {
         Self {
             factor_repo,
             event_writer,
+            bias_table,
         }
     }
 
@@ -109,7 +114,10 @@ impl FactorPipelineService {
             .into());
         }
 
-        let engine = FactorEngine::new(request.factors, request.features);
+        // Bind the currently-activated favorite-longshot bias table (content-hash
+        // verified at activation). `None` keeps `struct.favorite_longshot` inert.
+        let bias_table = self.bias_table.current();
+        let engine = FactorEngine::new(request.factors, request.features, bias_table);
         if engine.registry().is_empty() {
             return Err(QuantError::config(
                 "no factors enabled: factors.enabled_factor_families selects an empty factor set",
@@ -148,7 +156,8 @@ impl FactorPipelineService {
         let mut rejected = Vec::new();
         for (index, outcome) in outcomes.iter().enumerate() {
             match &outcome.eligibility {
-                FactorEligibility::RejectCandidate { reason } => {
+                FactorEligibility::RejectCandidate { reason }
+                | FactorEligibility::NotApplicable { reason } => {
                     rejected.push(RejectedFactorMarket {
                         market_id: outcome.market_id.clone(),
                         reason: reason.clone(),

@@ -8,6 +8,7 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
+    governance::BiasTableApplicator,
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
@@ -45,12 +46,12 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgFactorRepository, PgFeatureRepository, PgMarketRepository,
-        PgModelRunRepository,
+        PgEventRepository, PgFactorRepository, PgFavoriteLongshotBiasTableRepository,
+        PgFeatureRepository, PgMarketRepository, PgModelRunRepository,
     },
     traits::{
-        EventRepository, FactorRepository, FeatureRepository, MarketRepository, ModelRunRepository,
-        QuantFactReadRepository,
+        EventRepository, FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+        MarketRepository, ModelRunRepository, QuantFactReadRepository,
     },
 };
 use quant_pivot_research::{
@@ -339,7 +340,11 @@ async fn create_definition_and_values_then_list_for_run() {
         AsyncWriterObservability::default(),
     );
     let event_writer = Arc::new(FactorEventWriter::new(Arc::new(writer)));
-    let service = FactorPipelineService::new(Arc::clone(&factor_repo), event_writer);
+    let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
+        PgFavoriteLongshotBiasTableRepository::new(db.clone()),
+    )
+        as Arc<dyn FavoriteLongshotBiasTableRepository>));
+    let service = FactorPipelineService::new(Arc::clone(&factor_repo), event_writer, bias_table);
 
     let model_run_id = ModelRunId::from_v7();
     // The factor-value → model_run FK (added in 3.4) requires the owning run to
@@ -428,9 +433,14 @@ async fn unpublished_factor_definitions_block_pipeline() {
         prometheus::IntCounter::new("factor_e2e_unpub_drops", "drops").expect("counter"),
         AsyncWriterObservability::default(),
     );
+    let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
+        PgFavoriteLongshotBiasTableRepository::new(db.clone()),
+    )
+        as Arc<dyn FavoriteLongshotBiasTableRepository>));
     let service = FactorPipelineService::new(
         Arc::clone(&factor_repo),
         Arc::new(FactorEventWriter::new(Arc::new(writer))),
+        bias_table,
     );
 
     let model_run_id = ModelRunId::from_v7();
@@ -505,7 +515,7 @@ async fn factor_event_writer_batches() {
     // rows through its async sink.
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&factors, &features);
+    let engine = FactorEngine::new(&factors, &features, None);
 
     let as_of = Utc::now();
     let market_a = sample_vector("0xbatcha", Decimal::from(20_000), Decimal::from(120), as_of);

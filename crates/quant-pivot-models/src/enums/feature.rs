@@ -15,8 +15,6 @@ pub enum EvidenceSourceKind {
     GammaMetadata,
     /// A persisted `ClickHouse` fact (microstructure / tick window).
     ClickHouseFact,
-    /// An external vertical (domain) data source.
-    DomainExternal,
     /// Derived/computed from other in-memory inputs.
     Derived,
 }
@@ -30,7 +28,6 @@ impl EvidenceSourceKind {
             Self::Book => "book",
             Self::GammaMetadata => "gamma_metadata",
             Self::ClickHouseFact => "clickhouse_fact",
-            Self::DomainExternal => "domain_external",
             Self::Derived => "derived",
         }
     }

@@ -13,7 +13,6 @@ mod availability;
 mod book;
 mod builder;
 mod decision_capture;
-mod domain;
 mod market;
 mod microstructure;
 pub mod names;
@@ -22,6 +21,7 @@ mod persistence;
 mod resolved;
 mod schema;
 pub(crate) mod stats;
+mod structural;
 mod timeseries;
 mod value;
 mod writer;
@@ -36,7 +36,6 @@ pub use builder::{
 pub use decision_capture::{
     MarketDecisionCapture, RejectedMarketDraft, ResolvedMarketBundle, draft_data_quality_snapshot,
 };
-pub use domain::{DomainFeatureBuilder, DomainFeatureSkeleton};
 pub use null_policy::{NullDecision, NullPolicyEngine};
 pub use resolved::{
     MarketWindowSnapshot, MicrostructureBucket, ResolvedBook, ResolvedMarketContext,
@@ -60,9 +59,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::PointInTimeDataSource,
-    domain::market::registry::MarketRegistryInfo,
+    domain::market::registry::{MarketRegistryInfo, NegRiskLegSet},
     runtime_config::{DataQualityConfig, FeaturesConfig},
-    types::{MarketId, SchemaVersion, TokenId},
+    types::{EventId, MarketId, SchemaVersion, TokenId},
 };
 
 use crate::{pit::PitQueryEngine, selection::SelectedMarket};
@@ -95,6 +94,8 @@ pub struct FeatureBuildInput<'a> {
     pub pit: PitView<'a>,
     /// Pre-fetched windowed microstructure history for the primary token.
     pub window: &'a MarketWindowSnapshot,
+    /// Neg-risk sibling leg set: expected catalog count plus resolvable YES legs.
+    pub sibling: &'a NegRiskLegSet,
     /// Frozen feature configuration snapshot.
     pub config: &'a FeaturesConfig,
     /// Frozen data-quality configuration snapshot.
@@ -168,6 +169,20 @@ impl PitView<'_> {
         match self {
             Self::Live(source) => Ok(source.market_context(market_id, as_of)),
             Self::Historical(_) => Ok(None),
+        }
+    }
+
+    /// Expected vs resolved neg-risk YES legs for structural full-leg aggregates.
+    ///
+    /// The live source enumerates from the `MarketRegistry`; the historical arm
+    /// returns empty — offline dataset/backtest builds supply the set from the
+    /// prefetched window instead (same `resolve_book` semantics keep online and
+    /// offline byte-identical).
+    #[must_use]
+    pub fn neg_risk_leg_set(&self, event_id: &EventId) -> NegRiskLegSet {
+        match self {
+            Self::Live(source) => source.neg_risk_leg_set(event_id),
+            Self::Historical(_) => NegRiskLegSet::empty(),
         }
     }
 }

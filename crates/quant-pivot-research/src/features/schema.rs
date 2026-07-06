@@ -13,7 +13,6 @@ use std::{collections::HashMap, ops::RangeInclusive};
 use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use quant_pivot_models::{
-    enums::domain::DomainFamily,
     runtime_config::{
         FeatureFamily, FeaturesConfig,
         validation::{FEATURES_CONFIG_VALIDATORS, FeaturesConfigValidator},
@@ -25,8 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::features::{
     FeatureName,
-    domain::DOMAIN_FEATURES,
-    names::{book, market as market_names, micro, ts},
+    names::{book, market as market_names, micro, structural as structural_names, ts},
     value::{EvidenceSourceKind, FeatureValueKind},
 };
 
@@ -71,11 +69,9 @@ pub enum SourceRequirement {
     GammaMetadata,
     /// A window of `book_microstructure_*` facts.
     MicrostructureWindow,
-    /// An external vertical data source for a domain family.
-    DomainExternal {
-        /// The vertical the external source serves.
-        family: DomainFamily,
-    },
+    /// Same-`as_of` order books of the market's neg-risk sibling YES legs
+    /// (structural full-leg aggregates). No external data source.
+    NegRiskSiblingLegs,
 }
 
 impl SourceRequirement {
@@ -87,10 +83,9 @@ impl SourceRequirement {
     #[must_use]
     pub const fn evidence_kind(self) -> EvidenceSourceKind {
         match self {
-            Self::PublishedL2Book => EvidenceSourceKind::Book,
+            Self::PublishedL2Book | Self::NegRiskSiblingLegs => EvidenceSourceKind::Book,
             Self::GammaMetadata => EvidenceSourceKind::GammaMetadata,
             Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
-            Self::DomainExternal { .. } => EvidenceSourceKind::DomainExternal,
         }
     }
 }
@@ -130,8 +125,9 @@ pub enum NullPolicy {
     NeutralValue(Decimal),
     /// Missing ⇒ keep missing but degrade data quality / confidence.
     Penalize,
-    /// Missing ⇒ keep missing; the generic model proceeds (vertical data gap).
-    DomainMissing,
+    /// Missing ⇒ keep missing without degrading; the value is legitimately
+    /// optional for this market (e.g. a neg-risk aggregate on a binary market).
+    Optional,
 }
 
 /// A fully-specified feature definition (the eight-element schema record).
@@ -275,7 +271,7 @@ impl FeatureSchema {
                 FeatureFamily::PriceBook => price_book_specs(config, &mut specs),
                 FeatureFamily::TimeSeries => time_series_specs(config, &mut specs),
                 FeatureFamily::Microstructure => microstructure_specs(&mut specs),
-                FeatureFamily::Domain => domain_specs(&mut specs),
+                FeatureFamily::Structural => structural_specs(&mut specs),
             }
         }
         Self::new(config.feature_schema_version, specs)
@@ -345,6 +341,20 @@ impl FeatureSchema {
             matches!(
                 spec.source_requirement,
                 SourceRequirement::MicrostructureWindow
+            )
+        })
+    }
+
+    /// Whether any governed spec needs same-`as_of` neg-risk sibling-leg books.
+    ///
+    /// Drives the feature pipeline's sibling-leg prefetch: a schema without any
+    /// structural neg-risk aggregate skips the sibling resolution entirely.
+    #[must_use]
+    pub fn needs_sibling_legs(&self) -> bool {
+        self.specs.iter().any(|spec| {
+            matches!(
+                spec.source_requirement,
+                SourceRequirement::NegRiskSiblingLegs
             )
         })
     }
@@ -646,31 +656,139 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     );
 }
 
-fn domain_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::Domain as F;
+/// Structural (prediction-market-aware) feature specs (Phase 11.2.1).
+///
+/// Platform-computable from existing facts (book, market metadata, microstructure
+/// window, and same-`as_of` neg-risk sibling-leg books) — no external source.
+/// Neg-risk aggregates are `Optional`: on a binary market they resolve to
+/// `NullReason::NotApplicable`, and on a missing leg to `NullReason::LegBookMissing`
+/// — never a fabricated zero.
+fn structural_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::Structural as F;
     use FeatureValueKind::Decimal as Dec;
-    use PitRule::FactBeforeAsOfMinusDelay as Pit;
-    use StalenessRule::None as Fresh;
+    use NullPolicy::Penalize;
+    use PitRule::{BookVersionAtOrBeforeAsOf as BookPit, FactBeforeAsOfMinusDelay as WindowPit};
+    use SourceRequirement::{MicrostructureWindow, PublishedL2Book};
+    use StalenessRule::{MaxBookAge, MaxFeatureBucketAge};
 
-    // One representative spec per vertical, names sourced from the shared catalog.
-    // External ingestion is deferred (03.2 §10): until a source is wired these
-    // always resolve to `NullReason::DomainDataMissing` under
-    // `NullPolicy::DomainMissing`.
-    for (family, name) in DOMAIN_FEATURES {
-        out.push(
-            spec(
-                name,
-                F,
-                Dec,
-                SourceRequirement::DomainExternal { family },
-                Pit,
-                Fresh,
-            )
-            .unit(FeatureUnit::Ratio)
-            .null_policy(NullPolicy::DomainMissing)
-            .build(),
-        );
-    }
+    out.push(
+        spec(
+            structural_names::SHORT_RETURN,
+            F,
+            Dec,
+            MicrostructureWindow,
+            WindowPit,
+            MaxFeatureBucketAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Penalize)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::SHOCK_RATIO,
+            F,
+            Dec,
+            MicrostructureWindow,
+            WindowPit,
+            MaxFeatureBucketAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .range(Decimal::ZERO, Decimal::from(1_000_000))
+        .null_policy(Penalize)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::PRICE_EXTREMITY,
+            F,
+            Dec,
+            PublishedL2Book,
+            BookPit,
+            MaxBookAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        // Signed `mid − 0.5` ∈ [−0.5, 0.5].
+        .range(Decimal::new(-5, 1), Decimal::new(5, 1))
+        .null_policy(Penalize)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::BOOK_CHURN_INTENSITY,
+            F,
+            Dec,
+            MicrostructureWindow,
+            WindowPit,
+            MaxFeatureBucketAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Penalize)
+        .build(),
+    );
+    structural_neg_risk_specs(out);
+}
+
+fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::Structural as F;
+    use FeatureValueKind::{Count, Decimal as Dec};
+    use NullPolicy::Optional;
+    use PitRule::BookVersionAtOrBeforeAsOf as BookPit;
+    use SourceRequirement::NegRiskSiblingLegs;
+    use StalenessRule::MaxBookAge;
+
+    out.push(
+        spec(
+            structural_names::NEGRISK_LEG_ASK_SUM,
+            F,
+            Dec,
+            NegRiskSiblingLegs,
+            BookPit,
+            MaxBookAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::NEGRISK_LEG_BID_SUM,
+            F,
+            Dec,
+            NegRiskSiblingLegs,
+            BookPit,
+            MaxBookAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::NEGRISK_LEG_COUNT,
+            F,
+            Count,
+            NegRiskSiblingLegs,
+            BookPit,
+            MaxBookAge,
+        )
+        .unit(FeatureUnit::Count)
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::NEGRISK_CONVERT_EDGE,
+            F,
+            Dec,
+            NegRiskSiblingLegs,
+            BookPit,
+            MaxBookAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Optional)
+        .build(),
+    );
 }
 
 /// Validate `features.required_features` against the active [`FeatureSchema`].

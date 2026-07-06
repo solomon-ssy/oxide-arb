@@ -119,7 +119,7 @@ pub async fn rematerialize_training_examples(
         .await?;
 
     let builder = ConfiguredFeatureBuilder::new(&replay.features);
-    let engine = FactorEngine::new(&replay.factors, &replay.features);
+    let engine = FactorEngine::new(&replay.factors, &replay.features, replay.bias_table.clone());
 
     let mut rematerialized = Vec::new();
     for (as_of, group) in &schedule.by_as_of {
@@ -157,7 +157,8 @@ pub async fn rematerialize_training_examples(
                     .iter()
                     .map(|scored| scored.value.clone())
                     .collect(),
-                FactorEligibility::RejectCandidate { .. } => Vec::new(),
+                FactorEligibility::RejectCandidate { .. }
+                | FactorEligibility::NotApplicable { .. } => Vec::new(),
             };
             rematerialized.push(TrainingExample {
                 example_id: meta.example_id.clone(),
@@ -224,7 +225,7 @@ pub async fn rematerialize_exit_decision_examples(
         .await?;
 
     let builder = ConfiguredFeatureBuilder::new(&replay.features);
-    let engine = FactorEngine::new(&replay.factors, &replay.features);
+    let engine = FactorEngine::new(&replay.factors, &replay.features, replay.bias_table.clone());
 
     // Recompute the PIT market factors once per (as_of, market, token); many
     // lots may share the same key and reuse the same market cross-section.
@@ -257,7 +258,8 @@ pub async fn rematerialize_exit_decision_examples(
                     .iter()
                     .map(|scored| scored.value.clone())
                     .collect(),
-                FactorEligibility::RejectCandidate { .. } => Vec::new(),
+                FactorEligibility::RejectCandidate { .. }
+                | FactorEligibility::NotApplicable { .. } => Vec::new(),
             };
             market_factors.insert(
                 (

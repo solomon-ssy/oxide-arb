@@ -514,6 +514,7 @@ fn factor_breakdown(candidate: &SignalCandidate) -> RecommendationFactorBreakdow
             .map(|factor| FactorBreakdownEntry {
                 factor_name: factor.name.to_string(),
                 family: factor.family,
+                value_state: factor.value_state,
                 raw_value: factor.raw_value,
                 normalized_score: factor.normalized_score,
                 normalization_source: factor.normalization_source,

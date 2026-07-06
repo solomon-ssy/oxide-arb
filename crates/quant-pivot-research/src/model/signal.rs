@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
     enums::{
-        factor::{FactorFamily, FactorIndeterminateReason, NormalizationSource},
+        factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{FactorDirection, OutcomeSide},
     },
     types::{
@@ -30,6 +30,10 @@ pub struct FactorContribution {
     pub name: FactorName,
     /// Factor family.
     pub family: FactorFamily,
+    /// Authoritative value state (scored / missing-input / not-applicable /
+    /// indeterminate) — lets the report render "—(not applicable)" distinctly
+    /// from "—(missing)".
+    pub value_state: FactorValueState,
     /// Raw factor value before normalization.
     pub raw_value: Option<Decimal>,
     /// Normalized factor score in `[0, 1]`; `None` when missing / indeterminate.

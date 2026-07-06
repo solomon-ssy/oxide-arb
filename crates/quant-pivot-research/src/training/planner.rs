@@ -132,7 +132,7 @@ mod tests {
             sample_interval_secs: interval_secs,
             horizons_secs: vec![60],
             source_delay_secs: 10,
-            feature_schema_version: SchemaVersion::new(1),
+            feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
         }

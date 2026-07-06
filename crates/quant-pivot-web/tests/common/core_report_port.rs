@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use quant_pivot_core::{
-    app::quant_report::CoreQuantReportPort, infra::schedule::ReportScheduleRunner,
+    app::ports::quant_report::CoreQuantReportPort, infra::schedule::ReportScheduleRunner,
     report::AdHocReportRequest,
 };
 use quant_pivot_error::QuantResult;

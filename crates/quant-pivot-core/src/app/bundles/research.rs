@@ -12,30 +12,27 @@ use crate::{
     },
     service::{
         factor_pipeline::FactorPipelineService,
+        favorite_longshot_fit::FavoriteLongshotFitService,
         feature_pipeline::FeaturePipelineService,
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         training_dataset::{
-            TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
-            default_labelers,
+            TrainingDatasetService, TrainingDatasetServiceDeps, TrainingDatasetServiceWire,
         },
     },
 };
 use quant_pivot_api::{fees::FeeCalculator, ws::WsShardHealthPort};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::domain::{FactorGovernancePort, ModelGovernancePort, ModelSpecPort};
-use quant_pivot_models::{
-    config::DeployConfig,
-    domain::RuntimeConfigPort,
-    runtime_config::{
-        DataQualityConfig, FactorsConfig, FeaturesConfig, SelectionConfig, TrainingConfig,
-    },
+use quant_pivot_models::domain::{
+    FactorGovernancePort, FavoriteLongshotFitPort, ModelGovernancePort, ModelSpecPort,
 };
+use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
-    AttributionRepository, BacktestReportRepository, FactorRepository, FeatureRepository,
-    MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
-    ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
-    PositionRepository, QuantFactReadRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository, ShadowComparisonRepository, TrainingDatasetRepository,
+    AttributionRepository, BacktestReportRepository, FactorRepository,
+    FavoriteLongshotBiasTableRepository, FeatureRepository, MarketRepository,
+    MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
+    ModelRegistryRepository, ModelRunRepository, PositionRepository, QuantFactReadRepository,
+    RecommendationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::{
@@ -111,6 +108,8 @@ pub struct ResearchBundle {
     pub position_repo: Arc<dyn PositionRepository>,
     /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
     pub fee_calculator: Arc<FeeCalculator>,
+    /// Favorite-longshot bias-table fitter + read port (11.2.1).
+    pub favorite_longshot_fit: Arc<dyn FavoriteLongshotFitPort>,
 }
 
 struct OfflineResearchRepos {
@@ -155,6 +154,7 @@ impl ResearchBundle {
         let factor_pipeline = Arc::new(FactorPipelineService::new(
             Arc::clone(&factor_repo),
             Arc::clone(&deps.infra.factor_event_writer),
+            Arc::clone(&deps.governance.bias_table),
         ));
 
         let model_run_repo: Arc<dyn ModelRunRepository> =
@@ -189,6 +189,15 @@ impl ResearchBundle {
         let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
             model_registry: Arc::clone(&model_registry_repo),
         }));
+        let favorite_longshot_fit: Arc<dyn FavoriteLongshotFitPort> =
+            Arc::new(FavoriteLongshotFitService::new(
+                Arc::clone(&deps.infra.quant_fact_read),
+                Arc::clone(&deps.data.market_repo),
+                Arc::clone(&repos.favorite_longshot_bias_table)
+                    as Arc<dyn FavoriteLongshotBiasTableRepository>,
+                Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+                Arc::clone(&offline.training_dataset) as Arc<dyn TrainingDatasetRepository>,
+            ));
 
         Self {
             artifact_store,
@@ -217,6 +226,7 @@ impl ResearchBundle {
             market_repo: Arc::clone(&deps.data.market_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             fee_calculator: Arc::clone(&deps.data.fee_calculator),
+            favorite_longshot_fit,
         }
     }
 
@@ -226,12 +236,7 @@ impl ResearchBundle {
     /// labels, and writes a content-hashed Parquet artifact + ledger row.
     pub fn training_dataset_service(
         &self,
-        features: FeaturesConfig,
-        factors: FactorsConfig,
-        data_quality: DataQualityConfig,
-        training: TrainingConfig,
-        selection: SelectionConfig,
-        max_spine_samples: u64,
+        wire: TrainingDatasetServiceWire,
     ) -> QuantResult<TrainingDatasetService> {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
@@ -245,15 +250,8 @@ impl ResearchBundle {
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
             },
-            TrainingDatasetBuildConfig {
-                features,
-                factors,
-                data_quality,
-                training,
-                selection,
-                labelers: default_labelers(),
-            },
-            max_spine_samples,
+            wire.config,
+            wire.max_spine_samples,
         )
     }
 
@@ -277,6 +275,7 @@ impl ResearchBundle {
                 &deps.governance.alerts,
             ))),
             weight_overlay: Arc::clone(&deps.governance.weight_overlay),
+            bias_table: Arc::clone(&deps.governance.bias_table),
         }))
     }
 

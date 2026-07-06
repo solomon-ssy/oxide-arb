@@ -1,4 +1,4 @@
-//! Runtime-config v7 semantic validation.
+//! Runtime-config semantic validation.
 //!
 //! This module validates only the current quant-pivot document. Legacy Endgame
 //! and superseded pre-quant configuration paths are not accepted (clean-break
@@ -111,6 +111,18 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
         &config.features.volatility_windows_secs,
         report,
     );
+    if config.features.structural.shock_window_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.structural.shock_window_secs",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    if config.features.structural.book_churn_window_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.structural.book_churn_window_secs",
+            detail: "must be > 0".to_owned(),
+        });
+    }
     let mut seen = HashSet::new();
     for feature_ref in &config.features.required_features {
         let label = feature_ref.name.trim();
@@ -193,11 +205,11 @@ fn validate_factors(config: &RuntimeConfig, report: &mut ConfigValidationReport)
     }
     let mut seen = HashSet::new();
     for family in &config.factors.enabled_factor_families {
-        if !family.is_generic() {
+        if !family.is_config_selectable() {
             report.errors.push(ConfigValidationError::InvalidValue {
                 field: "factors.enabled_factor_families",
                 detail: format!(
-                    "domain factor family `{family}` must not appear in config; vertical factors are routed by market category"
+                    "factor family `{family}` is not config-selectable; vertical/domain factors are routed by market category"
                 ),
             });
         }
@@ -220,6 +232,103 @@ fn validate_factors(config: &RuntimeConfig, report: &mut ConfigValidationReport)
     validate_factor_normalization(config, report);
     validate_factor_cross_section(config, report);
     validate_factor_orthogonalize(config, report);
+    validate_factor_structural(config, report);
+}
+
+/// Validate the structural factor plane (Phase 11.2.1). Every knob a structural
+/// factor / bias-table fit reads is checked here so the compute path never falls
+/// back on a silent default (the factor / fit parse the same values fail-closed).
+fn validate_factor_structural(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let structural = &config.factors.structural;
+    positive_decimal(
+        "factors.structural.reversal_after_shock.shock_k",
+        &structural.reversal_after_shock.shock_k,
+        report,
+    );
+    positive_decimal(
+        "factors.structural.reversal_after_shock.shock_cap",
+        &structural.reversal_after_shock.shock_cap,
+        report,
+    );
+    if let (Ok(k), Ok(cap)) = (
+        structural
+            .reversal_after_shock
+            .shock_k
+            .value
+            .parse::<Decimal>(),
+        structural
+            .reversal_after_shock
+            .shock_cap
+            .value
+            .parse::<Decimal>(),
+    ) && cap < k
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.reversal_after_shock.shock_cap",
+            detail: "shock_cap must be >= shock_k".to_owned(),
+        });
+    }
+    if structural.negrisk.min_legs < 2 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.negrisk.min_legs",
+            detail: "must be >= 2 (a neg-risk event has at least two YES legs)".to_owned(),
+        });
+    }
+
+    let fl = &structural.favorite_longshot;
+    if fl.bins == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.bins",
+            detail: "must be >= 1".to_owned(),
+        });
+    }
+    // Strictly-ascending, positive ttr bucket boundaries.
+    let mut prev = 0_u64;
+    for &bound in &fl.ttr_bucket_bounds_secs {
+        if bound <= prev {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.structural.favorite_longshot.ttr_bucket_bounds_secs",
+                detail: "boundaries must be strictly ascending and positive".to_owned(),
+            });
+            break;
+        }
+        prev = bound;
+    }
+    if fl.min_bin_samples == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.min_bin_samples",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    if fl.min_curve_samples == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.min_curve_samples",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    if fl.fit_sample_stride_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.fit_sample_stride_secs",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    // Confidence level must sit in (0.5, 1) for a meaningful two-sided interval.
+    match fl.ci_confidence.value.parse::<Decimal>() {
+        Ok(parsed) if parsed > Decimal::new(5, 1) && parsed < Decimal::ONE => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.ci_confidence",
+            detail: format!("`{parsed}` must be within (0.5, 1)"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.ci_confidence",
+            detail: format!("`{}` is not a valid decimal string", fl.ci_confidence.value),
+        }),
+    }
+    non_negative_decimal(
+        "factors.structural.favorite_longshot.ic_significance_min",
+        &fl.ic_significance_min,
+        report,
+    );
 }
 
 fn validate_factor_normalization(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -828,14 +937,17 @@ mod tests {
     }
 
     #[test]
-    fn domain_family_in_config_is_rejected() {
-        let mut config = RuntimeConfig::default();
-        config
-            .factors
-            .enabled_factor_families
-            .push(FactorFamily::DomainSports);
+    fn structural_family_in_config_is_accepted() {
+        let config = RuntimeConfig::default();
+        assert!(
+            config
+                .factors
+                .enabled_factor_families
+                .contains(&FactorFamily::Structural),
+            "default config must enable the structural family"
+        );
         let report = validate_runtime_config(&config);
-        assert!(report.has_errors());
+        assert!(!report.has_errors());
     }
 
     #[test]

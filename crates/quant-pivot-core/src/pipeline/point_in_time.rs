@@ -6,9 +6,12 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
         PointInTimeDataSource,
-        market::{book::BookSnapshot, registry::MarketRegistryInfo},
+        market::{
+            book::BookSnapshot,
+            registry::{MarketRegistryInfo, NegRiskLegSet},
+        },
     },
-    types::{MarketId, TokenId},
+    types::{EventId, MarketId, TokenId},
 };
 
 use crate::pipeline::{book_store::BookStore, market_registry::MarketRegistry};
@@ -48,5 +51,9 @@ impl PointInTimeDataSource for LiveBookDataSource {
         _as_of: DateTime<Utc>,
     ) -> Option<Arc<MarketRegistryInfo>> {
         self.market_registry.get_market(market_id)
+    }
+
+    fn neg_risk_leg_set(&self, event_id: &EventId) -> NegRiskLegSet {
+        self.market_registry.neg_risk_leg_set(event_id)
     }
 }

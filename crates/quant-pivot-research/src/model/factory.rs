@@ -43,6 +43,12 @@ pub struct ActiveSchemaBinding {
     pub feature_schema_hash: ContentHash,
     /// Hash of the active enabled factor set.
     pub factor_schema_hash: ContentHash,
+    /// Content hash of the bound favorite-longshot bias table, if any.
+    ///
+    /// Runtime calibration data — **not** part of the factor schema digest and
+    /// not verified against model artifacts; recorded for train-serve provenance
+    /// and input-hash audit only.
+    pub bias_table_hash: Option<ContentHash>,
 }
 
 /// Loads governed model runtimes from the content-addressed artifact store.
@@ -309,6 +315,7 @@ mod tests {
         ActiveSchemaBinding {
             feature_schema_hash: feature_hash,
             factor_schema_hash: hash("fac"),
+            bias_table_hash: None,
         }
     }
 

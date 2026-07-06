@@ -1,6 +1,9 @@
-//! Factor family taxonomy: generic planes plus vertical domain families.
+//! Factor family taxonomy.
+//!
+//! Generic planes plus the platform-internal structural plane (Phase 11.2.1).
+//! Vertical (external-data) domain families are reintroduced by Phase 11.2.2
+//! when a real external source is wired.
 
-use super::domain::DomainFamily;
 use schemars::JsonSchema;
 
 crate::pg_enum! {
@@ -15,11 +18,10 @@ crate::pg_enum! {
         Activity => "activity",
         Resolution => "resolution",
         DataQuality => "data_quality",
-        DomainSports => "domain_sports",
-        DomainPolitics => "domain_politics",
-        DomainCrypto => "domain_crypto",
-        DomainWeather => "domain_weather",
-        DomainGeopolitics => "domain_geopolitics",
+        /// Prediction-market structural signals (neg-risk leg drift, shock-gated
+        /// reversal, resolution-proximity regime, favorite-longshot). Platform-
+        /// computable from existing facts — no external data source.
+        Structural => "structural",
     }
 }
 
@@ -27,11 +29,7 @@ crate::pg_enum! {
     type_name = "qp_factor_definition_scope",
     pub enum FactorDefinitionScope {
         Generic => "generic",
-        DomainSports => "domain_sports",
-        DomainPolitics => "domain_politics",
-        DomainCrypto => "domain_crypto",
-        DomainWeather => "domain_weather",
-        DomainGeopolitics => "domain_geopolitics",
+        Structural => "structural",
     }
 }
 
@@ -79,6 +77,29 @@ crate::pg_enum! {
 }
 
 crate::pg_enum! {
+    type_name = "qp_factor_value_state",
+    /// The authoritative outcome state of a persisted factor value — orthogonal
+    /// to `indeterminate_reason` (which is populated only for `Indeterminate`).
+    ///
+    /// This makes a structurally **not-applicable** factor (a neg-risk factor on
+    /// a binary market) durably distinguishable from a **missing-input** factor:
+    /// both carry no score, but they are different truths and must render / audit
+    /// differently (never conflated into one null bucket).
+    @derive(JsonSchema)
+    pub enum FactorValueState {
+        /// The factor produced a usable normalized score.
+        Scored => "scored",
+        /// A single declared input was absent (existing missing-input semantics).
+        MissingInput => "missing_input",
+        /// The factor does not apply to this market's structure (not a data gap).
+        NotApplicable => "not_applicable",
+        /// The factor should have computed but an input was structurally absent,
+        /// or the cross-section could not normalize (see `indeterminate_reason`).
+        Indeterminate => "indeterminate",
+    }
+}
+
+crate::pg_enum! {
     type_name = "qp_factor_indeterminate_reason",
     /// Why a factor produced **no** normalized score (never a silent neutral).
     @derive(JsonSchema)
@@ -89,6 +110,9 @@ crate::pg_enum! {
         ZeroVariance => "zero_variance",
         /// Small cross-section + `historical_quantile` policy but no usable history.
         NoHistory => "no_history",
+        /// A neg-risk sibling leg's order book was absent at `as_of`, so the
+        /// full-leg structural factor could not be computed (never a silent zero).
+        LegBookMissing => "leg_book_missing",
     }
 }
 
@@ -119,38 +143,24 @@ impl FactorFamily {
         )
     }
 
+    /// Whether this is the platform-internal structural plane (Phase 11.2.1).
+    #[must_use]
+    pub const fn is_structural(self) -> bool {
+        matches!(self, Self::Structural)
+    }
+
+    /// Whether this family is config-selectable via `enabled_factor_families`
+    /// (generic + structural are; future domain families route by category).
+    #[must_use]
+    pub const fn is_config_selectable(self) -> bool {
+        self.is_generic() || self.is_structural()
+    }
+
     #[must_use]
     pub const fn definition_scope(self) -> FactorDefinitionScope {
         match self {
-            Self::DomainSports => FactorDefinitionScope::DomainSports,
-            Self::DomainPolitics => FactorDefinitionScope::DomainPolitics,
-            Self::DomainCrypto => FactorDefinitionScope::DomainCrypto,
-            Self::DomainWeather => FactorDefinitionScope::DomainWeather,
-            Self::DomainGeopolitics => FactorDefinitionScope::DomainGeopolitics,
+            Self::Structural => FactorDefinitionScope::Structural,
             _ => FactorDefinitionScope::Generic,
-        }
-    }
-
-    #[must_use]
-    pub const fn domain_family(self) -> Option<DomainFamily> {
-        match self {
-            Self::DomainSports => Some(DomainFamily::Sports),
-            Self::DomainPolitics => Some(DomainFamily::Politics),
-            Self::DomainCrypto => Some(DomainFamily::Crypto),
-            Self::DomainWeather => Some(DomainFamily::Weather),
-            Self::DomainGeopolitics => Some(DomainFamily::Geopolitics),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn from_domain(domain: DomainFamily) -> Self {
-        match domain {
-            DomainFamily::Sports => Self::DomainSports,
-            DomainFamily::Politics => Self::DomainPolitics,
-            DomainFamily::Crypto => Self::DomainCrypto,
-            DomainFamily::Weather => Self::DomainWeather,
-            DomainFamily::Geopolitics => Self::DomainGeopolitics,
         }
     }
 }

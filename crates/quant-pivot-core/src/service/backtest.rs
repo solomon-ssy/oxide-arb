@@ -318,6 +318,11 @@ impl BacktestService {
         let binding = ActiveSchemaBinding {
             feature_schema_hash: dataset.feature_schema_hash.clone(),
             factor_schema_hash: dataset.factor_schema_hash.clone(),
+            bias_table_hash: self
+                .replay
+                .bias_table
+                .as_ref()
+                .map(|table| table.content_hash.clone()),
         };
         let factory = self.deps.factory_builder.build(binding);
         // Backtests are deterministic and never apply a config weight overlay.
@@ -615,7 +620,11 @@ async fn run_backtest_replay(
     inputs: BacktestReplayInputs,
 ) -> QuantResult<Option<BacktestRunResult>> {
     let builder = ConfiguredFeatureBuilder::new(&inputs.replay.features);
-    let engine = FactorEngine::new(&inputs.replay.factors, &inputs.replay.features);
+    let engine = FactorEngine::new(
+        &inputs.replay.factors,
+        &inputs.replay.features,
+        inputs.replay.bias_table.clone(),
+    );
 
     let total_sections = inputs.schedule.by_as_of.len() as u64;
     let mut processed_sections: u64 = 0;

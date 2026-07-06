@@ -342,7 +342,7 @@ fn book_row(token: &str, event_time_ms: i64) -> BookSnapshotRow {
         ingestion_time: event_time_ms,
         sequence: 1,
         source: ChFactSource::WsSnapshot,
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 
@@ -378,7 +378,7 @@ fn micro_row(token: &str, bucket_time_ms: i64, mid: Decimal) -> BookMicrostructu
         gap_count: 0,
         last_trade_count: 0,
         max_book_age_ms: 0,
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 
@@ -529,6 +529,7 @@ fn service_with_selection(
             // this frozen selection policy.
             selection,
             labelers: default_labelers(),
+            bias_table: None,
         },
         2_000_000,
     )
@@ -863,7 +864,7 @@ async fn settlement_label_available_after_resolution() {
             observed_at: as_of_ms + 30_000,
             sequence: 1,
             source: ChFactSource::WsMarketResolved,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion::FIRST,
         }],
     );
     let scenario = Arc::new(Mutex::new(fact));
@@ -1068,7 +1069,7 @@ async fn settlement_label_visible_without_micro_past_resolution() {
                 observed_at: as_of_ms + 30_000,
                 sequence: 1,
                 source: ChFactSource::WsMarketResolved,
-                schema_version: ChSchemaVersion(2),
+                schema_version: ChSchemaVersion::FIRST,
             }],
         )]),
     };

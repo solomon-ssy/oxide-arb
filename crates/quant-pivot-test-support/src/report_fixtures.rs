@@ -15,7 +15,7 @@ use quant_pivot_models::{
     domain::{RecommendationInfo, RecommendationReportInfo},
     enums::{
         common::MarketCategory,
-        factor::{FactorFamily, NormalizationSource},
+        factor::{FactorFamily, FactorValueState, NormalizationSource},
         quant::{
             AccountSource, BindingConstraint, EntryTriggerKind, ExitSettlementMode,
             FactorDirection, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
@@ -231,6 +231,7 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
     RecommendationFactorBreakdown(vec![FactorBreakdownEntry {
         factor_name: "liquidity_depth".to_owned(),
         family: FactorFamily::Liquidity,
+        value_state: FactorValueState::Scored,
         raw_value: Some(dec!(1234.5)),
         normalized_score: Some(Probability::new(dec!(0.8))),
         normalization_source: Some(NormalizationSource::CrossSection),

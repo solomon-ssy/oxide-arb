@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
-    app::account_read::CoreAccountReadPort,
+    app::ports::account_read::CoreAccountReadPort,
     pipeline::market_registry::MarketRegistry,
     service::account::{AccountProviderFactory, PolymarketAccountClient, ReservedCapitalReader},
 };

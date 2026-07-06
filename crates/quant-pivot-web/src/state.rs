@@ -8,11 +8,11 @@ use quant_pivot_models::{
     domain::{
         AccountReadPort, BacktestPort, CatalogStatusPort, CoreEvent, CoreEventPublisher,
         DataQualityPort, ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort,
-        KillSwitchPort, MarketDataPort, MaterializationRunEvent, MaterializationRunKind,
-        MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelSpecPort,
-        ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort,
-        ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort, RuntimeControlPort,
-        TrainingDatasetPort,
+        FavoriteLongshotFitPort, KillSwitchPort, MarketDataPort, MaterializationRunEvent,
+        MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort,
+        ModelSpecPort, ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort,
+        ReconciliationPort, ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort,
+        RuntimeControlPort, StructuralMonitorPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -75,9 +75,13 @@ pub struct AppState {
     /// Read-only research catalog paging (datasets / models / backtests /
     /// comparisons / factors) for the operator workbench (Phase 10.5).
     pub research_catalog: Arc<dyn ResearchCatalogPort>,
-    /// Durable async research-job engine (dataset build / model train / backtest):
-    /// enqueue + task-center list/get/cancel/retry.
+    /// Durable async research-job engine (dataset build / model train / backtest
+    /// / bias-table fit): enqueue + task-center list/get/cancel/retry.
     pub research_jobs: Arc<dyn ResearchJobPort>,
+    /// Favorite-longshot bias-table fit enqueue + artifact read (Phase 11.2.1).
+    pub favorite_longshot: Arc<dyn FavoriteLongshotFitPort>,
+    /// Live neg-risk structural-drift monitor (Phase 11.2.1).
+    pub structural_monitor: Arc<dyn StructuralMonitorPort>,
     /// Recommendation report read + governed mutation (Phase 04.4 API).
     pub quant_reports: Arc<dyn QuantReportPort>,
     /// Venue account live + snapshot read surface.

@@ -108,10 +108,15 @@ pub enum NullReason {
     StaleBeyondPolicy,
     /// A computed value fell outside the feature's valid range.
     OutOfValidRange,
-    /// A domain (vertical) data source had no value for this market.
-    DomainDataMissing,
     /// Insufficient history to compute a windowed feature.
     InsufficientHistory,
+    /// The feature does not apply to this market's structure (e.g. a neg-risk
+    /// full-leg aggregate on a binary market). Structurally absent — never a
+    /// data gap, never a fabricated zero.
+    NotApplicable,
+    /// A neg-risk sibling leg's order book was absent at `as_of`, so a full-leg
+    /// structural feature could not be computed (fail-closed, never zero).
+    LegBookMissing,
 }
 
 /// A provenance reference tying a feature value back to its evidence.

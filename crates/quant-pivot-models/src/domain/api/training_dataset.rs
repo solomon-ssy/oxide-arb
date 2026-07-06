@@ -40,6 +40,7 @@ use crate::{
 /// `Serialize` is derived so the request can be frozen verbatim into a durable
 /// research-job's `params_json` (the async job ledger replays it on execute).
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_build_training_dataset_request"))]
 pub struct BuildTrainingDatasetRequest {
     /// Target model specification (trainer binds artifacts to this spec).
     pub model_spec_id: ModelSpecId,
@@ -72,6 +73,8 @@ pub struct BuildTrainingDatasetRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_dataset_id: Option<TrainingDatasetId>,
 }
+
+crate::half_open_window_request!(BuildTrainingDatasetRequest);
 
 const fn default_feature_schema_version() -> SchemaVersion {
     SchemaVersion::FIRST

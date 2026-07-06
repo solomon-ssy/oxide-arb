@@ -29,6 +29,7 @@
 
 pub mod account;
 pub mod auth;
+pub mod bias_tables;
 pub mod data_quality;
 pub mod execution_orders;
 pub mod factor_governance;
@@ -50,6 +51,7 @@ pub mod research_models;
 pub mod roles;
 pub mod runtime_config;
 pub mod settlement_redeems;
+pub mod structural_monitor;
 pub mod system;
 pub mod training_datasets;
 pub mod users;
@@ -88,6 +90,8 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(training_datasets::route_specs());
     specs.extend(research_models::route_specs());
     specs.extend(research_jobs::route_specs());
+    specs.extend(bias_tables::route_specs());
+    specs.extend(structural_monitor::route_specs());
     specs.extend(model_governance::route_specs());
     specs.extend(factor_governance::route_specs());
     specs.extend(quant_reports::route_specs());

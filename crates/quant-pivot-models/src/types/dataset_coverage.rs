@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::{jsonb_active, types::SelectionExclusionSummary};
+use crate::{jsonb_active, types::ContentHash, types::SelectionExclusionSummary};
 
 /// Decimal scale for coverage ratio helpers (matches research-plane precision).
 const DATASET_COVERAGE_DECIMAL_SCALE: u32 = 12;
@@ -73,6 +73,10 @@ pub struct DatasetCoverage {
     /// Optional training-matrix probe (diagnostic only; does not gate build).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix_probe: Option<MatrixCoverageProbe>,
+    /// Content hash of the favorite-longshot bias table bound during the build,
+    /// if `factors.structural.favorite_longshot.bias_table_ref` was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bias_table_hash: Option<ContentHash>,
 }
 
 impl DatasetCoverage {

@@ -127,7 +127,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             return Ok(None);
         }
 
-        let binding = schema_binding(&config.features, &config.factors)?;
+        let binding = schema_binding(&config.features, &config.factors, None)?;
         let factory = self.deps.factory_builder.build(binding);
         let runtime = match factory.load_sell_scorer(&version).await {
             Ok(runtime) => runtime,

@@ -33,6 +33,7 @@ use quant_pivot_models::{
     domain::{
         ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo, NewTrainingDataset,
         NoopProgressSink, RecommendationAttributionInfo, RecommendationInfo, ResearchJobProgress,
+        query::TimeWindow,
     },
     enums::{
         common::MarketCategory,
@@ -63,7 +64,10 @@ use quant_pivot_research::{
         SubstitutionAudit,
     },
     hashing::ResearchHasher,
-    model::sell_scorer::{LotStateInput, position_state_factor_values, position_state_features},
+    model::{
+        FavoriteLongshotBiasTable,
+        sell_scorer::{LotStateInput, position_state_factor_values, position_state_features},
+    },
     pit::PitQueryEngine,
     selection::SelectedMarket,
     training::{
@@ -152,6 +156,29 @@ pub struct TrainingDatasetServiceDeps {
     pub fee_calculator: Arc<FeeCalculator>,
 }
 
+/// Deploy + frozen-config bundle for wiring [`TrainingDatasetService`].
+pub struct TrainingDatasetServiceWire {
+    /// Frozen runtime-config snapshot bound to one dataset build.
+    pub config: TrainingDatasetBuildConfig,
+    /// Deploy-level resource guard (not part of the reproducible `dataset_hash`).
+    pub max_spine_samples: u64,
+}
+
+/// Fail closed on empty/inverted half-open dataset windows (shared by plan/build).
+fn require_half_open_dataset_window(
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+) -> QuantResult<()> {
+    TimeWindow::try_half_open(window_start, window_end)
+        .map_err(|_| {
+            ResearchError::DatasetPlan {
+                detail: format!("window_start {window_start} must precede window_end {window_end}"),
+            }
+            .into()
+        })
+        .map(|_| ())
+}
+
 /// Frozen runtime-config snapshot bound to one dataset build.
 pub struct TrainingDatasetBuildConfig {
     /// Feature builder configuration.
@@ -168,6 +195,10 @@ pub struct TrainingDatasetBuildConfig {
     pub selection: SelectionConfig,
     /// Labelers materialized per example.
     pub labelers: Vec<Box<dyn Labeler>>,
+    /// Favorite-longshot bias table pinned by the frozen factor config (content-
+    /// hash verified). `None` keeps `struct.favorite_longshot` inert. Resolved by
+    /// the port so offline scoring binds the same table bytes as online serving.
+    pub bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
 }
 
 /// Orchestrates the offline training-dataset build for one frozen config.
@@ -198,6 +229,8 @@ pub struct TrainingDatasetService {
     /// Shared so the historical spine can be built inside a `spawn_blocking`
     /// closure (labelers are `Send + Sync` but not `Clone`).
     labelers: Arc<Vec<Box<dyn Labeler>>>,
+    /// Frozen favorite-longshot bias table bound to the offline factor engine.
+    bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
 }
 
 impl TrainingDatasetService {
@@ -241,6 +274,7 @@ impl TrainingDatasetService {
             selection: config.selection,
             max_spine_samples,
             labelers: Arc::new(config.labelers),
+            bias_table: config.bias_table,
         })
     }
 
@@ -330,15 +364,7 @@ impl TrainingDatasetService {
         sample_slices: u32,
         sample_markets: u32,
     ) -> QuantResult<PlanCounts> {
-        if request.window_start >= request.window_end {
-            return Err(ResearchError::DatasetPlan {
-                detail: format!(
-                    "window_start {} must precede window_end {}",
-                    request.window_start, request.window_end
-                ),
-            }
-            .into());
-        }
+        require_half_open_dataset_window(request.window_start, request.window_end)?;
         let mut total: u64 = 0;
         let wants_historical = wants_sample_source(request, TrainingSampleSource::HistoricalPit);
         // Candidate `MarketInfo` set (category + lifetime), reused for both the
@@ -501,15 +527,7 @@ fn stride_sample<'a>(candidates: &[&'a MarketInfo], limit: usize) -> Vec<&'a Mar
 #[async_trait]
 impl TrainingDatasetPlanner for TrainingDatasetService {
     async fn plan(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
-        if request.window_start >= request.window_end {
-            return Err(ResearchError::DatasetPlan {
-                detail: format!(
-                    "window_start {} must precede window_end {}",
-                    request.window_start, request.window_end
-                ),
-            }
-            .into());
-        }
+        require_half_open_dataset_window(request.window_start, request.window_end)?;
         // Point-in-time candidate selection: markets observed (had a book) in the
         // window whose fee-dominant category is in the enabled set (mirrors the
         // online [`CategoryFilter`]; per-`as_of` liquidity/data-quality eligibility
@@ -750,6 +768,7 @@ impl TrainingDatasetService {
             min_selection_depth: self.min_selection_depth.clone(),
             labelers: Arc::clone(&self.labelers),
             min_exit_depth_usd: self.min_exit_depth_usd,
+            bias_table: self.bias_table.as_ref().map(Arc::clone),
             context: ReplayContext::new(plan, &self.features),
             coverage,
         }
@@ -778,6 +797,7 @@ impl TrainingDatasetService {
             min_selection_depth: &self.min_selection_depth,
             labelers: &self.labelers,
             min_exit_depth_usd: self.min_exit_depth_usd,
+            bias_table: &self.bias_table,
             context: ReplayContext::new(plan, &self.features),
         }
     }
@@ -799,7 +819,11 @@ impl TrainingDatasetService {
             sink,
         } = tail;
         let builder = ConfiguredFeatureBuilder::new(&self.features);
-        let engine = FactorEngine::new(&self.factors, &self.features);
+        let engine = FactorEngine::new(
+            &self.factors,
+            &self.features,
+            self.bias_table.as_ref().map(Arc::clone),
+        );
 
         if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
             self.append_live_attribution_examples(
@@ -843,7 +867,7 @@ impl TrainingDatasetService {
 
     /// Reject an empty factor set (no enabled families).
     fn ensure_factors_enabled(&self) -> QuantResult<()> {
-        if FactorEngine::new(&self.factors, &self.features)
+        if FactorEngine::new(&self.factors, &self.features, None)
             .registry()
             .is_empty()
         {
@@ -882,6 +906,7 @@ impl TrainingDatasetService {
             features: self.features.clone(),
             factors: self.factors.clone(),
             data_quality: self.data_quality.clone(),
+            bias_table: self.bias_table.as_ref().map(Arc::clone),
         }
     }
 
@@ -999,7 +1024,11 @@ impl TrainingDatasetService {
             .collect();
         let exit_labelers = exit_decision_labelers();
         let builder = ConfiguredFeatureBuilder::new(&self.features);
-        let engine = FactorEngine::new(&self.factors, &self.features);
+        let engine = FactorEngine::new(
+            &self.factors,
+            &self.features,
+            self.bias_table.as_ref().map(Arc::clone),
+        );
         let replay_config = self.replay_config();
 
         for (as_of, group) in group_lot_samples(&input.plan.lot_samples) {
@@ -1192,6 +1221,10 @@ impl TrainingDatasetService {
         let factor_schema_hash = ResearchHasher::factor_schema(&engine.factor_set())?;
         let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
         let mut coverage = coverage;
+        coverage.bias_table_hash = self
+            .bias_table
+            .as_ref()
+            .map(|table| table.content_hash.clone());
         if !examples.is_empty() {
             let horizon_secs = plan.request.horizons_secs.first().copied().unwrap_or(0);
             coverage.matrix_probe = Some(probe_matrix_coverage(
@@ -1338,6 +1371,8 @@ struct HistoricalSpineParams<'a> {
     min_selection_depth: &'a DecimalString,
     labelers: &'a [Box<dyn Labeler>],
     min_exit_depth_usd: Usd,
+    /// Frozen favorite-longshot bias table bound to the spine factor engine.
+    bias_table: &'a Option<Arc<FavoriteLongshotBiasTable>>,
     context: ReplayContext,
 }
 
@@ -1358,6 +1393,8 @@ struct HistoricalSpineInputs {
     min_selection_depth: DecimalString,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
     min_exit_depth_usd: Usd,
+    /// Frozen favorite-longshot bias table bound to the spine factor engine.
+    bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     context: ReplayContext,
     coverage: DatasetCoverage,
 }
@@ -1386,6 +1423,7 @@ fn run_historical_spine_blocking(
             min_selection_depth: &inputs.min_selection_depth,
             labelers: &inputs.labelers,
             min_exit_depth_usd: inputs.min_exit_depth_usd,
+            bias_table: &inputs.bias_table,
             context: inputs.context,
         },
         inputs.coverage,
@@ -1402,11 +1440,16 @@ async fn run_historical_spine(
     mut coverage: DatasetCoverage,
 ) -> QuantResult<HistoricalSpineOutput> {
     let builder = ConfiguredFeatureBuilder::new(params.features);
-    let engine = FactorEngine::new(params.factors, params.features);
+    let engine = FactorEngine::new(
+        params.factors,
+        params.features,
+        params.bias_table.as_ref().map(Arc::clone),
+    );
     let replay_config = ReplayConfig {
         features: params.features.clone(),
         factors: params.factors.clone(),
         data_quality: params.data_quality.clone(),
+        bias_table: params.bias_table.as_ref().map(Arc::clone),
     };
     let pit_selector = OfflinePitSelector::new(
         params.selection,
@@ -1548,7 +1591,9 @@ fn append_historical_examples(
                 .iter()
                 .map(|scored| scored.value.clone())
                 .collect(),
-            FactorEligibility::RejectCandidate { .. } => Vec::new(),
+            FactorEligibility::RejectCandidate { .. } | FactorEligibility::NotApplicable { .. } => {
+                Vec::new()
+            }
         };
         let forward = forward_window(
             input.cross_section.as_of,
@@ -2002,7 +2047,9 @@ fn eligible_factor_values(outcome: &MarketFactorOutcome) -> Vec<FactorValue> {
             .iter()
             .map(|scored| scored.value.clone())
             .collect(),
-        FactorEligibility::RejectCandidate { .. } => Vec::new(),
+        FactorEligibility::RejectCandidate { .. } | FactorEligibility::NotApplicable { .. } => {
+            Vec::new()
+        }
     }
 }
 

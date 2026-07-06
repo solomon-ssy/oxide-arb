@@ -32,25 +32,33 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     config::ResearchJobsConfig,
     domain::{
-        BacktestJobParams, BacktestPort, BuildTrainingDatasetRequest, JobProgressSink,
-        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress,
-        TrainModelRequest, TrainingDatasetPort,
+        BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
+        FavoriteLongshotFitPort, JobProgressSink, ModelTrainingPort, ResearchJobError,
+        ResearchJobInfo, ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobId},
 };
-use quant_pivot_repository::traits::RuntimeConfigVersionRepository;
-
-use super::{
-    AppContext, backtest::CoreBacktestPort, model_training::CoreModelTrainingPort,
-    research_job::ResearchJobEngine, task_id::TaskId, task_registry::AppRunner,
-    training_dataset::CoreTrainingDatasetPort,
+use quant_pivot_repository::traits::{
+    FavoriteLongshotBiasTableRepository, RuntimeConfigVersionRepository,
 };
 
-const ALL_KINDS: [ResearchJobKind; 3] = [
+use super::{
+    AppContext,
+    ports::{
+        backtest::CoreBacktestPort, model_training::CoreModelTrainingPort,
+        training_dataset::CoreTrainingDatasetPort,
+    },
+    research_job::ResearchJobEngine,
+    task_id::TaskId,
+    task_registry::AppRunner,
+};
+
+const ALL_KINDS: [ResearchJobKind; 4] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
+    ResearchJobKind::BiasTableFit,
 ];
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
@@ -69,6 +77,7 @@ struct ResearchJobExecutor {
     datasets: Arc<dyn TrainingDatasetPort>,
     training: Arc<dyn ModelTrainingPort>,
     backtests: Arc<dyn BacktestPort>,
+    bias_tables: Arc<dyn FavoriteLongshotFitPort>,
 }
 
 /// Synchronous progress sink handed to the offline service: a lock-free channel
@@ -152,6 +161,15 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
+            ResearchJobKind::BiasTableFit => {
+                let params: BiasTableFitJobParams = from_params(&job.params_json)?;
+                let outcome = self.bias_tables.fit(params, progress, cancel).await?;
+                // Fail-closed fits succeed with no artifact (result_ref = None).
+                Ok(JobOutcome {
+                    result_ref: outcome.bias_table_id.map(|id| id.as_uuid()),
+                    coverage: None,
+                })
+            }
         }
     }
 }
@@ -169,11 +187,14 @@ impl AppContext {
     pub fn register_research_job_worker(&self, runner: &mut AppRunner, engine: ResearchJobEngine) {
         let runtime_config =
             Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
+        let bias_table_repo = Arc::clone(&self.infra.repos.favorite_longshot_bias_table)
+            as Arc<dyn FavoriteLongshotBiasTableRepository>;
         let config = self.config.quant.research_jobs;
         let executor = ResearchJobExecutor {
             datasets: Arc::new(CoreTrainingDatasetPort::from_research(
                 &self.research,
                 Arc::clone(&runtime_config),
+                Arc::clone(&bias_table_repo),
                 config.max_spine_samples,
                 config.plan_sample_slices,
                 config.plan_sample_markets,
@@ -181,11 +202,14 @@ impl AppContext {
             training: Arc::new(CoreModelTrainingPort::from_research(
                 &self.research,
                 Arc::clone(&runtime_config),
+                Arc::clone(&bias_table_repo),
             )),
             backtests: Arc::new(CoreBacktestPort::from_research(
                 &self.research,
                 Arc::clone(&runtime_config),
+                Arc::clone(&bias_table_repo),
             )),
+            bias_tables: Arc::clone(&self.research.favorite_longshot_fit),
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
             run_worker(engine, executor, config, token).await;
@@ -434,7 +458,7 @@ async fn run_one(
 }
 
 enum Terminal {
-    Succeeded(JobOutcome),
+    Succeeded(Box<JobOutcome>),
     Failed(String),
     Cancelled,
 }
@@ -442,7 +466,7 @@ enum Terminal {
 impl Terminal {
     fn from_result(result: QuantResult<JobOutcome>) -> Self {
         match result {
-            Ok(outcome) => Self::Succeeded(outcome),
+            Ok(outcome) => Self::Succeeded(Box::new(outcome)),
             // A cooperative cancel funnels through the build token and surfaces
             // as a terminal `Cancelled` (not a failure).
             Err(QuantError::Research(ResearchError::Cancelled { .. })) => Self::Cancelled,

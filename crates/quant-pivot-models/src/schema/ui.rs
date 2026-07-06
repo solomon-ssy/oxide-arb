@@ -366,7 +366,7 @@ pub fn enum_label(value: &str) -> UiText {
         "time_series" => UiText::localized("Time series", "时间序列"),
         // FactorFamily / FeatureFamily overlap
         "microstructure" => UiText::localized("Microstructure", "微观结构"),
-        "domain" => UiText::localized("Domain (vertical)", "垂直领域"),
+        "structural" => UiText::localized("Structural", "结构性"),
         "liquidity" => UiText::localized("Liquidity", "流动性"),
         "momentum" => UiText::localized("Momentum", "动量"),
         "mean_reversion" => UiText::localized("Mean reversion", "均值回归"),
@@ -660,6 +660,29 @@ fn feature_fields() -> Vec<FieldUiEntry> {
             "特征管线中每市场 point-in-time resolve 的并发上限。调高吞吐更快，但会增加数据库/CPU 压力。",
         ),
     ]
+    .into_iter()
+    .chain(structural_feature_fields())
+    .collect()
+}
+
+/// Structural feature-family windows (Phase 11.2.1).
+fn structural_feature_fields() -> Vec<FieldUiEntry> {
+    vec![
+        secs(
+            "features.structural.shock_window_secs",
+            "Structural shock window",
+            "结构冲击窗口",
+            "Lookback (seconds) for the shock ratio / realized-vol estimator that gates `struct.reversal_after_shock`. Drives historical prefetch for the structural feature plane.",
+            "结构冲击比率/已实现波动估计的回看窗口（秒），用于门控 `struct.reversal_after_shock`。决定结构特征平面的历史预取。",
+        ),
+        secs(
+            "features.structural.book_churn_window_secs",
+            "Book-churn window",
+            "订单簿 churn 窗口",
+            "Lookback (seconds) for the book-churn intensity proxy (delta-to-update ratio over the microstructure window). NOT true maker concentration (which needs trade-tape; see Phase 11.2.1.1).",
+            "订单簿 churn 强度代理（微观结构窗口内 delta/update 比率）的回看窗口（秒）。非真·做市集中度（需 trade-tape，见 Phase 11.2.1.1）。",
+        ),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -672,8 +695,8 @@ fn factor_fields() -> Vec<FieldUiEntry> {
             "factors.enabled_factor_families",
             "Enabled factor families",
             "启用因子族",
-            "Generic factor families computed online (must contain at least one). Domain families are routed by market category and must not appear here; disabling a family drops its factors from scoring.",
-            "在线计算的通用因子族（至少一个）。垂直（domain）族由市场分类路由，不得在此出现；停用某族会将其因子移出打分。",
+            "Generic and platform-internal structural factor families computed online (must contain at least one). External vertical/domain families are routed by market category and must not appear here; disabling a family drops its factors from scoring.",
+            "在线计算的通用与平台内结构因子族（至少一个）。外部垂直/domain 族由市场分类路由，不得在此出现；停用某族会将其因子移出打分。",
         )
         .widget(FieldWidget::EnumSet),
         f(
@@ -757,6 +780,100 @@ fn factor_fields() -> Vec<FieldUiEntry> {
             "归一化前对每个因子做残差化的维度（如市场分类），以移除结构性暴露。留空则关闭中性化。",
         )
         .widget(FieldWidget::EnumSet),
+    ]
+    .into_iter()
+    .chain(structural_factor_fields())
+    .collect()
+}
+
+/// Structural factor-plane parameters (Phase 11.2.1).
+fn structural_factor_fields() -> Vec<FieldUiEntry> {
+    vec![
+        decimal(
+            "factors.structural.reversal_after_shock.shock_k",
+            "Reversal shock threshold",
+            "反转冲击阈值",
+            "Shock threshold k: `struct.reversal_after_shock` only fires when `|ret| / realized_vol > k`. Below it the factor is inert (never a fabricated neutral).",
+            "冲击阈值 k：`struct.reversal_after_shock` 仅当 `|ret| / realized_vol > k` 时触发。低于此值因子保持 inert（绝不伪造中性值）。",
+        ),
+        decimal(
+            "factors.structural.reversal_after_shock.shock_cap",
+            "Reversal shock cap",
+            "反转冲击上限",
+            "Cap on the reported shock magnitude for `struct.reversal_after_shock` (bounds an extreme normalized signal).",
+            "`struct.reversal_after_shock` 报告的冲击幅度上限（限制极端归一化信号）。",
+        ),
+        integer(
+            "factors.structural.negrisk.min_legs",
+            "Neg-risk minimum legs",
+            "Neg-risk 最少腿数",
+            "Minimum resolved YES legs for neg-risk structural factors to compute. Below this the factor is Indeterminate, never a silent value.",
+            "Neg-risk 结构因子计算所需的最少已解析 YES 腿数。低于此值因子为 Indeterminate，绝不静默取值。",
+        ),
+        plain(
+            "factors.structural.favorite_longshot.bias_table_ref",
+            "Favorite-longshot bias table",
+            "Favorite-longshot 偏差表",
+            "Content-addressed bias-table artifact id (UUID). `None` keeps `struct.favorite_longshot` inert — never a fabricated constant. Fit via the bias-table catalog, then activate here.",
+            "内容寻址偏差表产物 id（UUID）。`None` 时 `struct.favorite_longshot` 保持 inert——绝不伪造常数。通过偏差表目录拟合后在此激活。",
+        ),
+        integer(
+            "factors.structural.favorite_longshot.bins",
+            "Bias-table price bins",
+            "偏差表价格分桶",
+            "Number of equal-width price buckets over `(0, 1)` the bias-table fit uses.",
+            "偏差表拟合在 `(0, 1)` 上使用的等宽价格分桶数。",
+        ),
+        f(
+            "factors.structural.favorite_longshot.ttr_bucket_bounds_secs",
+            "Bias-table ttr buckets",
+            "偏差表 ttr 分桶",
+            "Ascending time-to-resolution bucket boundaries (seconds); `n` bounds define `n+1` conditioning buckets. The favorite-longshot bias is conditioned on residual time to resolution as well as category.",
+            "升序的距结算时间分桶边界（秒）；`n` 个边界定义 `n+1` 个条件化分桶。favorite-longshot 偏差按距结算时间与分类共同条件化。",
+        )
+        .widget(FieldWidget::JsonTree),
+        integer(
+            "factors.structural.favorite_longshot.min_bin_samples",
+            "Bias-table min bin samples",
+            "偏差表分桶最小样本",
+            "Minimum samples per `(category, ttr_bucket, price_bucket)` bin for a usable bias estimate (fail-closed below this).",
+            "每个 `(category, ttr_bucket, price_bucket)` 分桶的可用偏差估计最小样本数（低于此 fail-closed）。",
+        ),
+        integer(
+            "factors.structural.favorite_longshot.min_curve_samples",
+            "Bias-table min curve samples",
+            "偏差表曲线最小样本",
+            "Minimum samples per `(category, ttr_bucket)` curve for it to be retained (fail-closed below this).",
+            "每个 `(category, ttr_bucket)` 曲线保留所需的最小样本数（低于此 fail-closed）。",
+        ),
+        ratio(
+            "factors.structural.favorite_longshot.ci_confidence",
+            "Bias-table CI confidence",
+            "偏差表置信区间",
+            "Two-sided confidence level for the Wilson interval and the IC significance test during bias-table fit (e.g. 0.95).",
+            "偏差表拟合 Wilson 区间与 IC 显著性检验的双侧置信水平（如 0.95）。",
+        ),
+        decimal(
+            "factors.structural.favorite_longshot.ic_significance_min",
+            "Bias-table IC floor",
+            "偏差表 IC 下限",
+            "Absolute `|IC|` floor a `(category, ttr_bucket)` curve must clear in addition to the Student-t significance test.",
+            "`(category, ttr_bucket)` 曲线在 Student-t 显著性检验之外还须清过的 `|IC|` 绝对下限。",
+        ),
+        secs(
+            "factors.structural.favorite_longshot.fit_sample_stride_secs",
+            "Bias-table fit sample stride",
+            "偏差表拟合采样步长",
+            "Spacing between the point-in-time sample instants the fit draws over each market's lifecycle. The fit samples across the whole life (not a single pre-resolution lead), matching the served distribution.",
+            "拟合在每个市场生命周期上抽取 PIT 采样点的间隔（秒）。拟合覆盖整个生命周期（非单一结算前提前量），匹配服务分布。",
+        ),
+        boolean(
+            "factors.structural.per_category_ic_gate",
+            "Per-category IC gate",
+            "逐分类 IC 门控",
+            "When true, disable a category's bias curve whose IC is not significant (soft gate; hard publish-gate is Phase 11.5).",
+            "为 true 时，关闭 IC 不显著的分类偏差曲线（软门控；硬发布门禁在 Phase 11.5）。",
+        ),
     ]
 }
 
@@ -1824,6 +1941,8 @@ fn features_section() -> SchemaNode {
             "features.momentum.slope_windows_secs",
             "features.volatility_windows_secs",
             "features.depth_levels",
+            "features.structural.shock_window_secs",
+            "features.structural.book_churn_window_secs",
             "features.max_concurrent_market_resolves",
         ]),
     )
@@ -1854,6 +1973,18 @@ fn factors_section() -> SchemaNode {
             "factors.cross_section.historical_lookback_secs",
             "factors.orthogonalize.max_correlation",
             "factors.orthogonalize.neutralize_by",
+            "factors.structural.reversal_after_shock.shock_k",
+            "factors.structural.reversal_after_shock.shock_cap",
+            "factors.structural.negrisk.min_legs",
+            "factors.structural.favorite_longshot.bias_table_ref",
+            "factors.structural.favorite_longshot.bins",
+            "factors.structural.favorite_longshot.ttr_bucket_bounds_secs",
+            "factors.structural.favorite_longshot.min_bin_samples",
+            "factors.structural.favorite_longshot.min_curve_samples",
+            "factors.structural.favorite_longshot.ci_confidence",
+            "factors.structural.favorite_longshot.ic_significance_min",
+            "factors.structural.favorite_longshot.fit_sample_stride_secs",
+            "factors.structural.per_category_ic_gate",
         ]),
     )
 }

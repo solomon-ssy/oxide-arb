@@ -8,7 +8,7 @@ use sea_orm::{
 
 use crate::{
     enums::{
-        factor::{FactorIndeterminateReason, NormalizationSource},
+        factor::{FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::FactorDirection,
     },
     idens::{
@@ -33,6 +33,7 @@ pub enum QuantFactorValue {
     ModelRunId,
     MarketId,
     AsOf,
+    ValueState,
     RawValue,
     NormalizedScore,
     NormalizationSource,
@@ -60,6 +61,11 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
+        // Authoritative value state: keeps not-applicable durably distinct from
+        // missing-input (both carry a NULL score) — never conflated.
+        .col(column::pg_enum::<FactorValueState>(
+            QuantFactorValue::ValueState,
+        ))
         .col(
             ColumnDef::new(QuantFactorValue::RawValue)
                 .decimal_len(28, 12)

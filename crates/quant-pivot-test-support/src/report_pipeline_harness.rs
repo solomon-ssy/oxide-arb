@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
-    governance::{RuntimeModeHandle, WeightOverlayApplicator},
+    governance::{BiasTableApplicator, RuntimeModeHandle, WeightOverlayApplicator},
     observability::{
         alert_dispatcher::AlertDispatcher, fact_lag::IngestPipelineLagTracker,
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
@@ -76,17 +76,19 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEquitySnapshotRepository, PgEventRepository, PgFactorRepository, PgFeatureRepository,
-        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgEquitySnapshotRepository, PgEventRepository, PgFactorRepository,
+        PgFavoriteLongshotBiasTableRepository, PgFeatureRepository, PgMarketRepository,
+        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
         PgShadowComparisonRepository,
     },
     traits::{
-        EquitySnapshotRepository, EventRepository, FactorRepository, MarketRepository,
-        MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
-        ReservedCapitalRepository, RuntimeConfigVersionRepository,
+        EquitySnapshotRepository, EventRepository, FactorRepository,
+        FavoriteLongshotBiasTableRepository, MarketRepository, MarketSelectionRepository,
+        ModelRegistryRepository, PositionRepository, QuantFactReadRepository,
+        RecommendationReportRepository, RecommendationRepository, ReservedCapitalRepository,
+        RuntimeConfigVersionRepository,
     },
 };
 use quant_pivot_research::{
@@ -696,9 +698,13 @@ fn recording_alerts() -> Arc<AlertDispatcher> {
 
 fn build_model_runner(db: &DatabaseConnection, store: Arc<dyn ArtifactStore>) -> Arc<ModelRunner> {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
+    let bias_table_repo = Arc::new(PgFavoriteLongshotBiasTableRepository::new(db.clone()))
+        as Arc<dyn FavoriteLongshotBiasTableRepository>;
+    let bias_table = Arc::new(BiasTableApplicator::new(bias_table_repo));
     let factor_pipeline = Arc::new(FactorPipelineService::new(
         Arc::clone(&factor_repo),
         noop_factor_writer(),
+        Arc::clone(&bias_table),
     ));
     Arc::new(ModelRunner::new(ModelRunnerDeps {
         model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
@@ -709,6 +715,7 @@ fn build_model_runner(db: &DatabaseConnection, store: Arc<dyn ArtifactStore>) ->
         signal_writer: noop_signal_writer(),
         alerts: Arc::new(DispatcherAlertSink::new(recording_alerts())),
         weight_overlay: Arc::new(WeightOverlayApplicator::new()),
+        bias_table,
     }))
 }
 
@@ -1002,7 +1009,7 @@ async fn publish_weighted_model(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) -> ModelVersionId {
-    let engine = FactorEngine::new(factors, features);
+    let engine = FactorEngine::new(factors, features, None);
     let factor_set = engine.factor_set();
     let count = factor_set.definitions.len();
     assert!(count > 0, "the factor set must be non-empty");

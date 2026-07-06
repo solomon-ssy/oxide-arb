@@ -138,6 +138,30 @@ impl Default for MomentumFeaturesConfig {
     }
 }
 
+/// Structural feature-family windows (Phase 11.2.1).
+///
+/// The structural plane is platform-computable — no external data source. These
+/// windows drive the shock/realized-vol and maker-concentration estimators the
+/// structural feature builder derives from the microstructure window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StructuralFeaturesConfig {
+    /// Lookback (seconds) for the shock ratio / realized-vol estimator that gates
+    /// `struct.reversal_after_shock`.
+    pub shock_window_secs: u64,
+    /// Lookback (seconds) for the book-churn intensity proxy window.
+    pub book_churn_window_secs: u64,
+}
+
+impl Default for StructuralFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            shock_window_secs: 900,
+            book_churn_window_secs: 900,
+        }
+    }
+}
+
 /// Feature schema and enabled feature families.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -156,6 +180,8 @@ pub struct FeaturesConfig {
     pub volatility_windows_secs: Vec<u64>,
     /// Order-book depth levels to inspect.
     pub depth_levels: Vec<u32>,
+    /// Structural feature-family windows (Phase 11.2.1).
+    pub structural: StructuralFeaturesConfig,
     /// Maximum concurrent per-market PIT resolves in the feature pipeline.
     pub max_concurrent_market_resolves: u32,
 }
@@ -181,23 +207,20 @@ impl FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            // v3: momentum features are now distinct estimators (ROC-with-lag,
-            // EMA slope, MACD, vol-adjusted return) instead of a plain return
-            // clone; the collinear `ts.momentum_{W}` feature is gone. Bumping the
-            // schema version changes `feature_schema_hash`, so the model factory
-            // rejects artifacts trained under the old feature set.
-            feature_schema_version: SchemaVersion::new(3),
+            feature_schema_version: SchemaVersion::FIRST,
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
                 FeatureFamily::TimeSeries,
                 FeatureFamily::Microstructure,
+                FeatureFamily::Structural,
             ],
             required_features: Vec::new(),
             bar_windows_secs: vec![60, 300, 900],
             momentum: MomentumFeaturesConfig::default(),
             volatility_windows_secs: vec![900, 3_600],
             depth_levels: vec![1, 3, 5],
+            structural: StructuralFeaturesConfig::default(),
             max_concurrent_market_resolves: 32,
         }
     }
@@ -302,14 +325,130 @@ impl Default for FactorOrthogonalizeConfig {
     }
 }
 
+/// Shock-gated reversal factor parameters (Phase 11.2.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReversalAfterShockConfig {
+    /// Shock threshold `k`: reversal only fires when `|ret| / realized_vol > k`.
+    pub shock_k: DecimalString,
+    /// Cap on the reported shock magnitude (bounds an extreme normalized signal).
+    pub shock_cap: DecimalString,
+}
+
+impl Default for ReversalAfterShockConfig {
+    fn default() -> Self {
+        Self {
+            shock_k: DecimalString::new("2.5"),
+            shock_cap: DecimalString::new("6"),
+        }
+    }
+}
+
+/// Neg-risk structural factor parameters (Phase 11.2.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct NegRiskStructuralConfig {
+    /// Minimum resolved YES legs for a neg-risk structural factor to compute
+    /// (below this the factor is `Indeterminate`, never a silent value).
+    pub min_legs: u32,
+}
+
+impl Default for NegRiskStructuralConfig {
+    fn default() -> Self {
+        Self { min_legs: 3 }
+    }
+}
+
+/// Favorite-longshot bias factor parameters (Phase 11.2.1).
+///
+/// `bias_table_ref` points at a fitted [`FavoriteLongshotBiasTableId`] artifact
+/// (as its UUID string); `None` disables the factor (it stays inert — never a
+/// fabricated constant). The sample-count gates fail closed on thin data.
+///
+/// [`FavoriteLongshotBiasTableId`]: crate::types::FavoriteLongshotBiasTableId
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FavoriteLongshotConfig {
+    /// Active fitted bias-table artifact id (UUID string), or `None` (inert).
+    pub bias_table_ref: Option<String>,
+    /// Number of equal-width price buckets over `(0, 1)` the fit uses.
+    pub bins: u32,
+    /// Ascending time-to-resolution bucket boundaries (seconds). `n` bounds
+    /// define `n + 1` conditioning buckets: `[0, b0), …, [b_{n-1}, ∞)`. The
+    /// favorite-longshot bias is conditioned on residual time to resolution as
+    /// well as category, so a bias measured a week out is never served as if it
+    /// applied an hour out.
+    pub ttr_bucket_bounds_secs: Vec<u64>,
+    /// Minimum samples per `(category, ttr_bucket, price_bucket)` bin for a
+    /// usable bias.
+    pub min_bin_samples: u64,
+    /// Minimum samples per `(category, ttr_bucket)` curve for it to be retained.
+    pub min_curve_samples: u64,
+    /// Two-sided confidence level for the Wilson interval and the IC
+    /// significance test (e.g. `0.95`).
+    pub ci_confidence: DecimalString,
+    /// Absolute `|IC|` floor a curve must additionally clear (the significance
+    /// test is a Student-t on the correlation; this is a belt-and-suspenders
+    /// magnitude floor).
+    pub ic_significance_min: DecimalString,
+    /// Spacing between the point-in-time sample instants the fit draws over each
+    /// market's lifecycle (seconds). The fit samples the entry mid across the
+    /// whole life (not a single pre-resolution lead), so the empirical bias is
+    /// measured on the same distribution the factor is served on.
+    pub fit_sample_stride_secs: u64,
+}
+
+impl Default for FavoriteLongshotConfig {
+    fn default() -> Self {
+        Self {
+            bias_table_ref: None,
+            bins: 10,
+            // Hour / day / week boundaries → four ttr conditioning buckets.
+            ttr_bucket_bounds_secs: vec![3_600, 86_400, 604_800],
+            min_bin_samples: 200,
+            min_curve_samples: 1_000,
+            ci_confidence: DecimalString::new("0.95"),
+            ic_significance_min: DecimalString::new("0.02"),
+            fit_sample_stride_secs: 21_600,
+        }
+    }
+}
+
+/// Structural factor-plane configuration (Phase 11.2.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StructuralFactorsConfig {
+    /// Shock-gated reversal parameters.
+    pub reversal_after_shock: ReversalAfterShockConfig,
+    /// Neg-risk structural factor parameters.
+    pub negrisk: NegRiskStructuralConfig,
+    /// Favorite-longshot bias factor parameters.
+    pub favorite_longshot: FavoriteLongshotConfig,
+    /// Soft per-category IC gate: disable a bias curve whose category IC is not
+    /// significant (the hard publish-gate is Phase 11.5).
+    pub per_category_ic_gate: bool,
+}
+
+impl Default for StructuralFactorsConfig {
+    fn default() -> Self {
+        Self {
+            reversal_after_shock: ReversalAfterShockConfig::default(),
+            negrisk: NegRiskStructuralConfig::default(),
+            favorite_longshot: FavoriteLongshotConfig::default(),
+            per_category_ic_gate: true,
+        }
+    }
+}
+
 /// Factor selection and weighted-scorer configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct FactorsConfig {
-    /// Generic factor families enabled for online computation.
+    /// Config-selectable factor families enabled for online computation
+    /// (generic + structural).
     ///
-    /// Domain (`FactorFamily::Domain`) variants are routed by market category and
-    /// must not appear here.
+    /// Vertical/domain factor families are routed by market category and must
+    /// not appear here.
     pub enabled_factor_families: Vec<FactorFamily>,
     /// Factor weights keyed by factor name.
     pub factor_weights: FactorWeights,
@@ -323,21 +462,26 @@ pub struct FactorsConfig {
     pub cross_section: FactorCrossSectionConfig,
     /// Orthogonalization / collinearity policy.
     pub orthogonalize: FactorOrthogonalizeConfig,
+    /// Structural factor-plane parameters (Phase 11.2.1).
+    pub structural: StructuralFactorsConfig,
 }
 
 impl Default for FactorsConfig {
     fn default() -> Self {
+        // All generic families plus the platform-internal structural plane are
+        // enabled by default: diversity is the baseline, weighting is learned
+        // (11.4). Domain families are routed by category and never appear here.
+        let mut enabled_factor_families = FactorFamily::ALL_GENERIC.to_vec();
+        enabled_factor_families.push(FactorFamily::Structural);
         Self {
-            // All generic factor families enabled by default: diversity is the
-            // baseline, weighting is learned (11.4). Domain families are routed
-            // by category and never appear here.
-            enabled_factor_families: FactorFamily::ALL_GENERIC.to_vec(),
+            enabled_factor_families,
             factor_weights: FactorWeights::default(),
             min_factor_confidence: DecimalString::new("0.50"),
             missing_factor_policy: MissingFactorPolicy::ZeroWeight,
             normalization: FactorNormalizationConfig::default(),
             cross_section: FactorCrossSectionConfig::default(),
             orthogonalize: FactorOrthogonalizeConfig::default(),
+            structural: StructuralFactorsConfig::default(),
         }
     }
 }

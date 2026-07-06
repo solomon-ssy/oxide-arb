@@ -12,6 +12,7 @@ pub mod quant_equity_snapshot;
 pub mod quant_execution_order;
 pub mod quant_factor_definition;
 pub mod quant_factor_value;
+pub mod quant_favorite_longshot_bias_table;
 pub mod quant_feature_vector;
 pub mod quant_market_selection;
 pub mod quant_market_selection_member;

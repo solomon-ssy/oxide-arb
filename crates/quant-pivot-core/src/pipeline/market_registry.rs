@@ -2,7 +2,10 @@ use crate::pipeline::market_filter::MarketFilter;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use quant_pivot_models::{
-    domain::market::{EventRegistryInfo, MarketRegistryInfo},
+    domain::market::{
+        EventRegistryInfo, MarketRegistryInfo,
+        registry::{NegRiskLeg, NegRiskLegSet},
+    },
     enums::market::MarketStatus,
     types::{EventId, MarketId, TokenId},
 };
@@ -170,6 +173,52 @@ impl MarketRegistry {
         self.markets.get(market_id).map(|entry| entry.neg_risk)
     }
 
+    /// The event a market belongs to, if catalogued.
+    #[must_use]
+    pub fn get_event(&self, event_id: &EventId) -> Option<EventRegistryInfo> {
+        self.events.get(event_id).map(|entry| entry.value().clone())
+    }
+
+    /// Every YES-leg token of a neg-risk event, deterministically ordered by
+    /// `(market_id, yes_token_id)` (stable for hashing / online-offline parity).
+    ///
+    /// Returns empty for an unknown event or a non-neg-risk event.
+    #[must_use]
+    pub fn neg_risk_leg_set(&self, event_id: &EventId) -> NegRiskLegSet {
+        let Some(event) = self.events.get(event_id) else {
+            return NegRiskLegSet::empty();
+        };
+        if !event.neg_risk {
+            return NegRiskLegSet::empty();
+        }
+        let mut expected_legs = 0_usize;
+        let mut legs = Vec::new();
+        for market_id in &event.market_ids {
+            match self.markets.get(market_id) {
+                Some(entry) if entry.neg_risk => {
+                    expected_legs += 1;
+                    legs.push(NegRiskLeg {
+                        market_id: entry.market_id.clone(),
+                        yes_token_id: entry.token_yes.clone(),
+                    });
+                }
+                Some(_) => {
+                    // Non-neg-risk event member — not a structural YES leg.
+                }
+                None => {
+                    // Catalogued outcome not yet materialized in the registry;
+                    // still expected so missing PIT books fail closed.
+                    expected_legs += 1;
+                }
+            }
+        }
+        legs.sort();
+        NegRiskLegSet {
+            expected_legs,
+            legs,
+        }
+    }
+
     /// Return (YES token, NO token) for a market.
     ///
     /// Tokens are identified by their `outcome` field: "Yes" and "No".
@@ -244,9 +293,18 @@ mod tests {
     };
     use rust_decimal_macros::dec;
     fn sample_market(id: &str, status: MarketStatus) -> MarketRegistryInfo {
+        sample_market_for_event(id, "evt-1", status, false)
+    }
+
+    fn sample_market_for_event(
+        id: &str,
+        event_id: &str,
+        status: MarketStatus,
+        neg_risk: bool,
+    ) -> MarketRegistryInfo {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
-            event_id: EventId::new("evt-1"),
+            event_id: EventId::new(event_id),
             token_yes: TokenId::new(format!("{id}-yes")),
             token_no: TokenId::new(format!("{id}-no")),
             question: "Test?".into(),
@@ -254,18 +312,18 @@ mod tests {
             categories: CategorySet::from(MarketCategory::Other),
             status,
             outcome: None,
-            neg_risk: false,
+            neg_risk,
             tick_size: TickSize::Hundredth,
             tokens: vec![
                 TokenInfo {
                     token_id: TokenId::new(format!("{id}-yes")),
                     outcome: "Yes".into(),
-                    neg_risk: false,
+                    neg_risk,
                 },
                 TokenInfo {
                     token_id: TokenId::new(format!("{id}-no")),
                     outcome: "No".into(),
-                    neg_risk: false,
+                    neg_risk,
                 },
             ],
             best_bid: None,
@@ -277,6 +335,20 @@ mod tests {
             fee_schedule: None,
             end_date: None,
             resolved_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn sample_neg_risk_event(event_id: &str, market_ids: Vec<&str>) -> EventRegistryInfo {
+        EventRegistryInfo {
+            event_id: EventId::new(event_id),
+            title: "Neg-risk event".into(),
+            slug: event_id.into(),
+            market_ids: market_ids.into_iter().map(MarketId::new).collect(),
+            categories: CategorySet::from(MarketCategory::Crypto),
+            tags: Vec::new(),
+            neg_risk: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -324,5 +396,63 @@ mod tests {
         let snapshot = reg.active_markets();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].as_str(), "m1");
+    }
+
+    #[test]
+    fn neg_risk_leg_set_counts_only_neg_risk_event_members() {
+        let reg = MarketRegistry::new();
+        let event_id = "evt-negrisk-mixed";
+        reg.register_event(sample_neg_risk_event(
+            event_id,
+            vec!["m-leg-a", "m-leg-b", "m-binary"],
+        ));
+        reg.register_market(sample_market_for_event(
+            "m-leg-a",
+            event_id,
+            MarketStatus::Active,
+            true,
+        ));
+        reg.register_market(sample_market_for_event(
+            "m-leg-b",
+            event_id,
+            MarketStatus::Active,
+            true,
+        ));
+        reg.register_market(sample_market_for_event(
+            "m-binary",
+            event_id,
+            MarketStatus::Active,
+            false,
+        ));
+
+        let set = reg.neg_risk_leg_set(&EventId::new(event_id));
+        assert_eq!(
+            set.expected_legs, 2,
+            "binary member must not inflate expected"
+        );
+        assert_eq!(set.legs.len(), 2);
+    }
+
+    #[test]
+    fn neg_risk_leg_set_expects_unregistered_catalog_member() {
+        let reg = MarketRegistry::new();
+        let event_id = "evt-negrisk-partial";
+        reg.register_event(sample_neg_risk_event(
+            event_id,
+            vec!["m-present", "m-missing"],
+        ));
+        reg.register_market(sample_market_for_event(
+            "m-present",
+            event_id,
+            MarketStatus::Active,
+            true,
+        ));
+
+        let set = reg.neg_risk_leg_set(&EventId::new(event_id));
+        assert_eq!(
+            set.expected_legs, 2,
+            "unregistered catalog leg still expected"
+        );
+        assert_eq!(set.legs.len(), 1);
     }
 }

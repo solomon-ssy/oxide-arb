@@ -256,10 +256,13 @@ pub struct SubstitutionConfidenceRules {
     pub stale_beyond_policy: Decimal,
     /// Penalty multiplier for [`NullReason::OutOfValidRange`].
     pub out_of_valid_range: Decimal,
-    /// Penalty multiplier for [`NullReason::DomainDataMissing`].
-    pub domain_data_missing: Decimal,
     /// Penalty multiplier for [`NullReason::InsufficientHistory`].
     pub insufficient_history: Decimal,
+    /// Penalty multiplier for [`NullReason::NotApplicable`] (structurally absent
+    /// features are never imputed, so this is neutral by default).
+    pub not_applicable: Decimal,
+    /// Penalty multiplier for [`NullReason::LegBookMissing`].
+    pub leg_book_missing: Decimal,
 }
 
 impl SubstitutionConfidenceRules {
@@ -270,8 +273,9 @@ impl SubstitutionConfidenceRules {
             NullReason::SourceUnavailable => self.source_unavailable,
             NullReason::StaleBeyondPolicy => self.stale_beyond_policy,
             NullReason::OutOfValidRange => self.out_of_valid_range,
-            NullReason::DomainDataMissing => self.domain_data_missing,
             NullReason::InsufficientHistory => self.insufficient_history,
+            NullReason::NotApplicable => self.not_applicable,
+            NullReason::LegBookMissing => self.leg_book_missing,
         }
     }
 
@@ -282,8 +286,9 @@ impl SubstitutionConfidenceRules {
             source_unavailable: Decimal::new(80, 2),
             stale_beyond_policy: Decimal::new(85, 2),
             out_of_valid_range: Decimal::new(75, 2),
-            domain_data_missing: Decimal::new(90, 2),
             insufficient_history: Decimal::new(85, 2),
+            not_applicable: Decimal::ONE,
+            leg_book_missing: Decimal::new(90, 2),
         }
     }
 }

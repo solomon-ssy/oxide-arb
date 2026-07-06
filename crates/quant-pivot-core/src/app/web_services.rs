@@ -1,33 +1,30 @@
 //! Web admin surface assembly for Phase 0.
 
 use super::AppContext;
-use crate::{
-    app::{
+use crate::app::{
+    ports::{
         account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
-        execution_read::CoreExecutionReadPort, execution_recovery_port::CoreExecutionRecoveryPort,
+        execution_read::CoreExecutionReadPort, execution_recovery::CoreExecutionRecoveryPort,
+        market_data::CoreMarketData, metrics_scrape::CoreMetricsScrape,
         model_training::CoreModelTrainingPort, quant_report::CoreQuantReportPort,
-        reconciliation_port::CoreReconciliationPort, research_catalog::CoreResearchCatalogPort,
-        task_id::TaskId, task_registry::AppRunner, training_dataset::CoreTrainingDatasetPort,
+        reconciliation::CoreReconciliationPort, research_catalog::CoreResearchCatalogPort,
+        structural_monitor::CoreStructuralMonitor, training_dataset::CoreTrainingDatasetPort,
     },
-    pipeline::book_store::BookStore,
+    task_id::TaskId,
+    task_registry::AppRunner,
 };
-use async_trait::async_trait;
-use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
-use quant_pivot_error::{QuantResult, control::ControlError, infra::InfraError};
-use quant_pivot_models::{
-    domain::{
-        BookSnapshot, CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-        MarketDataPort, MetricsScrapePort, NewOperationLog, OrderIntentPort, ReconciliationPort,
-        ResearchJobPort, RuntimeConfigPort,
-    },
-    types::TokenId,
+use quant_pivot_error::{QuantResult, infra::InfraError};
+use quant_pivot_models::domain::{
+    CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort, NewOperationLog,
+    OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort,
 };
 use quant_pivot_repository::traits::{
     AccountSnapshotRepository, AttributionRepository, EquitySnapshotRepository,
-    ExecutionOrderRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
-    PositionRepository, RecommendationReportRepository, RecommendationRepository,
-    ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
-    RuntimeConfigVersionRepository, SettlementRedeemRepository, UserRepository, UserRoleRepository,
+    ExecutionOrderRepository, FavoriteLongshotBiasTableRepository, MenuRepository,
+    OperationLogRepository, OrderIntentRepository, PositionRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
+    SettlementRedeemRepository, UserRepository, UserRoleRepository,
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
@@ -39,7 +36,7 @@ use quant_pivot_web::{
     routes, spawn_web_server,
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 const OPERATION_LOG_BATCH_SIZE: usize = 64;
 const OPERATION_LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
@@ -118,19 +115,17 @@ async fn build_app_state(
         operation_log,
         control: Arc::clone(&ctx.governance.runtime_control),
         kill_switch: Arc::clone(&ctx.governance.kill_switch),
-        market_data: Arc::new(CoreMarketData {
-            book_store: Arc::clone(&ctx.data.book_store),
-            ws_manager: Arc::clone(&ctx.data.ws_manager),
-        }),
+        market_data: Arc::new(CoreMarketData::new(
+            Arc::clone(&ctx.data.book_store),
+            Arc::clone(&ctx.data.ws_manager),
+        )),
         catalog: Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>,
         data_quality: Arc::clone(&ctx.data.data_quality) as Arc<dyn DataQualityPort>,
         events: ctx.events.clone(),
         markets: Arc::clone(&ctx.data.market_repo),
         quant_facts: Arc::clone(&ctx.infra.quant_fact_read),
         ws_sessions: SessionRegistry::default(),
-        metrics: Arc::new(CoreMetricsScrape {
-            registry: ctx.infra.metrics.registry.clone(),
-        }),
+        metrics: Arc::new(CoreMetricsScrape::new(ctx.infra.metrics.registry.clone())),
         readiness: Arc::new(PgRedisReadiness::new(
             ctx.infra.pg.connection().clone(),
             Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
@@ -139,6 +134,8 @@ async fn build_app_state(
         training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
             &ctx.research,
             Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+            Arc::clone(&repos.favorite_longshot_bias_table)
+                as Arc<dyn FavoriteLongshotBiasTableRepository>,
             ctx.config.quant.research_jobs.max_spine_samples,
             ctx.config.quant.research_jobs.plan_sample_slices,
             ctx.config.quant.research_jobs.plan_sample_markets,
@@ -146,16 +143,25 @@ async fn build_app_state(
         model_training: Arc::new(CoreModelTrainingPort::from_research(
             &ctx.research,
             Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+            Arc::clone(&repos.favorite_longshot_bias_table)
+                as Arc<dyn FavoriteLongshotBiasTableRepository>,
         )),
         backtests: Arc::new(CoreBacktestPort::from_research(
             &ctx.research,
             Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+            Arc::clone(&repos.favorite_longshot_bias_table)
+                as Arc<dyn FavoriteLongshotBiasTableRepository>,
         )),
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
         model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
+        favorite_longshot: Arc::clone(&ctx.research.favorite_longshot_fit),
+        structural_monitor: Arc::new(CoreStructuralMonitor::new(
+            Arc::clone(&ctx.data.market_registry),
+            Arc::clone(&ctx.data.book_store),
+        )),
         quant_reports: Arc::new(CoreQuantReportPort::new(
             Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,
             Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
@@ -264,58 +270,4 @@ fn build_operation_log_writer(
         OperationLogBuffer::new(Arc::new(op_log_writer)),
         op_log_worker,
     )
-}
-
-struct CoreMetricsScrape {
-    registry: prometheus::Registry,
-}
-
-impl MetricsScrapePort for CoreMetricsScrape {
-    fn gather_prometheus(&self) -> String {
-        use prometheus::Encoder;
-        let metric_families = self.registry.gather();
-        let mut buffer = Vec::new();
-        let encoder = prometheus::TextEncoder::new();
-        let _ = encoder.encode(&metric_families, &mut buffer);
-        String::from_utf8_lossy(&buffer).into_owned()
-    }
-}
-
-struct CoreMarketData {
-    book_store: Arc<BookStore>,
-    ws_manager: Arc<ClobWsManager>,
-}
-
-#[async_trait]
-impl MarketDataPort for CoreMarketData {
-    fn book(
-        &self,
-        yes_token: &TokenId,
-        no_token: &TokenId,
-    ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>) {
-        (
-            self.book_store.load(yes_token),
-            self.book_store.load(no_token),
-        )
-    }
-
-    fn subscribed_tokens(&self, token_ids: &[TokenId]) -> HashSet<TokenId> {
-        self.ws_manager.subscribed_tokens(token_ids)
-    }
-
-    fn all_subscribed_tokens(&self) -> HashSet<TokenId> {
-        self.ws_manager.all_subscribed_tokens()
-    }
-
-    async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError> {
-        self.ws_manager
-            .subscribe_tokens(SubscriptionSource::Web, &token_ids);
-        Ok(())
-    }
-
-    async fn unsubscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError> {
-        self.ws_manager
-            .unsubscribe_tokens(SubscriptionSource::Web, &token_ids);
-        Ok(())
-    }
 }

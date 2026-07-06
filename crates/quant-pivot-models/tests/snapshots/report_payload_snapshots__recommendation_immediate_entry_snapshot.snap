@@ -97,6 +97,7 @@ expression: recommendation_immediate_entry()
     {
       "factor_name": "liquidity_depth",
       "family": "liquidity",
+      "value_state": "scored",
       "raw_value": "1234.5",
       "normalized_score": "0.8",
       "normalization_source": "cross_section",

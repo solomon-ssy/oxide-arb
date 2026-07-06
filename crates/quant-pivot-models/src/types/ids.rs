@@ -42,7 +42,7 @@ pub struct EventId(Arc<str>);
 /// Never construct a `TokenId` from a `MarketId` string — this will cause
 /// silent lookup failures. Polymarket `condition_id` (`MarketId`) starts with
 /// "0x" (66 chars); CLOB token IDs are decimal U256 strings.
-#[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenId(Arc<str>);
 
 #[cfg(debug_assertions)]
@@ -123,6 +123,14 @@ pub struct BacktestReportId(Arc<Uuid>);
 /// Pairwise model-comparison report identifier (baseline vs candidate replay).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelComparisonReportId(Arc<Uuid>);
+
+/// Favorite-longshot bias-table artifact identifier (Phase 11.2.1).
+///
+/// A content-addressed calibration artifact mapping market-implied price → the
+/// empirical settlement frequency, conditioned by `(category, price_bucket)`.
+/// Phase 11.3 folds this into the unified `CalibrationArtifactId` governance.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FavoriteLongshotBiasTableId(Arc<Uuid>);
 
 /// Shadow comparison record identifier (shadow vs active model run).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

@@ -3,7 +3,8 @@
 use crate::{
     enums::{
         factor::{
-            FactorDefinitionScope, FactorFamily, FactorIndeterminateReason, NormalizationSource,
+            FactorDefinitionScope, FactorFamily, FactorIndeterminateReason, FactorValueState,
+            NormalizationSource,
         },
         quant::{FactorDirection, PublicationStatus},
     },
@@ -78,12 +79,16 @@ pub struct FactorValueInfo {
     pub model_run_id: ModelRunId,
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
+    /// Authoritative factor-value state (scored / missing-input / not-applicable
+    /// / indeterminate).
+    pub value_state: FactorValueState,
     pub raw_value: Option<Decimal>,
-    /// `None` when the factor was missing-input or indeterminate.
+    /// `None` when the factor was missing-input, not-applicable, or indeterminate.
     pub normalized_score: Option<Probability>,
     /// How the score was derived (`None` when not scored).
     pub normalization_source: Option<NormalizationSource>,
-    /// Why the factor was indeterminate (`None` unless indeterminate).
+    /// Why the factor was indeterminate (`None` unless `value_state` is
+    /// `Indeterminate`).
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,
@@ -93,8 +98,8 @@ pub struct FactorValueInfo {
 
 info_from_model!(FactorValueInfo, crate::entities::quant_factor_value::Model, {
     factor_value_id, factor_definition_id, feature_vector_id, model_run_id, market_id, as_of,
-    raw_value, normalized_score, normalization_source, indeterminate_reason, direction, confidence,
-    explanation, created_at,
+    value_state, raw_value, normalized_score, normalization_source, indeterminate_reason,
+    direction, confidence, explanation, created_at,
 });
 
 /// Insert payload for `quant_factor_value`.
@@ -107,12 +112,16 @@ pub struct NewFactorValue {
     pub model_run_id: ModelRunId,
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
+    /// Authoritative factor-value state (scored / missing-input / not-applicable
+    /// / indeterminate).
+    pub value_state: FactorValueState,
     pub raw_value: Option<Decimal>,
-    /// `None` when the factor was missing-input or indeterminate.
+    /// `None` when the factor was missing-input, not-applicable, or indeterminate.
     pub normalized_score: Option<Probability>,
     /// How the score was derived (`None` when not scored).
     pub normalization_source: Option<NormalizationSource>,
-    /// Why the factor was indeterminate (`None` unless indeterminate).
+    /// Why the factor was indeterminate (`None` unless `value_state` is
+    /// `Indeterminate`).
     pub indeterminate_reason: Option<FactorIndeterminateReason>,
     pub direction: FactorDirection,
     pub confidence: Probability,

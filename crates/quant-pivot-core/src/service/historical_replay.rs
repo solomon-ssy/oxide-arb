@@ -12,12 +12,13 @@
 //! The function is pure orchestration over already-prefetched facts (served by
 //! [`HistoricalWindow`]); it never touches a live `BookStore`.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
+    domain::market::registry::NegRiskLegSet,
     enums::quant::DataQualityStatus,
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
     types::{Price, Usd},
@@ -27,6 +28,7 @@ use quant_pivot_research::{
     features::{
         ConfiguredFeatureBuilder, FeatureVector, MarketWindowSnapshot, PitView, ResolvedBook,
     },
+    model::FavoriteLongshotBiasTable,
     pit::PitQueryEngine,
     selection::SelectedMarket,
 };
@@ -44,6 +46,10 @@ pub struct ReplayConfig {
     pub factors: FactorsConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
+    /// Favorite-longshot bias table pinned by the frozen factor config (content-
+    /// hash verified). `None` keeps `struct.favorite_longshot` inert. Bound here
+    /// so the offline engine scores byte-identically to the online plane.
+    pub bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
 }
 
 /// Per-call inputs for materializing one cross-section from a prefetched window.
@@ -133,7 +139,15 @@ pub async fn materialize_cross_section(
         .iter()
         .zip(windows.iter())
         .map(|(market, snapshot)| {
-            builder.resolve_inputs(market, as_of, pit_view, snapshot, Usd::ZERO)
+            // Neg-risk full-leg PIT (offline): enumerate the event's YES legs from
+            // the prefetched window and resolve each book at the same `as_of`
+            // through the same `resolve_book` the online plane uses — byte-identical.
+            let sibling = sibling_leg_set(market, request.prefetched);
+            async move {
+                builder
+                    .resolve_inputs(market, as_of, pit_view, snapshot, &sibling, Usd::ZERO)
+                    .await
+            }
         });
     let bundles = try_join_all(resolve_futures).await?;
 
@@ -174,6 +188,25 @@ pub async fn materialize_cross_section(
         outcomes,
         dropped_insufficient,
     }))
+}
+
+/// The neg-risk YES-leg set for a market's event from the prefetched window.
+///
+/// Mirrors `MarketRegistry::neg_risk_leg_set` (online): empty for binary /
+/// non-neg-risk markets; otherwise the neg-risk leg count with resolvable legs
+/// populated (`expected_legs` excludes non-neg-risk event members).
+fn sibling_leg_set(market: &SelectedMarket, prefetched: &Prefetched) -> NegRiskLegSet {
+    let Some(info) = prefetched.markets_by_id.get(&market.market_id) else {
+        return NegRiskLegSet::empty();
+    };
+    if !info.neg_risk {
+        return NegRiskLegSet::empty();
+    }
+    prefetched
+        .neg_risk_leg_sets
+        .get(&info.event_id)
+        .cloned()
+        .unwrap_or(NegRiskLegSet::empty())
 }
 
 /// Build selected markets and trailing feature windows for one cross-section.

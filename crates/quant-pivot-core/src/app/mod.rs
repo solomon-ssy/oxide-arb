@@ -1,25 +1,18 @@
 //! Application context — system composition root and lifecycle manager.
 
-pub mod account_read;
 pub mod attribution_worker;
-pub mod backtest;
 pub mod book_update_coalescer;
 pub mod bootstrap;
 pub mod build;
 pub mod execution_dispatcher;
-pub mod execution_read;
-pub mod execution_recovery_port;
 pub mod exit_monitor_worker;
 pub mod fact_writer_tasks;
 pub mod intent_service;
 pub mod lifecycle;
-pub mod model_training;
 pub mod periodic_services;
-pub mod quant_report;
-pub mod reconciliation_port;
+pub mod ports;
 pub mod reconciliation_worker;
 pub mod report_scheduler;
-pub mod research_catalog;
 pub mod research_job;
 pub mod research_job_worker;
 pub mod runtime_tasks;
@@ -27,7 +20,6 @@ pub mod settlement_redeem_worker;
 pub mod system_status_broadcaster;
 pub mod task_id;
 pub mod task_registry;
-pub mod training_dataset;
 pub mod web_services;
 
 mod bundles;

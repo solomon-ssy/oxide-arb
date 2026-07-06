@@ -147,7 +147,7 @@ mod tests {
             market_id: MarketId::new("m"),
             token_id: Some(TokenId::new("t")),
             as_of,
-            schema_version: SchemaVersion::new(1),
+            schema_version: SchemaVersion::FIRST,
             values: BTreeMap::new(),
             substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,

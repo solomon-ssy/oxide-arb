@@ -17,7 +17,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::{
         factor::{
-            FactorFamily, FactorIndeterminateReason, FactorNormalization, NormalizationSource,
+            FactorFamily, FactorIndeterminateReason, FactorNormalization, FactorValueState,
+            NormalizationSource,
         },
         quant::FactorDirection,
     },
@@ -144,7 +145,9 @@ impl FactorValue {
     pub const fn normalized_score(&self) -> Option<Probability> {
         match &self.normalization {
             NormalizedFactor::Scored { score, .. } => Some(*score),
-            NormalizedFactor::MissingInput | NormalizedFactor::Indeterminate { .. } => None,
+            NormalizedFactor::MissingInput
+            | NormalizedFactor::NotApplicable
+            | NormalizedFactor::Indeterminate { .. } => None,
         }
     }
 
@@ -154,12 +157,34 @@ impl FactorValue {
         matches!(self.normalization, NormalizedFactor::Scored { .. })
     }
 
+    /// Whether the factor does not apply to this market's structure.
+    #[must_use]
+    pub const fn is_not_applicable(&self) -> bool {
+        matches!(self.normalization, NormalizedFactor::NotApplicable)
+    }
+
+    /// The authoritative persisted state of this factor value (orthogonal to
+    /// `indeterminate_reason`, which is populated only for the indeterminate
+    /// case). Keeps a structurally not-applicable factor durably distinct from a
+    /// missing-input one.
+    #[must_use]
+    pub const fn value_state(&self) -> FactorValueState {
+        match &self.normalization {
+            NormalizedFactor::Scored { .. } => FactorValueState::Scored,
+            NormalizedFactor::MissingInput => FactorValueState::MissingInput,
+            NormalizedFactor::NotApplicable => FactorValueState::NotApplicable,
+            NormalizedFactor::Indeterminate { .. } => FactorValueState::Indeterminate,
+        }
+    }
+
     /// How the score was derived, when the factor was scored.
     #[must_use]
     pub const fn normalization_source(&self) -> Option<NormalizationSource> {
         match &self.normalization {
             NormalizedFactor::Scored { source, .. } => Some(*source),
-            NormalizedFactor::MissingInput | NormalizedFactor::Indeterminate { .. } => None,
+            NormalizedFactor::MissingInput
+            | NormalizedFactor::NotApplicable
+            | NormalizedFactor::Indeterminate { .. } => None,
         }
     }
 
@@ -168,9 +193,30 @@ impl FactorValue {
     pub const fn indeterminate_reason(&self) -> Option<FactorIndeterminateReason> {
         match &self.normalization {
             NormalizedFactor::Indeterminate { reason } => Some(*reason),
-            NormalizedFactor::Scored { .. } | NormalizedFactor::MissingInput => None,
+            NormalizedFactor::Scored { .. }
+            | NormalizedFactor::MissingInput
+            | NormalizedFactor::NotApplicable => None,
         }
     }
+}
+
+/// How the engine must treat a factor's raw cell before/around normalization.
+///
+/// Normalizable cells flow through the cross-sectional normalizer; the other two
+/// short-circuit it with an explicit outcome (a binary market's neg-risk factor
+/// is `NotApplicable`; a neg-risk market missing a leg book is `Indeterminate`)
+/// — never a silent zero and never a fabricated cross-section entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", tag = "eligibility", content = "reason")]
+pub enum RawFactorEligibility {
+    /// The raw value participates in the same-`as_of` cross-section normalization.
+    #[default]
+    Normalizable,
+    /// The factor does not apply to this market's structure (⇒ `NotApplicable`).
+    NotApplicable,
+    /// The factor should have computed but an input was structurally absent
+    /// (⇒ `Indeterminate { reason }`), e.g. a neg-risk sibling leg's book.
+    Indeterminate(FactorIndeterminateReason),
 }
 
 /// A per-market raw factor output, prior to (possibly cross-sectional)
@@ -189,6 +235,8 @@ pub struct RawFactor {
     pub family: FactorFamily,
     /// Raw value, or `None` when the inputs were unavailable.
     pub raw_value: Option<Decimal>,
+    /// How the engine must treat this cell around normalization.
+    pub eligibility: RawFactorEligibility,
     /// Contribution direction.
     pub direction: FactorDirection,
     /// Confidence in the raw value (0 when inputs are missing).
@@ -228,6 +276,15 @@ pub enum FactorEligibility {
     /// market is excluded from the candidate set (it produces no factor rows).
     RejectCandidate {
         /// Why the market was rejected.
+        reason: String,
+    },
+    /// A required factor is structurally not applicable to this market (e.g. a
+    /// binary market required to carry a neg-risk full-leg factor). Distinct from
+    /// `RejectCandidate` (a data/quality reject): the market is excluded because
+    /// the required signal cannot exist for its structure, not because it is
+    /// low quality.
+    NotApplicable {
+        /// Why the required factor does not apply.
         reason: String,
     },
 }

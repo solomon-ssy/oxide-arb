@@ -291,8 +291,10 @@ pub enum FeatureFamily {
     TimeSeries,
     /// Order-flow microstructure (quote rate, churn, queue depletion, …).
     Microstructure,
-    /// Vertical/domain-specific features (sports/politics/crypto/weather/geo).
-    Domain,
+    /// Prediction-market structural signals (neg-risk full-leg aggregates,
+    /// shock/realized-vol windows, resolution-proximity, maker concentration).
+    /// Platform-computable from existing facts — no external data source.
+    Structural,
 }
 
 impl FeatureFamily {
@@ -302,7 +304,7 @@ impl FeatureFamily {
         Self::PriceBook,
         Self::TimeSeries,
         Self::Microstructure,
-        Self::Domain,
+        Self::Structural,
     ];
 
     /// The stable `snake_case` wire name (matches the serde representation).
@@ -313,7 +315,7 @@ impl FeatureFamily {
             Self::PriceBook => "price_book",
             Self::TimeSeries => "time_series",
             Self::Microstructure => "microstructure",
-            Self::Domain => "domain",
+            Self::Structural => "structural",
         }
     }
 }

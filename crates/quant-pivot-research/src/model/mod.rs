@@ -14,6 +14,7 @@ pub mod classical;
 pub mod classical_runtime;
 pub mod degrade;
 pub mod factory;
+pub mod favorite_longshot;
 #[cfg(feature = "optimize")]
 pub mod optimize;
 pub mod overlay;
@@ -49,6 +50,9 @@ pub use degrade::{DegradeAction, InferenceStage, degrade_action};
 pub use factory::{
     ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
     ModelRuntimeFactoryBuilder,
+};
+pub use favorite_longshot::{
+    BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
 };
 pub use overlay::{WeightOverlay, WeightSource};
 pub use rank_scores::{RankScores, attach as attach_rank_scores};

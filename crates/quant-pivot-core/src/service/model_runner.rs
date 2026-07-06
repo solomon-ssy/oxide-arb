@@ -59,7 +59,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{
-    governance::{WeightOverlayApplicator, active_load_ok, shadow_load_ok},
+    governance::{BiasTableApplicator, WeightOverlayApplicator, active_load_ok, shadow_load_ok},
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
         signal_candidate_fact_writer::SignalCandidateEventWriter,
@@ -231,6 +231,8 @@ pub struct ModelRunnerDeps {
     pub alerts: Arc<dyn InferenceAlertSink>,
     /// Hot-reloadable factor-weight overlay for non-published candidate / shadow.
     pub weight_overlay: Arc<WeightOverlayApplicator>,
+    /// Hot-reloadable favorite-longshot bias table (provenance + factor plane).
+    pub bias_table: Arc<BiasTableApplicator>,
 }
 
 /// Online inference orchestrator (3.4 capstone).
@@ -244,6 +246,8 @@ pub struct ModelRunner {
     alerts: Arc<dyn InferenceAlertSink>,
     /// Hot-reloadable factor-weight overlay for non-published candidate / shadow.
     weight_overlay: Arc<WeightOverlayApplicator>,
+    /// Hot-reloadable favorite-longshot bias table (provenance audit).
+    bias_table: Arc<BiasTableApplicator>,
     /// Consecutive classical-shadow inference failures (reset on any success).
     shadow_classical_failures: AtomicU32,
 }
@@ -261,6 +265,7 @@ impl ModelRunner {
             signal_writer: deps.signal_writer,
             alerts: deps.alerts,
             weight_overlay: deps.weight_overlay,
+            bias_table: deps.bias_table,
             shadow_classical_failures: AtomicU32::new(0),
         }
     }
@@ -274,12 +279,14 @@ impl ModelRunner {
     /// reported in [`ModelRunOutcome::shadow`], never as an error.
     pub async fn run(&self, request: ModelRunRequest<'_>) -> QuantResult<ModelRunOutcome> {
         let factor_schema_hash =
-            FactorEngine::new(request.factors, request.features).factor_schema_hash()?;
+            FactorEngine::new(request.factors, request.features, None).factor_schema_hash()?;
         let feature_schema_hash =
             ResearchHasher::feature_schema(&FeatureSchema::build(request.features))?;
+        let bias_table_hash = self.bias_table.current_content_hash();
         let binding = ActiveSchemaBinding {
             feature_schema_hash,
             factor_schema_hash: factor_schema_hash.clone(),
+            bias_table_hash: bias_table_hash.clone(),
         };
 
         let active_version_id = match request.model.active_model_version_id.as_ref() {
@@ -292,6 +299,7 @@ impl ModelRunner {
             &request,
             "live_inference",
             &factor_schema_hash,
+            bias_table_hash.as_ref(),
             active_version_id.as_ref(),
         )?;
         self.create_run(
@@ -383,8 +391,9 @@ impl ModelRunner {
             feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(
                 request.features,
             ))?,
-            factor_schema_hash: FactorEngine::new(request.factors, request.features)
+            factor_schema_hash: FactorEngine::new(request.factors, request.features, None)
                 .factor_schema_hash()?,
+            bias_table_hash: self.bias_table.current_content_hash(),
         };
         let factory = self.factory_builder.build(binding);
         let runtime = factory
@@ -531,6 +540,7 @@ impl ModelRunner {
             request,
             "shadow",
             factor_schema_hash,
+            binding.bias_table_hash.as_ref(),
             Some(&shadow_version_id),
         ) {
             Ok(hash) => hash,
@@ -1068,6 +1078,7 @@ fn input_hash(
     request: &ModelRunRequest<'_>,
     run_kind: &str,
     factor_schema_hash: &ContentHash,
+    bias_table_hash: Option<&ContentHash>,
     model_version_id: Option<&ModelVersionId>,
 ) -> QuantResult<ContentHash> {
     #[derive(Serialize)]
@@ -1076,6 +1087,7 @@ fn input_hash(
         market_selection_id: Option<&'a MarketSelectionId>,
         feature_vector_ids: &'a [FeatureVectorId],
         factor_schema_hash: &'a ContentHash,
+        bias_table_hash: Option<&'a ContentHash>,
         model_version_id: Option<&'a ModelVersionId>,
         as_of: DateTime<Utc>,
     }
@@ -1084,6 +1096,7 @@ fn input_hash(
         market_selection_id: request.market_selection_id.as_ref(),
         feature_vector_ids: request.feature_vector_ids,
         factor_schema_hash,
+        bias_table_hash,
         model_version_id,
         as_of: request.as_of,
     })

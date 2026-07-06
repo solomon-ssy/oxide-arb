@@ -383,7 +383,7 @@ fn book_row(
         ingestion_time: event_time_ms,
         sequence: 1,
         source: ChFactSource::WsSnapshot,
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 
@@ -419,7 +419,7 @@ fn micro_row(token: &TokenId, market: &MarketId, bucket_time_ms: i64) -> BookMic
         gap_count: 0,
         last_trade_count: 0,
         max_book_age_ms: 0,
-        schema_version: ChSchemaVersion(2),
+        schema_version: ChSchemaVersion::FIRST,
     }
 }
 
@@ -609,6 +609,7 @@ fn replay_config() -> ReplayConfig {
             max_feature_bucket_age_secs: 120,
             ..DataQualityConfig::default()
         },
+        bias_table: None,
     }
 }
 
