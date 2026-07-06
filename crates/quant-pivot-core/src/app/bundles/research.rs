@@ -27,7 +27,7 @@ use quant_pivot_models::domain::{
 };
 use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
-    AttributionRepository, BacktestReportRepository, FactorRepository,
+    AttributionRepository, BacktestReportRepository, EventRepository, FactorRepository,
     FavoriteLongshotBiasTableRepository, FeatureRepository, MarketRepository,
     MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
     ModelRegistryRepository, ModelRunRepository, PositionRepository, QuantFactReadRepository,
@@ -104,6 +104,8 @@ pub struct ResearchBundle {
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
     pub market_repo: Arc<dyn MarketRepository>,
+    /// Event catalog snapshot for offline neg-risk leg enumeration (11.2.1).
+    pub event_repo: Arc<dyn EventRepository>,
     /// Position ledger for `ExitDecision` lot-timeline training (06.1).
     pub position_repo: Arc<dyn PositionRepository>,
     /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
@@ -193,6 +195,7 @@ impl ResearchBundle {
             Arc::new(FavoriteLongshotFitService::new(
                 Arc::clone(&deps.infra.quant_fact_read),
                 Arc::clone(&deps.data.market_repo),
+                Arc::clone(&repos.event) as Arc<dyn EventRepository>,
                 Arc::clone(&repos.favorite_longshot_bias_table)
                     as Arc<dyn FavoriteLongshotBiasTableRepository>,
                 Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
@@ -224,6 +227,7 @@ impl ResearchBundle {
             model_runtime_factory_builder,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
+            event_repo: Arc::clone(&repos.event) as Arc<dyn EventRepository>,
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             fee_calculator: Arc::clone(&deps.data.fee_calculator),
             favorite_longshot_fit,
@@ -242,6 +246,7 @@ impl ResearchBundle {
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.quant_fact_read),
                 market_repo: Arc::clone(&self.market_repo),
+                event_repo: Arc::clone(&self.event_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.training_dataset_repo),
                 attribution_repo: Arc::clone(&self.attribution_repo),

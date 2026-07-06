@@ -15,8 +15,8 @@ use quant_pivot_models::{
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, FavoriteLongshotBiasTableRepository, MarketRepository,
-    ModelComparisonReportRepository, ModelRegistryRepository, ModelRunRepository,
+    BacktestReportRepository, EventRepository, FavoriteLongshotBiasTableRepository,
+    MarketRepository, ModelComparisonReportRepository, ModelRegistryRepository, ModelRunRepository,
     QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
@@ -41,6 +41,7 @@ pub struct CoreBacktestPort {
     factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
 }
@@ -63,6 +64,7 @@ impl CoreBacktestPort {
             factory_builder: Arc::clone(&research.model_runtime_factory_builder),
             fact_read: Arc::clone(&research.quant_fact_read),
             market_repo: Arc::clone(&research.market_repo),
+            event_repo: Arc::clone(&research.event_repo),
             runtime_config,
             bias_table_repo,
         }
@@ -87,6 +89,7 @@ impl CoreBacktestPort {
                 factory_builder: Arc::clone(&self.factory_builder),
                 fact_read: Arc::clone(&self.fact_read),
                 market_repo: Arc::clone(&self.market_repo),
+                event_repo: Arc::clone(&self.event_repo),
             },
             &runtime.portfolio,
             ReplayConfig {

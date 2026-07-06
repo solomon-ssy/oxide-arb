@@ -501,6 +501,7 @@ fn service_with_selection(
         TrainingDatasetServiceDeps {
             fact_read,
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
+            event_repo: Arc::new(PgEventRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
             attribution_repo: Arc::new(PgAttributionRepository::new(db.clone())),

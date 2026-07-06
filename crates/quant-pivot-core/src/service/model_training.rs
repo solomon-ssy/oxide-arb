@@ -36,8 +36,8 @@ use quant_pivot_models::{
     enums::quant::ModelSerializationFormat, hashing::CanonicalDigest, types::ModelArtifactId,
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    TrainingDatasetRepository,
+    EventRepository, MarketRepository, ModelRegistryRepository, ModelRunRepository,
+    QuantFactReadRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -97,6 +97,8 @@ pub struct ModelTrainerServiceDeps {
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     /// Postgres market catalog for the replay window.
     pub market_repo: Arc<dyn MarketRepository>,
+    /// Postgres event catalog snapshot for neg-risk leg enumeration.
+    pub event_repo: Arc<dyn EventRepository>,
 }
 
 /// Frozen config governing training (from the runtime-config version).
@@ -188,6 +190,7 @@ impl ModelTrainerService {
                 &parquet_examples,
                 Arc::clone(&self.deps.fact_read),
                 Arc::clone(&self.deps.market_repo),
+                Arc::clone(&self.deps.event_repo),
                 &self.replay,
                 self.max_book_staleness,
             )
@@ -198,6 +201,7 @@ impl ModelTrainerService {
                 &parquet_examples,
                 Arc::clone(&self.deps.fact_read),
                 Arc::clone(&self.deps.market_repo),
+                Arc::clone(&self.deps.event_repo),
                 &self.replay,
                 self.max_book_staleness,
             )

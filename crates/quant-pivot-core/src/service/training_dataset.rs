@@ -49,8 +49,9 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, FeatureRepository, MarketRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, TrainingDatasetRepository,
+    AttributionRepository, EventRepository, FeatureRepository, MarketRepository,
+    PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -140,6 +141,8 @@ pub struct TrainingDatasetServiceDeps {
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     /// Postgres market catalog.
     pub market_repo: Arc<dyn MarketRepository>,
+    /// Postgres event catalog snapshot for neg-risk leg enumeration.
+    pub event_repo: Arc<dyn EventRepository>,
     /// Content-addressed artifact store for Parquet output.
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Training-dataset ledger repository.
@@ -205,6 +208,7 @@ pub struct TrainingDatasetBuildConfig {
 pub struct TrainingDatasetService {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
     attribution_repo: Arc<dyn AttributionRepository>,
@@ -252,6 +256,7 @@ impl TrainingDatasetService {
         Ok(Self {
             fact_read: deps.fact_read,
             market_repo: deps.market_repo,
+            event_repo: deps.event_repo,
             artifact_store: deps.artifact_store,
             dataset_repo: deps.dataset_repo,
             attribution_repo: deps.attribution_repo,
@@ -883,6 +888,7 @@ impl TrainingDatasetService {
         HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
             Arc::clone(&self.market_repo),
+            Arc::clone(&self.event_repo),
             self.max_book_staleness,
         )
     }

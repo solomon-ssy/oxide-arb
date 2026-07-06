@@ -24,6 +24,8 @@ pub enum Event {
     Status,
     Tags,
     NegRisk,
+    /// Gamma event catalog snapshot: ordered `condition_id`s at sync time.
+    CatalogMarketIds,
     EndDate,
     RawGamma,
     CreatedAt,
@@ -52,6 +54,12 @@ pub fn table() -> TableCreateStatement {
                 .boolean()
                 .not_null()
                 .default(false),
+        )
+        .col(
+            ColumnDef::new(Event::CatalogMarketIds)
+                .array(ColumnType::Text)
+                .not_null()
+                .default(Expr::cust("'{}'::text[]")),
         )
         .col(
             ColumnDef::new(Event::EndDate)

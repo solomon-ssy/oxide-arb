@@ -81,6 +81,7 @@ fn event_upsert_on_conflict() -> OnConflict {
             Column::Slug,
             Column::Tags,
             Column::NegRisk,
+            Column::CatalogMarketIds,
             Column::EndDate,
             Column::RawGamma,
         ])

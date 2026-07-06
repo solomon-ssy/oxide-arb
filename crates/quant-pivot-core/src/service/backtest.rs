@@ -36,7 +36,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, MarketRepository, ModelComparisonReportRepository,
+    BacktestReportRepository, EventRepository, MarketRepository, ModelComparisonReportRepository,
     ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
     TrainingDatasetRepository,
 };
@@ -90,6 +90,8 @@ pub struct BacktestServiceDeps {
     pub fact_read: Arc<dyn QuantFactReadRepository>,
     /// Postgres market catalog for the replay window.
     pub market_repo: Arc<dyn MarketRepository>,
+    /// Postgres event catalog snapshot for neg-risk leg enumeration.
+    pub event_repo: Arc<dyn EventRepository>,
 }
 
 /// A backtest request resolved by the admin port.
@@ -339,6 +341,7 @@ impl BacktestService {
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.market_repo),
+            Arc::clone(&self.deps.event_repo),
             self.max_book_staleness,
         );
         let window = loader

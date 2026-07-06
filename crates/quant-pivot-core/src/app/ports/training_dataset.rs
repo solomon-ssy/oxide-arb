@@ -16,7 +16,7 @@ use quant_pivot_models::{
     types::{RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+    AttributionRepository, EventRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
     MarketRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
     RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
@@ -40,6 +40,7 @@ use crate::{
 pub struct CoreTrainingDatasetPort {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
     attribution_repo: Arc<dyn AttributionRepository>,
@@ -71,6 +72,7 @@ impl CoreTrainingDatasetPort {
         Self {
             fact_read: Arc::clone(&research.quant_fact_read),
             market_repo: Arc::clone(&research.market_repo),
+            event_repo: Arc::clone(&research.event_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
             attribution_repo: Arc::clone(&research.attribution_repo),
@@ -105,6 +107,7 @@ impl CoreTrainingDatasetPort {
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.fact_read),
                 market_repo: Arc::clone(&self.market_repo),
+                event_repo: Arc::clone(&self.event_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 attribution_repo: Arc::clone(&self.attribution_repo),

@@ -1440,12 +1440,15 @@ async fn negrisk_missing_catalog_leg_fails_closed() {
 }
 
 #[test]
-fn negrisk_from_event_catalog_excludes_non_neg_risk_rows() {
+fn negrisk_from_catalog_excludes_non_neg_risk_members() {
     use std::sync::Arc;
 
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::market::MarketInfo,
+        domain::market::{
+            MarketInfo,
+            registry::{CatalogMarketLeg, NegRiskLegSet},
+        },
         enums::{
             common::{MarketCategory, TickSize},
             market::MarketStatus,
@@ -1481,14 +1484,35 @@ fn negrisk_from_event_catalog_excludes_non_neg_risk_rows() {
         })
     };
 
-    let set = NegRiskLegSet::from_event_catalog(&[
-        catalog("leg-a", true),
-        catalog("leg-b", true),
-        catalog("binary", false),
-    ]);
+    let leg_a = catalog("leg-a", true);
+    let leg_b = catalog("leg-b", true);
+    let binary = catalog("binary", false);
+    let by_id = [
+        (leg_a.market_id.clone(), leg_a),
+        (leg_b.market_id.clone(), leg_b),
+        (binary.market_id.clone(), binary),
+    ]
+    .into_iter()
+    .collect::<std::collections::HashMap<_, _>>();
+    let market_ids = [
+        MarketId::new("leg-a"),
+        MarketId::new("leg-b"),
+        MarketId::new("binary"),
+    ];
+    let set = NegRiskLegSet::from_catalog(&market_ids, |market_id| {
+        by_id.get(market_id).map(|info| {
+            if info.neg_risk {
+                CatalogMarketLeg::NegRisk {
+                    yes_token_id: info.yes_token_id.clone(),
+                }
+            } else {
+                CatalogMarketLeg::NonNegRisk
+            }
+        })
+    });
     assert_eq!(
         set.expected_legs, 2,
-        "non-neg-risk PG rows must not inflate expected_legs"
+        "non-neg-risk catalog members must not inflate expected_legs"
     );
     assert_eq!(set.legs.len(), 2);
 }

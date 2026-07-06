@@ -1,6 +1,7 @@
 pub mod account;
 pub mod attribution_payload;
 pub mod book_snapshot_ref;
+pub mod catalog;
 pub mod content;
 pub mod dataset_coverage;
 pub mod execution_payload;
@@ -22,6 +23,7 @@ pub mod training;
 pub use account::*;
 pub use attribution_payload::*;
 pub use book_snapshot_ref::*;
+pub use catalog::*;
 pub use content::*;
 pub use dataset_coverage::*;
 pub use execution_payload::*;

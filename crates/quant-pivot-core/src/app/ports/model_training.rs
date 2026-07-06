@@ -14,9 +14,9 @@ use quant_pivot_models::{
     types::{ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    FavoriteLongshotBiasTableRepository, MarketRepository, ModelRegistryRepository,
-    ModelRunRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    EventRepository, FavoriteLongshotBiasTableRepository, MarketRepository,
+    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+    RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -43,6 +43,7 @@ pub struct CoreModelTrainingPort {
     model_run_repo: Arc<dyn ModelRunRepository>,
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
 }
@@ -62,6 +63,7 @@ impl CoreModelTrainingPort {
             model_run_repo: Arc::clone(&research.model_run_repo),
             fact_read: Arc::clone(&research.quant_fact_read),
             market_repo: Arc::clone(&research.market_repo),
+            event_repo: Arc::clone(&research.event_repo),
             runtime_config,
             bias_table_repo,
         }
@@ -83,6 +85,7 @@ impl CoreModelTrainingPort {
                 model_run_repo: Arc::clone(&self.model_run_repo),
                 fact_read: Arc::clone(&self.fact_read),
                 market_repo: Arc::clone(&self.market_repo),
+                event_repo: Arc::clone(&self.event_repo),
             },
             ModelTrainerConfig {
                 factors: runtime.factors.clone(),

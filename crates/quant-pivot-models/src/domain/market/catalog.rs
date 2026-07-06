@@ -1,6 +1,9 @@
 //! Gamma catalog persistence DTOs for the `event` table.
 
-use crate::{enums::market::EventStatus, types::EventId};
+use crate::{
+    enums::market::EventStatus,
+    types::{CatalogMarketIds, EventId},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveValue, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, IntoActiveValue,
@@ -17,6 +20,8 @@ pub struct EventInfo {
     pub status: EventStatus,
     pub tags: Vec<String>,
     pub neg_risk: bool,
+    /// Ordered Gamma `condition_id`s at sync time (mirrors `EventRegistryInfo.market_ids`).
+    pub catalog_market_ids: CatalogMarketIds,
     pub end_date: Option<DateTime<Utc>>,
     pub raw_gamma: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
@@ -24,8 +29,17 @@ pub struct EventInfo {
 }
 
 info_from_model!(EventInfo, crate::entities::event::Model, {
-    event_id, title, slug, status, tags, neg_risk, end_date, raw_gamma,
-    created_at, updated_at,
+    event_id,
+    title,
+    slug,
+    status,
+    tags,
+    neg_risk,
+    catalog_market_ids,
+    end_date,
+    raw_gamma,
+    created_at,
+    updated_at,
 });
 
 /// Structured write wrapper for raw Gamma tag slugs.
@@ -57,6 +71,7 @@ pub struct UpsertEvent {
     pub status: EventStatus,
     pub tags: EventTags,
     pub neg_risk: bool,
+    pub catalog_market_ids: CatalogMarketIds,
     pub end_date: Option<DateTime<Utc>>,
     pub raw_gamma: Option<serde_json::Value>,
 }

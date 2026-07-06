@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use quant_pivot_models::{
     domain::market::{
         EventRegistryInfo, MarketRegistryInfo,
-        registry::{NegRiskLeg, NegRiskLegSet},
+        registry::{CatalogMarketLeg, NegRiskLegSet},
     },
     enums::market::MarketStatus,
     types::{EventId, MarketId, TokenId},
@@ -191,32 +191,17 @@ impl MarketRegistry {
         if !event.neg_risk {
             return NegRiskLegSet::empty();
         }
-        let mut expected_legs = 0_usize;
-        let mut legs = Vec::new();
-        for market_id in &event.market_ids {
-            match self.markets.get(market_id) {
-                Some(entry) if entry.neg_risk => {
-                    expected_legs += 1;
-                    legs.push(NegRiskLeg {
-                        market_id: entry.market_id.clone(),
+        NegRiskLegSet::from_catalog(&event.market_ids, |market_id| {
+            self.markets.get(market_id).map(|entry| {
+                if entry.neg_risk {
+                    CatalogMarketLeg::NegRisk {
                         yes_token_id: entry.token_yes.clone(),
-                    });
+                    }
+                } else {
+                    CatalogMarketLeg::NonNegRisk
                 }
-                Some(_) => {
-                    // Non-neg-risk event member — not a structural YES leg.
-                }
-                None => {
-                    // Catalogued outcome not yet materialized in the registry;
-                    // still expected so missing PIT books fail closed.
-                    expected_legs += 1;
-                }
-            }
-        }
-        legs.sort();
-        NegRiskLegSet {
-            expected_legs,
-            legs,
-        }
+            })
+        })
     }
 
     /// Return (YES token, NO token) for a market.

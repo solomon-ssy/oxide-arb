@@ -26,11 +26,11 @@ use quant_pivot_models::{
         BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice, ChUsd,
         MarketResolutionRow,
     },
-    domain::market::registry::{MarketInfo, NegRiskLegSet},
+    domain::market::registry::{CatalogMarketLeg, MarketInfo, NegRiskLegSet},
     enums::market::MarketStatus,
     types::{EventId, MarketId, TokenId},
 };
-use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
+use quant_pivot_repository::traits::{EventRepository, MarketRepository, QuantFactReadRepository};
 use quant_pivot_research::{
     features::{MarketWindowSnapshot, MicrostructureBucket},
     pit::{BookSnapshotAt, MarketContextAt, MaterializedPitEngine},
@@ -96,6 +96,7 @@ pub struct HistoricalWindow {
 pub struct HistoricalWindowLoader {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     max_book_staleness: Duration,
 }
 
@@ -105,11 +106,13 @@ impl HistoricalWindowLoader {
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
         market_repo: Arc<dyn MarketRepository>,
+        event_repo: Arc<dyn EventRepository>,
         max_book_staleness: Duration,
     ) -> Self {
         Self {
             fact_read,
             market_repo,
+            event_repo,
             max_book_staleness,
         }
     }
@@ -221,7 +224,7 @@ impl HistoricalWindowLoader {
         }
 
         let neg_risk_leg_sets =
-            build_neg_risk_leg_sets(self.market_repo.as_ref(), &sample_infos, &markets_by_id)
+            build_neg_risk_leg_sets(self.event_repo.as_ref(), &sample_infos, &markets_by_id)
                 .await?;
 
         Ok(Prefetched {
@@ -235,8 +238,12 @@ impl HistoricalWindowLoader {
 }
 
 /// Enumerate neg-risk leg sets for every event touched by the sample window.
+///
+/// Uses the persisted Gamma catalog snapshot (`EventInfo.catalog_market_ids`) —
+/// the same source as online [`MarketRegistry::neg_risk_leg_set`] — so
+/// `expected_legs` semantics match the live plane (Phase 11.2.1 train-serve parity).
 async fn build_neg_risk_leg_sets(
-    market_repo: &dyn MarketRepository,
+    event_repo: &dyn EventRepository,
     sample_infos: &[Arc<MarketInfo>],
     markets_by_id: &HashMap<MarketId, Arc<MarketInfo>>,
 ) -> QuantResult<HashMap<EventId, NegRiskLegSet>> {
@@ -248,13 +255,38 @@ async fn build_neg_risk_leg_sets(
     for info in markets_by_id.values().filter(|info| info.neg_risk) {
         neg_risk_events.insert(info.event_id.clone());
     }
+    let event_ids: Vec<EventId> = neg_risk_events.into_iter().collect();
+    let events = event_repo
+        .find_by_ids(&event_ids)
+        .await
+        .map_err(QuantError::from)?;
+    let events_by_id: HashMap<EventId, _> = events
+        .into_iter()
+        .map(|event| (event.event_id.clone(), event))
+        .collect();
+
     let mut neg_risk_leg_sets = HashMap::new();
-    for event_id in neg_risk_events {
-        let siblings = market_repo
-            .find_by_event(event_id.as_str())
-            .await
-            .map_err(QuantError::from)?;
-        neg_risk_leg_sets.insert(event_id, NegRiskLegSet::from_event_catalog(&siblings));
+    for event_id in event_ids {
+        let Some(event) = events_by_id.get(&event_id) else {
+            neg_risk_leg_sets.insert(event_id, NegRiskLegSet::empty());
+            continue;
+        };
+        if !event.neg_risk {
+            continue;
+        }
+        let catalog = event.catalog_market_ids.as_slice();
+        let leg_set = NegRiskLegSet::from_catalog(catalog, |market_id| {
+            markets_by_id.get(market_id).map(|info| {
+                if info.neg_risk {
+                    CatalogMarketLeg::NegRisk {
+                        yes_token_id: info.yes_token_id.clone(),
+                    }
+                } else {
+                    CatalogMarketLeg::NonNegRisk
+                }
+            })
+        });
+        neg_risk_leg_sets.insert(event_id, leg_set);
     }
     Ok(neg_risk_leg_sets)
 }

@@ -1,7 +1,5 @@
 //! Polymarket catalog persistence DTOs.
 
-use std::sync::Arc;
-
 use crate::{
     domain::{MarketFeeColumns, MarketFeeSchedule},
     enums::{
@@ -115,9 +113,10 @@ pub struct NegRiskLeg {
 
 /// Expected vs resolved neg-risk YES legs for an event (Phase 11.2.1 PIT).
 ///
-/// `expected_legs` is the count of **neg-risk outcome markets** in the event
-/// (not `event.market_ids.len()` — binary / non-neg-risk members are excluded).
-/// `legs` holds the registry-resolvable subset with YES tokens. When
+/// `expected_legs` is the count of **neg-risk outcome markets** listed in the
+/// event's Gamma catalog snapshot (`EventRegistryInfo.market_ids` online,
+/// `EventInfo.catalog_market_ids` offline). Non-neg-risk catalog members are
+/// excluded. `legs` holds the materialized subset with YES tokens. When
 /// `legs.len() < expected_legs`, structural features fail closed with
 /// [`NullReason::LegBookMissing`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -126,6 +125,15 @@ pub struct NegRiskLegSet {
     pub expected_legs: usize,
     /// Resolved YES legs present in the registry at enumeration time.
     pub legs: Vec<NegRiskLeg>,
+}
+
+/// Materialized market metadata needed to resolve one catalog member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogMarketLeg {
+    /// A neg-risk market with its YES token.
+    NegRisk { yes_token_id: TokenId },
+    /// A catalog member that is not a structural neg-risk leg (e.g. binary).
+    NonNegRisk,
 }
 
 impl NegRiskLegSet {
@@ -138,23 +146,40 @@ impl NegRiskLegSet {
         }
     }
 
-    /// Build from the catalog markets of one neg-risk event (offline PG parity).
+    /// Build from the event's Gamma catalog snapshot and a market resolver.
     ///
-    /// `expected_legs` equals the number of `neg_risk` rows returned by
-    /// `find_by_event`; non-neg-risk event members are not structural legs.
+    /// `catalog_market_ids` preserves Gamma sync order. `resolve` returns:
+    /// - `Some(CatalogMarketLeg::NegRisk { .. })` when the market is materialized
+    ///   and `neg_risk`;
+    /// - `Some(CatalogMarketLeg::NonNegRisk)` when materialized but not neg-risk;
+    /// - `None` when the catalog member is not yet materialized (still expected).
     #[must_use]
-    pub fn from_event_catalog(markets: &[Arc<MarketInfo>]) -> Self {
-        let mut legs: Vec<NegRiskLeg> = markets
-            .iter()
-            .filter(|market| market.neg_risk)
-            .map(|market| NegRiskLeg {
-                market_id: market.market_id.clone(),
-                yes_token_id: market.yes_token_id.clone(),
-            })
-            .collect();
+    pub fn from_catalog<F>(catalog_market_ids: &[MarketId], mut resolve: F) -> Self
+    where
+        F: FnMut(&MarketId) -> Option<CatalogMarketLeg>,
+    {
+        let mut expected_legs = 0_usize;
+        let mut legs = Vec::new();
+        for market_id in catalog_market_ids {
+            match resolve(market_id) {
+                Some(CatalogMarketLeg::NegRisk { yes_token_id }) => {
+                    expected_legs += 1;
+                    legs.push(NegRiskLeg {
+                        market_id: market_id.clone(),
+                        yes_token_id,
+                    });
+                }
+                Some(CatalogMarketLeg::NonNegRisk) => {}
+                None => {
+                    // Catalogued outcome not yet materialized — still expected so
+                    // missing PIT books fail closed (online/offline identical).
+                    expected_legs += 1;
+                }
+            }
+        }
         legs.sort();
         Self {
-            expected_legs: legs.len(),
+            expected_legs,
             legs,
         }
     }
@@ -314,7 +339,7 @@ mod neg_risk_leg_set_tests {
 
     use chrono::Utc;
 
-    use super::{MarketInfo, NegRiskLegSet};
+    use super::{CatalogMarketLeg, MarketInfo, NegRiskLegSet};
     use crate::{
         enums::{
             common::{MarketCategory, TickSize},
@@ -352,12 +377,33 @@ mod neg_risk_leg_set_tests {
     }
 
     #[test]
-    fn from_event_catalog_counts_only_neg_risk_markets() {
-        let set = NegRiskLegSet::from_event_catalog(&[
-            catalog_market("m-yes-1", true),
-            catalog_market("m-yes-2", true),
-            catalog_market("m-binary", false),
-        ]);
+    fn from_catalog_counts_only_neg_risk_markets() {
+        let m1 = catalog_market("m-yes-1", true);
+        let m2 = catalog_market("m-yes-2", true);
+        let binary = catalog_market("m-binary", false);
+        let by_id = [
+            (m1.market_id.clone(), m1),
+            (m2.market_id.clone(), m2),
+            (binary.market_id.clone(), binary),
+        ]
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+        let catalog = [
+            MarketId::new("m-yes-1"),
+            MarketId::new("m-yes-2"),
+            MarketId::new("m-binary"),
+        ];
+        let set = NegRiskLegSet::from_catalog(&catalog, |market_id| {
+            by_id.get(market_id).map(|info| {
+                if info.neg_risk {
+                    CatalogMarketLeg::NegRisk {
+                        yes_token_id: info.yes_token_id.clone(),
+                    }
+                } else {
+                    CatalogMarketLeg::NonNegRisk
+                }
+            })
+        });
         assert_eq!(set.expected_legs, 2);
         assert_eq!(set.legs.len(), 2);
         assert!(
@@ -365,5 +411,23 @@ mod neg_risk_leg_set_tests {
                 .iter()
                 .all(|leg| leg.market_id.as_str().starts_with("m-yes"))
         );
+    }
+
+    #[test]
+    fn from_catalog_expects_unregistered_catalog_member() {
+        let present = catalog_market("m-present", true);
+        let by_id = std::iter::once((present.market_id.clone(), present))
+            .collect::<std::collections::HashMap<_, _>>();
+        let catalog = [MarketId::new("m-present"), MarketId::new("m-missing")];
+        let set = NegRiskLegSet::from_catalog(&catalog, |market_id| {
+            by_id.get(market_id).map(|info| CatalogMarketLeg::NegRisk {
+                yes_token_id: info.yes_token_id.clone(),
+            })
+        });
+        assert_eq!(
+            set.expected_legs, 2,
+            "unregistered catalog leg still expected"
+        );
+        assert_eq!(set.legs.len(), 1);
     }
 }

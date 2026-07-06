@@ -117,6 +117,12 @@ impl From<&CatalogEvent> for UpsertEvent {
             status: event.status,
             tags: event.tags.clone().into(),
             neg_risk: event.neg_risk,
+            catalog_market_ids: event
+                .markets
+                .iter()
+                .map(|market| MarketId::new(&market.condition_id))
+                .collect::<Vec<_>>()
+                .into(),
             end_date: event.end_date,
             raw_gamma: Some(event.raw_wire.clone()),
         }

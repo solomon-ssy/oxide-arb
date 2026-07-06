@@ -19,7 +19,7 @@ use quant_pivot_models::{
     domain::TrainingDatasetInfo,
     types::{MarketId, TokenId, TrainingExampleId, TrainingSampleSource},
 };
-use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
+use quant_pivot_repository::traits::{EventRepository, MarketRepository, QuantFactReadRepository};
 use quant_pivot_research::{
     factors::{FactorEligibility, FactorEngine, FactorValue},
     features::{ConfiguredFeatureBuilder, FeatureVector},
@@ -96,6 +96,7 @@ pub async fn rematerialize_training_examples(
     parquet_examples: &[TrainingExample],
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     replay: &ReplayConfig,
     max_book_staleness: Duration,
 ) -> QuantResult<Vec<TrainingExample>> {
@@ -106,7 +107,8 @@ pub async fn rematerialize_training_examples(
     let lookback = Duration::from_secs(replay.features.max_lookback_secs());
     let max_horizon_secs = max_horizon(dataset);
 
-    let loader = HistoricalWindowLoader::new(fact_read, market_repo, max_book_staleness);
+    let loader =
+        HistoricalWindowLoader::new(fact_read, market_repo, event_repo, max_book_staleness);
     let window = loader
         .load(&WindowSpec {
             window_start: dataset.window_start,
@@ -204,6 +206,7 @@ pub async fn rematerialize_exit_decision_examples(
     parquet_examples: &[TrainingExample],
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     replay: &ReplayConfig,
     max_book_staleness: Duration,
 ) -> QuantResult<Vec<TrainingExample>> {
@@ -212,7 +215,8 @@ pub async fn rematerialize_exit_decision_examples(
     let lookback = Duration::from_secs(replay.features.max_lookback_secs());
     let max_horizon_secs = max_horizon(dataset);
 
-    let loader = HistoricalWindowLoader::new(fact_read, market_repo, max_book_staleness);
+    let loader =
+        HistoricalWindowLoader::new(fact_read, market_repo, event_repo, max_book_staleness);
     let window = loader
         .load(&WindowSpec {
             window_start: dataset.window_start,

@@ -50,8 +50,8 @@ use quant_pivot_models::{
     types::{ContentHash, FavoriteLongshotBiasTableId, MarketId, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
-    FavoriteLongshotBiasTableRepository, MarketRepository, QuantFactReadRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    EventRepository, FavoriteLongshotBiasTableRepository, MarketRepository,
+    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     features::PitView,
@@ -130,6 +130,7 @@ struct SettledMarket {
 pub struct FavoriteLongshotFitService {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
@@ -141,6 +142,7 @@ impl FavoriteLongshotFitService {
     pub const fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
         market_repo: Arc<dyn MarketRepository>,
+        event_repo: Arc<dyn EventRepository>,
         bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
         runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
         training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
@@ -148,6 +150,7 @@ impl FavoriteLongshotFitService {
         Self {
             fact_read,
             market_repo,
+            event_repo,
             bias_table_repo,
             runtime_config_repo,
             training_dataset_repo,
@@ -281,6 +284,7 @@ impl FavoriteLongshotFitService {
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
             Arc::clone(&self.market_repo),
+            Arc::clone(&self.event_repo),
             max_book_staleness,
         );
         let historical = loader.load(&spec).await?;
