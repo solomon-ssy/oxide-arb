@@ -423,6 +423,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         selection_fields(),
         data_quality_fields(),
         feature_fields(),
+        domain_fields(),
         factor_fields(),
         model_fields(),
         quality_gate_fields(),
@@ -537,6 +538,13 @@ fn data_quality_fields() -> Vec<FieldUiEntry> {
             "最大成交带年龄",
             "Oldest acceptable on-chain trade-tape print at decision time. Governs structural participant-concentration staleness; above it, trade-tape features are treated as stale per the staleness policy. Must be > 0.",
             "决策时可接受的最旧链上成交带打印时间。控制结构性参与者集中度特征的陈旧度；超过后按特征陈旧策略处理成交带特征。必须大于 0。",
+        ),
+        secs(
+            "data_quality.max_domain_observation_age_secs",
+            "Maximum domain-observation age",
+            "最大域观测年龄",
+            "Oldest acceptable external domain observation (Binance kline / Chainlink oracle) at decision time. Above it, domain features fail closed or degrade per the feature staleness policy. Must be > 0.",
+            "决策时可接受的最旧外部域观测（Binance K 线 / Chainlink 预言机）。超过后域特征按特征陈旧策略 fail-closed 或降级。必须大于 0。",
         ),
         boolean(
             "data_quality.reject_crossed_books",
@@ -670,6 +678,58 @@ fn feature_fields() -> Vec<FieldUiEntry> {
     .into_iter()
     .chain(structural_feature_fields())
     .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Field dictionary — Domain (external verticals)
+// ---------------------------------------------------------------------------
+
+fn domain_fields() -> Vec<FieldUiEntry> {
+    vec![
+        f(
+            "domain.enabled_by_family",
+            "Enabled domain families",
+            "启用的域垂直族",
+            "Per-vertical enablement for the external domain plane. A disabled family fails closed (`domain: None`) for its categories; only enabled families may serve linkage-backed domain features.",
+            "外部域平面的逐垂直启用开关。禁用的族对其分类 fail-closed（`domain: None`）；仅启用的族可提供联动支撑的域特征。",
+        )
+        .widget(FieldWidget::JsonTree),
+        secs(
+            "domain.crypto.source_delay_secs",
+            "Crypto source visibility delay",
+            "加密源可见性延迟",
+            "PIT delay applied to domain observations: only rows with `event_time <= as_of - delay` are visible to crypto domain features. Mirrors report `source_delay_secs`; must be ≥ 0.",
+            "应用于域观测的 PIT 延迟：仅 `event_time <= as_of - delay` 的行对加密域特征可见。镜像报告 `source_delay_secs`；必须 ≥ 0。",
+        ),
+        integer(
+            "domain.crypto.backfill_days",
+            "Crypto backfill window",
+            "加密回填窗口",
+            "Days of 1-minute kline history the domain ingest worker backfills on bootstrap before switching to incremental polling. Larger windows cost more Binance weight budget.",
+            "域摄取 worker 在启动时回填的 1 分钟 K 线历史天数，之后切换为增量轮询。窗口越大消耗的 Binance weight 预算越多。",
+        ),
+        secs(
+            "domain.crypto.momentum_window_secs",
+            "Crypto momentum lookback",
+            "加密动量回看",
+            "Lookback (seconds) for the underlying momentum feature fed into crypto domain builders. Must be > 0.",
+            "加密域构建器所用底层动量特征的回看窗口（秒）。必须 > 0。",
+        ),
+        secs(
+            "domain.crypto.volatility_window_secs",
+            "Crypto volatility lookback",
+            "加密波动率回看",
+            "Lookback (seconds) for the underlying realized-volatility feature fed into crypto domain builders. Must be > 0.",
+            "加密域构建器所用底层已实现波动率特征的回看窗口（秒）。必须 > 0。",
+        ),
+        bps(
+            "domain.crypto.cross_check.max_basis_bps",
+            "Maximum Binance–Chainlink basis",
+            "Binance–Chainlink 最大基差",
+            "When the settlement oracle is Chainlink, basis between Binance and Chainlink PIT quotes above this (bps) raises a cross-check risk signal and flags linkage for review — never silently clamps a feature.",
+            "结算预言机为 Chainlink 时，Binance 与 Chainlink PIT 报价基差超过此值（bps）会触发交叉核验风险信号并标记联动待复核——绝不静默钳制特征值。",
+        ),
+    ]
 }
 
 /// Structural feature-family windows (Phase 11.2.1).
@@ -975,6 +1035,10 @@ fn model_fields() -> Vec<FieldUiEntry> {
             "The published hold-vs-exit Sell scorer loaded by the opportunistic-sell evaluator. A separate pointer from the entry model so Buy and Sell models are governed independently. Empty disables model-driven opportunistic exits.",
             "机会性卖出评估器加载的、已发布的『持有 vs 退出』卖出评分模型。与入场模型是独立指针，使买、卖模型分别治理。留空则关闭由模型驱动的机会性退出。",
         ),
+    ]
+    .into_iter()
+    .chain(category_model_pointer_fields())
+    .chain([
         ratio(
             "model.min_model_confidence",
             "Minimum model confidence",
@@ -1002,6 +1066,82 @@ fn model_fields() -> Vec<FieldUiEntry> {
             "影子差异阈值",
             "Absolute active-vs-shadow score divergence above which a divergence alert is raised and recorded. Lower values surface drift earlier (more alerts).",
             "活动与影子模型分数的绝对偏离超过该阈值时，会触发并记录偏离告警。调低会更早暴露漂移（告警更多）。",
+        ),
+    ])
+    .collect()
+}
+
+fn category_model_pointer_fields() -> Vec<FieldUiEntry> {
+    vec![
+        plain(
+            "model.category_model_pointers.crypto",
+            "Crypto category model",
+            "加密分类模型",
+            "Published Buy-side model for Crypto markets (may consume the crypto domain slice). Empty falls back to the generic active model.",
+            "Crypto 市场的已发布 Buy 侧模型（可消费加密域切片）。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.sports",
+            "Sports category model",
+            "体育分类模型",
+            "Published Buy-side model for Sports markets. Empty falls back to the generic active model.",
+            "Sports 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.politics",
+            "Politics category model",
+            "政治分类模型",
+            "Published Buy-side model for Politics markets. Empty falls back to the generic active model.",
+            "Politics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.finance",
+            "Finance category model",
+            "金融分类模型",
+            "Published Buy-side model for Finance markets. Empty falls back to the generic active model.",
+            "Finance 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.tech",
+            "Tech category model",
+            "科技分类模型",
+            "Published Buy-side model for Tech markets. Empty falls back to the generic active model.",
+            "Tech 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.culture",
+            "Culture category model",
+            "文化分类模型",
+            "Published Buy-side model for Culture markets. Empty falls back to the generic active model.",
+            "Culture 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.weather",
+            "Weather category model",
+            "天气分类模型",
+            "Published Buy-side model for Weather markets. Empty falls back to the generic active model.",
+            "Weather 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.economics",
+            "Economics category model",
+            "经济分类模型",
+            "Published Buy-side model for Economics markets. Empty falls back to the generic active model.",
+            "Economics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.geopolitics",
+            "Geopolitics category model",
+            "地缘政治分类模型",
+            "Published Buy-side model for Geopolitics markets. Empty falls back to the generic active model.",
+            "Geopolitics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
+        ),
+        plain(
+            "model.category_model_pointers.other",
+            "Other category model",
+            "其他分类模型",
+            "Published Buy-side model for Other markets. Empty falls back to the generic active model.",
+            "Other 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
         ),
     ]
 }
@@ -1927,6 +2067,7 @@ fn build_tree() -> Vec<SchemaNode> {
         selection_section(),
         data_quality_section(),
         features_section(),
+        domain_section(),
         factors_section(),
         model_section(),
         quality_gate_section(),
@@ -1980,6 +2121,7 @@ fn data_quality_section() -> SchemaNode {
             "data_quality.max_ingest_lag_ms",
             "data_quality.max_feature_bucket_age_secs",
             "data_quality.max_trade_tape_age_secs",
+            "data_quality.max_domain_observation_age_secs",
             "data_quality.reject_crossed_books",
             "data_quality.reject_empty_books",
             "data_quality.feature_staleness_policy",
@@ -2019,6 +2161,29 @@ fn features_section() -> SchemaNode {
             "features.structural.trade_tape_min_notional_usd",
             "features.structural.trade_tape_min_coverage_ratio",
             "features.max_concurrent_market_resolves",
+        ]),
+    )
+}
+
+fn domain_section() -> SchemaNode {
+    section(
+        section_spec(
+            "domain",
+            35,
+            "lucide:globe",
+            ls("Domain", "外部域"),
+            ls(
+                "External vertical data plane (crypto underlying prices today).",
+                "外部垂直数据平面（当前为加密标的价）。",
+            ),
+        ),
+        fields_in_order(&[
+            "domain.enabled_by_family",
+            "domain.crypto.source_delay_secs",
+            "domain.crypto.backfill_days",
+            "domain.crypto.momentum_window_secs",
+            "domain.crypto.volatility_window_secs",
+            "domain.crypto.cross_check.max_basis_bps",
         ]),
     )
 }
@@ -2083,6 +2248,16 @@ fn model_section() -> SchemaNode {
             "model.active_model_version_id",
             "model.shadow_model_version_id",
             "model.active_exit_model_version_id",
+            "model.category_model_pointers.crypto",
+            "model.category_model_pointers.sports",
+            "model.category_model_pointers.politics",
+            "model.category_model_pointers.finance",
+            "model.category_model_pointers.tech",
+            "model.category_model_pointers.culture",
+            "model.category_model_pointers.weather",
+            "model.category_model_pointers.economics",
+            "model.category_model_pointers.geopolitics",
+            "model.category_model_pointers.other",
             "model.min_model_confidence",
             "model.min_quality_gate_age_secs",
             "model.candidate_score_floor",

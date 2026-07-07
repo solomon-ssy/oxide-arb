@@ -1,4 +1,27 @@
-//! End-to-end trade-tape participant concentration: feature → factor → monitor.
+//! End-to-end **structural** trade-tape participant concentration (Phase 11.2.1).
+//!
+//! # Contract
+//!
+//! Given a whale-heavy on-chain trade-tape fixture, the test locks three planes
+//! on the **same Postgres catalog** and a **domain-disabled** runtime config
+//! (this path is intentionally orthogonal to the crypto domain vertical):
+//!
+//! 1. **Feature plane** — `FeaturePipelineService` emits scored
+//!    `struct.participant_gini` / `struct.participant_cr1_share` / `struct.participant_hhi`
+//!    with whale-window numerics (CR1 ≥ 85%, Gini > 0).
+//! 2. **Factor plane** — `FactorPipelineService` persists
+//!    `struct.participant_concentration` whose raw value matches the canonical
+//!    composite estimator applied to the feature numerics.
+//! 3. **Monitor plane** — `CoreStructuralMonitor::participant_concentration`
+//!    exposes the same composite as the research estimator (byte-identical at
+//!    12 dp), proving online monitor ↔ offline feature/factor parity.
+//!
+//! # Explicitly out of scope
+//!
+//! - Crypto domain slice / linkage / `quant_domain_observation` (use
+//!   `DomainConfig::disabled()` and structural-only feature families).
+//! - Postgres persistence semantics of the feature repo itself (covered by
+//!   repository tests); here PG is the real FK shell for the factor plane.
 
 use std::sync::Arc;
 
@@ -21,8 +44,7 @@ use quant_pivot_core::{
     },
 };
 use quant_pivot_error::{control::ControlError, storage::StorageError};
-use quant_pivot_models::domain::RuntimeConfigPort;
-use quant_pivot_models::domain::quant::NewFeatureVector;
+use quant_pivot_models::domain::{RuntimeConfigPort, StructuralMonitorPort};
 use quant_pivot_models::runtime_config::FeatureFamily;
 use quant_pivot_models::{
     clickhouse::{
@@ -31,9 +53,8 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        NewModelRun, StructuralMonitorPort,
+        NewModelRun,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
-        quant::FeatureVectorInfo,
     },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
@@ -79,6 +100,8 @@ use quant_pivot_test_support::{
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
+use testcontainers::ContainerAsync;
+use testcontainers_modules::postgres::Postgres;
 
 struct Catalog {
     event_id: &'static str,
@@ -93,6 +116,14 @@ const CATALOG: Catalog = Catalog {
     yes_token: "77771",
     no_token: "77772",
 };
+
+fn composite_weights() -> ConcentrationCompositeWeights {
+    ConcentrationCompositeWeights {
+        gini: Decimal::new(50, 2),
+        cr1_share: Decimal::new(30, 2),
+        hhi: Decimal::new(20, 2),
+    }
+}
 
 struct FixedRuntimeConfig(Arc<RuntimeConfig>);
 
@@ -112,47 +143,6 @@ impl RuntimeConfigPort for FixedRuntimeConfig {
 }
 
 struct EmptyFactRead;
-
-/// Avoids PG pool contention in the feature round — this e2e asserts vector
-/// content, not Postgres persistence semantics.
-struct InMemoryFeatureRepo;
-
-#[async_trait]
-impl FeatureRepository for InMemoryFeatureRepo {
-    async fn create(&self, vector: NewFeatureVector) -> Result<FeatureVectorInfo, StorageError> {
-        Ok(to_info(vector))
-    }
-
-    async fn create_batch(
-        &self,
-        vectors: Vec<NewFeatureVector>,
-    ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
-        Ok(vectors.into_iter().map(to_info).collect())
-    }
-
-    async fn find_by_id(
-        &self,
-        _id: &FeatureVectorId,
-    ) -> Result<Option<FeatureVectorInfo>, StorageError> {
-        Ok(None)
-    }
-}
-
-fn to_info(vector: NewFeatureVector) -> FeatureVectorInfo {
-    FeatureVectorInfo {
-        feature_vector_id: vector.feature_vector_id,
-        market_id: vector.market_id,
-        token_id: vector.token_id,
-        as_of: vector.as_of,
-        feature_schema_version: vector.feature_schema_version,
-        feature_hash: vector.feature_hash,
-        data_quality: vector.data_quality,
-        staleness_ms: vector.staleness_ms,
-        payload: vector.payload,
-        source_refs: vector.source_refs,
-        created_at: Utc::now(),
-    }
-}
 
 #[async_trait]
 impl QuantFactReadRepository for EmptyFactRead {
@@ -401,6 +391,7 @@ fn structural_features_only_config() -> FeaturesConfig {
 }
 
 struct WhaleTapeConcHarness {
+    _container: ContainerAsync<Postgres>,
     db: DatabaseConnection,
     registry: Arc<MarketRegistry>,
     book_store: Arc<BookStore>,
@@ -411,7 +402,7 @@ struct WhaleTapeConcHarness {
 }
 
 async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
-    let (pool, _container) = setup_pg().await;
+    let (pool, container) = setup_pg().await;
     let db = pool.connection().clone();
     seed_catalog(&db, &CATALOG).await;
 
@@ -430,6 +421,7 @@ async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
     )) as Arc<dyn QuantFactReadRepository>;
 
     WhaleTapeConcHarness {
+        _container: container,
         db,
         registry,
         book_store,
@@ -442,7 +434,8 @@ async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
 
 async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePipelineResult {
     let features = structural_features_only_config();
-    let feature_repo = Arc::new(InMemoryFeatureRepo) as Arc<dyn FeatureRepository>;
+    let feature_repo =
+        Arc::new(PgFeatureRepository::new(harness.db.clone())) as Arc<dyn FeatureRepository>;
     let feature_pipeline = FeaturePipelineService::new(
         FeatureWindowProvider::new(Arc::clone(&harness.fact_read)),
         Arc::clone(&feature_repo),
@@ -453,7 +446,7 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
         TradeTapeOnChainConfig::default(),
     );
 
-    let domain = DomainConfig::default();
+    let domain = DomainConfig::disabled();
     let included = vec![selected_market(&CATALOG)];
     feature_pipeline
         .run(FeaturePipelineRequest {
@@ -472,68 +465,55 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
         .expect("feature pipeline")
 }
 
-fn assert_whale_concentration_features(vector: &FeatureVector) {
+fn concentration_feature_decimals(vector: &FeatureVector) -> (Decimal, Decimal, Decimal) {
     let gini = vector
         .value(&structural_features::PARTICIPANT_GINI)
         .expect("participant gini feature");
     let cr1 = vector
         .value(&structural_features::PARTICIPANT_CR1_SHARE)
         .expect("participant cr1 feature");
-    match (gini, cr1) {
-        (FeatureValue::Decimal(gini), FeatureValue::Decimal(cr1)) => {
-            assert!(
-                *cr1 >= Decimal::new(85, 2),
-                "whale window cr1 should reflect ~90% top share, got {cr1}"
-            );
-            assert!(
-                *gini > Decimal::ZERO,
-                "gini must be positive for whale window"
-            );
+    let hhi = vector
+        .value(&structural_features::PARTICIPANT_HHI)
+        .expect("participant hhi feature");
+    match (gini, cr1, hhi) {
+        (FeatureValue::Decimal(gini), FeatureValue::Decimal(cr1), FeatureValue::Decimal(hhi)) => {
+            (*gini, *cr1, *hhi)
         }
         other => panic!("expected scored decimal concentration features, got {other:?}"),
     }
 }
 
+fn assert_whale_concentration_features(vector: &FeatureVector) -> Decimal {
+    let (gini, cr1, hhi) = concentration_feature_decimals(vector);
+    assert!(
+        cr1 >= Decimal::new(85, 2),
+        "whale window cr1 should reflect ~90% top share, got {cr1}"
+    );
+    assert!(
+        gini > Decimal::ZERO,
+        "gini must be positive for whale window"
+    );
+    assert!(hhi > Decimal::ZERO, "hhi must be positive for whale window");
+    composite_concentration(gini, cr1, hhi, &composite_weights()).expect("composite from features")
+}
+
 async fn run_factor_round_and_assert_concentration(
     harness: &WhaleTapeConcHarness,
     feature_result: &FeaturePipelineResult,
+    expected_composite: Decimal,
 ) {
     let features = structural_features_only_config();
     let factors = structural_factors_config();
+    let domain = DomainConfig::disabled();
 
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    seed_catalog(&db, &CATALOG).await;
-
-    if !feature_result.accepted.is_empty() {
-        let rows = feature_result
-            .persisted
-            .iter()
-            .zip(feature_result.accepted.iter())
-            .map(|(persisted, vector)| {
-                let mut row = vector.try_to_new().expect("map feature row");
-                row.feature_vector_id = persisted.feature_vector_id.clone();
-                row
-            })
-            .collect::<Vec<_>>();
-        PgFeatureRepository::new(db.clone())
-            .create_batch(rows)
-            .await
-            .expect("persist feature vectors for factor FK");
-    }
-
-    let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
-    publish_all_factor_definitions(
-        factor_repo.as_ref(),
-        &factors,
-        &features,
-        &DomainConfig::default(),
-    )
-    .await
-    .expect("publish factor definitions");
+    let factor_repo =
+        Arc::new(PgFactorRepository::new(harness.db.clone())) as Arc<dyn FactorRepository>;
+    publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
+        .await
+        .expect("publish factor definitions");
 
     let model_run_id = ModelRunId::from_v7();
-    PgModelRunRepository::new(db.clone())
+    PgModelRunRepository::new(harness.db.clone())
         .create(NewModelRun {
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
@@ -559,12 +539,19 @@ async fn run_factor_round_and_assert_concentration(
         .iter()
         .map(|row| row.feature_vector_id.clone())
         .collect();
+    assert_eq!(
+        feature_vector_ids.len(),
+        feature_result.accepted.len(),
+        "persisted feature rows must align 1:1 with accepted vectors"
+    );
+
     let factor_service = FactorPipelineService::new(
         Arc::clone(&factor_repo),
         noop_factor_writer(),
         Arc::new(BiasTableApplicator::new(
-            Arc::new(PgFavoriteLongshotBiasTableRepository::new(db.clone()))
-                as Arc<dyn FavoriteLongshotBiasTableRepository>,
+            Arc::new(PgFavoriteLongshotBiasTableRepository::new(
+                harness.db.clone(),
+            )) as Arc<dyn FavoriteLongshotBiasTableRepository>,
         )),
     );
     let factor_result = factor_service
@@ -574,7 +561,7 @@ async fn run_factor_round_and_assert_concentration(
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
-            domain: &DomainConfig::default(),
+            domain: &domain,
         })
         .await
         .expect("factor pipeline");
@@ -582,8 +569,18 @@ async fn run_factor_round_and_assert_concentration(
         !factor_result.persisted.is_empty(),
         "factor values must persist"
     );
+    assert!(
+        factor_result.rejected.is_empty(),
+        "whale fixture must not reject factor scoring"
+    );
 
-    let engine = FactorEngine::new(&factors, &features, &DomainConfig::default(), None);
+    let listed = factor_repo
+        .list_values_for_run(&model_run_id)
+        .await
+        .expect("list values for run");
+    assert_eq!(listed.len(), factor_result.persisted.len());
+
+    let engine = FactorEngine::new(&factors, &features, &domain, None);
     let outcomes = engine
         .compute_all_batch(&feature_result.accepted, &factors)
         .expect("factor outcomes");
@@ -592,13 +589,21 @@ async fn run_factor_round_and_assert_concentration(
         .iter()
         .find(|factor| factor.value.name == STRUCT_PARTICIPANT_CONCENTRATION)
         .expect("participant concentration factor outcome");
-    assert!(
-        concentration.value.raw_value.is_some(),
-        "participant concentration must score from whale trade tape"
+    let raw = concentration
+        .value
+        .raw_value
+        .expect("participant concentration must score from whale trade tape");
+    assert_eq!(
+        raw.round_dp(12),
+        expected_composite.round_dp(12),
+        "factor composite must match feature-derived canonical estimator"
     );
 }
 
-async fn assert_monitor_concentration_matches_canonical(harness: &WhaleTapeConcHarness) {
+async fn assert_monitor_concentration_matches_canonical(
+    harness: &WhaleTapeConcHarness,
+    expected_composite: Decimal,
+) {
     let runtime = Arc::new(RuntimeConfig::default());
     let monitor = CoreStructuralMonitor::new(
         Arc::clone(&harness.registry),
@@ -626,21 +631,22 @@ async fn assert_monitor_concentration_matches_canonical(harness: &WhaleTapeConcH
         "monitor numerics must not be null when ingest route is healthy"
     );
 
-    let expected_composite = composite_concentration(
+    let monitor_composite = composite_concentration(
         market_view.gini.unwrap(),
         market_view.cr1_share.unwrap(),
         market_view.hhi.unwrap(),
-        &ConcentrationCompositeWeights {
-            gini: Decimal::new(50, 2),
-            cr1_share: Decimal::new(30, 2),
-            hhi: Decimal::new(20, 2),
-        },
+        &composite_weights(),
     )
     .expect("composite");
     assert_eq!(
         market_view.composite_raw.unwrap().round_dp(12),
-        expected_composite.round_dp(12),
+        monitor_composite.round_dp(12),
         "monitor composite must match canonical estimator"
+    );
+    assert_eq!(
+        monitor_composite.round_dp(12),
+        expected_composite.round_dp(12),
+        "monitor must agree with feature/factor plane"
     );
 }
 
@@ -650,8 +656,13 @@ async fn whale_trade_tape_scores_feature_factor_and_monitor() {
     let feature_result = run_whale_feature_pipeline(&harness).await;
 
     assert_eq!(feature_result.accepted.len(), 1, "vector must be accepted");
-    assert_whale_concentration_features(&feature_result.accepted[0]);
+    assert_eq!(
+        feature_result.persisted.len(),
+        1,
+        "feature vector must persist to Postgres"
+    );
+    let expected_composite = assert_whale_concentration_features(&feature_result.accepted[0]);
 
-    run_factor_round_and_assert_concentration(&harness, &feature_result).await;
-    assert_monitor_concentration_matches_canonical(&harness).await;
+    run_factor_round_and_assert_concentration(&harness, &feature_result, expected_composite).await;
+    assert_monitor_concentration_matches_canonical(&harness, expected_composite).await;
 }

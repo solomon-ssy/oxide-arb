@@ -1,5 +1,4 @@
 //! Quant-pivot Postgres repository implementations.
-
 mod account_snapshot;
 mod attribution;
 mod backtest_report;
