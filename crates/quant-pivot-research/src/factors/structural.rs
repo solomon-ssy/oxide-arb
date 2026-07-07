@@ -273,7 +273,7 @@ fn scored(
 
 /// Read a numeric feature (missing ⇒ `None`).
 fn read(features: &FeatureVector, name: &FeatureName) -> Option<Decimal> {
-    features.values.get(name).and_then(extract_decimal)
+    features.value(name).and_then(extract_decimal)
 }
 
 // ── reversal_after_shock ────────────────────────────────────────────────────
@@ -527,7 +527,7 @@ fn negrisk_outcome(
     value_name: &FeatureName,
     min_legs: u32,
 ) -> NegRiskOutcome {
-    match features.values.get(value_name) {
+    match features.value(value_name) {
         Some(FeatureValue::Missing(NullReason::NotApplicable)) => NegRiskOutcome::NotApplicable,
         Some(FeatureValue::Missing(NullReason::LegBookMissing)) => NegRiskOutcome::LegMissing,
         Some(value) if !value.is_missing() => {
@@ -689,8 +689,7 @@ impl FactorComputer for FavoriteLongshotFactor {
             ));
         };
         let category = features
-            .values
-            .get(&market_names::CATEGORY)
+            .value(&market_names::CATEGORY)
             .and_then(feature_category);
         let mid = read(features, &book_names::MID);
         let ttr = read(features, &market_names::TIME_TO_RESOLUTION_SECS);
@@ -762,8 +761,9 @@ mod tests {
             market_id: MarketId::new("m"),
             token_id: None,
             as_of: Utc.timestamp_opt(0, 0).unwrap(),
-            schema_version: SchemaVersion::FIRST,
-            values,
+            generic_schema_version: SchemaVersion::FIRST,
+            generic: values,
+            domain: None,
             substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
             staleness_ms: 0,

@@ -27,16 +27,14 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v14 (Phase 11.2.1) adds the favorite-longshot bias-table catalog
-    // (`research-bias-tables`) and the neg-risk structural-drift monitor
-    // (`structural-monitor`). The loader is idempotent (`on_conflict
-    // do_nothing`), so re-running on an existing DB inserts only the new nodes.
-    version: 14,
+    // v15 (Phase 11.2.2) adds market-linkage governance and domain-source
+    // cursor health pages. The loader is idempotent (`on_conflict do_nothing`).
+    version: 15,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v14",
+    checksum: "rbac.menus.bootstrap.v15",
     loader: load_boxed,
 };
 
@@ -572,6 +570,7 @@ fn build_research(t: &mut MenuTree) {
         perm(ResourceType::FactorDefinition, Operation::Retire),
     );
     build_research_bias_tables(t, &research);
+    build_research_domain_governance(t, &research);
     // Pairwise comparison report — deep-linkable from a backtest, hidden from
     // the sidebar (parented under the directory, not another page).
     t.page_hidden(PageSpec {
@@ -610,6 +609,34 @@ fn build_research_bias_tables(t: &mut MenuTree, research: &MenuId) {
         "Activate Bias Table",
         perm(ResourceType::RuntimeConfig, Operation::Create),
     );
+}
+
+/// Market-linkage ledger + domain-source ingest health (Phase 11.2.2).
+fn build_research_domain_governance(t: &mut MenuTree, research: &MenuId) {
+    let linkages = t.page(PageSpec {
+        parent: research,
+        name: "research-market-linkages",
+        title: "page.menu.researchMarketLinkages",
+        path: "/research/market-linkages",
+        component: "research/market-linkages/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:link-2",
+    });
+    t.button(
+        &linkages,
+        "materialization:create",
+        "Resolve / Override Linkage",
+        perm(ResourceType::Materialization, Operation::Create),
+    );
+    t.page(PageSpec {
+        parent: research,
+        name: "research-domain-sources",
+        title: "page.menu.researchDomainSources",
+        path: "/research/domain-sources",
+        component: "research/domain-sources/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:activity",
+    });
 }
 
 /// Task center: the durable async research-job engine (dataset build / model

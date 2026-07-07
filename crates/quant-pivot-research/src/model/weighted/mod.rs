@@ -504,6 +504,7 @@ mod tests {
             return_model: ReturnModelSpec::heuristic_default(),
             required_features: Vec::new(),
             objective_report: None,
+            category_scope: None,
         }
     }
 

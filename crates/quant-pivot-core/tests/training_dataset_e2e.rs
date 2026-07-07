@@ -18,7 +18,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
-        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
         JobProgressSink, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
@@ -35,13 +35,13 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     runtime_config::{
-        DataQualityConfig, DecimalString, FactorsConfig, FeatureFamily, FeaturesConfig,
-        SelectionConfig, TrainingConfig,
+        DataQualityConfig, DecimalString, DomainConfig, FactorsConfig, FeatureFamily,
+        FeaturesConfig, SelectionConfig, TrainingConfig,
     },
     types::{
-        ArtifactUri, ContentHash, DatasetCoverage, MarketId, ModelSpecId, ModelVersionId, Price,
-        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
-        TrainingHorizonsSecs, TrainingSampleSource, default_sample_sources,
+        ArtifactUri, ContentHash, DatasetCoverage, DomainInstrumentKey, MarketId, ModelSpecId,
+        ModelVersionId, Price, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId,
+        TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -66,6 +66,7 @@ use quant_pivot_research::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
 };
 use rust_decimal::Decimal;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
@@ -263,6 +264,24 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .collect()
         };
         Ok(markets.into_iter().collect())
+    }
+
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
     }
 
     async fn mid_price_series(
@@ -518,10 +537,12 @@ fn service_with_selection(
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
             fee_calculator: Arc::new(FeeCalculator::new()),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
         },
         TrainingDatasetBuildConfig {
             features: features_config(),
             factors: factors_config(),
+            domain: DomainConfig::default(),
             data_quality: DataQualityConfig {
                 // Default `max_book_age_ms` (5s) conflicts with `source_delay_secs`
                 // (10s): PIT evidence must be older than the delay but younger than

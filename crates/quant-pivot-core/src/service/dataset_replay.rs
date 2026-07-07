@@ -19,7 +19,9 @@ use quant_pivot_models::{
     domain::TrainingDatasetInfo,
     types::{MarketId, TokenId, TrainingExampleId, TrainingSampleSource},
 };
-use quant_pivot_repository::traits::{EventRepository, MarketRepository, QuantFactReadRepository};
+use quant_pivot_repository::traits::{
+    EventRepository, MarketLinkageRepository, MarketRepository, QuantFactReadRepository,
+};
 use quant_pivot_research::{
     factors::{FactorEligibility, FactorEngine, FactorValue},
     features::{ConfiguredFeatureBuilder, FeatureVector},
@@ -29,7 +31,9 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    pipeline::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
+    pipeline::historical_window::{
+        HistoricalWindow, HistoricalWindowLoader, ReplaySample, WindowSpec,
+    },
     service::historical_replay::{CrossSectionRequest, ReplayConfig, materialize_cross_section},
 };
 
@@ -83,6 +87,26 @@ struct ParquetExampleMeta {
     labels: Vec<TrainingLabel>,
 }
 
+/// Shared inputs for PIT dataset rematerialization (training + exit-decision).
+pub struct RematerializeInputs<'a> {
+    /// Frozen dataset metadata (window, delays, horizons).
+    pub dataset: &'a TrainingDatasetInfo,
+    /// Parquet rows supplying replay schedule + label truth.
+    pub parquet_examples: &'a [TrainingExample],
+    /// `ClickHouse` fact reader for PIT prefetch.
+    pub fact_read: Arc<dyn QuantFactReadRepository>,
+    /// Market catalog for registry joins.
+    pub market_repo: Arc<dyn MarketRepository>,
+    /// Event catalog (`series_slug` for linkage).
+    pub event_repo: Arc<dyn EventRepository>,
+    /// Bitemporal linkage ledger.
+    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
+    /// Frozen replay config snapshot.
+    pub replay: &'a ReplayConfig,
+    /// Maximum acceptable book staleness during replay.
+    pub max_book_staleness: Duration,
+}
+
 /// Recompute every training example's features and factors point-in-time.
 ///
 /// The `parquet_examples` supply only:
@@ -92,14 +116,18 @@ struct ParquetExampleMeta {
 /// Features and factors always flow through [`materialize_cross_section`], the
 /// same kernel used by the dataset build and the backtest replay.
 pub async fn rematerialize_training_examples(
-    dataset: &TrainingDatasetInfo,
-    parquet_examples: &[TrainingExample],
-    fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
-    replay: &ReplayConfig,
-    max_book_staleness: Duration,
+    inputs: &RematerializeInputs<'_>,
 ) -> QuantResult<Vec<TrainingExample>> {
+    let RematerializeInputs {
+        dataset,
+        parquet_examples,
+        fact_read,
+        market_repo,
+        event_repo,
+        linkage_repo,
+        replay,
+        max_book_staleness,
+    } = inputs;
     let schedule = ReplaySchedule::from_examples(parquet_examples);
     let label_index = parquet_label_index(parquet_examples);
 
@@ -107,8 +135,13 @@ pub async fn rematerialize_training_examples(
     let lookback = Duration::from_secs(replay.features.max_lookback_secs());
     let max_horizon_secs = max_horizon(dataset);
 
-    let loader =
-        HistoricalWindowLoader::new(fact_read, market_repo, event_repo, max_book_staleness);
+    let loader = HistoricalWindowLoader::new(
+        Arc::clone(fact_read),
+        Arc::clone(market_repo),
+        Arc::clone(event_repo),
+        Arc::clone(linkage_repo),
+        *max_book_staleness,
+    );
     let window = loader
         .load(&WindowSpec {
             window_start: dataset.window_start,
@@ -117,17 +150,60 @@ pub async fn rematerialize_training_examples(
             lookback,
             source_delay,
             max_horizon_secs,
+            domain: replay.domain.clone(),
         })
         .await?;
 
-    let builder = ConfiguredFeatureBuilder::new(&replay.features);
-    let engine = FactorEngine::new(&replay.factors, &replay.features, replay.bias_table.clone());
+    let builder = ConfiguredFeatureBuilder::new(&replay.features, &replay.domain);
+    let engine = FactorEngine::new(
+        &replay.factors,
+        &replay.features,
+        &replay.domain,
+        replay.bias_table.clone(),
+    );
 
+    rematerialize_training_rows(TrainingRematerializeContext {
+        schedule: &schedule,
+        window: &window,
+        builder: &builder,
+        engine: &engine,
+        replay,
+        label_index: &label_index,
+        source_delay,
+        lookback,
+    })
+    .await
+}
+
+struct TrainingRematerializeContext<'a> {
+    schedule: &'a ReplaySchedule,
+    window: &'a HistoricalWindow,
+    builder: &'a ConfiguredFeatureBuilder,
+    engine: &'a FactorEngine,
+    replay: &'a ReplayConfig,
+    label_index: &'a HashMap<(DateTime<Utc>, MarketId, TokenId), ParquetExampleMeta>,
+    source_delay: Duration,
+    lookback: Duration,
+}
+
+async fn rematerialize_training_rows(
+    ctx: TrainingRematerializeContext<'_>,
+) -> QuantResult<Vec<TrainingExample>> {
+    let TrainingRematerializeContext {
+        schedule,
+        window,
+        builder,
+        engine,
+        replay,
+        label_index,
+        source_delay,
+        lookback,
+    } = ctx;
     let mut rematerialized = Vec::new();
     for (as_of, group) in &schedule.by_as_of {
         let Some(cross) = materialize_cross_section(
-            &builder,
-            &engine,
+            builder,
+            engine,
             replay,
             &CrossSectionRequest {
                 pit: &window.pit,
@@ -202,21 +278,30 @@ pub async fn rematerialize_training_examples(
 /// lot's position-state pseudo-factors are re-merged so the trainer sees the
 /// same feature shape the dataset build produced.
 pub async fn rematerialize_exit_decision_examples(
-    dataset: &TrainingDatasetInfo,
-    parquet_examples: &[TrainingExample],
-    fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
-    replay: &ReplayConfig,
-    max_book_staleness: Duration,
+    inputs: &RematerializeInputs<'_>,
 ) -> QuantResult<Vec<TrainingExample>> {
+    let RematerializeInputs {
+        dataset,
+        parquet_examples,
+        fact_read,
+        market_repo,
+        event_repo,
+        linkage_repo,
+        replay,
+        max_book_staleness,
+    } = inputs;
     let schedule = ReplaySchedule::from_examples(parquet_examples);
     let source_delay = Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
     let lookback = Duration::from_secs(replay.features.max_lookback_secs());
     let max_horizon_secs = max_horizon(dataset);
 
-    let loader =
-        HistoricalWindowLoader::new(fact_read, market_repo, event_repo, max_book_staleness);
+    let loader = HistoricalWindowLoader::new(
+        Arc::clone(fact_read),
+        Arc::clone(market_repo),
+        Arc::clone(event_repo),
+        Arc::clone(linkage_repo),
+        *max_book_staleness,
+    );
     let window = loader
         .load(&WindowSpec {
             window_start: dataset.window_start,
@@ -225,20 +310,82 @@ pub async fn rematerialize_exit_decision_examples(
             lookback,
             source_delay,
             max_horizon_secs,
+            domain: replay.domain.clone(),
         })
         .await?;
 
-    let builder = ConfiguredFeatureBuilder::new(&replay.features);
-    let engine = FactorEngine::new(&replay.factors, &replay.features, replay.bias_table.clone());
+    let builder = ConfiguredFeatureBuilder::new(&replay.features, &replay.domain);
+    let engine = FactorEngine::new(
+        &replay.factors,
+        &replay.features,
+        &replay.domain,
+        replay.bias_table.clone(),
+    );
 
-    // Recompute the PIT market factors once per (as_of, market, token); many
-    // lots may share the same key and reuse the same market cross-section.
-    let mut market_factors: HashMap<(DateTime<Utc>, MarketId, TokenId), MarketFactorReplay> =
-        HashMap::new();
+    let market_factors = collect_exit_market_factors(
+        &schedule,
+        &window,
+        &builder,
+        &engine,
+        replay,
+        source_delay,
+        lookback,
+    )
+    .await?;
+
+    let mut rematerialized = Vec::with_capacity(parquet_examples.len());
+    for example in *parquet_examples {
+        let key = (
+            example.as_of,
+            example.market_id.clone(),
+            example.token_id.clone(),
+        );
+        let Some((vector, factors)) = market_factors.get(&key) else {
+            continue;
+        };
+        let mut factor_values = factors.clone();
+        if let Some(state) = &example.position_state {
+            factor_values.extend(position_state_factor_values(state));
+        }
+        rematerialized.push(TrainingExample {
+            example_id: example.example_id.clone(),
+            market_id: example.market_id.clone(),
+            token_id: example.token_id.clone(),
+            as_of: example.as_of,
+            sample_source: TrainingSampleSource::ExitDecision,
+            feature_vector: vector.clone(),
+            factor_values,
+            labels: example.labels.clone(),
+            source_refs: vector.source_refs.clone(),
+            lot_context: example.lot_context.clone(),
+            position_state: example.position_state.clone(),
+            book_fidelity: example.book_fidelity,
+        });
+    }
+
+    if rematerialized.is_empty() {
+        return Err(ResearchError::DatasetBuild {
+            detail: "PIT rematerialization produced zero ExitDecision training examples".to_owned(),
+        }
+        .into());
+    }
+    Ok(rematerialized)
+}
+
+async fn collect_exit_market_factors(
+    schedule: &ReplaySchedule,
+    window: &HistoricalWindow,
+    builder: &ConfiguredFeatureBuilder,
+    engine: &FactorEngine,
+    replay: &ReplayConfig,
+    source_delay: Duration,
+    lookback: Duration,
+) -> QuantResult<HashMap<(DateTime<Utc>, MarketId, TokenId), MarketFactorReplay>> {
+    let mut market_factors = HashMap::new();
     for (as_of, group) in &schedule.by_as_of {
         let Some(cross) = materialize_cross_section(
-            &builder,
-            &engine,
+            builder,
+            engine,
             replay,
             &CrossSectionRequest {
                 pit: &window.pit,
@@ -275,44 +422,7 @@ pub async fn rematerialize_exit_decision_examples(
             );
         }
     }
-
-    let mut rematerialized = Vec::with_capacity(parquet_examples.len());
-    for example in parquet_examples {
-        let key = (
-            example.as_of,
-            example.market_id.clone(),
-            example.token_id.clone(),
-        );
-        let Some((vector, factors)) = market_factors.get(&key) else {
-            continue;
-        };
-        let mut factor_values = factors.clone();
-        if let Some(state) = &example.position_state {
-            factor_values.extend(position_state_factor_values(state));
-        }
-        rematerialized.push(TrainingExample {
-            example_id: example.example_id.clone(),
-            market_id: example.market_id.clone(),
-            token_id: example.token_id.clone(),
-            as_of: example.as_of,
-            sample_source: TrainingSampleSource::ExitDecision,
-            feature_vector: vector.clone(),
-            factor_values,
-            labels: example.labels.clone(),
-            source_refs: vector.source_refs.clone(),
-            lot_context: example.lot_context.clone(),
-            position_state: example.position_state.clone(),
-            book_fidelity: example.book_fidelity,
-        });
-    }
-
-    if rematerialized.is_empty() {
-        return Err(ResearchError::DatasetBuild {
-            detail: "PIT rematerialization produced zero ExitDecision training examples".to_owned(),
-        }
-        .into());
-    }
-    Ok(rematerialized)
+    Ok(market_factors)
 }
 
 /// Index forward label truth keyed by the replay sample identity.

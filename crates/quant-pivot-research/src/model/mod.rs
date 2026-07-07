@@ -19,6 +19,7 @@ pub mod favorite_longshot;
 pub mod optimize;
 pub mod overlay;
 pub mod rank_scores;
+pub mod routing;
 pub mod runtime;
 pub mod score_percentile;
 pub mod sell_scorer;
@@ -56,6 +57,9 @@ pub use favorite_longshot::{
 };
 pub use overlay::{WeightOverlay, WeightSource};
 pub use rank_scores::{RankScores, attach as attach_rank_scores};
+pub use routing::{
+    ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
+};
 pub use runtime::{
     ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
     MarketInferenceContext, ModelFamily, ModelFamilyParseError, ModelRuntimeFactory,

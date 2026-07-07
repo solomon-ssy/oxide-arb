@@ -20,22 +20,27 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::market::registry::NegRiskLegSet,
     enums::quant::DataQualityStatus,
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
+    runtime_config::{
+        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy,
+    },
     types::{Price, Usd},
 };
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
     features::{
-        ConfiguredFeatureBuilder, FeatureSourceWindows, FeatureVector, MarketWindowSnapshot,
-        PitView, ResolvedBook, TradeTapeWindowSnapshot,
+        ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSourceWindows, FeatureVector,
+        MarketWindowSnapshot, PitView, ResolvedBook, TradeTapeWindowSnapshot,
     },
     model::FavoriteLongshotBiasTable,
     pit::PitQueryEngine,
     selection::SelectedMarket,
 };
 
-use crate::pipeline::historical_window::{
-    Prefetched, ReplaySample, feature_window, selected_market, trade_tape_window,
+use crate::pipeline::{
+    domain_pit::build_domain_slice_inputs,
+    historical_window::{
+        Prefetched, ReplaySample, feature_window, selected_market, trade_tape_window,
+    },
 };
 
 /// Frozen feature/factor/data-quality config governing a replay.
@@ -45,6 +50,8 @@ pub struct ReplayConfig {
     pub features: FeaturesConfig,
     /// Factor engine configuration.
     pub factors: FactorsConfig,
+    /// External-vertical domain plane configuration (Phase 11.2.2).
+    pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
     /// Favorite-longshot bias table pinned by the frozen factor config (content-
@@ -135,13 +142,33 @@ pub async fn materialize_cross_section(
     if selected.is_empty() {
         return Ok(None);
     }
+    // Domain-slice inputs (offline): the SAME pure assembly the online plane
+    // runs, over the prefetched linkage ledger + observation series — the
+    // domain slice is byte-identical across planes by construction.
+    let domain_inputs: Vec<Option<DomainSliceInputs>> = selected
+        .iter()
+        .map(|market| {
+            build_domain_slice_inputs(
+                market.category,
+                request
+                    .prefetched
+                    .linkages
+                    .get(&market.market_id)
+                    .map_or(&[][..], Vec::as_slice),
+                as_of,
+                &config.domain,
+                &request.prefetched.domain_observations,
+            )
+        })
+        .collect();
 
     let pit_view = PitView::Historical(request.pit);
     let resolve_futures = selected
         .iter()
         .zip(windows.iter())
         .zip(trade_windows.iter())
-        .map(|((market, snapshot), trade_snapshot)| {
+        .zip(domain_inputs.iter())
+        .map(|(((market, snapshot), trade_snapshot), domain)| {
             // Neg-risk full-leg PIT (offline): enumerate the event's YES legs from
             // the prefetched window and resolve each book at the same `as_of`
             // through the same `resolve_book` the online plane uses — byte-identical.
@@ -155,6 +182,7 @@ pub async fn materialize_cross_section(
                         FeatureSourceWindows {
                             microstructure: snapshot,
                             trade_tape: trade_snapshot,
+                            domain: domain.as_ref(),
                         },
                         &sibling,
                         Usd::ZERO,

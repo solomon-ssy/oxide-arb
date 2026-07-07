@@ -83,7 +83,7 @@ mod tests {
     use super::map_snapshot_to_model;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::MarketCandidate,
+        domain::{DomainAvailability, MarketCandidate},
         enums::{common::MarketCategory, market::MarketStatus},
         types::{
             ContentHash, EventId, MarketId, MarketSelectionId, Price, RuntimeConfigVersionId,
@@ -119,6 +119,7 @@ mod tests {
             connection_healthy: true,
             ingest_lag_ms: 1_000,
             observed_at: as_of(),
+            domain_availability: DomainAvailability::Unresolved,
         }
     }
 

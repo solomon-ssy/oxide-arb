@@ -215,6 +215,7 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
         return_model: request.return_model.clone(),
         required_features: request.required_features.clone(),
         objective_report: Some(fit.objective_report.clone()),
+        category_scope: None,
     };
     artifact.validate()?;
     let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
@@ -673,8 +674,9 @@ mod tests {
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: Some(TokenId::new("yes")),
             as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
-            schema_version: SchemaVersion::FIRST,
-            values: BTreeMap::new(),
+            generic_schema_version: SchemaVersion::FIRST,
+            generic: BTreeMap::new(),
+            domain: None,
             substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
             staleness_ms: 0,

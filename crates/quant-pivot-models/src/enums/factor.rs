@@ -1,8 +1,7 @@
 //! Factor family taxonomy.
 //!
-//! Generic planes plus the platform-internal structural plane (Phase 11.2.1).
-//! Vertical (external-data) domain families are reintroduced by Phase 11.2.2
-//! when a real external source is wired.
+//! Generic planes, the platform-internal structural plane (Phase 11.2.1), and
+//! the category-routed external domain planes (Phase 11.2.2).
 
 use schemars::JsonSchema;
 
@@ -22,6 +21,10 @@ crate::pg_enum! {
         /// reversal, resolution-proximity regime, favorite-longshot). Platform-
         /// computable from existing facts — no external data source.
         Structural => "structural",
+        /// Crypto external vertical (Binance underlying price + Chainlink
+        /// oracle). Routed by market category via `DomainFactorRegistry` —
+        /// never selectable through `enabled_factor_families`.
+        DomainCrypto => "domain_crypto",
     }
 }
 
@@ -30,6 +33,8 @@ crate::pg_enum! {
     pub enum FactorDefinitionScope {
         Generic => "generic",
         Structural => "structural",
+        /// Category-routed crypto domain factors (Phase 11.2.2).
+        DomainCrypto => "domain_crypto",
     }
 }
 
@@ -149,8 +154,14 @@ impl FactorFamily {
         matches!(self, Self::Structural)
     }
 
+    /// Whether this is a category-routed external domain plane (Phase 11.2.2).
+    #[must_use]
+    pub const fn is_domain(self) -> bool {
+        matches!(self, Self::DomainCrypto)
+    }
+
     /// Whether this family is config-selectable via `enabled_factor_families`
-    /// (generic + structural are; future domain families route by category).
+    /// (generic + structural are; domain families route by market category).
     #[must_use]
     pub const fn is_config_selectable(self) -> bool {
         self.is_generic() || self.is_structural()
@@ -160,6 +171,7 @@ impl FactorFamily {
     pub const fn definition_scope(self) -> FactorDefinitionScope {
         match self {
             Self::Structural => FactorDefinitionScope::Structural,
+            Self::DomainCrypto => FactorDefinitionScope::DomainCrypto,
             _ => FactorDefinitionScope::Generic,
         }
     }

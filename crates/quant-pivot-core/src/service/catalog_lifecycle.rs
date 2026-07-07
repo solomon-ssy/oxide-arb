@@ -98,6 +98,7 @@ mod tests {
             token_no: TokenId::new("no"),
             question: "Q?".into(),
             slug: "q".into(),
+            description: None,
             categories: CategorySet::from(MarketCategory::Politics),
             status,
             outcome: None,

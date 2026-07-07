@@ -1,6 +1,8 @@
 pub mod book_store;
+pub mod ch_domain_pit;
 pub mod data_pipeline;
 pub mod data_quality;
+pub mod domain_pit;
 pub mod event_source;
 pub mod feature_window_provider;
 pub mod historical_pit;

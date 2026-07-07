@@ -23,6 +23,8 @@ pub struct MarketInfo {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
+    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    pub description: Option<String>,
     /// Persisted category memberships (`text[]`).
     pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
@@ -45,7 +47,7 @@ pub struct MarketInfo {
 }
 
 info_from_model!(MarketInfo, crate::entities::market::Model, {
-    market_id, event_id, question, slug, categories, status, outcome,
+    market_id, event_id, question, slug, description, categories, status, outcome,
     yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at,
     fees_enabled, fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate,
     fee_source, fee_observed_at, created_at, updated_at,
@@ -73,6 +75,7 @@ pub struct UpsertMarket {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
+    pub description: Option<String>,
     pub categories: CategorySet,
     pub status: MarketStatus,
     pub outcome: Option<String>,
@@ -191,6 +194,8 @@ pub struct EventRegistryInfo {
     pub event_id: EventId,
     pub title: String,
     pub slug: String,
+    /// Recurring-series slug (Tier-0 linkage anchor), when present.
+    pub series_slug: Option<String>,
     pub market_ids: Vec<MarketId>,
     pub categories: CategorySet,
     pub tags: Vec<String>,
@@ -208,6 +213,8 @@ pub struct MarketRegistryInfo {
     pub token_no: TokenId,
     pub question: String,
     pub slug: String,
+    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    pub description: Option<String>,
     pub categories: CategorySet,
     pub status: MarketStatus,
     pub outcome: Option<String>,
@@ -268,6 +275,7 @@ impl UpsertMarket {
             event_id: value.event_id.clone(),
             question: value.question.clone(),
             slug: value.slug.clone(),
+            description: value.description.clone(),
             categories: value.categories,
             status: value.status,
             outcome: value.outcome.clone(),
@@ -331,103 +339,4 @@ pub fn collect_fee_data(markets: &[MarketRegistryInfo]) -> Vec<MarketFeeSchedule
         .iter()
         .filter_map(|market| market.fee_schedule.clone())
         .collect()
-}
-
-#[cfg(test)]
-mod neg_risk_leg_set_tests {
-    use std::sync::Arc;
-
-    use chrono::Utc;
-
-    use super::{CatalogMarketLeg, MarketInfo, NegRiskLegSet};
-    use crate::{
-        enums::{
-            common::{MarketCategory, TickSize},
-            market::MarketStatus,
-        },
-        types::{EventId, MarketId, TokenId},
-    };
-
-    fn catalog_market(id: &str, neg_risk: bool) -> Arc<MarketInfo> {
-        let now = Utc::now();
-        Arc::new(MarketInfo {
-            market_id: MarketId::new(id),
-            event_id: EventId::new("evt-1"),
-            question: "Q?".into(),
-            slug: id.into(),
-            categories: vec![MarketCategory::Crypto],
-            status: MarketStatus::Active,
-            outcome: None,
-            yes_token_id: TokenId::new(format!("{id}-yes")),
-            no_token_id: TokenId::new(format!("{id}-no")),
-            tick_size: TickSize::Hundredth,
-            neg_risk,
-            end_date: None,
-            resolved_at: None,
-            fees_enabled: false,
-            fee_rate: None,
-            fee_exponent: None,
-            fee_taker_only: None,
-            fee_rebate_rate: None,
-            fee_source: None,
-            fee_observed_at: None,
-            created_at: now,
-            updated_at: now,
-        })
-    }
-
-    #[test]
-    fn from_catalog_counts_only_neg_risk_markets() {
-        let m1 = catalog_market("m-yes-1", true);
-        let m2 = catalog_market("m-yes-2", true);
-        let binary = catalog_market("m-binary", false);
-        let by_id = [
-            (m1.market_id.clone(), m1),
-            (m2.market_id.clone(), m2),
-            (binary.market_id.clone(), binary),
-        ]
-        .into_iter()
-        .collect::<std::collections::HashMap<_, _>>();
-        let catalog = [
-            MarketId::new("m-yes-1"),
-            MarketId::new("m-yes-2"),
-            MarketId::new("m-binary"),
-        ];
-        let set = NegRiskLegSet::from_catalog(&catalog, |market_id| {
-            by_id.get(market_id).map(|info| {
-                if info.neg_risk {
-                    CatalogMarketLeg::NegRisk {
-                        yes_token_id: info.yes_token_id.clone(),
-                    }
-                } else {
-                    CatalogMarketLeg::NonNegRisk
-                }
-            })
-        });
-        assert_eq!(set.expected_legs, 2);
-        assert_eq!(set.legs.len(), 2);
-        assert!(
-            set.legs
-                .iter()
-                .all(|leg| leg.market_id.as_str().starts_with("m-yes"))
-        );
-    }
-
-    #[test]
-    fn from_catalog_expects_unregistered_catalog_member() {
-        let present = catalog_market("m-present", true);
-        let by_id = std::iter::once((present.market_id.clone(), present))
-            .collect::<std::collections::HashMap<_, _>>();
-        let catalog = [MarketId::new("m-present"), MarketId::new("m-missing")];
-        let set = NegRiskLegSet::from_catalog(&catalog, |market_id| {
-            by_id.get(market_id).map(|info| CatalogMarketLeg::NegRisk {
-                yes_token_id: info.yes_token_id.clone(),
-            })
-        });
-        assert_eq!(
-            set.expected_legs, 2,
-            "unregistered catalog leg still expected"
-        );
-        assert_eq!(set.legs.len(), 1);
-    }
 }

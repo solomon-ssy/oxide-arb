@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use quant_pivot_core::{
     observability::{fact_lag::IngestPipelineLagTracker, metrics_hub::MetricsHub},
@@ -11,18 +12,27 @@ use quant_pivot_core::{
     },
     service::market_selection::map_snapshot_to_model,
 };
+use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
+    clickhouse::{
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
+    },
     domain::market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
-    runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
-    types::{EventId, MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd},
+    runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
+    types::{
+        DomainInstrumentKey, EventId, MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
+    },
 };
 use quant_pivot_repository::{
     postgres::{PgEventRepository, PgMarketRepository, PgMarketSelectionRepository},
-    traits::{EventRepository, MarketRepository, MarketSelectionRepository},
+    traits::{
+        EventRepository, MarketRepository, MarketSelectionRepository, QuantFactReadRepository,
+    },
 };
 use quant_pivot_research::selection::{
     ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector, ModelFeatureRequirements,
@@ -30,6 +40,7 @@ use quant_pivot_research::selection::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
     ws::WsShardHealth,
 };
 use rust_decimal::Decimal;
@@ -57,6 +68,7 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         token_no: TokenId::new(catalog.no_token),
         question: "Will it happen?".into(),
         slug: "will-it-happen".into(),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -85,6 +97,119 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+    }
+}
+
+struct EmptyFactRead;
+
+#[async_trait]
+impl QuantFactReadRepository for EmptyFactRead {
+    async fn microstructure_window(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn microstructure_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _minute: bool,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn trade_tape_window_by_market(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn last_trades(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _limit: u64,
+    ) -> Result<Vec<TickEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn mid_price_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _bucket_secs: u32,
+    ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn book_snapshot_at(
+        &self,
+        _token_id: &TokenId,
+        _as_of_ms: i64,
+    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn book_snapshots_between(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolution_at(
+        &self,
+        _market_id: &MarketId,
+        _as_of_ms: i64,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn resolutions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<MarketResolutionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn observed_markets_between(
+        &self,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<MarketId>, StorageError> {
+        Ok(Vec::new())
     }
 }
 
@@ -147,12 +272,18 @@ async fn provider_selector_mapper_persist_round_trip() {
         Arc::clone(&book_store),
         WsShardHealth::operational(),
         Arc::new(IngestPipelineLagTracker::new()),
+        Arc::new(EmptyLinkageRepo),
+        Arc::new(EmptyFactRead),
     );
     let selector = ConfiguredMarketSelector::new();
     let selection_repo = PgMarketSelectionRepository::new(db);
 
     let as_of = Utc::now();
-    let candidates = provider.candidates(as_of);
+    let domain = DomainConfig::default();
+    let candidates = provider
+        .candidates(as_of, &domain)
+        .await
+        .expect("candidates");
     assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates[0].volume_24h_usd,

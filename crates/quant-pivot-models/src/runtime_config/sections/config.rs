@@ -3,6 +3,7 @@
 use crate::{
     enums::{
         common::MarketCategory,
+        domain::DomainFamily,
         factor::{FactorFamily, FactorNormalization},
     },
     runtime_config::wire::{
@@ -74,6 +75,10 @@ pub struct DataQualityConfig {
     /// Maximum acceptable age (seconds) of the freshest trade-tape print at
     /// decision time (`StalenessRule::MaxTradeTapeAge`).
     pub max_trade_tape_age_secs: u64,
+    /// Maximum acceptable age (seconds) of the freshest domain observation for
+    /// a linked instrument at decision time
+    /// (`StalenessRule::MaxDomainObservationAge`).
+    pub max_domain_observation_age_secs: u64,
     /// Reject crossed books before feature generation.
     pub reject_crossed_books: bool,
     /// Reject empty books before feature generation.
@@ -95,6 +100,7 @@ impl Default for DataQualityConfig {
             max_ingest_lag_ms: 10_000,
             max_feature_bucket_age_secs: 30,
             max_trade_tape_age_secs: 300,
+            max_domain_observation_age_secs: 300,
             reject_crossed_books: true,
             reject_empty_books: true,
             feature_staleness_policy: FeatureStalenessPolicy::RejectStaleRequired,
@@ -229,13 +235,14 @@ impl FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: SchemaVersion::new(4),
+            feature_schema_version: SchemaVersion::new(5),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
                 FeatureFamily::TimeSeries,
                 FeatureFamily::Microstructure,
                 FeatureFamily::Structural,
+                FeatureFamily::Domain,
             ],
             required_features: Vec::new(),
             bar_windows_secs: vec![60, 300, 900],
@@ -533,6 +540,101 @@ impl Default for FactorsConfig {
     }
 }
 
+/// Cross-check policy between the crypto feature source (Binance) and the
+/// settlement oracle (Chainlink) — Phase 11.2.2 §3.6.6.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CryptoCrossCheckConfig {
+    /// Maximum tolerated |Binance − Chainlink| basis, in basis points of the
+    /// oracle price. A wider observed basis raises the risk flag and marks the
+    /// linkage for review; it never fabricates or clamps a feature value.
+    pub max_basis_bps: u32,
+}
+
+impl Default for CryptoCrossCheckConfig {
+    fn default() -> Self {
+        Self { max_basis_bps: 50 }
+    }
+}
+
+/// Crypto external-vertical parameters (Phase 11.2.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CryptoDomainConfig {
+    /// Source visibility delay (seconds) applied to domain-observation PIT
+    /// reads: only rows with `event_time <= as_of - source_delay` are visible.
+    pub source_delay_secs: u64,
+    /// Days of 1m kline history the ingest worker backfills on bootstrap.
+    pub backfill_days: u32,
+    /// Lookback (seconds) for the underlying momentum feature.
+    pub momentum_window_secs: u64,
+    /// Lookback (seconds) for the underlying realized-vol feature.
+    pub volatility_window_secs: u64,
+    /// Feature-source vs settlement-oracle basis cross-check policy.
+    pub cross_check: CryptoCrossCheckConfig,
+}
+
+impl Default for CryptoDomainConfig {
+    fn default() -> Self {
+        Self {
+            source_delay_secs: 5,
+            backfill_days: 90,
+            momentum_window_secs: 3_600,
+            volatility_window_secs: 3_600,
+            cross_check: CryptoCrossCheckConfig::default(),
+        }
+    }
+}
+
+/// External-vertical domain plane (category-routed; Phase 11.2.2).
+///
+/// Domain families are **never** part of `enabled_factor_families`: routing is
+/// by market category, and this section only gates which verticals may serve
+/// data at all (a disabled family fails closed to `domain: None`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct DomainConfig {
+    /// Per-family enablement. A family absent from the map is disabled.
+    pub enabled_by_family: BTreeMap<DomainFamily, bool>,
+    /// Crypto vertical parameters.
+    pub crypto: CryptoDomainConfig,
+}
+
+impl DomainConfig {
+    /// Whether a domain family is enabled (absent ⇒ disabled, fail-closed).
+    #[must_use]
+    pub fn family_enabled(&self, family: DomainFamily) -> bool {
+        self.enabled_by_family
+            .get(&family)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// A domain plane with every vertical disabled.
+    ///
+    /// For windows that structurally consume no domain data (e.g. the
+    /// favorite-longshot bias fit, which reads only settlement mids) — the
+    /// prefetch then skips the linkage/observation reads entirely.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled_by_family: BTreeMap::new(),
+            crypto: CryptoDomainConfig::default(),
+        }
+    }
+}
+
+impl Default for DomainConfig {
+    fn default() -> Self {
+        let mut enabled_by_family = BTreeMap::new();
+        enabled_by_family.insert(DomainFamily::Crypto, true);
+        Self {
+            enabled_by_family,
+            crypto: CryptoDomainConfig::default(),
+        }
+    }
+}
+
 /// Active and shadow model references.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -545,6 +647,14 @@ pub struct ModelConfig {
     /// opportunistic-Sell exit evaluator loads this; a distinct pointer from
     /// `active_model_version_id` so Buy and Sell models are governed separately.
     pub active_exit_model_version_id: Option<ModelVersionRef>,
+    /// Category-specific Buy-side model pointers (Phase 11.2.2 `ModelRouting`).
+    ///
+    /// A market whose category has a pointer here scores through that artifact
+    /// (which may consume the category's domain slice); categories without a
+    /// pointer — or whose artifact is unavailable — fall back to the generic
+    /// `active_model_version_id`. Governed exactly like the active/shadow
+    /// pointers (versioned config + activation audit).
+    pub category_model_pointers: BTreeMap<MarketCategory, ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalString,
     /// Maximum age of a quality-gate report before model load is denied.
@@ -563,6 +673,7 @@ impl Default for ModelConfig {
             active_model_version_id: None,
             shadow_model_version_id: None,
             active_exit_model_version_id: None,
+            category_model_pointers: BTreeMap::new(),
             min_model_confidence: DecimalString::new("0.50"),
             min_quality_gate_age_secs: 86_400,
             candidate_score_floor: DecimalString::new("0.00"),

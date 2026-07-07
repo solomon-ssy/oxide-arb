@@ -28,8 +28,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -37,32 +37,35 @@ use quant_pivot_models::{
         BiasTableFitJobParams, BiasTableFitOutcome, BiasTableListQuery, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
         CoreEventPublisher, CreateModelSpecCommand, DataQualityPort, DataQualitySnapshot,
-        ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
-        ExecutionSubmitPort, FactorCollinearitySource, FactorCollinearityView,
-        FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort,
-        FavoriteLongshotBiasTableInfo, FavoriteLongshotFitPort, FitBiasTableRequest,
-        GatePreviewIntent, GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext,
-        KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort, MissingReasonCountView,
-        ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery,
-        ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery,
-        NegRiskEventDriftView, Paginated, ParticipantConcentrationDetailView,
-        ParticipantConcentrationSummaryView, PromoteDatasetRequest, PublishFactorCommand,
-        PublishFactorsBatchCommand, PublishModelCommand, QualityGateReportView,
-        QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
-        ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
-        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
-        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
-        RuntimeControlPort, SetKillSwitchCommand, StructuralMonitorPort, SystemStatus,
-        TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest, TrainedModelView,
-        TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
-        TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
+        DomainSourceCursorInfo, ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort,
+        ExecutionRecoveryView, ExecutionSubmitPort, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        FactorGovernancePort, FavoriteLongshotBiasTableInfo, FavoriteLongshotFitPort,
+        FitBiasTableRequest, GatePreviewIntent, GovernanceActor, HealthReport, JobProgressSink,
+        JobSubmitContext, KillSwitchPort, KillSwitchView, LinkageResolveSummaryView,
+        MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo, MarketLinkageListQuery,
+        MetricsScrapePort, MissingReasonCountView, ModelComparisonReportInfo, ModelGovernancePort,
+        ModelSpecInfo, ModelSpecListQuery, ModelSpecPort, ModelTrainingPort, ModelVersionInfo,
+        ModelVersionListQuery, NegRiskEventDriftView, NewMarketLinkage, OverrideLinkageRequest,
+        Paginated, ParticipantConcentrationDetailView, ParticipantConcentrationSummaryView,
+        PromoteDatasetRequest, PublishFactorCommand, PublishFactorsBatchCommand,
+        PublishModelCommand, QualityGateReportView, QuantModeTransitionReport, ReconciliationPort,
+        RegisterFactorDefinitionsCommand, ResearchCatalogPort, ResearchJobListQuery,
+        ResearchJobPort, ResearchJobView, ResolveReconciliationCommand,
+        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
+        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
+        SetKillSwitchCommand, StructuralMonitorPort, SystemStatus, TradeTapeCoverageView,
+        TradeTapeSourceHealthView, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
+        TrainingDatasetListQuery, TrainingDatasetPlanView, TrainingDatasetPort,
+        TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, FactorDefinitionId, FavoriteLongshotBiasTableId, MarketId,
-        ModelComparisonReportId, ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId,
-        RuntimeConfigVersionId, TokenId, TrainingDatasetId,
+        BacktestReportId, DomainInstrumentKey, DomainSourceId, FactorDefinitionId,
+        FavoriteLongshotBiasTableId, MarketId, MarketLinkageId, ModelComparisonReportId,
+        ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId, RuntimeConfigVersionId, TokenId,
+        TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -71,8 +74,9 @@ use quant_pivot_repository::{
         PgReconciliationRepository, PgSettlementRedeemRepository,
     },
     traits::{
-        AttributionRepository, ExecutionOrderRepository, PositionRepository,
-        QuantFactReadRepository, ReconciliationRepository, SettlementRedeemRepository,
+        AttributionRepository, DomainSourceCursorRepository, ExecutionOrderRepository,
+        MarketLinkageRepository, PositionRepository, QuantFactReadRepository,
+        ReconciliationRepository, SettlementRedeemRepository,
     },
 };
 use quant_pivot_storage::cache::connect_pool;
@@ -169,6 +173,9 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         research_catalog: Arc::new(MockResearchCatalogPort),
         research_jobs: Arc::new(MockResearchJobPort),
         favorite_longshot: Arc::new(MockFavoriteLongshotFitPort),
+        market_linkages: Arc::new(MockMarketLinkageRepository),
+        domain_source_cursors: Arc::new(MockDomainSourceCursorRepository),
+        linkage_governance: Arc::new(MockMarketLinkageGovernancePort),
         structural_monitor: Arc::new(MockStructuralMonitorPort),
         quant_reports: input.core_report.port.clone(),
         account_read: core_account_read_port(
@@ -497,6 +504,24 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _to_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
+    }
+
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
     }
 
     async fn observed_markets_between(
@@ -1148,5 +1173,113 @@ impl RuntimeControlPort for MockRuntimeControl {
 
     async fn health(&self) -> HealthReport {
         HealthReport::from_checks(Vec::new(), chrono::Utc::now())
+    }
+}
+
+#[derive(Default)]
+pub struct MockMarketLinkageRepository;
+
+#[async_trait]
+impl MarketLinkageRepository for MockMarketLinkageRepository {
+    async fn append(&self, _linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_market_linkage"),
+            detail: "mock".to_owned(),
+        })
+    }
+
+    async fn valid_at(
+        &self,
+        _market_id: &MarketId,
+        _as_of: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<MarketLinkageInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn latest_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn ledger_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+        _derived_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_by_id(
+        &self,
+        _linkage_id: &MarketLinkageId,
+    ) -> Result<Option<MarketLinkageInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: MarketLinkageListQuery,
+    ) -> Result<Paginated<MarketLinkageInfo>, StorageError> {
+        Ok(Paginated::empty_for(&query))
+    }
+}
+
+#[derive(Default)]
+pub struct MockMarketLinkageGovernancePort;
+
+#[async_trait]
+impl MarketLinkageGovernancePort for MockMarketLinkageGovernancePort {
+    async fn resolve_changed_markets(
+        &self,
+        _market_ids: &[MarketId],
+    ) -> QuantResult<LinkageResolveSummaryView> {
+        Ok(LinkageResolveSummaryView {
+            examined: 0,
+            appended: 0,
+            unchanged: 0,
+            resolved: 0,
+            unresolved: 0,
+        })
+    }
+
+    async fn apply_override(
+        &self,
+        _market_id: &MarketId,
+        _request: OverrideLinkageRequest,
+    ) -> QuantResult<MarketLinkageInfo> {
+        Err(QuantError::from(StorageError::InvariantViolation {
+            entity: Some("quant_market_linkage"),
+            detail: "mock".to_owned(),
+        }))
+    }
+}
+
+#[derive(Default)]
+pub struct MockDomainSourceCursorRepository;
+
+#[async_trait]
+impl DomainSourceCursorRepository for MockDomainSourceCursorRepository {
+    async fn find(
+        &self,
+        _source_id: &DomainSourceId,
+        _instrument_key: &DomainInstrumentKey,
+    ) -> Result<Option<DomainSourceCursorInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn upsert(
+        &self,
+        _cursor: UpsertDomainSourceCursor,
+    ) -> Result<DomainSourceCursorInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_domain_source_cursor"),
+            detail: "mock".to_owned(),
+        })
+    }
+
+    async fn list_all(&self) -> Result<Vec<DomainSourceCursorInfo>, StorageError> {
+        Ok(Vec::new())
     }
 }

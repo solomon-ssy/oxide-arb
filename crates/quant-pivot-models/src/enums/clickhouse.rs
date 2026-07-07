@@ -301,6 +301,7 @@ pub enum ChFeatureSourceKind {
     ClickHouseFact = 3,
     TradeTape = 4,
     Derived = 5,
+    DomainExternal = 6,
 }
 
 impl ChFeatureSourceKind {
@@ -312,6 +313,7 @@ impl ChFeatureSourceKind {
             Self::ClickHouseFact => "clickhouse_fact",
             Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
+            Self::DomainExternal => "domain_external",
         }
     }
 
@@ -324,6 +326,7 @@ impl ChFeatureSourceKind {
             "clickhouse_fact" => Some(Self::ClickHouseFact),
             "trade_tape" => Some(Self::TradeTape),
             "derived" => Some(Self::Derived),
+            "domain_external" => Some(Self::DomainExternal),
             _ => None,
         }
     }

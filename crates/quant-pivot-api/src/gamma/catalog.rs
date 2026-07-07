@@ -39,6 +39,8 @@ pub struct CatalogMarket {
     pub condition_id: String,
     pub question: String,
     pub slug: Option<String>,
+    /// Market rules text (resolution-source grounding anchor).
+    pub description: Option<String>,
     /// Exactly two legs — the binary invariant is encoded in the type.
     pub tokens: [CatalogToken; 2],
     pub status: MarketStatus,
@@ -67,6 +69,8 @@ pub struct CatalogEvent {
     pub id: String,
     pub title: String,
     pub slug: String,
+    /// Recurring-series slug, when the event belongs to a series.
+    pub series_slug: Option<String>,
     pub status: EventStatus,
     /// Raw Gamma tag slugs — the official categorization source.
     pub tags: Vec<String>,
@@ -131,6 +135,10 @@ impl From<WireEvent> for CatalogEvent {
         let id = wire.id;
         let title = wire.title.unwrap_or_default();
         let slug = wire.slug.unwrap_or_default();
+        let series_slug = wire
+            .series_slug
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         let neg_risk = wire.neg_risk.unwrap_or(false);
         let created_at = parse_gamma_timestamp(wire.created_at.as_deref());
         let updated_at = parse_gamma_timestamp(wire.updated_at.as_deref());
@@ -159,6 +167,7 @@ impl From<WireEvent> for CatalogEvent {
             id,
             title,
             slug,
+            series_slug,
             status,
             tags,
             categories,
@@ -209,6 +218,10 @@ impl TryFrom<WireMarket> for CatalogMarket {
             condition_id: wire.condition_id,
             question: wire.question,
             slug: wire.slug,
+            description: wire
+                .description
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
             tokens,
             status,
             neg_risk: wire.neg_risk.unwrap_or(false),

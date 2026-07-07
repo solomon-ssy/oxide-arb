@@ -22,7 +22,7 @@ use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::Repo
 use quant_pivot_models::{
     domain::{FactorValueInfo, NewFactorValue},
     enums::quant::PublicationStatus,
-    runtime_config::{FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
+    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy},
     types::{FactorDefinitionId, FeatureVectorId, MarketId, ModelRunId},
 };
 use quant_pivot_repository::traits::FactorRepository;
@@ -48,6 +48,8 @@ pub struct FactorPipelineRequest<'a> {
     pub factors: &'a FactorsConfig,
     /// Frozen feature config (resolves windowed factor inputs).
     pub features: &'a FeaturesConfig,
+    /// Frozen domain config (category-routed domain factor registration).
+    pub domain: &'a DomainConfig,
 }
 
 /// A market excluded by `RejectCandidate` (a required factor was missing or below
@@ -117,7 +119,12 @@ impl FactorPipelineService {
         // Bind the currently-activated favorite-longshot bias table (content-hash
         // verified at activation). `None` keeps `struct.favorite_longshot` inert.
         let bias_table = self.bias_table.current();
-        let engine = FactorEngine::new(request.factors, request.features, bias_table);
+        let engine = FactorEngine::new(
+            request.factors,
+            request.features,
+            request.domain,
+            bias_table,
+        );
         if engine.registry().is_empty() {
             return Err(QuantError::config(
                 "no factors enabled: factors.enabled_factor_families selects an empty factor set",

@@ -139,3 +139,30 @@ pub mod structural {
     pub const NEGRISK_CONVERT_EDGE: FeatureName =
         FeatureName::from_static("struct.negrisk_convert_edge");
 }
+
+/// Crypto external-vertical (domain-slice) features — computed from frozen
+/// market linkages + PIT domain observations (Phase 11.2.2).
+pub mod domain_crypto {
+    use super::FeatureName;
+
+    /// Signed relative distance from the underlying to the strike.
+    ///
+    /// Oriented so positive favors YES: `(close − strike)/strike` under `Above`,
+    /// `(strike − close)/strike` under `Below`, and `(close − ref)/ref` for up/down
+    /// markets (`UpVsReference`).
+    pub const DISTANCE_TO_STRIKE: FeatureName =
+        FeatureName::from_static("domain.crypto.distance_to_strike");
+    /// Underlying close-to-close momentum over the configured window.
+    pub const UNDERLYING_MOMENTUM: FeatureName =
+        FeatureName::from_static("domain.crypto.underlying_momentum");
+    /// Underlying realized volatility (stdev of log returns) over the window.
+    pub const UNDERLYING_REALIZED_VOL: FeatureName =
+        FeatureName::from_static("domain.crypto.underlying_realized_vol");
+    /// Seconds from `as_of` until the subject's settlement observation.
+    pub const TIME_TO_OBSERVATION: FeatureName =
+        FeatureName::from_static("domain.crypto.time_to_observation");
+    /// Basis (bps) between the feature source (Binance close) and the
+    /// settlement oracle quote (Chainlink) — risk / cross-check signal.
+    pub const BASIS_VS_RESOLUTION_SOURCE: FeatureName =
+        FeatureName::from_static("domain.crypto.basis_vs_resolution_source");
+}

@@ -28,11 +28,12 @@ use quant_pivot_models::domain::{
 use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
     AttributionRepository, BacktestReportRepository, EventRepository, FactorRepository,
-    FavoriteLongshotBiasTableRepository, FeatureRepository, MarketRepository,
-    MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
-    ModelRegistryRepository, ModelRunRepository, PositionRepository, QuantFactReadRepository,
-    RecommendationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-    TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+    FavoriteLongshotBiasTableRepository, FeatureRepository, MarketLinkageRepository,
+    MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
+    ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
+    PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository, ShadowComparisonRepository, TradeTapeBlockCursorRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::{
@@ -106,6 +107,8 @@ pub struct ResearchBundle {
     pub market_repo: Arc<dyn MarketRepository>,
     /// Event catalog snapshot for offline neg-risk leg enumeration (11.2.1).
     pub event_repo: Arc<dyn EventRepository>,
+    /// Frozen market → external-subject linkage ledger (11.2.2).
+    pub market_linkage_repo: Arc<dyn MarketLinkageRepository>,
     /// Position ledger for `ExitDecision` lot-timeline training (06.1).
     pub position_repo: Arc<dyn PositionRepository>,
     /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
@@ -123,6 +126,54 @@ struct OfflineResearchRepos {
     governance_audit: Arc<dyn ModelGovernanceAuditRepository>,
 }
 
+struct ResearchPipelines {
+    candidate_provider: Arc<MarketCandidateProvider>,
+    feature_repo: Arc<dyn FeatureRepository>,
+    feature_pipeline: Arc<FeaturePipelineService>,
+    factor_repo: Arc<dyn FactorRepository>,
+    factor_pipeline: Arc<FactorPipelineService>,
+}
+
+fn assemble_research_pipelines(
+    deps: &ResearchBundleDeps<'_>,
+    market_linkage_repo: &Arc<dyn MarketLinkageRepository>,
+) -> ResearchPipelines {
+    let candidate_provider = Arc::new(MarketCandidateProvider::new(
+        Arc::clone(&deps.data.market_registry),
+        Arc::clone(&deps.data.book_store),
+        Arc::clone(&deps.data.ws_manager) as Arc<dyn WsShardHealthPort>,
+        Arc::clone(&deps.infra.ingest_lag_tracker),
+        Arc::clone(market_linkage_repo),
+        Arc::clone(&deps.infra.quant_fact_read),
+    ));
+    let feature_repo: Arc<dyn FeatureRepository> =
+        Arc::clone(&deps.infra.repos.feature) as Arc<dyn FeatureRepository>;
+    let feature_pipeline = Arc::new(FeaturePipelineService::new(
+        FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
+        Arc::clone(&feature_repo),
+        Arc::clone(&deps.infra.feature_event_writer),
+        Arc::clone(&deps.data.market_registry),
+        Arc::clone(&deps.infra.repos.trade_tape_block_cursor)
+            as Arc<dyn TradeTapeBlockCursorRepository>,
+        Arc::clone(market_linkage_repo),
+        deps.deploy.market_data.trade_tape_on_chain.clone(),
+    ));
+    let factor_repo: Arc<dyn FactorRepository> =
+        Arc::clone(&deps.infra.repos.factor) as Arc<dyn FactorRepository>;
+    let factor_pipeline = Arc::new(FactorPipelineService::new(
+        Arc::clone(&factor_repo),
+        Arc::clone(&deps.infra.factor_event_writer),
+        Arc::clone(&deps.governance.bias_table),
+    ));
+    ResearchPipelines {
+        candidate_provider,
+        feature_repo,
+        feature_pipeline,
+        factor_repo,
+        factor_pipeline,
+    }
+}
+
 impl ResearchBundle {
     /// Build the research bundle from deploy config plus wired infra/data handles.
     ///
@@ -138,29 +189,14 @@ impl ResearchBundle {
         let market_selector: Arc<dyn MarketSelector> = Arc::new(ConfiguredMarketSelector::new());
         let market_selection_repo: Arc<dyn MarketSelectionRepository> =
             Arc::clone(&repos.market_selection) as Arc<dyn MarketSelectionRepository>;
-        let candidate_provider = Arc::new(MarketCandidateProvider::new(
-            Arc::clone(&deps.data.market_registry),
-            Arc::clone(&deps.data.book_store),
-            Arc::clone(&deps.data.ws_manager) as Arc<dyn WsShardHealthPort>,
-            Arc::clone(&deps.infra.ingest_lag_tracker),
-        ));
-        let feature_repo: Arc<dyn FeatureRepository> =
-            Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>;
-        let feature_pipeline = Arc::new(FeaturePipelineService::new(
-            FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
-            Arc::clone(&feature_repo),
-            Arc::clone(&deps.infra.feature_event_writer),
-            Arc::clone(&deps.data.market_registry),
-            Arc::clone(&repos.trade_tape_block_cursor) as Arc<dyn TradeTapeBlockCursorRepository>,
-            deps.deploy.market_data.trade_tape_on_chain.clone(),
-        ));
-        let factor_repo: Arc<dyn FactorRepository> =
-            Arc::clone(&repos.factor) as Arc<dyn FactorRepository>;
-        let factor_pipeline = Arc::new(FactorPipelineService::new(
-            Arc::clone(&factor_repo),
-            Arc::clone(&deps.infra.factor_event_writer),
-            Arc::clone(&deps.governance.bias_table),
-        ));
+        let market_linkage_repo: Arc<dyn MarketLinkageRepository> =
+            Arc::clone(&repos.market_linkage) as Arc<dyn MarketLinkageRepository>;
+        let pipelines = assemble_research_pipelines(deps, &market_linkage_repo);
+        let candidate_provider = pipelines.candidate_provider;
+        let feature_repo = pipelines.feature_repo;
+        let feature_pipeline = pipelines.feature_pipeline;
+        let factor_repo = pipelines.factor_repo;
+        let factor_pipeline = pipelines.factor_pipeline;
 
         let model_run_repo: Arc<dyn ModelRunRepository> =
             Arc::clone(&repos.model_run) as Arc<dyn ModelRunRepository>;
@@ -199,6 +235,7 @@ impl ResearchBundle {
                 Arc::clone(&deps.infra.quant_fact_read),
                 Arc::clone(&deps.data.market_repo),
                 Arc::clone(&repos.event) as Arc<dyn EventRepository>,
+                Arc::clone(&market_linkage_repo),
                 Arc::clone(&repos.favorite_longshot_bias_table)
                     as Arc<dyn FavoriteLongshotBiasTableRepository>,
                 Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
@@ -231,6 +268,7 @@ impl ResearchBundle {
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
             event_repo: Arc::clone(&repos.event) as Arc<dyn EventRepository>,
+            market_linkage_repo: Arc::clone(&market_linkage_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             fee_calculator: Arc::clone(&deps.data.fee_calculator),
             favorite_longshot_fit,
@@ -257,6 +295,7 @@ impl ResearchBundle {
                 feature_repo: Arc::clone(&self.feature_repo),
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
+                linkage_repo: Arc::clone(&self.market_linkage_repo),
             },
             wire.config,
             wire.max_spine_samples,

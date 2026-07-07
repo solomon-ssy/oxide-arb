@@ -19,7 +19,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::factor::{FactorIndeterminateReason, NormalizationSource},
     runtime_config::{
-        FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
+        DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
     types::{ContentHash, FactorDefinitionId, Probability},
@@ -109,13 +109,14 @@ pub struct FactorEngine {
 }
 
 impl FactorEngine {
-    /// Build the engine from frozen factor + feature config.
+    /// Build the engine from frozen factor + feature + domain config.
     ///
     /// `factors` selects the enabled families; `features` resolves windowed
     /// factor inputs (e.g. the momentum / volatility windows) against the active
     /// feature schema, so a factor's declared input always matches a real feature
-    /// name. Normalizers are resolved per compute call from
-    /// `factors.normalization` so parameter tuning never re-keys the registry.
+    /// name; `domain` gates the category-routed vertical factors (11.2.2).
+    /// Normalizers are resolved per compute call from `factors.normalization`
+    /// so parameter tuning never re-keys the registry.
     ///
     /// `bias_table` binds the favorite-longshot factor; `None` keeps it inert.
     /// The table is runtime data — it does not affect `factor_schema_hash`.
@@ -123,10 +124,11 @@ impl FactorEngine {
     pub fn new(
         factors: &FactorsConfig,
         features: &FeaturesConfig,
+        domain: &DomainConfig,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> Self {
         Self {
-            registry: FactorRegistry::build(factors, features, bias_table),
+            registry: FactorRegistry::build(factors, features, domain, bias_table),
         }
     }
 

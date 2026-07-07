@@ -22,8 +22,8 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
@@ -34,9 +34,10 @@ use quant_pivot_models::{
         common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
-    runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
+    runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
-        EventId, FeatureVectorId, MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        DomainInstrumentKey, EventId, FeatureVectorId, MarketId, Price, RuntimeConfigVersionId,
+        Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -55,6 +56,7 @@ use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObse
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
     ws::WsShardHealth,
 };
@@ -83,6 +85,7 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         token_no: TokenId::new(catalog.no_token),
         question: "Feature E2E?".into(),
         slug: "feature-e2e".into(),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -243,6 +246,24 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
+    }
+
     async fn observed_markets_between(
         &self,
         _from_ms: i64,
@@ -321,15 +342,18 @@ async fn insufficient_vectors_are_partitioned_and_not_persisted() {
         event_writer,
         Arc::clone(&registry),
         live_trade_tape_block_cursor_repo(),
+        Arc::new(EmptyLinkageRepo),
         TradeTapeOnChainConfig::default(),
     );
 
+    let domain = DomainConfig::default();
     let included = vec![market];
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
             as_of,
             features: &features,
+            domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
@@ -374,9 +398,12 @@ async fn create_feature_vector_then_find() {
         Arc::clone(&book_store),
         WsShardHealth::operational(),
         Arc::new(IngestPipelineLagTracker::new()),
+        Arc::new(EmptyLinkageRepo),
+        Arc::new(EmptyFactRead),
     );
     let selector = ConfiguredMarketSelector::new();
     let features = FeaturesConfig::default();
+    let domain = DomainConfig::default();
     let as_of = Utc::now();
 
     let request = MarketSelectionBuildRequest {
@@ -395,7 +422,10 @@ async fn create_feature_vector_then_find() {
         source_delay_secs: 0,
     };
 
-    let candidates = provider.candidates(as_of);
+    let candidates = provider
+        .candidates(as_of, &domain)
+        .await
+        .expect("candidates");
     let snapshot = selector
         .build_snapshot(request, candidates)
         .await
@@ -419,8 +449,9 @@ async fn create_feature_vector_then_find() {
         Arc::clone(&feature_repo),
         Arc::clone(&event_writer),
         Arc::clone(&registry),
-        quant_pivot_test_support::trade_tape_fixtures::live_trade_tape_block_cursor_repo(),
-        quant_pivot_models::config::TradeTapeOnChainConfig::default(),
+        live_trade_tape_block_cursor_repo(),
+        Arc::new(EmptyLinkageRepo),
+        TradeTapeOnChainConfig::default(),
     );
 
     let result = pipeline
@@ -428,6 +459,7 @@ async fn create_feature_vector_then_find() {
             included: &snapshot.included,
             as_of,
             features: &features,
+            domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
@@ -441,7 +473,7 @@ async fn create_feature_vector_then_find() {
     assert_eq!(result.accepted.len(), 1);
     assert!(result.rejected.is_empty());
     let vector = &result.accepted[0];
-    assert!(vector.values.contains_key(&names::book::BEST_BID));
+    assert!(vector.value(&names::book::BEST_BID).is_some());
 
     let expected_hash = ResearchHasher::feature_vector(vector).expect("hash");
     let persisted = &result.persisted[0];

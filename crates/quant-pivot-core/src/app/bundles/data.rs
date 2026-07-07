@@ -2,6 +2,7 @@
 
 use super::InfraBundle;
 use crate::{
+    governance::{LinkageResolverDeps, LinkageResolverService},
     observability::{
         backpressure::BackpressurePolicy, book_fact_writer::BookFactWriter, metrics_hub::MetricsHub,
     },
@@ -35,7 +36,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
     postgres::{PgEventRepository, PgMarketRepository},
-    traits::{EventRepository, MarketRepository},
+    traits::{EventRepository, MarketLinkageRepository, MarketRepository},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -58,6 +59,8 @@ pub struct DataBundle {
     pub market_filter: Arc<MarketFilter>,
     pub data_pipeline: Arc<DataPipeline>,
     pub gamma_service: Arc<GammaService>,
+    /// Offline market-linkage resolver (Phase 11.2.2).
+    pub linkage_resolver: Arc<LinkageResolverService>,
     pub ws_manager: Arc<ClobWsManager>,
     pub ws_subscription: Arc<WsSubscriptionCoordinator>,
     pub catalog: Arc<CatalogReadiness>,
@@ -102,41 +105,28 @@ impl DataBundle {
             PgMarketRepository::new(deps.infra.pg.connection().clone()),
             Arc::clone(&deps.infra.cache),
         ));
-        let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(
-            Arc::clone(&ws_manager),
-            MarketDataSubscriptionPolicy::new(
-                deps.deploy
-                    .market_data
-                    .websocket
-                    .engine_max_subscription_tokens,
-                deps.deploy
-                    .market_data
-                    .websocket
-                    .engine_subscription_window_hours,
-            ),
-        ));
-        let status_nudge = SystemStatusNudge::default();
-        let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
-            gamma_client: Arc::clone(&gamma_client),
-            market_registry: Arc::clone(&market_registry),
-            market_cache: Arc::clone(&market_cache),
-            market_filter: Arc::clone(&market_filter),
-            fee_calculator: Arc::clone(&fee_calculator),
+        let event_repo: Arc<dyn EventRepository> = cached_event_repo(deps);
+        let linkage_resolver = Arc::new(LinkageResolverService::new(LinkageResolverDeps {
+            linkage_repo: Arc::clone(&deps.infra.repos.market_linkage)
+                as Arc<dyn MarketLinkageRepository>,
             market_repo: Arc::clone(&market_repo),
-            event_repo: cached_event_repo(deps),
-            cache: Arc::clone(&deps.infra.cache),
-            metrics: Arc::clone(deps.metrics),
-            catalog: Arc::clone(&catalog),
-            ws_subscription: Some(Arc::clone(&ws_subscription)),
-            events: deps.events.clone(),
-            status_nudge: status_nudge.clone(),
-            subscription_window_hours: deps
-                .deploy
-                .market_data
-                .websocket
-                .engine_subscription_window_hours,
-            full_sync_interval_secs: deps.deploy.market_data.gamma.full_sync_interval_secs,
+            event_repo: Arc::clone(&event_repo),
         }));
+        let status_nudge = SystemStatusNudge::default();
+        let (gamma_service, ws_subscription) = assemble_gamma_service(GammaServiceAssembly {
+            deps,
+            gamma_client: &gamma_client,
+            ws_manager: &ws_manager,
+            market_repo: &market_repo,
+            event_repo: &event_repo,
+            market_registry: &market_registry,
+            market_cache: &market_cache,
+            market_filter: &market_filter,
+            fee_calculator: &fee_calculator,
+            catalog: &catalog,
+            linkage_resolver: &linkage_resolver,
+            status_nudge: status_nudge.clone(),
+        });
 
         let data_quality = Arc::new(BookDataQualityService::new(
             Arc::clone(&book_store),
@@ -165,6 +155,7 @@ impl DataBundle {
             market_filter,
             data_pipeline,
             gamma_service,
+            linkage_resolver,
             ws_manager,
             ws_subscription,
             catalog,
@@ -183,6 +174,76 @@ fn cached_event_repo(deps: &DataBundleDeps<'_>) -> Arc<dyn EventRepository> {
         PgEventRepository::new(deps.infra.pg.connection().clone()),
         Arc::clone(&deps.infra.cache),
     ))
+}
+
+struct GammaServiceAssembly<'a> {
+    deps: &'a DataBundleDeps<'a>,
+    gamma_client: &'a Arc<GammaClient>,
+    ws_manager: &'a Arc<ClobWsManager>,
+    market_repo: &'a Arc<dyn MarketRepository>,
+    event_repo: &'a Arc<dyn EventRepository>,
+    market_registry: &'a Arc<MarketRegistry>,
+    market_cache: &'a Arc<MarketCache>,
+    market_filter: &'a Arc<MarketFilter>,
+    fee_calculator: &'a Arc<FeeCalculator>,
+    catalog: &'a Arc<CatalogReadiness>,
+    linkage_resolver: &'a Arc<LinkageResolverService>,
+    status_nudge: SystemStatusNudge,
+}
+
+fn assemble_gamma_service(
+    inputs: GammaServiceAssembly<'_>,
+) -> (Arc<GammaService>, Arc<WsSubscriptionCoordinator>) {
+    let GammaServiceAssembly {
+        deps,
+        gamma_client,
+        ws_manager,
+        market_repo,
+        event_repo,
+        market_registry,
+        market_cache,
+        market_filter,
+        fee_calculator,
+        catalog,
+        linkage_resolver,
+        status_nudge,
+    } = inputs;
+    let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(
+        Arc::clone(ws_manager),
+        MarketDataSubscriptionPolicy::new(
+            deps.deploy
+                .market_data
+                .websocket
+                .engine_max_subscription_tokens,
+            deps.deploy
+                .market_data
+                .websocket
+                .engine_subscription_window_hours,
+        ),
+    ));
+    let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
+        gamma_client: Arc::clone(gamma_client),
+        market_registry: Arc::clone(market_registry),
+        market_cache: Arc::clone(market_cache),
+        market_filter: Arc::clone(market_filter),
+        fee_calculator: Arc::clone(fee_calculator),
+        market_repo: Arc::clone(market_repo),
+        event_repo: Arc::clone(event_repo),
+        cache: Arc::clone(&deps.infra.cache),
+        metrics: Arc::clone(deps.metrics),
+        catalog: Arc::clone(catalog),
+        ws_subscription: Some(Arc::clone(&ws_subscription)),
+        events: deps.events.clone(),
+        status_nudge,
+        subscription_window_hours: deps
+            .deploy
+            .market_data
+            .websocket
+            .engine_subscription_window_hours,
+        full_sync_interval_secs: deps.deploy.market_data.gamma.full_sync_interval_secs,
+        linkage_resolver: Some(Arc::clone(linkage_resolver)),
+    }));
+    (gamma_service, ws_subscription)
 }
 
 fn build_data_pipeline(

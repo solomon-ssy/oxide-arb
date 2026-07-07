@@ -13,6 +13,7 @@
 use crate::{
     observability::feature_fact_writer::FeatureEventWriter,
     pipeline::{
+        domain_pit::{build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument},
         feature_window_provider::FeatureWindowProvider,
         market_registry::MarketRegistry,
         trade_tape_source::{cursors_by_contract_address, trade_tape_market_ingest_available},
@@ -24,20 +25,22 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        FeatureVectorInfo, NewFeatureVector, TradeTapeSourceKind, market::registry::NegRiskLegSet,
-        quant::NewReportDataQualitySnapshot,
+        FeatureVectorInfo, MarketLinkage, NewFeatureVector, TradeTapeSourceKind,
+        market::registry::NegRiskLegSet, quant::NewReportDataQualitySnapshot,
     },
-    enums::quant::DataQualityStatus,
-    runtime_config::{DataQualityConfig, FeaturesConfig},
-    types::{MarketId, RuntimeConfigVersionId, TokenId, Usd},
+    enums::{domain::DomainFamily, quant::DataQualityStatus},
+    runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
+    types::{DomainInstrumentKey, MarketId, RuntimeConfigVersionId, TokenId, Usd},
 };
-use quant_pivot_repository::traits::{FeatureRepository, TradeTapeBlockCursorRepository};
+use quant_pivot_repository::traits::{
+    FeatureRepository, MarketLinkageRepository, TradeTapeBlockCursorRepository,
+};
 use quant_pivot_research::{
     features::{
-        ConfiguredFeatureBuilder, FeatureName, FeatureSchema, FeatureSourceWindows, FeatureVector,
-        MarketDecisionCapture, MarketWindowSnapshot, NullReason, PitView, RejectedMarketDraft,
-        ResolvedMarketBundle, TradeTapeWindowSnapshot, draft_data_quality_snapshot, feature_events,
-        merged_required_features,
+        ConfiguredFeatureBuilder, DomainSliceInputs, FeatureName, FeatureSchema,
+        FeatureSourceWindows, FeatureVector, MarketDecisionCapture, MarketWindowSnapshot,
+        NullReason, PitView, RejectedMarketDraft, ResolvedMarketBundle, TradeTapeWindowSnapshot,
+        draft_data_quality_snapshot, feature_events, merged_required_features,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -55,6 +58,8 @@ pub struct FeaturePipelineRequest<'a> {
     pub as_of: DateTime<Utc>,
     /// Frozen feature config.
     pub features: &'a FeaturesConfig,
+    /// Frozen domain-plane config (Phase 11.2.2).
+    pub domain: &'a DomainConfig,
     /// Frozen data-quality config.
     pub data_quality: &'a DataQualityConfig,
     /// Model-required features (drives critical-missing rejection).
@@ -109,6 +114,7 @@ pub struct FeaturePipelineService {
     event_writer: Arc<FeatureEventWriter>,
     market_registry: Arc<MarketRegistry>,
     block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
     trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
@@ -121,6 +127,7 @@ impl FeaturePipelineService {
         event_writer: Arc<FeatureEventWriter>,
         market_registry: Arc<MarketRegistry>,
         block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+        linkage_repo: Arc<dyn MarketLinkageRepository>,
         trade_tape_on_chain: TradeTapeOnChainConfig,
     ) -> Self {
         Self {
@@ -129,6 +136,7 @@ impl FeaturePipelineService {
             event_writer,
             market_registry,
             block_cursor_repo,
+            linkage_repo,
             trade_tape_on_chain,
         }
     }
@@ -143,7 +151,7 @@ impl FeaturePipelineService {
         &self,
         request: FeaturePipelineRequest<'_>,
     ) -> QuantResult<FeaturePipelineResult> {
-        let builder = ConfiguredFeatureBuilder::new(request.features);
+        let builder = ConfiguredFeatureBuilder::new(request.features, request.domain);
         let source_delay = Duration::from_secs(request.source_delay_secs);
         let windows = self.load_windows(&builder, &request, source_delay).await?;
 
@@ -176,7 +184,8 @@ impl FeaturePipelineService {
                         ),
                     })
                 })?;
-                Ok((index, market, window, trade_tape))
+                let domain = windows.domain.get(&market.market_id);
+                Ok((index, market, window, trade_tape, domain))
             })
             .collect::<QuantResult<Vec<_>>>()?;
 
@@ -293,10 +302,94 @@ impl FeaturePipelineService {
         } else {
             empty_trade_tape_windows(request.included, request.as_of, source_delay)
         };
+        let domain = if builder.needs_domain() {
+            self.load_domain_inputs(request).await?
+        } else {
+            HashMap::new()
+        };
         Ok(FeaturePrefetchWindows {
             microstructure,
             trade_tape,
+            domain,
         })
+    }
+
+    /// Prefetch the frozen linkage records + PIT domain observations for every
+    /// category-mapped market, then assemble per-market domain-slice inputs via
+    /// the SAME pure function the offline replay uses (zero train-serve skew).
+    ///
+    /// The observation fetch is bounded by the **domain** source delay
+    /// (`domain.crypto.source_delay_secs`), not the report-schedule delay: the
+    /// pure assembly re-slices to that cutoff, so fetching under a different
+    /// bound would silently truncate the window.
+    async fn load_domain_inputs(
+        &self,
+        request: &FeaturePipelineRequest<'_>,
+    ) -> QuantResult<HashMap<MarketId, DomainSliceInputs>> {
+        let mapped: Vec<&SelectedMarket> = request
+            .included
+            .iter()
+            .filter(|market| {
+                DomainFamily::for_category(market.category)
+                    .is_some_and(|family| request.domain.family_enabled(family))
+            })
+            .collect();
+        if mapped.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let market_ids: Vec<MarketId> = mapped
+            .iter()
+            .map(|market| market.market_id.clone())
+            .collect();
+        let ledger_rows = self
+            .linkage_repo
+            .ledger_for_markets(&market_ids, request.as_of)
+            .await
+            .map_err(QuantError::from)?;
+        let mut linkages: HashMap<MarketId, Vec<MarketLinkage>> = HashMap::new();
+        let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
+        for info in ledger_rows {
+            let market_id = info.market_id.clone();
+            let linkage = info.into_domain().map_err(|error| {
+                QuantError::config(format!(
+                    "linkage ledger row for market {market_id} has an undecodable outcome \
+                     payload: {error}"
+                ))
+            })?;
+            if let Some(binding) = linkage.binding() {
+                instruments.insert(binding.instrument_key.clone());
+                if let Some(oracle_key) = oracle_instrument(binding) {
+                    instruments.insert(oracle_key);
+                }
+            }
+            linkages.entry(market_id).or_default().push(linkage);
+        }
+        let lookback = Duration::from_secs(crypto_lookback_secs(request.domain));
+        let domain_delay = Duration::from_secs(request.domain.crypto.source_delay_secs);
+        let observations = self
+            .window_provider
+            .load_domain_observations(
+                instruments.into_iter().collect(),
+                request.as_of,
+                lookback,
+                domain_delay,
+            )
+            .await?;
+        let mut inputs = HashMap::new();
+        for market in mapped {
+            if let Some(slice_inputs) = build_domain_slice_inputs(
+                market.category,
+                linkages
+                    .get(&market.market_id)
+                    .map_or(&[][..], Vec::as_slice),
+                request.as_of,
+                request.domain,
+                &observations,
+            ) {
+                inputs.insert(market.market_id.clone(), slice_inputs);
+            }
+        }
+        Ok(inputs)
     }
 
     /// Resolve one PIT bundle per market with bounded concurrency, preserving
@@ -315,6 +408,7 @@ impl FeaturePipelineService {
             &'a SelectedMarket,
             &'a MarketWindowSnapshot,
             &'a TradeTapeWindowSnapshot,
+            Option<&'a DomainSliceInputs>,
         )],
         max_concurrent: usize,
     ) -> QuantResult<Vec<ResolvedMarketBundle<'a>>> {
@@ -324,10 +418,10 @@ impl FeaturePipelineService {
             // per-market `Vec<NegRiskLeg>` must outlive the `join_all` await.
             let sibling_sets: Vec<NegRiskLegSet> = chunk
                 .iter()
-                .map(|(_, market, _, _)| request.pit.neg_risk_leg_set(&market.event_id))
+                .map(|(_, market, _, _, _)| request.pit.neg_risk_leg_set(&market.event_id))
                 .collect();
             let chunk_results = join_all(chunk.iter().zip(&sibling_sets).map(
-                |((_, market, window, trade_tape), sibling)| {
+                |((_, market, window, trade_tape, domain), sibling)| {
                     builder.resolve_inputs(
                         market,
                         request.as_of,
@@ -335,6 +429,7 @@ impl FeaturePipelineService {
                         FeatureSourceWindows {
                             microstructure: window,
                             trade_tape,
+                            domain: *domain,
                         },
                         sibling,
                         request.liquidity_cap_usd,
@@ -342,7 +437,7 @@ impl FeaturePipelineService {
                 },
             ))
             .await;
-            for ((index, _, _, _), bundle) in chunk.iter().zip(chunk_results) {
+            for ((index, _, _, _, _), bundle) in chunk.iter().zip(chunk_results) {
                 bundles.push((*index, bundle?));
             }
         }
@@ -354,6 +449,7 @@ impl FeaturePipelineService {
 struct FeaturePrefetchWindows {
     microstructure: HashMap<TokenId, MarketWindowSnapshot>,
     trade_tape: HashMap<MarketId, TradeTapeWindowSnapshot>,
+    domain: HashMap<MarketId, DomainSliceInputs>,
 }
 
 /// Merge post-build data quality into frozen captures for every market.
@@ -380,8 +476,7 @@ fn reject_market(
     schema: &FeatureSchema,
 ) -> RejectedMarket {
     let missing_required = vector
-        .values
-        .iter()
+        .iter_values()
         .filter_map(|(name, value)| {
             let reason = value.null_reason()?;
             let spec = schema.by_name(name)?;

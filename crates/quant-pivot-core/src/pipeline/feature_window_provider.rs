@@ -16,8 +16,8 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd},
-    domain::TradeTapePrint,
-    types::{MarketId, TokenId},
+    domain::{DomainObservation, TradeTapePrint},
+    types::{DomainInstrumentKey, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
@@ -97,6 +97,47 @@ impl FeatureWindowProvider {
             );
         }
         Ok(windows)
+    }
+
+    /// Load PIT-bounded domain observations for a set of external instruments
+    /// (Phase 11.2.2). Series are ascending by `observed_at`, all inside
+    /// `[as_of - source_delay - lookback, as_of - source_delay)`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `ClickHouse` read failures as a storage error.
+    pub async fn load_domain_observations(
+        &self,
+        instruments: Vec<DomainInstrumentKey>,
+        as_of: DateTime<Utc>,
+        lookback: Duration,
+        source_delay: Duration,
+    ) -> QuantResult<HashMap<DomainInstrumentKey, Vec<DomainObservation>>> {
+        if instruments.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let cutoff = as_of - to_chrono(source_delay);
+        let from = cutoff - to_chrono(lookback);
+        let rows = self
+            .fact_read
+            .domain_observations_between(
+                instruments,
+                from.timestamp_millis(),
+                // `[from, to)` — include the cutoff instant itself.
+                cutoff.timestamp_millis() + 1,
+            )
+            .await?;
+        let mut grouped: HashMap<DomainInstrumentKey, Vec<DomainObservation>> = HashMap::new();
+        for row in rows {
+            // Unreadable persisted labels fail closed (skipped, never guessed).
+            if let Some(observation) = DomainObservation::from_clickhouse_row(&row) {
+                grouped
+                    .entry(observation.instrument_key.clone())
+                    .or_default()
+                    .push(observation);
+            }
+        }
+        Ok(grouped)
     }
 
     /// Load a per-market trade-tape window for every selected market.

@@ -62,7 +62,7 @@ fn yes_price(vector: &FeatureVector) -> Option<Price> {
 
 /// Read a `[0, 1]` probability-valued feature.
 fn probability_feature(vector: &FeatureVector, name: &FeatureName) -> Option<Probability> {
-    match vector.values.get(name) {
+    match vector.value(name) {
         Some(FeatureValue::Probability(value)) => Some(*value),
         _ => None,
     }
@@ -70,7 +70,7 @@ fn probability_feature(vector: &FeatureVector, name: &FeatureName) -> Option<Pro
 
 /// Read a USD-valued feature.
 fn usd_feature(vector: &FeatureVector, name: &FeatureName) -> Option<Usd> {
-    match vector.values.get(name) {
+    match vector.value(name) {
         Some(FeatureValue::Usd(value)) => Some(*value),
         _ => None,
     }
@@ -78,7 +78,7 @@ fn usd_feature(vector: &FeatureVector, name: &FeatureName) -> Option<Usd> {
 
 /// Read a count-valued feature.
 fn count_feature(vector: &FeatureVector, name: &FeatureName) -> Option<u64> {
-    match vector.values.get(name) {
+    match vector.value(name) {
         Some(FeatureValue::Count(value)) => Some(*value),
         _ => None,
     }

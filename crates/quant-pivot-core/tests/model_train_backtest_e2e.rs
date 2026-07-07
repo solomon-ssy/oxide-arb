@@ -30,7 +30,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
-        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
         ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion, NewTrainingDataset,
@@ -52,13 +52,15 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     runtime_config::{
-        DataQualityConfig, FactorWeights, FactorsConfig, FeatureFamily, FeaturesConfig,
-        PortfolioBudget, PortfolioConfig, PortfolioConstraints, wire::DecimalString,
+        DataQualityConfig, DomainConfig, FactorWeights, FactorsConfig, FeatureFamily,
+        FeaturesConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints,
+        wire::DecimalString,
     },
     types::{
-        ContentHash, DatasetCoverage, FactorDefinitionId, MarketId, ModelSpecId, ModelVersionId,
-        Price, Probability, RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
-        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
+        ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId, MarketId,
+        ModelSpecId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, SchemaVersion,
+        TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -84,6 +86,7 @@ use quant_pivot_research::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -155,8 +158,9 @@ fn examples() -> Vec<TrainingExample> {
                 market_id: market.clone(),
                 token_id: Some(token.clone()),
                 as_of,
-                schema_version: SchemaVersion::FIRST,
-                values,
+                generic_schema_version: SchemaVersion::FIRST,
+                generic: values,
+                domain: None,
                 substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
                 staleness_ms: 0,
@@ -352,6 +356,24 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .collect()
         };
         Ok(markets.into_iter().collect())
+    }
+
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
     }
 
     async fn mid_price_series(
@@ -613,6 +635,7 @@ fn replay_config() -> ReplayConfig {
             factor_weights: FactorWeights { weights },
             ..FactorsConfig::default()
         },
+        domain: DomainConfig::default(),
         data_quality: DataQualityConfig {
             max_book_age_ms: 60_000,
             max_feature_bucket_age_secs: 120,
@@ -678,6 +701,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
             fact_read: Arc::clone(&fact_read),
             market_repo: Arc::clone(&market_repo),
             event_repo: Arc::new(PgEventRepository::new(db.clone())),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
         },
         trainer_config(),
         replay_config(),
@@ -741,6 +765,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
             fact_read,
             market_repo,
             event_repo: Arc::new(PgEventRepository::new(db.clone())),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
         },
         &portfolio(),
         replay_config(),

@@ -22,14 +22,16 @@ use quant_pivot_core::{
     service::{
         factor_pipeline::FactorPipelineService,
         feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
-        model_runner::{InferenceAlertSink, ModelRunRequest, ModelRunner, ModelRunnerDeps},
+        model_runner::{
+            InferenceAlertSink, ModelRunOutcome, ModelRunRequest, ModelRunner, ModelRunnerDeps,
+        },
     },
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
@@ -44,12 +46,13 @@ use quant_pivot_models::{
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     runtime_config::{
-        DataQualityConfig, DecimalString, FactorWeights, FactorsConfig, FeaturesConfig,
-        ModelConfig, ModelVersionRef,
+        DataQualityConfig, DecimalString, DomainConfig, FactorWeights, FactorsConfig,
+        FeaturesConfig, ModelConfig, ModelVersionRef,
     },
     types::{
-        ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, ModelSpecId, ModelVersionId,
-        Price, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
+        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelRunId,
+        ModelSpecId, ModelVersionId, Price, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -81,6 +84,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     factor_governance::publish_all_factor_definitions,
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use rust_decimal::Decimal;
@@ -188,6 +192,24 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
+    }
+
     async fn observed_markets_between(
         &self,
         _from_ms: i64,
@@ -205,6 +227,7 @@ fn registry_market() -> MarketRegistryInfo {
         token_no: TokenId::new(NO_TOKEN),
         question: "Model E2E?".into(),
         slug: "model-e2e".into(),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -341,16 +364,19 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
         noop_feature_writer(),
         Arc::clone(&registry),
         live_trade_tape_block_cursor_repo(),
+        Arc::new(EmptyLinkageRepo),
         TradeTapeOnChainConfig::default(),
     );
 
     let features = FeaturesConfig::default();
+    let domain = DomainConfig::default();
     let included = vec![selected_market()];
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
             as_of: Utc::now(),
             features: &features,
+            domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
@@ -399,6 +425,7 @@ fn peer_registry_market(index: usize) -> MarketRegistryInfo {
         token_no: TokenId::new(&no),
         question: format!("Model E2E peer {index}?"),
         slug: format!("model-e2e-peer-{index}"),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -547,10 +574,12 @@ async fn build_cross_section_features(
         noop_feature_writer(),
         Arc::clone(&registry),
         live_trade_tape_block_cursor_repo(),
+        Arc::new(EmptyLinkageRepo),
         TradeTapeOnChainConfig::default(),
     );
 
     let features = FeaturesConfig::default();
+    let domain = DomainConfig::default();
     let included: Vec<SelectedMarket> = std::iter::once(selected_market())
         .chain((0..PEER_COUNT).map(peer_selected_market))
         .collect();
@@ -559,6 +588,7 @@ async fn build_cross_section_features(
             included: &included,
             as_of: Utc::now(),
             features: &features,
+            domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
@@ -595,7 +625,7 @@ async fn publish_weighted_model(
     factors: &FactorsConfig,
     features: &FeaturesConfig,
 ) -> ModelVersionId {
-    let engine = FactorEngine::new(factors, features, None);
+    let engine = FactorEngine::new(factors, features, &DomainConfig::default(), None);
     let factor_set = engine.factor_set();
     let count = factor_set.definitions.len();
     assert!(count > 0, "the factor set must be non-empty");
@@ -631,6 +661,7 @@ async fn publish_weighted_model(
         return_model: ReturnModelSpec::heuristic_default(),
         required_features: Vec::new(),
         objective_report: None,
+        category_scope: None,
     }));
     artifact.validate().expect("artifact valid");
     let artifact_hash = artifact.content_hash().expect("hash");
@@ -739,7 +770,7 @@ fn factors_with_overlay_skew(
     features: &FeaturesConfig,
     lead_index: usize,
 ) -> FactorsConfig {
-    let engine = FactorEngine::new(base, features, None);
+    let engine = FactorEngine::new(base, features, &DomainConfig::default(), None);
     let definitions = &engine.factor_set().definitions;
     assert!(
         definitions.len() >= 2,
@@ -814,7 +845,7 @@ async fn publish_enabled_factors(
     features: &FeaturesConfig,
 ) {
     let repo = PgFactorRepository::new(db.clone());
-    publish_all_factor_definitions(&repo, factors, features)
+    publish_all_factor_definitions(&repo, factors, features, &DomainConfig::default())
         .await
         .expect("publish factor definitions");
 }
@@ -860,6 +891,7 @@ async fn online_loop_selection_to_signal_candidates() {
             feature_vector_ids: &ids,
             features: &features,
             factors: &factors,
+            domain: &DomainConfig::default(),
             model: &model_config(&active, None),
             top_n: 10,
             as_of: Utc::now(),
@@ -935,6 +967,7 @@ async fn inference_degradation_shadow_failure_keeps_active() {
             feature_vector_ids: &ids,
             features: &features,
             factors: &factors,
+            domain: &DomainConfig::default(),
             model: &model_config(&active, Some(&missing_shadow)),
             top_n: 10,
             as_of: Utc::now(),
@@ -954,6 +987,54 @@ async fn inference_degradation_shadow_failure_keeps_active() {
         0,
         "a shadow failure must not raise a critical alert"
     );
+}
+
+struct OverlayRoundInput<'a> {
+    runner: &'a ModelRunner,
+    overlay: &'a WeightOverlayApplicator,
+    base_factors: &'a FactorsConfig,
+    features: &'a FeaturesConfig,
+    model: &'a ModelConfig,
+    selection: &'a [SelectedMarket],
+    vectors: &'a [FeatureVector],
+    ids: &'a [FeatureVectorId],
+    as_of: chrono::DateTime<Utc>,
+    skew: usize,
+}
+
+async fn run_overlay_round(input: OverlayRoundInput<'_>) -> ModelRunOutcome {
+    let OverlayRoundInput {
+        runner,
+        overlay,
+        base_factors,
+        features,
+        model,
+        selection,
+        vectors,
+        ids,
+        as_of,
+        skew,
+    } = input;
+    overlay.reload(
+        &factors_with_overlay_skew(base_factors, features, skew),
+        model,
+    );
+    runner
+        .run(ModelRunRequest {
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            market_selection_id: None,
+            selection,
+            feature_vectors: vectors,
+            feature_vector_ids: ids,
+            features,
+            factors: base_factors,
+            domain: &DomainConfig::default(),
+            model,
+            top_n: 10,
+            as_of,
+        })
+        .await
+        .expect("overlay round")
 }
 
 #[tokio::test]
@@ -987,45 +1068,32 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
     let model = model_config(&published, Some(&candidate.to_string()));
     let as_of = Utc::now();
 
-    overlay.reload(
-        &factors_with_overlay_skew(&base_factors, &features, 0),
-        &model,
-    );
-    let first = runner
-        .run(ModelRunRequest {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-            market_selection_id: None,
-            selection: &selection,
-            feature_vectors: &vectors,
-            feature_vector_ids: &ids,
-            features: &features,
-            factors: &base_factors,
-            model: &model,
-            top_n: 10,
-            as_of,
-        })
-        .await
-        .expect("first round");
-
-    overlay.reload(
-        &factors_with_overlay_skew(&base_factors, &features, 1),
-        &model,
-    );
-    let second = runner
-        .run(ModelRunRequest {
-            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-            market_selection_id: None,
-            selection: &selection,
-            feature_vectors: &vectors,
-            feature_vector_ids: &ids,
-            features: &features,
-            factors: &base_factors,
-            model: &model,
-            top_n: 10,
-            as_of,
-        })
-        .await
-        .expect("second round");
+    let first = run_overlay_round(OverlayRoundInput {
+        runner: &runner,
+        overlay: &overlay,
+        base_factors: &base_factors,
+        features: &features,
+        model: &model,
+        selection: &selection,
+        vectors: &vectors,
+        ids: &ids,
+        as_of,
+        skew: 0,
+    })
+    .await;
+    let second = run_overlay_round(OverlayRoundInput {
+        runner: &runner,
+        overlay: &overlay,
+        base_factors: &base_factors,
+        features: &features,
+        model: &model,
+        selection: &selection,
+        vectors: &vectors,
+        ids: &ids,
+        as_of,
+        skew: 1,
+    })
+    .await;
 
     let active_first = first.accepted[0].composite_score.inner();
     let active_second = second.accepted[0].composite_score.inner();
@@ -1107,6 +1175,7 @@ async fn inference_rejects_retired_active_model() {
             feature_vector_ids: &ids,
             features: &features,
             factors: &factors,
+            domain: &DomainConfig::default(),
             model: &model_config(&active, None),
             top_n: 10,
             as_of: Utc::now(),

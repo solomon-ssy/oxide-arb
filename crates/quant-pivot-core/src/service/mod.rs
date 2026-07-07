@@ -3,6 +3,7 @@ pub mod backtest;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;
 pub mod dataset_replay;
+pub mod domain_ingest;
 pub mod equity;
 pub mod factor_pipeline;
 pub mod favorite_longshot_fit;

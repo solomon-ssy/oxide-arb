@@ -35,11 +35,10 @@ pub fn feature_events(
         return Vec::new();
     };
     let as_of_ms = vector.as_of.timestamp_millis();
-    let schema_version = vector.schema_version.get();
+    let schema_version = vector.generic_schema_version.get();
 
     vector
-        .values
-        .iter()
+        .iter_values()
         .filter_map(|(name, value)| {
             let kind = value.kind()?;
             let decimal = value.to_fact_decimal()?;

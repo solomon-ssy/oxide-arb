@@ -61,6 +61,14 @@ pub const STRUCT_PARTICIPANT_CONCENTRATION: FactorName =
 /// Neg-risk full-leg YES-ask-sum drift (`Σ ask − 1`); neg-risk markets only.
 pub const STRUCT_NEGRISK_LEG_SUM_DRIFT: FactorName =
     FactorName::from_static("struct.negrisk_leg_sum_drift");
+
+/// Crypto domain plane (Phase 11.2.2; category-routed, never config-selected):
+/// strike distance scaled by settlement urgency.
+pub const DOMAIN_CRYPTO_STRIKE_PRESSURE: FactorName =
+    FactorName::from_static("domain_crypto_strike_pressure");
+/// Underlying momentum per unit realized vol (the crypto subject's regime).
+pub const DOMAIN_CRYPTO_BETA_REGIME: FactorName =
+    FactorName::from_static("domain_crypto_beta_regime");
 /// Neg-risk conversion edge (basket vs NO-favorite); neg-risk markets only.
 pub const STRUCT_NEGRISK_CONVERT_EDGE: FactorName =
     FactorName::from_static("struct.negrisk_convert_edge");

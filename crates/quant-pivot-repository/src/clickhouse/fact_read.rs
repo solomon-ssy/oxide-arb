@@ -7,11 +7,11 @@ use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     enums::clickhouse::{ChBookEventType, ChTradeTapeSource},
-    types::{MarketId, TokenId},
+    types::{DomainInstrumentKey, MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
@@ -312,6 +312,58 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .fetch_all::<ObservedMarketRow>()
             .await?;
         Ok(rows.into_iter().map(|row| row.market_id).collect())
+    }
+
+    async fn domain_observations_between(
+        &self,
+        instrument_keys: Vec<DomainInstrumentKey>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        if instrument_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_domain_observation FINAL \
+                 WHERE instrument_key IN ? \
+                 AND event_time >= fromUnixTimestamp64Milli(?) \
+                 AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY instrument_key, metric, event_time, ingestion_time",
+            )
+            .bind(instrument_keys)
+            .bind(from_ms)
+            .bind(to_ms)
+            .fetch_all::<DomainObservationRow>()
+            .await?;
+        Ok(rows)
+    }
+
+    async fn domain_observation_at(
+        &self,
+        instrument_key: &DomainInstrumentKey,
+        metric: &str,
+        as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        let row = self
+            .pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_domain_observation \
+                 WHERE instrument_key = ? \
+                 AND metric = ? \
+                 AND event_time <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY event_time DESC, ingestion_time DESC \
+                 LIMIT 1",
+            )
+            .bind(instrument_key.clone())
+            .bind(metric)
+            .bind(as_of_ms)
+            .fetch_optional::<DomainObservationRow>()
+            .await?;
+        Ok(row)
     }
 }
 

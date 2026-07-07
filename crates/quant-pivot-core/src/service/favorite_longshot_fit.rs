@@ -46,12 +46,15 @@ use quant_pivot_models::{
     enums::common::MarketCategory,
     enums::quant::TrainingDatasetStatus,
     hashing::CanonicalDigest,
-    runtime_config::{DataQualityConfig, FactorsConfig, FavoriteLongshotConfig, RuntimeConfig},
+    runtime_config::{
+        DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig, RuntimeConfig,
+    },
     types::{ContentHash, FavoriteLongshotBiasTableId, MarketId, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
-    EventRepository, FavoriteLongshotBiasTableRepository, MarketRepository,
-    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    EventRepository, FavoriteLongshotBiasTableRepository, MarketLinkageRepository,
+    MarketRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     features::PitView,
@@ -131,6 +134,7 @@ pub struct FavoriteLongshotFitService {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
     event_repo: Arc<dyn EventRepository>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
@@ -143,6 +147,7 @@ impl FavoriteLongshotFitService {
         fact_read: Arc<dyn QuantFactReadRepository>,
         market_repo: Arc<dyn MarketRepository>,
         event_repo: Arc<dyn EventRepository>,
+        linkage_repo: Arc<dyn MarketLinkageRepository>,
         bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
         runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
         training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
@@ -151,6 +156,7 @@ impl FavoriteLongshotFitService {
             fact_read,
             market_repo,
             event_repo,
+            linkage_repo,
             bias_table_repo,
             runtime_config_repo,
             training_dataset_repo,
@@ -280,11 +286,14 @@ impl FavoriteLongshotFitService {
             lookback: StdDuration::ZERO,
             source_delay: StdDuration::ZERO,
             max_horizon_secs: 0,
+            // The bias fit reads only settlement mids — no domain data.
+            domain: DomainConfig::disabled(),
         };
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
             Arc::clone(&self.market_repo),
             Arc::clone(&self.event_repo),
+            Arc::clone(&self.linkage_repo),
             max_book_staleness,
         );
         let historical = loader.load(&spec).await?;

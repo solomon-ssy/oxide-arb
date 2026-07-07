@@ -22,6 +22,7 @@
 
 mod cache;
 mod db;
+mod domain_sources;
 mod fees;
 mod keys;
 mod market_data;
@@ -36,6 +37,7 @@ use std::collections::HashMap;
 
 pub use cache::*;
 pub use db::*;
+pub use domain_sources::*;
 pub use fees::*;
 pub use keys::*;
 pub use market_data::*;
@@ -65,6 +67,8 @@ pub struct DeployConfig {
     pub polymarket: PolymarketConfig,
     /// Market-data connections (CLOB WebSocket + Gamma catalog).
     pub market_data: MarketDataDeployConfig,
+    /// External-vertical domain data sources (Binance klines + Chainlink).
+    pub domain_sources: DomainSourcesConfig,
     /// Logging (level + format).
     pub observability: ObservabilityConfig,
     /// Postgres + `ClickHouse` connections and write batching.

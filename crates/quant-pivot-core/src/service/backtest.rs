@@ -36,9 +36,9 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, EventRepository, MarketRepository, ModelComparisonReportRepository,
-    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    TrainingDatasetRepository,
+    BacktestReportRepository, EventRepository, MarketLinkageRepository, MarketRepository,
+    ModelComparisonReportRepository, ModelRegistryRepository, ModelRunRepository,
+    QuantFactReadRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -92,6 +92,8 @@ pub struct BacktestServiceDeps {
     pub market_repo: Arc<dyn MarketRepository>,
     /// Postgres event catalog snapshot for neg-risk leg enumeration.
     pub event_repo: Arc<dyn EventRepository>,
+    /// Frozen market → external-subject linkage ledger (11.2.2).
+    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
 }
 
 /// A backtest request resolved by the admin port.
@@ -342,6 +344,7 @@ impl BacktestService {
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.market_repo),
             Arc::clone(&self.deps.event_repo),
+            Arc::clone(&self.deps.linkage_repo),
             self.max_book_staleness,
         );
         let window = loader
@@ -352,6 +355,7 @@ impl BacktestService {
                 lookback,
                 source_delay,
                 max_horizon_secs,
+                domain: self.replay.domain.clone(),
             })
             .await?;
 
@@ -622,10 +626,11 @@ fn run_backtest_replay_blocking(
 async fn run_backtest_replay(
     inputs: BacktestReplayInputs,
 ) -> QuantResult<Option<BacktestRunResult>> {
-    let builder = ConfiguredFeatureBuilder::new(&inputs.replay.features);
+    let builder = ConfiguredFeatureBuilder::new(&inputs.replay.features, &inputs.replay.domain);
     let engine = FactorEngine::new(
         &inputs.replay.factors,
         &inputs.replay.features,
+        &inputs.replay.domain,
         inputs.replay.bias_table.clone(),
     );
 

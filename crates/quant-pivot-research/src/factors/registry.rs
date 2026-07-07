@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 use quant_pivot_models::{
     enums::factor::FactorFamily,
-    runtime_config::{FactorsConfig, FeaturesConfig},
+    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
 };
 
 use crate::{
     factors::{
         computer::FactorComputer,
+        domain::DomainFactorRegistry,
         generic::generic_factors,
         structural::structural_factors,
         value::{FactorDefinitionSpec, FactorSet},
@@ -31,19 +32,24 @@ pub struct FactorRegistry {
 }
 
 impl FactorRegistry {
-    /// Build the registry, selecting the generic + structural factors whose
-    /// family is enabled by `enabled_factor_families`.
+    /// Build the registry: the generic + structural factors whose family is
+    /// enabled by `enabled_factor_families`, plus the category-routed domain
+    /// factors of every vertical enabled in `domain.enabled_by_family`.
     ///
     /// `bias_table` binds the favorite-longshot factor; `None` keeps it inert
     /// (fail-closed). The table is runtime data — it does not affect
     /// `factor_schema_hash`.
     ///
-    /// Vertical/domain factors route by category (not this list) and are
-    /// reintroduced by Phase 11.2.2.
+    /// Domain factors are **never** selected through `enabled_factor_families`
+    /// (config validation rejects them there): they join the batch column set
+    /// here and self-route per market by category, so cross-sectional
+    /// normalization sees an aligned column whose non-crypto cells are
+    /// structurally `NotApplicable` (Phase 11.2.2 §3.7).
     #[must_use]
     pub fn build(
         factors: &FactorsConfig,
         features: &FeaturesConfig,
+        domain: &DomainConfig,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> Self {
         let enabled: HashSet<FactorFamily> =
@@ -52,6 +58,7 @@ impl FactorRegistry {
             .into_iter()
             .chain(structural_factors(factors, features, bias_table))
             .filter(|(spec, _)| enabled.contains(&spec.family))
+            .chain(DomainFactorRegistry::build(domain).all())
             .collect();
         Self { factors: selected }
     }

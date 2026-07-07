@@ -16,13 +16,14 @@ use quant_pivot_models::{
         quant::DataQualityStatus,
     },
     runtime_config::{
-        DecimalString, FactorsConfig, FeaturesConfig, MissingFactorPolicy, SmallCrossSectionPolicy,
+        DecimalString, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
+        SmallCrossSectionPolicy,
     },
     types::{MarketId, Price, Probability, SchemaVersion, TokenId, Usd},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason, stats};
+use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason, generic::stats};
 use crate::model::favorite_longshot::{
     BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
     TtrBucketCurve,
@@ -72,8 +73,9 @@ fn make_vector(
         market_id: MarketId::new(market),
         token_id: Some(TokenId::new("token")),
         as_of,
-        schema_version: SchemaVersion::FIRST,
-        values,
+        generic_schema_version: SchemaVersion::FIRST,
+        generic: values,
+        domain: None,
         substitutions: Vec::new(),
         data_quality,
         staleness_ms,
@@ -114,7 +116,7 @@ fn compute_one(
 ) -> ScoredFactor {
     let config = factors_config(&[family], MissingFactorPolicy::ZeroWeight, "0.10");
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
     let vectors = [
         make_vector("0xmarket0", market0, DataQualityStatus::Fresh, 0, as_of),
@@ -145,7 +147,12 @@ fn default_factor_config_enables_all_generic_and_structural_families() {
             .contains(&FactorFamily::Structural),
         "default config must enable the structural family"
     );
-    let engine = FactorEngine::new(&config, &FeaturesConfig::default(), None);
+    let engine = FactorEngine::new(
+        &config,
+        &FeaturesConfig::default(),
+        &DomainConfig::disabled(),
+        None,
+    );
     // 8 generic single-feature + 4 momentum estimators + 6 structural factors.
     assert!(
         engine.registry().len() >= 18,
@@ -165,7 +172,7 @@ fn small_cross_section_yields_indeterminate_not_half() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vector = make_vector(
         "0xlonely",
         &[
@@ -208,7 +215,7 @@ fn zero_variance_yields_indeterminate() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
     let vectors: Vec<FeatureVector> = (0..4)
         .map(|index| {
@@ -250,7 +257,7 @@ fn compute_all_batch_rejects_mixed_as_of() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
     let first = make_vector(
         "0xa",
@@ -286,7 +293,7 @@ fn factor_explanation_lists_positive_and_negative_drivers() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vector = make_vector(
         "0xdq",
         &[
@@ -327,7 +334,7 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
         "0.50",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
     let vectors = [
         make_vector(
@@ -372,7 +379,7 @@ fn factor_missing_reject_candidate_policy() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let as_of = Utc::now();
     let complete_a = make_vector(
         "0xcomplete_a",
@@ -433,6 +440,7 @@ fn factor_set_change_changes_schema_hash() {
             "0.50",
         ),
         &features,
+        &DomainConfig::disabled(),
         None,
     );
     let two = FactorEngine::new(
@@ -442,6 +450,7 @@ fn factor_set_change_changes_schema_hash() {
             "0.50",
         ),
         &features,
+        &DomainConfig::disabled(),
         None,
     );
     assert_ne!(
@@ -461,6 +470,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
             "0.50",
         ),
         &features,
+        &DomainConfig::disabled(),
         None,
     );
     let reversed = FactorEngine::new(
@@ -470,6 +480,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
             "0.50",
         ),
         &features,
+        &DomainConfig::disabled(),
         None,
     );
     assert_eq!(
@@ -565,7 +576,7 @@ fn compute_all_batch_is_deterministic() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(32);
     let first = engine
         .compute_all_batch(&vectors, &config)
@@ -587,7 +598,7 @@ fn compute_all_batch_preserves_input_order() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(20);
     let outcomes = engine
         .compute_all_batch(&vectors, &config)
@@ -609,7 +620,7 @@ fn serial_and_parallel_normalizer_paths_are_bit_identical() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(24);
     let history = FactorHistory::empty();
     let serial = engine
@@ -632,7 +643,7 @@ fn online_and_replay_entrypoints_agree_default_policy() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(20);
     let replay = engine
         .compute_all_batch(&vectors, &config)
@@ -658,7 +669,7 @@ fn cross_sectional_zscore_mean_zero_std_one_per_as_of() {
         "0.10",
     );
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(9);
     let outcomes = engine
         .compute_all_batch(&vectors, &config)
@@ -705,7 +716,7 @@ fn historical_quantile_scores_small_cross_section() {
     config.cross_section.min_size = 5;
     config.cross_section.small_cross_section_policy = SmallCrossSectionPolicy::HistoricalQuantile;
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&config, &features, None);
+    let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
 
     let mut history = FactorHistory::empty();
     history.insert(

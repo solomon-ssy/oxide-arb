@@ -295,16 +295,21 @@ pub enum FeatureFamily {
     /// shock/realized-vol windows, resolution-proximity, maker concentration).
     /// Platform-computable from existing facts — no external data source.
     Structural,
+    /// Category-mapped external vertical slice (crypto underlying price, …).
+    /// Built from `quant_domain_observation` + frozen market linkages; a market
+    /// whose category maps to no vertical carries no domain slice at all.
+    Domain,
 }
 
 impl FeatureFamily {
     /// Every feature family in declaration order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::MarketMetadata,
         Self::PriceBook,
         Self::TimeSeries,
         Self::Microstructure,
         Self::Structural,
+        Self::Domain,
     ];
 
     /// The stable `snake_case` wire name (matches the serde representation).
@@ -316,6 +321,7 @@ impl FeatureFamily {
             Self::TimeSeries => "time_series",
             Self::Microstructure => "microstructure",
             Self::Structural => "structural",
+            Self::Domain => "domain",
         }
     }
 }

@@ -13,10 +13,10 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
-    types::{MarketId, TokenId},
+    types::{DomainInstrumentKey, MarketId, TokenId},
 };
 
 /// Read port over persisted quant facts, used to materialize feature windows and
@@ -136,4 +136,27 @@ pub trait QuantFactReadRepository: Send + Sync {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError>;
+
+    /// External domain observations for `instrument_keys` with `event_time` in
+    /// `[from_ms, to_ms)` (epoch milliseconds), ordered by instrument, metric,
+    /// event time, then `ingestion_time` (stable replay order). Feeds the
+    /// online domain feature window and the offline materialized domain PIT
+    /// engine (Phase 11.2.2).
+    async fn domain_observations_between(
+        &self,
+        instrument_keys: Vec<DomainInstrumentKey>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError>;
+
+    /// The freshest domain observation per `(instrument, metric)` at or before
+    /// `as_of_ms`, or `None` when none exists. Point-in-time correct with the
+    /// stable `event_time DESC, ingestion_time DESC` tie-break. Powers ingest
+    /// health probes and the domain-availability projector.
+    async fn domain_observation_at(
+        &self,
+        instrument_key: &DomainInstrumentKey,
+        metric: &str,
+        as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError>;
 }

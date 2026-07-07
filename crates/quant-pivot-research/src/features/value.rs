@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::naming::stable_name;
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    enums::{common::MarketCategory, quant::DataQualityStatus},
+    enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{FeatureNameRef, FeaturesConfig},
     types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
 };
@@ -125,6 +125,12 @@ pub enum NullReason {
     /// The trade-tape source does not provide enough maker/taker role coverage
     /// for role-specific features.
     InsufficientRoleCoverage,
+    /// No PIT domain observation was available for the linked instrument at
+    /// `as_of` (external source gap — never a fabricated zero).
+    DomainSourceUnavailable,
+    /// The market has no `Resolved` linkage at `as_of`, so domain features
+    /// cannot bind to an external instrument (fail-closed).
+    LinkageUnresolved,
 }
 
 /// A provenance reference tying a feature value back to its evidence.
@@ -232,10 +238,32 @@ pub struct SubstitutionAudit {
     pub substituted: FeatureValue,
 }
 
-/// An in-memory, point-in-time feature vector for one market.
+/// The category-mapped external-vertical slice of a [`FeatureVector`].
 ///
-/// Keyed by stable feature name and canonical-hashable: `values` is a
-/// `BTreeMap`, so the digest is independent of insertion order.
+/// Present **only** when the market's category maps to a vertical with a
+/// resolved linkage; individual values inside the slice may still be
+/// [`FeatureValue::Missing`] (present-but-missing is a data gap; an absent
+/// slice is a structural non-applicability — the two are never conflated).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainFeatureSlice {
+    /// The vertical this slice belongs to.
+    pub family: DomainFamily,
+    /// Domain feature-schema version that produced this slice.
+    pub schema_version: SchemaVersion,
+    /// Domain feature values keyed by stable name (sorted → canonical).
+    pub values: BTreeMap<FeatureName, FeatureValue>,
+}
+
+/// An in-memory, point-in-time feature vector for one market: a fixed-width
+/// **generic** slice (platform-computable, always present) plus an optional,
+/// category-scoped **domain** slice.
+///
+/// There is no missing-value pollution across the layer boundary: a market
+/// whose category maps to no vertical (or whose vertical is unresolved /
+/// unavailable) carries `domain = None`, which is *structurally distinct* from
+/// a present-but-missing domain feature. Both maps are `BTreeMap`s, so the
+/// canonical digest is independent of insertion order, and the digest
+/// distinguishes the domain family and both schema versions by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureVector {
     /// The market this vector describes.
@@ -244,10 +272,14 @@ pub struct FeatureVector {
     pub token_id: Option<TokenId>,
     /// Decision time the vector was computed as of.
     pub as_of: DateTime<Utc>,
-    /// Schema version that produced this vector.
-    pub schema_version: SchemaVersion,
-    /// Feature values keyed by stable name (sorted → canonical).
-    pub values: BTreeMap<FeatureName, FeatureValue>,
+    /// Generic feature-schema version that produced the generic slice.
+    pub generic_schema_version: SchemaVersion,
+    /// Generic + structural plane (platform-computable, always present).
+    pub generic: BTreeMap<FeatureName, FeatureValue>,
+    /// Category-mapped external vertical slice; `None` when the category maps
+    /// to no vertical or the vertical is unresolved/unavailable (fail-closed,
+    /// never a fabricated zero row).
+    pub domain: Option<DomainFeatureSlice>,
     /// Audited neutral-value substitutions applied during the build.
     pub substitutions: Vec<SubstitutionAudit>,
     /// Aggregate data-quality classification for the vector.
@@ -256,4 +288,32 @@ pub struct FeatureVector {
     pub staleness_ms: u64,
     /// Provenance of the values, for audit and replay.
     pub source_refs: Vec<EvidenceSourceRef>,
+}
+
+impl FeatureVector {
+    /// Look up a feature value across the generic slice, then the domain slice.
+    ///
+    /// Names are namespace-disjoint (`domain.<family>.*` vs everything else),
+    /// so the two-layer lookup can never shadow.
+    #[must_use]
+    pub fn value(&self, name: &FeatureName) -> Option<&FeatureValue> {
+        self.generic.get(name).or_else(|| {
+            self.domain
+                .as_ref()
+                .and_then(|slice| slice.values.get(name))
+        })
+    }
+
+    /// Iterate `(name, value)` pairs across both slices (generic first).
+    pub fn iter_values(&self) -> impl Iterator<Item = (&FeatureName, &FeatureValue)> {
+        self.generic
+            .iter()
+            .chain(self.domain.iter().flat_map(|slice| slice.values.iter()))
+    }
+
+    /// Total value count across both slices.
+    #[must_use]
+    pub fn value_count(&self) -> usize {
+        self.generic.len() + self.domain.as_ref().map_or(0, |slice| slice.values.len())
+    }
 }

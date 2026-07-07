@@ -16,8 +16,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     BacktestReportRepository, EventRepository, FavoriteLongshotBiasTableRepository,
-    MarketRepository, ModelComparisonReportRepository, ModelRegistryRepository, ModelRunRepository,
-    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    MarketLinkageRepository, MarketRepository, ModelComparisonReportRepository,
+    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+    RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
 
@@ -42,6 +43,7 @@ pub struct CoreBacktestPort {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
     event_repo: Arc<dyn EventRepository>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
 }
@@ -65,6 +67,7 @@ impl CoreBacktestPort {
             fact_read: Arc::clone(&research.quant_fact_read),
             market_repo: Arc::clone(&research.market_repo),
             event_repo: Arc::clone(&research.event_repo),
+            linkage_repo: Arc::clone(&research.market_linkage_repo),
             runtime_config,
             bias_table_repo,
         }
@@ -90,11 +93,13 @@ impl CoreBacktestPort {
                 fact_read: Arc::clone(&self.fact_read),
                 market_repo: Arc::clone(&self.market_repo),
                 event_repo: Arc::clone(&self.event_repo),
+                linkage_repo: Arc::clone(&self.linkage_repo),
             },
             &runtime.portfolio,
             ReplayConfig {
                 features: runtime.features,
                 factors: runtime.factors,
+                domain: runtime.domain,
                 data_quality: runtime.data_quality,
                 bias_table,
             },

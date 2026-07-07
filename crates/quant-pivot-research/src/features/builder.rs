@@ -11,23 +11,26 @@
 use crate::{
     features::{
         FeatureBuildInput, FeatureBuilder, FeatureVector, PitView,
-        book::PriceBookFeatureBuilder,
         decision_capture::{
             ResolvedMarketBundle, empty_book, market_decision_capture_from_resolved,
             stub_market_context,
         },
-        market::MarketMetadataFeatureBuilder,
-        microstructure::MicrostructureFeatureBuilder,
+        domain::{
+            CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceInputs,
+        },
+        generic::{
+            book::PriceBookFeatureBuilder, market::MarketMetadataFeatureBuilder,
+            microstructure::MicrostructureFeatureBuilder, structural::StructuralFeatureBuilder,
+            timeseries::TimeSeriesFeatureBuilder,
+        },
         null_policy::{NullDecision, NullPolicyEngine},
         resolved::{
             MarketWindowSnapshot, ResolvedBook, ResolvedMarketContext, TradeTapeWindowSnapshot,
         },
         schema::{FeatureSchema, FeatureSpec, StalenessRule},
-        structural::StructuralFeatureBuilder,
-        timeseries::TimeSeriesFeatureBuilder,
         value::{
-            EvidenceSourceRef, FeatureName, FeatureValue, NullReason, SubstitutionAudit,
-            merged_required_features,
+            DomainFeatureSlice, EvidenceSourceRef, FeatureName, FeatureValue, NullReason,
+            SubstitutionAudit, merged_required_features,
         },
     },
     selection::SelectedMarket,
@@ -37,8 +40,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{NegRiskLeg, market::registry::NegRiskLegSet},
-    enums::{common::MarketCategory, quant::DataQualityStatus},
-    runtime_config::{DataQualityConfig, FeatureFamily, FeaturesConfig},
+    enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
+    runtime_config::{DataQualityConfig, DomainConfig, FeatureFamily, FeaturesConfig},
     types::{BookSnapshotRef, MarketId, SchemaVersion, TokenId, Usd},
 };
 use rayon::prelude::*;
@@ -148,6 +151,9 @@ pub struct ResolvedInputs<'a> {
     pub window: &'a MarketWindowSnapshot,
     /// Pre-fetched, PIT-bounded trade-tape window for the primary token.
     pub trade_tape: &'a TradeTapeWindowSnapshot,
+    /// Pre-fetched domain-slice inputs (present only for category-mapped
+    /// markets with a resolved linkage).
+    pub domain: Option<&'a DomainSliceInputs>,
     /// Same-`as_of` neg-risk sibling YES legs whose book resolved (empty unless
     /// the market is neg-risk and the schema declares a structural aggregate).
     pub sibling_legs: Vec<ResolvedLeg>,
@@ -160,12 +166,17 @@ pub struct ResolvedInputs<'a> {
 pub struct FeatureSourceWindows<'a> {
     pub microstructure: &'a MarketWindowSnapshot,
     pub trade_tape: &'a TradeTapeWindowSnapshot,
+    /// Domain-slice inputs; `None` for markets outside every vertical.
+    pub domain: Option<&'a DomainSliceInputs>,
 }
 
 /// The configured, composable feature builder.
 pub struct ConfiguredFeatureBuilder {
     schema: FeatureSchema,
     groups: Vec<Box<dyn FeatureGroupBuilder>>,
+    domain_builders: Vec<Box<dyn DomainFeatureBuilder>>,
+    /// Frozen domain-plane parameters (windows, cross-check policy).
+    domain_config: DomainConfig,
     source_needs: FeatureSourceNeeds,
 }
 
@@ -179,6 +190,7 @@ const NEED_BOOK: u8 = 1 << 0;
 const NEED_MARKET: u8 = 1 << 1;
 const NEED_SIBLING_LEGS: u8 = 1 << 2;
 const NEED_TRADE_TAPE: u8 = 1 << 3;
+const NEED_DOMAIN: u8 = 1 << 4;
 
 impl FeatureSourceNeeds {
     fn from_schema(schema: &FeatureSchema) -> Self {
@@ -194,6 +206,9 @@ impl FeatureSourceNeeds {
         }
         if schema.needs_trade_tape() {
             bits |= NEED_TRADE_TAPE;
+        }
+        if schema.needs_domain() {
+            bits |= NEED_DOMAIN;
         }
         Self { bits }
     }
@@ -213,6 +228,10 @@ impl FeatureSourceNeeds {
     const fn trade_tape(self) -> bool {
         self.bits & NEED_TRADE_TAPE != 0
     }
+
+    const fn domain(self) -> bool {
+        self.bits & NEED_DOMAIN != 0
+    }
 }
 
 impl ConfiguredFeatureBuilder {
@@ -224,9 +243,10 @@ impl ConfiguredFeatureBuilder {
     /// requirements, so the build loop never issues a book/metadata lookup no
     /// enabled feature consumes.
     #[must_use]
-    pub fn new(config: &FeaturesConfig) -> Self {
+    pub fn new(config: &FeaturesConfig, domain_config: &DomainConfig) -> Self {
         let schema = FeatureSchema::build(config);
         let mut groups: Vec<Box<dyn FeatureGroupBuilder>> = Vec::new();
+        let mut domain_builders: Vec<Box<dyn DomainFeatureBuilder>> = Vec::new();
         for family in &config.enabled_feature_families {
             match family {
                 FeatureFamily::MarketMetadata => {
@@ -238,12 +258,19 @@ impl ConfiguredFeatureBuilder {
                     groups.push(Box::new(MicrostructureFeatureBuilder));
                 }
                 FeatureFamily::Structural => groups.push(Box::new(StructuralFeatureBuilder)),
+                FeatureFamily::Domain => {
+                    if domain_config.family_enabled(DomainFamily::Crypto) {
+                        domain_builders.push(Box::new(CryptoDomainFeatureBuilder));
+                    }
+                }
             }
         }
         let source_needs = FeatureSourceNeeds::from_schema(&schema);
         Self {
             schema,
             groups,
+            domain_builders,
+            domain_config: domain_config.clone(),
             source_needs,
         }
     }
@@ -258,6 +285,12 @@ impl ConfiguredFeatureBuilder {
     #[must_use]
     pub const fn needs_trade_tape(&self) -> bool {
         self.source_needs.trade_tape()
+    }
+
+    /// Whether the active schema declares any domain-slice feature.
+    #[must_use]
+    pub const fn needs_domain(&self) -> bool {
+        self.source_needs.domain()
     }
 
     /// Resolve the PIT inputs for one market (the only async / I/O step).
@@ -319,6 +352,11 @@ impl ConfiguredFeatureBuilder {
                 market_ctx,
                 window: windows.microstructure,
                 trade_tape: windows.trade_tape,
+                domain: if self.source_needs.domain() {
+                    windows.domain
+                } else {
+                    None
+                },
                 sibling_legs,
                 sibling_leg_total,
             },
@@ -378,7 +416,7 @@ impl ConfiguredFeatureBuilder {
             book_snapshot_ref: Some(&bundle.capture.book_snapshot_ref),
         };
 
-        // Collect every group's raw features into a name-keyed map.
+        // Collect every generic group's raw features into a name-keyed map.
         let mut raw: BTreeMap<FeatureName, RawFeature> = BTreeMap::new();
         for group in &self.groups {
             for feature in group.compute(&ctx) {
@@ -387,17 +425,22 @@ impl ConfiguredFeatureBuilder {
         }
 
         let required = merged_required_features(required_features, config);
-        let assembly = self.assemble(&raw, &required, data_quality, resolved.as_of);
+        let mut assembly = self.assemble(&raw, &required, data_quality, resolved.as_of);
+        let domain = self.compute_domain_slice(resolved, &required, data_quality, &mut assembly);
 
         let book_age_ms = book_age_ms(resolved.as_of, resolved.book.as_ref());
         let feature_bucket_age_ms = feature_bucket_age_ms(resolved.as_of, resolved.window);
         let trade_tape_age_ms = trade_tape_age_ms(resolved.as_of, resolved.trade_tape);
+        let domain_age_ms = domain_age_ms(resolved.as_of, resolved.domain);
         let data_quality_status = classify(
             assembly.rejected,
             assembly.degraded,
-            book_age_ms,
-            feature_bucket_age_ms,
-            trade_tape_age_ms,
+            FreshnessAges {
+                book: book_age_ms,
+                feature_bucket: feature_bucket_age_ms,
+                trade_tape: trade_tape_age_ms,
+                domain: domain_age_ms,
+            },
             data_quality,
         );
 
@@ -405,15 +448,94 @@ impl ConfiguredFeatureBuilder {
             market_id: resolved.market.market_id.clone(),
             token_id: Some(resolved.market.primary_token_id.clone()),
             as_of: resolved.as_of,
-            schema_version: self.schema.version(),
-            values: assembly.values,
+            generic_schema_version: self.schema.version(),
+            generic: assembly.values,
+            domain,
             substitutions: assembly.substitutions,
             data_quality: data_quality_status,
             staleness_ms: book_age_ms
                 .max(feature_bucket_age_ms)
-                .max(trade_tape_age_ms),
+                .max(trade_tape_age_ms)
+                .max(domain_age_ms),
             source_refs: assembly.evidence,
         }
+    }
+
+    /// Build the optional domain slice for a category-mapped, linkage-resolved
+    /// market (pure; inputs were prefetched by the pipeline).
+    ///
+    /// Returns `None` when the vector structurally carries no domain slice:
+    /// no domain inputs (category maps to no vertical, family disabled, or
+    /// linkage unresolved) or no registered builder for the family. When the
+    /// slice applies, its values flow through the same governed null-policy /
+    /// valid-range / staleness machinery as the generic slice, and its
+    /// substitutions and evidence merge into the vector-level audit trail.
+    fn compute_domain_slice(
+        &self,
+        resolved: &ResolvedInputs<'_>,
+        required: &HashSet<FeatureName>,
+        data_quality: &DataQualityConfig,
+        assembly: &mut Assembly,
+    ) -> Option<DomainFeatureSlice> {
+        let inputs = resolved.domain?;
+        let builder = self
+            .domain_builders
+            .iter()
+            .find(|builder| builder.family() == inputs.family)?;
+        let ctx = DomainComputeCtx {
+            as_of: resolved.as_of,
+            binding: &inputs.binding,
+            primary: &inputs.primary,
+            oracle: inputs.oracle.as_ref(),
+            crypto: &self.domain_config.crypto,
+        };
+        let mut raw: BTreeMap<FeatureName, RawFeature> = BTreeMap::new();
+        for feature in builder.compute(&ctx) {
+            raw.insert(feature.name.clone(), feature);
+        }
+
+        let mut values = BTreeMap::new();
+        for spec in self.schema.domain_specs() {
+            let is_required = required.contains(&spec.name);
+            let raw_feature = raw.get(&spec.name);
+            match resolve_value(raw_feature, spec, resolved.as_of, data_quality) {
+                Resolved::Present {
+                    value,
+                    evidence: ev,
+                } => {
+                    if let Some(ev) = ev {
+                        push_unique(&mut assembly.evidence, ev);
+                    }
+                    values.insert(spec.name.clone(), value);
+                }
+                Resolved::Absent(reason) => {
+                    match NullPolicyEngine::decide(spec, reason, data_quality, is_required) {
+                        NullDecision::Reject(reason) => {
+                            assembly.rejected = true;
+                            values.insert(spec.name.clone(), FeatureValue::Missing(reason));
+                        }
+                        NullDecision::Substitute { value } => {
+                            assembly.substitutions.push(SubstitutionAudit {
+                                feature: spec.name.clone(),
+                                reason,
+                                substituted: value.clone(),
+                            });
+                            values.insert(spec.name.clone(), value);
+                        }
+                        NullDecision::KeepMissing { reason, degrade } => {
+                            assembly.degraded |= degrade;
+                            values.insert(spec.name.clone(), FeatureValue::Missing(reason));
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(DomainFeatureSlice {
+            family: inputs.family,
+            schema_version: self.schema.version(),
+            values,
+        })
     }
 
     /// Compute vectors for a batch of resolved inputs, in parallel, preserving
@@ -460,6 +582,7 @@ impl FeatureBuilder for ConfiguredFeatureBuilder {
                 FeatureSourceWindows {
                     microstructure: input.window,
                     trade_tape: input.trade_tape,
+                    domain: input.domain,
                 },
                 input.sibling,
                 Usd::ZERO,
@@ -490,6 +613,11 @@ impl ConfiguredFeatureBuilder {
         let mut degraded = false;
 
         for spec in self.schema.specs() {
+            // Domain-family specs belong to the optional domain slice and are
+            // assembled by `compute_domain_slice` — never into the generic map.
+            if spec.family == FeatureFamily::Domain {
+                continue;
+            }
             let is_required = required.contains(&spec.name);
             let raw_feature = raw.get(&spec.name);
             let resolved = resolve_value(raw_feature, spec, as_of, data_quality);
@@ -606,6 +734,9 @@ fn staleness_breach(
         StalenessRule::MaxTradeTapeAge => {
             data_quality.max_trade_tape_age_secs.saturating_mul(1_000)
         }
+        StalenessRule::MaxDomainObservationAge => data_quality
+            .max_domain_observation_age_secs
+            .saturating_mul(1_000),
     };
     if bound_ms == 0 {
         return false;
@@ -652,14 +783,29 @@ fn trade_tape_age_ms(as_of: DateTime<Utc>, trade_tape: &TradeTapeWindowSnapshot)
         .map_or(0, |trade_time| age_ms(as_of, trade_time))
 }
 
+/// Freshest domain-observation age in milliseconds at `as_of` (zero for
+/// markets that carry no domain slice — absence is structural, not staleness).
+fn domain_age_ms(as_of: DateTime<Utc>, domain: Option<&DomainSliceInputs>) -> u64 {
+    domain
+        .and_then(|inputs| inputs.primary.freshest_time())
+        .map_or(0, |observed_at| age_ms(as_of, observed_at))
+}
+
+/// Per-source freshness ages feeding the aggregate classification.
+#[derive(Copy, Clone)]
+struct FreshnessAges {
+    book: u64,
+    feature_bucket: u64,
+    trade_tape: u64,
+    domain: u64,
+}
+
 /// Classify the vector's aggregate data quality across freshness dimensions:
-/// book age, feature-bucket age, and trade-tape age.
+/// book age, feature-bucket age, trade-tape age, and domain-observation age.
 const fn classify(
     rejected: bool,
     degraded: bool,
-    book_age_ms: u64,
-    feature_bucket_age_ms: u64,
-    trade_tape_age_ms: u64,
+    ages: FreshnessAges,
     data_quality: &DataQualityConfig,
 ) -> DataQualityStatus {
     if rejected {
@@ -670,18 +816,23 @@ const fn classify(
         .max_feature_bucket_age_secs
         .saturating_mul(1_000);
     let tape_bound = data_quality.max_trade_tape_age_secs.saturating_mul(1_000);
-    if exceeds(book_age_ms, book_bound)
-        || exceeds(feature_bucket_age_ms, bucket_bound)
-        || exceeds(trade_tape_age_ms, tape_bound)
+    let domain_bound = data_quality
+        .max_domain_observation_age_secs
+        .saturating_mul(1_000);
+    if exceeds(ages.book, book_bound)
+        || exceeds(ages.feature_bucket, bucket_bound)
+        || exceeds(ages.trade_tape, tape_bound)
+        || exceeds(ages.domain, domain_bound)
     {
         return DataQualityStatus::Stale;
     }
     if degraded {
         return DataQualityStatus::Degraded;
     }
-    if within_half(book_age_ms, book_bound)
-        && within_half(feature_bucket_age_ms, bucket_bound)
-        && within_half(trade_tape_age_ms, tape_bound)
+    if within_half(ages.book, book_bound)
+        && within_half(ages.feature_bucket, bucket_bound)
+        && within_half(ages.trade_tape, tape_bound)
+        && within_half(ages.domain, domain_bound)
     {
         DataQualityStatus::Fresh
     } else {

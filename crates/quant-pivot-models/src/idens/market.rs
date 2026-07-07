@@ -27,6 +27,8 @@ pub enum Market {
     EventId,
     Question,
     Slug,
+    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    Description,
     Categories,
     Status,
     Outcome,
@@ -55,6 +57,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::text_id(Market::EventId))
         .col(ColumnDef::new(Market::Question).text().not_null())
         .col(ColumnDef::new(Market::Slug).text().not_null())
+        .col(ColumnDef::new(Market::Description).text().null())
         .col(column::pg_enum_array::<MarketCategory>(Market::Categories))
         .col(column::pg_enum_default::<MarketStatus>(
             Market::Status,

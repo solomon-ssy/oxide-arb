@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::features::{
     FeatureName,
-    names::{book, market as market_names, micro, structural as structural_names, ts},
+    names::{
+        book, domain_crypto as domain_crypto_names, market as market_names, micro,
+        structural as structural_names, ts,
+    },
     value::{EvidenceSourceKind, FeatureValueKind},
 };
 
@@ -74,6 +77,9 @@ pub enum SourceRequirement {
     NegRiskSiblingLegs,
     /// A window of persisted full-market trade-tape participant facts.
     TradeTapeWindow,
+    /// A resolved market linkage plus a PIT window of external domain
+    /// observations (`quant_domain_observation`) for the linked instrument.
+    DomainObservationWindow,
 }
 
 impl SourceRequirement {
@@ -89,6 +95,7 @@ impl SourceRequirement {
             Self::GammaMetadata => EvidenceSourceKind::GammaMetadata,
             Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
             Self::TradeTapeWindow => EvidenceSourceKind::TradeTape,
+            Self::DomainObservationWindow => EvidenceSourceKind::DomainExternal,
         }
     }
 }
@@ -117,6 +124,8 @@ pub enum StalenessRule {
     MaxFeatureBucketAge,
     /// Bounded by `data_quality.max_trade_tape_age_secs`.
     MaxTradeTapeAge,
+    /// Bounded by `data_quality.max_domain_observation_age_secs`.
+    MaxDomainObservationAge,
 }
 
 /// How a feature behaves when its value is absent. The four-state policy is the
@@ -277,6 +286,7 @@ impl FeatureSchema {
                 FeatureFamily::TimeSeries => time_series_specs(config, &mut specs),
                 FeatureFamily::Microstructure => microstructure_specs(&mut specs),
                 FeatureFamily::Structural => structural_specs(&mut specs),
+                FeatureFamily::Domain => domain_specs(&mut specs),
             }
         }
         Self::new(config.feature_schema_version, specs)
@@ -370,6 +380,25 @@ impl FeatureSchema {
         self.specs
             .iter()
             .any(|spec| matches!(spec.source_requirement, SourceRequirement::TradeTapeWindow))
+    }
+
+    /// Whether any governed spec needs a resolved linkage + domain window.
+    ///
+    /// Drives the pipeline's linkage / domain-observation prefetch: a schema
+    /// without the domain family never touches the linkage store.
+    #[must_use]
+    pub fn needs_domain(&self) -> bool {
+        self.specs.iter().any(|spec| {
+            matches!(
+                spec.source_requirement,
+                SourceRequirement::DomainObservationWindow
+            )
+        })
+    }
+
+    /// The governed specs of the domain family (the domain-slice schema).
+    pub fn domain_specs(&self) -> impl Iterator<Item = &FeatureSpec> {
+        self.by_family(FeatureFamily::Domain)
     }
 }
 
@@ -865,6 +894,91 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
             MaxBookAge,
         )
         .unit(FeatureUnit::Ratio)
+        .null_policy(Optional)
+        .build(),
+    );
+}
+
+/// Crypto external-vertical (domain-slice) feature specs (Phase 11.2.2).
+///
+/// Every spec requires a resolved market linkage plus a PIT window of external
+/// domain observations. All are `Optional`: a market whose category maps to no
+/// vertical simply carries no domain slice (the specs then structurally do not
+/// apply), and a linked market with a source gap keeps an explicit
+/// present-but-missing value — never a fabricated zero, never market rejection.
+fn domain_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::Domain as F;
+    use FeatureValueKind::{Bps, Count, Decimal as Dec};
+    use NullPolicy::Optional;
+    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use SourceRequirement::DomainObservationWindow as Src;
+    use StalenessRule::{MaxDomainObservationAge, None as Fresh};
+
+    out.push(
+        spec(
+            domain_crypto_names::DISTANCE_TO_STRIKE,
+            F,
+            Dec,
+            Src,
+            Pit,
+            MaxDomainObservationAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            domain_crypto_names::UNDERLYING_MOMENTUM,
+            F,
+            Dec,
+            Src,
+            Pit,
+            MaxDomainObservationAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            domain_crypto_names::UNDERLYING_REALIZED_VOL,
+            F,
+            Dec,
+            Src,
+            Pit,
+            MaxDomainObservationAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .range(Decimal::ZERO, Decimal::from(1_000_000))
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        // Intrinsically point-in-time: derived from the frozen subject's
+        // observation instant, not from any observation feed.
+        spec(
+            domain_crypto_names::TIME_TO_OBSERVATION,
+            F,
+            Count,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .unit(FeatureUnit::Seconds)
+        .null_policy(Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            domain_crypto_names::BASIS_VS_RESOLUTION_SOURCE,
+            F,
+            Bps,
+            Src,
+            Pit,
+            MaxDomainObservationAge,
+        )
+        .unit(FeatureUnit::Bps)
         .null_policy(Optional)
         .build(),
     );

@@ -19,7 +19,10 @@ use std::collections::BTreeMap;
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::{DataQualityStatus, ModelSerializationFormat},
+    enums::{
+        common::MarketCategory,
+        quant::{DataQualityStatus, ModelSerializationFormat},
+    },
     types::{ArtifactUri, ContentHash, ModelArtifactId, ModelVersionId},
 };
 use rust_decimal::Decimal;
@@ -269,6 +272,10 @@ pub struct SubstitutionConfidenceRules {
     pub insufficient_trade_tape: Decimal,
     /// Penalty multiplier for [`NullReason::InsufficientRoleCoverage`].
     pub insufficient_role_coverage: Decimal,
+    /// Penalty multiplier for [`NullReason::DomainSourceUnavailable`].
+    pub domain_source_unavailable: Decimal,
+    /// Penalty multiplier for [`NullReason::LinkageUnresolved`].
+    pub linkage_unresolved: Decimal,
 }
 
 impl SubstitutionConfidenceRules {
@@ -285,6 +292,8 @@ impl SubstitutionConfidenceRules {
             NullReason::TradeTapeUnavailable => self.trade_tape_unavailable,
             NullReason::InsufficientTradeTape => self.insufficient_trade_tape,
             NullReason::InsufficientRoleCoverage => self.insufficient_role_coverage,
+            NullReason::DomainSourceUnavailable => self.domain_source_unavailable,
+            NullReason::LinkageUnresolved => self.linkage_unresolved,
         }
     }
 
@@ -301,6 +310,8 @@ impl SubstitutionConfidenceRules {
             trade_tape_unavailable: Decimal::new(80, 2),
             insufficient_trade_tape: Decimal::new(85, 2),
             insufficient_role_coverage: Decimal::new(90, 2),
+            domain_source_unavailable: Decimal::new(80, 2),
+            linkage_unresolved: Decimal::new(80, 2),
         }
     }
 }
@@ -464,6 +475,10 @@ pub struct WeightedFactorModelArtifact {
     pub required_features: Vec<FeatureName>,
     /// Trainer objective report (filled by 3.6; `None` when hand-authored).
     pub objective_report: Option<TrainingObjectiveReport>,
+    /// When set, this artifact is scoped to one market category (Phase 11.2.2
+    /// category routing). `None` means the generic cross-category scorer.
+    #[serde(default)]
+    pub category_scope: Option<MarketCategory>,
 }
 
 impl WeightedFactorModelArtifact {
@@ -858,6 +873,7 @@ mod tests {
             return_model: ReturnModelSpec::heuristic_default(),
             required_features: Vec::new(),
             objective_report: None,
+            category_scope: None,
         }
     }
 

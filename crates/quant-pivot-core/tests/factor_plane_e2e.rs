@@ -25,8 +25,8 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        QuantFactorEventRow, TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, QuantFactorEventRow, TickEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
@@ -39,10 +39,10 @@ use quant_pivot_models::{
         market::MarketStatus,
         quant::{ModelRunKind, ModelRunStatus},
     },
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig},
+    runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
-        ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, Price, RuntimeConfigVersionId,
-        Shares, TokenId, Usd,
+        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelRunId, Price,
+        RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -65,6 +65,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     factor_governance::{publish_all_factor_definitions, register_all_factor_definitions},
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use rust_decimal::Decimal;
@@ -93,6 +94,7 @@ fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
         token_no: TokenId::new(catalog.no_token),
         question: "Factor E2E?".into(),
         slug: "factor-e2e".into(),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -253,6 +255,24 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
+    }
+
     async fn observed_markets_between(
         &self,
         _from_ms: i64,
@@ -312,16 +332,19 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
         noop_feature_writer(),
         Arc::clone(&registry),
         live_trade_tape_block_cursor_repo(),
+        Arc::new(EmptyLinkageRepo),
         TradeTapeOnChainConfig::default(),
     );
 
     let features = FeaturesConfig::default();
+    let domain = DomainConfig::default();
     let included = vec![selected_market()];
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
             as_of: Utc::now(),
             features: &features,
+            domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
@@ -391,9 +414,14 @@ async fn create_definition_and_values_then_list_for_run() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
-        .await
-        .expect("publish factor definitions");
+    publish_all_factor_definitions(
+        factor_repo.as_ref(),
+        &factors,
+        &features,
+        &DomainConfig::default(),
+    )
+    .await
+    .expect("publish factor definitions");
 
     let result = service
         .run(FactorPipelineRequest {
@@ -402,6 +430,7 @@ async fn create_definition_and_values_then_list_for_run() {
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
+            domain: &DomainConfig::default(),
         })
         .await
         .expect("factor pipeline");
@@ -494,6 +523,7 @@ async fn unpublished_factor_definitions_block_pipeline() {
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
+            domain: &DomainConfig::default(),
         })
         .await;
     let Err(error) = unregistered else {
@@ -505,9 +535,14 @@ async fn unpublished_factor_definitions_block_pipeline() {
     );
 
     // Registered-but-Draft definitions must also block until published.
-    register_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
-        .await
-        .expect("register draft definitions");
+    register_all_factor_definitions(
+        factor_repo.as_ref(),
+        &factors,
+        &features,
+        &DomainConfig::default(),
+    )
+    .await
+    .expect("register draft definitions");
     let draft = service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
@@ -515,6 +550,7 @@ async fn unpublished_factor_definitions_block_pipeline() {
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
+            domain: &DomainConfig::default(),
         })
         .await;
     let Err(error) = draft else {
@@ -532,7 +568,7 @@ async fn factor_event_writer_batches() {
     // rows through its async sink.
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let engine = FactorEngine::new(&factors, &features, None);
+    let engine = FactorEngine::new(&factors, &features, &DomainConfig::disabled(), None);
 
     let as_of = Utc::now();
     let market_a = sample_vector("0xbatcha", Decimal::from(20_000), Decimal::from(120), as_of);
@@ -606,8 +642,9 @@ fn sample_vector(
         market_id: MarketId::new(market),
         token_id: Some(TokenId::new("token")),
         as_of,
-        schema_version: SchemaVersion::FIRST,
-        values,
+        generic_schema_version: SchemaVersion::FIRST,
+        generic: values,
+        domain: None,
         substitutions: Vec::new(),
         data_quality: DataQualityStatus::Fresh,
         staleness_ms: 0,

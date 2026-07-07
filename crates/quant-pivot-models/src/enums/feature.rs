@@ -19,6 +19,9 @@ pub enum EvidenceSourceKind {
     TradeTape,
     /// Derived/computed from other in-memory inputs.
     Derived,
+    /// An external-vertical domain observation (`quant_domain_observation`
+    /// window: Binance klines / Chainlink oracle quotes).
+    DomainExternal,
 }
 
 impl EvidenceSourceKind {
@@ -32,6 +35,7 @@ impl EvidenceSourceKind {
             Self::ClickHouseFact => "clickhouse_fact",
             Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
+            Self::DomainExternal => "domain_external",
         }
     }
 }

@@ -7,7 +7,7 @@
 //! fail-closed placeholder (which excluded every market once any feature was
 //! required) with a real, evidence-grounded judgment.
 
-use quant_pivot_models::domain::MarketCandidate;
+use quant_pivot_models::domain::{DomainAvailability, MarketCandidate};
 
 use crate::features::{
     schema::{FeatureSchema, SourceRequirement},
@@ -65,6 +65,14 @@ const fn source_available(candidate: &MarketCandidate, requirement: SourceRequir
         SourceRequirement::PublishedL2Book
         | SourceRequirement::MicrostructureWindow
         | SourceRequirement::NegRiskSiblingLegs => has_two_sided_book(candidate),
+        // Domain features exist only for category-mapped markets whose linkage
+        // resolved AND whose linked source had PIT data at `as_of` (11.2.2
+        // §3.8). A model *requiring* a domain feature therefore excludes every
+        // unmapped / unresolved / source-empty market — fail-closed by
+        // construction, never a fabricated value.
+        SourceRequirement::DomainObservationWindow => {
+            matches!(candidate.domain_availability, DomainAvailability::Available)
+        }
     }
 }
 

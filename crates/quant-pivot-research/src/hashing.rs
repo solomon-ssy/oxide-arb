@@ -101,10 +101,14 @@ impl ResearchHasher {
         Self::canonical(&definitions)
     }
 
-    /// Canonical hash of an in-memory feature vector.
+    /// Canonical hash of an in-memory two-layer feature vector.
     ///
-    /// `FeatureVector::values` is a `BTreeMap`, so the digest is independent of
-    /// feature insertion order by construction.
+    /// Both slices are `BTreeMap`s (order-independent by construction), and
+    /// the canonical serialization covers `generic_schema_version`, the
+    /// generic values, and the optional domain slice **including its family
+    /// and schema version** — so the digest distinguishes `domain: None` from
+    /// a present slice, and one domain family from another, with no separate
+    /// composite formula to keep in sync.
     pub fn feature_vector(vector: &FeatureVector) -> QuantResult<ContentHash> {
         Self::canonical(vector)
     }

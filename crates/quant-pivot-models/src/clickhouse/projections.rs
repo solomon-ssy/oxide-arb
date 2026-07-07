@@ -124,6 +124,7 @@ impl From<EvidenceSourceKind> for ChFeatureSourceKind {
             EvidenceSourceKind::ClickHouseFact => Self::ClickHouseFact,
             EvidenceSourceKind::TradeTape => Self::TradeTape,
             EvidenceSourceKind::Derived => Self::Derived,
+            EvidenceSourceKind::DomainExternal => Self::DomainExternal,
         }
     }
 }

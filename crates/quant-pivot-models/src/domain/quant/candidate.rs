@@ -25,6 +25,27 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Frozen domain-plane availability for one candidate at selection time.
+///
+/// Produced by the core-side projector from the category → family routing
+/// table, the linkage ledger, and domain ingest health, so the selection
+/// filters stay pure functions over the frozen candidate (Phase 11.2.2 §3.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainAvailability {
+    /// The market's category maps to no vertical: domain features are
+    /// structurally not applicable (this is never an exclusion reason).
+    NotMapped,
+    /// Category-mapped, but no `Resolved` linkage existed at `as_of`
+    /// (fail-closed — a model requiring domain features excludes the market).
+    Unresolved,
+    /// Linkage resolved, but the linked instrument had no visible PIT
+    /// observation at `as_of` (source gap).
+    SourceEmpty,
+    /// Linkage resolved and the source had PIT data at `as_of`.
+    Available,
+}
+
 /// A decision-time freeze of one market's selection-relevant facts.
 ///
 /// Produced once per selection round by the core-side projector; the selector
@@ -73,6 +94,8 @@ pub struct MarketCandidate {
     ///
     /// This is a process-global measurement shared by all candidates in a round.
     pub ingest_lag_ms: u64,
+    /// Domain-plane availability at `observed_at` (Phase 11.2.2 §3.8).
+    pub domain_availability: DomainAvailability,
     /// The instant this candidate was frozen (equals the selection `as_of`).
     pub observed_at: DateTime<Utc>,
 }

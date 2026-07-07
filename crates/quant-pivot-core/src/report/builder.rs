@@ -437,6 +437,7 @@ impl DefaultReportBuilder {
             .active_requirements(ActiveModelRequirementsRequest {
                 features: &config.features,
                 factors: &config.factors,
+                domain: &config.domain,
                 model: &config.model,
                 as_of,
             })
@@ -456,7 +457,11 @@ impl DefaultReportBuilder {
         &self,
         context: &BuildContext,
     ) -> QuantResult<MarketSelectionSnapshot> {
-        let candidates = self.deps.candidate_provider.candidates(context.as_of);
+        let candidates = self
+            .deps
+            .candidate_provider
+            .candidates(context.as_of, &context.config.domain)
+            .await?;
         let selection = self
             .deps
             .market_selector
@@ -493,6 +498,7 @@ impl DefaultReportBuilder {
                 as_of: context.as_of,
                 runtime_config_version_id: context.version.runtime_config_version_id.clone(),
                 features: &context.config.features,
+                domain: &context.config.domain,
                 data_quality: &context.config.data_quality,
                 model_requirements: &context.active.model_requirements,
                 source_delay_secs: context.source_delay_secs,
@@ -523,6 +529,7 @@ impl DefaultReportBuilder {
                 feature_vector_ids: &feature_vector_ids,
                 features: &context.config.features,
                 factors: &context.config.factors,
+                domain: &context.config.domain,
                 model: &context.config.model,
                 top_n: bounded_usize(context.top_n),
                 as_of: context.as_of,

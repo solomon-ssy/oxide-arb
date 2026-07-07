@@ -15,6 +15,7 @@
 
 mod collinearity;
 mod computer;
+mod domain;
 mod frozen;
 mod generic;
 pub mod names;
@@ -33,6 +34,7 @@ pub use collinearity::{
     neutralize_by_group,
 };
 pub use computer::{FactorComputer, FactorEngine, FactorHistory};
+pub use domain::{DomainFactorRegistry, crypto_domain_factors};
 pub use frozen::frozen_factor_outcome;
 pub use generic::{factor_definition_id, generic_factors};
 pub use normalize::{

@@ -156,6 +156,43 @@ max_blocks_per_tick = 2000
 # Purpose: ClickHouse batch size. Default: 1000.
 batch_size = 1000
 
+# ── External Domain Sources (Phase 11.2.2 crypto vertical) ───────────────────
+# Runtime tunables (family enablement, source delay, backfill depth, basis
+# thresholds) are runtime config under `domain.*` — only connections live here.
+
+[domain_sources.binance]
+# Purpose: Binance spot kline ingestion (public market data, no key).
+# Default: true.
+enabled = true
+# Purpose: Binance spot REST base URL. Default: "https://api.binance.com".
+base_url = "https://api.binance.com"
+# Purpose: proactive request-weight budget per minute (klines cost weight
+# 2/request; the venue IP budget is 6000/min). Default: 1000.
+weight_budget_per_min = 1000
+# Purpose: incremental poll cadence (seconds). Default: 30.
+poll_secs = 30
+# Purpose: ClickHouse batch size. Default: 5000.
+batch_size = 5000
+
+[domain_sources.chainlink]
+# Purpose: Chainlink aggregator oracle-quote ingestion via the shared Polygon
+# RPC ([polymarket.onchain].rpc_url) — basis cross-check source. Default: true.
+enabled = true
+# Purpose: incremental poll cadence (seconds). Default: 15.
+poll_secs = 15
+# Purpose: max historical rounds back-scanned per feed on bootstrap.
+# Default: 500.
+max_round_backscan = 500
+
+# Purpose: AggregatorV3 proxy addresses keyed by feed (Polygon mainnet).
+# Adding an asset = add its feed here + extend the resolver ruleset.
+[domain_sources.chainlink.feeds]
+BTC-USD = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+ETH-USD = "0xF9680D99D6C9589e2a93a78A04A279e509205945"
+SOL-USD = "0x16F8008c3e89f62e5e2b909Ce70999370D38F4F2"
+XRP-USD = "0x979211Dfbc0738559B778a6a58a5b1bbbBe720f9"
+DOGE-USD = "0x1c747D909102bfCdb305C54bDdDBdA3eF588B1d0"
+
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]

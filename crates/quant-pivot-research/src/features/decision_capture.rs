@@ -415,6 +415,7 @@ mod tests {
             token_no: TokenId::new("no-token"),
             question: "Will it happen?".to_owned(),
             slug: "slug".to_owned(),
+            description: None,
             categories: CategorySet::default(),
             status: MarketStatus::Active,
             outcome: None,

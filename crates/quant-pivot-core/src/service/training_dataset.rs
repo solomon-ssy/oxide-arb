@@ -40,8 +40,8 @@ use quant_pivot_models::{
         quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
     },
     runtime_config::{
-        DataQualityConfig, DecimalString, FactorsConfig, FeaturesConfig, SelectionConfig,
-        TrainingConfig,
+        DataQualityConfig, DecimalString, DomainConfig, FactorsConfig, FeaturesConfig,
+        SelectionConfig, TrainingConfig,
     },
     types::{
         Bps, MarketId, Price, Shares, TokenId, TrainingDatasetId, TrainingExampleId,
@@ -49,8 +49,8 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, EventRepository, FeatureRepository, MarketRepository,
-    PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    AttributionRepository, EventRepository, FeatureRepository, MarketLinkageRepository,
+    MarketRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
     TrainingDatasetRepository,
 };
 use quant_pivot_research::{
@@ -61,8 +61,8 @@ use quant_pivot_research::{
         MarketFactorOutcome, NormalizedFactor,
     },
     features::{
-        ConfiguredFeatureBuilder, EvidenceSourceRef, FeatureName, FeatureValue, FeatureVector,
-        SubstitutionAudit,
+        ConfiguredFeatureBuilder, DomainFeatureSlice, EvidenceSourceRef, FeatureName, FeatureValue,
+        FeatureVector, SubstitutionAudit,
     },
     hashing::ResearchHasher,
     model::{
@@ -158,6 +158,8 @@ pub struct TrainingDatasetServiceDeps {
     pub position_repo: Arc<dyn PositionRepository>,
     /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
     pub fee_calculator: Arc<FeeCalculator>,
+    /// Frozen market → external-subject linkage ledger (11.2.2).
+    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
 }
 
 /// Deploy + frozen-config bundle for wiring [`TrainingDatasetService`].
@@ -189,6 +191,8 @@ pub struct TrainingDatasetBuildConfig {
     pub features: FeaturesConfig,
     /// Factor engine configuration.
     pub factors: FactorsConfig,
+    /// External-vertical domain plane configuration (Phase 11.2.2).
+    pub domain: DomainConfig,
     /// Data-quality gates applied during feature build.
     pub data_quality: DataQualityConfig,
     /// Offline training-dataset build parameters (from runtime `training` section).
@@ -217,8 +221,10 @@ pub struct TrainingDatasetService {
     feature_repo: Arc<dyn FeatureRepository>,
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
+    domain: DomainConfig,
     data_quality: DataQualityConfig,
     max_book_staleness: Duration,
     min_exit_depth_usd: Usd,
@@ -265,8 +271,10 @@ impl TrainingDatasetService {
             feature_repo: deps.feature_repo,
             position_repo: deps.position_repo,
             fee_calculator: deps.fee_calculator,
+            linkage_repo: deps.linkage_repo,
             features: config.features,
             factors: config.factors,
+            domain: config.domain,
             data_quality: config.data_quality,
             max_book_staleness,
             min_exit_depth_usd,
@@ -647,7 +655,9 @@ impl TrainingDatasetService {
         let context = ReplayContext::new(&plan, &self.features);
         let loader = self.window_loader();
         // Prefetch is real ClickHouse I/O — stays on the async runtime.
-        let window = loader.load(&context.window_spec(&plan)).await?;
+        let window = loader
+            .load(&context.window_spec(&plan, &self.domain))
+            .await?;
         let coverage = DatasetCoverage {
             planned_samples: planned_historical_samples(&plan),
             book_decode_failures: window.book_decode_failures,
@@ -719,7 +729,9 @@ impl TrainingDatasetService {
         self.ensure_factors_enabled()?;
         let context = ReplayContext::new(&plan, &self.features);
         let loader = self.window_loader();
-        let prefetched = loader.prefetch(&context.window_spec(&plan)).await?;
+        let prefetched = loader
+            .prefetch(&context.window_spec(&plan, &self.domain))
+            .await?;
         let mut coverage = DatasetCoverage {
             planned_samples: planned_historical_samples(&plan),
             ..DatasetCoverage::default()
@@ -770,6 +782,7 @@ impl TrainingDatasetService {
             features: self.features.clone(),
             factors: self.factors.clone(),
             data_quality: self.data_quality.clone(),
+            domain: self.domain.clone(),
             selection: self.selection.clone(),
             min_selection_depth: self.min_selection_depth.clone(),
             labelers: Arc::clone(&self.labelers),
@@ -799,6 +812,7 @@ impl TrainingDatasetService {
             features: &self.features,
             factors: &self.factors,
             data_quality: &self.data_quality,
+            domain: &self.domain,
             selection: &self.selection,
             min_selection_depth: &self.min_selection_depth,
             labelers: &self.labelers,
@@ -824,10 +838,11 @@ impl TrainingDatasetService {
             context,
             sink,
         } = tail;
-        let builder = ConfiguredFeatureBuilder::new(&self.features);
+        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain);
         let engine = FactorEngine::new(
             &self.factors,
             &self.features,
+            &self.domain,
             self.bias_table.as_ref().map(Arc::clone),
         );
 
@@ -873,7 +888,7 @@ impl TrainingDatasetService {
 
     /// Reject an empty factor set (no enabled families).
     fn ensure_factors_enabled(&self) -> QuantResult<()> {
-        if FactorEngine::new(&self.factors, &self.features, None)
+        if FactorEngine::new(&self.factors, &self.features, &self.domain, None)
             .registry()
             .is_empty()
         {
@@ -890,6 +905,7 @@ impl TrainingDatasetService {
             Arc::clone(&self.fact_read),
             Arc::clone(&self.market_repo),
             Arc::clone(&self.event_repo),
+            Arc::clone(&self.linkage_repo),
             self.max_book_staleness,
         )
     }
@@ -907,11 +923,12 @@ impl TrainingDatasetService {
         )
     }
 
-    /// The frozen replay config (feature/factor/data-quality) for this build.
+    /// The frozen replay config (feature/factor/domain/data-quality) for this build.
     fn replay_config(&self) -> ReplayConfig {
         ReplayConfig {
             features: self.features.clone(),
             factors: self.factors.clone(),
+            domain: self.domain.clone(),
             data_quality: self.data_quality.clone(),
             bias_table: self.bias_table.as_ref().map(Arc::clone),
         }
@@ -1030,10 +1047,11 @@ impl TrainingDatasetService {
             .map(|lot| (lot.order_intent_id.clone(), lot))
             .collect();
         let exit_labelers = exit_decision_labelers();
-        let builder = ConfiguredFeatureBuilder::new(&self.features);
+        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain);
         let engine = FactorEngine::new(
             &self.factors,
             &self.features,
+            &self.domain,
             self.bias_table.as_ref().map(Arc::clone),
         );
         let replay_config = self.replay_config();
@@ -1374,6 +1392,7 @@ struct HistoricalSpineParams<'a> {
     features: &'a FeaturesConfig,
     factors: &'a FactorsConfig,
     data_quality: &'a DataQualityConfig,
+    domain: &'a DomainConfig,
     selection: &'a SelectionConfig,
     min_selection_depth: &'a DecimalString,
     labelers: &'a [Box<dyn Labeler>],
@@ -1396,6 +1415,7 @@ struct HistoricalSpineInputs {
     features: FeaturesConfig,
     factors: FactorsConfig,
     data_quality: DataQualityConfig,
+    domain: DomainConfig,
     selection: SelectionConfig,
     min_selection_depth: DecimalString,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
@@ -1426,6 +1446,7 @@ fn run_historical_spine_blocking(
             features: &inputs.features,
             factors: &inputs.factors,
             data_quality: &inputs.data_quality,
+            domain: &inputs.domain,
             selection: &inputs.selection,
             min_selection_depth: &inputs.min_selection_depth,
             labelers: &inputs.labelers,
@@ -1446,15 +1467,17 @@ async fn run_historical_spine(
     params: HistoricalSpineParams<'_>,
     mut coverage: DatasetCoverage,
 ) -> QuantResult<HistoricalSpineOutput> {
-    let builder = ConfiguredFeatureBuilder::new(params.features);
+    let builder = ConfiguredFeatureBuilder::new(params.features, params.domain);
     let engine = FactorEngine::new(
         params.factors,
         params.features,
+        params.domain,
         params.bias_table.as_ref().map(Arc::clone),
     );
     let replay_config = ReplayConfig {
         features: params.features.clone(),
         factors: params.factors.clone(),
+        domain: params.domain.clone(),
         data_quality: params.data_quality.clone(),
         bias_table: params.bias_table.as_ref().map(Arc::clone),
     };
@@ -1648,7 +1671,12 @@ fn append_historical_examples(
 }
 
 fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
-    let values = info.payload.get("values")?.clone();
+    let generic = info.payload.get("generic")?.clone();
+    let domain = info
+        .payload
+        .get("domain")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let substitutions = info
         .payload
         .get("substitutions")
@@ -1658,8 +1686,9 @@ fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
         market_id: info.market_id.clone(),
         token_id: info.token_id.clone(),
         as_of: info.as_of,
-        schema_version: info.feature_schema_version,
-        values: serde_json::from_value::<BTreeMap<FeatureName, FeatureValue>>(values).ok()?,
+        generic_schema_version: info.feature_schema_version,
+        generic: serde_json::from_value::<BTreeMap<FeatureName, FeatureValue>>(generic).ok()?,
+        domain: serde_json::from_value::<Option<DomainFeatureSlice>>(domain).ok()?,
         substitutions: serde_json::from_value::<Vec<SubstitutionAudit>>(substitutions).ok()?,
         data_quality: info.data_quality,
         staleness_ms: u64::try_from(info.staleness_ms.max(0)).ok()?,
@@ -1978,7 +2007,7 @@ impl ReplayContext {
     }
 
     /// The prefetch window spec for this build's sample set.
-    fn window_spec(&self, plan: &DatasetPlan) -> WindowSpec {
+    fn window_spec(&self, plan: &DatasetPlan, domain: &DomainConfig) -> WindowSpec {
         WindowSpec {
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
@@ -1997,6 +2026,7 @@ impl ReplayContext {
             lookback: self.lookback,
             source_delay: self.source_delay,
             max_horizon_secs: self.max_horizon_secs,
+            domain: domain.clone(),
         }
     }
 }

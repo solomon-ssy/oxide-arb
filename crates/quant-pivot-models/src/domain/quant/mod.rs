@@ -18,6 +18,8 @@ mod favorite_longshot;
 mod feature;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
+#[allow(clippy::needless_update)] // NewMarketLinkage omits DB-managed created_at
+mod linkage;
 #[allow(clippy::needless_update)] // NewModelRun covers all ActiveModel columns
 mod model;
 mod portfolio;
@@ -50,6 +52,7 @@ pub use factor::*;
 pub use favorite_longshot::*;
 pub use feature::*;
 pub use governance_audit::*;
+pub use linkage::*;
 pub use model::*;
 pub use portfolio::*;
 pub use position::*;

@@ -36,8 +36,8 @@ use quant_pivot_models::{
     enums::quant::ModelSerializationFormat, hashing::CanonicalDigest, types::ModelArtifactId,
 };
 use quant_pivot_repository::traits::{
-    EventRepository, MarketRepository, ModelRegistryRepository, ModelRunRepository,
-    QuantFactReadRepository, TrainingDatasetRepository,
+    EventRepository, MarketLinkageRepository, MarketRepository, ModelRegistryRepository,
+    ModelRunRepository, QuantFactReadRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -66,7 +66,9 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::service::{
-    dataset_replay::{rematerialize_exit_decision_examples, rematerialize_training_examples},
+    dataset_replay::{
+        RematerializeInputs, rematerialize_exit_decision_examples, rematerialize_training_examples,
+    },
     historical_replay::ReplayConfig,
 };
 
@@ -99,6 +101,8 @@ pub struct ModelTrainerServiceDeps {
     pub market_repo: Arc<dyn MarketRepository>,
     /// Postgres event catalog snapshot for neg-risk leg enumeration.
     pub event_repo: Arc<dyn EventRepository>,
+    /// Frozen market → external-subject linkage ledger (11.2.2).
+    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
 }
 
 /// Frozen config governing training (from the runtime-config version).
@@ -184,28 +188,20 @@ impl ModelTrainerService {
         // factors PIT but preserve each lot's frozen labels + position-state
         // (the generic rematerialize would rewrite them to `HistoricalPit` and
         // drop the lot state, tripping the Sell-training guard).
+        let rematerialize = RematerializeInputs {
+            dataset: &dataset,
+            parquet_examples: &parquet_examples,
+            fact_read: Arc::clone(&self.deps.fact_read),
+            market_repo: Arc::clone(&self.deps.market_repo),
+            event_repo: Arc::clone(&self.deps.event_repo),
+            linkage_repo: Arc::clone(&self.deps.linkage_repo),
+            replay: &self.replay,
+            max_book_staleness: self.max_book_staleness,
+        };
         let examples = if input.model_family.is_exit_scorer() {
-            rematerialize_exit_decision_examples(
-                &dataset,
-                &parquet_examples,
-                Arc::clone(&self.deps.fact_read),
-                Arc::clone(&self.deps.market_repo),
-                Arc::clone(&self.deps.event_repo),
-                &self.replay,
-                self.max_book_staleness,
-            )
-            .await?
+            rematerialize_exit_decision_examples(&rematerialize).await?
         } else {
-            rematerialize_training_examples(
-                &dataset,
-                &parquet_examples,
-                Arc::clone(&self.deps.fact_read),
-                Arc::clone(&self.deps.market_repo),
-                Arc::clone(&self.deps.event_repo),
-                &self.replay,
-                self.max_book_staleness,
-            )
-            .await?
+            rematerialize_training_examples(&rematerialize).await?
         };
 
         let model_version_id = input.model_version_id.clone();
@@ -648,7 +644,7 @@ fn build_classical_matrix(
 
     let mut feature_names: BTreeSet<String> = BTreeSet::new();
     for example in &sorted {
-        for (name, value) in &example.feature_vector.values {
+        for (name, value) in example.feature_vector.iter_values() {
             if is_numeric(value) {
                 feature_names.insert(name.as_str().to_owned());
             }

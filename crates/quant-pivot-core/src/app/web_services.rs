@@ -18,13 +18,14 @@ use crate::{
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
-    CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort, NewOperationLog,
-    OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort,
+    CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+    MarketLinkageGovernancePort, NewOperationLog, OrderIntentPort, ReconciliationPort,
+    ResearchJobPort, RuntimeConfigPort,
 };
 use quant_pivot_repository::traits::{
-    AccountSnapshotRepository, AttributionRepository, EquitySnapshotRepository,
-    ExecutionOrderRepository, FavoriteLongshotBiasTableRepository, MenuRepository,
-    OperationLogRepository, OrderIntentRepository, PositionRepository,
+    AccountSnapshotRepository, AttributionRepository, DomainSourceCursorRepository,
+    EquitySnapshotRepository, ExecutionOrderRepository, FavoriteLongshotBiasTableRepository,
+    MenuRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
     RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
     SettlementRedeemRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
@@ -98,6 +99,7 @@ async fn build_app_state(
     let repos = &ctx.infra.repos;
     let auth = build_web_auth(ctx).await?;
     let execution = build_web_execution_ports(ctx);
+    let research_ports = build_research_web_ports(ctx);
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
@@ -134,33 +136,20 @@ async fn build_app_state(
             Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
             Some(Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>),
         )),
-        training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
-            &ctx.research,
-            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
-            Arc::clone(&repos.favorite_longshot_bias_table)
-                as Arc<dyn FavoriteLongshotBiasTableRepository>,
-            ctx.config.quant.research_jobs.max_spine_samples,
-            ctx.config.quant.research_jobs.plan_sample_slices,
-            ctx.config.quant.research_jobs.plan_sample_markets,
-        )),
-        model_training: Arc::new(CoreModelTrainingPort::from_research(
-            &ctx.research,
-            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
-            Arc::clone(&repos.favorite_longshot_bias_table)
-                as Arc<dyn FavoriteLongshotBiasTableRepository>,
-        )),
-        backtests: Arc::new(CoreBacktestPort::from_research(
-            &ctx.research,
-            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
-            Arc::clone(&repos.favorite_longshot_bias_table)
-                as Arc<dyn FavoriteLongshotBiasTableRepository>,
-        )),
+        training_datasets: research_ports.training_datasets,
+        model_training: research_ports.model_training,
+        backtests: research_ports.backtests,
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
         model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
         favorite_longshot: Arc::clone(&ctx.research.favorite_longshot_fit),
+        market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
+        domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
+            as Arc<dyn DomainSourceCursorRepository>,
+        linkage_governance: Arc::clone(&ctx.data.linkage_resolver)
+            as Arc<dyn MarketLinkageGovernancePort>,
         structural_monitor: Arc::new(CoreStructuralMonitor::new(
             Arc::clone(&ctx.data.market_registry),
             Arc::clone(&ctx.data.book_store),
@@ -279,4 +268,38 @@ fn build_operation_log_writer(
         OperationLogBuffer::new(Arc::new(op_log_writer)),
         op_log_worker,
     )
+}
+
+struct ResearchWebPorts {
+    training_datasets: Arc<CoreTrainingDatasetPort>,
+    model_training: Arc<CoreModelTrainingPort>,
+    backtests: Arc<CoreBacktestPort>,
+}
+
+fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
+    let repos = &ctx.infra.repos;
+    let runtime_config =
+        Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
+    let bias_table = Arc::clone(&repos.favorite_longshot_bias_table)
+        as Arc<dyn FavoriteLongshotBiasTableRepository>;
+    ResearchWebPorts {
+        training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
+            &ctx.research,
+            Arc::clone(&runtime_config),
+            Arc::clone(&bias_table),
+            ctx.config.quant.research_jobs.max_spine_samples,
+            ctx.config.quant.research_jobs.plan_sample_slices,
+            ctx.config.quant.research_jobs.plan_sample_markets,
+        )),
+        model_training: Arc::new(CoreModelTrainingPort::from_research(
+            &ctx.research,
+            Arc::clone(&runtime_config),
+            Arc::clone(&bias_table),
+        )),
+        backtests: Arc::new(CoreBacktestPort::from_research(
+            &ctx.research,
+            runtime_config,
+            bias_table,
+        )),
+    }
 }

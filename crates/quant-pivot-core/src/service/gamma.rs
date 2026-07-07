@@ -1,6 +1,7 @@
 //! Gamma market catalog sync — full and incremental refresh into registry, cache, and DB.
 
 use crate::{
+    governance::LinkageResolverService,
     observability::metrics_hub::MetricsHub,
     pipeline::{
         market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
@@ -61,6 +62,8 @@ pub struct GammaServiceDeps {
     pub subscription_window_hours: u64,
     /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
     pub full_sync_interval_secs: u64,
+    /// Offline linkage resolver — runs after successful sync (Phase 11.2.2).
+    pub linkage_resolver: Option<Arc<LinkageResolverService>>,
 }
 
 pub struct GammaService {
@@ -79,6 +82,7 @@ pub struct GammaService {
     status_nudge: SystemStatusNudge,
     subscription_window_hours: u64,
     full_sync_interval_secs: u64,
+    linkage_resolver: Option<Arc<LinkageResolverService>>,
     last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
 }
 
@@ -100,6 +104,7 @@ impl GammaService {
             status_nudge: deps.status_nudge,
             subscription_window_hours: deps.subscription_window_hours,
             full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
+            linkage_resolver: deps.linkage_resolver,
             last_sync_at: parking_lot::Mutex::new(None),
         }
     }
@@ -116,9 +121,34 @@ impl GammaService {
 
         if result.is_ok() {
             self.publish_catalog_ready();
+            self.trigger_linkage_resolution();
         }
 
         result
+    }
+
+    fn trigger_linkage_resolution(&self) {
+        let Some(resolver) = self.linkage_resolver.as_ref() else {
+            return;
+        };
+        let resolver = Arc::clone(resolver);
+        tokio::spawn(async move {
+            match resolver.resolve_changed_markets(&[]).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        examined = summary.examined,
+                        appended = summary.appended,
+                        unchanged = summary.unchanged,
+                        resolved = summary.resolved,
+                        unresolved = summary.unresolved,
+                        "linkage resolver pass complete after gamma sync"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "linkage resolver pass failed after gamma sync");
+                }
+            }
+        });
     }
 
     fn publish_catalog_ready(&self) {
@@ -576,6 +606,7 @@ mod tests {
             event_id: EventId::new("evt-1"),
             title: "t".into(),
             slug: "s".into(),
+            series_slug: None,
             market_ids: vec![
                 MarketId::new("m1"),
                 MarketId::new("m2"),
@@ -603,6 +634,7 @@ mod tests {
             event_id: EventId::new("evt-1"),
             question: "Test?".into(),
             slug: "test".into(),
+            description: None,
             categories: CategorySet::EMPTY,
             status,
             outcome: outcome.map(str::to_owned),

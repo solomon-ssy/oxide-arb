@@ -117,8 +117,7 @@ impl FactorGovernancePort for FactorGovernanceService {
         command: RegisterFactorDefinitionsCommand,
         _actor: GovernanceActor,
     ) -> QuantResult<Vec<FactorDefinitionInfo>> {
-        let _reason = command.reason;
-        let engine = FactorEngine::new(&command.factors, &command.features, None);
+        let engine = FactorEngine::new(&command.factors, &command.features, &command.domain, None);
         if engine.registry().is_empty() {
             return Err(QuantError::config(
                 "no factors enabled: factors.enabled_factor_families selects an empty factor set",

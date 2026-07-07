@@ -129,8 +129,7 @@ pub fn build_feature_matrix(
             .iter()
             .map(|name| {
                 vector
-                    .values
-                    .get(name)
+                    .value(name)
                     .cloned()
                     .unwrap_or(FeatureValue::Missing(NullReason::SourceUnavailable))
             })

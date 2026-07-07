@@ -4,6 +4,7 @@ mod book_decision_context;
 mod book_l2_replay;
 mod book_microstructure;
 mod book_snapshot;
+mod domain_observation;
 mod market_resolution;
 mod projections;
 mod quant_facts;
@@ -15,6 +16,7 @@ pub use book_decision_context::BookDecisionContextRow;
 pub use book_l2_replay::BookL2ReplayRow;
 pub use book_microstructure::{BookMicrostructureRow, MidPriceBucketRow};
 pub use book_snapshot::BookSnapshotRow;
+pub use domain_observation::DomainObservationRow;
 pub use market_resolution::MarketResolutionRow;
 pub use quant_facts::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,

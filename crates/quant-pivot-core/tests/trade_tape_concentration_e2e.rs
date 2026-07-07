@@ -22,15 +22,18 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::{control::ControlError, storage::StorageError};
 use quant_pivot_models::domain::RuntimeConfigPort;
+use quant_pivot_models::domain::quant::NewFeatureVector;
+use quant_pivot_models::runtime_config::FeatureFamily;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
         NewModelRun, StructuralMonitorPort,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+        quant::FeatureVectorInfo,
     },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
@@ -38,10 +41,12 @@ use quant_pivot_models::{
         market::MarketStatus,
         quant::{ModelRunKind, ModelRunStatus},
     },
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
+    runtime_config::{
+        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig,
+    },
     types::{
-        ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, Price, RuntimeConfigVersionId,
-        Shares, TokenId, Usd,
+        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelRunId, Price,
+        RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -67,6 +72,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     factor_governance::publish_all_factor_definitions,
     pg::setup_pg,
+    report_pipeline_harness::EmptyLinkageRepo,
     trade_tape_fixtures::{
         ConfigurableFactRead, live_trade_tape_block_cursor_repo, whale_concentration_by_market,
     },
@@ -106,6 +112,47 @@ impl RuntimeConfigPort for FixedRuntimeConfig {
 }
 
 struct EmptyFactRead;
+
+/// Avoids PG pool contention in the feature round — this e2e asserts vector
+/// content, not Postgres persistence semantics.
+struct InMemoryFeatureRepo;
+
+#[async_trait]
+impl FeatureRepository for InMemoryFeatureRepo {
+    async fn create(&self, vector: NewFeatureVector) -> Result<FeatureVectorInfo, StorageError> {
+        Ok(to_info(vector))
+    }
+
+    async fn create_batch(
+        &self,
+        vectors: Vec<NewFeatureVector>,
+    ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
+        Ok(vectors.into_iter().map(to_info).collect())
+    }
+
+    async fn find_by_id(
+        &self,
+        _id: &FeatureVectorId,
+    ) -> Result<Option<FeatureVectorInfo>, StorageError> {
+        Ok(None)
+    }
+}
+
+fn to_info(vector: NewFeatureVector) -> FeatureVectorInfo {
+    FeatureVectorInfo {
+        feature_vector_id: vector.feature_vector_id,
+        market_id: vector.market_id,
+        token_id: vector.token_id,
+        as_of: vector.as_of,
+        feature_schema_version: vector.feature_schema_version,
+        feature_hash: vector.feature_hash,
+        data_quality: vector.data_quality,
+        staleness_ms: vector.staleness_ms,
+        payload: vector.payload,
+        source_refs: vector.source_refs,
+        created_at: Utc::now(),
+    }
+}
 
 #[async_trait]
 impl QuantFactReadRepository for EmptyFactRead {
@@ -191,6 +238,24 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
+    }
+
     async fn observed_markets_between(
         &self,
         _from_ms: i64,
@@ -208,6 +273,7 @@ fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
         token_no: TokenId::new(catalog.no_token),
         question: "Trade tape concentration E2E?".into(),
         slug: "tape-conc-e2e".into(),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -322,6 +388,18 @@ fn structural_factors_config() -> FactorsConfig {
     }
 }
 
+fn structural_features_only_config() -> FeaturesConfig {
+    FeaturesConfig {
+        enabled_feature_families: vec![
+            FeatureFamily::MarketMetadata,
+            FeatureFamily::PriceBook,
+            FeatureFamily::Structural,
+        ],
+        max_concurrent_market_resolves: 1,
+        ..FeaturesConfig::default()
+    }
+}
+
 struct WhaleTapeConcHarness {
     db: DatabaseConnection,
     registry: Arc<MarketRegistry>,
@@ -363,24 +441,26 @@ async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
 }
 
 async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePipelineResult {
-    let features = FeaturesConfig::default();
-    let feature_repo =
-        Arc::new(PgFeatureRepository::new(harness.db.clone())) as Arc<dyn FeatureRepository>;
+    let features = structural_features_only_config();
+    let feature_repo = Arc::new(InMemoryFeatureRepo) as Arc<dyn FeatureRepository>;
     let feature_pipeline = FeaturePipelineService::new(
         FeatureWindowProvider::new(Arc::clone(&harness.fact_read)),
         Arc::clone(&feature_repo),
         noop_feature_writer(),
         Arc::clone(&harness.registry),
         live_trade_tape_block_cursor_repo(),
+        Arc::new(EmptyLinkageRepo),
         TradeTapeOnChainConfig::default(),
     );
 
+    let domain = DomainConfig::default();
     let included = vec![selected_market(&CATALOG)];
     feature_pipeline
         .run(FeaturePipelineRequest {
             included: &included,
             as_of: harness.as_of,
             features: &features,
+            domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
@@ -394,12 +474,10 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
 
 fn assert_whale_concentration_features(vector: &FeatureVector) {
     let gini = vector
-        .values
-        .get(&structural_features::PARTICIPANT_GINI)
+        .value(&structural_features::PARTICIPANT_GINI)
         .expect("participant gini feature");
     let cr1 = vector
-        .values
-        .get(&structural_features::PARTICIPANT_CR1_SHARE)
+        .value(&structural_features::PARTICIPANT_CR1_SHARE)
         .expect("participant cr1 feature");
     match (gini, cr1) {
         (FeatureValue::Decimal(gini), FeatureValue::Decimal(cr1)) => {
@@ -420,16 +498,42 @@ async fn run_factor_round_and_assert_concentration(
     harness: &WhaleTapeConcHarness,
     feature_result: &FeaturePipelineResult,
 ) {
-    let features = FeaturesConfig::default();
+    let features = structural_features_only_config();
     let factors = structural_factors_config();
-    let factor_repo =
-        Arc::new(PgFactorRepository::new(harness.db.clone())) as Arc<dyn FactorRepository>;
-    publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
-        .await
-        .expect("publish factor definitions");
+
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_catalog(&db, &CATALOG).await;
+
+    if !feature_result.accepted.is_empty() {
+        let rows = feature_result
+            .persisted
+            .iter()
+            .zip(feature_result.accepted.iter())
+            .map(|(persisted, vector)| {
+                let mut row = vector.try_to_new().expect("map feature row");
+                row.feature_vector_id = persisted.feature_vector_id.clone();
+                row
+            })
+            .collect::<Vec<_>>();
+        PgFeatureRepository::new(db.clone())
+            .create_batch(rows)
+            .await
+            .expect("persist feature vectors for factor FK");
+    }
+
+    let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
+    publish_all_factor_definitions(
+        factor_repo.as_ref(),
+        &factors,
+        &features,
+        &DomainConfig::default(),
+    )
+    .await
+    .expect("publish factor definitions");
 
     let model_run_id = ModelRunId::from_v7();
-    PgModelRunRepository::new(harness.db.clone())
+    PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
             model_run_id: model_run_id.clone(),
             run_kind: ModelRunKind::LiveInference,
@@ -459,9 +563,8 @@ async fn run_factor_round_and_assert_concentration(
         Arc::clone(&factor_repo),
         noop_factor_writer(),
         Arc::new(BiasTableApplicator::new(
-            Arc::new(PgFavoriteLongshotBiasTableRepository::new(
-                harness.db.clone(),
-            )) as Arc<dyn FavoriteLongshotBiasTableRepository>,
+            Arc::new(PgFavoriteLongshotBiasTableRepository::new(db.clone()))
+                as Arc<dyn FavoriteLongshotBiasTableRepository>,
         )),
     );
     let factor_result = factor_service
@@ -471,6 +574,7 @@ async fn run_factor_round_and_assert_concentration(
             feature_vector_ids: &feature_vector_ids,
             factors: &factors,
             features: &features,
+            domain: &DomainConfig::default(),
         })
         .await
         .expect("factor pipeline");
@@ -479,7 +583,7 @@ async fn run_factor_round_and_assert_concentration(
         "factor values must persist"
     );
 
-    let engine = FactorEngine::new(&factors, &features, None);
+    let engine = FactorEngine::new(&factors, &features, &DomainConfig::default(), None);
     let outcomes = engine
         .compute_all_batch(&feature_result.accepted, &factors)
         .expect("factor outcomes");

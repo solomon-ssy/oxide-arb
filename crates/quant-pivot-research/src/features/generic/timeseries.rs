@@ -8,8 +8,8 @@
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    generic::stats,
     resolved::MarketWindowSnapshot,
-    stats,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
 use quant_pivot_models::{

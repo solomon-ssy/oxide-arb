@@ -13,7 +13,9 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{ModelVersionInfo, OrderIntentInfo, PointInTimeDataSource, PositionInfo},
     enums::quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
-    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
+    runtime_config::{
+        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig,
+    },
     types::{
         Bps, ContentHash, MarketId, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd,
     },
@@ -104,7 +106,7 @@ impl ModelBackedExitSignalReinferer {
         version: &ModelVersionInfo,
         config: &RuntimeConfig,
     ) -> QuantResult<Option<Box<dyn QuantModelRuntime>>> {
-        let binding = schema_binding(&config.features, &config.factors, None)?;
+        let binding = schema_binding(&config.features, &config.factors, &config.domain, None)?;
         let factory = self.deps.factory_builder.build(binding);
         let overlay = resolve_overlay(&self.deps.weight_overlay, version);
         match factory.load(version, overlay).await {
@@ -170,6 +172,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             window_provider: &self.deps.window_provider,
             market: &market,
             features: &config.features,
+            domain: &config.domain,
             data_quality: &config.data_quality,
             requirements: &requirements,
             as_of,
@@ -215,6 +218,7 @@ pub(crate) struct LiveFeatureBuildRequest<'a> {
     pub window_provider: &'a FeatureWindowProvider,
     pub market: &'a SelectedMarket,
     pub features: &'a FeaturesConfig,
+    pub domain: &'a DomainConfig,
     pub data_quality: &'a DataQualityConfig,
     pub requirements: &'a ModelFeatureRequirements,
     pub as_of: DateTime<Utc>,
@@ -316,11 +320,13 @@ async fn resolve_frozen_config(
 pub(crate) fn schema_binding(
     features: &FeaturesConfig,
     factors: &FactorsConfig,
+    domain: &DomainConfig,
     bias_table_hash: Option<ContentHash>,
 ) -> QuantResult<ActiveSchemaBinding> {
     Ok(ActiveSchemaBinding {
         feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(features))?,
-        factor_schema_hash: FactorEngine::new(factors, features, None).factor_schema_hash()?,
+        factor_schema_hash: FactorEngine::new(factors, features, domain, None)
+            .factor_schema_hash()?,
         bias_table_hash,
     })
 }
@@ -380,7 +386,7 @@ pub fn selected_market_for_lot(
 pub(crate) async fn build_live_feature_vector(
     request: &LiveFeatureBuildRequest<'_>,
 ) -> QuantResult<Option<FeatureVector>> {
-    let builder = ConfiguredFeatureBuilder::new(request.features);
+    let builder = ConfiguredFeatureBuilder::new(request.features, request.domain);
     let window = load_window(
         request.window_provider,
         &builder,
@@ -410,6 +416,10 @@ pub(crate) async fn build_live_feature_vector(
             FeatureSourceWindows {
                 microstructure: &window,
                 trade_tape: &trade_tape,
+                // Exit-side factor truth is the FROZEN entry breakdown (domain
+                // factors included); the live vector only supplies price /
+                // liquidity context, so it carries no domain slice.
+                domain: None,
             },
             &sibling,
             request.liquidity_cap_usd,
@@ -651,6 +661,7 @@ mod tests {
             token_no: TokenId::new("no"),
             question: "q".to_owned(),
             slug: "s".to_owned(),
+            description: None,
             categories: CategorySet::default(),
             status: MarketStatus::Active,
             outcome: None,

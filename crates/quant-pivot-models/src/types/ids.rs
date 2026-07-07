@@ -62,6 +62,37 @@ impl TokenId {
 #[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderId(Arc<str>);
 
+/// External domain data source identifier (e.g. `binance`, `chainlink`).
+///
+/// A stable, lowercase source label persisted on every long-format
+/// `quant_domain_observation` row and on ingest cursors. New sources are a
+/// pure data extension — no schema change.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DomainSourceId(Arc<str>);
+
+impl DomainSourceId {
+    /// The Binance spot kline source.
+    #[must_use]
+    pub fn binance() -> Self {
+        Self::new("binance")
+    }
+
+    /// The Chainlink on-chain aggregator source.
+    #[must_use]
+    pub fn chainlink() -> Self {
+        Self::new("chainlink")
+    }
+}
+
+/// Canonical external instrument key, e.g. `BINANCE:BTCUSDT:1m` or
+/// `CHAINLINK:BTC-USD`.
+///
+/// The single join key between frozen market linkages and stored domain
+/// observations. Constructed only through the typed helpers in
+/// [`crate::types::domain`] so the format never drifts per call site.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DomainInstrumentKey(Arc<str>);
+
 impl OrderId {
     /// Generate a synthetic venue-order id for tests and local adapters.
     #[must_use]
@@ -135,6 +166,10 @@ pub struct FavoriteLongshotBiasTableId(Arc<Uuid>);
 /// Shadow comparison record identifier (shadow vs active model run).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShadowComparisonId(Arc<Uuid>);
+
+/// Frozen market → external-subject linkage ledger row identifier (11.2.2).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MarketLinkageId(Arc<Uuid>);
 
 /// Durable research job identifier (async dataset build / model train / backtest).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

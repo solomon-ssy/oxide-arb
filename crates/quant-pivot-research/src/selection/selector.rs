@@ -156,7 +156,7 @@ mod tests {
     };
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::MarketCandidate,
+        domain::{DomainAvailability, MarketCandidate},
         enums::{common::MarketCategory, market::MarketStatus},
         runtime_config::{DataQualityConfig, DecimalString, FeaturesConfig, SelectionConfig},
         types::{EventId, MarketId, Price, RuntimeConfigVersionId, TokenId, Usd},
@@ -187,6 +187,7 @@ mod tests {
             empty: false,
             connection_healthy: true,
             ingest_lag_ms: 1_000,
+            domain_availability: DomainAvailability::NotMapped,
             observed_at: as_of(),
         }
     }

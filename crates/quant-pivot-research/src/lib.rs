@@ -38,12 +38,14 @@ pub mod stats;
 
 pub mod artifact;
 pub mod backtest;
+pub mod domain;
 pub mod execution_sim;
 pub mod factors;
 pub mod features;
 pub mod gates;
 pub mod governance;
 pub mod hashing;
+pub mod linkage;
 pub mod model;
 pub mod pit;
 pub mod portfolio;

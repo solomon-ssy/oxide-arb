@@ -23,6 +23,9 @@ pub struct Model {
     pub question: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
+    /// Market rules text (resolution-source grounding anchor; 11.2.2).
+    #[sea_orm(column_type = "Text", nullable)]
+    pub description: Option<String>,
     /// Category memberships inherited from the parent event's Gamma tags.
     pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,

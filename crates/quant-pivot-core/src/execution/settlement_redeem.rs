@@ -1445,6 +1445,7 @@ mod tests {
             event_id: EventId::new("event-1"),
             question: "Will it happen?".to_owned(),
             slug: "will-it-happen".to_owned(),
+            description: None,
             categories: vec![MarketCategory::Politics],
             status: MarketStatus::Settled,
             outcome: Some("Yes".to_owned()),

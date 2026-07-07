@@ -13,11 +13,14 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }
 linkme = { workspace = true }
+# Deterministic Tier-1 linkage template parsing (11.2.2).
+regex = { workspace = true }
 
 # ── Research numeric stack ────────────────────────────────────────────────────
 # Pure-Rust, lightweight, and load-bearing for the online feature plane (rolling

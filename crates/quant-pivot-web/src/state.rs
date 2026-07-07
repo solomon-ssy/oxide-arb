@@ -4,21 +4,21 @@ use std::sync::Arc;
 
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::ExecutionRecoveryPort,
     domain::{
         AccountReadPort, BacktestPort, CatalogStatusPort, CoreEvent, CoreEventPublisher,
-        DataQualityPort, ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort,
-        FavoriteLongshotFitPort, KillSwitchPort, MarketDataPort, MaterializationRunEvent,
-        MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort,
-        ModelSpecPort, ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort,
-        ReconciliationPort, ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort,
-        RuntimeControlPort, StructuralMonitorPort, TrainingDatasetPort,
+        DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort, ExecutionSubmitPort,
+        FactorGovernancePort, FavoriteLongshotFitPort, KillSwitchPort, MarketDataPort,
+        MarketLinkageGovernancePort, MaterializationRunEvent, MaterializationRunKind,
+        MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelSpecPort,
+        ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort,
+        ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort, RuntimeControlPort,
+        StructuralMonitorPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, MenuRepository, OperationLogRepository, QuantFactReadRepository,
-    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
-    UserRepository, UserRoleRepository,
+    DomainSourceCursorRepository, MarketLinkageRepository, MarketRepository, MenuRepository,
+    OperationLogRepository, QuantFactReadRepository, RoleMenuRepository, RolePermissionRepository,
+    RoleRepository, RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
 };
 
 use crate::{
@@ -80,6 +80,12 @@ pub struct AppState {
     pub research_jobs: Arc<dyn ResearchJobPort>,
     /// Favorite-longshot bias-table fit enqueue + artifact read (Phase 11.2.1).
     pub favorite_longshot: Arc<dyn FavoriteLongshotFitPort>,
+    /// Market → external-subject linkage ledger (Phase 11.2.2).
+    pub market_linkages: Arc<dyn MarketLinkageRepository>,
+    /// Domain-source ingest cursor health (Phase 11.2.2).
+    pub domain_source_cursors: Arc<dyn DomainSourceCursorRepository>,
+    /// Offline market-linkage resolver (Phase 11.2.2).
+    pub linkage_governance: Arc<dyn MarketLinkageGovernancePort>,
     /// Live neg-risk structural-drift monitor (Phase 11.2.1).
     pub structural_monitor: Arc<dyn StructuralMonitorPort>,
     /// Recommendation report read + governed mutation (Phase 04.4 API).

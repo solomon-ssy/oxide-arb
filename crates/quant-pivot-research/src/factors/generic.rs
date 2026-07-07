@@ -320,7 +320,7 @@ impl FactorComputer for FeatureBackedFactor {
     }
 
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
-        let raw = features.values.get(&self.input).and_then(extract_decimal);
+        let raw = features.value(&self.input).and_then(extract_decimal);
         let (confidence, headline, drivers) = raw.map_or_else(
             || {
                 (
@@ -373,11 +373,10 @@ impl FactorComputer for DataQualityFactor {
 
     fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
         let base = data_quality_confidence(features.data_quality);
-        let total = features.values.len();
+        let total = features.value_count();
         let missing = features
-            .values
-            .values()
-            .filter(|value| value.is_missing())
+            .iter_values()
+            .filter(|(_, value)| value.is_missing())
             .count();
         let missing_ratio = if total == 0 {
             Decimal::ZERO

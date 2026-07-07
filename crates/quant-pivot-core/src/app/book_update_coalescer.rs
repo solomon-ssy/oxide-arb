@@ -178,6 +178,7 @@ mod tests {
             token_no: TokenId::new(format!("{id}-no")),
             question: "Test?".into(),
             slug: "test".into(),
+            description: None,
             categories: CategorySet::from(MarketCategory::Other),
             status: MarketStatus::Active,
             outcome: None,

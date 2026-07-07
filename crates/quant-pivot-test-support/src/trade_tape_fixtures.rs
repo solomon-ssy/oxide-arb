@@ -10,11 +10,11 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChShares, ChUsd,
-        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{TradeTapeBlockCursorInfo, UpsertTradeTapeBlockCursor},
     enums::clickhouse::{ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource},
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    types::{DomainInstrumentKey, MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{QuantFactReadRepository, TradeTapeBlockCursorRepository};
 use rust_decimal::Decimal;
@@ -236,6 +236,28 @@ impl QuantFactReadRepository for ConfigurableFactRead {
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         self.inner
             .resolutions_between(market_ids, from_ms, to_ms)
+            .await
+    }
+
+    async fn domain_observations_between(
+        &self,
+        instrument_keys: Vec<DomainInstrumentKey>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        self.inner
+            .domain_observations_between(instrument_keys, from_ms, to_ms)
+            .await
+    }
+
+    async fn domain_observation_at(
+        &self,
+        instrument_key: &DomainInstrumentKey,
+        metric: &str,
+        as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        self.inner
+            .domain_observation_at(instrument_key, metric, as_of_ms)
             .await
     }
 

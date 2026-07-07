@@ -21,6 +21,8 @@ pub enum Event {
     EventId,
     Title,
     Slug,
+    /// Recurring-series slug (Tier-0 linkage anchor), when present.
+    SeriesSlug,
     Status,
     Tags,
     NegRisk,
@@ -39,6 +41,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::text_id_pk(Event::EventId))
         .col(ColumnDef::new(Event::Title).text().not_null())
         .col(ColumnDef::new(Event::Slug).text().not_null())
+        .col(ColumnDef::new(Event::SeriesSlug).text().null())
         .col(column::pg_enum_default::<EventStatus>(
             Event::Status,
             &EventStatus::Active,

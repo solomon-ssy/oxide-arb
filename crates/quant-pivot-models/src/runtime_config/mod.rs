@@ -33,10 +33,10 @@ use crate::types::SchemaVersion;
 ///
 /// This is a **monotonic** version: every schema-changing phase bumps it by one
 /// and the greenfield database is reset (zero compatibility — no shim, no
-/// migration; non-matching documents are rejected). It is currently
-/// [`SchemaVersion::FIRST`] because the schema was last reset here, NOT because
-/// the baseline is permanently pinned — future phases (11.2.2 / 11.3) bump it.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(4);
+/// migration; non-matching documents are rejected). Bumped to 5 by Phase
+/// 11.2.2 (domain section, category model pointers, feature schema v5); future
+/// phases (11.3+) bump it again.
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -53,6 +53,8 @@ pub struct RuntimeConfig {
     pub features: FeaturesConfig,
     /// Factor selection and weighted-scorer configuration.
     pub factors: FactorsConfig,
+    /// External-vertical domain plane (category-routed; Phase 11.2.2).
+    pub domain: DomainConfig,
     /// Active and shadow model references.
     pub model: ModelConfig,
     /// Governed quality-gate thresholds (model publication / dataset promotion).
@@ -83,6 +85,7 @@ impl Default for RuntimeConfig {
             data_quality: DataQualityConfig::default(),
             features: FeaturesConfig::default(),
             factors: FactorsConfig::default(),
+            domain: DomainConfig::default(),
             model: ModelConfig::default(),
             quality_gate: QualityGateConfig::default(),
             training: TrainingConfig::default(),
@@ -309,7 +312,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(4));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(5));
     }
 
     #[test]

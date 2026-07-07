@@ -108,6 +108,10 @@ pub struct WireEvent {
     pub id: String,
     pub title: Option<String>,
     pub slug: Option<String>,
+    /// Recurring-series slug (e.g. `btc-up-or-down-5m`) — the Tier-0 linkage
+    /// anchor for clock-templated crypto markets.
+    #[serde(default)]
+    pub series_slug: Option<String>,
     #[serde(flatten)]
     end_date: GammaEndDate,
     #[serde(default)]
@@ -155,6 +159,10 @@ pub struct WireMarket {
     pub question: String,
     #[serde(default)]
     pub slug: Option<String>,
+    /// Market rules text — carries the resolution-source sentence (Chainlink
+    /// data stream / Binance candle) the linkage resolver grounds against.
+    #[serde(default)]
+    pub description: Option<String>,
     #[serde(default)]
     pub clob_token_ids: GammaStringList,
     #[serde(default)]

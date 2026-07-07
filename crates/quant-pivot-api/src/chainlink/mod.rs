@@ -1,0 +1,271 @@
+//! Chainlink on-chain aggregator source (`AggregatorV3` `eth_call`).
+
+use std::{collections::BTreeMap, str::FromStr, sync::Mutex, time::Duration};
+
+use alloy::{
+    primitives::{Address, I256},
+    providers::{Provider, ProviderBuilder},
+    rpc::client::RpcClient,
+    sol,
+    transports::http::Http,
+};
+use chrono::{DateTime, TimeZone, Utc};
+use quant_pivot_error::{QuantError, QuantResult, rpc::RpcError};
+use quant_pivot_models::{
+    config::{ChainlinkSourceConfig, OnchainConfig},
+    domain::DomainObservation,
+    enums::domain::{DomainFamily, DomainMetric},
+    types::{ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId},
+};
+use reqwest::Client as ReqwestClient;
+use rust_decimal::Decimal;
+use url::Url;
+
+use crate::domain::{DomainDataSource, DomainFetchRequest};
+
+type DynProvider = alloy::providers::DynProvider;
+
+sol! {
+    #[sol(rpc)]
+    interface AggregatorV3Interface {
+        function latestRoundData() external view returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+        function getRoundData(uint80 roundId) external view returns (
+            uint80 roundId,
+            int256 answer,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        );
+        function decimals() external view returns (uint8);
+    }
+}
+
+/// Chainlink aggregator reader backed by Polygon `eth_call`.
+pub struct ChainlinkAggregatorSource {
+    config: ChainlinkSourceConfig,
+    provider: DynProvider,
+    feeds: BTreeMap<ChainlinkFeedKey, Address>,
+    decimals_cache: Mutex<BTreeMap<ChainlinkFeedKey, u8>>,
+}
+
+impl ChainlinkAggregatorSource {
+    /// Connect from deploy config (reuses the shared Polygon RPC endpoint).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the RPC URL is invalid or feed addresses fail to parse.
+    pub fn connect(
+        onchain: &OnchainConfig,
+        config: ChainlinkSourceConfig,
+    ) -> Result<Self, RpcError> {
+        let rpc_url = Url::parse(&onchain.rpc_url).map_err(|error| {
+            RpcError::ConnectionFailed(format!(
+                "invalid Polygon RPC URL '{}': {error}",
+                onchain.rpc_url
+            ))
+        })?;
+        let http_client = ReqwestClient::builder()
+            .timeout(Duration::from_millis(onchain.rpc_timeout_ms))
+            .build()
+            .map_err(|error| {
+                RpcError::ConnectionFailed(format!(
+                    "failed to build Polygon RPC HTTP client: {error}"
+                ))
+            })?;
+        let transport = Http::with_client(http_client, rpc_url);
+        let rpc_client = RpcClient::new(transport, false);
+        let provider = ProviderBuilder::new().connect_client(rpc_client).erased();
+        let feeds = config
+            .feeds
+            .iter()
+            .map(|(feed, address)| {
+                let key = ChainlinkFeedKey::parse(feed).map_err(|error| RpcError::CallFailed {
+                    method: "chainlink_feed_key".into(),
+                    reason: error.to_string(),
+                })?;
+                let address = Address::from_str(address).map_err(|error| RpcError::CallFailed {
+                    method: "chainlink_feed_address".into(),
+                    reason: format!("{feed}: {error}"),
+                })?;
+                Ok((key, address))
+            })
+            .collect::<Result<BTreeMap<_, _>, RpcError>>()?;
+        Ok(Self {
+            config,
+            provider,
+            feeds,
+            decimals_cache: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn parse_instrument(key: &DomainInstrumentKey) -> QuantResult<ChainlinkFeedKey> {
+        let feed = key
+            .as_str()
+            .strip_prefix("CHAINLINK:")
+            .ok_or_else(|| QuantError::config(format!("not a Chainlink instrument key: {key}")))?;
+        ChainlinkFeedKey::parse(feed).map_err(|error| QuantError::config(error.to_string()))
+    }
+
+    async fn decimals(&self, feed: &ChainlinkFeedKey, address: Address) -> QuantResult<u8> {
+        let cached = self.decimals_cache.lock().expect("lock").get(feed).copied();
+        if let Some(decimals) = cached {
+            return Ok(decimals);
+        }
+        let contract = AggregatorV3Interface::new(address, &self.provider);
+        let decimals = contract.decimals().call().await.map_err(|error| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_decimals".into(),
+                reason: error.to_string(),
+            })
+        })?;
+        self.decimals_cache
+            .lock()
+            .expect("lock")
+            .insert(feed.clone(), decimals);
+        Ok(decimals)
+    }
+
+    async fn observation_from_round_fields(
+        &self,
+        feed: &ChainlinkFeedKey,
+        address: Address,
+        answer: I256,
+        updated_at_raw: alloy::primitives::U256,
+    ) -> QuantResult<Option<DomainObservation>> {
+        if answer <= I256::ZERO {
+            return Ok(None);
+        }
+        let updated_at = i64::try_from(updated_at_raw).map_err(|error| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_updated_at".into(),
+                reason: error.to_string(),
+            })
+        })?;
+        let observed_at = Utc.timestamp_opt(updated_at, 0).single().ok_or_else(|| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_updated_at".into(),
+                reason: "timestamp out of range".into(),
+            })
+        })?;
+        let decimals = self.decimals(feed, address).await?;
+        let value = scale_answer(answer, decimals)?;
+        Ok(Some(DomainObservation {
+            family: DomainFamily::Crypto,
+            source_id: DomainSourceId::chainlink(),
+            instrument_key: DomainInstrumentKey::chainlink_feed(feed),
+            metric: DomainMetric::OraclePrice,
+            value,
+            observed_at,
+            publish_time: observed_at,
+        }))
+    }
+
+    async fn fetch_incremental(
+        &self,
+        feed: &ChainlinkFeedKey,
+        address: Address,
+        from_exclusive: DateTime<Utc>,
+    ) -> QuantResult<Vec<DomainObservation>> {
+        let contract = AggregatorV3Interface::new(address, &self.provider);
+        let latest = contract.latestRoundData().call().await.map_err(|error| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_latestRoundData".into(),
+                reason: error.to_string(),
+            })
+        })?;
+        let observation = self
+            .observation_from_round_fields(feed, address, latest.answer, latest.updatedAt)
+            .await?;
+        Ok(observation
+            .into_iter()
+            .filter(|row| row.observed_at > from_exclusive)
+            .collect())
+    }
+
+    async fn fetch_bootstrap(
+        &self,
+        feed: &ChainlinkFeedKey,
+        address: Address,
+        from_exclusive: DateTime<Utc>,
+        to_inclusive: DateTime<Utc>,
+    ) -> QuantResult<Vec<DomainObservation>> {
+        let contract = AggregatorV3Interface::new(address, &self.provider);
+        let latest = contract.latestRoundData().call().await.map_err(|error| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_latestRoundData".into(),
+                reason: error.to_string(),
+            })
+        })?;
+        let latest_round = latest.roundId.to::<u64>();
+        let backscan = u64::from(self.config.max_round_backscan);
+        let start_round = latest_round.saturating_sub(backscan).max(1);
+        let mut observations = Vec::new();
+        for round_id in start_round..=latest_round {
+            let round = contract
+                .getRoundData(alloy::primitives::Uint::<80, 2>::from(round_id))
+                .call()
+                .await
+                .map_err(|error| {
+                    QuantError::Rpc(RpcError::CallFailed {
+                        method: "chainlink_getRoundData".into(),
+                        reason: error.to_string(),
+                    })
+                })?;
+            if let Some(observation) = self
+                .observation_from_round_fields(feed, address, round.answer, round.updatedAt)
+                .await?
+                && observation.observed_at > from_exclusive
+                && observation.observed_at <= to_inclusive
+            {
+                observations.push(observation);
+            }
+        }
+        observations.sort_by_key(|row| row.observed_at);
+        Ok(observations)
+    }
+}
+
+fn scale_answer(answer: I256, decimals: u8) -> QuantResult<Decimal> {
+    let raw = answer
+        .to_string()
+        .parse::<Decimal>()
+        .map_err(|error| QuantError::config(format!("chainlink answer parse: {error}")))?;
+    let scale = Decimal::from(10_u64.pow(u32::from(decimals)));
+    Ok(raw / scale)
+}
+
+#[async_trait::async_trait]
+impl DomainDataSource for ChainlinkAggregatorSource {
+    fn family(&self) -> DomainFamily {
+        DomainFamily::Crypto
+    }
+
+    fn source_id(&self) -> DomainSourceId {
+        DomainSourceId::chainlink()
+    }
+
+    async fn fetch(&self, request: DomainFetchRequest) -> QuantResult<Vec<DomainObservation>> {
+        let feed = Self::parse_instrument(&request.instrument_key)?;
+        let address = self.feeds.get(&feed).ok_or_else(|| {
+            QuantError::config(format!("chainlink feed `{feed}` is not configured"))
+        })?;
+        if request.bootstrap {
+            self.fetch_bootstrap(
+                &feed,
+                *address,
+                request.from_exclusive,
+                request.to_inclusive,
+            )
+            .await
+        } else {
+            self.fetch_incremental(&feed, *address, request.from_exclusive)
+                .await
+        }
+    }
+}

@@ -27,9 +27,9 @@ use rust_decimal::Decimal;
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedLeg},
+    generic::stats::{realized_volatility, simple_return},
     names::structural as names,
     resolved::{MicrostructureBucket, ResolvedBook},
-    stats::{realized_volatility, simple_return},
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
 use crate::trade_tape::{

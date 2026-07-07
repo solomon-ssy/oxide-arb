@@ -10,9 +10,12 @@
 //!
 //! All types propagate errors through [`quant_pivot_error`]'s sub-error system.
 
+pub mod binance;
+pub mod chainlink;
 pub mod clob;
 pub mod ctf;
 pub mod data_api;
+pub mod domain;
 pub mod exchange;
 pub mod fees;
 pub mod gamma;

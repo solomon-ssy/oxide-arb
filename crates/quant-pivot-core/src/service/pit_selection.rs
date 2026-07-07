@@ -29,7 +29,8 @@ use chrono::{DateTime, Utc};
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{MarketCandidate, MarketInfo},
+    domain::{DomainAvailability, MarketCandidate, MarketInfo},
+    enums::domain::DomainFamily,
     runtime_config::{DataQualityConfig, DecimalString, FeaturesConfig, SelectionConfig},
     types::{RuntimeConfigVersionId, Usd},
 };
@@ -154,6 +155,14 @@ fn project_candidate(
         // Offline replay: a stored book is the venue truth (no live-feed staleness).
         connection_healthy: true,
         ingest_lag_ms: 0,
+        // Offline selection never gates on model feature requirements (see
+        // `request`), so availability is conservative truth only: a mapped
+        // category without a consulted linkage is `Unresolved` (fail-closed);
+        // the domain slice itself is assembled later from the frozen ledger.
+        domain_availability: DomainFamily::for_category(market.fee_category())
+            .map_or(DomainAvailability::NotMapped, |_| {
+                DomainAvailability::Unresolved
+            }),
         observed_at: as_of,
     }
 }
@@ -187,6 +196,7 @@ mod tests {
             event_id: EventId::new("e"),
             question: "q".to_owned(),
             slug: "s".to_owned(),
+            description: None,
             categories: vec![MarketCategory::Sports],
             status: MarketStatus::Active,
             outcome: None,

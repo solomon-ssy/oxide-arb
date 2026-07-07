@@ -90,11 +90,15 @@ fn finite_f64(decimal: Decimal) -> Option<f64> {
 }
 
 /// Resolve one column cell to a finite `f64`, or `None` to reject the row.
+///
+/// The two-layer lookup covers both the generic slice and the optional domain
+/// slice; a market without a domain slice resolves domain columns to missing
+/// (non-critical domain columns then take `fill_missing`, and models learn on
+/// the availability structure explicitly — never a fabricated observation).
 fn cell(example: &TrainingExample, column: &FeatureColumnSpec) -> Option<f64> {
     let resolved = example
         .feature_vector
-        .values
-        .get(&column.feature)
+        .value(&column.feature)
         .and_then(scalar);
     let decimal = match resolved {
         Some(value) => column.scale.apply(value),
@@ -276,8 +280,9 @@ mod tests {
                 market_id: MarketId::new("m"),
                 token_id: Some(TokenId::new("t")),
                 as_of,
-                schema_version: SchemaVersion::FIRST,
-                values,
+                generic_schema_version: SchemaVersion::FIRST,
+                generic: values,
+                domain: None,
                 substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
                 staleness_ms: 0,

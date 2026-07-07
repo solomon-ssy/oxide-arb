@@ -280,6 +280,7 @@ pub async fn register(
             RegisterFactorDefinitionsCommand {
                 factors: config.factors.clone(),
                 features: config.features.clone(),
+                domain: config.domain.clone(),
                 reason: request.reason.clone(),
             },
             governance_actor(&actor, &acting_role),

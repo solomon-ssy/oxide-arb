@@ -1,10 +1,22 @@
 //! Background runtime tasks for Phase 0 ingest plane.
 
 use super::AppContext;
-use crate::app::{task_id::TaskId, task_registry::AppRunner, trade_tape_worker::TradeTapeWorker};
-use quant_pivot_api::exchange::ExchangeLogClient;
-use quant_pivot_models::clickhouse::TradeTapeRow;
-use quant_pivot_repository::{clickhouse::ChFactWriter, traits::TradeTapeBlockCursorRepository};
+use crate::{
+    app::{
+        domain_ingest_worker::DomainIngestWorker, task_id::TaskId, task_registry::AppRunner,
+        trade_tape_worker::TradeTapeWorker,
+    },
+    service::domain_ingest::DomainIngestor,
+};
+use quant_pivot_api::{
+    binance::BinanceKlineSource, chainlink::ChainlinkAggregatorSource, domain::DomainDataSource,
+    exchange::ExchangeLogClient,
+};
+use quant_pivot_models::clickhouse::{DomainObservationRow, TradeTapeRow};
+use quant_pivot_repository::{
+    clickhouse::ChFactWriter,
+    traits::{DomainSourceCursorRepository, TradeTapeBlockCursorRepository},
+};
 use std::sync::Arc;
 
 impl AppContext {
@@ -24,6 +36,13 @@ impl AppContext {
             runner.spawn(TaskId::TradeTapeWorker, move |token| async move {
                 if let Err(error) = worker.run(token).await {
                     tracing::error!(%error, "TradeTapeWorker exited with error");
+                }
+            });
+        }
+        if let Some(worker) = self.build_domain_ingest_worker() {
+            runner.spawn(TaskId::DomainIngestWorker, move |token| async move {
+                if let Err(error) = worker.run(token).await {
+                    tracing::error!(%error, "DomainIngestWorker exited with error");
                 }
             });
         }
@@ -52,6 +71,60 @@ impl AppContext {
                 "quant_trade_tape",
             )),
             config.clone(),
+        )))
+    }
+
+    fn build_domain_ingest_worker(&self) -> Option<Arc<DomainIngestWorker>> {
+        let sources_config = &self.config.domain_sources;
+        if !sources_config.binance.enabled && !sources_config.chainlink.enabled {
+            return None;
+        }
+
+        let mut sources: Vec<Arc<dyn DomainDataSource>> = Vec::new();
+        let mut poll_secs = u64::MAX;
+
+        if sources_config.binance.enabled {
+            sources.push(Arc::new(BinanceKlineSource::new(
+                sources_config.binance.clone(),
+            )));
+            poll_secs = poll_secs.min(sources_config.binance.poll_secs);
+        }
+        if sources_config.chainlink.enabled {
+            match ChainlinkAggregatorSource::connect(
+                &self.config.polymarket.onchain,
+                sources_config.chainlink.clone(),
+            ) {
+                Ok(source) => {
+                    sources.push(Arc::new(source));
+                    poll_secs = poll_secs.min(sources_config.chainlink.poll_secs);
+                }
+                Err(error) => {
+                    tracing::error!(%error, "domain-ingest worker disabled: Chainlink RPC connect failed");
+                    if sources.is_empty() {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        if sources.is_empty() {
+            return None;
+        }
+
+        Some(Arc::new(DomainIngestWorker::new(
+            Arc::new(DomainIngestor::new(
+                sources,
+                Arc::clone(&self.infra.repos.domain_source_cursor)
+                    as Arc<dyn DomainSourceCursorRepository>,
+                Arc::new(ChFactWriter::<DomainObservationRow>::new(
+                    Arc::clone(&self.infra.ch),
+                    Arc::clone(&self.infra.ch_write_manager),
+                    "quant_domain_observation",
+                )),
+                self.runtime_config(),
+                sources_config.clone(),
+            )),
+            poll_secs.max(1),
         )))
     }
 }

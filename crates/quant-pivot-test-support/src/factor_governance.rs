@@ -3,7 +3,7 @@
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     enums::quant::PublicationStatus,
-    runtime_config::{FactorsConfig, FeaturesConfig},
+    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
 };
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::factors::FactorEngine;
@@ -20,8 +20,9 @@ pub async fn register_all_factor_definitions(
     factor_repo: &dyn FactorRepository,
     factors: &FactorsConfig,
     features: &FeaturesConfig,
+    domain: &DomainConfig,
 ) -> QuantResult<()> {
-    let engine = FactorEngine::new(factors, features, None);
+    let engine = FactorEngine::new(factors, features, domain, None);
     for spec in &engine.factor_set().definitions {
         let definition = spec.try_to_new(features.feature_schema_version)?;
         factor_repo
@@ -43,8 +44,9 @@ pub async fn publish_all_factor_definitions(
     factor_repo: &dyn FactorRepository,
     factors: &FactorsConfig,
     features: &FeaturesConfig,
+    domain: &DomainConfig,
 ) -> QuantResult<()> {
-    let engine = FactorEngine::new(factors, features, None);
+    let engine = FactorEngine::new(factors, features, domain, None);
     for spec in &engine.factor_set().definitions {
         let definition = spec.try_to_new(features.feature_schema_version)?;
         let row = factor_repo

@@ -10,19 +10,15 @@
 //! identical [`FeatureVector`] online and offline.
 
 mod availability;
-mod book;
 mod builder;
 mod decision_capture;
-mod market;
-mod microstructure;
+pub mod domain;
+pub mod generic;
 pub mod names;
 mod null_policy;
 mod persistence;
 mod resolved;
 mod schema;
-pub(crate) mod stats;
-mod structural;
-mod timeseries;
 mod value;
 mod writer;
 
@@ -37,6 +33,9 @@ pub use builder::{
 pub use decision_capture::{
     MarketDecisionCapture, RejectedMarketDraft, ResolvedMarketBundle, draft_data_quality_snapshot,
 };
+pub use domain::{
+    CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceInputs,
+};
 pub use null_policy::{NullDecision, NullPolicyEngine};
 pub use resolved::{
     MarketWindowSnapshot, MicrostructureBucket, ResolvedBook, ResolvedMarketContext,
@@ -47,8 +46,8 @@ pub use schema::{
     validate_required_features,
 };
 pub use value::{
-    EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, FeatureValueKind,
-    FeatureVector, NullReason, SubstitutionAudit, merged_required_features,
+    DomainFeatureSlice, EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue,
+    FeatureValueKind, FeatureVector, NullReason, SubstitutionAudit, merged_required_features,
 };
 pub use writer::feature_events;
 
@@ -98,6 +97,9 @@ pub struct FeatureBuildInput<'a> {
     pub window: &'a MarketWindowSnapshot,
     /// Pre-fetched trade-tape participant history for the primary token.
     pub trade_tape: &'a TradeTapeWindowSnapshot,
+    /// Pre-fetched domain-slice inputs (present only for markets whose
+    /// category maps to an enabled vertical with a resolved linkage).
+    pub domain: Option<&'a DomainSliceInputs>,
     /// Neg-risk sibling leg set: expected catalog count plus resolvable YES legs.
     pub sibling: &'a NegRiskLegSet,
     /// Frozen feature configuration snapshot.

@@ -17,6 +17,9 @@ pub struct Model {
     pub title: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
+    /// Recurring-series slug (Tier-0 linkage anchor), when present.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub series_slug: Option<String>,
     pub status: EventStatus,
     /// Raw Gamma tag slugs — the official categorization source.
     pub tags: Vec<String>,

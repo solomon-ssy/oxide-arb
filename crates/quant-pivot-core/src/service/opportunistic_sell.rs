@@ -127,7 +127,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             return Ok(None);
         }
 
-        let binding = schema_binding(&config.features, &config.factors, None)?;
+        let binding = schema_binding(&config.features, &config.factors, &config.domain, None)?;
         let factory = self.deps.factory_builder.build(binding);
         let runtime = match factory.load_sell_scorer(&version).await {
             Ok(runtime) => runtime,
@@ -154,6 +154,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             window_provider: &self.deps.window_provider,
             market: &market,
             features: &config.features,
+            domain: &config.domain,
             data_quality: &config.data_quality,
             requirements: &requirements,
             as_of,

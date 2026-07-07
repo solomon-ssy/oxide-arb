@@ -96,6 +96,7 @@ impl From<&CatalogEvent> for EventRegistryInfo {
             event_id: EventId::new(&event.id),
             title: event.title.clone(),
             slug: event.slug.clone(),
+            series_slug: event.series_slug.clone(),
             market_ids: event
                 .markets
                 .iter()
@@ -116,6 +117,7 @@ impl From<&CatalogEvent> for UpsertEvent {
             event_id: EventId::new(&event.id),
             title: event.title.clone(),
             slug: event.slug.clone(),
+            series_slug: event.series_slug.clone(),
             status: event.status,
             tags: event.tags.clone().into(),
             neg_risk: event.neg_risk,
@@ -171,6 +173,7 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             event_id: ctx.event_id.clone(),
             question: market.question.clone(),
             slug: market.slug.clone().unwrap_or_default(),
+            description: market.description.clone(),
             categories: ctx.categories,
             status,
             outcome: outcome.clone(),
@@ -196,6 +199,7 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             token_no: no_token,
             question: market.question,
             slug: market.slug.unwrap_or_default(),
+            description: market.description,
             categories: ctx.categories,
             status,
             outcome,

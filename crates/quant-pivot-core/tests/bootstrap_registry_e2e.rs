@@ -17,7 +17,7 @@ use quant_pivot_models::{
         PublishFactorsBatchCommand, RegisterFactorDefinitionsCommand,
     },
     enums::{model::ModelFamily, quant::PublicationStatus},
-    runtime_config::{FactorsConfig, FeaturesConfig},
+    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
     types::SchemaVersion,
 };
 use quant_pivot_repository::{
@@ -95,6 +95,7 @@ async fn factor_register_then_publish_batch_seeds_catalog() {
             RegisterFactorDefinitionsCommand {
                 factors: factors.clone(),
                 features: features.clone(),
+                domain: DomainConfig::default(),
                 reason: "bootstrap register".to_owned(),
             },
             actor(),
@@ -118,6 +119,7 @@ async fn factor_register_then_publish_batch_seeds_catalog() {
             RegisterFactorDefinitionsCommand {
                 factors: factors.clone(),
                 features: features.clone(),
+                domain: DomainConfig::default(),
                 reason: "bootstrap register (idempotent)".to_owned(),
             },
             actor(),

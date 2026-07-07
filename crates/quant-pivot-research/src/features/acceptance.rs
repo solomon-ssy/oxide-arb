@@ -11,7 +11,8 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::runtime_config::SelectionConfig;
 use quant_pivot_models::{
     domain::{
-        BookSnapshot, MarketCandidate, MarketRegistryInfo, PointInTimeDataSource, TokenInfo,
+        BookSnapshot, DomainAvailability, MarketCandidate, MarketRegistryInfo,
+        PointInTimeDataSource, TokenInfo,
         market::{
             book::BookLevel,
             registry::{NegRiskLeg, NegRiskLegSet},
@@ -23,7 +24,9 @@ use quant_pivot_models::{
         market::MarketStatus,
         quant::DataQualityStatus,
     },
-    runtime_config::{DataQualityConfig, FeatureFamily, FeatureStalenessPolicy, FeaturesConfig},
+    runtime_config::{
+        DataQualityConfig, DomainConfig, FeatureFamily, FeatureStalenessPolicy, FeaturesConfig,
+    },
     types::{Bps, EventId, MarketId, Price, Probability, SchemaVersion, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
@@ -194,8 +197,9 @@ fn sample_vector() -> FeatureVector {
         market_id: MarketId::new("m1"),
         token_id: Some(TokenId::new("t1")),
         as_of: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-        schema_version: SchemaVersion::FIRST,
-        values,
+        generic_schema_version: SchemaVersion::FIRST,
+        generic: values,
+        domain: None,
         substitutions: Vec::new(),
         data_quality: DataQualityStatus::Fresh,
         staleness_ms: 100,
@@ -267,7 +271,7 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
         enabled_feature_families: vec![FeatureFamily::Structural],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let market = SelectedMarket {
         market_id: MarketId::new("m-binary"),
         event_id: EventId::new("e1"),
@@ -292,6 +296,7 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
             pit,
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -300,7 +305,7 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
         .expect("build");
 
     let value = vector
-        .values
+        .generic
         .get(&NEGRISK_LEG_ASK_SUM)
         .expect("structural neg-risk feature present in schema");
     assert_eq!(
@@ -350,7 +355,7 @@ async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() 
         enabled_feature_families: vec![FeatureFamily::TimeSeries, FeatureFamily::Microstructure],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let market = SelectedMarket {
         market_id: MarketId::new("m-gate"),
         event_id: EventId::new("e1"),
@@ -378,6 +383,7 @@ async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() 
             pit: PitView::Live(&source),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -411,7 +417,7 @@ fn feature_event_writer_batches_present_only() {
     assert_eq!(rows[0].ingestion_time, 1_000);
 
     let mut missing_only = sample_vector();
-    missing_only.values.insert(
+    missing_only.generic.insert(
         book::SPREAD_BPS,
         FeatureValue::Missing(NullReason::SourceUnavailable),
     );
@@ -438,6 +444,7 @@ fn candidate_with_book() -> MarketCandidate {
         book_age_ms: Some(500),
         connection_healthy: true,
         ingest_lag_ms: 0,
+        domain_availability: DomainAvailability::NotMapped,
         crossed: false,
         empty: false,
         observed_at: Utc::now(),
@@ -574,6 +581,7 @@ impl PointInTimeDataSource for ParityLiveSource {
             token_no: TokenId::new("no"),
             question: "parity?".into(),
             slug: "parity".into(),
+            description: None,
             categories: CategorySet::from(MarketCategory::Sports),
             status: self.fixture.market.status,
             outcome: None,
@@ -651,7 +659,7 @@ async fn online_offline_feature_parity() {
         enabled_feature_families: vec![FeatureFamily::MarketMetadata, FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let selected = SelectedMarket {
         market_id: market_id.clone(),
         event_id: EventId::new("evt-parity"),
@@ -682,6 +690,7 @@ async fn online_offline_feature_parity() {
             pit: PitView::Live(&live_source),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &data_quality,
@@ -701,6 +710,7 @@ async fn online_offline_feature_parity() {
             pit: PitView::Historical(&hist_engine),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &data_quality,
@@ -708,7 +718,7 @@ async fn online_offline_feature_parity() {
         .await
         .expect("historical build");
 
-    assert_eq!(live.values, historical.values);
+    assert_eq!(live.generic, historical.generic);
     assert_eq!(
         ResearchHasher::feature_vector(&live).expect("hash"),
         ResearchHasher::feature_vector(&historical).expect("hash"),
@@ -788,7 +798,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
         enabled_feature_families: vec![FeatureFamily::TimeSeries],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -798,6 +808,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
             pit: PitView::Live(&EmptyPit),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -806,7 +817,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
         .expect("build");
 
     let ret = vector
-        .values
+        .generic
         .get(&FeatureName::ts_return(60))
         .expect("return present");
     assert!(
@@ -840,7 +851,7 @@ async fn feature_stale_book_rejects_market() {
         enabled_feature_families: vec![FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let market = windowed_market(&token);
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, Duration::ZERO);
     let trade_tape =
@@ -854,6 +865,7 @@ async fn feature_stale_book_rejects_market() {
             pit: PitView::Historical(&engine),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -868,7 +880,7 @@ async fn feature_stale_book_rejects_market() {
     );
     assert_eq!(
         vector
-            .values
+            .generic
             .get(&book::BEST_BID)
             .and_then(FeatureValue::null_reason),
         Some(NullReason::StaleBeyondPolicy),
@@ -914,7 +926,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
         enabled_feature_families: vec![FeatureFamily::TimeSeries],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let required = vec![FeatureName::ts_return(60)];
 
     // Default policy rejects a stale *required* feature ⇒ Insufficient.
@@ -927,6 +939,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
             pit: PitView::Live(&EmptyPit),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -951,6 +964,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
             pit: PitView::Live(&EmptyPit),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &lenient,
@@ -960,7 +974,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
     assert_ne!(degraded.data_quality, DataQualityStatus::Insufficient);
     assert_eq!(
         degraded
-            .values
+            .generic
             .get(&FeatureName::ts_return(60))
             .and_then(FeatureValue::null_reason),
         Some(NullReason::StaleBeyondPolicy),
@@ -986,7 +1000,7 @@ async fn feature_out_of_valid_range_rejects() {
         enabled_feature_families: vec![FeatureFamily::PriceBook],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let market = windowed_market(&token);
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, Duration::ZERO);
     let trade_tape =
@@ -1000,6 +1014,7 @@ async fn feature_out_of_valid_range_rejects() {
             pit: PitView::Historical(&engine),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -1009,7 +1024,7 @@ async fn feature_out_of_valid_range_rejects() {
 
     assert_eq!(
         vector
-            .values
+            .generic
             .get(&book::BEST_BID)
             .and_then(FeatureValue::null_reason),
         Some(NullReason::OutOfValidRange),
@@ -1030,8 +1045,9 @@ fn category_feature_projects_table_index() {
         market_id: MarketId::new("m1"),
         token_id: Some(TokenId::new("t1")),
         as_of: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
-        schema_version: SchemaVersion::FIRST,
-        values,
+        generic_schema_version: SchemaVersion::FIRST,
+        generic: values,
+        domain: None,
         substitutions: Vec::new(),
         data_quality: DataQualityStatus::Fresh,
         staleness_ms: 0,
@@ -1116,7 +1132,7 @@ async fn online_offline_parity_full_families_with_window() {
     };
     let trade_tape = TradeTapeWindowSnapshot::empty(market_id.clone(), as_of, Duration::ZERO);
     let config = FeaturesConfig::default();
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let selected = parity_selected_market(&market_id, &token);
     let dq = DataQualityConfig::default();
 
@@ -1132,6 +1148,7 @@ async fn online_offline_parity_full_families_with_window() {
             pit: PitView::Live(&live_source),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &dq,
@@ -1151,6 +1168,7 @@ async fn online_offline_parity_full_families_with_window() {
             pit: PitView::Historical(&hist_engine),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &dq,
@@ -1158,13 +1176,13 @@ async fn online_offline_parity_full_families_with_window() {
         .await
         .expect("historical build");
 
-    assert_eq!(live.values, historical.values);
+    assert_eq!(live.generic, historical.generic);
     assert_eq!(
         ResearchHasher::feature_vector(&live).expect("hash"),
         ResearchHasher::feature_vector(&historical).expect("hash"),
     );
     assert!(
-        live.values.contains_key(&FeatureName::ts_return(60)),
+        live.generic.contains_key(&FeatureName::ts_return(60)),
         "the window-backed time-series family must participate in the parity proof"
     );
 }
@@ -1232,6 +1250,7 @@ impl PointInTimeDataSource for SiblingLegLiveSource<'_> {
             token_no: TokenId::new("no-negrisk"),
             question: "negrisk parity?".into(),
             slug: "negrisk-parity".into(),
+            description: None,
             categories: CategorySet::from(MarketCategory::Crypto),
             status: self.fixture.market.status,
             outcome: None,
@@ -1382,7 +1401,7 @@ async fn build_sibling_parity_vectors(
         ],
         ..FeaturesConfig::default()
     };
-    let builder = ConfiguredFeatureBuilder::new(&config);
+    let builder = ConfiguredFeatureBuilder::new(&config, &DomainConfig::default());
     let window = MarketWindowSnapshot::empty(
         selected.primary_token_id.clone(),
         fixture.as_of,
@@ -1404,6 +1423,7 @@ async fn build_sibling_parity_vectors(
             pit: PitView::Live(&live_source),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling,
             config: &config,
             data_quality: &data_quality,
@@ -1420,6 +1440,7 @@ async fn build_sibling_parity_vectors(
             pit: PitView::Historical(&hist_engine),
             window: &window,
             trade_tape: &trade_tape,
+            domain: None,
             sibling,
             config: &config,
             data_quality: &data_quality,
@@ -1438,13 +1459,13 @@ async fn negrisk_sibling_legs_online_offline_parity() {
     };
     let (live, historical) = build_sibling_parity_vectors(&fixture, &sibling, &selected).await;
 
-    assert_eq!(live.values, historical.values);
+    assert_eq!(live.generic, historical.generic);
     assert_eq!(
         ResearchHasher::feature_vector(&live).expect("hash"),
         ResearchHasher::feature_vector(&historical).expect("hash"),
     );
     let ask_sum = live
-        .values
+        .generic
         .get(&NEGRISK_LEG_ASK_SUM)
         .expect("leg ask sum present");
     assert_eq!(
@@ -1465,7 +1486,7 @@ async fn negrisk_missing_catalog_leg_fails_closed() {
     };
     let (live, _) = build_sibling_parity_vectors(&fixture, &sibling, &selected).await;
     let value = live
-        .values
+        .generic
         .get(&NEGRISK_LEG_ASK_SUM)
         .expect("neg-risk leg ask sum in schema");
     assert_eq!(
@@ -1499,6 +1520,7 @@ fn negrisk_from_catalog_excludes_non_neg_risk_members() {
             event_id: EventId::new("evt-catalog"),
             question: "Q?".into(),
             slug: id.into(),
+            description: None,
             categories: vec![MarketCategory::Crypto],
             status: MarketStatus::Active,
             outcome: None,

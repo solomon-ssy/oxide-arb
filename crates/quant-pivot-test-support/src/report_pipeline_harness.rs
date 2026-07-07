@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
     governance::{BiasTableApplicator, RuntimeModeHandle, WeightOverlayApplicator},
@@ -37,16 +37,17 @@ use quant_pivot_core::{
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
+        MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        CoreEventPublisher, NewAccountSnapshot, NewEquitySnapshot, NewMarketSelection,
-        NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, PointInTimeDataSource,
-        RecommendationInfo, RecommendationReportInfo,
+        CoreEventPublisher, MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot,
+        NewEquitySnapshot, NewMarketLinkage, NewMarketSelection, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, Paginated, PointInTimeDataSource, RecommendationInfo,
+        RecommendationReportInfo,
         governance::lifecycle::OperationalPhase,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -62,16 +63,16 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     runtime_config::{
-        DecimalString, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig, ModelConfig,
-        ModelVersionRef, PortfolioBudget, PortfolioConfig, PortfolioConstraints,
+        DecimalString, DomainConfig, FactorCrossSectionConfig, FactorsConfig, FeaturesConfig,
+        ModelConfig, ModelVersionRef, PortfolioBudget, PortfolioConfig, PortfolioConstraints,
         RUNTIME_CONFIG_SCHEMA_VERSION, ReportsConfig, RuntimeConfig, SelectionConfig,
     },
     types::{
-        AccountPositions, ContentHash, EventId, ExposureBreakdown, MarketId, MarketSelectionId,
-        ModelSpecId, ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioRejectedSummary, PortfolioRiskBudget, Price,
-        RecommendationId, RecommendationReportId, ReportDataQualityTokens,
-        RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        AccountPositions, ContentHash, DomainInstrumentKey, EventId, ExposureBreakdown, MarketId,
+        MarketLinkageId, MarketSelectionId, ModelSpecId, ModelVersionId, OperationLogId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
+        PortfolioRiskBudget, Price, RecommendationId, RecommendationReportId,
+        ReportDataQualityTokens, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
         SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
@@ -86,10 +87,10 @@ use quant_pivot_repository::{
     },
     traits::{
         EquitySnapshotRepository, EventRepository, FactorRepository,
-        FavoriteLongshotBiasTableRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, PositionRepository, QuantFactReadRepository,
-        RecommendationReportRepository, RecommendationRepository, ReservedCapitalRepository,
-        RuntimeConfigVersionRepository,
+        FavoriteLongshotBiasTableRepository, MarketLinkageRepository, MarketRepository,
+        MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
+        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
+        ReservedCapitalRepository, RuntimeConfigVersionRepository,
     },
 };
 use quant_pivot_research::{
@@ -216,6 +217,57 @@ impl PolymarketAccountClient for StubAccountClient {
     }
 }
 
+/// Empty linkage ledger: every market is fail-closed unresolved (no domain
+/// slice, `DomainAvailability::Unresolved` for mapped categories).
+pub struct EmptyLinkageRepo;
+
+#[async_trait]
+impl MarketLinkageRepository for EmptyLinkageRepo {
+    async fn append(&self, _linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_market_linkage"),
+            detail: "EmptyLinkageRepo is read-only".to_owned(),
+        })
+    }
+
+    async fn valid_at(
+        &self,
+        _market_id: &MarketId,
+        _as_of: DateTime<Utc>,
+    ) -> Result<Option<MarketLinkageInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn latest_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn ledger_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+        _derived_before: DateTime<Utc>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_by_id(
+        &self,
+        _linkage_id: &MarketLinkageId,
+    ) -> Result<Option<MarketLinkageInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: MarketLinkageListQuery,
+    ) -> Result<Paginated<MarketLinkageInfo>, StorageError> {
+        Ok(Paginated::empty_for(&query))
+    }
+}
+
 struct EmptyFactRead;
 
 #[async_trait]
@@ -302,6 +354,24 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
+    async fn domain_observations_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<DomainObservationRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn domain_observation_at(
+        &self,
+        _instrument_key: &DomainInstrumentKey,
+        _metric: &str,
+        _as_of_ms: i64,
+    ) -> Result<Option<DomainObservationRow>, StorageError> {
+        Ok(None)
+    }
+
     async fn observed_markets_between(
         &self,
         _from_ms: i64,
@@ -325,10 +395,12 @@ impl ReportPipelineHarness {
         let store = artifact_store();
         let factor_repo =
             Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
-        publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
+        let domain = DomainConfig::default();
+        publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
             .await
             .expect("publish factor definitions");
-        let model_version_id = publish_weighted_model(db, &store, &factors, &features).await;
+        let model_version_id =
+            publish_weighted_model(db, &store, &factors, &features, &domain).await;
 
         let runtime_config = runtime_config_for_pipeline(
             &model_version_id,
@@ -751,6 +823,8 @@ fn build_report_builder(
             Arc::clone(book_store),
             WsShardHealth::operational(),
             Arc::new(IngestPipelineLagTracker::new()),
+            Arc::new(EmptyLinkageRepo),
+            Arc::new(EmptyFactRead),
         )),
         feature_pipeline: Arc::new(FeaturePipelineService::new(
             FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
@@ -758,6 +832,7 @@ fn build_report_builder(
             noop_feature_writer(),
             Arc::clone(registry),
             live_trade_tape_block_cursor_repo(),
+            Arc::new(EmptyLinkageRepo),
             TradeTapeOnChainConfig::default(),
         )),
         model_runner,
@@ -817,6 +892,7 @@ fn registry_market(
         token_no: TokenId::new(no_token),
         question: question.into(),
         slug: slug.into(),
+        description: None,
         categories: CategorySet::from(MarketCategory::Sports),
         status: MarketStatus::Active,
         outcome: None,
@@ -1022,8 +1098,9 @@ async fn publish_weighted_model(
     store: &Arc<dyn ArtifactStore>,
     factors: &FactorsConfig,
     features: &FeaturesConfig,
+    domain: &DomainConfig,
 ) -> ModelVersionId {
-    let engine = FactorEngine::new(factors, features, None);
+    let engine = FactorEngine::new(factors, features, domain, None);
     let factor_set = engine.factor_set();
     let count = factor_set.definitions.len();
     assert!(count > 0, "the factor set must be non-empty");
@@ -1058,6 +1135,7 @@ async fn publish_weighted_model(
         return_model: ReturnModelSpec::heuristic_default(),
         required_features: Vec::new(),
         objective_report: None,
+        category_scope: None,
     }));
     artifact.validate().expect("artifact valid");
     let artifact_hash = artifact.content_hash().expect("hash");

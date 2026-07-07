@@ -17,8 +17,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, EventRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
-    MarketRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    MarketLinkageRepository, MarketRepository, PositionRepository, QuantFactReadRepository,
+    RecommendationRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -48,6 +48,7 @@ pub struct CoreTrainingDatasetPort {
     feature_repo: Arc<dyn FeatureRepository>,
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
@@ -80,6 +81,7 @@ impl CoreTrainingDatasetPort {
             feature_repo: Arc::clone(&research.feature_repo),
             position_repo: Arc::clone(&research.position_repo),
             fee_calculator: Arc::clone(&research.fee_calculator),
+            linkage_repo: Arc::clone(&research.market_linkage_repo),
             runtime_config,
             bias_table_repo,
             max_spine_samples,
@@ -115,10 +117,12 @@ impl CoreTrainingDatasetPort {
                 feature_repo: Arc::clone(&self.feature_repo),
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
+                linkage_repo: Arc::clone(&self.linkage_repo),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,
                 factors: runtime.factors,
+                domain: runtime.domain,
                 data_quality: runtime.data_quality,
                 training: runtime.training,
                 selection: runtime.selection,

@@ -133,6 +133,7 @@ mod tests {
             token_no: TokenId::new(format!("{id}-no")),
             question: "Q?".into(),
             slug: "q".into(),
+            description: None,
             categories,
             status: MarketStatus::Active,
             outcome: None,

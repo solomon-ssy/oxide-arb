@@ -26,12 +26,15 @@ use quant_pivot_models::{
         BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice, ChUsd,
         MarketResolutionRow, TradeTapeRow,
     },
-    domain::TradeTapePrint,
     domain::market::registry::{CatalogMarketLeg, MarketInfo, NegRiskLegSet},
-    enums::market::MarketStatus,
-    types::{EventId, MarketId, TokenId},
+    domain::{DomainObservation, MarketLinkage, TradeTapePrint},
+    enums::{domain::DomainFamily, market::MarketStatus},
+    runtime_config::DomainConfig,
+    types::{DomainInstrumentKey, EventId, MarketId, TokenId},
 };
-use quant_pivot_repository::traits::{EventRepository, MarketRepository, QuantFactReadRepository};
+use quant_pivot_repository::traits::{
+    EventRepository, MarketLinkageRepository, MarketRepository, QuantFactReadRepository,
+};
 use quant_pivot_research::{
     features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
     pit::{BookSnapshotAt, MarketContextAt, MaterializedPitEngine},
@@ -39,7 +42,11 @@ use quant_pivot_research::{
     training::{ForwardSample, ForwardWindow, MarketResolution as ResearchMarketResolution},
 };
 
-use crate::pipeline::{historical_pit::snapshot_from_row, trade_tape_pit::TradeTapePitParams};
+use crate::pipeline::{
+    domain_pit::{crypto_lookback_secs, oracle_instrument},
+    historical_pit::snapshot_from_row,
+    trade_tape_pit::TradeTapePitParams,
+};
 
 /// One `(market, token)` instant the replay will resolve point-in-time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +71,8 @@ pub struct WindowSpec {
     pub source_delay: Duration,
     /// Maximum forward label horizon (forward facts are read this far past `window_end`).
     pub max_horizon_secs: u64,
+    /// Frozen domain-plane configuration (drives linkage + observation prefetch).
+    pub domain: DomainConfig,
 }
 
 /// Batch-prefetched historical facts for an offline replay window.
@@ -80,6 +89,11 @@ pub struct Prefetched {
     pub markets_by_id: HashMap<MarketId, Arc<MarketInfo>>,
     /// Per-event neg-risk leg enumeration (expected vs resolved), keyed by event.
     pub neg_risk_leg_sets: HashMap<EventId, NegRiskLegSet>,
+    /// External domain observations per instrument, ascending (Phase 11.2.2).
+    pub domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
+    /// Frozen linkage ledger records per market covering the window (any
+    /// derivation order; PIT selection happens per `as_of`).
+    pub linkages: HashMap<MarketId, Vec<MarketLinkage>>,
 }
 
 /// A fully prefetched + materialized historical window, ready for zero-DB replay.
@@ -100,22 +114,26 @@ pub struct HistoricalWindowLoader {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
     event_repo: Arc<dyn EventRepository>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
     max_book_staleness: Duration,
 }
 
 impl HistoricalWindowLoader {
-    /// Wire the loader from the fact reader, market catalog, and staleness bound.
+    /// Wire the loader from the fact reader, market catalog, linkage ledger,
+    /// and staleness bound.
     #[must_use]
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
         market_repo: Arc<dyn MarketRepository>,
         event_repo: Arc<dyn EventRepository>,
+        linkage_repo: Arc<dyn MarketLinkageRepository>,
         max_book_staleness: Duration,
     ) -> Self {
         Self {
             fact_read,
             market_repo,
             event_repo,
+            linkage_repo,
             max_book_staleness,
         }
     }
@@ -232,6 +250,8 @@ impl HistoricalWindowLoader {
         let neg_risk_leg_sets =
             build_neg_risk_leg_sets(self.event_repo.as_ref(), &sample_infos, &markets_by_id)
                 .await?;
+        let (linkages, domain_observations) =
+            self.prefetch_domain(spec, &markets, &markets_by_id).await?;
 
         Ok(Prefetched {
             books,
@@ -240,7 +260,97 @@ impl HistoricalWindowLoader {
             resolutions,
             markets_by_id,
             neg_risk_leg_sets,
+            domain_observations,
+            linkages,
         })
+    }
+
+    /// Prefetch the frozen linkage ledger and PIT domain observations for every
+    /// category-mapped sample market (Phase 11.2.2).
+    ///
+    /// The observation range covers the widest domain lookback before
+    /// `window_start` through `window_end` (domain features never look
+    /// forward); the linkage ledger is bounded by `derived_at <= window_end`
+    /// so per-`as_of` bitemporal selection happens in memory.
+    async fn prefetch_domain(
+        &self,
+        spec: &WindowSpec,
+        sample_markets: &[MarketId],
+        markets_by_id: &HashMap<MarketId, Arc<MarketInfo>>,
+    ) -> QuantResult<(
+        HashMap<MarketId, Vec<MarketLinkage>>,
+        HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
+    )> {
+        let mapped_markets: Vec<MarketId> = sample_markets
+            .iter()
+            .filter(|market_id| {
+                markets_by_id.get(*market_id).is_some_and(|info| {
+                    DomainFamily::for_category(info.fee_category())
+                        .is_some_and(|family| spec.domain.family_enabled(family))
+                })
+            })
+            .cloned()
+            .collect();
+        if mapped_markets.is_empty() {
+            return Ok((HashMap::new(), HashMap::new()));
+        }
+
+        let ledger_rows = self
+            .linkage_repo
+            .ledger_for_markets(&mapped_markets, spec.window_end)
+            .await
+            .map_err(QuantError::from)?;
+        let mut linkages: HashMap<MarketId, Vec<MarketLinkage>> = HashMap::new();
+        let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
+        for info in ledger_rows {
+            let market_id = info.market_id.clone();
+            let linkage = info.into_domain().map_err(|error| {
+                QuantError::config(format!(
+                    "linkage ledger row for market {market_id} has an undecodable outcome \
+                     payload: {error}"
+                ))
+            })?;
+            if let Some(binding) = linkage.binding() {
+                instruments.insert(binding.instrument_key.clone());
+                if let Some(oracle_key) = oracle_instrument(binding) {
+                    instruments.insert(oracle_key);
+                }
+            }
+            linkages.entry(market_id).or_default().push(linkage);
+        }
+        if instruments.is_empty() {
+            return Ok((linkages, HashMap::new()));
+        }
+
+        let lookback_secs = i64::try_from(crypto_lookback_secs(&spec.domain)).unwrap_or(i64::MAX);
+        let delay_secs = i64::try_from(spec.domain.crypto.source_delay_secs).unwrap_or(i64::MAX);
+        let from_ms = (spec.window_start
+            - ChronoDuration::seconds(lookback_secs)
+            - ChronoDuration::seconds(delay_secs))
+        .timestamp_millis();
+        let to_ms = spec.window_end.timestamp_millis();
+        let rows = self
+            .fact_read
+            .domain_observations_between(instruments.into_iter().collect(), from_ms, to_ms)
+            .await
+            .map_err(QuantError::from)?;
+        let mut domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>> =
+            HashMap::new();
+        for row in rows {
+            // An unreadable persisted label means this build cannot interpret
+            // the row — fail closed by skipping (the feature side then reports
+            // DomainSourceUnavailable, never a fabricated value).
+            if let Some(observation) = DomainObservation::from_clickhouse_row(&row) {
+                domain_observations
+                    .entry(observation.instrument_key.clone())
+                    .or_default()
+                    .push(observation);
+            }
+        }
+        for series in domain_observations.values_mut() {
+            series.sort_by_key(|observation| observation.observed_at);
+        }
+        Ok((linkages, domain_observations))
     }
 }
 

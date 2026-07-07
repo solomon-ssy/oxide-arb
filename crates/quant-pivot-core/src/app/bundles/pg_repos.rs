@@ -6,12 +6,13 @@
 
 use quant_pivot_repository::postgres::{
     PgAccountSnapshotRepository, PgAttributionRepository, PgBacktestReportRepository,
-    PgCapitalAllocationRepository, PgEquitySnapshotRepository, PgEventRepository,
-    PgExecutionOrderRepository, PgExecutionSubmissionRepository, PgFactorRepository,
-    PgFavoriteLongshotBiasTableRepository, PgFeatureRepository, PgKillSwitchStateRepository,
-    PgMarketRepository, PgMarketSelectionRepository, PgMenuRepository,
-    PgModelComparisonReportRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-    PgModelRunRepository, PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
+    PgCapitalAllocationRepository, PgDomainSourceCursorRepository, PgEquitySnapshotRepository,
+    PgEventRepository, PgExecutionOrderRepository, PgExecutionSubmissionRepository,
+    PgFactorRepository, PgFavoriteLongshotBiasTableRepository, PgFeatureRepository,
+    PgKillSwitchStateRepository, PgMarketLinkageRepository, PgMarketRepository,
+    PgMarketSelectionRepository, PgMenuRepository, PgModelComparisonReportRepository,
+    PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
+    PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
     PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
     PgResearchJobRepository, PgReservedCapitalRepository, PgRoleMenuRepository,
     PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
@@ -62,6 +63,8 @@ pub struct PgRepositories {
     pub role_permission: Arc<PgRolePermissionRepository>,
     pub account_snapshot: Arc<PgAccountSnapshotRepository>,
     pub trade_tape_block_cursor: Arc<PgTradeTapeBlockCursorRepository>,
+    pub market_linkage: Arc<PgMarketLinkageRepository>,
+    pub domain_source_cursor: Arc<PgDomainSourceCursorRepository>,
 }
 
 impl PgRepositories {
@@ -108,6 +111,8 @@ impl PgRepositories {
             role_permission: arc_repo(&db, PgRolePermissionRepository::new),
             account_snapshot: arc_repo(&db, PgAccountSnapshotRepository::new),
             trade_tape_block_cursor: arc_repo(&db, PgTradeTapeBlockCursorRepository::new),
+            market_linkage: arc_repo(&db, PgMarketLinkageRepository::new),
+            domain_source_cursor: arc_repo(&db, PgDomainSourceCursorRepository::new),
         }
     }
 }

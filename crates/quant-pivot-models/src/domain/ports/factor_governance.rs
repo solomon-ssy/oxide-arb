@@ -5,7 +5,7 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{FactorDefinitionInfo, GovernanceActor},
-    runtime_config::{FactorsConfig, FeaturesConfig},
+    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
     types::FactorDefinitionId,
 };
 
@@ -38,6 +38,8 @@ pub struct RegisterFactorDefinitionsCommand {
     pub factors: FactorsConfig,
     /// Frozen feature config resolving windowed factor inputs + schema version.
     pub features: FeaturesConfig,
+    /// Frozen domain config selecting the category-routed domain factor set.
+    pub domain: DomainConfig,
     /// Operator reason (HTTP op-log only).
     pub reason: String,
 }

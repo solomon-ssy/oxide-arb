@@ -27,6 +27,8 @@ pub enum TaskId {
     DataPipeline,
     /// Periodically ingests Polygon `OrderFilled` logs into `quant_trade_tape`.
     TradeTapeWorker,
+    /// Periodically ingests external domain observations into `quant_domain_observation`.
+    DomainIngestWorker,
 
     // ── Catalog ───────────────────────────────────────────────────────
     GammaSync,
@@ -125,7 +127,9 @@ impl TaskId {
             | Self::WsBroadcaster
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
-            Self::DataPipeline | Self::TradeTapeWorker => TaskKind::WsIngress,
+            Self::DataPipeline | Self::TradeTapeWorker | Self::DomainIngestWorker => {
+                TaskKind::WsIngress
+            }
             Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::PotentialLossEscalation

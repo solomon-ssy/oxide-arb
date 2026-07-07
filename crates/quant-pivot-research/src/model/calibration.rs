@@ -418,6 +418,8 @@ pub fn calibrate_substitution_rules(
         NullReason::TradeTapeUnavailable,
         NullReason::InsufficientTradeTape,
         NullReason::InsufficientRoleCoverage,
+        NullReason::DomainSourceUnavailable,
+        NullReason::LinkageUnresolved,
     ];
     let clean = stratum_mean(samples.iter().filter(|s| s.substitution_reasons.is_empty()));
     let reason_means: Vec<Option<Decimal>> = reasons
@@ -447,6 +449,12 @@ pub fn calibrate_substitution_rules(
             reason_means[8],
             best,
         ),
+        domain_source_unavailable: fail_closed(
+            baseline.domain_source_unavailable,
+            reason_means[9],
+            best,
+        ),
+        linkage_unresolved: fail_closed(baseline.linkage_unresolved, reason_means[10], best),
     };
     let mut fits: Vec<StratumFit> = reasons
         .iter()
@@ -545,6 +553,8 @@ const fn reason_label(reason: NullReason) -> &'static str {
         NullReason::TradeTapeUnavailable => "trade_tape_unavailable",
         NullReason::InsufficientTradeTape => "insufficient_trade_tape",
         NullReason::InsufficientRoleCoverage => "insufficient_role_coverage",
+        NullReason::DomainSourceUnavailable => "domain_source_unavailable",
+        NullReason::LinkageUnresolved => "linkage_unresolved",
     }
 }
 

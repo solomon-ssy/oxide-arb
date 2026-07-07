@@ -2,7 +2,9 @@
 
 > 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
 > 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
-> 离线 replay 在 HistoricalQuantile 下 fail-closed）；11.0/11.2–11.11 仍在设计/规划阶段。
+> 离线 replay 在 HistoricalQuantile 下 fail-closed）；**11.2.2 已落地**（crypto 外部垂直：两层向量、
+> Tier 0/1 linkage、Binance 特征源、domain PIT、category 路由）；**11.2.3 Tier 2 LLM linkage**
+> 设计已冻结、待实现。11.0/11.2.1/11.3–11.11 仍在设计/规划或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -69,6 +71,7 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.2 | Polymarket Vertical Alpha (拆分索引) | — | 4 | [11.2](11.2-polymarket-vertical-alpha.md) |
 | 11.2.1 | Platform-Internal Structural Alpha | 结构因子族 + neg-risk 全腿 + favorite-longshot 偏差表(11.3 提前件) | 4(前半) | [11.2.1](11.2.1-platform-structural-alpha.md) |
 | 11.2.2 | Crypto External Vertical | 两层向量 + 分层 linkage + Binance 特征源 + category 路由 | 4(后半) | [11.2.2](11.2.2-crypto-external-vertical.md) |
+| 11.2.3 | Tier 2 LLM Linkage Fallback | 离线 LLM 结构化抽取 + grounding gate + review queue | — (extends 11.2.2) | [11.2.3](11.2.3-tier2-llm-linkage.md) |
 | 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
 | 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论 | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
@@ -87,6 +90,7 @@ flowchart TD
     P111["11.1 Factor & Signal Redesign"]
     P1121["11.2.1 Platform Structural Alpha"]
     P1122["11.2.2 Crypto External Vertical"]
+    P1123["11.2.3 Tier 2 LLM Linkage"]
     P113["11.3 Calibration & Kelly Safety"]
     P114["11.4 Training Objective & LTR"]
     P115["11.5 Leakage/CPCV/DSR"]
@@ -101,6 +105,7 @@ flowchart TD
     P110 --> P116
     P111 --> P1121
     P1121 --> P1122
+    P1122 -.-> P1123
     P111 --> P114
     P116 --> P114
     P114 --> P115
@@ -124,13 +129,14 @@ flowchart TD
 - **11.7 → 11.8** 是产物表达力:退出/入场结构 + 报告生命周期语义。
 - **11.9 → 11.10** 是研究闭环:归因反馈 + 自动再训练 + 反事实归因,闭合"开环"。
 - **11.2 / 11.11** 相对独立,可并行。**11.2 已破坏式拆分为 [11.2.1](11.2.1-platform-structural-alpha.md)
-  (平台内结构,先行) + [11.2.2](11.2.2-crypto-external-vertical.md)(crypto 外部垂直,后行)**,两篇合计
+  (平台内结构,先行) + [11.2.2](11.2.2-crypto-external-vertical.md)(crypto 外部垂直,**已落地**) + [11.2.3](11.2.3-tier2-llm-linkage.md)
+  (Tier 2 LLM linkage 兜底,设计冻结、待实现)**,三篇合计
   **接管并取代 [`../phase-03/03.8-vertical-domain-closed-loop.md`](../phase-03/03.8-vertical-domain-closed-loop.md)**
   的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance")。
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
-  治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 破坏式 **单调 +1 bump**
-  （当前 `SchemaVersion::FIRST`）、11.2.2 再 +1;`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2 再 bump 至 5
-  (两层向量重构在 11.2.2)。
+  治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
+  11.2.2 再 bump 至 **v5**;`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2 再 bump 至 **5**
+  (两层向量重构在 11.2.2)。Tier 2 LLM linkage 不加 schema bump（见 11.2.3）。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 
