@@ -25,9 +25,9 @@ use quant_pivot_research::{
     model::SignalCandidate,
     portfolio::{
         AccountSnapshot, CorrelationConstraint, CorrelationEstimator, CorrelationInput,
-        CorrelationMarket, DefaultPortfolioPlanner, PlanCandidate, PortfolioPlanInput,
-        PortfolioPlanOutput, PortfolioPlanner, RejectedCandidate, optimizer_from_config,
-        sizing_model_from_config,
+        CorrelationMarket, DefaultPortfolioPlanner, DrawdownState, PlanCandidate,
+        PortfolioPlanInput, PortfolioPlanOutput, PortfolioPlanner, RejectedCandidate,
+        optimizer_from_config, sizing_model_from_config,
     },
     selection::{
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
@@ -535,7 +535,7 @@ impl DefaultReportBuilder {
         selection: &MarketSelectionSnapshot,
         model_outcome: &ModelRunOutcome,
         account: &AccountSnapshot,
-        drawdown_state: quant_pivot_research::portfolio::DrawdownState,
+        drawdown_state: DrawdownState,
         correlation: Option<&CorrelationConstraint>,
     ) -> QuantResult<PortfolioPlanOutput> {
         let caps = portfolio_caps(&context.config)?;

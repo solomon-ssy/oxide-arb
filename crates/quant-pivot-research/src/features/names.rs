@@ -105,6 +105,27 @@ pub mod structural {
     /// (which needs trade-tape); see `11.2.1.1`.
     pub const BOOK_CHURN_INTENSITY: FeatureName =
         FeatureName::from_static("struct.book_churn_intensity");
+    /// Count of trade-tape participant rows in the configured PIT window.
+    pub const TRADE_TAPE_COUNT: FeatureName = FeatureName::from_static("struct.trade_tape_count");
+    /// Total trade-tape notional USD in the configured PIT window.
+    pub const TRADE_TAPE_NOTIONAL_USD: FeatureName =
+        FeatureName::from_static("struct.trade_tape_notional_usd");
+    /// Participant-address coverage ratio in the trade-tape window.
+    pub const PARTICIPANT_COVERAGE_RATIO: FeatureName =
+        FeatureName::from_static("struct.participant_coverage_ratio");
+    /// Distinct fill-participant addresses in the trade-tape window.
+    pub const PARTICIPANT_COUNT: FeatureName = FeatureName::from_static("struct.participant_count");
+    /// Notional-weighted Gini concentration over fill-side participants.
+    pub const PARTICIPANT_GINI: FeatureName = FeatureName::from_static("struct.participant_gini");
+    /// Notional-weighted Herfindahl-Hirschman concentration over participants.
+    pub const PARTICIPANT_HHI: FeatureName = FeatureName::from_static("struct.participant_hhi");
+    /// Largest single-participant notional share (CR1).
+    pub const PARTICIPANT_CR1_SHARE: FeatureName =
+        FeatureName::from_static("struct.participant_cr1_share");
+    /// Maker role Gini when role coverage is sufficient.
+    pub const MAKER_GINI: FeatureName = FeatureName::from_static("struct.maker_gini");
+    /// Taker role Gini when role coverage is sufficient.
+    pub const TAKER_GINI: FeatureName = FeatureName::from_static("struct.taker_gini");
     /// Sum of best-ask across all neg-risk YES legs (drift = sum − 1).
     pub const NEGRISK_LEG_ASK_SUM: FeatureName =
         FeatureName::from_static("struct.negrisk_leg_ask_sum");

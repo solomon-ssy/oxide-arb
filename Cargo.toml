@@ -150,6 +150,8 @@ alloy = { version = "1.6", features = [
   "signer-local",
   "sol-types",
   "contract",
+  "rpc-types",
+  "json-rpc",
 ] }
 
 # HTTP client (aligned with SDK's reqwest ^0.13)

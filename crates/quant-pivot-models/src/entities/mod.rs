@@ -33,6 +33,7 @@ pub mod quant_research_job;
 pub mod quant_settlement_redeem;
 pub mod quant_settlement_redeem_lot;
 pub mod quant_shadow_comparison;
+pub mod quant_trade_tape_block_cursor;
 pub mod quant_training_dataset;
 pub mod role;
 pub mod role_menu;

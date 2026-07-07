@@ -16,6 +16,8 @@ pub struct MarketDataDeployConfig {
     pub gamma: GammaConfig,
     /// Polymarket Data API client (keyless positions reads).
     pub data_api: DataApiConfig,
+    /// On-chain trade-tape ingestion for structural participant-concentration facts.
+    pub trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
 /// Polymarket CLOB WebSocket sharding and reconnect policy.
@@ -137,4 +139,32 @@ const fn default_data_api_page_size() -> u32 {
 }
 const fn default_data_api_size_threshold() -> u32 {
     1
+}
+
+/// On-chain trade-tape ingestion configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TradeTapeOnChainConfig {
+    /// Enable periodic on-chain `OrderFilled` ingestion. Default: true.
+    pub enabled: bool,
+    /// Poll interval in seconds. Default: 30.
+    pub poll_secs: u64,
+    /// Block confirmations before a chunk is considered finalized. Default: 12.
+    pub confirmations: u64,
+    /// Maximum blocks scanned per contract per tick. Default: 2000.
+    pub max_blocks_per_tick: u64,
+    /// Maximum rows written per `ClickHouse` batch. Default: 1000.
+    pub batch_size: usize,
+}
+
+impl Default for TradeTapeOnChainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_secs: 30,
+            confirmations: 12,
+            max_blocks_per_tick: 2_000,
+            batch_size: 1_000,
+        }
+    }
 }

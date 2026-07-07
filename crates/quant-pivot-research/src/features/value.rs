@@ -117,6 +117,14 @@ pub enum NullReason {
     /// A neg-risk sibling leg's order book was absent at `as_of`, so a full-leg
     /// structural feature could not be computed (fail-closed, never zero).
     LegBookMissing,
+    /// No trade-tape window was available at `as_of`.
+    TradeTapeUnavailable,
+    /// The trade-tape window exists but does not meet the configured sample or
+    /// notional floor.
+    InsufficientTradeTape,
+    /// The trade-tape source does not provide enough maker/taker role coverage
+    /// for role-specific features.
+    InsufficientRoleCoverage,
 }
 
 /// A provenance reference tying a feature value back to its evidence.

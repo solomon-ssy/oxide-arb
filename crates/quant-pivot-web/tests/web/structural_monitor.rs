@@ -37,3 +37,33 @@ async fn negrisk_events_returns_ok_envelope() {
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(res.json()["data"], json!([]));
 }
+
+#[tokio::test]
+async fn trade_tape_coverage_returns_ok_envelope() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let req = TestRequest::get()
+        .uri("/api/quant/structural/trade-tape/coverage")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&admin));
+    let res = harness::call(&env.state, req).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let body = res.json();
+    assert!(body["data"]["pit_as_of"].is_string());
+    assert!(body["data"]["source_health"].is_array());
+}
+
+#[tokio::test]
+async fn participant_concentration_returns_ok_envelope() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let req = TestRequest::get()
+        .uri("/api/quant/structural/participant-concentration")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&admin));
+    let res = harness::call(&env.state, req).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let body = res.json();
+    assert!(body["data"]["pit_cutoff"].is_string());
+    assert!(body["data"]["markets"].is_array());
+}

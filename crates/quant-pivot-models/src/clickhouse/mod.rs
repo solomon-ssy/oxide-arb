@@ -8,6 +8,7 @@ mod market_resolution;
 mod projections;
 mod quant_facts;
 mod tick_event;
+mod trade_tape;
 mod types;
 
 pub use book_decision_context::BookDecisionContextRow;
@@ -22,6 +23,7 @@ pub use quant_facts::{
     QuantSignalCandidateEventRow,
 };
 pub use tick_event::TickEventRow;
+pub use trade_tape::TradeTapeRow;
 pub use types::{
     ChBps, ChDecimal64, ChFactor, ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd,
 };

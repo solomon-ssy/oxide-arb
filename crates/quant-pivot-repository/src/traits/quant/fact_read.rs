@@ -14,7 +14,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow,
+        TickEventRow, TradeTapeRow,
     },
     types::{MarketId, TokenId},
 };
@@ -57,6 +57,16 @@ pub trait QuantFactReadRepository: Send + Sync {
         to_ms: i64,
         limit: u64,
     ) -> Result<Vec<TickEventRow>, StorageError>;
+
+    /// Trade-tape participant rows for `market_ids` with `event_time` in
+    /// `[from_ms, to_ms)` (epoch milliseconds), ordered by market then event time.
+    /// Used by structural participant-concentration features and the operator UI.
+    async fn trade_tape_window_by_market(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError>;
 
     /// Coarse mid-price series per token for correlation estimation: the last
     /// `mid_price_close` within each `bucket_secs` interval over

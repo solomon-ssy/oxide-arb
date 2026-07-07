@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS quant_feature_event
     feature_name LowCardinality(String),
     feature_value Decimal64(8),
     value_kind Enum8('decimal' = 0, 'probability' = 1, 'bps' = 2, 'usd' = 3, 'count' = 4, 'bool' = 5, 'category' = 6),
-    source_kind Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'derived' = 5),
+    source_kind Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'trade_tape' = 4, 'derived' = 5),
     staleness_ms UInt64,
     ingestion_time DateTime64(3, 'UTC')
 )

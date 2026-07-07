@@ -27,6 +27,9 @@ pub enum ChFactSource {
     QuantPipeline = 7,
     Execution = 8,
     WsShardStatus = 9,
+    DataApiTrade = 10,
+    ClobTrade = 11,
+    WsTrade = 12,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
@@ -70,6 +73,28 @@ pub enum ChBookEvidenceTier {
     DecisionContext = 2,
     AggregateOnly = 3,
     Insufficient = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChTradeParticipantRole {
+    Maker = 1,
+    Taker = 2,
+    Unknown = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChTradeTapeSource {
+    OnChain = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChTradeSide {
+    Buy = 1,
+    Sell = 2,
+    Unknown = 3,
 }
 
 // ── Quant pipeline facts (snake_case SQL labels) ─────────────────────────
@@ -274,6 +299,7 @@ pub enum ChFeatureSourceKind {
     Book = 1,
     GammaMetadata = 2,
     ClickHouseFact = 3,
+    TradeTape = 4,
     Derived = 5,
 }
 
@@ -284,6 +310,7 @@ impl ChFeatureSourceKind {
             Self::Book => "book",
             Self::GammaMetadata => "gamma_metadata",
             Self::ClickHouseFact => "clickhouse_fact",
+            Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
         }
     }
@@ -295,6 +322,7 @@ impl ChFeatureSourceKind {
             "book" => Some(Self::Book),
             "gamma_metadata" => Some(Self::GammaMetadata),
             "clickhouse_fact" => Some(Self::ClickHouseFact),
+            "trade_tape" => Some(Self::TradeTape),
             "derived" => Some(Self::Derived),
             _ => None,
         }

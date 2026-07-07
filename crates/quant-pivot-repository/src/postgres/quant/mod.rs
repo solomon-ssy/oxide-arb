@@ -26,6 +26,7 @@ mod research_job;
 mod reserved_capital;
 mod settlement_redeem;
 mod shadow_comparison;
+mod trade_tape_block_cursor;
 
 pub use {
     account_snapshot::PgAccountSnapshotRepository, attribution::PgAttributionRepository,
@@ -43,4 +44,5 @@ pub use {
     reconciliation::PgReconciliationRepository, research_job::PgResearchJobRepository,
     reserved_capital::PgReservedCapitalRepository, settlement_redeem::PgSettlementRedeemRepository,
     shadow_comparison::PgShadowComparisonRepository,
+    trade_tape_block_cursor::PgTradeTapeBlockCursorRepository,
 };

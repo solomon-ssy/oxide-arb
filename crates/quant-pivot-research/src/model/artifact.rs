@@ -263,6 +263,12 @@ pub struct SubstitutionConfidenceRules {
     pub not_applicable: Decimal,
     /// Penalty multiplier for [`NullReason::LegBookMissing`].
     pub leg_book_missing: Decimal,
+    /// Penalty multiplier for [`NullReason::TradeTapeUnavailable`].
+    pub trade_tape_unavailable: Decimal,
+    /// Penalty multiplier for [`NullReason::InsufficientTradeTape`].
+    pub insufficient_trade_tape: Decimal,
+    /// Penalty multiplier for [`NullReason::InsufficientRoleCoverage`].
+    pub insufficient_role_coverage: Decimal,
 }
 
 impl SubstitutionConfidenceRules {
@@ -276,6 +282,9 @@ impl SubstitutionConfidenceRules {
             NullReason::InsufficientHistory => self.insufficient_history,
             NullReason::NotApplicable => self.not_applicable,
             NullReason::LegBookMissing => self.leg_book_missing,
+            NullReason::TradeTapeUnavailable => self.trade_tape_unavailable,
+            NullReason::InsufficientTradeTape => self.insufficient_trade_tape,
+            NullReason::InsufficientRoleCoverage => self.insufficient_role_coverage,
         }
     }
 
@@ -289,6 +298,9 @@ impl SubstitutionConfidenceRules {
             insufficient_history: Decimal::new(85, 2),
             not_applicable: Decimal::ONE,
             leg_book_missing: Decimal::new(90, 2),
+            trade_tape_unavailable: Decimal::new(80, 2),
+            insufficient_trade_tape: Decimal::new(85, 2),
+            insufficient_role_coverage: Decimal::new(90, 2),
         }
     }
 }

@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 1),
+# They live in the versioned runtime configuration (schema_version = 2),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -142,6 +142,19 @@ base_url = "https://data-api.polymarket.com"
 page_size = 500
 # Purpose: minimum token size to include (sizeThreshold). Default: 1.
 size_threshold = 1
+
+[market_data.trade_tape_on_chain]
+# Purpose: on-chain OrderFilled ingestion for structural participant
+# concentration. Default: true.
+enabled = true
+# Purpose: poll cadence (seconds). Default: 30.
+poll_secs = 30
+# Purpose: block confirmations before finalizing a chunk. Default: 12.
+confirmations = 12
+# Purpose: max blocks scanned per contract per tick. Default: 2000.
+max_blocks_per_tick = 2000
+# Purpose: ClickHouse batch size. Default: 1000.
+batch_size = 1000
 
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 

@@ -169,7 +169,7 @@ mod tests {
     use super::project_candidate;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::market::book::BookLevel,
+        domain::{MarketInfo, market::book::BookLevel},
         enums::{
             common::{MarketCategory, TickSize},
             market::MarketStatus,
@@ -180,9 +180,9 @@ mod tests {
     use rust_decimal::Decimal;
     use std::sync::Arc;
 
-    fn market() -> quant_pivot_models::domain::MarketInfo {
+    fn market() -> MarketInfo {
         let now = Utc.timestamp_millis_opt(1_000_000).single().expect("ts");
-        quant_pivot_models::domain::MarketInfo {
+        MarketInfo {
             market_id: MarketId::new("m"),
             event_id: EventId::new("e"),
             question: "q".to_owned(),

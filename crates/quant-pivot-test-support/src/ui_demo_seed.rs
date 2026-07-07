@@ -41,12 +41,13 @@ use quant_pivot_models::{
         },
     },
     types::{
-        AttributionDetail, CapitalAllocationId, EntryOutcome, ExecutionOrderId, ExitOutcome,
-        MarketId, OrderId, OrderIntentId, PositionId, Price, RecommendationId,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, SettlementBalanceEvidence, SettlementPayoutVector, SettlementRedeemId,
-        SettlementRedeemIndexSets, SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId,
-        Usd,
+        AccountSnapshotId, AttributionDetail, CapitalAllocationId, EntryOutcome, ExecutionOrderId,
+        ExitOutcome, MarketId, MarketSelectionId, OrderId, OrderIntentId, PortfolioPlanId,
+        PositionId, Price, RecommendationId, RecommendationReportId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        RuntimeConfigVersionId, SettlementBalanceEvidence, SettlementPayoutVector,
+        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId,
+        SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -89,8 +90,8 @@ const SETTLE_NO: &str = "ui-demo-no-token";
 #[derive(Debug, Clone)]
 pub struct DemoSeedRecord {
     pub slug: String,
-    pub report_id: quant_pivot_models::types::RecommendationReportId,
-    pub recommendation_id: quant_pivot_models::types::RecommendationId,
+    pub report_id: RecommendationReportId,
+    pub recommendation_id: RecommendationId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub intent_id: Option<OrderIntentId>,
@@ -1267,9 +1268,9 @@ async fn seed_diff_report(
     let report_id = RecommendationReportId::from_v7();
     let primary = markets.first().expect("at least one market");
     let ids = ExecutionTxnIds {
-        account_snapshot: quant_pivot_models::types::AccountSnapshotId::from_v7(),
-        data_quality_snapshot: quant_pivot_models::types::ReportDataQualitySnapshotId::from_v7(),
-        portfolio_plan: quant_pivot_models::types::PortfolioPlanId::from_v7(),
+        account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
         report: report_id.clone(),
         recommendation: RecommendationId::from_v7(),
         model_version: infra.model_version_id.clone(),
@@ -1327,9 +1328,9 @@ async fn seed_custom_report(
     let market_selection_id =
         seed_market_selection_for_diff(db, &infra.runtime_config_version_id).await;
     let ids = ExecutionTxnIds {
-        account_snapshot: quant_pivot_models::types::AccountSnapshotId::from_v7(),
-        data_quality_snapshot: quant_pivot_models::types::ReportDataQualitySnapshotId::from_v7(),
-        portfolio_plan: quant_pivot_models::types::PortfolioPlanId::from_v7(),
+        account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
         model_version: infra.model_version_id.clone(),
@@ -1384,8 +1385,8 @@ async fn seed_market_catalog_for_diff(
 
 async fn seed_market_selection_for_diff(
     db: &DatabaseConnection,
-    runtime_config_version_id: &quant_pivot_models::types::RuntimeConfigVersionId,
-) -> quant_pivot_models::types::MarketSelectionId {
+    runtime_config_version_id: &RuntimeConfigVersionId,
+) -> MarketSelectionId {
     use quant_pivot_models::{
         domain::NewMarketSelection,
         types::{ContentHash, MarketSelectionId, SelectionExclusionSummary},

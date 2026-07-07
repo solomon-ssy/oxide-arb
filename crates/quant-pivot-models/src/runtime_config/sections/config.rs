@@ -71,6 +71,9 @@ pub struct DataQualityConfig {
     /// bucket at decision time. Governs offline/online feature staleness
     /// (`StalenessRule::MaxFeatureBucketAge`) — independent of live ingest lag.
     pub max_feature_bucket_age_secs: u64,
+    /// Maximum acceptable age (seconds) of the freshest trade-tape print at
+    /// decision time (`StalenessRule::MaxTradeTapeAge`).
+    pub max_trade_tape_age_secs: u64,
     /// Reject crossed books before feature generation.
     pub reject_crossed_books: bool,
     /// Reject empty books before feature generation.
@@ -91,6 +94,7 @@ impl Default for DataQualityConfig {
             max_book_age_ms: 5_000,
             max_ingest_lag_ms: 10_000,
             max_feature_bucket_age_secs: 30,
+            max_trade_tape_age_secs: 300,
             reject_crossed_books: true,
             reject_empty_books: true,
             feature_staleness_policy: FeatureStalenessPolicy::RejectStaleRequired,
@@ -140,9 +144,8 @@ impl Default for MomentumFeaturesConfig {
 
 /// Structural feature-family windows (Phase 11.2.1).
 ///
-/// The structural plane is platform-computable — no external data source. These
-/// windows drive the shock/realized-vol and maker-concentration estimators the
-/// structural feature builder derives from the microstructure window.
+/// These windows drive the shock/realized-vol, book-churn proxy, and persisted
+/// trade-tape participant-concentration estimators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StructuralFeaturesConfig {
@@ -151,6 +154,14 @@ pub struct StructuralFeaturesConfig {
     pub shock_window_secs: u64,
     /// Lookback (seconds) for the book-churn intensity proxy window.
     pub book_churn_window_secs: u64,
+    /// Lookback (seconds) for trade-tape participant concentration.
+    pub trade_tape_window_secs: u64,
+    /// Minimum distinct fill-participant addresses before concentration features are scored.
+    pub trade_tape_min_unique_participants: u64,
+    /// Minimum notional USD required before concentration features are scored.
+    pub trade_tape_min_notional_usd: DecimalString,
+    /// Minimum participant-address coverage ratio in `[0, 1]`.
+    pub trade_tape_min_coverage_ratio: DecimalString,
 }
 
 impl Default for StructuralFeaturesConfig {
@@ -158,6 +169,10 @@ impl Default for StructuralFeaturesConfig {
         Self {
             shock_window_secs: 900,
             book_churn_window_secs: 900,
+            trade_tape_window_secs: 86_400,
+            trade_tape_min_unique_participants: 20,
+            trade_tape_min_notional_usd: DecimalString::new("100.00"),
+            trade_tape_min_coverage_ratio: DecimalString::new("0.95"),
         }
     }
 }
@@ -187,11 +202,10 @@ pub struct FeaturesConfig {
 }
 
 impl FeaturesConfig {
-    /// The maximum trailing lookback (seconds) any enabled time-series feature
-    /// needs — the union of bar, momentum (ROC / slope / slow-EMA), and
-    /// volatility windows. Drives the microstructure-window prefetch.
+    /// The maximum trailing microstructure lookback (seconds) any enabled
+    /// book-derived feature needs.
     #[must_use]
-    pub fn max_lookback_secs(&self) -> u64 {
+    pub fn max_microstructure_lookback_secs(&self) -> u64 {
         self.bar_windows_secs
             .iter()
             .chain(self.momentum.roc_windows_secs.iter())
@@ -202,12 +216,20 @@ impl FeaturesConfig {
             .max()
             .unwrap_or(0)
     }
+
+    /// The maximum trailing fact lookback (seconds) any enabled time-series
+    /// feature needs across all source families.
+    #[must_use]
+    pub fn max_lookback_secs(&self) -> u64 {
+        self.max_microstructure_lookback_secs()
+            .max(self.structural.trade_tape_window_secs)
+    }
 }
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: SchemaVersion::FIRST,
+            feature_schema_version: SchemaVersion::new(4),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
@@ -424,6 +446,8 @@ pub struct StructuralFactorsConfig {
     pub negrisk: NegRiskStructuralConfig,
     /// Favorite-longshot bias factor parameters.
     pub favorite_longshot: FavoriteLongshotConfig,
+    /// Participant-concentration composite weights.
+    pub participant_concentration: ParticipantConcentrationConfig,
     /// Soft per-category IC gate: disable a bias curve whose category IC is not
     /// significant (the hard publish-gate is Phase 11.5).
     pub per_category_ic_gate: bool,
@@ -435,7 +459,30 @@ impl Default for StructuralFactorsConfig {
             reversal_after_shock: ReversalAfterShockConfig::default(),
             negrisk: NegRiskStructuralConfig::default(),
             favorite_longshot: FavoriteLongshotConfig::default(),
+            participant_concentration: ParticipantConcentrationConfig::default(),
             per_category_ic_gate: true,
+        }
+    }
+}
+
+/// Neutral structural participant-concentration composite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ParticipantConcentrationConfig {
+    /// Weight on participant notional Gini.
+    pub gini_weight: DecimalString,
+    /// Weight on largest single-participant notional share (CR1).
+    pub cr1_share_weight: DecimalString,
+    /// Weight on participant notional HHI.
+    pub hhi_weight: DecimalString,
+}
+
+impl Default for ParticipantConcentrationConfig {
+    fn default() -> Self {
+        Self {
+            gini_weight: DecimalString::new("0.50"),
+            cr1_share_weight: DecimalString::new("0.30"),
+            hhi_weight: DecimalString::new("0.20"),
         }
     }
 }

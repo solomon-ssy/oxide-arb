@@ -26,8 +26,9 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        QuantFactorEventRow, TickEventRow,
+        QuantFactorEventRow, TickEventRow, TradeTapeRow,
     },
+    config::TradeTapeOnChainConfig,
     domain::{
         NewModelRun,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
@@ -64,6 +65,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     factor_governance::{publish_all_factor_definitions, register_all_factor_definitions},
     pg::setup_pg,
+    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
@@ -188,6 +190,15 @@ impl QuantFactReadRepository for EmptyFactRead {
         Ok(Vec::new())
     }
 
+    async fn trade_tape_window_by_market(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn last_trades(
         &self,
         _token_ids: Vec<TokenId>,
@@ -295,8 +306,14 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
-    let pipeline =
-        FeaturePipelineService::new(window_provider, feature_repo, noop_feature_writer());
+    let pipeline = FeaturePipelineService::new(
+        window_provider,
+        feature_repo,
+        noop_feature_writer(),
+        Arc::clone(&registry),
+        live_trade_tape_block_cursor_repo(),
+        TradeTapeOnChainConfig::default(),
+    );
 
     let features = FeaturesConfig::default();
     let included = vec![selected_market()];

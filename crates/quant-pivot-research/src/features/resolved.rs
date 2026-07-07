@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_models::{
+    domain::TradeTapePrint,
     domain::market::{
         book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
         registry::MarketRegistryInfo,
@@ -30,6 +31,84 @@ fn millis_to_utc(timestamp_ms: u64, default: DateTime<Utc>) -> DateTime<Utc> {
         .ok()
         .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
         .unwrap_or(default)
+}
+
+/// A pre-fetched, point-in-time-bounded trade-tape window for one market.
+#[derive(Debug, Clone)]
+pub struct TradeTapeWindowSnapshot {
+    /// Market the window describes (YES+NO token fills aggregated).
+    pub market_id: MarketId,
+    /// Decision time the window was resolved as of.
+    pub as_of: DateTime<Utc>,
+    /// Source visibility delay applied to the trade tape.
+    pub source_delay: Duration,
+    /// Whether the trade-tape source was queried and considered available.
+    pub source_available: bool,
+    /// Participant rows ascending by event time, all before the PIT cutoff.
+    pub prints: Vec<TradeTapePrint>,
+}
+
+impl TradeTapeWindowSnapshot {
+    #[must_use]
+    pub const fn empty(market_id: MarketId, as_of: DateTime<Utc>, source_delay: Duration) -> Self {
+        Self {
+            market_id,
+            as_of,
+            source_delay,
+            source_available: false,
+            prints: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub const fn available(
+        market_id: MarketId,
+        as_of: DateTime<Utc>,
+        source_delay: Duration,
+        prints: Vec<TradeTapePrint>,
+    ) -> Self {
+        Self {
+            market_id,
+            as_of,
+            source_delay,
+            source_available: true,
+            prints,
+        }
+    }
+
+    #[must_use]
+    pub fn cutoff(&self) -> DateTime<Utc> {
+        self.as_of
+            - ChronoDuration::from_std(self.source_delay).unwrap_or_else(|_| ChronoDuration::zero())
+    }
+
+    #[must_use]
+    pub fn freshest_trade_time(&self) -> Option<DateTime<Utc>> {
+        self.prints.last().map(|print| print.event_time)
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.prints.is_empty()
+    }
+
+    /// Re-label ingest availability without discarding prefetched prints.
+    #[must_use]
+    pub const fn with_source_available(mut self, source_available: bool) -> Self {
+        self.source_available = source_available;
+        self
+    }
+
+    #[must_use]
+    pub fn prints_in(&self, window: Duration) -> Vec<&TradeTapePrint> {
+        let cutoff = self.cutoff();
+        let start =
+            cutoff - ChronoDuration::from_std(window).unwrap_or_else(|_| ChronoDuration::zero());
+        self.prints
+            .iter()
+            .filter(|print| print.event_time >= start && print.event_time < cutoff)
+            .collect()
+    }
 }
 
 /// A book resolved as of a decision time, independent of live vs historical

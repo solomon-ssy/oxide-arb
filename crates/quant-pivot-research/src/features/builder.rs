@@ -19,7 +19,9 @@ use crate::{
         market::MarketMetadataFeatureBuilder,
         microstructure::MicrostructureFeatureBuilder,
         null_policy::{NullDecision, NullPolicyEngine},
-        resolved::{MarketWindowSnapshot, ResolvedBook, ResolvedMarketContext},
+        resolved::{
+            MarketWindowSnapshot, ResolvedBook, ResolvedMarketContext, TradeTapeWindowSnapshot,
+        },
         schema::{FeatureSchema, FeatureSpec, StalenessRule},
         structural::StructuralFeatureBuilder,
         timeseries::TimeSeriesFeatureBuilder,
@@ -103,6 +105,8 @@ pub struct FeatureComputeCtx<'a> {
     pub market: Option<&'a ResolvedMarketContext>,
     /// Pre-fetched windowed microstructure history for the primary token.
     pub window: &'a MarketWindowSnapshot,
+    /// Pre-fetched trade-tape participant history for the primary token.
+    pub trade_tape: &'a TradeTapeWindowSnapshot,
     /// Same-`as_of` neg-risk sibling YES legs whose book resolved (empty for
     /// binary markets or when the schema declares no structural neg-risk aggregate).
     pub sibling_legs: &'a [ResolvedLeg],
@@ -142,6 +146,8 @@ pub struct ResolvedInputs<'a> {
     pub market_ctx: Option<ResolvedMarketContext>,
     /// Pre-fetched, PIT-bounded microstructure window for the primary token.
     pub window: &'a MarketWindowSnapshot,
+    /// Pre-fetched, PIT-bounded trade-tape window for the primary token.
+    pub trade_tape: &'a TradeTapeWindowSnapshot,
     /// Same-`as_of` neg-risk sibling YES legs whose book resolved (empty unless
     /// the market is neg-risk and the schema declares a structural aggregate).
     pub sibling_legs: Vec<ResolvedLeg>,
@@ -149,16 +155,64 @@ pub struct ResolvedInputs<'a> {
     pub sibling_leg_total: usize,
 }
 
+/// Pre-fetched source windows for one `(market, as_of)` feature build.
+#[derive(Clone, Copy)]
+pub struct FeatureSourceWindows<'a> {
+    pub microstructure: &'a MarketWindowSnapshot,
+    pub trade_tape: &'a TradeTapeWindowSnapshot,
+}
+
 /// The configured, composable feature builder.
 pub struct ConfiguredFeatureBuilder {
     schema: FeatureSchema,
     groups: Vec<Box<dyn FeatureGroupBuilder>>,
-    /// Precomputed PIT gating: whether any spec needs a resolved order book.
-    needs_book: bool,
-    /// Precomputed PIT gating: whether any spec needs Gamma market metadata.
-    needs_market: bool,
-    /// Precomputed PIT gating: whether any spec needs neg-risk sibling-leg books.
-    needs_sibling_legs: bool,
+    source_needs: FeatureSourceNeeds,
+}
+
+/// Precomputed PIT/source gating for the active feature schema.
+#[derive(Clone, Copy)]
+struct FeatureSourceNeeds {
+    bits: u8,
+}
+
+const NEED_BOOK: u8 = 1 << 0;
+const NEED_MARKET: u8 = 1 << 1;
+const NEED_SIBLING_LEGS: u8 = 1 << 2;
+const NEED_TRADE_TAPE: u8 = 1 << 3;
+
+impl FeatureSourceNeeds {
+    fn from_schema(schema: &FeatureSchema) -> Self {
+        let mut bits = 0_u8;
+        if schema.needs_book() {
+            bits |= NEED_BOOK;
+        }
+        if schema.needs_market_metadata() {
+            bits |= NEED_MARKET;
+        }
+        if schema.needs_sibling_legs() {
+            bits |= NEED_SIBLING_LEGS;
+        }
+        if schema.needs_trade_tape() {
+            bits |= NEED_TRADE_TAPE;
+        }
+        Self { bits }
+    }
+
+    const fn book(self) -> bool {
+        self.bits & NEED_BOOK != 0
+    }
+
+    const fn market(self) -> bool {
+        self.bits & NEED_MARKET != 0
+    }
+
+    const fn sibling_legs(self) -> bool {
+        self.bits & NEED_SIBLING_LEGS != 0
+    }
+
+    const fn trade_tape(self) -> bool {
+        self.bits & NEED_TRADE_TAPE != 0
+    }
 }
 
 impl ConfiguredFeatureBuilder {
@@ -186,15 +240,11 @@ impl ConfiguredFeatureBuilder {
                 FeatureFamily::Structural => groups.push(Box::new(StructuralFeatureBuilder)),
             }
         }
-        let needs_book = schema.needs_book();
-        let needs_market = schema.needs_market_metadata();
-        let needs_sibling_legs = schema.needs_sibling_legs();
+        let source_needs = FeatureSourceNeeds::from_schema(&schema);
         Self {
             schema,
             groups,
-            needs_book,
-            needs_market,
-            needs_sibling_legs,
+            source_needs,
         }
     }
 
@@ -202,6 +252,12 @@ impl ConfiguredFeatureBuilder {
     #[must_use]
     pub const fn schema(&self) -> &FeatureSchema {
         &self.schema
+    }
+
+    /// Whether the active schema declares any trade-tape feature.
+    #[must_use]
+    pub const fn needs_trade_tape(&self) -> bool {
+        self.source_needs.trade_tape()
     }
 
     /// Resolve the PIT inputs for one market (the only async / I/O step).
@@ -218,7 +274,7 @@ impl ConfiguredFeatureBuilder {
         market: &'a SelectedMarket,
         as_of: DateTime<Utc>,
         pit: PitView<'a>,
-        window: &'a MarketWindowSnapshot,
+        windows: FeatureSourceWindows<'a>,
         sibling: &NegRiskLegSet,
         liquidity_cap_usd: Usd,
     ) -> QuantResult<ResolvedMarketBundle<'a>> {
@@ -239,17 +295,17 @@ impl ConfiguredFeatureBuilder {
             registry.as_deref(),
             liquidity_cap_usd,
         )?;
-        let book = if self.needs_book {
+        let book = if self.source_needs.book() {
             Some(capture.book.clone())
         } else {
             None
         };
-        let market_ctx = if self.needs_market {
+        let market_ctx = if self.source_needs.market() {
             Some(capture.market.clone())
         } else {
             None
         };
-        let sibling_leg_total = if self.needs_sibling_legs {
+        let sibling_leg_total = if self.source_needs.sibling_legs() {
             sibling.expected_legs
         } else {
             0
@@ -261,7 +317,8 @@ impl ConfiguredFeatureBuilder {
                 as_of,
                 book,
                 market_ctx,
-                window,
+                window: windows.microstructure,
+                trade_tape: windows.trade_tape,
                 sibling_legs,
                 sibling_leg_total,
             },
@@ -281,7 +338,7 @@ impl ConfiguredFeatureBuilder {
         as_of: DateTime<Utc>,
         legs: &[NegRiskLeg],
     ) -> QuantResult<Vec<ResolvedLeg>> {
-        if !self.needs_sibling_legs || legs.is_empty() {
+        if !self.source_needs.sibling_legs() || legs.is_empty() {
             return Ok(Vec::new());
         }
         let mut resolved = Vec::with_capacity(legs.len());
@@ -313,6 +370,7 @@ impl ConfiguredFeatureBuilder {
             book: resolved.book.as_ref(),
             market: resolved.market_ctx.as_ref(),
             window: resolved.window,
+            trade_tape: resolved.trade_tape,
             sibling_legs: &resolved.sibling_legs,
             sibling_leg_total: resolved.sibling_leg_total,
             config,
@@ -333,11 +391,13 @@ impl ConfiguredFeatureBuilder {
 
         let book_age_ms = book_age_ms(resolved.as_of, resolved.book.as_ref());
         let feature_bucket_age_ms = feature_bucket_age_ms(resolved.as_of, resolved.window);
+        let trade_tape_age_ms = trade_tape_age_ms(resolved.as_of, resolved.trade_tape);
         let data_quality_status = classify(
             assembly.rejected,
             assembly.degraded,
             book_age_ms,
             feature_bucket_age_ms,
+            trade_tape_age_ms,
             data_quality,
         );
 
@@ -349,7 +409,9 @@ impl ConfiguredFeatureBuilder {
             values: assembly.values,
             substitutions: assembly.substitutions,
             data_quality: data_quality_status,
-            staleness_ms: book_age_ms.max(feature_bucket_age_ms),
+            staleness_ms: book_age_ms
+                .max(feature_bucket_age_ms)
+                .max(trade_tape_age_ms),
             source_refs: assembly.evidence,
         }
     }
@@ -395,7 +457,10 @@ impl FeatureBuilder for ConfiguredFeatureBuilder {
                 input.market,
                 input.as_of,
                 input.pit,
-                input.window,
+                FeatureSourceWindows {
+                    microstructure: input.window,
+                    trade_tape: input.trade_tape,
+                },
                 input.sibling,
                 Usd::ZERO,
             )
@@ -538,6 +603,9 @@ fn staleness_breach(
         StalenessRule::MaxFeatureBucketAge => data_quality
             .max_feature_bucket_age_secs
             .saturating_mul(1_000),
+        StalenessRule::MaxTradeTapeAge => {
+            data_quality.max_trade_tape_age_secs.saturating_mul(1_000)
+        }
     };
     if bound_ms == 0 {
         return false;
@@ -577,15 +645,21 @@ fn feature_bucket_age_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) ->
         .map_or(0, |bucket_time| age_ms(as_of, bucket_time))
 }
 
-/// Classify the vector's aggregate data quality across both freshness
-/// dimensions: book age (bounded by `max_book_age_ms`) and feature-bucket age
-/// (bounded by `max_feature_bucket_age_secs`). The two are judged independently
-/// — bucket age is never measured against the book-age bound.
+/// Freshest trade-tape print age in milliseconds at `as_of`.
+fn trade_tape_age_ms(as_of: DateTime<Utc>, trade_tape: &TradeTapeWindowSnapshot) -> u64 {
+    trade_tape
+        .freshest_trade_time()
+        .map_or(0, |trade_time| age_ms(as_of, trade_time))
+}
+
+/// Classify the vector's aggregate data quality across freshness dimensions:
+/// book age, feature-bucket age, and trade-tape age.
 const fn classify(
     rejected: bool,
     degraded: bool,
     book_age_ms: u64,
     feature_bucket_age_ms: u64,
+    trade_tape_age_ms: u64,
     data_quality: &DataQualityConfig,
 ) -> DataQualityStatus {
     if rejected {
@@ -595,13 +669,20 @@ const fn classify(
     let bucket_bound = data_quality
         .max_feature_bucket_age_secs
         .saturating_mul(1_000);
-    if exceeds(book_age_ms, book_bound) || exceeds(feature_bucket_age_ms, bucket_bound) {
+    let tape_bound = data_quality.max_trade_tape_age_secs.saturating_mul(1_000);
+    if exceeds(book_age_ms, book_bound)
+        || exceeds(feature_bucket_age_ms, bucket_bound)
+        || exceeds(trade_tape_age_ms, tape_bound)
+    {
         return DataQualityStatus::Stale;
     }
     if degraded {
         return DataQualityStatus::Degraded;
     }
-    if within_half(book_age_ms, book_bound) && within_half(feature_bucket_age_ms, bucket_bound) {
+    if within_half(book_age_ms, book_bound)
+        && within_half(feature_bucket_age_ms, bucket_bound)
+        && within_half(trade_tape_age_ms, tape_bound)
+    {
         DataQualityStatus::Fresh
     } else {
         DataQualityStatus::Acceptable

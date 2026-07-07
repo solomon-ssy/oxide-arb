@@ -193,3 +193,56 @@ async fn resolution_at_is_pit_bounded() {
     assert_eq!(resolved.resolved_at, early);
     assert_eq!(resolved.winning_token_id, yes);
 }
+
+#[tokio::test]
+#[ignore = "requires Docker ClickHouse"]
+async fn trade_tape_window_dedupes_replacing_merge_tree() {
+    use quant_pivot_models::clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow};
+    use quant_pivot_models::enums::clickhouse::{
+        ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource,
+    };
+
+    let (pool, client, _container) = setup_clickhouse().await;
+    let read = ChQuantFactReadRepository::new(Arc::clone(&pool));
+    let market_id = MarketId::new("0xtrade-tape-dedupe");
+    let token_id = TokenId::new("tok-dedupe");
+    let event_time = 1_700_000_000_000_i64;
+
+    let base = TradeTapeRow {
+        market_id: market_id.clone(),
+        token_id: token_id.clone(),
+        event_time,
+        ingestion_time: event_time,
+        participant_address: "0xparticipant".to_owned(),
+        participant_role: ChTradeParticipantRole::Maker,
+        side: ChTradeSide::Buy,
+        price: ChPrice::from(Price::new(Decimal::new(55, 2))),
+        size_shares: ChShares::from(quant_pivot_models::types::Shares::new(Decimal::from(10))),
+        notional_usd: ChUsd::from(quant_pivot_models::types::Usd::new(Decimal::from(5))),
+        tx_hash: Some("0xtx".to_owned()),
+        trade_id: "trade-dedupe-1".to_owned(),
+        source: ChTradeTapeSource::OnChain,
+        coverage_flags: 0,
+        raw_payload_json: None,
+        schema_version: ChSchemaVersion::FIRST,
+    };
+    let mut stale = base.clone();
+    stale.ingestion_time = event_time - 1_000;
+    let mut fresh = base.clone();
+    fresh.ingestion_time = event_time + 1_000;
+
+    let mut insert = client
+        .insert::<TradeTapeRow>("quant_trade_tape")
+        .await
+        .expect("insert");
+    insert.write(&stale).await.expect("write stale");
+    insert.write(&fresh).await.expect("write fresh");
+    insert.end().await.expect("end");
+
+    let rows = read
+        .trade_tape_window_by_market(vec![market_id.clone()], event_time - 1, event_time + 1)
+        .await
+        .expect("read");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].ingestion_time, fresh.ingestion_time);
+}

@@ -10,6 +10,7 @@ pub fn all_ddl() -> Vec<String> {
         include_str!("sql/book_microstructure_1m_mv.sql"),
         include_str!("sql/book_decision_contexts.sql"),
         include_str!("sql/market_resolution_event.sql"),
+        include_str!("sql/quant_trade_tape.sql"),
         include_str!("sql/quant_facts.sql"),
     ]
     .into_iter()

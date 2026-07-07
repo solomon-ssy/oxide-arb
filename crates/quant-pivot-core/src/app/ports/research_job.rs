@@ -17,7 +17,8 @@ use quant_pivot_models::{
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
-        BacktestReportId, ModelVersionId, ResearchJobId, RuntimeConfigVersionId, TrainingDatasetId,
+        BacktestReportId, ModelSpecId, ModelVersionId, ResearchJobId, RuntimeConfigVersionId,
+        TrainingDatasetId,
     },
 };
 
@@ -43,8 +44,8 @@ impl CoreResearchJobPort {
         &self,
         kind: ResearchJobKind,
         params: serde_json::Value,
-        model_spec_id: Option<quant_pivot_models::types::ModelSpecId>,
-        runtime_config_version_id: Option<quant_pivot_models::types::RuntimeConfigVersionId>,
+        model_spec_id: Option<ModelSpecId>,
+        runtime_config_version_id: Option<RuntimeConfigVersionId>,
         parent_job_id: Option<ResearchJobId>,
         ctx: &JobSubmitContext,
     ) -> NewResearchJob {

@@ -32,7 +32,7 @@ use quant_pivot_repository::traits::{
     MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
     ModelRegistryRepository, ModelRunRepository, PositionRepository, QuantFactReadRepository,
     RecommendationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-    TrainingDatasetRepository,
+    TradeTapeBlockCursorRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::{
@@ -150,6 +150,9 @@ impl ResearchBundle {
             FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
             Arc::clone(&feature_repo),
             Arc::clone(&deps.infra.feature_event_writer),
+            Arc::clone(&deps.data.market_registry),
+            Arc::clone(&repos.trade_tape_block_cursor) as Arc<dyn TradeTapeBlockCursorRepository>,
+            deps.deploy.market_data.trade_tape_on_chain.clone(),
         ));
         let factor_repo: Arc<dyn FactorRepository> =
             Arc::clone(&repos.factor) as Arc<dyn FactorRepository>;

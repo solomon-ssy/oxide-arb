@@ -29,8 +29,9 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow,
+        TickEventRow, TradeTapeRow,
     },
+    config::TradeTapeOnChainConfig,
     domain::{
         NewModelRun, NewModelSpec, NewModelVersion,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
@@ -80,6 +81,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     factor_governance::publish_all_factor_definitions,
     pg::setup_pg,
+    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
@@ -120,6 +122,15 @@ impl QuantFactReadRepository for EmptyFactRead {
         _to_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn trade_tape_window_by_market(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -328,6 +339,9 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
         FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
         feature_repo,
         noop_feature_writer(),
+        Arc::clone(&registry),
+        live_trade_tape_block_cursor_repo(),
+        TradeTapeOnChainConfig::default(),
     );
 
     let features = FeaturesConfig::default();
@@ -531,6 +545,9 @@ async fn build_cross_section_features(
         FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
         feature_repo,
         noop_feature_writer(),
+        Arc::clone(&registry),
+        live_trade_tape_block_cursor_repo(),
+        TradeTapeOnChainConfig::default(),
     );
 
     let features = FeaturesConfig::default();

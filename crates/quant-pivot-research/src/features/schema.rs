@@ -72,6 +72,8 @@ pub enum SourceRequirement {
     /// Same-`as_of` order books of the market's neg-risk sibling YES legs
     /// (structural full-leg aggregates). No external data source.
     NegRiskSiblingLegs,
+    /// A window of persisted full-market trade-tape participant facts.
+    TradeTapeWindow,
 }
 
 impl SourceRequirement {
@@ -86,6 +88,7 @@ impl SourceRequirement {
             Self::PublishedL2Book | Self::NegRiskSiblingLegs => EvidenceSourceKind::Book,
             Self::GammaMetadata => EvidenceSourceKind::GammaMetadata,
             Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
+            Self::TradeTapeWindow => EvidenceSourceKind::TradeTape,
         }
     }
 }
@@ -112,6 +115,8 @@ pub enum StalenessRule {
     MaxBookAge,
     /// Bounded by `data_quality.max_feature_bucket_age_secs`.
     MaxFeatureBucketAge,
+    /// Bounded by `data_quality.max_trade_tape_age_secs`.
+    MaxTradeTapeAge,
 }
 
 /// How a feature behaves when its value is absent. The four-state policy is the
@@ -357,6 +362,14 @@ impl FeatureSchema {
                 SourceRequirement::NegRiskSiblingLegs
             )
         })
+    }
+
+    /// Whether any governed spec needs a pre-fetched trade-tape window.
+    #[must_use]
+    pub fn needs_trade_tape(&self) -> bool {
+        self.specs
+            .iter()
+            .any(|spec| matches!(spec.source_requirement, SourceRequirement::TradeTapeWindow))
     }
 }
 
@@ -726,7 +739,73 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
         .null_policy(Penalize)
         .build(),
     );
+    trade_tape_structural_specs(out);
     structural_neg_risk_specs(out);
+}
+
+fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::Structural as F;
+    use FeatureValueKind::{Count, Decimal as Dec, Usd};
+    use NullPolicy::Penalize;
+    use PitRule::FactBeforeAsOfMinusDelay as WindowPit;
+    use SourceRequirement::TradeTapeWindow;
+    use StalenessRule::MaxTradeTapeAge;
+
+    out.push(
+        spec(
+            structural_names::TRADE_TAPE_COUNT,
+            F,
+            Count,
+            TradeTapeWindow,
+            WindowPit,
+            MaxTradeTapeAge,
+        )
+        .unit(FeatureUnit::Count)
+        .null_policy(Penalize)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::PARTICIPANT_COUNT,
+            F,
+            Count,
+            TradeTapeWindow,
+            WindowPit,
+            MaxTradeTapeAge,
+        )
+        .unit(FeatureUnit::Count)
+        .null_policy(Penalize)
+        .build(),
+    );
+    out.push(
+        spec(
+            structural_names::TRADE_TAPE_NOTIONAL_USD,
+            F,
+            Usd,
+            TradeTapeWindow,
+            WindowPit,
+            MaxTradeTapeAge,
+        )
+        .unit(FeatureUnit::Usd)
+        .null_policy(Penalize)
+        .build(),
+    );
+    for name in [
+        structural_names::PARTICIPANT_COVERAGE_RATIO,
+        structural_names::PARTICIPANT_GINI,
+        structural_names::PARTICIPANT_HHI,
+        structural_names::PARTICIPANT_CR1_SHARE,
+        structural_names::MAKER_GINI,
+        structural_names::TAKER_GINI,
+    ] {
+        out.push(
+            spec(name, F, Dec, TradeTapeWindow, WindowPit, MaxTradeTapeAge)
+                .unit(FeatureUnit::Ratio)
+                .range(Decimal::ZERO, Decimal::ONE)
+                .null_policy(Penalize)
+                .build(),
+        );
+    }
 }
 
 fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {

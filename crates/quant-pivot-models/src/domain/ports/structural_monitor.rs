@@ -1,9 +1,15 @@
-//! Admin port for the live neg-risk structural monitor (Phase 11.2.1).
+//! Admin port for the Structural Alpha monitor (Phase 11.2.1+).
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
-use crate::domain::NegRiskEventDriftView;
+use crate::{
+    domain::{
+        NegRiskEventDriftView, ParticipantConcentrationDetailView,
+        ParticipantConcentrationSummaryView, TradeTapeCoverageView,
+    },
+    types::MarketId,
+};
 
 /// Live read of the `struct.negrisk_leg_sum_drift` signal at the event level.
 ///
@@ -15,4 +21,16 @@ pub trait StructuralMonitorPort: Send + Sync {
     /// Snapshot the neg-risk leg-sum drift across all active neg-risk events,
     /// ordered by descending absolute drift (most mispriced first).
     async fn negrisk_events(&self) -> QuantResult<Vec<NegRiskEventDriftView>>;
+
+    /// Snapshot source coverage and cursor health for trade-tape ingestion.
+    async fn trade_tape_coverage(&self) -> QuantResult<TradeTapeCoverageView>;
+
+    /// Cross-market participant concentration summary, most concentrated first.
+    async fn participant_concentration(&self) -> QuantResult<ParticipantConcentrationSummaryView>;
+
+    /// Per-market participant concentration detail and top participant breakdown.
+    async fn participant_concentration_market(
+        &self,
+        market_id: &MarketId,
+    ) -> QuantResult<Option<ParticipantConcentrationDetailView>>;
 }

@@ -31,7 +31,8 @@ mod acceptance;
 
 pub use availability::FeatureAvailabilityOracle;
 pub use builder::{
-    ConfiguredFeatureBuilder, FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedInputs,
+    ConfiguredFeatureBuilder, FeatureComputeCtx, FeatureGroupBuilder, FeatureSourceWindows,
+    RawFeature, ResolvedInputs,
 };
 pub use decision_capture::{
     MarketDecisionCapture, RejectedMarketDraft, ResolvedMarketBundle, draft_data_quality_snapshot,
@@ -39,6 +40,7 @@ pub use decision_capture::{
 pub use null_policy::{NullDecision, NullPolicyEngine};
 pub use resolved::{
     MarketWindowSnapshot, MicrostructureBucket, ResolvedBook, ResolvedMarketContext,
+    TradeTapeWindowSnapshot,
 };
 pub use schema::{
     FeatureSchema, FeatureSpec, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule,
@@ -94,6 +96,8 @@ pub struct FeatureBuildInput<'a> {
     pub pit: PitView<'a>,
     /// Pre-fetched windowed microstructure history for the primary token.
     pub window: &'a MarketWindowSnapshot,
+    /// Pre-fetched trade-tape participant history for the primary token.
+    pub trade_tape: &'a TradeTapeWindowSnapshot,
     /// Neg-risk sibling leg set: expected catalog count plus resolvable YES legs.
     pub sibling: &'a NegRiskLegSet,
     /// Frozen feature configuration snapshot.

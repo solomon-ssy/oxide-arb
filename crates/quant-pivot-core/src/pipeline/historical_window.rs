@@ -24,21 +24,22 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice, ChUsd,
-        MarketResolutionRow,
+        MarketResolutionRow, TradeTapeRow,
     },
+    domain::TradeTapePrint,
     domain::market::registry::{CatalogMarketLeg, MarketInfo, NegRiskLegSet},
     enums::market::MarketStatus,
     types::{EventId, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{EventRepository, MarketRepository, QuantFactReadRepository};
 use quant_pivot_research::{
-    features::{MarketWindowSnapshot, MicrostructureBucket},
+    features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
     pit::{BookSnapshotAt, MarketContextAt, MaterializedPitEngine},
     selection::SelectedMarket,
     training::{ForwardSample, ForwardWindow, MarketResolution as ResearchMarketResolution},
 };
 
-use crate::pipeline::historical_pit::snapshot_from_row;
+use crate::pipeline::{historical_pit::snapshot_from_row, trade_tape_pit::TradeTapePitParams};
 
 /// One `(market, token)` instant the replay will resolve point-in-time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +72,8 @@ pub struct Prefetched {
     pub books: HashMap<TokenId, Vec<BookSnapshotRow>>,
     /// Microstructure buckets per token (trailing + forward).
     pub micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
+    /// Trade-tape participant rows per market.
+    pub trade_tape: HashMap<MarketId, Vec<TradeTapeRow>>,
     /// Settlement resolutions per market.
     pub resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     /// Market catalog metadata.
@@ -201,6 +204,11 @@ impl HistoricalWindowLoader {
             .microstructure_window(tokens.clone(), micro_from, micro_to)
             .await
             .map_err(QuantError::from)?;
+        let trade_rows = self
+            .fact_read
+            .trade_tape_window_by_market(markets.clone(), micro_from, micro_to)
+            .await
+            .map_err(QuantError::from)?;
         let resolution_rows = self
             .fact_read
             .resolutions_between(markets.clone(), 0, resolution_to)
@@ -211,10 +219,8 @@ impl HistoricalWindowLoader {
         for row in book_rows {
             books.entry(row.token_id.clone()).or_default().push(row);
         }
-        let mut micro: HashMap<TokenId, Vec<BookMicrostructureRow>> = HashMap::new();
-        for row in micro_rows {
-            micro.entry(row.token_id.clone()).or_default().push(row);
-        }
+        let micro = group_micro_rows(micro_rows);
+        let trade_tape = group_trade_tape_rows(trade_rows);
         let mut resolutions: HashMap<MarketId, Vec<MarketResolutionRow>> = HashMap::new();
         for row in resolution_rows {
             resolutions
@@ -230,11 +236,30 @@ impl HistoricalWindowLoader {
         Ok(Prefetched {
             books,
             micro,
+            trade_tape,
             resolutions,
             markets_by_id,
             neg_risk_leg_sets,
         })
     }
+}
+
+fn group_micro_rows(
+    rows: Vec<BookMicrostructureRow>,
+) -> HashMap<TokenId, Vec<BookMicrostructureRow>> {
+    let mut grouped: HashMap<TokenId, Vec<BookMicrostructureRow>> = HashMap::new();
+    for row in rows {
+        grouped.entry(row.token_id.clone()).or_default().push(row);
+    }
+    grouped
+}
+
+fn group_trade_tape_rows(rows: Vec<TradeTapeRow>) -> HashMap<MarketId, Vec<TradeTapeRow>> {
+    let mut grouped: HashMap<MarketId, Vec<TradeTapeRow>> = HashMap::new();
+    for row in rows {
+        grouped.entry(row.market_id.clone()).or_default().push(row);
+    }
+    grouped
 }
 
 /// Enumerate neg-risk leg sets for every event touched by the sample window.
@@ -401,6 +426,32 @@ pub fn feature_window(
         source_delay,
         buckets,
     }
+}
+
+/// Build the trailing PIT trade-tape window for one `(market, as_of)`.
+#[must_use]
+pub fn trade_tape_window(
+    market_id: MarketId,
+    as_of: DateTime<Utc>,
+    source_delay: Duration,
+    lookback: Duration,
+    rows: &[TradeTapeRow],
+) -> TradeTapeWindowSnapshot {
+    let pit = TradeTapePitParams {
+        trigger_time: as_of,
+        source_delay,
+        lookback,
+    };
+    let start = pit.cutoff() - to_chrono(lookback);
+    let cutoff = pit.cutoff();
+    let prints = rows
+        .iter()
+        .filter_map(|row| {
+            let at = ms(row.event_time);
+            (at >= start && at < cutoff).then(|| TradeTapePrint::from_clickhouse_row(row, at))
+        })
+        .collect();
+    TradeTapeWindowSnapshot::available(market_id, as_of, source_delay, prints)
 }
 
 /// Build the strictly-forward label/settlement window for one `(token, as_of)`.

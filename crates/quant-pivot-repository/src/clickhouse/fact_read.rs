@@ -8,9 +8,9 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow,
+        TickEventRow, TradeTapeRow,
     },
-    enums::clickhouse::ChBookEventType,
+    enums::clickhouse::{ChBookEventType, ChTradeTapeSource},
     types::{MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
@@ -125,6 +125,35 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(to_ms)
             .bind(limit)
             .fetch_all::<TickEventRow>()
+            .await?;
+        Ok(rows)
+    }
+
+    async fn trade_tape_window_by_market(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+        if market_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_trade_tape FINAL \
+                 WHERE market_id IN ? \
+                 AND source = ? \
+                 AND event_time >= fromUnixTimestamp64Milli(?) \
+                 AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY market_id, event_time, ingestion_time, trade_id, participant_role",
+            )
+            .bind(market_ids)
+            .bind(ChTradeTapeSource::OnChain)
+            .bind(from_ms)
+            .bind(to_ms)
+            .fetch_all::<TradeTapeRow>()
             .await?;
         Ok(rows)
     }

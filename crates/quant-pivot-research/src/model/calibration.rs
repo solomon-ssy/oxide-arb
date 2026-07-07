@@ -415,6 +415,9 @@ pub fn calibrate_substitution_rules(
         NullReason::InsufficientHistory,
         NullReason::NotApplicable,
         NullReason::LegBookMissing,
+        NullReason::TradeTapeUnavailable,
+        NullReason::InsufficientTradeTape,
+        NullReason::InsufficientRoleCoverage,
     ];
     let clean = stratum_mean(samples.iter().filter(|s| s.substitution_reasons.is_empty()));
     let reason_means: Vec<Option<Decimal>> = reasons
@@ -433,6 +436,17 @@ pub fn calibrate_substitution_rules(
         insufficient_history: fail_closed(baseline.insufficient_history, reason_means[3], best),
         not_applicable: fail_closed(baseline.not_applicable, reason_means[4], best),
         leg_book_missing: fail_closed(baseline.leg_book_missing, reason_means[5], best),
+        trade_tape_unavailable: fail_closed(baseline.trade_tape_unavailable, reason_means[6], best),
+        insufficient_trade_tape: fail_closed(
+            baseline.insufficient_trade_tape,
+            reason_means[7],
+            best,
+        ),
+        insufficient_role_coverage: fail_closed(
+            baseline.insufficient_role_coverage,
+            reason_means[8],
+            best,
+        ),
     };
     let mut fits: Vec<StratumFit> = reasons
         .iter()
@@ -528,6 +542,9 @@ const fn reason_label(reason: NullReason) -> &'static str {
         NullReason::InsufficientHistory => "insufficient_history",
         NullReason::NotApplicable => "not_applicable",
         NullReason::LegBookMissing => "leg_book_missing",
+        NullReason::TradeTapeUnavailable => "trade_tape_unavailable",
+        NullReason::InsufficientTradeTape => "insufficient_trade_tape",
+        NullReason::InsufficientRoleCoverage => "insufficient_role_coverage",
     }
 }
 

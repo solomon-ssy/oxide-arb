@@ -21,7 +21,7 @@ use quant_pivot_models::{
     constants::COLLATERAL_SCALE,
     domain::{
         ConfirmSettlementRedeem, CoreEvent, CoreEventPublisher, MarketInfo, NewSettlementRedeem,
-        NewSettlementRedeemLot, OrderIntentInfo, PositionExit, PositionInfo,
+        NewSettlementRedeemLot, OrderIntentInfo, PositionExit, PositionInfo, SettlementRedeemInfo,
         SettlementRedeemLifecycleEvent, SettlementRedeemLotWrite,
     },
     enums::{
@@ -1080,10 +1080,7 @@ pub(crate) fn is_auto_redeem_candidate(intent: &OrderIntentInfo) -> bool {
         )
 }
 
-fn retry_due(
-    redeem: &quant_pivot_models::domain::SettlementRedeemInfo,
-    now: DateTime<Utc>,
-) -> bool {
+fn retry_due(redeem: &SettlementRedeemInfo, now: DateTime<Utc>) -> bool {
     redeem.next_attempt_at.is_none_or(|at| now >= at)
 }
 

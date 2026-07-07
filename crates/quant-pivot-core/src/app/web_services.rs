@@ -1,17 +1,20 @@
 //! Web admin surface assembly for Phase 0.
 
 use super::AppContext;
-use crate::app::{
-    ports::{
-        account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
-        execution_read::CoreExecutionReadPort, execution_recovery::CoreExecutionRecoveryPort,
-        market_data::CoreMarketData, metrics_scrape::CoreMetricsScrape,
-        model_training::CoreModelTrainingPort, quant_report::CoreQuantReportPort,
-        reconciliation::CoreReconciliationPort, research_catalog::CoreResearchCatalogPort,
-        structural_monitor::CoreStructuralMonitor, training_dataset::CoreTrainingDatasetPort,
+use crate::{
+    app::{
+        ports::{
+            account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
+            execution_read::CoreExecutionReadPort, execution_recovery::CoreExecutionRecoveryPort,
+            market_data::CoreMarketData, metrics_scrape::CoreMetricsScrape,
+            model_training::CoreModelTrainingPort, quant_report::CoreQuantReportPort,
+            reconciliation::CoreReconciliationPort, research_catalog::CoreResearchCatalogPort,
+            structural_monitor::CoreStructuralMonitor, training_dataset::CoreTrainingDatasetPort,
+        },
+        task_id::TaskId,
+        task_registry::AppRunner,
     },
-    task_id::TaskId,
-    task_registry::AppRunner,
+    pipeline::feature_window_provider::FeatureWindowProvider,
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
@@ -24,7 +27,7 @@ use quant_pivot_repository::traits::{
     OperationLogRepository, OrderIntentRepository, PositionRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
     RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
-    SettlementRedeemRepository, UserRepository, UserRoleRepository,
+    SettlementRedeemRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
@@ -161,6 +164,12 @@ async fn build_app_state(
         structural_monitor: Arc::new(CoreStructuralMonitor::new(
             Arc::clone(&ctx.data.market_registry),
             Arc::clone(&ctx.data.book_store),
+            Arc::new(FeatureWindowProvider::new(Arc::clone(
+                &ctx.infra.quant_fact_read,
+            ))),
+            Arc::clone(&repos.trade_tape_block_cursor) as Arc<dyn TradeTapeBlockCursorRepository>,
+            Arc::clone(&ctx.governance.applicator) as Arc<dyn RuntimeConfigPort>,
+            ctx.config.market_data.trade_tape_on_chain.clone(),
         )),
         quant_reports: Arc::new(CoreQuantReportPort::new(
             Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,

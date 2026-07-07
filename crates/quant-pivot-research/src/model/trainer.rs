@@ -42,6 +42,7 @@ use crate::{
     },
     parallel::par_map_with_index,
     precision::RESEARCH_DECIMAL_SCALE,
+    stats,
     training::{LabelName, TrainingExample},
 };
 
@@ -351,7 +352,9 @@ fn refine(
     train_rows: &[SampleRow],
     l2: Decimal,
 ) -> (Vec<Decimal>, Decimal) {
-    match crate::model::optimize::refine_weights(grid_weights, train_rows, l2) {
+    use crate::model::optimize;
+
+    match optimize::refine_weights(grid_weights, train_rows, l2) {
         Some(refined) => {
             let refined_objective = penalized_objective(&refined, train_rows, l2);
             if refined_objective > grid_objective {
@@ -458,7 +461,7 @@ pub(crate) fn rank_ic(weights: &[Decimal], rows: &[SampleRow]) -> Decimal {
     }
     let predicted: Vec<Decimal> = rows.iter().map(|row| row.net(weights)).collect();
     let labels: Vec<Decimal> = rows.iter().map(|row| row.label).collect();
-    crate::stats::spearman(&predicted, &labels)
+    stats::spearman(&predicted, &labels)
 }
 
 /// Normalize a non-negative vector onto the unit simplex (sum to 1). A zero
@@ -646,6 +649,7 @@ mod tests {
                 SubstitutionConfidenceRules,
             },
             runtime::ModelFamily,
+            trainer::train_weighted,
         },
         training::{LabelName, TrainingExample, TrainingLabel},
     };
@@ -798,11 +802,9 @@ mod tests {
             .build()
             .expect("multi-thread pool");
         let a = single
-            .install(|| super::train_weighted(&req))
+            .install(|| train_weighted(&req))
             .expect("train single");
-        let b = many
-            .install(|| super::train_weighted(&req))
-            .expect("train many");
+        let b = many.install(|| train_weighted(&req)).expect("train many");
         assert_eq!(
             a.artifact_hash, b.artifact_hash,
             "rayon thread count must not change the trained artifact"

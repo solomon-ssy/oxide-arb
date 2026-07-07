@@ -15,6 +15,8 @@ pub enum EvidenceSourceKind {
     GammaMetadata,
     /// A persisted `ClickHouse` fact (microstructure / tick window).
     ClickHouseFact,
+    /// Persisted full-market trade tape.
+    TradeTape,
     /// Derived/computed from other in-memory inputs.
     Derived,
 }
@@ -28,6 +30,7 @@ impl EvidenceSourceKind {
             Self::Book => "book",
             Self::GammaMetadata => "gamma_metadata",
             Self::ClickHouseFact => "clickhouse_fact",
+            Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
         }
     }

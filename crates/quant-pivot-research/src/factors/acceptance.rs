@@ -22,17 +22,20 @@ use quant_pivot_models::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use crate::factors::{
-    CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorHistory,
-    FactorName, FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
-    generic::generic_factors,
-    names::{MEAN_REVERSION, STRUCT_FAVORITE_LONGSHOT, STRUCT_REVERSAL_AFTER_SHOCK},
-    structural::structural_factors,
-};
 use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason, stats};
 use crate::model::favorite_longshot::{
     BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
     TtrBucketCurve,
+};
+use crate::{
+    factors::{
+        CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorHistory,
+        FactorName, FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
+        generic::generic_factors,
+        names::{MEAN_REVERSION, STRUCT_FAVORITE_LONGSHOT, STRUCT_REVERSAL_AFTER_SHOCK},
+        structural::structural_factors,
+    },
+    hashing::ResearchHasher,
 };
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -608,7 +611,7 @@ fn serial_and_parallel_normalizer_paths_are_bit_identical() {
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, None);
     let vectors = varied_batch(24);
-    let history = crate::factors::FactorHistory::empty();
+    let history = FactorHistory::empty();
     let serial = engine
         .compute_all_batch_inner(&vectors, &config, &history, false)
         .expect("serial path");
@@ -1011,7 +1014,7 @@ fn favorite_longshot_uses_bias_table_not_constant() {
         from: Utc.timestamp_opt(0, 0).unwrap(),
         to: Utc.timestamp_opt(1_000, 0).unwrap(),
     };
-    let split_hash = crate::hashing::ResearchHasher::canonical(&"acceptance-split").unwrap();
+    let split_hash = ResearchHasher::canonical(&"acceptance-split").unwrap();
     let fit_config = BiasFitConfig {
         bins: 4,
         ttr_bucket_bounds_secs: Vec::new(),
@@ -1139,12 +1142,12 @@ fn structural_factor_ic_gate_disables_insignificant_category() {
     );
     let table = FavoriteLongshotBiasTable {
         table_id: FavoriteLongshotBiasTableId::from_v7(),
-        content_hash: crate::hashing::ResearchHasher::canonical(&"ic-gate-test").unwrap(),
+        content_hash: ResearchHasher::canonical(&"ic-gate-test").unwrap(),
         fit_window: TimeWindow {
             from: Utc.timestamp_opt(0, 0).unwrap(),
             to: Utc.timestamp_opt(1_000, 0).unwrap(),
         },
-        calibration_split_hash: crate::hashing::ResearchHasher::canonical(&"split").unwrap(),
+        calibration_split_hash: ResearchHasher::canonical(&"split").unwrap(),
         by_category,
     };
     let mid = Price::new(Decimal::new(25, 2));

@@ -26,6 +26,7 @@ use serde::Serialize;
 
 use crate::{
     features::{
+        FeatureName, FeatureVector, MarketWindowSnapshot, NullReason,
         builder::ResolvedInputs,
         resolved::{ResolvedBook, ResolvedMarketContext},
         value::EvidenceSourceRef,
@@ -211,7 +212,7 @@ pub fn draft_data_quality_snapshot(
     as_of: DateTime<Utc>,
     runtime_config_version_id: RuntimeConfigVersionId,
     bundles: &[ResolvedMarketBundle<'_>],
-    vectors: &[crate::features::FeatureVector],
+    vectors: &[FeatureVector],
     rejected_markets: &[RejectedMarketDraft],
 ) -> NewReportDataQualitySnapshot {
     let rejected_by_market: std::collections::HashMap<_, _> = rejected_markets
@@ -257,7 +258,7 @@ pub struct RejectedMarketDraft {
     /// Excluded market id.
     pub market_id: MarketId,
     /// Required features that were missing.
-    pub missing_required: Vec<(crate::features::FeatureName, crate::features::NullReason)>,
+    pub missing_required: Vec<(FeatureName, NullReason)>,
 }
 
 /// Empty book stub when PIT resolve returns no snapshot (DQ flags `empty`).
@@ -308,7 +309,7 @@ fn book_age_ms(as_of: DateTime<Utc>, book: &ResolvedBook) -> u64 {
     u64::try_from((as_of - book.observed_at).num_milliseconds()).unwrap_or(0)
 }
 
-fn fact_lag_ms(as_of: DateTime<Utc>, window: &crate::features::MarketWindowSnapshot) -> u64 {
+fn fact_lag_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> u64 {
     window.freshest_bucket_time().map_or(0, |bucket_time| {
         u64::try_from((as_of - bucket_time).num_milliseconds()).unwrap_or(0)
     })
@@ -320,7 +321,7 @@ mod tests {
         book_snapshot_ref_from_resolved, empty_book, liquidity_score_from_resolved,
         market_context_from_resolved, recommendation_identity_from_resolved,
     };
-    use crate::features::resolved::ResolvedMarketContext;
+    use crate::features::{ResolvedBook, resolved::ResolvedMarketContext};
     use crate::selection::SelectedMarket;
     use chrono::Utc;
     use quant_pivot_models::{
@@ -337,9 +338,9 @@ mod tests {
     use rust_decimal_macros::dec;
     use std::sync::Arc;
 
-    fn sample_book() -> super::ResolvedBook {
+    fn sample_book() -> ResolvedBook {
         let token = TokenId::new("123");
-        super::ResolvedBook {
+        ResolvedBook {
             token_id: token,
             bids: Arc::new([BookLevel::from_decimal(
                 Price::new(dec!(0.48)),

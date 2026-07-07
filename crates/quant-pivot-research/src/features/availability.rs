@@ -55,7 +55,9 @@ impl<'a> FeatureAvailabilityOracle<'a> {
 const fn source_available(candidate: &MarketCandidate, requirement: SourceRequirement) -> bool {
     match requirement {
         // Gamma metadata is always present for a catalog-backed candidate.
-        SourceRequirement::GammaMetadata => true,
+        // Trade-tape availability is PIT/window-level; the selection candidate
+        // intentionally does not carry cursor/fact state.
+        SourceRequirement::GammaMetadata | SourceRequirement::TradeTapeWindow => true,
         // Book-derived and windowed fact features need a live, two-sided book;
         // facts only flow while a book is published. Neg-risk sibling-leg
         // aggregates are platform-computable from the same book plane (a binary

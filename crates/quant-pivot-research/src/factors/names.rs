@@ -51,11 +51,13 @@ pub const STRUCT_RESOLUTION_PROXIMITY_REGIME: FactorName =
 /// This is a **book-derived** liquidity-turnover proxy — NOT true maker
 /// participant concentration (Gini / top-1% share), which requires trade-tape
 /// (maker/taker address + fill size) the platform does not yet ingest. The
-/// honest concentration factor is designed in
-/// [`11.2.1.1-trade-tape-participant-concentration.md`] and will supersede this
-/// proxy; the name reflects exactly what the current facts can compute.
+/// honest concentration factor is `struct.participant_concentration`; the name
+/// reflects exactly what the current facts can compute.
 pub const STRUCT_BOOK_CHURN_INTENSITY: FactorName =
     FactorName::from_static("struct.book_churn_intensity");
+/// Trade-tape participant concentration (neutral structural regime signal).
+pub const STRUCT_PARTICIPANT_CONCENTRATION: FactorName =
+    FactorName::from_static("struct.participant_concentration");
 /// Neg-risk full-leg YES-ask-sum drift (`Σ ask − 1`); neg-risk markets only.
 pub const STRUCT_NEGRISK_LEG_SUM_DRIFT: FactorName =
     FactorName::from_static("struct.negrisk_leg_sum_drift");

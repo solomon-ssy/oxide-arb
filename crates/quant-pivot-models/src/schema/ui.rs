@@ -531,6 +531,13 @@ fn data_quality_fields() -> Vec<FieldUiEntry> {
             "Oldest acceptable materialized feature bucket at decision time. Governs online/offline feature staleness (independent of live ingest lag); above it, features are treated as stale per the staleness policy. Must be > 0.",
             "决策时可接受的最旧物化特征桶年龄。控制在线/离线特征陈旧度（与实时入库滞后独立）；超过后按特征陈旧策略处理。必须大于 0。",
         ),
+        secs(
+            "data_quality.max_trade_tape_age_secs",
+            "Maximum trade-tape age",
+            "最大成交带年龄",
+            "Oldest acceptable on-chain trade-tape print at decision time. Governs structural participant-concentration staleness; above it, trade-tape features are treated as stale per the staleness policy. Must be > 0.",
+            "决策时可接受的最旧链上成交带打印时间。控制结构性参与者集中度特征的陈旧度；超过后按特征陈旧策略处理成交带特征。必须大于 0。",
+        ),
         boolean(
             "data_quality.reject_crossed_books",
             "Reject crossed books",
@@ -682,6 +689,34 @@ fn structural_feature_fields() -> Vec<FieldUiEntry> {
             "Lookback (seconds) for the book-churn intensity proxy (delta-to-update ratio over the microstructure window). NOT true maker concentration (which needs trade-tape; see Phase 11.2.1.1).",
             "订单簿 churn 强度代理（微观结构窗口内 delta/update 比率）的回看窗口（秒）。非真·做市集中度（需 trade-tape，见 Phase 11.2.1.1）。",
         ),
+        secs(
+            "features.structural.trade_tape_window_secs",
+            "Trade-tape window",
+            "Trade tape 窗口",
+            "Lookback (seconds) for participant-concentration features. The PIT query reads fill-side trade tape over `[as_of - delay - window, as_of - delay)`.",
+            "参与者集中度特征的回看窗口（秒）。PIT 查询读取 `[as_of - delay - window, as_of - delay)` 内的 fill-side trade tape。",
+        ),
+        integer(
+            "features.structural.trade_tape_min_unique_participants",
+            "Trade-tape minimum trades",
+            "Trade tape 最小成交数",
+            "Minimum fill count required before participant-concentration features can score. Below this the feature emits an explicit insufficient-trade-tape null reason.",
+            "参与者集中度特征可打分前要求的最小成交笔数。低于此值时特征输出明确的 insufficient-trade-tape 空值原因。",
+        ),
+        usd(
+            "features.structural.trade_tape_min_notional_usd",
+            "Trade-tape minimum notional",
+            "Trade tape 最小名义额",
+            "Minimum USD notional required before participant-concentration features can score. Keeps sparse dust fills from creating a concentration signal.",
+            "参与者集中度特征可打分前要求的最小 USD 名义额。防止稀疏 dust 成交生成集中度信号。",
+        ),
+        ratio(
+            "features.structural.trade_tape_min_coverage_ratio",
+            "Trade-tape minimum coverage",
+            "Trade tape 最小覆盖率",
+            "Minimum source coverage ratio in [0, 1] required before participant-concentration features can score; missing coverage fails closed instead of becoming zero.",
+            "参与者集中度特征可打分前要求的最小数据源覆盖率（[0,1]）；覆盖不足会 fail closed，而不是写成 0。",
+        ),
     ]
 }
 
@@ -810,6 +845,41 @@ fn structural_factor_fields() -> Vec<FieldUiEntry> {
             "Minimum resolved YES legs for neg-risk structural factors to compute. Below this the factor is Indeterminate, never a silent value.",
             "Neg-risk 结构因子计算所需的最少已解析 YES 腿数。低于此值因子为 Indeterminate，绝不静默取值。",
         ),
+    ]
+    .into_iter()
+    .chain(participant_concentration_factor_fields())
+    .chain(favorite_longshot_factor_fields())
+    .collect()
+}
+
+fn participant_concentration_factor_fields() -> Vec<FieldUiEntry> {
+    vec![
+        decimal(
+            "factors.structural.participant_concentration.gini_weight",
+            "Participant Gini weight",
+            "参与者 Gini 权重",
+            "Non-negative composite weight applied to `struct.participant_gini` when building the neutral participant-concentration risk/regime factor.",
+            "构建中性参与者集中度风险/状态因子时应用在 `struct.participant_gini` 上的非负复合权重。",
+        ),
+        decimal(
+            "factors.structural.participant_concentration.cr1_share_weight",
+            "Participant top-1 weight",
+            "参与者 Top-1 权重",
+            "Non-negative composite weight applied to `struct.participant_cr1_share`; at least one participant-concentration weight must be positive.",
+            "应用在 `struct.participant_cr1_share` 上的非负复合权重；参与者集中度权重至少有一个必须为正。",
+        ),
+        decimal(
+            "factors.structural.participant_concentration.hhi_weight",
+            "Participant HHI weight",
+            "参与者 HHI 权重",
+            "Non-negative composite weight applied to `struct.participant_hhi`. The resulting factor is neutral and does not imply YES/NO direction.",
+            "应用在 `struct.participant_hhi` 上的非负复合权重。生成的因子为中性，不表达 YES/NO 方向。",
+        ),
+    ]
+}
+
+fn favorite_longshot_factor_fields() -> Vec<FieldUiEntry> {
+    vec![
         plain(
             "factors.structural.favorite_longshot.bias_table_ref",
             "Favorite-longshot bias table",
@@ -1909,6 +1979,7 @@ fn data_quality_section() -> SchemaNode {
             "data_quality.max_book_age_ms",
             "data_quality.max_ingest_lag_ms",
             "data_quality.max_feature_bucket_age_secs",
+            "data_quality.max_trade_tape_age_secs",
             "data_quality.reject_crossed_books",
             "data_quality.reject_empty_books",
             "data_quality.feature_staleness_policy",
@@ -1943,6 +2014,10 @@ fn features_section() -> SchemaNode {
             "features.depth_levels",
             "features.structural.shock_window_secs",
             "features.structural.book_churn_window_secs",
+            "features.structural.trade_tape_window_secs",
+            "features.structural.trade_tape_min_unique_participants",
+            "features.structural.trade_tape_min_notional_usd",
+            "features.structural.trade_tape_min_coverage_ratio",
             "features.max_concurrent_market_resolves",
         ]),
     )
@@ -1976,6 +2051,9 @@ fn factors_section() -> SchemaNode {
             "factors.structural.reversal_after_shock.shock_k",
             "factors.structural.reversal_after_shock.shock_cap",
             "factors.structural.negrisk.min_legs",
+            "factors.structural.participant_concentration.gini_weight",
+            "factors.structural.participant_concentration.cr1_share_weight",
+            "factors.structural.participant_concentration.hhi_weight",
             "factors.structural.favorite_longshot.bias_table_ref",
             "factors.structural.favorite_longshot.bins",
             "factors.structural.favorite_longshot.ttr_bucket_bounds_secs",

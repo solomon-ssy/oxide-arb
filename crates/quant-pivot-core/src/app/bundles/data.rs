@@ -35,7 +35,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
     postgres::{PgEventRepository, PgMarketRepository},
-    traits::MarketRepository,
+    traits::{EventRepository, MarketRepository},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -123,10 +123,7 @@ impl DataBundle {
             market_filter: Arc::clone(&market_filter),
             fee_calculator: Arc::clone(&fee_calculator),
             market_repo: Arc::clone(&market_repo),
-            event_repo: Arc::new(CachedEventRepository::new(
-                PgEventRepository::new(deps.infra.pg.connection().clone()),
-                Arc::clone(&deps.infra.cache),
-            )),
+            event_repo: cached_event_repo(deps),
             cache: Arc::clone(&deps.infra.cache),
             metrics: Arc::clone(deps.metrics),
             catalog: Arc::clone(&catalog),
@@ -179,6 +176,13 @@ impl DataBundle {
             fee_calculator,
         }
     }
+}
+
+fn cached_event_repo(deps: &DataBundleDeps<'_>) -> Arc<dyn EventRepository> {
+    Arc::new(CachedEventRepository::new(
+        PgEventRepository::new(deps.infra.pg.connection().clone()),
+        Arc::clone(&deps.infra.cache),
+    ))
 }
 
 fn build_data_pipeline(

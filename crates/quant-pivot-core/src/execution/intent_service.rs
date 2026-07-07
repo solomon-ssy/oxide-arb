@@ -757,7 +757,7 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
-        domain::{ApproveIntentCommand, evaluate_intent_approval_invalidation},
+        domain::{ApproveIntentCommand, RecommendationInfo, evaluate_intent_approval_invalidation},
         enums::{
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
@@ -777,7 +777,7 @@ mod tests {
     use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
-    fn rec() -> quant_pivot_models::domain::RecommendationInfo {
+    fn rec() -> RecommendationInfo {
         report_fixtures::recommendation(
             RecommendationReportId::from_v7(),
             RecommendationId::from_v7(),

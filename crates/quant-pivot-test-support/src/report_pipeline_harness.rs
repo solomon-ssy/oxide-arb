@@ -38,8 +38,9 @@ use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow,
+        TickEventRow, TradeTapeRow,
     },
+    config::TradeTapeOnChainConfig,
     domain::{
         CoreEventPublisher, NewAccountSnapshot, NewEquitySnapshot, NewMarketSelection,
         NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan, NewRecommendation,
@@ -112,6 +113,7 @@ use sea_orm::DatabaseConnection;
 use crate::{
     catalog_fixtures::{make_event, make_market},
     report_fixtures,
+    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use crate::{factor_governance::publish_all_factor_definitions, ws::WsShardHealth};
 
@@ -234,6 +236,15 @@ impl QuantFactReadRepository for EmptyFactRead {
         _to_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn trade_tape_window_by_market(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -745,6 +756,9 @@ fn build_report_builder(
             FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
             Arc::new(PgFeatureRepository::new(db.clone())),
             noop_feature_writer(),
+            Arc::clone(registry),
+            live_trade_tape_block_cursor_repo(),
+            TradeTapeOnChainConfig::default(),
         )),
         model_runner,
         account_provider_factory: account_factory,

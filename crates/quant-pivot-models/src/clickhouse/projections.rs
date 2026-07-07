@@ -122,6 +122,7 @@ impl From<EvidenceSourceKind> for ChFeatureSourceKind {
             EvidenceSourceKind::Book => Self::Book,
             EvidenceSourceKind::GammaMetadata => Self::GammaMetadata,
             EvidenceSourceKind::ClickHouseFact => Self::ClickHouseFact,
+            EvidenceSourceKind::TradeTape => Self::TradeTape,
             EvidenceSourceKind::Derived => Self::Derived,
         }
     }

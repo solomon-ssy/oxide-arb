@@ -630,7 +630,11 @@ mod tests {
     use super::{ClassicalAdapterRegistry, SmartcoreModel};
     use ndarray::{Array1, Array2};
 
-    use crate::{features::FeatureName, model::runtime::ClassicalKind, training::TrainingMatrix};
+    use crate::{
+        features::FeatureName,
+        model::{classical::dense_matrix, runtime::ClassicalKind},
+        training::TrainingMatrix,
+    };
 
     /// A linearly separable matrix: label = 1 when feature-0 is high.
     fn training_matrix() -> TrainingMatrix {
@@ -705,7 +709,7 @@ mod tests {
         let SmartcoreModel::Logistic { .. } = &model else {
             panic!("logistic variant");
         };
-        let x = super::dense_matrix(&[vec![2.0, 0.0], vec![-2.0, 0.0]]).expect("matrix");
+        let x = dense_matrix(&[vec![2.0, 0.0], vec![-2.0, 0.0]]).expect("matrix");
         let proba = model.predict(&x).expect("predict");
         assert!(
             proba.iter().all(|p| (0.0..=1.0).contains(p)),

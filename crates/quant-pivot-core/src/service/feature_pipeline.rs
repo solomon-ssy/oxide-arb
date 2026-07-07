@@ -12,26 +12,32 @@
 
 use crate::{
     observability::feature_fact_writer::FeatureEventWriter,
-    pipeline::feature_window_provider::FeatureWindowProvider,
+    pipeline::{
+        feature_window_provider::FeatureWindowProvider,
+        market_registry::MarketRegistry,
+        trade_tape_source::{cursors_by_contract_address, trade_tape_market_ingest_available},
+    },
 };
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
+    config::TradeTapeOnChainConfig,
     domain::{
-        FeatureVectorInfo, NewFeatureVector, market::registry::NegRiskLegSet,
+        FeatureVectorInfo, NewFeatureVector, TradeTapeSourceKind, market::registry::NegRiskLegSet,
         quant::NewReportDataQualitySnapshot,
     },
     enums::quant::DataQualityStatus,
     runtime_config::{DataQualityConfig, FeaturesConfig},
     types::{MarketId, RuntimeConfigVersionId, TokenId, Usd},
 };
-use quant_pivot_repository::traits::FeatureRepository;
+use quant_pivot_repository::traits::{FeatureRepository, TradeTapeBlockCursorRepository};
 use quant_pivot_research::{
     features::{
-        ConfiguredFeatureBuilder, FeatureName, FeatureSchema, FeatureVector, MarketDecisionCapture,
-        MarketWindowSnapshot, NullReason, PitView, RejectedMarketDraft, ResolvedMarketBundle,
-        draft_data_quality_snapshot, feature_events, merged_required_features,
+        ConfiguredFeatureBuilder, FeatureName, FeatureSchema, FeatureSourceWindows, FeatureVector,
+        MarketDecisionCapture, MarketWindowSnapshot, NullReason, PitView, RejectedMarketDraft,
+        ResolvedMarketBundle, TradeTapeWindowSnapshot, draft_data_quality_snapshot, feature_events,
+        merged_required_features,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -101,6 +107,9 @@ pub struct FeaturePipelineService {
     window_provider: FeatureWindowProvider,
     feature_repo: Arc<dyn FeatureRepository>,
     event_writer: Arc<FeatureEventWriter>,
+    market_registry: Arc<MarketRegistry>,
+    block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
 impl FeaturePipelineService {
@@ -110,11 +119,17 @@ impl FeaturePipelineService {
         window_provider: FeatureWindowProvider,
         feature_repo: Arc<dyn FeatureRepository>,
         event_writer: Arc<FeatureEventWriter>,
+        market_registry: Arc<MarketRegistry>,
+        block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+        trade_tape_on_chain: TradeTapeOnChainConfig,
     ) -> Self {
         Self {
             window_provider,
             feature_repo,
             event_writer,
+            market_registry,
+            block_cursor_repo,
+            trade_tape_on_chain,
         }
     }
 
@@ -140,16 +155,28 @@ impl FeaturePipelineService {
             .iter()
             .enumerate()
             .map(|(index, market)| {
-                let window = windows.get(&market.primary_token_id).ok_or_else(|| {
+                let window = windows
+                    .microstructure
+                    .get(&market.primary_token_id)
+                    .ok_or_else(|| {
+                        QuantError::from(ReportError::InvariantViolation {
+                            stage: "feature_pipeline",
+                            detail: format!(
+                                "missing prefetched window for token {}",
+                                market.primary_token_id.as_str()
+                            ),
+                        })
+                    })?;
+                let trade_tape = windows.trade_tape.get(&market.market_id).ok_or_else(|| {
                     QuantError::from(ReportError::InvariantViolation {
                         stage: "feature_pipeline",
                         detail: format!(
-                            "missing prefetched window for token {}",
-                            market.primary_token_id.as_str()
+                            "missing prefetched trade-tape window for market {}",
+                            market.market_id.as_str()
                         ),
                     })
                 })?;
-                Ok((index, market, window))
+                Ok((index, market, window, trade_tape))
             })
             .collect::<QuantResult<Vec<_>>>()?;
 
@@ -220,14 +247,56 @@ impl FeaturePipelineService {
         builder: &ConfiguredFeatureBuilder,
         request: &FeaturePipelineRequest<'_>,
         source_delay: Duration,
-    ) -> QuantResult<HashMap<TokenId, MarketWindowSnapshot>> {
-        if !builder.schema().needs_window() {
-            return Ok(empty_windows(request.included, request.as_of, source_delay));
-        }
-        let lookback = Duration::from_secs(request.features.max_lookback_secs());
-        self.window_provider
-            .load_windows(request.included, request.as_of, lookback, source_delay)
-            .await
+    ) -> QuantResult<FeaturePrefetchWindows> {
+        let lookback = Duration::from_secs(request.features.max_microstructure_lookback_secs());
+        let microstructure = if builder.schema().needs_window() {
+            self.window_provider
+                .load_windows(request.included, request.as_of, lookback, source_delay)
+                .await?
+        } else {
+            empty_windows(request.included, request.as_of, source_delay)
+        };
+        let trade_tape = if builder.needs_trade_tape() && self.trade_tape_on_chain.enabled {
+            let cursors = self
+                .block_cursor_repo
+                .list_by_source(TradeTapeSourceKind::OnChain.as_str())
+                .await?;
+            let cursors_by_address = cursors_by_contract_address(&cursors);
+            let trade_lookback =
+                Duration::from_secs(request.features.structural.trade_tape_window_secs);
+            let mut windows = self
+                .window_provider
+                .load_trade_tape_windows(
+                    request.included,
+                    request.as_of,
+                    trade_lookback,
+                    source_delay,
+                )
+                .await?;
+            for market in request.included {
+                let neg_risk = self
+                    .market_registry
+                    .get_market(&market.market_id)
+                    .is_some_and(|info| info.neg_risk);
+                let available = trade_tape_market_ingest_available(
+                    &self.trade_tape_on_chain,
+                    &cursors_by_address,
+                    neg_risk,
+                );
+                if let Some(window) = windows.get_mut(&market.market_id)
+                    && !available
+                {
+                    *window = window.clone().with_source_available(false);
+                }
+            }
+            windows
+        } else {
+            empty_trade_tape_windows(request.included, request.as_of, source_delay)
+        };
+        Ok(FeaturePrefetchWindows {
+            microstructure,
+            trade_tape,
+        })
     }
 
     /// Resolve one PIT bundle per market with bounded concurrency, preserving
@@ -241,7 +310,12 @@ impl FeaturePipelineService {
     async fn resolve_bundles<'a>(
         builder: &ConfiguredFeatureBuilder,
         request: &FeaturePipelineRequest<'a>,
-        resolve_jobs: &[(usize, &'a SelectedMarket, &'a MarketWindowSnapshot)],
+        resolve_jobs: &[(
+            usize,
+            &'a SelectedMarket,
+            &'a MarketWindowSnapshot,
+            &'a TradeTapeWindowSnapshot,
+        )],
         max_concurrent: usize,
     ) -> QuantResult<Vec<ResolvedMarketBundle<'a>>> {
         let mut bundles = Vec::with_capacity(resolve_jobs.len());
@@ -250,28 +324,36 @@ impl FeaturePipelineService {
             // per-market `Vec<NegRiskLeg>` must outlive the `join_all` await.
             let sibling_sets: Vec<NegRiskLegSet> = chunk
                 .iter()
-                .map(|(_, market, _)| request.pit.neg_risk_leg_set(&market.event_id))
+                .map(|(_, market, _, _)| request.pit.neg_risk_leg_set(&market.event_id))
                 .collect();
             let chunk_results = join_all(chunk.iter().zip(&sibling_sets).map(
-                |((_, market, window), sibling)| {
+                |((_, market, window, trade_tape), sibling)| {
                     builder.resolve_inputs(
                         market,
                         request.as_of,
                         request.pit,
-                        window,
+                        FeatureSourceWindows {
+                            microstructure: window,
+                            trade_tape,
+                        },
                         sibling,
                         request.liquidity_cap_usd,
                     )
                 },
             ))
             .await;
-            for ((index, _, _), bundle) in chunk.iter().zip(chunk_results) {
+            for ((index, _, _, _), bundle) in chunk.iter().zip(chunk_results) {
                 bundles.push((*index, bundle?));
             }
         }
         bundles.sort_by_key(|(index, _)| *index);
         Ok(bundles.into_iter().map(|(_, bundle)| bundle).collect())
     }
+}
+
+struct FeaturePrefetchWindows {
+    microstructure: HashMap<TokenId, MarketWindowSnapshot>,
+    trade_tape: HashMap<MarketId, TradeTapeWindowSnapshot>,
 }
 
 /// Merge post-build data quality into frozen captures for every market.
@@ -328,6 +410,23 @@ fn empty_windows(
             (
                 token.clone(),
                 MarketWindowSnapshot::empty(token, as_of, source_delay),
+            )
+        })
+        .collect()
+}
+
+fn empty_trade_tape_windows(
+    markets: &[SelectedMarket],
+    as_of: DateTime<Utc>,
+    source_delay: Duration,
+) -> HashMap<MarketId, TradeTapeWindowSnapshot> {
+    markets
+        .iter()
+        .map(|market| {
+            let market_id = market.market_id.clone();
+            (
+                market_id.clone(),
+                TradeTapeWindowSnapshot::empty(market_id, as_of, source_delay),
             )
         })
         .collect()

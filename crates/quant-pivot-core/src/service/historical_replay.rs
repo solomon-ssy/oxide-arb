@@ -26,7 +26,8 @@ use quant_pivot_models::{
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
     features::{
-        ConfiguredFeatureBuilder, FeatureVector, MarketWindowSnapshot, PitView, ResolvedBook,
+        ConfiguredFeatureBuilder, FeatureSourceWindows, FeatureVector, MarketWindowSnapshot,
+        PitView, ResolvedBook, TradeTapeWindowSnapshot,
     },
     model::FavoriteLongshotBiasTable,
     pit::PitQueryEngine,
@@ -34,7 +35,7 @@ use quant_pivot_research::{
 };
 
 use crate::pipeline::historical_window::{
-    Prefetched, ReplaySample, feature_window, selected_market,
+    Prefetched, ReplaySample, feature_window, selected_market, trade_tape_window,
 };
 
 /// Frozen feature/factor/data-quality config governing a replay.
@@ -123,12 +124,13 @@ pub async fn materialize_cross_section(
     }
 
     let as_of = request.as_of;
-    let (selected, windows) = cross_section_inputs(
+    let (selected, windows, trade_windows) = cross_section_inputs(
         request.group,
         request.prefetched,
         as_of,
         request.source_delay,
         request.lookback,
+        Duration::from_secs(config.features.structural.trade_tape_window_secs),
     );
     if selected.is_empty() {
         return Ok(None);
@@ -138,14 +140,25 @@ pub async fn materialize_cross_section(
     let resolve_futures = selected
         .iter()
         .zip(windows.iter())
-        .map(|(market, snapshot)| {
+        .zip(trade_windows.iter())
+        .map(|((market, snapshot), trade_snapshot)| {
             // Neg-risk full-leg PIT (offline): enumerate the event's YES legs from
             // the prefetched window and resolve each book at the same `as_of`
             // through the same `resolve_book` the online plane uses — byte-identical.
             let sibling = sibling_leg_set(market, request.prefetched);
             async move {
                 builder
-                    .resolve_inputs(market, as_of, pit_view, snapshot, &sibling, Usd::ZERO)
+                    .resolve_inputs(
+                        market,
+                        as_of,
+                        pit_view,
+                        FeatureSourceWindows {
+                            microstructure: snapshot,
+                            trade_tape: trade_snapshot,
+                        },
+                        &sibling,
+                        Usd::ZERO,
+                    )
                     .await
             }
         });
@@ -216,9 +229,15 @@ fn cross_section_inputs(
     as_of: DateTime<Utc>,
     source_delay: Duration,
     lookback: Duration,
-) -> (Vec<SelectedMarket>, Vec<MarketWindowSnapshot>) {
+    trade_lookback: Duration,
+) -> (
+    Vec<SelectedMarket>,
+    Vec<MarketWindowSnapshot>,
+    Vec<TradeTapeWindowSnapshot>,
+) {
     let mut selected = Vec::with_capacity(group.len());
     let mut windows = Vec::with_capacity(group.len());
+    let mut trade_windows = Vec::with_capacity(group.len());
     for sample in group {
         let Some(info) = prefetched.markets_by_id.get(&sample.market_id) else {
             continue;
@@ -234,6 +253,16 @@ fn cross_section_inputs(
                 .get(&sample.token_id)
                 .map_or(&[][..], Vec::as_slice),
         ));
+        trade_windows.push(trade_tape_window(
+            sample.market_id.clone(),
+            as_of,
+            source_delay,
+            trade_lookback,
+            prefetched
+                .trade_tape
+                .get(&sample.market_id)
+                .map_or(&[][..], Vec::as_slice),
+        ));
     }
-    (selected, windows)
+    (selected, windows, trade_windows)
 }

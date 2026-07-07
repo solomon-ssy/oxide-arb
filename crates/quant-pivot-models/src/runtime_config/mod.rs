@@ -36,7 +36,7 @@ use crate::types::SchemaVersion;
 /// migration; non-matching documents are rejected). It is currently
 /// [`SchemaVersion::FIRST`] because the schema was last reset here, NOT because
 /// the baseline is permanently pinned — future phases (11.2.2 / 11.3) bump it.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::FIRST;
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(4);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -176,6 +176,33 @@ impl RuntimeConfig {
         }
         masked.to_json()
     }
+
+    /// Canonical PIT source delay from enabled report schedules.
+    ///
+    /// Returns `None` when enabled schedules disagree on `source_delay_secs`.
+    #[must_use]
+    pub fn pit_source_delay_secs(&self) -> Option<u64> {
+        let delays: Vec<u64> = self
+            .reports
+            .schedules
+            .iter()
+            .filter(|schedule| schedule.enabled)
+            .map(|schedule| schedule.source_delay_secs)
+            .collect();
+        if delays.is_empty() {
+            return self
+                .reports
+                .schedules
+                .first()
+                .map(|schedule| schedule.source_delay_secs);
+        }
+        let first = delays[0];
+        if delays.iter().all(|delay| *delay == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
 }
 
 /// Dotted document paths whose values are masked on read surfaces.
@@ -280,19 +307,19 @@ mod tests {
     fn schema_version_is_current() {
         assert_eq!(
             RuntimeConfig::default().schema_version,
-            SchemaVersion::FIRST
+            RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::FIRST);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(4));
     }
 
     #[test]
     fn rejects_non_current_schema_documents() {
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(2);
+        document["schema_version"] = json!(SchemaVersion::FIRST.get());
         let error = RuntimeConfig::from_json(&document).expect_err("non-current must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 2
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found == SchemaVersion::FIRST
         ));
     }
 

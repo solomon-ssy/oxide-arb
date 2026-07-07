@@ -74,12 +74,13 @@ use quant_pivot_research::{
     training::{
         DatasetCoverage, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest, DecisionBook,
         ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler, LabelBuildInput,
-        LabelBuildOutput, Labeler, LiquidityExitLabeler, LotSamplePlan, LotTerminalSnapshot,
-        LotTrainingContext, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, PlanMarket,
-        ReturnToHorizonLabeler, SamplePlan, SettlementOutcomeLabeler, TrainingDatasetArtifact,
-        TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample, TrainingLabel,
-        assert_no_future_leakage, count_samples, label_names_for_sources,
-        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
+        LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
+        LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
+        MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
+        SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
+        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
+        count_samples, label_names_for_sources, plan_lot_timeline_samples, plan_samples,
+        probe_matrix_coverage, remaining_shares_at,
     },
 };
 use rust_decimal::Decimal;
@@ -1759,7 +1760,7 @@ fn attribution_labels(
 
 fn push_label(labels: &mut Vec<TrainingLabel>, name: &'static str, value: Decimal) {
     labels.push(TrainingLabel {
-        label_name: quant_pivot_research::training::LabelName::from_static(name),
+        label_name: LabelName::from_static(name),
         horizon_secs: 0,
         value,
         is_resolved: true,
@@ -1809,7 +1810,7 @@ fn group_lot_samples(samples: &[LotSamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&
 
 async fn decision_book_at(
     pit: &dyn PitQueryEngine,
-    token_id: &quant_pivot_models::types::TokenId,
+    token_id: &TokenId,
     as_of: DateTime<Utc>,
     micro: &[BookMicrostructureRow],
 ) -> QuantResult<(Option<DecisionBook>, Option<BookFidelity>)> {

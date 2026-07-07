@@ -67,6 +67,8 @@ pub fn canonical_state_hash<T: Serialize>(value: &T) -> Result<String, Canonical
 
 #[cfg(test)]
 mod tests {
+    use crate::hashing::canonical_state_hash;
+
     use super::{BLAKE3_PREFIX, CanonicalDigest};
     use serde::Serialize;
 
@@ -98,7 +100,7 @@ mod tests {
     fn canonical_state_hash_matches_blake3_json() {
         let value = Sample { a: 1, b: "x" };
         assert_eq!(
-            super::canonical_state_hash(&value).expect("hash"),
+            canonical_state_hash(&value).expect("hash"),
             CanonicalDigest::blake3_json(&value).expect("digest")
         );
     }

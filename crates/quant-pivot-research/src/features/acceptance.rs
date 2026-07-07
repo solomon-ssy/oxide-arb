@@ -28,9 +28,11 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 
+use crate::features::names::structural::NEGRISK_LEG_ASK_SUM;
 use crate::{
     features::{
         FeatureBuildInput, FeatureBuilder, MarketWindowSnapshot, MicrostructureBucket, PitView,
+        TradeTapeWindowSnapshot,
         availability::FeatureAvailabilityOracle,
         builder::ConfiguredFeatureBuilder,
         names::{book, market},
@@ -279,6 +281,8 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
     let pit = PitView::Live(&EmptyPit);
     let window =
         MarketWindowSnapshot::empty(market.primary_token_id.clone(), Utc::now(), Duration::ZERO);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(market.market_id.clone(), Utc::now(), Duration::ZERO);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -287,6 +291,7 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
             required_features: &[],
             pit,
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -296,7 +301,7 @@ async fn binary_market_negrisk_feature_is_not_applicable() {
 
     let value = vector
         .values
-        .get(&crate::features::names::structural::NEGRISK_LEG_ASK_SUM)
+        .get(&NEGRISK_LEG_ASK_SUM)
         .expect("structural neg-risk feature present in schema");
     assert_eq!(
         value.null_reason(),
@@ -362,6 +367,8 @@ async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() 
     };
     let window =
         MarketWindowSnapshot::empty(market.primary_token_id.clone(), Utc::now(), Duration::ZERO);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(market.market_id.clone(), Utc::now(), Duration::ZERO);
     builder
         .build(FeatureBuildInput {
             market: &market,
@@ -370,6 +377,7 @@ async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() 
             required_features: &[],
             pit: PitView::Live(&source),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -655,6 +663,8 @@ async fn online_offline_feature_parity() {
         source_refs: Vec::new(),
     };
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, Duration::ZERO);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(selected.market_id.clone(), as_of, Duration::ZERO);
     let data_quality = DataQualityConfig {
         feature_staleness_policy: FeatureStalenessPolicy::AllowDegraded,
         ..DataQualityConfig::default()
@@ -671,6 +681,7 @@ async fn online_offline_feature_parity() {
             required_features: &[],
             pit: PitView::Live(&live_source),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &data_quality,
@@ -689,6 +700,7 @@ async fn online_offline_feature_parity() {
             required_features: &[],
             pit: PitView::Historical(&hist_engine),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &data_quality,
@@ -769,12 +781,14 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
         source_delay: Duration::ZERO,
         buckets,
     };
+    let market = windowed_market(&token);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, Duration::ZERO);
     let config = FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::TimeSeries],
         ..FeaturesConfig::default()
     };
     let builder = ConfiguredFeatureBuilder::new(&config);
-    let market = windowed_market(&token);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -783,6 +797,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
             required_features: &[],
             pit: PitView::Live(&EmptyPit),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -828,6 +843,8 @@ async fn feature_stale_book_rejects_market() {
     let builder = ConfiguredFeatureBuilder::new(&config);
     let market = windowed_market(&token);
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, Duration::ZERO);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, Duration::ZERO);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -836,6 +853,7 @@ async fn feature_stale_book_rejects_market() {
             required_features: &[],
             pit: PitView::Historical(&engine),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -889,12 +907,14 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
         source_delay: Duration::ZERO,
         buckets,
     };
+    let market = windowed_market(&token);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, Duration::ZERO);
     let config = FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::TimeSeries],
         ..FeaturesConfig::default()
     };
     let builder = ConfiguredFeatureBuilder::new(&config);
-    let market = windowed_market(&token);
     let required = vec![FeatureName::ts_return(60)];
 
     // Default policy rejects a stale *required* feature ⇒ Insufficient.
@@ -906,6 +926,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
             required_features: &required,
             pit: PitView::Live(&EmptyPit),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -929,6 +950,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
             required_features: &required,
             pit: PitView::Live(&EmptyPit),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &lenient,
@@ -967,6 +989,8 @@ async fn feature_out_of_valid_range_rejects() {
     let builder = ConfiguredFeatureBuilder::new(&config);
     let market = windowed_market(&token);
     let window = MarketWindowSnapshot::empty(token.clone(), as_of, Duration::ZERO);
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, Duration::ZERO);
     let vector = builder
         .build(FeatureBuildInput {
             market: &market,
@@ -975,6 +999,7 @@ async fn feature_out_of_valid_range_rejects() {
             required_features: &[],
             pit: PitView::Historical(&engine),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &DataQualityConfig::default(),
@@ -1030,6 +1055,19 @@ fn category_feature_projects_table_index() {
     );
 }
 
+fn parity_selected_market(market_id: &MarketId, token: &TokenId) -> SelectedMarket {
+    SelectedMarket {
+        market_id: market_id.clone(),
+        event_id: EventId::new("evt-parity-win"),
+        category: MarketCategory::Sports,
+        primary_token_id: token.clone(),
+        secondary_token_id: None,
+        liquidity_usd: Some(Usd::new(Decimal::from(5_000))),
+        volume_24h_usd: None,
+        source_refs: Vec::new(),
+    }
+}
+
 #[tokio::test]
 async fn online_offline_parity_full_families_with_window() {
     let as_of = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
@@ -1076,18 +1114,10 @@ async fn online_offline_parity_full_families_with_window() {
         source_delay: Duration::ZERO,
         buckets,
     };
+    let trade_tape = TradeTapeWindowSnapshot::empty(market_id.clone(), as_of, Duration::ZERO);
     let config = FeaturesConfig::default();
     let builder = ConfiguredFeatureBuilder::new(&config);
-    let selected = SelectedMarket {
-        market_id: market_id.clone(),
-        event_id: EventId::new("evt-parity-win"),
-        category: MarketCategory::Sports,
-        primary_token_id: token.clone(),
-        secondary_token_id: None,
-        liquidity_usd: Some(Usd::new(Decimal::from(5_000))),
-        volume_24h_usd: None,
-        source_refs: Vec::new(),
-    };
+    let selected = parity_selected_market(&market_id, &token);
     let dq = DataQualityConfig::default();
 
     let live_source = ParityLiveSource {
@@ -1101,6 +1131,7 @@ async fn online_offline_parity_full_families_with_window() {
             required_features: &[],
             pit: PitView::Live(&live_source),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &dq,
@@ -1119,6 +1150,7 @@ async fn online_offline_parity_full_families_with_window() {
             required_features: &[],
             pit: PitView::Historical(&hist_engine),
             window: &window,
+            trade_tape: &trade_tape,
             sibling: &EMPTY_NEGRISK_LEGS,
             config: &config,
             data_quality: &dq,
@@ -1356,6 +1388,8 @@ async fn build_sibling_parity_vectors(
         fixture.as_of,
         Duration::ZERO,
     );
+    let trade_tape =
+        TradeTapeWindowSnapshot::empty(selected.market_id.clone(), fixture.as_of, Duration::ZERO);
     let data_quality = DataQualityConfig {
         feature_staleness_policy: FeatureStalenessPolicy::AllowDegraded,
         ..DataQualityConfig::default()
@@ -1369,6 +1403,7 @@ async fn build_sibling_parity_vectors(
             required_features: &[],
             pit: PitView::Live(&live_source),
             window: &window,
+            trade_tape: &trade_tape,
             sibling,
             config: &config,
             data_quality: &data_quality,
@@ -1384,6 +1419,7 @@ async fn build_sibling_parity_vectors(
             required_features: &[],
             pit: PitView::Historical(&hist_engine),
             window: &window,
+            trade_tape: &trade_tape,
             sibling,
             config: &config,
             data_quality: &data_quality,
@@ -1409,7 +1445,7 @@ async fn negrisk_sibling_legs_online_offline_parity() {
     );
     let ask_sum = live
         .values
-        .get(&crate::features::names::structural::NEGRISK_LEG_ASK_SUM)
+        .get(&NEGRISK_LEG_ASK_SUM)
         .expect("leg ask sum present");
     assert_eq!(
         ask_sum.to_fact_decimal(),
@@ -1430,7 +1466,7 @@ async fn negrisk_missing_catalog_leg_fails_closed() {
     let (live, _) = build_sibling_parity_vectors(&fixture, &sibling, &selected).await;
     let value = live
         .values
-        .get(&crate::features::names::structural::NEGRISK_LEG_ASK_SUM)
+        .get(&NEGRISK_LEG_ASK_SUM)
         .expect("neg-risk leg ask sum in schema");
     assert_eq!(
         value.null_reason(),

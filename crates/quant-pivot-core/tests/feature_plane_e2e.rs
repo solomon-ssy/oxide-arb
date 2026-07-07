@@ -23,8 +23,9 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow,
+        TickEventRow, TradeTapeRow,
     },
+    config::TradeTapeOnChainConfig,
     domain::{
         FeatureVectorInfo, NewFeatureVector,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
@@ -54,6 +55,7 @@ use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObse
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
     ws::WsShardHealth,
 };
 use rust_decimal::Decimal;
@@ -175,6 +177,15 @@ impl QuantFactReadRepository for EmptyFactRead {
         _to_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn trade_tape_window_by_market(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -308,6 +319,9 @@ async fn insufficient_vectors_are_partitioned_and_not_persisted() {
         window_provider,
         Arc::clone(&repo) as Arc<dyn FeatureRepository>,
         event_writer,
+        Arc::clone(&registry),
+        live_trade_tape_block_cursor_repo(),
+        TradeTapeOnChainConfig::default(),
     );
 
     let included = vec![market];
@@ -404,6 +418,9 @@ async fn create_feature_vector_then_find() {
         window_provider,
         Arc::clone(&feature_repo),
         Arc::clone(&event_writer),
+        Arc::clone(&registry),
+        quant_pivot_test_support::trade_tape_fixtures::live_trade_tape_block_cursor_repo(),
+        quant_pivot_models::config::TradeTapeOnChainConfig::default(),
     );
 
     let result = pipeline

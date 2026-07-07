@@ -16,13 +16,17 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd},
-    types::TokenId,
+    domain::TradeTapePrint,
+    types::{MarketId, TokenId},
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
+    features::TradeTapeWindowSnapshot,
     features::{MarketWindowSnapshot, MicrostructureBucket},
     selection::SelectedMarket,
 };
+
+use super::trade_tape_pit::TradeTapePitParams;
 
 /// Pre-fetches and decodes microstructure windows for a selected-market set.
 pub struct FeatureWindowProvider {
@@ -90,6 +94,56 @@ impl FeatureWindowProvider {
                     source_delay,
                     buckets,
                 },
+            );
+        }
+        Ok(windows)
+    }
+
+    /// Load a per-market trade-tape window for every selected market.
+    ///
+    /// Empty snapshots are marked source-available because the `ClickHouse` read
+    /// completed; a disabled/unavailable source is represented by callers using
+    /// [`TradeTapeWindowSnapshot::empty`].
+    pub async fn load_trade_tape_windows(
+        &self,
+        markets: &[SelectedMarket],
+        as_of: DateTime<Utc>,
+        lookback: Duration,
+        source_delay: Duration,
+    ) -> QuantResult<HashMap<MarketId, TradeTapeWindowSnapshot>> {
+        let market_ids: Vec<MarketId> = markets
+            .iter()
+            .map(|market| market.market_id.clone())
+            .collect();
+        if market_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let pit = TradeTapePitParams {
+            trigger_time: as_of,
+            source_delay,
+            lookback,
+        };
+        let rows = self
+            .fact_read
+            .trade_tape_window_by_market(market_ids, pit.ch_from_ms(), pit.ch_to_ms())
+            .await?;
+
+        let mut grouped: HashMap<MarketId, Vec<TradeTapePrint>> = HashMap::new();
+        for row in rows {
+            grouped
+                .entry(row.market_id.clone())
+                .or_default()
+                .push(TradeTapePrint::from_clickhouse_row(&row, as_of));
+        }
+
+        let mut windows = HashMap::with_capacity(markets.len());
+        for market in markets {
+            let market_id = market.market_id.clone();
+            let prints = grouped.remove(&market_id).unwrap_or_default();
+            windows.insert(
+                market_id.clone(),
+                TradeTapeWindowSnapshot::available(market_id, as_of, source_delay, prints),
             );
         }
         Ok(windows)

@@ -20,6 +20,7 @@ pub mod settlement_redeem_worker;
 pub mod system_status_broadcaster;
 pub mod task_id;
 pub mod task_registry;
+pub mod trade_tape_worker;
 pub mod web_services;
 
 mod bundles;

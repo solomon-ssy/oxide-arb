@@ -16,6 +16,7 @@ pub mod report_pipeline_harness;
 pub mod report_snapshots;
 pub mod research_ui_seed;
 pub mod storage;
+pub mod trade_tape_fixtures;
 pub mod ui_demo_seed;
 pub mod ws;
 

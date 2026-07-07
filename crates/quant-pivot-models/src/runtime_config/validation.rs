@@ -123,6 +123,33 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
             detail: "must be > 0".to_owned(),
         });
     }
+    if config.features.structural.trade_tape_window_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.structural.trade_tape_window_secs",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    if config
+        .features
+        .structural
+        .trade_tape_min_unique_participants
+        == 0
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.structural.trade_tape_min_unique_participants",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    non_negative_decimal(
+        "features.structural.trade_tape_min_notional_usd",
+        &config.features.structural.trade_tape_min_notional_usd,
+        report,
+    );
+    unit_ratio(
+        "features.structural.trade_tape_min_coverage_ratio",
+        &config.features.structural.trade_tape_min_coverage_ratio,
+        report,
+    );
     let mut seen = HashSet::new();
     for feature_ref in &config.features.required_features {
         let label = feature_ref.name.trim();
@@ -329,6 +356,41 @@ fn validate_factor_structural(config: &RuntimeConfig, report: &mut ConfigValidat
         &fl.ic_significance_min,
         report,
     );
+    validate_participant_concentration_weights(config, report);
+}
+
+fn validate_participant_concentration_weights(
+    config: &RuntimeConfig,
+    report: &mut ConfigValidationReport,
+) {
+    let structural = &config.factors.structural;
+    let pc = &structural.participant_concentration;
+    non_negative_decimal(
+        "factors.structural.participant_concentration.gini_weight",
+        &pc.gini_weight,
+        report,
+    );
+    non_negative_decimal(
+        "factors.structural.participant_concentration.cr1_share_weight",
+        &pc.cr1_share_weight,
+        report,
+    );
+    non_negative_decimal(
+        "factors.structural.participant_concentration.hhi_weight",
+        &pc.hhi_weight,
+        report,
+    );
+    if let (Ok(gini), Ok(cr1), Ok(hhi)) = (
+        pc.gini_weight.value.parse::<Decimal>(),
+        pc.cr1_share_weight.value.parse::<Decimal>(),
+        pc.hhi_weight.value.parse::<Decimal>(),
+    ) && gini + cr1 + hhi <= Decimal::ZERO
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.participant_concentration",
+            detail: "at least one composite weight must be positive".to_owned(),
+        });
+    }
 }
 
 fn validate_factor_normalization(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -580,6 +642,12 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
                 detail: format!("duplicate schedule_id `{id}`"),
             });
         }
+    }
+    if config.pit_source_delay_secs().is_none() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "reports.schedules.source_delay_secs",
+            detail: "enabled schedules must share one source_delay_secs".to_owned(),
+        });
     }
 }
 

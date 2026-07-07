@@ -5,6 +5,8 @@
 //! are produced from the same canonical token pair — the two stores can never
 //! disagree about a market's YES/NO legs.
 
+use crate::gamma::CatalogMarketReject;
+
 use super::catalog::{CatalogEvent, CatalogMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::market::MarketError;
@@ -69,7 +71,7 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
                     }
                     Err(error) => rejected.push(RejectedMarket {
                         condition_id,
-                        reject: super::catalog::CatalogMarketReject::InvalidTokenPair {
+                        reject: CatalogMarketReject::InvalidTokenPair {
                             reason: error.to_string(),
                         },
                     }),

@@ -3,7 +3,10 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use quant_pivot_models::{
     enums::{common::MarketCategory, quant::OutcomeSide},
-    types::{EventId, ExposureBreakdown, ModelRunId, Price, Probability, TokenId, Usd},
+    types::{
+        EventId, ExposureBreakdown, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
+        TokenId, Usd,
+    },
 };
 use quant_pivot_research::{
     backtest::PortfolioCaps,
@@ -18,9 +21,9 @@ use rust_decimal_macros::dec;
 
 fn candidate(index: usize, composite: Decimal) -> SignalCandidate {
     SignalCandidate {
-        signal_candidate_id: quant_pivot_models::types::SignalCandidateId::from_v7(),
+        signal_candidate_id: SignalCandidateId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
-        market_id: quant_pivot_models::types::MarketId::new(format!("0x{index:040x}")),
+        market_id: MarketId::new(format!("0x{index:040x}")),
         token_id: TokenId::new("yes"),
         outcome_side: OutcomeSide::Yes,
         composite_score: Probability::new(composite),

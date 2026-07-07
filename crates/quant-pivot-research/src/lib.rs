@@ -48,6 +48,7 @@ pub mod model;
 pub mod pit;
 pub mod portfolio;
 pub mod selection;
+pub mod trade_tape;
 pub mod training;
 
 #[cfg(test)]

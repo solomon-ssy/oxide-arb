@@ -12,6 +12,7 @@ use crate::{
         RuntimeConfigSchemaView, UiText,
     },
     runtime_config::RuntimeConfig,
+    schema::ui::FieldUiEntry,
 };
 
 use crate::schema::ui::{enum_label, field_ui, field_ui_map, schema_tree, tree_field_paths};
@@ -163,10 +164,7 @@ const fn infer_widget(value_type: JsonValueType, sensitive: bool) -> FieldWidget
     }
 }
 
-fn resolve_enum_items(
-    leaf: &SchemaLeaf,
-    ui: Option<&crate::schema::ui::FieldUiEntry>,
-) -> Option<Vec<EnumItemView>> {
+fn resolve_enum_items(leaf: &SchemaLeaf, ui: Option<&FieldUiEntry>) -> Option<Vec<EnumItemView>> {
     if let Some(keys) = ui.and_then(|entry| entry.static_map_keys) {
         return Some(
             keys.iter()
@@ -206,7 +204,7 @@ fn title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_preferences_schema, preferences_schema_ui_gaps};
-    use crate::domain::SchemaNode;
+    use crate::domain::{FieldWidget, JsonValueType, SchemaNode};
 
     fn walk_sections(node: &SchemaNode, gaps: &mut Vec<String>) {
         if let SchemaNode::Section(section) = node {
@@ -266,8 +264,8 @@ mod tests {
             .iter()
             .find(|field| field.path == "factors.factor_weights")
             .expect("factor_weights field");
-        assert_eq!(field.value_type, crate::domain::JsonValueType::DecimalMap);
-        assert_eq!(field.widget, Some(crate::domain::FieldWidget::WeightMap));
+        assert_eq!(field.value_type, JsonValueType::DecimalMap);
+        assert_eq!(field.widget, Some(FieldWidget::WeightMap));
         let items = field.enum_items.as_ref().expect("enum_items");
         assert_eq!(items.len(), 12);
         assert!(

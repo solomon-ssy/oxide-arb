@@ -339,8 +339,8 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
         icon: "lucide:target",
     });
-    // Neg-risk structural-drift monitor (Phase 11.2.1): live per-event best-ask
-    // leg sum vs 1.0 — a platform-internal structural mispricing signal.
+    // Structural Alpha dashboard (Phase 11.2.1+): trade-tape participant
+    // concentration, source coverage, and neg-risk leg-sum drift.
     t.page(PageSpec {
         parent: &trading,
         name: "structural-monitor",

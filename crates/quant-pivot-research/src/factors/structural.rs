@@ -17,7 +17,7 @@ use quant_pivot_models::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorNormalization},
         quant::FactorDirection,
     },
-    runtime_config::{DecimalString, FactorsConfig, FeaturesConfig},
+    runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, StructuralFactorsConfig},
     types::{FactorDefinitionId, Price, Probability},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -28,8 +28,8 @@ use crate::{
         generic::{data_quality_confidence, extract_decimal, factor_definition_id},
         names::{
             STRUCT_BOOK_CHURN_INTENSITY, STRUCT_FAVORITE_LONGSHOT, STRUCT_NEGRISK_CONVERT_EDGE,
-            STRUCT_NEGRISK_LEG_SUM_DRIFT, STRUCT_RESOLUTION_PROXIMITY_REGIME,
-            STRUCT_REVERSAL_AFTER_SHOCK,
+            STRUCT_NEGRISK_LEG_SUM_DRIFT, STRUCT_PARTICIPANT_CONCENTRATION,
+            STRUCT_RESOLUTION_PROXIMITY_REGIME, STRUCT_REVERSAL_AFTER_SHOCK,
         },
         value::{
             FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, RawFactor,
@@ -41,6 +41,7 @@ use crate::{
         names::{book as book_names, market as market_names, structural as feat},
     },
     model::FavoriteLongshotBiasTable,
+    trade_tape::{ConcentrationCompositeWeights, composite_concentration},
 };
 
 /// Every structural `(spec, computer)` pair, resolved against the factor +
@@ -98,6 +99,7 @@ pub fn structural_factors(
             input: feat::BOOK_CHURN_INTENSITY,
             headline_label: "book-churn intensity",
         }),
+        participant_concentration_factor(structural),
         computer(NegRiskLegSumDriftFactor {
             definition_id: factor_definition_id(STRUCT_NEGRISK_LEG_SUM_DRIFT.as_str()),
             spec: structural_spec(
@@ -159,6 +161,38 @@ fn computer<C: FactorComputer + 'static>(
 ) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     let spec = factor.spec().clone();
     (spec, Arc::new(factor) as Arc<dyn FactorComputer>)
+}
+
+fn participant_concentration_factor(
+    structural: &StructuralFactorsConfig,
+) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
+    let participant = &structural.participant_concentration;
+    computer(ParticipantConcentrationFactor {
+        definition_id: factor_definition_id(STRUCT_PARTICIPANT_CONCENTRATION.as_str()),
+        spec: structural_spec(
+            STRUCT_PARTICIPANT_CONCENTRATION,
+            vec![
+                feat::PARTICIPANT_GINI,
+                feat::PARTICIPANT_CR1_SHARE,
+                feat::PARTICIPANT_HHI,
+            ],
+            FactorDirection::Neutral,
+            FactorNormalization::WinsorizedZScore,
+            FactorOutputKind::NormalizedScore,
+        ),
+        gini_weight: parse_decimal(
+            &participant.gini_weight,
+            "factors.structural.participant_concentration.gini_weight",
+        ),
+        cr1_weight: parse_decimal(
+            &participant.cr1_share_weight,
+            "factors.structural.participant_concentration.cr1_share_weight",
+        ),
+        hhi_weight: parse_decimal(
+            &participant.hhi_weight,
+            "factors.structural.participant_concentration.hhi_weight",
+        ),
+    })
 }
 
 /// A structural factor spec (never *required* — structural signals degrade
@@ -402,6 +436,75 @@ impl FactorComputer for SingleFeatureStructuralFactor {
                     }],
                 )
             },
+        ))
+    }
+}
+
+// ── participant_concentration ───────────────────────────────────────────────
+
+struct ParticipantConcentrationFactor {
+    definition_id: FactorDefinitionId,
+    spec: FactorDefinitionSpec,
+    gini_weight: Decimal,
+    cr1_weight: Decimal,
+    hhi_weight: Decimal,
+}
+
+impl FactorComputer for ParticipantConcentrationFactor {
+    fn definition_id(&self) -> FactorDefinitionId {
+        self.definition_id.clone()
+    }
+
+    fn spec(&self) -> &FactorDefinitionSpec {
+        &self.spec
+    }
+
+    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+        let (Some(gini), Some(cr1), Some(hhi)) = (
+            read(features, &feat::PARTICIPANT_GINI),
+            read(features, &feat::PARTICIPANT_CR1_SHARE),
+            read(features, &feat::PARTICIPANT_HHI),
+        ) else {
+            return Ok(inert(
+                self.definition_id.clone(),
+                &self.spec,
+                RawFactorEligibility::Normalizable,
+                "trade-tape participant concentration unavailable".to_owned(),
+            ));
+        };
+        let weights = ConcentrationCompositeWeights {
+            gini: self.gini_weight,
+            cr1_share: self.cr1_weight,
+            hhi: self.hhi_weight,
+        };
+        let Some(raw) = composite_concentration(gini, cr1, hhi, &weights) else {
+            return Ok(inert(
+                self.definition_id.clone(),
+                &self.spec,
+                RawFactorEligibility::Normalizable,
+                "participant concentration weights disabled".to_owned(),
+            ));
+        };
+        Ok(scored(
+            self.definition_id.clone(),
+            &self.spec,
+            raw.round_dp(12),
+            features,
+            format!("participant concentration gini={gini}, cr1={cr1}, hhi={hhi}"),
+            vec![
+                FactorDriver {
+                    feature_name: feat::PARTICIPANT_GINI,
+                    contribution: gini,
+                },
+                FactorDriver {
+                    feature_name: feat::PARTICIPANT_CR1_SHARE,
+                    contribution: cr1,
+                },
+                FactorDriver {
+                    feature_name: feat::PARTICIPANT_HHI,
+                    contribution: hhi,
+                },
+            ],
         ))
     }
 }

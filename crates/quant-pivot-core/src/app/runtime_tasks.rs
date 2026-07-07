@@ -1,7 +1,10 @@
 //! Background runtime tasks for Phase 0 ingest plane.
 
 use super::AppContext;
-use crate::app::{task_id::TaskId, task_registry::AppRunner};
+use crate::app::{task_id::TaskId, task_registry::AppRunner, trade_tape_worker::TradeTapeWorker};
+use quant_pivot_api::exchange::ExchangeLogClient;
+use quant_pivot_models::clickhouse::TradeTapeRow;
+use quant_pivot_repository::{clickhouse::ChFactWriter, traits::TradeTapeBlockCursorRepository};
 use std::sync::Arc;
 
 impl AppContext {
@@ -17,5 +20,38 @@ impl AppContext {
                 }
             }
         });
+        if let Some(worker) = self.build_trade_tape_worker() {
+            runner.spawn(TaskId::TradeTapeWorker, move |token| async move {
+                if let Err(error) = worker.run(token).await {
+                    tracing::error!(%error, "TradeTapeWorker exited with error");
+                }
+            });
+        }
+    }
+
+    fn build_trade_tape_worker(&self) -> Option<Arc<TradeTapeWorker>> {
+        let config = &self.config.market_data.trade_tape_on_chain;
+        if !config.enabled {
+            return None;
+        }
+        let log_client = match ExchangeLogClient::connect(&self.config.polymarket.onchain) {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                tracing::error!(%error, "trade-tape worker disabled: RPC connect failed");
+                return None;
+            }
+        };
+        Some(Arc::new(TradeTapeWorker::new(
+            log_client,
+            Arc::clone(&self.data.market_registry),
+            Arc::clone(&self.infra.repos.trade_tape_block_cursor)
+                as Arc<dyn TradeTapeBlockCursorRepository>,
+            Arc::new(ChFactWriter::<TradeTapeRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_trade_tape",
+            )),
+            config.clone(),
+        )))
     }
 }

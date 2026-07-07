@@ -24,20 +24,20 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome, frozen_factor_outcome},
     features::{
-        ConfiguredFeatureBuilder, FeatureSchema, FeatureVector, MarketWindowSnapshot, PitView,
-        merged_required_features,
+        ConfiguredFeatureBuilder, FeatureSchema, FeatureSourceWindows, FeatureVector,
+        MarketWindowSnapshot, PitView, TradeTapeWindowSnapshot, merged_required_features,
     },
     hashing::ResearchHasher,
     model::{
         ActiveSchemaBinding, ModelRuntimeFactoryBuilder, ModelRuntimeOutput, QuantModelRuntime,
-        SignalCandidate,
+        SignalCandidate, WeightOverlay,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::quality_gate_load::quality_gate_passed_ok,
+    governance::{WeightOverlayApplicator, quality_gate_load::quality_gate_passed_ok},
     pipeline::{
         feature_window_provider::FeatureWindowProvider, inference_batch::build_runtime_input,
         market_registry::MarketRegistry,
@@ -49,7 +49,7 @@ use crate::{
 pub struct ModelBackedExitSignalReinfererDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    pub weight_overlay: Arc<crate::governance::WeightOverlayApplicator>,
+    pub weight_overlay: Arc<WeightOverlayApplicator>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     /// Source of the entry recommendation's frozen factor breakdown, replayed as
     /// the exit-side factor plane (reproducing the entry thesis).
@@ -340,9 +340,9 @@ pub(crate) fn exit_model_load_ok(version: &ModelVersionInfo) -> Result<(), Strin
 }
 
 fn resolve_overlay(
-    applicator: &crate::governance::WeightOverlayApplicator,
+    applicator: &WeightOverlayApplicator,
     version: &ModelVersionInfo,
-) -> Option<quant_pivot_research::model::WeightOverlay> {
+) -> Option<WeightOverlay> {
     if version.publication_status == PublicationStatus::Published {
         return None;
     }
@@ -390,6 +390,15 @@ pub(crate) async fn build_live_feature_vector(
         request.features,
     )
     .await?;
+    let trade_tape = load_trade_tape_window(
+        request.window_provider,
+        &builder,
+        request.market,
+        request.as_of,
+        request.source_delay,
+        request.features,
+    )
+    .await?;
 
     let pit_view = PitView::Live(request.pit.as_ref());
     let sibling = pit_view.neg_risk_leg_set(&request.market.event_id);
@@ -398,7 +407,10 @@ pub(crate) async fn build_live_feature_vector(
             request.market,
             request.as_of,
             pit_view,
-            &window,
+            FeatureSourceWindows {
+                microstructure: &window,
+                trade_tape: &trade_tape,
+            },
             &sibling,
             request.liquidity_cap_usd,
         )
@@ -431,7 +443,7 @@ async fn load_window(
             buckets: Vec::new(),
         });
     }
-    let lookback = Duration::from_secs(features.max_lookback_secs());
+    let lookback = Duration::from_secs(features.max_microstructure_lookback_secs());
     let mut windows = window_provider
         .load_windows(std::slice::from_ref(market), as_of, lookback, source_delay)
         .await?;
@@ -439,6 +451,33 @@ async fn load_window(
         QuantError::config(format!(
             "missing prefetched window for token {}",
             market.primary_token_id.as_str()
+        ))
+    })
+}
+
+async fn load_trade_tape_window(
+    window_provider: &FeatureWindowProvider,
+    builder: &ConfiguredFeatureBuilder,
+    market: &SelectedMarket,
+    as_of: DateTime<Utc>,
+    source_delay: Duration,
+    features: &FeaturesConfig,
+) -> QuantResult<TradeTapeWindowSnapshot> {
+    if !builder.needs_trade_tape() {
+        return Ok(TradeTapeWindowSnapshot::empty(
+            market.market_id.clone(),
+            as_of,
+            source_delay,
+        ));
+    }
+    let lookback = Duration::from_secs(features.structural.trade_tape_window_secs);
+    let mut windows = window_provider
+        .load_trade_tape_windows(std::slice::from_ref(market), as_of, lookback, source_delay)
+        .await?;
+    windows.remove(&market.market_id).ok_or_else(|| {
+        QuantError::config(format!(
+            "missing prefetched trade-tape window for market {}",
+            market.market_id.as_str()
         ))
     })
 }

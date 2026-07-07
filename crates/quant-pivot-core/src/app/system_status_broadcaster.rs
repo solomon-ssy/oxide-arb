@@ -178,7 +178,7 @@ mod tests {
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         domain::{
-            CatalogStatusPort, CoreEvent, CoreEventPublisher, OperationalPhase,
+            CatalogStatusPort, CoreEvent, CoreEventPublisher, HealthReport, OperationalPhase,
             QuantModeTransitionReport, RuntimeControlPort, SystemStatus,
             lifecycle::{MarketDataConnectivity, WsShardConnectivity},
             ports::runtime_control::CatalogState,
@@ -237,8 +237,8 @@ mod tests {
             }
         }
 
-        async fn health(&self) -> quant_pivot_models::domain::HealthReport {
-            quant_pivot_models::domain::HealthReport::from_checks(Vec::new(), Utc::now())
+        async fn health(&self) -> HealthReport {
+            HealthReport::from_checks(Vec::new(), Utc::now())
         }
     }
 

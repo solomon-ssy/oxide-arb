@@ -10,6 +10,11 @@ use chrono::Duration;
 use quant_pivot_models::types::Price;
 use rust_decimal::Decimal;
 
+use crate::{
+    execution_sim::ExitFillSimulator,
+    training::{DecisionBook, hold_terminal_proceeds},
+};
+
 use super::{
     LabelBuildInput, LabelBuildOutput, LabelDelayReason, LabelName, Labeler, MissingLabelReason,
     TrainingLabel, TrainingSampleSource,
@@ -320,10 +325,10 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         };
-        let sim = crate::execution_sim::ExitFillSimulator::new(ctx.fee_bps);
+        let sim = ExitFillSimulator::new(ctx.fee_bps);
         let fill = match book {
-            super::DecisionBook::L2 { bids } => sim.simulate_l2(bids, ctx.remaining_shares),
-            super::DecisionBook::Microstructure { best_bid, depth } => {
+            DecisionBook::L2 { bids } => sim.simulate_l2(bids, ctx.remaining_shares),
+            DecisionBook::Microstructure { best_bid, depth } => {
                 sim.simulate_fallback(*best_bid, *depth, ctx.remaining_shares)
             }
         };
@@ -333,7 +338,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
             };
         }
         let exit_proceeds = fill.net_proceeds.inner();
-        let hold_terminal = super::hold_terminal_proceeds(&ctx.terminal, input.as_of).inner();
+        let hold_terminal = hold_terminal_proceeds(&ctx.terminal, input.as_of).inner();
         let alpha = (exit_proceeds - hold_terminal) / cost_basis * bps_denominator();
         LabelBuildOutput::Available(TrainingLabel {
             label_name: self.label_name(),
@@ -388,7 +393,10 @@ mod tests {
     use super::*;
     use crate::training::{ForwardSample, ForwardWindow, MarketResolution};
     use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_models::types::{MarketId, Price, TokenId, Usd};
+    use quant_pivot_models::{
+        domain::BookLevel,
+        types::{MarketId, Price, TokenId, Usd},
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -595,12 +603,10 @@ mod tests {
             fee_bps: Bps::ZERO,
             terminal,
             decision_book: Some(DecisionBook::L2 {
-                bids: Arc::new([
-                    quant_pivot_models::domain::market::book::BookLevel::from_decimal_unchecked(
-                        price("0.55"),
-                        Shares::new(dec!(100)),
-                    ),
-                ]),
+                bids: Arc::new([BookLevel::from_decimal_unchecked(
+                    price("0.55"),
+                    Shares::new(dec!(100)),
+                )]),
             }),
         };
         let window = forward(Vec::new(), 0, None);

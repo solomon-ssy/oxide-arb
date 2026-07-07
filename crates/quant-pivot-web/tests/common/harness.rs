@@ -29,7 +29,7 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow,
-        TickEventRow,
+        TickEventRow, TradeTapeRow,
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -42,18 +42,20 @@ use quant_pivot_models::{
         FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort,
         FavoriteLongshotBiasTableInfo, FavoriteLongshotFitPort, FitBiasTableRequest,
         GatePreviewIntent, GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext,
-        KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort,
+        KillSwitchPort, KillSwitchView, MarketDataPort, MetricsScrapePort, MissingReasonCountView,
         ModelComparisonReportInfo, ModelGovernancePort, ModelSpecInfo, ModelSpecListQuery,
         ModelSpecPort, ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery,
-        NegRiskEventDriftView, Paginated, PromoteDatasetRequest, PublishFactorCommand,
+        NegRiskEventDriftView, Paginated, ParticipantConcentrationDetailView,
+        ParticipantConcentrationSummaryView, PromoteDatasetRequest, PublishFactorCommand,
         PublishFactorsBatchCommand, PublishModelCommand, QualityGateReportView,
         QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
         ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
         ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
         RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
         RuntimeControlPort, SetKillSwitchCommand, StructuralMonitorPort, SystemStatus,
-        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
-        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
+        TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest, TrainedModelView,
+        TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        TrainingDatasetPort, TrainingDatasetView, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
@@ -87,6 +89,7 @@ use quant_pivot_web::{
     routes,
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
+use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
 use serde_json::Value;
 use std::{collections::HashSet, sync::Mutex};
@@ -97,8 +100,10 @@ use tokio_util::sync::CancellationToken;
 use quant_pivot_models::domain::OrderIntentPort;
 
 use crate::{
-    core_report_port::CoreReportTestHandle, order_intent_port::build_order_intent_service, pg,
-    redis, repos::WebHarnessRepos,
+    core_report_port::{self, CoreReportTestHandle},
+    order_intent_port::build_order_intent_service,
+    pg, redis,
+    repos::WebHarnessRepos,
 };
 
 pub const API_VERSION: (&str, &str) = ("Accept-Api-Version", "v1");
@@ -244,8 +249,7 @@ impl TestEnv {
         let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let catalog = Arc::new(MockCatalogStatus);
         let data_quality = Arc::new(MockDataQuality);
-        let core_report =
-            crate::core_report_port::build_core_report_stack(&db, events.clone()).await;
+        let core_report = core_report_port::build_core_report_stack(&db, events.clone()).await;
         let order_intents = build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
         let state = web_harness_app_state(WebHarnessAppStateInput {
             db: &db,
@@ -429,6 +433,15 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _to_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn trade_tape_window_by_market(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -1051,6 +1064,60 @@ pub struct MockStructuralMonitorPort;
 impl StructuralMonitorPort for MockStructuralMonitorPort {
     async fn negrisk_events(&self) -> QuantResult<Vec<NegRiskEventDriftView>> {
         Ok(Vec::new())
+    }
+
+    async fn trade_tape_coverage(&self) -> QuantResult<TradeTapeCoverageView> {
+        let now = chrono::Utc::now();
+        Ok(TradeTapeCoverageView {
+            as_of: now,
+            pit_as_of: now,
+            pit_cutoff: now,
+            window_secs: 86_400,
+            source_delay_secs: 60,
+            active_market_count: 0,
+            token_cursor_count: 0,
+            market_cursor_count: 0,
+            covered_market_ratio: Decimal::ZERO,
+            source_health: vec![TradeTapeSourceHealthView {
+                source: "on_chain".to_owned(),
+                enabled: true,
+                token_cursor_count: 0,
+                bootstrap_count: 0,
+                catching_up_count: 0,
+                live_count: 0,
+                empty_count: 0,
+                error_count: 0,
+                worst_lag_blocks: None,
+                last_updated_at: None,
+            }],
+            missing_reason_breakdown: vec![MissingReasonCountView {
+                reason: "trade_tape_unavailable".to_owned(),
+                count: 0,
+            }],
+        })
+    }
+
+    async fn participant_concentration(&self) -> QuantResult<ParticipantConcentrationSummaryView> {
+        let now = chrono::Utc::now();
+        Ok(ParticipantConcentrationSummaryView {
+            as_of: now,
+            pit_as_of: now,
+            pit_cutoff: now,
+            window_secs: 86_400,
+            source_delay_secs: 60,
+            min_unique_participants: 5,
+            min_notional_usd: Decimal::ZERO,
+            min_coverage_ratio: Decimal::ZERO,
+            markets: Vec::new(),
+            missing_reason_breakdown: Vec::new(),
+        })
+    }
+
+    async fn participant_concentration_market(
+        &self,
+        _market_id: &MarketId,
+    ) -> QuantResult<Option<ParticipantConcentrationDetailView>> {
+        Ok(None)
     }
 }
 

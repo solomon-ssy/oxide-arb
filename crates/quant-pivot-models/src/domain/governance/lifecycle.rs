@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn operational_phase_serde_round_trip() {
         let phase = OperationalPhase::Degraded {
-            reasons: vec![super::OperationalDegradeReason::MarketDataStale],
+            reasons: vec![OperationalDegradeReason::MarketDataStale],
         };
         let json = serde_json::to_string(&phase).expect("serialize");
         let decoded: OperationalPhase = serde_json::from_str(&json).expect("deserialize");

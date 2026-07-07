@@ -14,3 +14,5 @@ pub mod market_registry;
 pub mod order_book;
 pub mod point_in_time;
 pub mod staleness_classifier;
+pub mod trade_tape_pit;
+pub mod trade_tape_source;

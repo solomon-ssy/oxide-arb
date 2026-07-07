@@ -4,8 +4,9 @@
 //! expired-recommendation attribution path.
 
 use quant_pivot_models::{
-    entities::quant_recommendation,
+    entities::{quant_order_intent, quant_recommendation},
     enums::quant::{OrderIntentStatus, RecommendationStatus},
+    types::OrderIntentId,
 };
 use quant_pivot_repository::{
     postgres::PgRecommendationRepository, traits::RecommendationRepository,
@@ -32,10 +33,9 @@ async fn mark_recommendation_expired(db: &sea_orm::DatabaseConnection, ids: &Exe
 
 async fn patch_intent_status(
     db: &sea_orm::DatabaseConnection,
-    intent_id: &quant_pivot_models::types::OrderIntentId,
+    intent_id: &OrderIntentId,
     status: OrderIntentStatus,
 ) {
-    use quant_pivot_models::entities::quant_order_intent;
     let row = quant_order_intent::Entity::find_by_id(intent_id.clone())
         .one(db)
         .await

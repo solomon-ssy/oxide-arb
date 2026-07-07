@@ -16,7 +16,8 @@ use quant_pivot_repository::postgres::{
     PgResearchJobRepository, PgReservedCapitalRepository, PgRoleMenuRepository,
     PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
     PgSettlementRedeemRepository, PgShadowComparisonRepository, PgSystemRuntimeStateRepository,
-    PgTrainingDatasetRepository, PgUserRepository, PgUserRoleRepository, arc_repo,
+    PgTradeTapeBlockCursorRepository, PgTrainingDatasetRepository, PgUserRepository,
+    PgUserRoleRepository, arc_repo,
 };
 use quant_pivot_storage::postgres::PostgresPool;
 use std::sync::Arc;
@@ -60,6 +61,7 @@ pub struct PgRepositories {
     pub role_menu: Arc<PgRoleMenuRepository>,
     pub role_permission: Arc<PgRolePermissionRepository>,
     pub account_snapshot: Arc<PgAccountSnapshotRepository>,
+    pub trade_tape_block_cursor: Arc<PgTradeTapeBlockCursorRepository>,
 }
 
 impl PgRepositories {
@@ -105,6 +107,7 @@ impl PgRepositories {
             role_menu: arc_repo(&db, PgRoleMenuRepository::new),
             role_permission: arc_repo(&db, PgRolePermissionRepository::new),
             account_snapshot: arc_repo(&db, PgAccountSnapshotRepository::new),
+            trade_tape_block_cursor: arc_repo(&db, PgTradeTapeBlockCursorRepository::new),
         }
     }
 }
