@@ -9,14 +9,13 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
     governance::BiasTableApplicator,
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
     },
-    pipeline::{
-        book_store::BookStore, feature_window_provider::FeatureWindowProvider,
-        market_registry::MarketRegistry, point_in_time::LiveBookDataSource,
-    },
+    pit::platform::live_book::LiveBookDataSource,
+    prefetch::feature_window::FeatureWindowProvider,
     service::{
         factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
         feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},

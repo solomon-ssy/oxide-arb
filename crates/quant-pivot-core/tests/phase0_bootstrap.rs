@@ -1,6 +1,6 @@
 //! Phase 0 bootstrap tests.
 
-use quant_pivot_core::{observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore};
+use quant_pivot_core::{ingest::book_store::BookStore, observability::metrics_hub::MetricsHub};
 use quant_pivot_models::{
     domain::{SystemStatus, market::book::BookLevel},
     enums::quant::QuantRuntimeMode,

@@ -29,7 +29,7 @@ if rg 'from_decimal_unchecked' crates/quant-pivot-api/src/ws/ crates/quant-pivot
 fi
 
 echo "=== Checking DataPipeline try_send success path does not clone events ==="
-if rg 'pipeline_event\.clone\(\)' crates/quant-pivot-core/src/pipeline/data_pipeline.rs 2>/dev/null; then
+if rg 'pipeline_event\.clone\(\)' crates/quant-pivot-core/src/ingest/data_pipeline.rs 2>/dev/null; then
     echo "ERROR: data_pipeline try_send success path must not clone PipelineEvent"
     ERRORS=$((ERRORS + 1))
 fi

@@ -15,7 +15,7 @@ use super::{
     client::PolymarketAccountClient, mapping::map_position, provider::AccountProvider,
     reserved::ReservedCapitalReader,
 };
-use crate::pipeline::market_registry::MarketRegistry;
+use crate::ingest::market_registry::MarketRegistry;
 
 /// Builds an [`AccountSnapshot`] from the real venue account.
 ///

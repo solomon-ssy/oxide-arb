@@ -1,4 +1,4 @@
-use crate::pipeline::market_filter::MarketFilter;
+use crate::ingest::market_filter::MarketFilter;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use quant_pivot_models::{

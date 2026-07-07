@@ -63,7 +63,7 @@ use quant_pivot_research::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::json;
 
-use crate::pipeline::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec};
+use crate::prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec};
 
 /// Parse a runtime-config decimal string (must have passed validation on write).
 fn config_decimal(raw: &str, field: &'static str) -> QuantResult<Decimal> {

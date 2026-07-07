@@ -1,5 +1,5 @@
 use super::order_book::OrderBook;
-use crate::{observability::metrics_hub::MetricsHub, pipeline::market_registry::MarketRegistry};
+use crate::{ingest::market_registry::MarketRegistry, observability::metrics_hub::MetricsHub};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;

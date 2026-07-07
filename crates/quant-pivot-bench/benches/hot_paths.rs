@@ -1,7 +1,7 @@
 //! Phase 0 hot-path benchmarks (ingest + book store only).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use quant_pivot_core::{observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore};
+use quant_pivot_core::{ingest::book_store::BookStore, observability::metrics_hub::MetricsHub};
 use quant_pivot_models::{
     domain::market::book::BookLevel,
     types::{Price, Shares, TokenId},

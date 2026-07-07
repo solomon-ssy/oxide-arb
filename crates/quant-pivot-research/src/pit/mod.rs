@@ -10,8 +10,10 @@
 //! dataset build loop never touches a database.
 
 mod materialized;
+mod trade_tape_window;
 
 pub use materialized::MaterializedPitEngine;
+pub use trade_tape_window::TradeTapePitParams;
 
 use std::sync::Arc;
 

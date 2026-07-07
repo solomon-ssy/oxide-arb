@@ -37,7 +37,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     governance::RuntimeModeHandle,
-    pipeline::market_candidate_provider::MarketCandidateProvider,
+    prefetch::market_candidates::MarketCandidateProvider,
     service::{
         account::AccountProviderFactory,
         equity::{DrawdownProvider, ReportEquitySnapshot},

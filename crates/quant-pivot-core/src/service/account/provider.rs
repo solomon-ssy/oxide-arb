@@ -11,7 +11,7 @@ use quant_pivot_research::portfolio::AccountSnapshot;
 use super::{
     client::PolymarketAccountClient, reserved::ReservedCapitalReader, venue::VenueAccountProvider,
 };
-use crate::pipeline::market_registry::MarketRegistry;
+use crate::ingest::market_registry::MarketRegistry;
 
 /// Produces the decision-time account capital base for report sizing.
 #[async_trait]

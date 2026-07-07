@@ -11,11 +11,9 @@
 //! strictly forward; the dataset hash makes the whole thing reproducible.
 
 use crate::{
-    pipeline::{
-        historical_pit::ChHistoricalPitSource,
-        historical_window::{
-            HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
-        },
+    pit::platform::ch_historical::ChHistoricalPitSource,
+    prefetch::historical_window::{
+        HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
     },
     service::{
         historical_replay::{

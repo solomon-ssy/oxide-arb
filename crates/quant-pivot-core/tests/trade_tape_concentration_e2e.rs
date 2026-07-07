@@ -30,14 +30,13 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
     app::ports::structural_monitor::CoreStructuralMonitor,
     governance::BiasTableApplicator,
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
     },
-    pipeline::{
-        book_store::BookStore, feature_window_provider::FeatureWindowProvider,
-        market_registry::MarketRegistry, point_in_time::LiveBookDataSource,
-    },
+    pit::platform::live_book::LiveBookDataSource,
+    prefetch::feature_window::FeatureWindowProvider,
     service::{
         factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
         feature_pipeline::{FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService},

@@ -57,10 +57,9 @@ use quant_pivot_research::{
 };
 
 use crate::{
-    pipeline::{
-        historical_window::{HistoricalWindow, HistoricalWindowLoader, WindowSpec},
-        inference_batch::build_runtime_input,
-        inference_context::build_market_inference_context,
+    prefetch::historical_window::{HistoricalWindow, HistoricalWindowLoader, WindowSpec},
+    projection::{
+        inference_batch::build_runtime_input, inference_context::build_market_inference_context,
     },
     service::{
         dataset_replay::{ReplaySchedule, max_horizon},

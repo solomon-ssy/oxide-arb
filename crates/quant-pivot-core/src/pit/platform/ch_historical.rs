@@ -1,7 +1,7 @@
 //! Streaming historical point-in-time source backed by `ClickHouse` facts +
 //! `Postgres` market metadata.
 //!
-//! The `as_of`-bounded counterpart to [`LiveBookDataSource`](super::point_in_time::LiveBookDataSource):
+//! The `as_of`-bounded counterpart to [`LiveBookDataSource`](super::live_book::LiveBookDataSource):
 //! it resolves the freshest book snapshot published at or before `as_of` (within
 //! `max_book_staleness`) and derives the market's point-in-time status from the
 //! authoritative settlement ledger. Used by the 3.6 backtester for streaming

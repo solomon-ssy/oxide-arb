@@ -21,7 +21,7 @@ use quant_pivot_repository::{
     traits::{FactWriter, TradeTapeBlockCursorRepository},
 };
 
-use crate::{infra::periodic_task::PeriodicTask, pipeline::market_registry::MarketRegistry};
+use crate::{infra::periodic_task::PeriodicTask, ingest::market_registry::MarketRegistry};
 use tokio_util::sync::CancellationToken;
 
 /// Periodically ingests Polygon `OrderFilled` logs into `quant_trade_tape`.

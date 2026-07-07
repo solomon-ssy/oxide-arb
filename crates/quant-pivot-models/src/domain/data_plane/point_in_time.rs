@@ -7,8 +7,8 @@
 //!
 //! **Historical replay** uses [`PitQueryEngine`](quant_pivot_research::pit::PitQueryEngine)
 //! (`quant-pivot-research::pit`); the ClickHouse-backed streaming resolver is
-//! [`ChHistoricalPitSource`](quant_pivot_core::pipeline::historical_pit::ChHistoricalPitSource)
-//! in `quant-pivot-core::pipeline::historical_pit`. Offline dataset builds
+//! [`ChHistoricalPitSource`](quant_pivot_core::pit::platform::ch_historical::ChHistoricalPitSource)
+//! in `quant-pivot-core::pit::platform::ch_historical`. Offline dataset builds
 //! batch-prefetch facts and serve from [`MaterializedPitEngine`](quant_pivot_research::pit::MaterializedPitEngine).
 
 use std::sync::Arc;

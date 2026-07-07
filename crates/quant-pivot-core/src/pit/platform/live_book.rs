@@ -14,7 +14,7 @@ use quant_pivot_models::{
     types::{EventId, MarketId, TokenId},
 };
 
-use crate::pipeline::{book_store::BookStore, market_registry::MarketRegistry};
+use crate::ingest::{book_store::BookStore, market_registry::MarketRegistry};
 
 /// Live PIT source backed by current in-memory book/market state.
 ///

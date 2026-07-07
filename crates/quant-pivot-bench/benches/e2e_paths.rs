@@ -1,7 +1,7 @@
 //! Phase 0 end-to-end micro-benchmarks (data plane skeleton).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use quant_pivot_core::{observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore};
+use quant_pivot_core::{ingest::book_store::BookStore, observability::metrics_hub::MetricsHub};
 use quant_pivot_models::types::TokenId;
 use std::sync::Arc;
 

@@ -40,10 +40,9 @@ use rust_decimal::Decimal;
 
 use crate::{
     governance::{WeightOverlayApplicator, quality_gate_load::quality_gate_passed_ok},
-    pipeline::{
-        feature_window_provider::FeatureWindowProvider, inference_batch::build_runtime_input,
-        market_registry::MarketRegistry,
-    },
+    ingest::market_registry::MarketRegistry,
+    prefetch::feature_window::FeatureWindowProvider,
+    projection::inference_batch::build_runtime_input,
     service::signal_reinference::{ExitSignalReinferer, FreshSignal},
 };
 
@@ -586,7 +585,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{find_lot_candidate, liquidity_score_cap, selected_market_for_lot};
-    use crate::pipeline::market_registry::MarketRegistry;
+    use crate::ingest::market_registry::MarketRegistry;
 
     fn candidate(token: &str, side: OutcomeSide) -> SignalCandidate {
         SignalCandidate {

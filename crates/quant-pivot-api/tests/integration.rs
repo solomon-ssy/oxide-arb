@@ -2,6 +2,8 @@
 //!
 //! Run: `cargo test -p quant-pivot-api -- --ignored --test-threads=1`
 
+#[path = "integration/binance_klines.rs"]
+mod binance_klines;
 #[path = "integration/clob_auth.rs"]
 mod clob_auth;
 #[path = "integration/gamma_sync.rs"]

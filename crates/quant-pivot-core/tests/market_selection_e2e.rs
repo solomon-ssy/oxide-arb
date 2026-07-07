@@ -5,11 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use quant_pivot_core::{
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{fact_lag::IngestPipelineLagTracker, metrics_hub::MetricsHub},
-    pipeline::{
-        book_store::BookStore, market_candidate_provider::MarketCandidateProvider,
-        market_registry::MarketRegistry,
-    },
+    prefetch::market_candidates::MarketCandidateProvider,
     service::market_selection::map_snapshot_to_model,
 };
 use quant_pivot_error::storage::StorageError;

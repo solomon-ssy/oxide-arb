@@ -10,7 +10,7 @@ use quant_pivot_models::{
     types::TokenId,
 };
 
-use crate::pipeline::book_store::BookStore;
+use crate::ingest::book_store::BookStore;
 
 pub struct CoreMarketData {
     book_store: Arc<BookStore>,

@@ -11,7 +11,7 @@
 
 use crate::{
     app::{AppContext, task_id::TaskId, task_registry::AppRunner},
-    pipeline::{book_store::BookStore, market_registry::MarketRegistry},
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
 };
 use quant_pivot_models::{
     domain::{
@@ -148,8 +148,8 @@ impl AppContext {
 mod tests {
     use super::BookUpdateCoalescer;
     use crate::{
+        ingest::{book_store::BookStore, market_registry::MarketRegistry},
         observability::metrics_hub::MetricsHub,
-        pipeline::{book_store::BookStore, market_registry::MarketRegistry},
     };
     use chrono::Utc;
     use quant_pivot_models::{

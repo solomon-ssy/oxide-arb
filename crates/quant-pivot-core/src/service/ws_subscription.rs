@@ -7,8 +7,8 @@
 //! never unsubscribe an engine-owned token.
 
 use crate::{
+    ingest::{market_filter::MarketFilter, market_registry::MarketRegistry},
     observability::metrics_hub::MetricsHub,
-    pipeline::{market_filter::MarketFilter, market_registry::MarketRegistry},
 };
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
@@ -328,7 +328,7 @@ impl MarketDataSubscriptionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::market_registry::MarketRegistry;
+    use crate::ingest::market_registry::MarketRegistry;
     use chrono::Duration;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},

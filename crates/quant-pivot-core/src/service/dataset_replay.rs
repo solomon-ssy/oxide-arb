@@ -31,7 +31,7 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    pipeline::historical_window::{
+    prefetch::historical_window::{
         HistoricalWindow, HistoricalWindowLoader, ReplaySample, WindowSpec,
     },
     service::historical_replay::{CrossSectionRequest, ReplayConfig, materialize_cross_section},

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
     app::ports::account_read::CoreAccountReadPort,
-    pipeline::market_registry::MarketRegistry,
+    ingest::market_registry::MarketRegistry,
     service::account::{AccountProviderFactory, PolymarketAccountClient, ReservedCapitalReader},
 };
 use quant_pivot_error::QuantResult;

@@ -14,11 +14,17 @@
 //!
 //! [`OpenAPI`]: https://polymarket-docs.copilot.markets/api-reference/core/get-current-positions-for-a-user
 
-use crate::infra::retry::{self, RetryPolicy};
+use crate::{
+    infra::{
+        http::is_retryable_status,
+        retry::{self, RetryPolicy},
+    },
+    wire::decimal::de_decimal,
+};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::config::DataApiConfig;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 /// A single venue position as returned by the Data API.
 ///
@@ -189,33 +195,6 @@ impl DataApiClient {
             }
         })
         .await
-    }
-}
-
-/// HTTP status codes worth retrying (rate limit + transient server errors).
-const fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504)
-}
-
-/// Deserialize a decimal from a JSON number or string without binary `f64` loss.
-fn de_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use std::str::FromStr;
-
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match &value {
-        serde_json::Value::Null => Ok(Decimal::ZERO),
-        serde_json::Value::Number(number) => {
-            Decimal::from_str(&number.to_string()).map_err(serde::de::Error::custom)
-        }
-        serde_json::Value::String(text) => {
-            Decimal::from_str(text).map_err(serde::de::Error::custom)
-        }
-        other => Err(serde::de::Error::custom(format!(
-            "expected decimal number or string, got {other}"
-        ))),
     }
 }
 

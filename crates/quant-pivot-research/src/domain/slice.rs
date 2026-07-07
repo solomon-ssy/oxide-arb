@@ -25,7 +25,8 @@ use quant_pivot_models::{
     runtime_config::DomainConfig,
     types::DomainInstrumentKey,
 };
-use quant_pivot_research::{domain::DomainObservationWindow, features::DomainSliceInputs};
+
+use crate::{domain::DomainObservationWindow, features::DomainSliceInputs};
 
 /// The trailing observation lookback (seconds) the crypto domain slice needs:
 /// the widest of the momentum / volatility feature windows.
@@ -256,7 +257,6 @@ mod tests {
         let observations = HashMap::new();
         let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
 
-        // Rung 1: unmapped category.
         assert!(
             build_domain_slice_inputs(
                 MarketCategory::Sports,
@@ -268,13 +268,11 @@ mod tests {
             .is_none()
         );
 
-        // Rung 3: no linkage records at all.
         assert!(
             build_domain_slice_inputs(MarketCategory::Crypto, &[], as_of, &domain, &observations)
                 .is_none()
         );
 
-        // Rung 4: PIT-valid record is unresolved.
         let unresolved = vec![linkage(
             LinkageOutcome::Unresolved {
                 reason: "no template".to_owned(),
@@ -292,7 +290,6 @@ mod tests {
             .is_none()
         );
 
-        // Happy path: mapped + enabled + resolved.
         let inputs = build_domain_slice_inputs(
             MarketCategory::Crypto,
             &resolved,
@@ -313,7 +310,6 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let visible = as_of - Duration::minutes(1);
-        // Inside the delay window (< source_delay before as_of) — must be excluded.
         let too_fresh = as_of - Duration::seconds(1);
         let make = |at| DomainObservation {
             family: DomainFamily::Crypto,

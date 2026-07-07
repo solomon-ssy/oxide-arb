@@ -4,7 +4,7 @@ use super::AppContext;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
     infra::periodic_task::PeriodicTask,
-    pipeline::data_quality::DataQualityService,
+    ingest::data_quality::DataQualityService,
     service::equity::EquitySnapshotService,
 };
 use quant_pivot_error::{QuantError, QuantResult};

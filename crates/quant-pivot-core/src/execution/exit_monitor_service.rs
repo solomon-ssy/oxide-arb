@@ -36,8 +36,8 @@ use crate::{
         },
     },
     governance::KillSwitchHandle,
+    ingest::book_store::BookStore,
     observability::metrics_hub::MetricsHub,
-    pipeline::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
 };
 

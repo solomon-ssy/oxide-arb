@@ -11,13 +11,12 @@
 //! scheduler is deferred; this service is the callable unit schedulers invoke.
 
 use crate::{
-    observability::feature_fact_writer::FeatureEventWriter,
-    pipeline::{
-        domain_pit::{build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument},
-        feature_window_provider::FeatureWindowProvider,
+    ingest::{
         market_registry::MarketRegistry,
-        trade_tape_source::{cursors_by_contract_address, trade_tape_market_ingest_available},
+        trade_tape_health::{cursors_by_contract_address, trade_tape_market_ingest_available},
     },
+    observability::feature_fact_writer::FeatureEventWriter,
+    prefetch::feature_window::FeatureWindowProvider,
 };
 use chrono::{DateTime, Utc};
 use futures_util::future::join_all;
@@ -34,6 +33,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     FeatureRepository, MarketLinkageRepository, TradeTapeBlockCursorRepository,
+};
+use quant_pivot_research::domain::{
+    build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument,
 };
 use quant_pivot_research::{
     features::{

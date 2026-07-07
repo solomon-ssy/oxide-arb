@@ -1,8 +1,10 @@
 //! Binance spot REST kline source (`GET /api/v3/klines`).
 
-use std::{num::NonZeroU32, str::FromStr, sync::Arc, time::Duration};
+mod mapper;
+mod wire;
 
-use chrono::{TimeZone, Utc};
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
+
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
@@ -12,16 +14,16 @@ use quant_pivot_error::{QuantError, QuantResult, api::ApiError};
 use quant_pivot_models::{
     config::BinanceSourceConfig,
     domain::DomainObservation,
-    enums::domain::{DomainFamily, DomainMetric, KlineInterval, KlineIntervalParseError},
+    enums::domain::{DomainFamily, KlineInterval, KlineIntervalParseError},
     types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
 };
-use reqwest::StatusCode;
-use rust_decimal::Decimal;
 
 use crate::{
     domain::{DomainDataSource, DomainFetchRequest},
-    infra::retry::{self, RetryPolicy},
+    infra::{http::get_text_with_retry, retry::RetryPolicy},
 };
+
+pub use wire::{BinanceKlineRow, KLINE_FIELD_COUNT};
 
 type WeightLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -100,53 +102,11 @@ impl BinanceKlineSource {
             start_ms,
             end_ms,
         );
-        let http = self.http.clone();
-        let body = retry::retry_with_policy(&self.retry_policy, || {
-            let http = http.clone();
-            let url = url.clone();
-            async move {
-                let response = http
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|error| ApiError::Http {
-                        method: "GET",
-                        url: url.clone(),
-                        status: 0,
-                        body: error.to_string(),
-                        retryable: true,
-                    })?;
-                let status = response.status();
-                if status.is_success() {
-                    return response.text().await.map_err(|error| ApiError::Http {
-                        method: "GET",
-                        url: url.clone(),
-                        status: 0,
-                        body: error.to_string(),
-                        retryable: true,
-                    });
-                }
-                let retryable = matches!(
-                    status,
-                    StatusCode::TOO_MANY_REQUESTS
-                        | StatusCode::INTERNAL_SERVER_ERROR
-                        | StatusCode::BAD_GATEWAY
-                        | StatusCode::SERVICE_UNAVAILABLE
-                        | StatusCode::GATEWAY_TIMEOUT
-                );
-                Err(ApiError::Http {
-                    method: "GET",
-                    url: url.clone(),
-                    status: status.as_u16(),
-                    body: response.text().await.unwrap_or_default(),
-                    retryable,
-                })
-            }
-        })
-        .await
-        .map_err(QuantError::from)?;
+        let body = get_text_with_retry(&self.http, &self.retry_policy, &url)
+            .await
+            .map_err(QuantError::from)?;
 
-        let rows: Vec<Vec<serde_json::Value>> =
+        let rows: Vec<wire::BinanceKlineRow> =
             serde_json::from_str(&body).map_err(|error| ApiError::Deserialize {
                 context: "binance klines".into(),
                 detail: error.to_string(),
@@ -154,7 +114,7 @@ impl BinanceKlineSource {
         let instrument_key = DomainInstrumentKey::binance_kline(symbol, interval);
         let mut observations = Vec::with_capacity(rows.len() * 2);
         for row in rows {
-            observations.extend(decode_kline_row(&instrument_key, &row)?);
+            observations.extend(mapper::into_observations(&row, &instrument_key)?);
         }
         Ok(observations)
     }
@@ -190,105 +150,27 @@ impl DomainDataSource for BinanceKlineSource {
                 .last()
                 .map(|row| row.observed_at.timestamp_millis())
                 .expect("non-empty page");
+            let kline_count = page.len() / 2;
             observations.extend(page);
             if last_observed >= end_ms {
                 break;
             }
-            let page_len = observations.len();
-            if page_len % (KLINE_PAGE_SIZE as usize * 2) != 0 {
+            // Binance returns at most KLINE_PAGE_SIZE klines per request; a short
+            // page means we reached the end of the available range.
+            if kline_count < KLINE_PAGE_SIZE as usize {
                 break;
             }
+            // Advance past the last candle's close time so the next page cannot
+            // duplicate rows (klines are uniquely identified by open time).
             cursor_ms = last_observed.saturating_add(1);
         }
         Ok(observations)
     }
 }
 
-fn decode_kline_row(
-    instrument_key: &DomainInstrumentKey,
-    row: &[serde_json::Value],
-) -> QuantResult<Vec<DomainObservation>> {
-    if row.len() < 7 {
-        return Err(QuantError::from(ApiError::Deserialize {
-            context: "binance kline row".into(),
-            detail: "row too short".into(),
-        }));
-    }
-    let close_time_ms = row[6].as_i64().ok_or_else(|| {
-        QuantError::from(ApiError::Deserialize {
-            context: "binance kline row".into(),
-            detail: "close time missing".into(),
-        })
-    })?;
-    let observed_at = Utc
-        .timestamp_millis_opt(close_time_ms)
-        .single()
-        .ok_or_else(|| {
-            QuantError::from(ApiError::Deserialize {
-                context: "binance kline row".into(),
-                detail: "close time invalid".into(),
-            })
-        })?;
-    let close = parse_decimal_field(row.get(4).ok_or_else(|| {
-        QuantError::from(ApiError::Deserialize {
-            context: "binance kline row".into(),
-            detail: "close missing".into(),
-        })
-    })?)?;
-    let volume = parse_decimal_field(row.get(5).ok_or_else(|| {
-        QuantError::from(ApiError::Deserialize {
-            context: "binance kline row".into(),
-            detail: "volume missing".into(),
-        })
-    })?)?;
-    let base = DomainObservation {
-        family: DomainFamily::Crypto,
-        source_id: DomainSourceId::binance(),
-        instrument_key: instrument_key.clone(),
-        metric: DomainMetric::Close,
-        value: close,
-        observed_at,
-        publish_time: observed_at,
-    };
-    Ok(vec![
-        base.clone(),
-        DomainObservation {
-            metric: DomainMetric::Volume,
-            value: volume,
-            ..base
-        },
-    ])
-}
-
-fn parse_decimal_field(value: &serde_json::Value) -> QuantResult<Decimal> {
-    let text = match value {
-        serde_json::Value::String(text) => text.as_str(),
-        serde_json::Value::Number(number) => {
-            return Decimal::from_str(&number.to_string()).map_err(|error| {
-                QuantError::from(ApiError::Deserialize {
-                    context: "binance decimal".into(),
-                    detail: error.to_string(),
-                })
-            });
-        }
-        _ => {
-            return Err(QuantError::from(ApiError::Deserialize {
-                context: "binance decimal".into(),
-                detail: "expected decimal string".into(),
-            }));
-        }
-    };
-    Decimal::from_str(text).map_err(|error| {
-        QuantError::from(ApiError::Deserialize {
-            context: "binance decimal".into(),
-            detail: error.to_string(),
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BinanceKlineSource, DomainDataSource, DomainFetchRequest};
+    use super::{BinanceKlineSource, DomainDataSource, DomainFetchRequest, KLINE_PAGE_SIZE};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         config::BinanceSourceConfig,
@@ -299,6 +181,23 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
     };
+
+    fn full_kline_row(open_time_ms: i64, close: &str) -> serde_json::Value {
+        serde_json::json!([
+            open_time_ms,
+            "0.01",
+            "0.02",
+            "0.005",
+            close,
+            "148976.11427815",
+            open_time_ms + 59_999,
+            "2434.19055334",
+            308,
+            "1756.87402397",
+            "28.46694368",
+            "0"
+        ])
+    }
 
     #[tokio::test]
     async fn fetch_parses_klines_into_close_and_volume() {
@@ -314,7 +213,12 @@ mod tests {
                     "0.005",
                     "0.01577100",
                     "148976.11427815",
-                    1_499_644_799_999_i64
+                    1_499_644_799_999_i64,
+                    "2434.19055334",
+                    308,
+                    "1756.87402397",
+                    "28.46694368",
+                    "0"
                 ]])),
             )
             .mount(&server)
@@ -340,5 +244,56 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row.metric == DomainMetric::Close));
         assert!(rows.iter().any(|row| row.metric == DomainMetric::Volume));
+    }
+
+    #[tokio::test]
+    async fn fetch_paginates_until_short_page() {
+        let server = MockServer::start().await;
+        let range_start = Utc
+            .with_ymd_and_hms(2017, 7, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let mut full_page: Vec<serde_json::Value> = Vec::with_capacity(KLINE_PAGE_SIZE as usize);
+        for index in 0..KLINE_PAGE_SIZE {
+            let open_time_ms = range_start + i64::from(index) * 60_000;
+            full_page.push(full_kline_row(open_time_ms, "0.01577100"));
+        }
+        let last_close_ms = range_start + i64::from(KLINE_PAGE_SIZE - 1) * 60_000 + 59_999;
+        let next_cursor = last_close_ms + 1;
+        let tail = full_kline_row(next_cursor, "0.02");
+
+        Mock::given(method("GET"))
+            .and(path("/api/v3/klines"))
+            .and(query_param("symbol", "BTCUSDT"))
+            .and(query_param("startTime", range_start.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(full_page)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/klines"))
+            .and(query_param("symbol", "BTCUSDT"))
+            .and(query_param("startTime", next_cursor.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([tail])))
+            .mount(&server)
+            .await;
+
+        let source = BinanceKlineSource::new(BinanceSourceConfig {
+            base_url: server.uri(),
+            ..BinanceSourceConfig::default()
+        });
+        let key = DomainInstrumentKey::binance_kline(
+            &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+            KlineInterval::OneMinute,
+        );
+        let rows = source
+            .fetch(DomainFetchRequest {
+                instrument_key: key,
+                from_exclusive: Utc.with_ymd_and_hms(2017, 7, 1, 0, 0, 0).unwrap(),
+                to_inclusive: Utc.with_ymd_and_hms(2017, 7, 10, 0, 0, 0).unwrap(),
+                bootstrap: true,
+            })
+            .await
+            .expect("fetch");
+        assert_eq!(rows.len(), (KLINE_PAGE_SIZE as usize + 1) * 2);
     }
 }

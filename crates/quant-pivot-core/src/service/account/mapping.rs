@@ -6,7 +6,7 @@ use quant_pivot_models::{
     types::{MarketId, PositionSnapshot, Price, Shares, TokenId, Usd},
 };
 
-use crate::pipeline::market_registry::MarketRegistry;
+use crate::ingest::market_registry::MarketRegistry;
 
 /// Map one venue position to a [`PositionSnapshot`], enriching market metadata
 /// from the registry.

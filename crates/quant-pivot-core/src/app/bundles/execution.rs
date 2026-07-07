@@ -38,7 +38,7 @@ use crate::{
         SettlementRedeemService, SettlementRedeemServiceDeps, VenueEvidenceCollector,
         VenueReconciliationReader,
     },
-    pipeline::feature_window_provider::FeatureWindowProvider,
+    prefetch::feature_window::FeatureWindowProvider,
     service::{
         model_backed_reinferer::{
             ModelBackedExitSignalReinferer, ModelBackedExitSignalReinfererDeps,

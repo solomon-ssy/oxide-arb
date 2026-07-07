@@ -3,10 +3,7 @@
 use super::InfraBundle;
 use crate::{
     governance::{LinkageResolverDeps, LinkageResolverService},
-    observability::{
-        backpressure::BackpressurePolicy, book_fact_writer::BookFactWriter, metrics_hub::MetricsHub,
-    },
-    pipeline::{
+    ingest::{
         book_store::BookStore,
         data_pipeline::{self, DataPipeline, DataPipelineDeps},
         data_quality::BookDataQualityService,
@@ -14,8 +11,11 @@ use crate::{
         market_cache::MarketCache,
         market_filter::MarketFilter,
         market_registry::MarketRegistry,
-        point_in_time::LiveBookDataSource,
     },
+    observability::{
+        backpressure::BackpressurePolicy, book_fact_writer::BookFactWriter, metrics_hub::MetricsHub,
+    },
+    pit::platform::live_book::LiveBookDataSource,
     service::{
         catalog_readiness::CatalogReadiness,
         gamma::{GammaService, GammaServiceDeps},

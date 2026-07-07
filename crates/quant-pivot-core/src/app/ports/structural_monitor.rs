@@ -33,16 +33,18 @@ use quant_pivot_research::{
 };
 use rust_decimal::Decimal;
 
-use crate::pipeline::{
-    book_store::BookStore,
-    feature_window_provider::FeatureWindowProvider,
-    market_registry::MarketRegistry,
-    trade_tape_pit::TradeTapePitParams,
-    trade_tape_source::{
-        cursors_by_contract_address, trade_tape_market_ingest_available,
-        trade_tape_route_lag_blocks,
+use crate::{
+    ingest::{
+        book_store::BookStore,
+        market_registry::MarketRegistry,
+        trade_tape_health::{
+            cursors_by_contract_address, trade_tape_market_ingest_available,
+            trade_tape_route_lag_blocks,
+        },
     },
+    prefetch::feature_window::FeatureWindowProvider,
 };
+use quant_pivot_research::pit::TradeTapePitParams;
 
 const TOP_MARKETS_LIMIT: usize = 50;
 const TOP_PARTICIPANTS_LIMIT: usize = 25;

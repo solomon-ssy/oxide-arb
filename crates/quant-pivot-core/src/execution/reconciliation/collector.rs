@@ -18,7 +18,7 @@ use quant_pivot_models::{
 };
 
 use super::{ReconcileFacts, VenuePresence, VenueReconciliationReader};
-use crate::pipeline::book_store::BookStore;
+use crate::ingest::book_store::BookStore;
 
 /// Evidence chain + structured facts produced for one reconcilable order.
 pub struct CollectedReconciliation {

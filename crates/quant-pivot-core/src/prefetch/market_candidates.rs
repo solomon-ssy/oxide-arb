@@ -27,8 +27,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{MarketLinkageRepository, QuantFactReadRepository};
 
 use crate::{
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::fact_lag::IngestPipelineLagTracker,
-    pipeline::{book_store::BookStore, market_registry::MarketRegistry},
 };
 
 /// Projects the decision-time market world into frozen candidate facts.

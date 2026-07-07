@@ -7,17 +7,15 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
     governance::{BiasTableApplicator, RuntimeModeHandle, WeightOverlayApplicator},
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         alert_dispatcher::AlertDispatcher, fact_lag::IngestPipelineLagTracker,
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub, recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
-    pipeline::{
-        book_store::BookStore, feature_window_provider::FeatureWindowProvider,
-        market_candidate_provider::MarketCandidateProvider, market_registry::MarketRegistry,
-        point_in_time::LiveBookDataSource,
-    },
+    pit::platform::live_book::LiveBookDataSource,
+    prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     report::{
         DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps,
         ReportLifecycleDeps, ReportLifecycleService, ReportPublisher, ReportPublisherDeps,

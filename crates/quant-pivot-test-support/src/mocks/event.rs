@@ -1,7 +1,7 @@
 //! Injectable [`PipelineEvent`] source for `DataPipeline` tests.
 
 use flume::{Receiver, Sender};
-use quant_pivot_core::pipeline::event_source::PipelineEventSource;
+use quant_pivot_core::ingest::event_source::PipelineEventSource;
 use quant_pivot_models::domain::pipeline::PipelineEvent;
 
 /// Bounded in-memory pipeline event bus for tests.

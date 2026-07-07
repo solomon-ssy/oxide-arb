@@ -42,10 +42,10 @@ use quant_pivot_research::{
     training::{ForwardSample, ForwardWindow, MarketResolution as ResearchMarketResolution},
 };
 
-use crate::pipeline::{
-    domain_pit::{crypto_lookback_secs, oracle_instrument},
-    historical_pit::snapshot_from_row,
-    trade_tape_pit::TradeTapePitParams,
+use crate::pit::platform::ch_historical::snapshot_from_row;
+use quant_pivot_research::{
+    domain::{crypto_lookback_secs, oracle_instrument},
+    pit::TradeTapePitParams,
 };
 
 /// One `(market, token)` instant the replay will resolve point-in-time.

@@ -6,10 +6,7 @@ use crate::{
         FactorGovernanceDeps, FactorGovernanceService, ModelGovernanceDeps, ModelGovernanceService,
         ModelSpecDeps, ModelSpecService,
     },
-    pipeline::{
-        feature_window_provider::FeatureWindowProvider,
-        market_candidate_provider::MarketCandidateProvider,
-    },
+    prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::{
         factor_pipeline::FactorPipelineService,
         favorite_longshot_fit::FavoriteLongshotFitService,

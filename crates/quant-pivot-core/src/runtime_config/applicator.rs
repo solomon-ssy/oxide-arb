@@ -4,11 +4,11 @@ use crate::{
     execution::breaker::ExecutionBreaker,
     governance::{BiasTableApplicator, WeightOverlayApplicator},
     infra::schedule::ReportScheduleRunner,
-    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
-    pipeline::{
+    ingest::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
         market_filter::MarketFilter, market_registry::MarketRegistry,
     },
+    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     runtime_config::RuntimeConfigStore,
     service::ws_subscription::WsSubscriptionCoordinator,
 };

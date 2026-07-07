@@ -19,7 +19,7 @@ use quant_pivot_research::{
     selection::SelectedMarket,
 };
 
-use crate::pipeline::inference_context::build_market_inference_context;
+use crate::projection::inference_context::build_market_inference_context;
 
 /// Build one factor-inference row from an aligned `(market, vector, outcome)`.
 ///

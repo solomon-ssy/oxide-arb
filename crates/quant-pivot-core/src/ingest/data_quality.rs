@@ -27,8 +27,8 @@ use quant_pivot_models::{
 };
 
 use crate::{
+    ingest::{book_store::BookStore, staleness_classifier::StalenessClassifier},
     observability::fact_lag::IngestPipelineLagTracker,
-    pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
 };
 
 /// Classifies live book freshness and structural validity.

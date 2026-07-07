@@ -8,15 +8,13 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
+    ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         fact_lag::IngestPipelineLagTracker, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
     },
-    pipeline::{
-        book_store::BookStore, feature_window_provider::FeatureWindowProvider,
-        market_candidate_provider::MarketCandidateProvider, market_registry::MarketRegistry,
-        point_in_time::LiveBookDataSource,
-    },
+    pit::platform::live_book::LiveBookDataSource,
+    prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
 };
 use quant_pivot_error::storage::StorageError;

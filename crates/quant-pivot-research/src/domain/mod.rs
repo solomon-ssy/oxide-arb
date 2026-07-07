@@ -8,8 +8,12 @@
 //! return byte-identical windows for the same visibility bounds.
 
 pub mod materialized;
+pub mod slice;
 
 pub use materialized::MaterializedDomainPitEngine;
+pub use slice::{
+    build_domain_slice_inputs, crypto_lookback_secs, linkage_valid_at, oracle_instrument,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

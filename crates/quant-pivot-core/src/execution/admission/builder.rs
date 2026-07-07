@@ -27,7 +27,7 @@ use super::{AdmissionInput, AdmissionSeams, StateVersion};
 use crate::{
     execution::{breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle},
     governance::{KillSwitchHandle, RuntimeModeHandle},
-    pipeline::book_store::BookStore,
+    ingest::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
     service::account::AccountProviderFactory,
 };

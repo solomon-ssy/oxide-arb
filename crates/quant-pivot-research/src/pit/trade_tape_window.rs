@@ -1,4 +1,4 @@
-//! Shared point-in-time trade-tape window parameters.
+//! Canonical point-in-time trade-tape window parameters.
 
 use std::time::Duration;
 

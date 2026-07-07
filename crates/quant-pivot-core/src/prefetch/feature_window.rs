@@ -26,7 +26,7 @@ use quant_pivot_research::{
     selection::SelectedMarket,
 };
 
-use super::trade_tape_pit::TradeTapePitParams;
+use quant_pivot_research::pit::TradeTapePitParams;
 
 /// Pre-fetches and decodes microstructure windows for a selected-market set.
 pub struct FeatureWindowProvider {

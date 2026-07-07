@@ -2,10 +2,10 @@
 
 use crate::{
     governance::LinkageResolverService,
-    observability::metrics_hub::MetricsHub,
-    pipeline::{
+    ingest::{
         market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
     },
+    observability::metrics_hub::MetricsHub,
     service::{
         catalog_lifecycle::apply_past_deadline_to_sync_batch, catalog_readiness::CatalogReadiness,
         system_status_nudge::SystemStatusNudge, ws_subscription::WsSubscriptionCoordinator,

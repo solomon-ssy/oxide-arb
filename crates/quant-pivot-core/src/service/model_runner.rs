@@ -65,7 +65,7 @@ use crate::{
         alert_dispatcher::{Alert, AlertDispatcher},
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
-    pipeline::inference_batch::build_runtime_input,
+    projection::inference_batch::build_runtime_input,
     service::factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
 };
 

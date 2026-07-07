@@ -39,10 +39,11 @@ use rust_decimal::Decimal;
 
 use crate::{
     execution::{ExitSignalContext, ExitSignalEvaluator, ExitSignalVerdict},
+    ingest::market_registry::MarketRegistry,
     observability::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
     },
-    pipeline::{feature_window_provider::FeatureWindowProvider, market_registry::MarketRegistry},
+    prefetch::feature_window::FeatureWindowProvider,
     runtime_config::RuntimeConfigStore,
     service::model_backed_reinferer::{
         LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok,

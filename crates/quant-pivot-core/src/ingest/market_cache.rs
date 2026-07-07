@@ -105,7 +105,7 @@ impl MarketCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::market_registry::MarketRegistry;
+    use crate::ingest::market_registry::MarketRegistry;
     use chrono::Utc;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},

@@ -14,7 +14,7 @@ use crate::{
         task_id::TaskId,
         task_registry::AppRunner,
     },
-    pipeline::feature_window_provider::FeatureWindowProvider,
+    prefetch::feature_window::FeatureWindowProvider,
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{

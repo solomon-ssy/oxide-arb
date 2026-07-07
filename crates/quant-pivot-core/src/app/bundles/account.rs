@@ -15,7 +15,7 @@ use quant_pivot_repository::traits::ReservedCapitalRepository;
 
 use super::InfraBundle;
 use crate::{
-    pipeline::market_registry::MarketRegistry,
+    ingest::market_registry::MarketRegistry,
     service::account::{
         AccountProviderFactory, PolymarketAccountClient, RepoReservedCapitalReader,
         ReservedCapitalReader, VenuePolymarketAccountClient,
