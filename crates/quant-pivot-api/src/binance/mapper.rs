@@ -10,7 +10,9 @@ use quant_pivot_models::{
 
 use super::wire::BinanceKlineRow;
 
-/// Map one kline row into Close + Volume observations (the only persisted metrics today).
+/// Map one kline row into its Close observation (the only metric any crypto
+/// domain feature consumes — see [`DomainMetric`]'s doc for why base-asset
+/// volume is deliberately not modeled).
 ///
 /// # Errors
 ///
@@ -18,7 +20,7 @@ use super::wire::BinanceKlineRow;
 pub fn into_observations(
     row: &BinanceKlineRow,
     instrument_key: &DomainInstrumentKey,
-) -> QuantResult<[DomainObservation; 2]> {
+) -> QuantResult<[DomainObservation; 1]> {
     let observed_at = Utc
         .timestamp_millis_opt(row.close_time_ms)
         .single()
@@ -29,7 +31,7 @@ pub fn into_observations(
             })
         })?;
 
-    let base = DomainObservation {
+    Ok([DomainObservation {
         family: DomainFamily::Crypto,
         source_id: DomainSourceId::binance(),
         instrument_key: instrument_key.clone(),
@@ -37,16 +39,7 @@ pub fn into_observations(
         value: row.close,
         observed_at,
         publish_time: observed_at,
-    };
-
-    Ok([
-        base.clone(),
-        DomainObservation {
-            metric: DomainMetric::Volume,
-            value: row.volume,
-            ..base
-        },
-    ])
+    }])
 }
 
 #[cfg(test)]
@@ -75,7 +68,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_close_and_volume() {
+    fn maps_close_observation() {
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
             KlineInterval::OneMinute,
@@ -83,8 +76,6 @@ mod tests {
         let observations = into_observations(&sample_row(1_499_644_799_999), &key).expect("map");
         assert_eq!(observations[0].metric, DomainMetric::Close);
         assert_eq!(observations[0].value, dec!(0.01577100));
-        assert_eq!(observations[1].metric, DomainMetric::Volume);
-        assert_eq!(observations[1].value, dec!(148976.11427815));
         assert_eq!(
             observations[0].observed_at.timestamp_millis(),
             1_499_644_799_999

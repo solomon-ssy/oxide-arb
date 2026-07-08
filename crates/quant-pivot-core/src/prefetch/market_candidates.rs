@@ -134,9 +134,13 @@ impl MarketCandidateProvider {
             return Ok(HashMap::new());
         }
 
-        let latest = self
+        // PIT-correct: the record that was actually valid at `as_of`, never
+        // the ledger's latest-ever row for the market — a metadata revision
+        // resolved *after* `as_of` must never leak into this decision
+        // (`latest_for_markets` is reserved for resolver idempotence only).
+        let valid_at = self
             .linkage_repo
-            .latest_for_markets(&mapped)
+            .valid_at_for_markets(&mapped, as_of)
             .await
             .map_err(QuantError::from)?;
         let mut by_market: HashMap<MarketId, DomainAvailability> = mapped
@@ -147,7 +151,7 @@ impl MarketCandidateProvider {
         // Resolve source presence once per distinct instrument.
         let mut instrument_by_market: HashMap<MarketId, DomainInstrumentKey> = HashMap::new();
         let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
-        for info in latest {
+        for info in valid_at {
             if info.status == LinkageStatus::Unresolved {
                 continue;
             }

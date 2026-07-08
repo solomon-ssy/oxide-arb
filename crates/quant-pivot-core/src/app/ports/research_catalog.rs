@@ -17,8 +17,9 @@ use quant_pivot_models::{
     domain::{
         BacktestReportInfo, BacktestReportListQuery, CollinearPairView, ComparisonReportListQuery,
         FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery,
-        ModelVersionInfo, ModelVersionListQuery, Paginated, ResearchCatalogPort,
+        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelPickerSide,
+        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+        ModelVersionListQuery, Paginated, PublishedModelOptionView, ResearchCatalogPort,
         TrainingDatasetInfo, TrainingDatasetListQuery, pagination::PageRequest,
     },
     enums::{common::MarketCategory, quant::PublicationStatus},
@@ -28,6 +29,7 @@ use quant_pivot_repository::traits::{
     BacktestReportRepository, FactorRepository, MarketRepository, ModelComparisonReportRepository,
     ModelRegistryRepository, TrainingDatasetRepository,
 };
+use quant_pivot_research::{artifact::ArtifactStore, model::load_hash_verified_artifact};
 use rust_decimal::Decimal;
 
 use crate::app::bundles::ResearchBundle;
@@ -39,6 +41,12 @@ use quant_pivot_research::factors::{
 /// pulls in one page (the generic factor set is a dozen; this is generous).
 const COLLINEARITY_DEFINITION_LIMIT: u64 = 500;
 
+/// Ceiling on how many `Published` model versions the picker catalog loads in
+/// one pass. The governed registry is a human-curated handful of models, not
+/// a market-scale collection; generous enough that a real deployment never
+/// truncates silently.
+const PUBLISHED_CATALOG_LIMIT: u64 = 500;
+
 /// Read-only research catalog port wired from the research bundle repositories.
 pub struct CoreResearchCatalogPort {
     datasets: Arc<dyn TrainingDatasetRepository>,
@@ -47,6 +55,7 @@ pub struct CoreResearchCatalogPort {
     comparisons: Arc<dyn ModelComparisonReportRepository>,
     factors: Arc<dyn FactorRepository>,
     markets: Arc<dyn MarketRepository>,
+    artifact_store: Arc<dyn ArtifactStore>,
 }
 
 impl CoreResearchCatalogPort {
@@ -60,6 +69,7 @@ impl CoreResearchCatalogPort {
             comparisons: Arc::clone(&research.comparison_report_repo),
             factors: Arc::clone(&research.factor_repo),
             markets: Arc::clone(&research.market_repo),
+            artifact_store: Arc::clone(&research.artifact_store),
         }
     }
 
@@ -125,6 +135,82 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             .page_specs(query)
             .await
             .map_err(QuantError::from)
+    }
+
+    async fn list_published_model_options(
+        &self,
+        query: ModelPublishedCatalogQuery,
+    ) -> QuantResult<Vec<PublishedModelOptionView>> {
+        let versions = self
+            .models
+            .page_versions(ModelVersionListQuery {
+                model_spec_id: None,
+                publication_status: Some(PublicationStatus::Published),
+                from: None,
+                to: None,
+                page: PageRequest {
+                    page: 1,
+                    size: PUBLISHED_CATALOG_LIMIT,
+                },
+            })
+            .await
+            .map_err(QuantError::from)?
+            .items;
+
+        let mut options = Vec::with_capacity(versions.len());
+        for version in versions {
+            let Some(spec) = self
+                .models
+                .find_model_spec_by_id(&version.model_spec_id)
+                .await
+                .map_err(QuantError::from)?
+            else {
+                tracing::warn!(
+                    model_version_id = %version.model_version_id,
+                    "published version's spec not found; excluded from the picker catalog"
+                );
+                continue;
+            };
+            let matches_side = match query.side {
+                ModelPickerSide::Buy => !spec.model_family.is_exit_scorer(),
+                ModelPickerSide::Sell => spec.model_family.is_exit_scorer(),
+            };
+            if !matches_side {
+                continue;
+            }
+            let category_scope = match load_hash_verified_artifact(&self.artifact_store, &version)
+                .await
+            {
+                Ok(artifact) => artifact.category_scope(),
+                Err(error) => {
+                    tracing::warn!(
+                        model_version_id = %version.model_version_id, %error,
+                        "published version's artifact failed to load; excluded from the picker catalog"
+                    );
+                    continue;
+                }
+            };
+            if let Some(category) = query.category
+                && category_scope.is_some_and(|scope| scope != category)
+            {
+                continue;
+            }
+            options.push(PublishedModelOptionView {
+                model_version_id: version.model_version_id,
+                model_spec_id: version.model_spec_id,
+                spec_name: spec.name,
+                version: version.version,
+                model_family: spec.model_family.as_str().to_owned(),
+                category_scope,
+                published_at: version.published_at,
+            });
+        }
+        options.sort_by(|left, right| {
+            left.spec_name
+                .cmp(&right.spec_name)
+                .then_with(|| right.version.cmp(&left.version))
+        });
+        Ok(options)
     }
 
     async fn list_backtest_reports(

@@ -31,10 +31,12 @@ use quant_pivot_models::{
     clickhouse::QuantSignalCandidateEventRow,
     domain::{ModelVersionInfo, NewModelRun, NewShadowComparison},
     enums::{
-        common::{AlertCategory, AlertLevel, AlertSource},
+        common::{AlertCategory, AlertLevel, AlertSource, MarketCategory},
         quant::{ModelRunKind, ModelRunStatus, OutcomeSide, PublicationStatus},
     },
-    runtime_config::{DecimalString, DomainConfig, FactorsConfig, FeaturesConfig, ModelConfig},
+    runtime_config::{
+        DecimalString, DomainConfig, FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef,
+    },
     types::{
         ContentHash, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
         Probability, RuntimeConfigVersionId,
@@ -45,7 +47,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
-    features::{FeatureSchema, FeatureVector},
+    features::{FeatureName, FeatureSchema, FeatureVector},
     governance::{ShadowComparison, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
@@ -434,13 +436,107 @@ impl ModelRunner {
             .load(&version, self.resolve_overlay(&version))
             .await?;
 
+        let mut by_category = HashMap::new();
+        for (category, reference) in &request.model.category_model_pointers {
+            if let Some(features) = self
+                .resolve_category_requirements(*category, reference, &factory, &request)
+                .await
+            {
+                by_category.insert(*category, features);
+            }
+        }
+
         Ok(ActiveModelRequirements {
             model_version_id: version_id,
             version,
             model_requirements: ModelFeatureRequirements {
-                required_features: runtime.required_features(),
+                generic: runtime.required_features(),
+                by_category: by_category.into_iter().collect(),
             },
         })
+    }
+
+    /// Resolve one category pointer's required features for selection
+    /// eligibility, enforcing the same governance a live routed inference
+    /// would (11.2.2 remediation R7): the pointer must parse, resolve to a
+    /// registered version that passes the active-load gate, and — new in
+    /// this remediation — the loaded artifact's `category_scope` must be
+    /// exactly this category or `None`. Any failure falls back to `None`
+    /// (selection then only checks the generic bar for this category,
+    /// mirroring `resolve_model_route`'s own fallback), logged so a
+    /// dangling or mis-scoped pointer is never a silent misconfiguration.
+    async fn resolve_category_requirements(
+        &self,
+        category: MarketCategory,
+        reference: &ModelVersionRef,
+        factory: &Arc<dyn ModelRuntimeFactory>,
+        request: &ActiveModelRequirementsRequest<'_>,
+    ) -> Option<Vec<FeatureName>> {
+        let version_id = match ModelVersionId::try_from(reference) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(
+                    %category, reference = %reference.id, %error,
+                    "category_model_pointers entry is not a valid model version id; \
+                     selection falls back to the generic requirement bar for this category"
+                );
+                return None;
+            }
+        };
+        let version = match self
+            .model_registry_repo
+            .find_model_version_by_id(&version_id)
+            .await
+        {
+            Ok(Some(version)) => version,
+            Ok(None) => {
+                tracing::warn!(
+                    %category, %version_id,
+                    "category pointer model version not found; selection falls back to generic"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %category, %version_id, %error,
+                    "failed to load category pointer model version; selection falls back to generic"
+                );
+                return None;
+            }
+        };
+        if let Err(reason) = active_load_ok(
+            &version,
+            request.model.min_quality_gate_age_secs,
+            request.as_of,
+        ) {
+            tracing::warn!(
+                %category, %version_id, %reason,
+                "category pointer model failed the active-load gate; selection falls back to generic"
+            );
+            return None;
+        }
+        let runtime = match factory.load(&version, self.resolve_overlay(&version)).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::warn!(
+                    %category, %version_id, %error,
+                    "failed to load category pointer model artifact; selection falls back to generic"
+                );
+                return None;
+            }
+        };
+        if runtime
+            .category_scope()
+            .is_some_and(|scope| scope != category)
+        {
+            tracing::warn!(
+                %category, %version_id, category_scope = ?runtime.category_scope(),
+                "category pointer model artifact's category_scope disagrees with the pointer's \
+                 own category key; selection falls back to generic (fail-closed)"
+            );
+            return None;
+        }
+        Some(runtime.required_features())
     }
 
     /// The active path: factor plane → load → infer → emit.
@@ -765,6 +861,62 @@ impl ModelRunner {
         }
     }
 
+    /// Whether `artifact`'s frozen `category_scope` is exactly `category` or
+    /// `None` (11.2.2 remediation R7). `false` (never scores `category`) on
+    /// any resolution failure — a category pointer's target must be provably
+    /// scoped to that category before it is trusted to score real markets; a
+    /// missing version or unloadable artifact fails closed to the generic
+    /// route, loudly.
+    async fn category_scope_ok(
+        &self,
+        category: MarketCategory,
+        artifact: &ModelVersionId,
+        factory: &Arc<dyn ModelRuntimeFactory>,
+    ) -> bool {
+        let version = match self
+            .model_registry_repo
+            .find_model_version_by_id(artifact)
+            .await
+        {
+            Ok(Some(version)) => version,
+            Ok(None) => {
+                tracing::warn!(
+                    %category, %artifact,
+                    "category pointer model version not found; inference falls back to generic"
+                );
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %category, %artifact, %error,
+                    "failed to load category pointer model version; inference falls back to generic"
+                );
+                return false;
+            }
+        };
+        let runtime = match factory.load(&version, self.resolve_overlay(&version)).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::warn!(
+                    %category, %artifact, %error,
+                    "failed to load category pointer model artifact; inference falls back to generic"
+                );
+                return false;
+            }
+        };
+        let scope = runtime.category_scope();
+        if scope.is_none_or(|scope| scope == category) {
+            true
+        } else {
+            tracing::warn!(
+                %category, %artifact, category_scope = ?scope,
+                "category pointer model artifact's category_scope disagrees with the pointer's \
+                 own category key; inference falls back to generic (fail-closed)"
+            );
+            false
+        }
+    }
+
     /// Resolve + freshness-check the active model version: look up the registry
     /// row and enforce the load-time quality-gate staleness deny (3.7).
     /// Score the aligned cross-section, honoring `category_model_pointers` with
@@ -780,12 +932,37 @@ impl ModelRunner {
             generic_version_id,
             batch,
         } = inputs;
-        let mut groups: HashMap<ModelVersionId, Vec<usize>> = HashMap::new();
-        for (idx, market) in batch.markets.iter().enumerate() {
+
+        // Resolve each distinct category's route ONCE (not per-market) and
+        // enforce `category_scope` at the exact point a wrong-scoped model
+        // would otherwise score real markets (11.2.2 remediation R7): a
+        // pointer whose target's spec disagrees with the routed category
+        // falls back to generic, loudly, rather than silently scoring with a
+        // mis-scoped artifact.
+        let mut category_routes: HashMap<MarketCategory, ModelVersionId> = HashMap::new();
+        for market in batch.markets {
+            if category_routes.contains_key(&market.category) {
+                continue;
+            }
             let version_id = match resolve_model_route(market.category, request.model) {
-                ModelRouting::CategorySpecific { artifact, .. } => artifact,
+                ModelRouting::CategorySpecific { category, artifact } => {
+                    if self.category_scope_ok(category, &artifact, factory).await {
+                        artifact
+                    } else {
+                        generic_version_id.clone()
+                    }
+                }
                 ModelRouting::GenericWeighted => generic_version_id.clone(),
             };
+            category_routes.insert(market.category, version_id);
+        }
+
+        let mut groups: HashMap<ModelVersionId, Vec<usize>> = HashMap::new();
+        for (idx, market) in batch.markets.iter().enumerate() {
+            let version_id = category_routes
+                .get(&market.category)
+                .cloned()
+                .unwrap_or_else(|| generic_version_id.clone());
             groups.entry(version_id).or_default().push(idx);
         }
 

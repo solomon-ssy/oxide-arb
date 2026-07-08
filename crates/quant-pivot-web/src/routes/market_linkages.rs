@@ -11,17 +11,22 @@ use actix_web::{http::Method, web};
 use chrono::Utc;
 use quant_pivot_models::{
     domain::{
-        LinkageResolveSummaryView, MarketLinkageDetailView, MarketLinkageListQuery,
-        MarketLinkageSummaryView, OverrideLinkageRequest, Paginated, ResolveLinkagesRequest,
+        LinkageResolveSummaryView, MarketLinkageDetailView, MarketLinkageHistoryEntryView,
+        MarketLinkageListQuery, MarketLinkageSummaryView, OverrideLinkageRequest, Paginated,
+        ResolveLinkagesRequest,
     },
-    enums::rbac::{Operation, ResourceType},
+    enums::{
+        operation_log::OperationCategory,
+        rbac::{Operation, ResourceType},
+    },
     types::MarketId,
 };
 
 use crate::{
+    audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
-    extractors::{ActingRole, RequestId, ValidatedJson},
+    extractors::{ActingRole, AuthedActor, RequestId, ValidatedJson},
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -47,6 +52,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/market-linkages/{market_id}",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             get,
+        ),
+        spec(
+            Method::GET,
+            "/research/market-linkages/{market_id}/history",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            history,
         ),
         spec(
             Method::POST,
@@ -84,17 +95,52 @@ pub async fn get(
     Ok(WebResponse::ok(MarketLinkageDetailView::from(info)))
 }
 
+/// `GET /api/research/market-linkages/{market_id}/history` — the full ledger.
+///
+/// History for one market, oldest first: every resolve pass and operator
+/// override that ever produced a row, the audit trail the detail drawer
+/// renders (R8 UI/UX closed loop).
+pub async fn history(
+    state: web::Data<AppState>,
+    market_id: web::Path<MarketId>,
+) -> Result<WebResponse<Vec<MarketLinkageHistoryEntryView>>, WebError> {
+    let market_id = market_id.into_inner();
+    let rows = state
+        .market_linkages
+        .ledger_for_markets(&[market_id], Utc::now())
+        .await?;
+    Ok(WebResponse::ok(
+        rows.into_iter()
+            .map(MarketLinkageHistoryEntryView::from)
+            .collect::<Vec<_>>(),
+    ))
+}
+
 /// `POST /api/research/market-linkages/resolve` — trigger offline re-resolution.
 pub async fn resolve(
     state: web::Data<AppState>,
-    _acting_role: ActingRole,
-    _request_id: RequestId,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
     body: ValidatedJson<ResolveLinkagesRequest>,
 ) -> Result<WebResponse<LinkageResolveSummaryView>, WebError> {
+    let request = body.into_inner();
     let summary = state
         .linkage_governance
-        .resolve_changed_markets(&body.into_inner().market_ids)
+        .resolve_changed_markets(&request.market_ids)
         .await?;
+    op_ctx.set_action(OperationCategory::Other, "market_linkage.resolve");
+    op_ctx.set_resource(ResourceType::Materialization, "market-linkages");
+    op_ctx.set_detail(serde_json::json!({
+        "market_ids": request.market_ids,
+        "reason": request.reason,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "examined": summary.examined,
+        "appended": summary.appended,
+        "resolved": summary.resolved,
+        "unresolved": summary.unresolved,
+    }));
     Ok(WebResponse::ok(summary))
 }
 
@@ -102,13 +148,28 @@ pub async fn resolve(
 pub async fn r#override(
     state: web::Data<AppState>,
     market_id: web::Path<MarketId>,
-    _acting_role: ActingRole,
-    _request_id: RequestId,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
     body: ValidatedJson<OverrideLinkageRequest>,
 ) -> Result<WebResponse<MarketLinkageDetailView>, WebError> {
+    let market_id = market_id.into_inner();
+    let request = body.into_inner();
+    let reason = request.reason.clone();
     let row = state
         .linkage_governance
-        .apply_override(&market_id.into_inner(), body.into_inner())
+        .apply_override(&market_id, request, actor.claims.username.clone())
         .await?;
+    op_ctx.set_action(OperationCategory::Other, "market_linkage.override");
+    op_ctx.set_resource(ResourceType::Materialization, market_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "market_id": market_id.to_string(),
+        "linkage_id": row.linkage_id.to_string(),
+        "reason": reason,
+        "acting_role": acting_role.0,
+        "actor": actor.claims.username,
+        "request_id": request_id.0,
+    }));
     Ok(WebResponse::ok(MarketLinkageDetailView::from(row)))
 }

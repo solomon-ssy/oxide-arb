@@ -16,13 +16,14 @@
 //! `MarketLinkageRepository`.
 
 pub mod extractor;
+pub mod oracle;
 pub mod ruleset;
 pub mod tier0_slug;
 pub mod tier1_template;
 
 pub use extractor::{
     DefaultSubjectValidator, ExtractedCandidate, SubjectExtractor, SubjectValidator,
-    ValidationOutcome,
+    ValidationOutcome, validate_structural_consistency,
 };
 pub use ruleset::{AssetRule, CRYPTO_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
 pub use tier0_slug::Tier0SlugExtractor;
@@ -95,6 +96,7 @@ impl LayeredResolver {
                         subject: candidate.subject,
                         instrument_key: candidate.instrument_key,
                         grounding: candidate.grounding,
+                        override_context: None,
                     }),
                     resolver_tier: tier.tier(),
                     resolver_version: self.resolver_version,
@@ -131,6 +133,11 @@ mod tests {
         types::MarketId,
     };
 
+    /// The literal Chainlink Data Streams rules-text anchor every observed
+    /// short-cycle up/down market carries.
+    const CHAINLINK_STREAM_RULES: &str = "The resolution source for this market is the \
+        Chainlink BTC/USD data stream, available at https://data.chain.link/streams/btc-usd.";
+
     fn metadata(slug: &str, question: &str, description: Option<&str>) -> LinkageSourceMetadata {
         LinkageSourceMetadata {
             market_id: MarketId::new("0xmarket"),
@@ -150,7 +157,7 @@ mod tests {
             .resolve(&metadata(
                 "btc-updown-5m-1780319100",
                 "Bitcoin Up or Down",
-                None,
+                Some(CHAINLINK_STREAM_RULES),
             ))
             .expect("resolve");
         assert_eq!(tier0.resolver_tier, ResolverTier::Tier0Slug);
@@ -179,7 +186,11 @@ mod tests {
             ValidationOutcome,
         };
         // Build a valid candidate, then corrupt one span's text.
-        let source = metadata("btc-updown-5m-1780319100", "Bitcoin Up or Down", None);
+        let source = metadata(
+            "btc-updown-5m-1780319100",
+            "Bitcoin Up or Down",
+            Some(CHAINLINK_STREAM_RULES),
+        );
         let mut candidate = Tier0SlugExtractor
             .extract(&source)
             .expect("extract")

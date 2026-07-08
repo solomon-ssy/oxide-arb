@@ -25,9 +25,10 @@ use quant_pivot_models::{
     domain::{
         BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery,
         CreateModelSpecCommand, CreateModelSpecRequest, GovernanceActor, JobSubmitContext,
-        ModelComparisonReportView, ModelSpecListQuery, ModelVersionListQuery, Paginated,
-        QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
-        RunBacktestRequest, TrainModelRequest, TrainedModelView,
+        ModelComparisonReportView, ModelPublishedCatalogQuery, ModelSpecListQuery,
+        ModelVersionListQuery, Paginated, PublishedModelOptionView, QualityGatePreviewQuery,
+        QualityGateReportView, QuantModelSpecView, ResearchJobView, RunBacktestRequest,
+        TrainModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -72,6 +73,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             list_models,
+        ),
+        spec(
+            Method::GET,
+            "/research/models/published-catalog",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            list_published_catalog,
         ),
         spec(
             Method::POST,
@@ -210,6 +217,20 @@ pub async fn list_models(
         .await?
         .map(TrainedModelView::from);
     Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/models/published-catalog` — the `Published`,
+/// side-and-category-eligible candidates for one `ModelVersionSelect`
+/// runtime-config field (11.2.2 remediation R8).
+pub async fn list_published_catalog(
+    state: web::Data<AppState>,
+    query: web::Query<ModelPublishedCatalogQuery>,
+) -> Result<WebResponse<Vec<PublishedModelOptionView>>, WebError> {
+    let options = state
+        .research_catalog
+        .list_published_model_options(query.into_inner())
+        .await?;
+    Ok(WebResponse::ok(options))
 }
 
 /// `GET /api/research/backtest-reports` — paginated backtest-report ledger catalog.

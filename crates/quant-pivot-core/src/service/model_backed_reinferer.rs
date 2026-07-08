@@ -155,9 +155,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             return Ok(None);
         };
 
-        let requirements = ModelFeatureRequirements {
-            required_features: runtime.required_features(),
-        };
+        let requirements = ModelFeatureRequirements::generic_only(runtime.required_features());
         // Exit re-inference has no schedule/request source delay; fall back the
         // live feature `as_of` by the maximum tolerated feature-bucket age so the
         // window end lands on the freshest guaranteed-settled fact boundary.
@@ -425,8 +423,7 @@ pub(crate) async fn build_live_feature_vector(
         )
         .await?;
 
-    let required_set =
-        merged_required_features(&request.requirements.required_features, request.features);
+    let required_set = merged_required_features(&request.requirements.generic, request.features);
     let mut required: Vec<_> = required_set.into_iter().collect();
     required.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let vector = builder.compute_vector(&bundle, &required, request.features, request.data_quality);

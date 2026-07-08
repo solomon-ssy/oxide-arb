@@ -1,10 +1,11 @@
 //! Quant model registry HTTP contract types.
 
 use crate::{
-    domain::{ModelSpecInfo, pagination::PageRequest},
-    enums::{model::ModelFamily, quant::PublicationStatus},
-    types::SchemaVersion,
+    domain::{ModelPickerSide, ModelSpecInfo, pagination::PageRequest},
+    enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
+    types::{ModelSpecId, ModelVersionId, SchemaVersion},
 };
+use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -91,4 +92,30 @@ pub struct ModelSpecListQuery {
     #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+/// Filter for `GET /research/models/published-catalog`.
+///
+/// The category/side-aware picker source for every `FieldWidget::ModelVersionSelect`
+/// field (11.2.2 remediation R8).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelPublishedCatalogQuery {
+    /// Restrict to versions whose artifact declares this category or `None`.
+    /// Absent = no category filter (used by the generic pointer fields).
+    pub category: Option<MarketCategory>,
+    /// Restrict to versions of this runtime side (Buy ranker vs. Sell scorer).
+    pub side: ModelPickerSide,
+}
+
+/// One `Published` model version offered by the governed picker widget.
+#[derive(Debug, Clone, Serialize)]
+pub struct PublishedModelOptionView {
+    pub model_version_id: ModelVersionId,
+    pub model_spec_id: ModelSpecId,
+    pub spec_name: String,
+    pub version: i32,
+    pub model_family: String,
+    /// The artifact's own declared scope (`None` = generic cross-category).
+    pub category_scope: Option<MarketCategory>,
+    pub published_at: Option<DateTime<Utc>>,
 }

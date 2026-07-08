@@ -637,6 +637,15 @@ fn build_research_domain_governance(t: &mut MenuTree, research: &MenuId) {
         permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
         icon: "lucide:activity",
     });
+    t.page(PageSpec {
+        parent: research,
+        name: "research-basis-alerts",
+        title: "page.menu.researchBasisAlerts",
+        path: "/research/basis-alerts",
+        component: "research/basis-alerts/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:triangle-alert",
+    });
 }
 
 /// Task center: the durable async research-job engine (dataset build / model

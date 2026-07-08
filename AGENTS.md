@@ -80,6 +80,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/lint-architecture.sh
 bash scripts/lint-quant-pivot-boundary.sh
 bash scripts/lint-quant-pivot-errors.sh
+bash scripts/lint-dead-semantics.sh
+bash scripts/lint-acceptance-tests.sh
 cargo test --workspace
 ```
 

@@ -1,5 +1,6 @@
 pub mod account;
 pub mod backtest;
+pub mod basis_alert;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;
 pub mod dataset_replay;

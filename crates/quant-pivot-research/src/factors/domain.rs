@@ -9,7 +9,12 @@
 //! different (or no) vertical yields [`RawFactorEligibility::NotApplicable`] —
 //! structurally absent, never entering the cross-section; a category-mapped
 //! market with missing domain inputs yields `raw_value: None` with zero
-//! confidence (`DomainMissing` semantics — never a silent zero).
+//! confidence (`DomainMissing` semantics — never a silent zero). The same
+//! `NotApplicable` eligibility (not `DomainMissing`) is also used when the
+//! market maps to the vertical but an *input feature itself* carries
+//! [`crate::features::NullReason::NotApplicable`] (e.g. a basis feature that
+//! structurally cannot exist for a Binance-settled market) — see
+//! [`read_input`]; this is never conflated with a transient data-source gap.
 
 use std::sync::Arc;
 
@@ -40,7 +45,7 @@ use crate::{
         },
     },
     features::{
-        FeatureName, FeatureValue, FeatureVector,
+        FeatureName, FeatureValue, FeatureVector, NullReason,
         names::{domain_crypto, market as market_names},
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -172,12 +177,26 @@ fn routes_to_crypto(features: &FeatureVector) -> bool {
     }
 }
 
-/// Read a decimal-valued feature across both vector slices.
-fn read_decimal(features: &FeatureVector, name: &FeatureName) -> Option<Decimal> {
-    features.value(name).and_then(|value| match value {
-        FeatureValue::Missing(_) => None,
-        present => present.to_fact_decimal(),
-    })
+/// One input feature's state for a domain factor computer: a genuine value,
+/// a structural non-applicability (never conflated with a data gap — see
+/// [`not_applicable`] vs [`domain_missing`]), or any other missing reason.
+enum InputState {
+    Present(Decimal),
+    NotApplicable,
+    Missing,
+}
+
+/// Read a decimal-valued feature across both vector slices, preserving
+/// whether an absence is structural (`NullReason::NotApplicable`) or a data
+/// gap — the two must never collapse into the same `RawFactor` eligibility.
+fn read_input(features: &FeatureVector, name: &FeatureName) -> InputState {
+    match features.value(name) {
+        Some(FeatureValue::Missing(NullReason::NotApplicable)) => InputState::NotApplicable,
+        Some(FeatureValue::Missing(_)) | None => InputState::Missing,
+        Some(present) => present
+            .to_fact_decimal()
+            .map_or(InputState::Missing, InputState::Present),
+    }
 }
 
 /// Assemble a raw domain factor (shared by both computers).
@@ -247,10 +266,21 @@ impl FactorComputer for StrikePressureFactor {
         if !routes_to_crypto(features) {
             return Ok(not_applicable(&self.spec));
         }
-        let (Some(distance), Some(tto_secs)) = (
-            read_decimal(features, &domain_crypto::DISTANCE_TO_STRIKE),
-            read_decimal(features, &domain_crypto::TIME_TO_OBSERVATION),
-        ) else {
+        let (distance_state, tto_state) = (
+            read_input(features, &domain_crypto::DISTANCE_TO_STRIKE),
+            read_input(features, &domain_crypto::TIME_TO_OBSERVATION),
+        );
+        if matches!(distance_state, InputState::NotApplicable)
+            || matches!(tto_state, InputState::NotApplicable)
+        {
+            // The market maps to crypto, but this specific signal structurally
+            // does not apply to it (e.g. a market shape this factor's inputs
+            // are never computed for) — distinct from a transient data gap.
+            return Ok(not_applicable(&self.spec));
+        }
+        let (InputState::Present(distance), InputState::Present(tto_secs)) =
+            (distance_state, tto_state)
+        else {
             return Ok(domain_missing(&self.spec));
         };
         // pressure = distance × sqrt(1 day / max(tto, 1 min)): the same
@@ -300,10 +330,17 @@ impl FactorComputer for BetaRegimeFactor {
         if !routes_to_crypto(features) {
             return Ok(not_applicable(&self.spec));
         }
-        let (Some(momentum), Some(vol)) = (
-            read_decimal(features, &domain_crypto::UNDERLYING_MOMENTUM),
-            read_decimal(features, &domain_crypto::UNDERLYING_REALIZED_VOL),
-        ) else {
+        let (momentum_state, vol_state) = (
+            read_input(features, &domain_crypto::UNDERLYING_MOMENTUM),
+            read_input(features, &domain_crypto::UNDERLYING_REALIZED_VOL),
+        );
+        if matches!(momentum_state, InputState::NotApplicable)
+            || matches!(vol_state, InputState::NotApplicable)
+        {
+            return Ok(not_applicable(&self.spec));
+        }
+        let (InputState::Present(momentum), InputState::Present(vol)) = (momentum_state, vol_state)
+        else {
             return Ok(domain_missing(&self.spec));
         };
         // Vol-normalized trend; a zero-vol window carries no regime signal
@@ -428,6 +465,36 @@ mod tests {
             let raw = computer.compute_raw(&sports).expect("compute");
             assert_eq!(raw.eligibility, RawFactorEligibility::NotApplicable);
         }
+    }
+
+    #[test]
+    fn structural_not_applicable_input_never_collapses_to_domain_missing() {
+        // A crypto-mapped market whose strike-pressure inputs are explicitly
+        // `NullReason::NotApplicable` (not merely absent/unavailable) must
+        // report `RawFactorEligibility::NotApplicable` — the SAME structural
+        // signal as an unmapped category, never the data-gap `Normalizable` +
+        // `raw_value: None` used for a transient source outage.
+        let mut values = BTreeMap::new();
+        values.insert(
+            domain_crypto::DISTANCE_TO_STRIKE,
+            FeatureValue::Missing(crate::features::NullReason::NotApplicable),
+        );
+        values.insert(
+            domain_crypto::TIME_TO_OBSERVATION,
+            FeatureValue::Missing(crate::features::NullReason::NotApplicable),
+        );
+        let slice = DomainFeatureSlice {
+            family: DomainFamily::Crypto,
+            schema_version: SchemaVersion::new(5),
+            values,
+        };
+        let (_, strike_pressure) = &crypto_domain_factors()[0];
+        let raw = strike_pressure
+            .compute_raw(&vector(MarketCategory::Crypto, Some(slice)))
+            .expect("compute");
+        assert_eq!(raw.eligibility, RawFactorEligibility::NotApplicable);
+        assert!(raw.raw_value.is_none());
+        assert!(raw.confidence.inner().is_zero());
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //!
 //! These are the strongly-typed, point-in-time feature carriers. Persistence
 //! projects them to `quant_feature_vector` (`payload` = canonical JSON of
-//! [`FeatureVector::values`]); the compute path never reads the opaque payload
-//! back — this type is the single source of truth.
+//! [`FeatureVector::generic`] and the optional [`FeatureVector::domain`]
+//! slice); the compute path never reads the opaque payload back — this type
+//! is the single source of truth.
 
 use std::collections::{BTreeMap, HashSet};
 

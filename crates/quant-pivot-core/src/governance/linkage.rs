@@ -11,8 +11,8 @@ use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         GroundingProof, LinkageOutcome, LinkageResolveSummaryView, LinkageSourceMetadata,
-        MarketInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, OverrideLinkageRequest,
-        ResolvedBinding,
+        MarketInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, OverrideContext,
+        OverrideLinkageRequest, ResolvedBinding,
     },
     enums::{
         common::MarketCategory,
@@ -24,7 +24,9 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{EventRepository, MarketLinkageRepository, MarketRepository};
-use quant_pivot_research::linkage::{LayeredResolver, ResolutionResult};
+use quant_pivot_research::linkage::{
+    LayeredResolver, ResolutionResult, validate_structural_consistency,
+};
 
 /// Dependencies for the offline linkage resolver.
 pub struct LinkageResolverDeps {
@@ -151,20 +153,28 @@ impl LinkageResolverService {
         })
     }
 
-    /// Operator override stub: append an audited binding with
-    /// `resolver_tier = Override`.
+    /// Audited operator override: append a binding with `resolver_tier =
+    /// Override` after it passes the same [`validate_structural_consistency`]
+    /// checks every automated candidate must clear (ruleset instrument
+    /// binding + oracle↔asset consistency).
     ///
-    /// Full governance audit wiring lands with the Phase 07 HTTP surface; this
-    /// method freezes the override into the ledger using the same append path as
-    /// deterministic resolution.
+    /// An override carries no text-extraction evidence — it is a human
+    /// decision, not extracted from source metadata — so
+    /// [`ResolvedBinding::grounding`] stays empty; the real audit trail is
+    /// [`ResolvedBinding::override_context`] (`reason` + `actor`), which is
+    /// **never** discarded (the pre-remediation stub dropped both).
     ///
     /// # Errors
     ///
-    /// Propagates catalog load, deserialization, hashing, and persistence failures.
+    /// Propagates catalog load, deserialization, hashing, and persistence
+    /// failures, and returns [`QuantError::config`] when the proposed subject
+    /// fails structural consistency (wrong instrument for the asset, or an
+    /// oracle/asset mismatch).
     pub async fn apply_override(
         &self,
         market_id: &MarketId,
         request: OverrideLinkageRequest,
+        actor: String,
     ) -> QuantResult<MarketLinkageInfo> {
         let market = self
             .deps
@@ -188,11 +198,18 @@ impl LinkageResolverService {
         let subject: MarketSubject = serde_json::from_value(request.subject)
             .map_err(|error| QuantError::config(error.to_string()))?;
         let instrument_key = DomainInstrumentKey::new(&request.instrument_key);
+        let MarketSubject::Crypto(crypto_subject) = &subject;
+        validate_structural_consistency(crypto_subject, &instrument_key)
+            .map_err(QuantError::config)?;
         let domain_family = subject.family();
         let outcome = LinkageOutcome::Resolved(ResolvedBinding {
             subject,
             instrument_key,
             grounding: GroundingProof { spans: Vec::new() },
+            override_context: Some(OverrideContext {
+                reason: request.reason,
+                actor,
+            }),
         });
         let resolver_version = self.resolver.resolver_version();
         let content_hash = MarketLinkage::compute_content_hash(
@@ -203,6 +220,7 @@ impl LinkageResolverService {
             resolver_version,
             &metadata_hash,
         )?;
+        let derived_at = Utc::now();
         let linkage = MarketLinkage {
             linkage_id: MarketLinkageId::from_v7(),
             market_id: market_id.clone(),
@@ -213,7 +231,12 @@ impl LinkageResolverService {
             resolver_version,
             metadata_hash,
             content_hash,
-            derived_at: Utc::now(),
+            derived_at,
+            // Inert placeholder — the database assigns the authoritative
+            // `created_at` on insert (`NewMarketLinkage` excludes this
+            // column); only a value reloaded through `into_domain` ever
+            // participates in a PIT tie-break.
+            created_at: derived_at,
         };
         self.deps
             .linkage_repo
@@ -319,6 +342,8 @@ fn resolution_to_linkage(
         metadata_hash,
         content_hash,
         derived_at,
+        // Inert placeholder — see the override construction site above.
+        created_at: derived_at,
     })
 }
 
@@ -342,7 +367,8 @@ impl quant_pivot_models::domain::MarketLinkageGovernancePort for LinkageResolver
         &self,
         market_id: &MarketId,
         request: OverrideLinkageRequest,
+        actor: String,
     ) -> QuantResult<MarketLinkageInfo> {
-        self.apply_override(market_id, request).await
+        self.apply_override(market_id, request, actor).await
     }
 }

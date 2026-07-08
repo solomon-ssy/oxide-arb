@@ -22,6 +22,10 @@ pub enum QuantDomainSourceCursor {
     InstrumentKey,
     LastEventTime,
     Status,
+    /// Human-readable detail from the most recent failed tick, or `NULL` when
+    /// the last tick for this instrument succeeded (R10 ingest hardening).
+    /// Cleared on the next successful tick — never accumulates stale errors.
+    LastError,
     CreatedAt,
     UpdatedAt,
 }
@@ -38,6 +42,11 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(column::text_id(QuantDomainSourceCursor::Status))
+        .col(
+            ColumnDef::new(QuantDomainSourceCursor::LastError)
+                .text()
+                .null(),
+        )
         .col(timestamp_with_write_default(
             QuantDomainSourceCursor::CreatedAt,
         ))

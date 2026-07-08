@@ -50,17 +50,19 @@ crate::pg_enum! {
     /// Which layer of the market-linkage resolver produced a linkage record.
     ///
     /// Deterministic tiers (`Tier0Slug` / `Tier1Template`) are pure functions
-    /// of frozen market metadata. `Tier2Llm` is the offline-only LLM fallback
-    /// (interface reserved by 11.2.2, designed in 11.2.3). `Override` is an
-    /// audited operator decision.
+    /// of frozen market metadata. `Override` is an audited operator decision.
+    ///
+    /// A `Tier2Llm` variant (offline structured-extraction fallback, designed
+    /// in `phase-11/11.2.3`) is deliberately **not** modeled here yet — it
+    /// lands only alongside its real implementation, per the zero-dead-
+    /// semantics policy (an unemitted, unmatched enum variant is a
+    /// remediation blocker, not a reserved placeholder).
     @derive(JsonSchema)
     pub enum ResolverTier {
         /// Deterministic series-slug direct read (`{asset}-updown-{tf}-{epoch}`).
         Tier0Slug => "tier0_slug",
         /// Deterministic template parser over slug / question / description.
         Tier1Template => "tier1_template",
-        /// Offline LLM structured extraction (11.2.3; never on the PIT hot path).
-        Tier2Llm => "tier2_llm",
         /// Audited operator override.
         Override => "override",
     }
@@ -83,15 +85,17 @@ crate::pg_enum! {
 crate::wire_enum! {
     /// The metric dimension of one long-format domain observation.
     ///
-    /// Only metrics that are actually persisted and consumed exist here (no
-    /// dead semantics): candle close + volume from the Binance kline source,
-    /// and the oracle spot price from the Chainlink aggregator source.
+    /// Only metrics that are actually persisted **and consumed by a feature**
+    /// exist here (no dead semantics): candle close from the Binance kline
+    /// source (the sole feature-source price every crypto domain feature
+    /// reads) and the oracle spot price from the Chainlink aggregator source
+    /// (the basis cross-check counterpart). Candle volume is deliberately
+    /// **not** modeled here — Binance klines carry it on the wire, but no
+    /// domain feature consumes it; re-add it only alongside a real consumer.
     @derive(JsonSchema, PartialOrd, Ord)
     pub enum DomainMetric {
         /// Candle close price (Binance klines; the feature-source price).
         Close => "close",
-        /// Candle base-asset volume (Binance klines).
-        Volume => "volume",
         /// Oracle spot price (Chainlink aggregator; basis cross-check source).
         OraclePrice => "oracle_price",
     }

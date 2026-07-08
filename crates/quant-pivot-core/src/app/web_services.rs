@@ -23,11 +23,12 @@ use quant_pivot_models::domain::{
     ResearchJobPort, RuntimeConfigPort,
 };
 use quant_pivot_repository::traits::{
-    AccountSnapshotRepository, AttributionRepository, DomainSourceCursorRepository,
-    EquitySnapshotRepository, ExecutionOrderRepository, FavoriteLongshotBiasTableRepository,
-    MenuRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
+    AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
+    DomainSourceCursorRepository, EquitySnapshotRepository, ExecutionOrderRepository,
+    FavoriteLongshotBiasTableRepository, MenuRepository, OperationLogRepository,
+    OrderIntentRepository, PositionRepository, RecommendationReportRepository,
+    RecommendationRepository, ReconciliationRepository, RoleMenuRepository,
+    RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
     SettlementRedeemRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -148,6 +149,7 @@ async fn build_app_state(
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
         domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
             as Arc<dyn DomainSourceCursorRepository>,
+        basis_alerts: Arc::clone(&ctx.infra.repos.basis_alert) as Arc<dyn BasisAlertRepository>,
         linkage_governance: Arc::clone(&ctx.data.linkage_resolver)
             as Arc<dyn MarketLinkageGovernancePort>,
         structural_monitor: Arc::new(CoreStructuralMonitor::new(

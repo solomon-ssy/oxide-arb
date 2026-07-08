@@ -10,7 +10,7 @@ use crate::{
     service::{
         factor_pipeline::FactorPipelineService,
         favorite_longshot_fit::FavoriteLongshotFitService,
-        feature_pipeline::FeaturePipelineService,
+        feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         training_dataset::{
             TrainingDatasetService, TrainingDatasetServiceDeps, TrainingDatasetServiceWire,
@@ -24,11 +24,11 @@ use quant_pivot_models::domain::{
 };
 use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
-    AttributionRepository, BacktestReportRepository, EventRepository, FactorRepository,
-    FavoriteLongshotBiasTableRepository, FeatureRepository, MarketLinkageRepository,
-    MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
-    ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
-    PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    AttributionRepository, BacktestReportRepository, BasisAlertRepository, EventRepository,
+    FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+    MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+    ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
+    ModelRunRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
     RuntimeConfigVersionRepository, ShadowComparisonRepository, TradeTapeBlockCursorRepository,
     TrainingDatasetRepository,
 };
@@ -145,16 +145,18 @@ fn assemble_research_pipelines(
     ));
     let feature_repo: Arc<dyn FeatureRepository> =
         Arc::clone(&deps.infra.repos.feature) as Arc<dyn FeatureRepository>;
-    let feature_pipeline = Arc::new(FeaturePipelineService::new(
-        FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
-        Arc::clone(&feature_repo),
-        Arc::clone(&deps.infra.feature_event_writer),
-        Arc::clone(&deps.data.market_registry),
-        Arc::clone(&deps.infra.repos.trade_tape_block_cursor)
+    let feature_pipeline = Arc::new(FeaturePipelineService::new(FeaturePipelineDeps {
+        window_provider: FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
+        feature_repo: Arc::clone(&feature_repo),
+        event_writer: Arc::clone(&deps.infra.feature_event_writer),
+        market_registry: Arc::clone(&deps.data.market_registry),
+        block_cursor_repo: Arc::clone(&deps.infra.repos.trade_tape_block_cursor)
             as Arc<dyn TradeTapeBlockCursorRepository>,
-        Arc::clone(market_linkage_repo),
-        deps.deploy.market_data.trade_tape_on_chain.clone(),
-    ));
+        linkage_repo: Arc::clone(market_linkage_repo),
+        basis_alert_repo: Arc::clone(&deps.infra.repos.basis_alert)
+            as Arc<dyn BasisAlertRepository>,
+        trade_tape_on_chain: deps.deploy.market_data.trade_tape_on_chain.clone(),
+    }));
     let factor_repo: Arc<dyn FactorRepository> =
         Arc::clone(&deps.infra.repos.factor) as Arc<dyn FactorRepository>;
     let factor_pipeline = Arc::new(FactorPipelineService::new(

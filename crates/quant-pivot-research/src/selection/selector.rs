@@ -148,7 +148,10 @@ impl MarketSelector for ConfiguredMarketSelector {
 mod tests {
     use super::ConfiguredMarketSelector;
     use crate::{
-        features::names,
+        features::{
+            FeatureName,
+            names::{self, book::SPREAD_BPS},
+        },
         selection::{
             ExclusionReason, MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector,
             ModelFeatureRequirements,
@@ -350,9 +353,8 @@ mod tests {
     async fn model_eligibility_keeps_market_with_available_required_feature() {
         // A healthy candidate has a two-sided book, so a book-derived feature is
         // available — the market is kept (no blanket fail-closed).
-        let model_requirements = ModelFeatureRequirements {
-            required_features: vec![names::book::SPREAD_BPS],
-        };
+        let model_requirements =
+            ModelFeatureRequirements::generic_only(vec![names::book::SPREAD_BPS]);
         let snapshot = build(
             request_with_model(selection_config(), model_requirements),
             vec![healthy_candidate("0xok")],
@@ -368,11 +370,10 @@ mod tests {
         // A model requiring a feature the schema does not define makes the market
         // ineligible — and only that feature is reported missing (the oracle never
         // claims to provide a feature it does not declare).
-        let model_requirements = ModelFeatureRequirements {
-            required_features: vec![crate::features::FeatureName::from_static(
+        let model_requirements =
+            ModelFeatureRequirements::generic_only(vec![FeatureName::from_static(
                 "nonexistent.feature",
-            )],
-        };
+            )]);
         let snapshot = build(
             request_with_model(selection_config(), model_requirements),
             vec![healthy_candidate("0xok")],
@@ -384,6 +385,62 @@ mod tests {
             ExclusionReason::ModelFeatureUnavailable { missing } => {
                 assert_eq!(missing.len(), 1);
                 assert_eq!(missing[0].as_str(), "nonexistent.feature");
+            }
+            other => panic!("expected ModelFeatureUnavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn category_specific_requirement_never_gates_a_different_category() {
+        // 11.2.2 remediation R7: a crypto-only domain requirement (from the
+        // category-specific model routed for Crypto) must gate ONLY crypto
+        // candidates — a Sports candidate lacking that feature is unaffected,
+        // even though the feature is globally "required" for one category.
+
+        let mut model_requirements = ModelFeatureRequirements::generic_only(vec![SPREAD_BPS]);
+        model_requirements.by_category.insert(
+            MarketCategory::Crypto,
+            vec![FeatureName::from_static("domain.crypto.distance_to_strike")],
+        );
+
+        let mut selection = selection_config();
+        selection.enabled_categories = vec![MarketCategory::Sports, MarketCategory::Crypto];
+
+        let mut crypto_candidate = healthy_candidate("0xcrypto");
+        crypto_candidate.category = MarketCategory::Crypto;
+
+        let snapshot = build(
+            request_with_model(selection, model_requirements),
+            vec![healthy_candidate("0xsports"), crypto_candidate],
+        )
+        .await;
+
+        // Sports market: only `generic` (SPREAD_BPS, available) applies — kept.
+        let kept: Vec<_> = snapshot
+            .included
+            .iter()
+            .map(|m| m.market_id.as_str().to_owned())
+            .collect();
+        assert!(
+            kept.contains(&"0xsports".to_owned()),
+            "a Sports market must never be gated by Crypto's domain requirement"
+        );
+        // Crypto market: `generic` ∪ Crypto's domain requirement applies; the
+        // domain feature is unavailable for this fixture (no linkage), so it
+        // is excluded — but for the RIGHT reason (its own category's bar).
+        assert!(!kept.contains(&"0xcrypto".to_owned()));
+        let crypto_exclusion = snapshot
+            .excluded
+            .iter()
+            .find(|excluded| excluded.market_id.as_str() == "0xcrypto")
+            .expect("crypto candidate excluded");
+        match &crypto_exclusion.reason {
+            ExclusionReason::ModelFeatureUnavailable { missing } => {
+                assert!(
+                    missing
+                        .iter()
+                        .any(|name| name.as_str() == "domain.crypto.distance_to_strike")
+                );
             }
             other => panic!("expected ModelFeatureUnavailable, got {other:?}"),
         }

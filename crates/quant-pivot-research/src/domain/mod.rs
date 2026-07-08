@@ -1,47 +1,25 @@
 //! External-vertical (domain) point-in-time contracts (Phase 11.2.2).
 //!
-//! Mirrors the platform PIT plane: a [`DomainPitQueryEngine`] answers
-//! window queries over stored `quant_domain_observation` facts, and the
-//! feature pipeline pre-fetches per-instrument [`DomainObservationWindow`]
-//! snapshots so domain feature computation is a pure function. The online
-//! (`ClickHouse`) and offline ([`MaterializedDomainPitEngine`]) backends
-//! return byte-identical windows for the same visibility bounds.
+//! Train-serve parity for the domain slice is a **single shared code path**,
+//! not a dual-engine mirror: both the online feature pipeline
+//! (`quant-pivot-core::service::feature_pipeline`) and the offline replay
+//! (`quant-pivot-core::service::historical_replay`) prefetch the full
+//! `quant_domain_observation` range for the round into an in-memory
+//! `HashMap<DomainInstrumentKey, Vec<DomainObservation>>` via the identical
+//! `QuantFactReadRepository::domain_observations_between` query, then call
+//! the **same** [`build_domain_slice_inputs`] function to assemble the PIT
+//! window. There is exactly one assembly implementation to keep in sync —
+//! zero skew is structural, not tested-for.
 
-pub mod materialized;
 pub mod slice;
 
-pub use materialized::MaterializedDomainPitEngine;
 pub use slice::{
     build_domain_slice_inputs, crypto_lookback_secs, linkage_valid_at, oracle_instrument,
 };
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::{
-    domain::DomainObservation, enums::domain::DomainMetric, types::DomainInstrumentKey,
-};
+use quant_pivot_models::{domain::DomainObservation, enums::domain::DomainMetric};
 use rust_decimal::Decimal;
-
-/// PIT window query over stored domain observations.
-///
-/// The caller owns the visibility arithmetic (`to = as_of - source_delay`);
-/// implementations return **ascending** `observed_at` order with the stable
-/// ingestion-time tie-break, all strictly inside `[from, to)`.
-#[async_trait]
-pub trait DomainPitQueryEngine: Send + Sync {
-    /// Observations for one instrument with `observed_at ∈ [from, to)`.
-    ///
-    /// # Errors
-    ///
-    /// Propagates backend query failures.
-    async fn observations_between(
-        &self,
-        instrument_key: &DomainInstrumentKey,
-        from: DateTime<Utc>,
-        to_exclusive: DateTime<Utc>,
-    ) -> QuantResult<Vec<DomainObservation>>;
-}
 
 /// A pre-fetched, PIT-bounded window of observations for one instrument.
 ///

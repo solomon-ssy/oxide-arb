@@ -10,11 +10,15 @@
 //! inputs must be order-normalized before hashing**. Prefer the typed helpers
 //! ([`ResearchHasher::factor_schema`], [`ResearchHasher::model_feature_requirements`],
 //! [`ResearchHasher::feature_names`]) over raw [`ResearchHasher::ordered`] at
-//! call sites. Map-keyed compute types (e.g. [`crate::features::FeatureVector::values`],
-//! a `BTreeMap`) are already canonical by construction.
+//! call sites. Map-keyed compute types (e.g. [`crate::features::FeatureVector::generic`]
+//! / [`crate::features::DomainFeatureSlice::values`], both `BTreeMap`s) are already
+//! canonical by construction.
+
+use std::collections::BTreeMap;
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
+    enums::{common::MarketCategory, domain::DomainFamily},
     hashing::CanonicalDigest,
     types::{ContentHash, SchemaVersion},
 };
@@ -22,7 +26,7 @@ use serde::Serialize;
 
 use crate::{
     factors::FactorSet,
-    features::{FeatureName, FeatureSchema, FeatureSpec, FeatureVector},
+    features::{FeatureName, FeatureSchema, FeatureSpec, FeatureValue, FeatureVector},
     model::ModelArtifact,
     selection::ModelFeatureRequirements,
     training::LabelName,
@@ -33,6 +37,65 @@ use crate::{
 struct FeatureSchemaCanonical {
     version: SchemaVersion,
     specs: Vec<FeatureSpec>,
+}
+
+/// Decimal places every hashed feature value is quantized to before it enters
+/// [`ResearchHasher::feature_vector`]'s composite digest.
+///
+/// Mirrors the crate-wide statistical quantization convention (see
+/// `features::generic::stats::STAT_SCALE`), kept as its own constant here
+/// because quantizing **for hashing** must never mutate the value actually
+/// stored in / consumed from the vector — only the hash input is rounded.
+/// Twelve places sits well inside `f64`'s ~15 decimal digits of precision, so
+/// an `f64`-derived statistic that differs only past the 12th decimal place
+/// (cross-platform floating-point noise) can never perturb `feature_hash`.
+const HASH_STAT_SCALE: u32 = 12;
+
+/// Composite `feature_hash` layout: `generic_schema_version`, the sorted
+/// generic-slice digest, and the domain slice's family / schema version /
+/// digest (each `None` when the vector carries no domain slice at all).
+///
+/// `Option::None` serializes to JSON `null`, an unambiguous sentinel distinct
+/// from every real `DomainFamily` / `SchemaVersion` / `ContentHash` value —
+/// stronger than a string literal sentinel, which would risk colliding with a
+/// family whose wire tag happened to be that literal string.
+#[derive(Serialize)]
+struct FeatureHashComposite {
+    generic_schema_version: SchemaVersion,
+    generic_hash: ContentHash,
+    domain_family: Option<DomainFamily>,
+    domain_schema_version: Option<SchemaVersion>,
+    domain_hash: Option<ContentHash>,
+}
+
+/// Quantize every embedded `Decimal` in `values` at [`HASH_STAT_SCALE`],
+/// returning a hash-only projection (the caller's stored map is untouched).
+fn quantized_for_hash(
+    values: &BTreeMap<FeatureName, FeatureValue>,
+) -> BTreeMap<FeatureName, FeatureValue> {
+    values
+        .iter()
+        .map(|(name, value)| (name.clone(), quantize_value_for_hash(value)))
+        .collect()
+}
+
+/// Quantize the `Decimal` payload of one [`FeatureValue`] for hashing.
+///
+/// `Count` / `Bool` / `Category` / `Missing` carry no `Decimal` and pass
+/// through verbatim.
+fn quantize_value_for_hash(value: &FeatureValue) -> FeatureValue {
+    match *value {
+        FeatureValue::Decimal(inner) => FeatureValue::Decimal(inner.round_dp(HASH_STAT_SCALE)),
+        FeatureValue::Bps(inner) => FeatureValue::Bps(inner.round_dp(HASH_STAT_SCALE)),
+        FeatureValue::Usd(inner) => FeatureValue::Usd(inner.round_dp(HASH_STAT_SCALE)),
+        FeatureValue::Probability(inner) => {
+            FeatureValue::Probability(inner.round_dp(HASH_STAT_SCALE))
+        }
+        FeatureValue::Count(_)
+        | FeatureValue::Bool(_)
+        | FeatureValue::Category(_)
+        | FeatureValue::Missing(_) => value.clone(),
+    }
 }
 
 /// Typed canonical hasher for research artifacts (`blake3:<hex>`).
@@ -85,10 +148,35 @@ impl ResearchHasher {
     }
 
     /// Order-independent hash of model feature requirements for selector inputs.
+    ///
+    /// Both `generic` and every `by_category` vector are sorted before
+    /// hashing (via [`ModelFeatureRequirements::for_category`]'s underlying
+    /// `BTreeSet` normalization is not reused here since categories must stay
+    /// distinguishable); the map's own key order is already canonical
+    /// (`BTreeMap`).
     pub fn model_feature_requirements(
         requirements: &ModelFeatureRequirements,
     ) -> QuantResult<ContentHash> {
-        Self::feature_names(&requirements.required_features)
+        #[derive(Serialize)]
+        struct Canonical {
+            generic: Vec<FeatureName>,
+            by_category: BTreeMap<MarketCategory, Vec<FeatureName>>,
+        }
+        let mut generic = requirements.generic.clone();
+        generic.sort();
+        let by_category: BTreeMap<_, Vec<_>> = requirements
+            .by_category
+            .iter()
+            .map(|(category, features)| {
+                let mut sorted = features.clone();
+                sorted.sort();
+                (*category, sorted)
+            })
+            .collect();
+        Self::canonical(&Canonical {
+            generic,
+            by_category,
+        })
     }
 
     /// Order-independent hash of a governed factor set (`factor_schema_hash`).
@@ -101,16 +189,41 @@ impl ResearchHasher {
         Self::canonical(&definitions)
     }
 
-    /// Canonical hash of an in-memory two-layer feature vector.
+    /// Composite content hash of an in-memory two-layer feature vector.
     ///
-    /// Both slices are `BTreeMap`s (order-independent by construction), and
-    /// the canonical serialization covers `generic_schema_version`, the
-    /// generic values, and the optional domain slice **including its family
-    /// and schema version** — so the digest distinguishes `domain: None` from
-    /// a present slice, and one domain family from another, with no separate
-    /// composite formula to keep in sync.
+    /// `feature_hash = H(generic_schema_version, H(generic), domain_family |
+    /// None, domain_schema_version | None, H(domain_values) | None)`. Only
+    /// the components above participate — `market_id` / `token_id` / `as_of`
+    /// / `substitutions` / `data_quality` / `staleness_ms` / `source_refs`
+    /// are audit/context metadata, never content, and must never perturb the
+    /// digest of an otherwise-identical feature computation (e.g. two ingest
+    /// runs at different staleness for the same underlying values). Every
+    /// `Decimal` payload is quantized at [`HASH_STAT_SCALE`] before hashing
+    /// (the stored vector itself is untouched) so cross-platform floating
+    /// point noise can never flip the digest. `domain: None` (structurally
+    /// absent) is byte-distinct from a present slice by construction (`Some`
+    /// vs `None` in the composite, not string sentinels).
+    ///
+    /// # Errors
+    ///
+    /// Propagates canonical-serialization failures.
     pub fn feature_vector(vector: &FeatureVector) -> QuantResult<ContentHash> {
-        Self::canonical(vector)
+        let generic_hash = Self::canonical(&quantized_for_hash(&vector.generic))?;
+        let (domain_family, domain_schema_version, domain_hash) = match &vector.domain {
+            Some(slice) => (
+                Some(slice.family),
+                Some(slice.schema_version),
+                Some(Self::canonical(&quantized_for_hash(&slice.values))?),
+            ),
+            None => (None, None, None),
+        };
+        Self::canonical(&FeatureHashComposite {
+            generic_schema_version: vector.generic_schema_version,
+            generic_hash,
+            domain_family,
+            domain_schema_version,
+            domain_hash,
+        })
     }
 
     /// Canonical hash of a serialized model artifact.
@@ -176,21 +289,32 @@ mod tests {
 
     #[test]
     fn model_feature_requirements_is_order_independent() {
-        let forward = ModelFeatureRequirements {
-            required_features: vec![
-                FeatureName::from_static("alpha"),
-                FeatureName::from_static("beta"),
-            ],
-        };
-        let shuffled = ModelFeatureRequirements {
-            required_features: vec![
-                FeatureName::from_static("beta"),
-                FeatureName::from_static("alpha"),
-            ],
-        };
+        let forward = ModelFeatureRequirements::generic_only(vec![
+            FeatureName::from_static("alpha"),
+            FeatureName::from_static("beta"),
+        ]);
+        let shuffled = ModelFeatureRequirements::generic_only(vec![
+            FeatureName::from_static("beta"),
+            FeatureName::from_static("alpha"),
+        ]);
         let forward_hash = ResearchHasher::model_feature_requirements(&forward).expect("hash");
         let shuffled_hash = ResearchHasher::model_feature_requirements(&shuffled).expect("hash");
         assert_eq!(forward_hash, shuffled_hash);
+    }
+
+    #[test]
+    fn model_feature_requirements_distinguishes_category_specific_sets() {
+        let generic_only =
+            ModelFeatureRequirements::generic_only(vec![FeatureName::from_static("book.mid")]);
+        let mut with_category = generic_only.clone();
+        with_category.by_category.insert(
+            quant_pivot_models::enums::common::MarketCategory::Crypto,
+            vec![FeatureName::from_static("domain.crypto.distance_to_strike")],
+        );
+        assert_ne!(
+            ResearchHasher::model_feature_requirements(&generic_only).expect("hash"),
+            ResearchHasher::model_feature_requirements(&with_category).expect("hash"),
+        );
     }
 
     fn sample_spec(name: &'static str) -> FeatureSpec {
@@ -262,6 +386,224 @@ mod tests {
         assert_ne!(
             ResearchHasher::factor_schema(&two).expect("hash"),
             ResearchHasher::factor_schema(&three).expect("hash"),
+        );
+    }
+
+    // ── R1: composite `feature_vector` hash ────────────────────────────────
+
+    use std::collections::BTreeMap;
+
+    use crate::features::{
+        DomainFeatureSlice, EvidenceSourceRef, FeatureValue, FeatureVector, NullReason,
+    };
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        enums::{domain::DomainFamily, feature::EvidenceSourceKind, quant::DataQualityStatus},
+        types::{MarketId, Probability, TokenId},
+    };
+    use rust_decimal_macros::dec;
+
+    /// A minimal, self-contained two-layer vector for hash unit tests. Every
+    /// context/audit field (`market_id`/`token_id`/`as_of`/`staleness_ms`/
+    /// `source_refs`/`data_quality`/`substitutions`) is deliberately varied
+    /// across the two builders below so tests can prove those fields never
+    /// perturb `feature_hash`.
+    fn base_vector(
+        generic: BTreeMap<FeatureName, FeatureValue>,
+        domain: Option<DomainFeatureSlice>,
+    ) -> FeatureVector {
+        FeatureVector {
+            market_id: MarketId::new("m1"),
+            token_id: Some(TokenId::new("t1")),
+            as_of: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            generic_schema_version: SchemaVersion::new(1),
+            generic,
+            domain,
+            substitutions: Vec::new(),
+            data_quality: DataQualityStatus::Fresh,
+            staleness_ms: 100,
+            source_refs: Vec::new(),
+        }
+    }
+
+    fn generic_with(
+        name: &'static str,
+        value: FeatureValue,
+    ) -> BTreeMap<FeatureName, FeatureValue> {
+        let mut map = BTreeMap::new();
+        map.insert(FeatureName::from_static(name), value);
+        map
+    }
+
+    fn crypto_slice(schema_version: SchemaVersion, value: FeatureValue) -> DomainFeatureSlice {
+        DomainFeatureSlice {
+            family: DomainFamily::Crypto,
+            schema_version,
+            values: generic_with("domain.crypto.distance_to_strike", value),
+        }
+    }
+
+    #[test]
+    fn feature_vector_hash_stable_for_same_input() {
+        let a = base_vector(
+            generic_with(
+                "book.mid",
+                FeatureValue::Probability(Probability::new(dec!(0.5))),
+            ),
+            None,
+        );
+        let b = base_vector(
+            generic_with(
+                "book.mid",
+                FeatureValue::Probability(Probability::new(dec!(0.5))),
+            ),
+            None,
+        );
+        assert_eq!(
+            ResearchHasher::feature_vector(&a).expect("hash"),
+            ResearchHasher::feature_vector(&b).expect("hash"),
+        );
+    }
+
+    #[test]
+    fn feature_vector_hash_ignores_context_and_audit_metadata() {
+        // Same generic/domain content; every context/audit field differs.
+        let generic = generic_with(
+            "book.mid",
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
+        );
+        let a = base_vector(generic.clone(), None);
+        let b = FeatureVector {
+            market_id: MarketId::new("m-different"),
+            token_id: None,
+            as_of: Utc.with_ymd_and_hms(2026, 6, 1, 12, 30, 0).unwrap(),
+            generic_schema_version: SchemaVersion::new(1),
+            generic,
+            domain: None,
+            substitutions: vec![crate::features::SubstitutionAudit {
+                feature: FeatureName::from_static("market.neg_risk"),
+                reason: NullReason::SourceUnavailable,
+                substituted: FeatureValue::Bool(false),
+            }],
+            data_quality: DataQualityStatus::Degraded,
+            staleness_ms: 987_654,
+            source_refs: vec![EvidenceSourceRef {
+                source_kind: EvidenceSourceKind::Book,
+                reference: "snapshot-42".to_owned(),
+                observed_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 29, 0).unwrap(),
+            }],
+        };
+        assert_eq!(
+            ResearchHasher::feature_vector(&a).expect("hash"),
+            ResearchHasher::feature_vector(&b).expect("hash"),
+            "market_id/token_id/as_of/staleness_ms/source_refs/data_quality/substitutions \
+             are context metadata and must never perturb feature_hash",
+        );
+    }
+
+    #[test]
+    fn feature_vector_hash_distinguishes_domain_none_from_present() {
+        let generic = generic_with(
+            "book.mid",
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
+        );
+        let without_domain = base_vector(generic.clone(), None);
+        let with_domain = base_vector(
+            generic,
+            Some(crypto_slice(
+                SchemaVersion::new(1),
+                FeatureValue::Decimal(dec!(0.02)),
+            )),
+        );
+        assert_ne!(
+            ResearchHasher::feature_vector(&without_domain).expect("hash"),
+            ResearchHasher::feature_vector(&with_domain).expect("hash"),
+        );
+    }
+
+    #[test]
+    fn feature_vector_hash_distinguishes_domain_schema_version() {
+        // `DomainFamily` has a single live variant today (`Crypto` — see
+        // `enums::domain::DomainFamily::ALL`); fabricating a second variant
+        // solely to exercise this test would itself be dead semantics, which
+        // this remediation forbids. `domain_family` is nonetheless a
+        // first-class field of `FeatureHashComposite` (verified by
+        // construction / the type checker), so discrimination across
+        // families is automatic the moment a second family is registered.
+        // `domain_schema_version` is the axis we can exercise today with the
+        // one live family.
+        let generic = generic_with(
+            "book.mid",
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
+        );
+        let v1 = base_vector(
+            generic.clone(),
+            Some(crypto_slice(
+                SchemaVersion::new(1),
+                FeatureValue::Decimal(dec!(0.02)),
+            )),
+        );
+        let v2 = base_vector(
+            generic,
+            Some(crypto_slice(
+                SchemaVersion::new(2),
+                FeatureValue::Decimal(dec!(0.02)),
+            )),
+        );
+        assert_ne!(
+            ResearchHasher::feature_vector(&v1).expect("hash"),
+            ResearchHasher::feature_vector(&v2).expect("hash"),
+        );
+    }
+
+    #[test]
+    fn feature_vector_hash_quantizes_beyond_stat_scale() {
+        // Differ only past the 12th decimal place (HASH_STAT_SCALE): the
+        // quantization pass must collapse both to the same digest.
+        let a = base_vector(
+            generic_with("book.mid", FeatureValue::Decimal(dec!(0.123456789012340))),
+            None,
+        );
+        let b = base_vector(
+            generic_with("book.mid", FeatureValue::Decimal(dec!(0.123456789012341))),
+            None,
+        );
+        assert_eq!(
+            ResearchHasher::feature_vector(&a).expect("hash"),
+            ResearchHasher::feature_vector(&b).expect("hash"),
+            "values differing only past HASH_STAT_SCALE must hash identically",
+        );
+    }
+
+    #[test]
+    fn feature_vector_hash_distinguishes_within_stat_scale() {
+        let a = base_vector(
+            generic_with("book.mid", FeatureValue::Decimal(dec!(0.120000000000))),
+            None,
+        );
+        let b = base_vector(
+            generic_with("book.mid", FeatureValue::Decimal(dec!(0.130000000000))),
+            None,
+        );
+        assert_ne!(
+            ResearchHasher::feature_vector(&a).expect("hash"),
+            ResearchHasher::feature_vector(&b).expect("hash"),
+        );
+    }
+
+    #[test]
+    fn feature_vector_hash_quantization_never_mutates_stored_value() {
+        // The hash-only quantization pass must be side-effect-free: the
+        // vector's own stored `Decimal` retains full precision.
+        let high_precision = dec!(0.123456789012345678);
+        let vector = base_vector(
+            generic_with("book.mid", FeatureValue::Decimal(high_precision)),
+            None,
+        );
+        let _ = ResearchHasher::feature_vector(&vector).expect("hash");
+        assert_eq!(
+            vector.generic[&FeatureName::from_static("book.mid")],
+            FeatureValue::Decimal(high_precision),
         );
     }
 }

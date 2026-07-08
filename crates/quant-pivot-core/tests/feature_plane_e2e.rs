@@ -15,7 +15,9 @@ use quant_pivot_core::{
     },
     pit::platform::live_book::LiveBookDataSource,
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
-    service::feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
+    service::feature_pipeline::{
+        FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineService,
+    },
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
@@ -54,7 +56,7 @@ use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObse
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
-    report_pipeline_harness::EmptyLinkageRepo,
+    report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
     ws::WsShardHealth,
 };
@@ -334,15 +336,16 @@ async fn insufficient_vectors_are_partitioned_and_not_persisted() {
     );
     let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(writer)));
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
-    let pipeline = FeaturePipelineService::new(
+    let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         window_provider,
-        Arc::clone(&repo) as Arc<dyn FeatureRepository>,
+        feature_repo: Arc::clone(&repo) as Arc<dyn FeatureRepository>,
         event_writer,
-        Arc::clone(&registry),
-        live_trade_tape_block_cursor_repo(),
-        Arc::new(EmptyLinkageRepo),
-        TradeTapeOnChainConfig::default(),
-    );
+        market_registry: Arc::clone(&registry),
+        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        linkage_repo: Arc::new(EmptyLinkageRepo),
+        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+    });
 
     let domain = DomainConfig::default();
     let included = vec![market];
@@ -414,9 +417,7 @@ async fn create_feature_vector_then_find() {
         },
         data_quality: DataQualityConfig::default(),
         features: features.clone(),
-        model_requirements: ModelFeatureRequirements {
-            required_features: vec![names::book::BEST_BID],
-        },
+        model_requirements: ModelFeatureRequirements::generic_only(vec![names::book::BEST_BID]),
         source_delay_secs: 0,
     };
 
@@ -442,15 +443,16 @@ async fn create_feature_vector_then_find() {
     let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(writer)));
 
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
-    let pipeline = FeaturePipelineService::new(
+    let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         window_provider,
-        Arc::clone(&feature_repo),
-        Arc::clone(&event_writer),
-        Arc::clone(&registry),
-        live_trade_tape_block_cursor_repo(),
-        Arc::new(EmptyLinkageRepo),
-        TradeTapeOnChainConfig::default(),
-    );
+        feature_repo: Arc::clone(&feature_repo),
+        event_writer: Arc::clone(&event_writer),
+        market_registry: Arc::clone(&registry),
+        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        linkage_repo: Arc::new(EmptyLinkageRepo),
+        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+    });
 
     let result = pipeline
         .run(FeaturePipelineRequest {

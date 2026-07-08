@@ -302,6 +302,7 @@ mod tests {
             }),
             instrument_key: instrument(),
             grounding: GroundingProof { spans: Vec::new() },
+            override_context: None,
         }
     }
 

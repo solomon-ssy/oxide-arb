@@ -6,13 +6,13 @@
 
 use quant_pivot_repository::postgres::{
     PgAccountSnapshotRepository, PgAttributionRepository, PgBacktestReportRepository,
-    PgCapitalAllocationRepository, PgDomainSourceCursorRepository, PgEquitySnapshotRepository,
-    PgEventRepository, PgExecutionOrderRepository, PgExecutionSubmissionRepository,
-    PgFactorRepository, PgFavoriteLongshotBiasTableRepository, PgFeatureRepository,
-    PgKillSwitchStateRepository, PgMarketLinkageRepository, PgMarketRepository,
-    PgMarketSelectionRepository, PgMenuRepository, PgModelComparisonReportRepository,
-    PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
-    PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
+    PgBasisAlertRepository, PgCapitalAllocationRepository, PgDomainSourceCursorRepository,
+    PgEquitySnapshotRepository, PgEventRepository, PgExecutionOrderRepository,
+    PgExecutionSubmissionRepository, PgFactorRepository, PgFavoriteLongshotBiasTableRepository,
+    PgFeatureRepository, PgKillSwitchStateRepository, PgMarketLinkageRepository,
+    PgMarketRepository, PgMarketSelectionRepository, PgMenuRepository,
+    PgModelComparisonReportRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
+    PgModelRunRepository, PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
     PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
     PgResearchJobRepository, PgReservedCapitalRepository, PgRoleMenuRepository,
     PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
@@ -65,6 +65,7 @@ pub struct PgRepositories {
     pub trade_tape_block_cursor: Arc<PgTradeTapeBlockCursorRepository>,
     pub market_linkage: Arc<PgMarketLinkageRepository>,
     pub domain_source_cursor: Arc<PgDomainSourceCursorRepository>,
+    pub basis_alert: Arc<PgBasisAlertRepository>,
 }
 
 impl PgRepositories {
@@ -113,6 +114,7 @@ impl PgRepositories {
             trade_tape_block_cursor: arc_repo(&db, PgTradeTapeBlockCursorRepository::new),
             market_linkage: arc_repo(&db, PgMarketLinkageRepository::new),
             domain_source_cursor: arc_repo(&db, PgDomainSourceCursorRepository::new),
+            basis_alert: arc_repo(&db, PgBasisAlertRepository::new),
         }
     }
 }

@@ -19,9 +19,10 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use crate::domain::{
-    FieldSemantics, FieldWhen, FieldWidget, SchemaFieldRef, SchemaNode, SchemaSection, SchemaUnion,
-    SchemaUnionCase, UiProps, UiText,
+    FieldSemantics, FieldWhen, FieldWidget, ModelPickerProps, ModelPickerSide, SchemaFieldRef,
+    SchemaNode, SchemaSection, SchemaUnion, SchemaUnionCase, UiProps, UiText,
 };
+use crate::enums::common::MarketCategory;
 use crate::schema::factor_names::GENERIC_SCORING_FACTOR_NAMES;
 use serde_json::Value;
 
@@ -34,6 +35,7 @@ pub struct FieldUiEntry {
     pub widget: Option<FieldWidget>,
     pub semantics: Option<FieldSemantics>,
     pub ui_props: Option<UiProps>,
+    pub model_picker: Option<ModelPickerProps>,
     /// Fixed map keys for decimal-map / weight-map widgets (declared in UI overlay).
     pub static_map_keys: Option<&'static [&'static str]>,
     pub visible: bool,
@@ -112,6 +114,19 @@ impl FieldUiEntry {
         self.when = rules;
         self
     }
+
+    /// Render as a governed model-version picker, filtered to `category` /
+    /// `side` (11.2.2 remediation R8).
+    #[must_use]
+    const fn model_version_select(
+        mut self,
+        category: Option<MarketCategory>,
+        side: ModelPickerSide,
+    ) -> Self {
+        self.widget = Some(FieldWidget::ModelVersionSelect);
+        self.model_picker = Some(ModelPickerProps { category, side });
+        self
+    }
 }
 
 /// One `if target == true` visibility rule (parent toggle gates its children).
@@ -146,6 +161,7 @@ fn f(
         widget: None,
         semantics: None,
         ui_props: None,
+        model_picker: None,
         static_map_keys: None,
         visible: true,
         when: Vec::new(),
@@ -705,8 +721,8 @@ fn domain_fields() -> Vec<FieldUiEntry> {
             "domain.crypto.backfill_days",
             "Crypto backfill window",
             "加密回填窗口",
-            "Days of 1-minute kline history the domain ingest worker backfills on bootstrap before switching to incremental polling. Larger windows cost more Binance weight budget.",
-            "域摄取 worker 在启动时回填的 1 分钟 K 线历史天数，之后切换为增量轮询。窗口越大消耗的 Binance weight 预算越多。",
+            "Days of history the domain ingest worker backfills on bootstrap before switching to incremental polling. Exact for Binance klines; a ceiling for Chainlink, additionally capped by the deploy-config `max_round_backscan` round count (a Chainlink feed may backfill fewer days when its round cadence is sparse). Larger windows cost more Binance weight budget.",
+            "域摄取 worker 在启动时回填的历史天数，之后切换为增量轮询。对 Binance K 线是精确值；对 Chainlink 是上限——另受部署配置 `max_round_backscan` 轮次数量的约束（若某个 feed 的轮次节奏较稀疏，实际回填天数可能更短）。窗口越大消耗的 Binance weight 预算越多。",
         ),
         secs(
             "domain.crypto.momentum_window_secs",
@@ -728,6 +744,13 @@ fn domain_fields() -> Vec<FieldUiEntry> {
             "Binance–Chainlink 最大基差",
             "When the settlement oracle is Chainlink, basis between Binance and Chainlink PIT quotes above this (bps) raises a cross-check risk signal and flags linkage for review — never silently clamps a feature.",
             "结算预言机为 Chainlink 时，Binance 与 Chainlink PIT 报价基差超过此值（bps）会触发交叉核验风险信号并标记联动待复核——绝不静默钳制特征值。",
+        ),
+        secs(
+            "domain.crypto.cross_check.alert_cooldown_secs",
+            "Basis-alert cooldown",
+            "基差告警冷却期",
+            "Minimum seconds between two persisted basis-exceedance alerts for the same market. A market whose basis persistently exceeds the threshold raises one alert per cooldown window, not one per report round.",
+            "同一市场两次持久化基差超限告警之间的最小间隔（秒）。持续超限的市场每个冷却窗口只触发一次告警，而非每轮报告都触发。",
         ),
     ]
 }
@@ -1020,21 +1043,24 @@ fn model_fields() -> Vec<FieldUiEntry> {
             "The published model version used for online entry scoring. Changing it swaps the live scorer on the next report run — a high-impact governance action requiring the model to have cleared its quality gate. Empty means no active model (report generation is degraded).",
             "用于在线入场打分的已发布模型版本。修改会在下次报告运行时切换生产打分器——高影响治理动作，要求该模型已通过质量门。留空表示没有活动模型（报告生成降级）。",
         )
-        .critical(),
+        .critical()
+        .model_version_select(None, ModelPickerSide::Buy),
         plain(
             "model.shadow_model_version_id",
             "Shadow model version",
             "影子模型版本",
             "An optional model scored in parallel for comparison only (never drives entries). Used to measure divergence from the active model before promotion. Empty disables shadow scoring.",
             "可选的并行打分模型，仅用于对比（绝不驱动入场）。用于在晋升前衡量与活动模型的偏离。留空则关闭影子打分。",
-        ),
+        )
+        .model_version_select(None, ModelPickerSide::Buy),
         plain(
             "model.active_exit_model_version_id",
             "Active exit (Sell) scorer version",
             "活动退出(卖出)评分模型版本",
             "The published hold-vs-exit Sell scorer loaded by the opportunistic-sell evaluator. A separate pointer from the entry model so Buy and Sell models are governed independently. Empty disables model-driven opportunistic exits.",
             "机会性卖出评估器加载的、已发布的『持有 vs 退出』卖出评分模型。与入场模型是独立指针，使买、卖模型分别治理。留空则关闭由模型驱动的机会性退出。",
-        ),
+        )
+        .model_version_select(None, ModelPickerSide::Sell),
     ]
     .into_iter()
     .chain(category_model_pointer_fields())
@@ -1077,72 +1103,82 @@ fn category_model_pointer_fields() -> Vec<FieldUiEntry> {
             "model.category_model_pointers.crypto",
             "Crypto category model",
             "加密分类模型",
-            "Published Buy-side model for Crypto markets (may consume the crypto domain slice). Empty falls back to the generic active model.",
-            "Crypto 市场的已发布 Buy 侧模型（可消费加密域切片）。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Crypto markets (may consume the crypto domain slice). Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Crypto.",
+            "Crypto 市场的已发布 Buy 侧模型（可消费加密域切片）。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Crypto 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Crypto), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.sports",
             "Sports category model",
             "体育分类模型",
-            "Published Buy-side model for Sports markets. Empty falls back to the generic active model.",
-            "Sports 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Sports markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Sports.",
+            "Sports 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Sports 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Sports), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.politics",
             "Politics category model",
             "政治分类模型",
-            "Published Buy-side model for Politics markets. Empty falls back to the generic active model.",
-            "Politics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Politics markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Politics.",
+            "Politics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Politics 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Politics), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.finance",
             "Finance category model",
             "金融分类模型",
-            "Published Buy-side model for Finance markets. Empty falls back to the generic active model.",
-            "Finance 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Finance markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Finance.",
+            "Finance 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Finance 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Finance), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.tech",
             "Tech category model",
             "科技分类模型",
-            "Published Buy-side model for Tech markets. Empty falls back to the generic active model.",
-            "Tech 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Tech markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Tech.",
+            "Tech 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Tech 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Tech), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.culture",
             "Culture category model",
             "文化分类模型",
-            "Published Buy-side model for Culture markets. Empty falls back to the generic active model.",
-            "Culture 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Culture markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Culture.",
+            "Culture 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Culture 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Culture), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.weather",
             "Weather category model",
             "天气分类模型",
-            "Published Buy-side model for Weather markets. Empty falls back to the generic active model.",
-            "Weather 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Weather markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Weather.",
+            "Weather 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Weather 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Weather), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.economics",
             "Economics category model",
             "经济分类模型",
-            "Published Buy-side model for Economics markets. Empty falls back to the generic active model.",
-            "Economics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Economics markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Economics.",
+            "Economics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Economics 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Economics), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.geopolitics",
             "Geopolitics category model",
             "地缘政治分类模型",
-            "Published Buy-side model for Geopolitics markets. Empty falls back to the generic active model.",
-            "Geopolitics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Geopolitics markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Geopolitics.",
+            "Geopolitics 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Geopolitics 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Geopolitics), ModelPickerSide::Buy),
         plain(
             "model.category_model_pointers.other",
             "Other category model",
             "其他分类模型",
-            "Published Buy-side model for Other markets. Empty falls back to the generic active model.",
-            "Other 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。",
-        ),
+            "Published Buy-side model for Other markets. Empty falls back to the generic active model. The picker rejects a version whose artifact declares a category_scope other than Other.",
+            "Other 市场的已发布 Buy 侧模型。留空则回落到通用活动模型。选择器会拒绝其 artifact 声明的 category_scope 不是 Other 的版本。",
+        )
+        .model_version_select(Some(MarketCategory::Other), ModelPickerSide::Buy),
     ]
 }
 
@@ -2184,6 +2220,7 @@ fn domain_section() -> SchemaNode {
             "domain.crypto.momentum_window_secs",
             "domain.crypto.volatility_window_secs",
             "domain.crypto.cross_check.max_basis_bps",
+            "domain.crypto.cross_check.alert_cooldown_secs",
         ]),
     )
 }

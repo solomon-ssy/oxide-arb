@@ -481,9 +481,7 @@ fn model_eligibility_uses_real_availability_oracle() {
         candidate: &candidate,
         thresholds: &thresholds,
         as_of: Utc::now(),
-        model_requirements: &ModelFeatureRequirements {
-            required_features: book_required,
-        },
+        model_requirements: &ModelFeatureRequirements::generic_only(book_required),
         feature_schema: &schema,
     };
     assert!(matches!(
@@ -492,9 +490,7 @@ fn model_eligibility_uses_real_availability_oracle() {
     ));
 
     let ctx = MarketCandidateCtx {
-        model_requirements: &ModelFeatureRequirements {
-            required_features: unknown_required,
-        },
+        model_requirements: &ModelFeatureRequirements::generic_only(unknown_required),
         ..ctx
     };
     assert!(matches!(

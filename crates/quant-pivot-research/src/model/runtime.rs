@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::ModelVersionInfo,
-    enums::quant::DataQualityStatus,
+    enums::{common::MarketCategory, quant::DataQualityStatus},
     types::{ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd},
 };
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,17 @@ pub trait QuantModelRuntime: Send + Sync {
     /// missing any of them is filtered before it reaches inference. Empty means
     /// the model imposes no extra selection requirement.
     fn required_features(&self) -> Vec<FeatureName>;
+
+    /// The single market category this runtime's frozen artifact declares
+    /// itself scoped to, or `None` for a generic cross-category scorer
+    /// (11.2.2 category routing). Enforced by the core `ModelRunner` and
+    /// `CategoryPointerGuard` against `model.category_model_pointers`: a
+    /// pointer's target must declare exactly the pointer's own category, or
+    /// `None`. Defaults to `None`; only the weighted-factor artifact carries
+    /// a scope today.
+    fn category_scope(&self) -> Option<MarketCategory> {
+        None
+    }
 
     /// Whether this runtime is scoring on its frozen artifact weights or on a
     /// runtime-config weight overlay. Defaults to [`WeightSource::Artifact`];

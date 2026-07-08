@@ -21,12 +21,13 @@ use quant_pivot_models::{
         RollbackModelCommand, RuntimeConfigPort,
     },
     enums::{
+        common::MarketCategory,
         model::ModelFamily,
         quant::{ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
-    runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
+    runtime_config::{ModelVersionRef, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
     types::{
         ArtifactUri, BacktestReportId, ContentHash, DatasetCoverage, ModelRunId, ModelSpecId,
         ModelVersionId, Probability, RuntimeConfigActivationId, RuntimeConfigVersionId,
@@ -807,6 +808,93 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
     assert!(
         audits.iter().any(|audit| audit.reason == "decommission"),
         "the retire reason is audited"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn retire_published_version_clears_dangling_category_pointer() {
+    // 11.2.2 remediation R7: a category-specific pointer left dangling after
+    // its target retires must never survive silently — the retire-sync must
+    // clear it in the same activation as the generic active pointer, so the
+    // online runner never routes another round onto a dead version.
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let dataset = seed_dataset(
+        &db,
+        &spec,
+        &rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_coverage(),
+        '1',
+    )
+    .await;
+    let version = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    publish_ready_version(PublishReadyParams {
+        governance: &harness.service,
+        db: &db,
+        rc_id: &rc_id,
+        version: &version,
+        active_for_shadow: &version,
+        backtest_seed: '1',
+        shadow_seed: 'a',
+        reason: "publish for category-pointer retire",
+    })
+    .await;
+
+    // Simulate an operator having pinned this same version to a category
+    // route (independent of the generic active pointer publish already set).
+    let mut config = (*harness.store.current()).clone();
+    config.model.category_model_pointers.insert(
+        MarketCategory::Crypto,
+        ModelVersionRef {
+            id: version.to_string(),
+        },
+    );
+    harness.store.replace(config);
+    assert!(
+        harness
+            .store
+            .current()
+            .model
+            .category_model_pointers
+            .contains_key(&MarketCategory::Crypto),
+        "precondition: category pointer is armed before retire"
+    );
+
+    harness
+        .service
+        .retire(
+            RetireModelCommand {
+                model_version_id: version.clone(),
+                reason: "decommission with category pointer".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect("retire");
+
+    assert!(
+        harness
+            .store
+            .current()
+            .model
+            .active_model_version_id
+            .is_none(),
+        "retire must clear the active runtime pointer"
+    );
+    assert!(
+        !harness
+            .store
+            .current()
+            .model
+            .category_model_pointers
+            .contains_key(&MarketCategory::Crypto),
+        "retire must also clear a dangling category_model_pointers entry"
     );
 }
 

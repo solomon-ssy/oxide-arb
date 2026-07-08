@@ -141,9 +141,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         let Some(market) = selected_market_for_lot(&self.deps.market_registry, lot) else {
             return Ok(None);
         };
-        let requirements = ModelFeatureRequirements {
-            required_features: runtime.required_features(),
-        };
+        let requirements = ModelFeatureRequirements::generic_only(runtime.required_features());
         let source_delay = Duration::from_secs(config.data_quality.max_feature_bucket_age_secs);
         let as_of =
             now - chrono::Duration::from_std(source_delay).unwrap_or(chrono::Duration::zero());

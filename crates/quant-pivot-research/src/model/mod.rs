@@ -50,7 +50,7 @@ pub use classical_runtime::ClassicalRuntime;
 pub use degrade::{DegradeAction, InferenceStage, degrade_action};
 pub use factory::{
     ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
-    ModelRuntimeFactoryBuilder,
+    ModelRuntimeFactoryBuilder, load_hash_verified_artifact,
 };
 pub use favorite_longshot::{
     BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,

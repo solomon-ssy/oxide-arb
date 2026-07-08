@@ -15,7 +15,10 @@
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{GroundingField, GroundingProof, LinkageSourceMetadata, MarketSubject},
+    domain::{
+        CryptoSubject, GroundingField, GroundingKind, GroundingProof, LinkageSourceMetadata,
+        MarketSubject, ResolutionOracle,
+    },
     enums::domain::ResolverTier,
     types::{DomainInstrumentKey, Probability},
 };
@@ -115,58 +118,130 @@ impl SubjectValidator for DefaultSubjectValidator {
             }
         }
 
-        // 2. Load-bearing fields must be grounded: the asset always, the
-        //    strike whenever one was extracted, and the settlement oracle.
+        // 2. Every load-bearing subject field must be grounded, and the
+        //    fields extracted independently of a template (`asset` / `strike`
+        //    / `resolution_oracle`) must carry a genuinely literal span — a
+        //    `TemplateEntailed` span is only acceptable for a value that is a
+        //    deterministic function of a fully-matched template
+        //    (`comparator` / `reference_at` / `observation_at`), never for
+        //    independently-extracted evidence. This is the fix for the
+        //    audited pseudo-grounding hole: a whole-slug span used to satisfy
+        //    "has any span" for every field regardless of kind.
         let MarketSubject::Crypto(subject) = &candidate.subject;
-        if !has_span(candidate, "asset") {
+        if !has_span_of_kind(candidate, "asset", GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
-                reason: "candidate carries no grounding span for `asset`".to_owned(),
+                reason: "candidate carries no literal grounding span for `asset`".to_owned(),
             };
         }
-        if subject.strike.is_some() && !has_span(candidate, "strike") {
+        if subject.strike.is_some()
+            && !has_span_of_kind(candidate, "strike", GroundingKind::LiteralSpan)
+        {
             return ValidationOutcome::Rejected {
-                reason: "candidate extracted a strike without grounding it".to_owned(),
+                reason: "candidate extracted a strike without a literal grounding span".to_owned(),
             };
         }
-        if !has_span(candidate, "resolution_oracle") {
+        if !has_span_of_kind(candidate, "resolution_oracle", GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
-                reason: "candidate carries no grounding span for `resolution_oracle`".to_owned(),
+                reason: "candidate carries no literal grounding span for `resolution_oracle` \
+                         (a ruleset-default oracle is never accepted)"
+                    .to_owned(),
             };
         }
-
-        // 3. Ruleset consistency: the instrument binding must be exactly the
-        //    frozen table's binding for the extracted asset — a drifted key
-        //    would silently join the wrong price series.
-        let ticker = subject.asset.as_str().to_lowercase();
-        let Some(rule) = rule_for_alias(&ticker) else {
+        if !has_span(candidate, "comparator") {
             return ValidationOutcome::Rejected {
-                reason: format!(
-                    "asset `{}` is not in the frozen resolver ruleset",
-                    subject.asset
-                ),
+                reason: "candidate carries no grounding span for `comparator`".to_owned(),
             };
-        };
-        if candidate.instrument_key != rule.instrument_key() {
+        }
+        if !has_span(candidate, "observation_at") {
             return ValidationOutcome::Rejected {
-                reason: format!(
-                    "instrument key `{}` disagrees with the ruleset binding `{}`",
-                    candidate.instrument_key,
-                    rule.instrument_key()
-                ),
+                reason: "candidate carries no grounding span for `observation_at`".to_owned(),
+            };
+        }
+        if subject.reference_at.is_some() && !has_span(candidate, "reference_at") {
+            return ValidationOutcome::Rejected {
+                reason: "candidate extracted a reference_at without grounding it".to_owned(),
             };
         }
 
-        ValidationOutcome::Accepted
+        match validate_structural_consistency(subject, &candidate.instrument_key) {
+            Ok(()) => ValidationOutcome::Accepted,
+            Err(reason) => ValidationOutcome::Rejected { reason },
+        }
     }
 }
 
-/// Whether the candidate grounds a given subject field.
+/// Ruleset-consistency checks shared by every candidate regardless of how it was produced.
+///
+/// An automated tier's candidate runs this as steps 3–4 of
+/// [`DefaultSubjectValidator::validate`]; an operator override (which has no
+/// text-extraction evidence to ground and therefore skips the grounding-span
+/// checks above) still MUST pass these same structural checks, so a
+/// fat-fingered override can never bind a market to the wrong instrument or
+/// an internally-inconsistent oracle/asset pair.
+///
+/// # Errors
+///
+/// Returns the rejection reason as `Err` (never panics on a malformed subject).
+pub fn validate_structural_consistency(
+    subject: &CryptoSubject,
+    instrument_key: &DomainInstrumentKey,
+) -> Result<(), String> {
+    // Ruleset consistency: the instrument binding must be exactly the frozen
+    // table's binding for the extracted asset — a drifted key would silently
+    // join the wrong price series.
+    let ticker = subject.asset.as_str().to_lowercase();
+    let Some(rule) = rule_for_alias(&ticker) else {
+        return Err(format!(
+            "asset `{}` is not in the frozen resolver ruleset",
+            subject.asset
+        ));
+    };
+    if *instrument_key != rule.instrument_key() {
+        return Err(format!(
+            "instrument key `{instrument_key}` disagrees with the ruleset binding `{}`",
+            rule.instrument_key()
+        ));
+    }
+
+    // Oracle ↔ asset consistency: a Chainlink feed must name exactly the
+    // ruleset's feed for the resolved asset — a mismatched feed (e.g. a
+    // copy-pasted rules template citing the wrong pair, or an operator
+    // override typo) would silently bind the basis cross-check to the wrong
+    // series.
+    if let ResolutionOracle::ChainlinkDataStreams { feed } = &subject.resolution_oracle
+        && *feed != rule.feed()
+    {
+        return Err(format!(
+            "resolution oracle cites Chainlink feed `{feed}`, which disagrees with the \
+             ruleset's `{}` feed for asset `{}`",
+            rule.feed(),
+            subject.asset
+        ));
+    }
+
+    Ok(())
+}
+
+/// Whether the candidate grounds a given subject field (any kind).
 fn has_span(candidate: &ExtractedCandidate, subject_field: &str) -> bool {
     candidate
         .grounding
         .spans
         .iter()
         .any(|span| span.subject_field == subject_field)
+}
+
+/// Whether the candidate grounds a given subject field with a span of exactly `kind`.
+fn has_span_of_kind(
+    candidate: &ExtractedCandidate,
+    subject_field: &str,
+    kind: GroundingKind,
+) -> bool {
+    candidate
+        .grounding
+        .spans
+        .iter()
+        .any(|span| span.subject_field == subject_field && span.kind == kind)
 }
 
 /// The text of one metadata field, when present.

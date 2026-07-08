@@ -42,7 +42,11 @@ pub fn crypto_lookback_secs(domain: &DomainConfig) -> u64 {
 /// `as_of` (bitemporal knowledge axis — never a future revision).
 ///
 /// `linkages` may arrive in any order; ties on `derived_at` break on
-/// `created_at` then `linkage_id` (stable across stores).
+/// `created_at` then `linkage_id` — byte-identical to the Postgres
+/// repository's `ORDER BY derived_at DESC, created_at DESC, linkage_id DESC`,
+/// so the online (`valid_at`) and offline (`ledger_for_markets` + this
+/// function) planes can never pick a different revision for the same
+/// `(market, as_of)` on a tie.
 #[must_use]
 pub fn linkage_valid_at(
     linkages: &[MarketLinkage],
@@ -52,8 +56,11 @@ pub fn linkage_valid_at(
         .iter()
         .filter(|linkage| linkage.derived_at <= as_of)
         .max_by(|a, b| {
-            (a.derived_at, &a.linkage_id.to_string())
-                .cmp(&(b.derived_at, &b.linkage_id.to_string()))
+            (a.derived_at, a.created_at, &a.linkage_id.to_string()).cmp(&(
+                b.derived_at,
+                b.created_at,
+                &b.linkage_id.to_string(),
+            ))
         })
 }
 
@@ -185,6 +192,7 @@ mod tests {
             }),
             instrument_key: instrument(),
             grounding: GroundingProof { spans: Vec::new() },
+            override_context: None,
         }
     }
 
@@ -200,6 +208,9 @@ mod tests {
             &metadata_hash,
         )
         .expect("hash");
+        let derived_at = Utc
+            .with_ymd_and_hms(2026, 7, 1, 11, derived_minute, 0)
+            .unwrap();
         MarketLinkage {
             linkage_id: MarketLinkageId::from_v7(),
             market_id,
@@ -210,9 +221,8 @@ mod tests {
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
             content_hash,
-            derived_at: Utc
-                .with_ymd_and_hms(2026, 7, 1, 11, derived_minute, 0)
-                .unwrap(),
+            derived_at,
+            created_at: derived_at,
         }
     }
 

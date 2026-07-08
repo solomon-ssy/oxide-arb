@@ -28,7 +28,7 @@ use quant_pivot_core::{
         },
         equity::EquitySnapshotService,
         factor_pipeline::FactorPipelineService,
-        feature_pipeline::FeaturePipelineService,
+        feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
     },
 };
@@ -40,12 +40,12 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        CoreEventPublisher, MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot,
-        NewEquitySnapshot, NewMarketLinkage, NewMarketSelection, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, Paginated, PointInTimeDataSource, RecommendationInfo,
-        RecommendationReportInfo,
+        BasisAlertInfo, BasisAlertListQuery, CoreEventPublisher, MarketLinkageInfo,
+        MarketLinkageListQuery, NewAccountSnapshot, NewBasisAlert, NewEquitySnapshot,
+        NewMarketLinkage, NewMarketSelection, NewModelSpec, NewModelVersion, NewOperationLog,
+        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
+        NewReportTransaction, NewRuntimeConfigActivation, NewRuntimeConfigVersion, Paginated,
+        PointInTimeDataSource, RecommendationInfo, RecommendationReportInfo,
         governance::lifecycle::OperationalPhase,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -84,7 +84,7 @@ use quant_pivot_repository::{
         PgShadowComparisonRepository,
     },
     traits::{
-        EquitySnapshotRepository, EventRepository, FactorRepository,
+        BasisAlertRepository, EquitySnapshotRepository, EventRepository, FactorRepository,
         FavoriteLongshotBiasTableRepository, MarketLinkageRepository, MarketRepository,
         MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
         QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
@@ -236,6 +236,14 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
         Ok(None)
     }
 
+    async fn valid_at_for_markets(
+        &self,
+        _market_ids: &[MarketId],
+        _as_of: DateTime<Utc>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn latest_for_markets(
         &self,
         _market_ids: &[MarketId],
@@ -262,6 +270,34 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
         &self,
         query: MarketLinkageListQuery,
     ) -> Result<Paginated<MarketLinkageInfo>, StorageError> {
+        Ok(Paginated::empty_for(&query))
+    }
+}
+
+/// Empty basis-alert feed: every basis check reports no history (no cooldown
+/// suppression), and recording is a read-only no-op error for this harness.
+pub struct EmptyBasisAlertRepo;
+
+#[async_trait]
+impl BasisAlertRepository for EmptyBasisAlertRepo {
+    async fn record(&self, _alert: NewBasisAlert) -> Result<BasisAlertInfo, StorageError> {
+        Err(StorageError::InvariantViolation {
+            entity: Some("quant_basis_alert"),
+            detail: "EmptyBasisAlertRepo is read-only".to_owned(),
+        })
+    }
+
+    async fn latest_for_market(
+        &self,
+        _market_id: &MarketId,
+    ) -> Result<Option<BasisAlertInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: BasisAlertListQuery,
+    ) -> Result<Paginated<BasisAlertInfo>, StorageError> {
         Ok(Paginated::empty_for(&query))
     }
 }
@@ -824,15 +860,16 @@ fn build_report_builder(
             Arc::new(EmptyLinkageRepo),
             Arc::new(EmptyFactRead),
         )),
-        feature_pipeline: Arc::new(FeaturePipelineService::new(
-            FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
-            Arc::new(PgFeatureRepository::new(db.clone())),
-            noop_feature_writer(),
-            Arc::clone(registry),
-            live_trade_tape_block_cursor_repo(),
-            Arc::new(EmptyLinkageRepo),
-            TradeTapeOnChainConfig::default(),
-        )),
+        feature_pipeline: Arc::new(FeaturePipelineService::new(FeaturePipelineDeps {
+            window_provider: FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
+            feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
+            event_writer: noop_feature_writer(),
+            market_registry: Arc::clone(registry),
+            block_cursor_repo: live_trade_tape_block_cursor_repo(),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
+            basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+            trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+        })),
         model_runner,
         account_provider_factory: account_factory,
         drawdown_provider: Arc::new(EquitySnapshotService::new(

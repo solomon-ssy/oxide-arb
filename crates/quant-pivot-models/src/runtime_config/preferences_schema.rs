@@ -50,6 +50,7 @@ pub fn build_preferences_schema() -> RuntimeConfigSchemaView {
                     .and_then(|entry| entry.widget)
                     .or_else(|| Some(infer_widget(leaf.value_type, leaf.sensitive))),
                 semantics: ui.and_then(|entry| entry.semantics),
+                model_picker: ui.and_then(|entry| entry.model_picker),
                 default: leaf.default,
                 description: leaf.description,
                 sensitive: leaf.sensitive,

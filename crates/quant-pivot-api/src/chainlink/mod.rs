@@ -166,6 +166,12 @@ impl ChainlinkAggregatorSource {
         }))
     }
 
+    /// Steady-state fetch: normally just `latestRoundData`, but walks
+    /// `getRoundData` backward — bounded by `max_incremental_gap_rounds` — to
+    /// recover any rounds the aggregator advanced between polls (e.g. after a
+    /// poller outage), rather than permanently losing them (R10 ingest
+    /// hardening). The common case (no gap: the latest round is already
+    /// `<= from_exclusive`'s successor) costs exactly one RPC call.
     async fn fetch_incremental(
         &self,
         feed: &ChainlinkFeedKey,
@@ -179,13 +185,45 @@ impl ChainlinkAggregatorSource {
                 reason: error.to_string(),
             })
         })?;
-        let observation = self
-            .observation_from_round_fields(feed, address, latest.answer, latest.updatedAt)
-            .await?;
-        Ok(observation
-            .into_iter()
-            .filter(|row| row.observed_at > from_exclusive)
-            .collect())
+        let latest_round = latest.roundId.to::<u64>();
+        let floor_round = gap_recovery_floor(latest_round, self.config.max_incremental_gap_rounds);
+
+        let mut observations = Vec::new();
+        let mut round_id = latest_round;
+        let mut answer = latest.answer;
+        let mut updated_at = latest.updatedAt;
+        loop {
+            let Some(observation) = self
+                .observation_from_round_fields(feed, address, answer, updated_at)
+                .await?
+            else {
+                // An unpriced round breaks the ascending-timestamp assumption
+                // this walk relies on; stop rather than guess further back.
+                break;
+            };
+            if observation.observed_at <= from_exclusive {
+                break;
+            }
+            observations.push(observation);
+            if round_id <= floor_round || round_id <= 1 {
+                break;
+            }
+            round_id -= 1;
+            let round = contract
+                .getRoundData(alloy::primitives::Uint::<80, 2>::from(round_id))
+                .call()
+                .await
+                .map_err(|error| {
+                    QuantError::Rpc(RpcError::CallFailed {
+                        method: "chainlink_getRoundData".into(),
+                        reason: error.to_string(),
+                    })
+                })?;
+            answer = round.answer;
+            updated_at = round.updatedAt;
+        }
+        observations.sort_by_key(|row| row.observed_at);
+        Ok(observations)
     }
 
     async fn fetch_bootstrap(
@@ -231,6 +269,14 @@ impl ChainlinkAggregatorSource {
     }
 }
 
+/// The oldest round id an incremental gap-recovery walk may visit: `gap_cap`
+/// rounds back from `latest_round`, clamped to round `1` (round ids are
+/// 1-based; there is no round `0`).
+const fn gap_recovery_floor(latest_round: u64, gap_cap: u32) -> u64 {
+    let floor = latest_round.saturating_sub(gap_cap as u64);
+    if floor < 1 { 1 } else { floor }
+}
+
 fn scale_answer(answer: I256, decimals: u8) -> QuantResult<Decimal> {
     let raw = answer
         .to_string()
@@ -267,5 +313,21 @@ impl DomainDataSource for ChainlinkAggregatorSource {
             self.fetch_incremental(&feed, *address, request.from_exclusive)
                 .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gap_recovery_floor;
+
+    #[test]
+    fn floor_is_bounded_by_gap_cap() {
+        assert_eq!(gap_recovery_floor(1_000, 100), 900);
+    }
+
+    #[test]
+    fn floor_clamps_to_round_one_near_genesis() {
+        assert_eq!(gap_recovery_floor(50, 100), 1);
+        assert_eq!(gap_recovery_floor(0, 100), 1);
     }
 }

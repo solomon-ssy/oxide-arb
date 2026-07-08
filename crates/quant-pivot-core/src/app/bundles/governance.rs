@@ -4,9 +4,9 @@ use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
-        BiasTableApplicator, DefaultModePreflight, DefaultModeTransitionGate, KillSwitchControl,
-        KillSwitchHandle, ModePreflightDeps, RuntimeModeHandle, SystemStatusPublisher,
-        WeightOverlayApplicator,
+        BiasTableApplicator, CategoryPointerGuard, DefaultModePreflight, DefaultModeTransitionGate,
+        KillSwitchControl, KillSwitchHandle, ModePreflightDeps, RuntimeModeHandle,
+        SystemStatusPublisher, WeightOverlayApplicator,
         execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
         runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
     },
@@ -43,6 +43,7 @@ use quant_pivot_repository::{
         RuntimeConfigVersionRepository, ShadowComparisonRepository, SystemRuntimeStateRepository,
     },
 };
+use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
 use std::sync::Arc;
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
@@ -141,15 +142,23 @@ impl GovernanceBundle {
             &infra.repos.favorite_longshot_bias_table,
         )
             as Arc<dyn FavoriteLongshotBiasTableRepository>));
-        let applicator = build_runtime_config_applicator(
+        let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
+            deploy.research.artifact_root.clone(),
+        ));
+        let category_pointer_guard = Arc::new(CategoryPointerGuard::new(
+            Arc::clone(&infra.repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+            artifact_store,
+        ));
+        let applicator = build_runtime_config_applicator(RuntimeConfigApplicatorDeps {
             deploy,
             metrics,
-            &runtime_config,
-            &alerts,
-            &weight_overlay,
-            &bias_table,
+            runtime_config: &runtime_config,
+            alerts: &alerts,
+            weight_overlay: &weight_overlay,
+            bias_table: &bias_table,
+            category_pointer_guard: &category_pointer_guard,
             data,
-        );
+        });
         let health_checker = build_health_checker(infra, data, &runtime_mode);
         let reconciliation_repo: Arc<dyn ReconciliationRepository> =
             Arc::clone(&infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
@@ -224,15 +233,32 @@ fn seed_weight_overlay(runtime_config: &Arc<RuntimeConfigStore>) -> Arc<WeightOv
     weight_overlay
 }
 
+/// Dependencies for [`build_runtime_config_applicator`].
+#[derive(Clone, Copy)]
+struct RuntimeConfigApplicatorDeps<'a> {
+    deploy: &'a Arc<DeployConfig>,
+    metrics: &'a Arc<MetricsHub>,
+    runtime_config: &'a Arc<RuntimeConfigStore>,
+    alerts: &'a Arc<AlertDispatcher>,
+    weight_overlay: &'a Arc<WeightOverlayApplicator>,
+    bias_table: &'a Arc<BiasTableApplicator>,
+    category_pointer_guard: &'a Arc<CategoryPointerGuard>,
+    data: &'a DataBundle,
+}
+
 fn build_runtime_config_applicator(
-    deploy: &Arc<DeployConfig>,
-    metrics: &Arc<MetricsHub>,
-    runtime_config: &Arc<RuntimeConfigStore>,
-    alerts: &Arc<AlertDispatcher>,
-    weight_overlay: &Arc<WeightOverlayApplicator>,
-    bias_table: &Arc<BiasTableApplicator>,
-    data: &DataBundle,
+    deps: RuntimeConfigApplicatorDeps<'_>,
 ) -> Arc<RuntimeConfigApplicator> {
+    let RuntimeConfigApplicatorDeps {
+        deploy,
+        metrics,
+        runtime_config,
+        alerts,
+        weight_overlay,
+        bias_table,
+        category_pointer_guard,
+        data,
+    } = deps;
     Arc::new(RuntimeConfigApplicator::new(
         Arc::clone(runtime_config),
         RuntimeConfigSubscribers {
@@ -245,6 +271,7 @@ fn build_runtime_config_applicator(
             alerts: Arc::clone(alerts),
             weight_overlay: Arc::clone(weight_overlay),
             bias_table: Arc::clone(bias_table),
+            category_pointer_guard: Arc::clone(category_pointer_guard),
             subscription_window_hours: deploy
                 .market_data
                 .websocket

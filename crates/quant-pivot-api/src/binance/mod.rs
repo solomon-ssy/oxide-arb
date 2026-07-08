@@ -49,9 +49,16 @@ impl BinanceKlineSource {
         let quota = Quota::with_period(Duration::from_mins(1))
             .expect("valid quota")
             .allow_burst(NonZeroU32::new(budget).expect("nonzero budget"));
+        // A hung TCP connection must never block an ingest tick indefinitely
+        // (R10 ingest hardening); `reqwest::Client::new()` has no request
+        // timeout by default.
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(config.request_timeout_ms))
+            .build()
+            .expect("valid reqwest client");
         Self {
             config,
-            http: reqwest::Client::new(),
+            http,
             retry_policy: RetryPolicy::gamma_default(),
             weight_limiter: Arc::new(RateLimiter::direct(quota)),
         }
@@ -112,7 +119,7 @@ impl BinanceKlineSource {
                 detail: error.to_string(),
             })?;
         let instrument_key = DomainInstrumentKey::binance_kline(symbol, interval);
-        let mut observations = Vec::with_capacity(rows.len() * 2);
+        let mut observations = Vec::with_capacity(rows.len());
         for row in rows {
             observations.extend(mapper::into_observations(&row, &instrument_key)?);
         }
@@ -150,7 +157,9 @@ impl DomainDataSource for BinanceKlineSource {
                 .last()
                 .map(|row| row.observed_at.timestamp_millis())
                 .expect("non-empty page");
-            let kline_count = page.len() / 2;
+            // One `DomainObservation` per kline row (Close only — see
+            // `DomainMetric`'s doc for why volume is not modeled).
+            let kline_count = page.len();
             observations.extend(page);
             if last_observed >= end_ms {
                 break;
@@ -200,7 +209,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_parses_klines_into_close_and_volume() {
+    async fn fetch_parses_klines_into_close_observations() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/klines"))
@@ -241,9 +250,8 @@ mod tests {
             })
             .await
             .expect("fetch");
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|row| row.metric == DomainMetric::Close));
-        assert!(rows.iter().any(|row| row.metric == DomainMetric::Volume));
+        assert_eq!(rows.len(), 1);
+        assert!(rows.iter().all(|row| row.metric == DomainMetric::Close));
     }
 
     #[tokio::test]
@@ -294,6 +302,6 @@ mod tests {
             })
             .await
             .expect("fetch");
-        assert_eq!(rows.len(), (KLINE_PAGE_SIZE as usize + 1) * 2);
+        assert_eq!(rows.len(), KLINE_PAGE_SIZE as usize + 1);
     }
 }

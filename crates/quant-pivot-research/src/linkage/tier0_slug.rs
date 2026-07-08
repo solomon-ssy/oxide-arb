@@ -4,20 +4,24 @@
 //! slugs: `{asset}-updown-{5m|15m|4h}-{epoch}` where `epoch` is the window
 //! **open** aligned to the interval (`epoch % duration == 0`) and the window is
 //! `[epoch, epoch + duration)`. These series settle against the asset's
-//! Chainlink Data Streams feed (the rules text carries the literal
-//! `data.chain.link/streams/{feed}` reference; the slug template itself is the
-//! deterministic evidence for the whole subject).
+//! Chainlink Data Streams feed, and the rules text always carries the literal
+//! `data.chain.link/streams/{feed}` anchor — the slug template alone is
+//! deterministic evidence for the *subject shape* (asset / comparator /
+//! window), but the *settlement oracle* is independently grounded to that
+//! literal description anchor via [`oracle::extract_oracle`], exactly like
+//! Tier 1. A market whose description does not ground a recognized oracle
+//! produces **no candidate** — never a guessed default.
 //!
-//! This tier covers the traded-volume bulk of the crypto vertical with **zero**
-//! free-text parsing; anything that does not match the template exactly falls
-//! through to Tier 1.
+//! This tier covers the traded-volume bulk of the crypto vertical with
+//! near-zero free-text parsing; anything that does not match the epoch
+//! template exactly falls through to Tier 1.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        CryptoSubject, GroundingField, GroundingProof, GroundingSpan, LinkageSourceMetadata,
-        MarketSubject, PriceComparator, ResolutionOracle,
+        CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan,
+        LinkageSourceMetadata, MarketSubject, PriceComparator,
     },
     enums::domain::ResolverTier,
     types::Probability,
@@ -25,6 +29,7 @@ use quant_pivot_models::{
 
 use crate::linkage::{
     extractor::{ExtractedCandidate, SubjectExtractor},
+    oracle::extract_oracle,
     ruleset::rule_for_alias,
 };
 
@@ -77,6 +82,11 @@ fn parse_updown_slug(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandid
     let window_open = Utc.timestamp_opt(epoch, 0).single()?;
     let window_close = window_open + Duration::seconds(duration_secs);
 
+    // The oracle is independently grounded to the description's literal
+    // anchor — never assumed from the ruleset, even though every observed
+    // short-cycle market in production settles via Chainlink Data Streams.
+    let (resolution_oracle, oracle_span) = extract_oracle(rule, metadata.description.as_deref())?;
+
     let subject = CryptoSubject {
         asset: rule.asset(),
         quote: rule.quote(),
@@ -84,19 +94,20 @@ fn parse_updown_slug(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandid
         strike: None,
         reference_at: Some(window_open),
         observation_at: window_close,
-        resolution_oracle: ResolutionOracle::ChainlinkDataStreams { feed: rule.feed() },
+        resolution_oracle,
     };
 
-    // Grounding: the asset anchors to its literal alias; every derived field
-    // (comparator, window instants, oracle) is entailed by the full template
-    // match, so it anchors to the whole slug span — the template IS the
-    // deterministic evidence for those fields.
-    let full_slug_span = |subject_field: &str| GroundingSpan {
+    // Grounding: the asset anchors to its literal alias span; comparator and
+    // the window instants are entailed by the full template match (never
+    // independently written anywhere in the slug); the oracle anchors to its
+    // own literal span in the description.
+    let template_entailed = |subject_field: &str| GroundingSpan {
         subject_field: subject_field.to_owned(),
         source: GroundingField::Slug,
         start: 0,
         end: slug.len(),
         text: slug.to_owned(),
+        kind: GroundingKind::TemplateEntailed,
     };
     let grounding = GroundingProof {
         spans: vec![
@@ -106,11 +117,12 @@ fn parse_updown_slug(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandid
                 start: 0,
                 end: alias.len(),
                 text: alias.to_owned(),
+                kind: GroundingKind::LiteralSpan,
             },
-            full_slug_span("comparator"),
-            full_slug_span("reference_at"),
-            full_slug_span("observation_at"),
-            full_slug_span("resolution_oracle"),
+            template_entailed("comparator"),
+            template_entailed("reference_at"),
+            template_entailed("observation_at"),
+            oracle_span,
         ],
     };
 
@@ -151,23 +163,34 @@ mod tests {
     };
     use quant_pivot_models::types::MarketId;
 
-    fn metadata(slug: &str) -> LinkageSourceMetadata {
+    /// The literal Chainlink Data Streams rules-text anchor every observed
+    /// short-cycle up/down market carries.
+    const CHAINLINK_STREAM_RULES: &str = "This market will resolve to \"Up\" if the Bitcoin \
+        price at the end of the time range is greater than or equal to the price at the \
+        beginning. The resolution source for this market is the Chainlink BTC/USD data \
+        stream, available at https://data.chain.link/streams/btc-usd.";
+
+    fn metadata(slug: &str, description: Option<&str>) -> LinkageSourceMetadata {
         LinkageSourceMetadata {
             market_id: MarketId::new("0xmarket"),
             slug: slug.to_owned(),
             question: "Bitcoin Up or Down".to_owned(),
-            description: None,
+            description: description.map(str::to_owned),
             series_slug: Some("btc-updown-5m".to_owned()),
             end_date: None,
         }
     }
 
+    fn grounded(slug: &str) -> LinkageSourceMetadata {
+        metadata(slug, Some(CHAINLINK_STREAM_RULES))
+    }
+
     #[test]
     fn deterministic_updown_slug_parses_and_grounds() {
         // 1780319100 = 2026-06-01T13:05:00Z, aligned to 300s.
-        let metadata = metadata("btc-updown-5m-1780319100");
+        let source = grounded("btc-updown-5m-1780319100");
         let candidate = Tier0SlugExtractor
-            .extract(&metadata)
+            .extract(&source)
             .expect("extract")
             .expect("recognized");
         let MarketSubject::Crypto(subject) = &candidate.subject;
@@ -188,8 +211,34 @@ mod tests {
 
         // The full candidate must clear the single grounding gate.
         assert_eq!(
-            DefaultSubjectValidator.validate(&candidate, &metadata),
+            DefaultSubjectValidator.validate(&candidate, &source),
             ValidationOutcome::Accepted
+        );
+    }
+
+    #[test]
+    fn missing_description_yields_no_candidate() {
+        // Fail-open regression guard: without a literal oracle anchor in the
+        // description, Tier 0 must produce NO candidate — never a guessed
+        // Chainlink default from the ruleset.
+        assert!(
+            Tier0SlugExtractor
+                .extract(&metadata("btc-updown-5m-1780319100", None))
+                .expect("extract")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unrecognized_oracle_text_yields_no_candidate() {
+        assert!(
+            Tier0SlugExtractor
+                .extract(&metadata(
+                    "btc-updown-5m-1780319100",
+                    Some("This market resolves via magic.")
+                ))
+                .expect("extract")
+                .is_none()
         );
     }
 
@@ -198,21 +247,21 @@ mod tests {
         // Epoch not aligned to the 5m boundary.
         assert!(
             Tier0SlugExtractor
-                .extract(&metadata("btc-updown-5m-1780319101"))
+                .extract(&grounded("btc-updown-5m-1780319101"))
                 .expect("extract")
                 .is_none()
         );
         // Unknown asset alias.
         assert!(
             Tier0SlugExtractor
-                .extract(&metadata("pepe-updown-5m-1780319100"))
+                .extract(&grounded("pepe-updown-5m-1780319100"))
                 .expect("extract")
                 .is_none()
         );
         // Human-readable hourly slug is Tier 1 territory.
         assert!(
             Tier0SlugExtractor
-                .extract(&metadata("bitcoin-up-or-down-july-7-3pm-et"))
+                .extract(&grounded("bitcoin-up-or-down-july-7-3pm-et"))
                 .expect("extract")
                 .is_none()
         );

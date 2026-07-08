@@ -27,9 +27,23 @@ pub trait MarketLinkageRepository: Send + Sync {
         as_of: DateTime<Utc>,
     ) -> Result<Option<MarketLinkageInfo>, StorageError>;
 
-    /// Each market's newest ledger record (any status) for the given markets.
-    /// Drives resolver idempotence (skip unchanged metadata/ruleset) and the
-    /// online domain-availability projector.
+    /// Batched [`Self::valid_at`]: each market's PIT-valid record at `as_of`
+    /// (`derived_at <= as_of`, never a future revision), one row per market
+    /// that has one. This is the **only** PIT-correct batch read — the online
+    /// domain-availability projector must use this, never
+    /// [`Self::latest_for_markets`] (which ignores `as_of` entirely and would
+    /// leak a future metadata revision into a past decision).
+    async fn valid_at_for_markets(
+        &self,
+        market_ids: &[MarketId],
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError>;
+
+    /// Each market's newest ledger record (any status), ignoring `as_of`
+    /// entirely. Drives **only** resolver idempotence (skip re-resolving a
+    /// market whose newest record already matches the current metadata/ruleset)
+    /// — never a PIT decision-time read; use [`Self::valid_at_for_markets`] for
+    /// that.
     async fn latest_for_markets(
         &self,
         market_ids: &[MarketId],

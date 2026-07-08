@@ -4,6 +4,8 @@ mod account;
 mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
+#[allow(clippy::needless_update)] // NewBasisAlert omits DB-managed created_at
+mod basis_alert;
 mod candidate;
 mod capital;
 #[allow(clippy::needless_update)] // NewModelComparisonReport omits DB-managed created_at
@@ -42,6 +44,7 @@ mod shadow;
 pub use account::*;
 pub use attribution::*;
 pub use backtest::*;
+pub use basis_alert::*;
 pub use candidate::*;
 pub use capital::*;
 pub use comparison::*;

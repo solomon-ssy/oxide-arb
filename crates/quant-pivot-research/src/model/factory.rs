@@ -135,24 +135,46 @@ impl DefaultModelRuntimeFactory {
     /// Fetch, hash-verify, validate, and schema-bind the artifact for a version.
     /// Shared fail-closed prologue for every runtime family.
     async fn load_verified(&self, model_version: &ModelVersionInfo) -> QuantResult<ModelArtifact> {
-        let recorded = &model_version.artifact_hash;
-        let key = ModelArtifact::artifact_key(recorded)?;
-        let bytes = self.store.get_by_key(&key).await?;
-        let artifact = ModelArtifact::from_bytes(&bytes)?;
-
-        let recomputed = artifact.content_hash()?;
-        if recomputed != *recorded {
-            return Err(ResearchError::ArtifactHashMismatch {
-                expected: recorded.as_str().to_owned(),
-                actual: recomputed.as_str().to_owned(),
-            }
-            .into());
-        }
-
-        artifact.validate()?;
+        let artifact = load_hash_verified_artifact(&self.store, model_version).await?;
         self.verify_header(artifact.header(), model_version)?;
         Ok(artifact)
     }
+}
+
+/// Fetch, hash-verify, and structurally validate an artifact for a version —
+/// without binding it to any particular active feature/factor schema.
+///
+/// Used by governance checks (e.g. `CategoryPointerGuard`) that must inspect an
+/// artifact's structural metadata (its declared `category_scope`) at
+/// config-apply time, before the round's `ActiveSchemaBinding` even exists.
+/// [`DefaultModelRuntimeFactory::load_verified`] wraps this with the additional
+/// schema-binding check required to actually run inference.
+///
+/// # Errors
+///
+/// [`ResearchError::ArtifactHashMismatch`] when the stored bytes no longer hash
+/// to the version's recorded `artifact_hash`, or any structural invariant
+/// violation from [`ModelArtifact::validate`].
+pub async fn load_hash_verified_artifact(
+    store: &Arc<dyn ArtifactStore>,
+    model_version: &ModelVersionInfo,
+) -> QuantResult<ModelArtifact> {
+    let recorded = &model_version.artifact_hash;
+    let key = ModelArtifact::artifact_key(recorded)?;
+    let bytes = store.get_by_key(&key).await?;
+    let artifact = ModelArtifact::from_bytes(&bytes)?;
+
+    let recomputed = artifact.content_hash()?;
+    if recomputed != *recorded {
+        return Err(ResearchError::ArtifactHashMismatch {
+            expected: recorded.as_str().to_owned(),
+            actual: recomputed.as_str().to_owned(),
+        }
+        .into());
+    }
+
+    artifact.validate()?;
+    Ok(artifact)
 }
 
 #[async_trait]

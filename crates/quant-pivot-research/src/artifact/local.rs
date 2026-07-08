@@ -167,12 +167,15 @@ mod tests {
     use crate::artifact::ArtifactNamespace;
 
     fn temp_root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "qp_artifact_test_{}_{}",
+            "qp_artifact_test_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
+                .map_or(0, |d| d.as_nanos()),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
     }
 

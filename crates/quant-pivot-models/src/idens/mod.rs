@@ -7,6 +7,7 @@ pub mod menu;
 pub mod operation_log;
 pub mod quant_account_snapshot;
 pub mod quant_backtest_report;
+pub mod quant_basis_alert;
 pub mod quant_capital_allocation;
 pub mod quant_domain_source_cursor;
 pub mod quant_equity_snapshot;

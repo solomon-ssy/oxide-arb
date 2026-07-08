@@ -1,6 +1,7 @@
 //! Runtime mode handle and quant governance primitives.
 
 pub mod bias_table;
+pub mod category_pointer_guard;
 pub mod execution_recovery;
 pub mod factor_governance;
 pub mod kill_switch;
@@ -18,6 +19,7 @@ pub mod system_status;
 pub mod weight_overlay;
 
 pub use bias_table::BiasTableApplicator;
+pub use category_pointer_guard::CategoryPointerGuard;
 pub use factor_governance::{FactorGovernanceDeps, FactorGovernanceService};
 pub use kill_switch::{KillSwitchControl, KillSwitchHandle};
 pub use linkage::{LinkageResolverDeps, LinkageResolverService};

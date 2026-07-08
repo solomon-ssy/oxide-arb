@@ -13,6 +13,7 @@ pub struct Model {
     pub instrument_key: DomainInstrumentKey,
     pub last_event_time: DateTime<Utc>,
     pub status: String,
+    pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

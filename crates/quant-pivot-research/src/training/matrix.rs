@@ -4,14 +4,40 @@
 //! explicit (column scale), every non-finite result rejects the sample, and a
 //! missing critical feature or label rejects the sample. Categorical features are
 //! never fed as ordinals — they must be one-hot encoded upstream.
+//!
+//! # Non-critical missingness never collapses to a silent zero
+//!
+//! A non-critical column's value cell is filled with [`FeatureColumnSpec::fill_missing`]
+//! when absent, but that placeholder is **never** presented to the model alone: a
+//! companion `{feature}.__available` column is emitted immediately after it,
+//! carrying which of three structurally distinct states produced the row —
+//! [`CellOutcome::Present`] (`1.0`), [`CellOutcome::NotApplicable`] (`0.0`, the
+//! feature structurally never applies to this row — e.g. `domain: None` or an
+//! explicit `NullReason::NotApplicable`), or [`CellOutcome::MissingApplicable`]
+//! (`-1.0`, the feature applies in principle but this instance has a data/quality
+//! gap). A learner can therefore never confuse a fabricated placeholder with a
+//! real observation, and never conflates "this market has no such vertical" with
+//! "this market's vertical had a data outage."
 
 use ndarray::{Array1, Array2};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use super::{LabelName, TrainingExample};
-use crate::features::{FeatureName, FeatureSchema, FeatureUnit, FeatureValue, FeatureValueKind};
+use crate::features::{
+    FeatureName, FeatureSchema, FeatureUnit, FeatureValue, FeatureValueKind, NullReason,
+};
 use quant_pivot_models::types::MatrixCoverageProbe;
+
+/// Availability-column value: the cell was a genuine observation.
+const AVAILABILITY_PRESENT: f64 = 1.0;
+/// Availability-column value: the feature structurally does not apply to this row.
+const AVAILABILITY_NOT_APPLICABLE: f64 = 0.0;
+/// Availability-column value: the feature applies but is missing this instance.
+const AVAILABILITY_MISSING: f64 = -1.0;
+/// Suffix appended to a non-critical column's feature name for its
+/// availability companion column.
+const AVAILABILITY_SUFFIX: &str = ".__available";
 
 /// How a column's decimal value is scaled before the `f64` cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,23 +115,67 @@ fn finite_f64(decimal: Decimal) -> Option<f64> {
         .and_then(|value| value.is_finite().then_some(value))
 }
 
-/// Resolve one column cell to a finite `f64`, or `None` to reject the row.
+/// The three structurally distinct states a training-matrix cell can be in.
 ///
-/// The two-layer lookup covers both the generic slice and the optional domain
-/// slice; a market without a domain slice resolves domain columns to missing
-/// (non-critical domain columns then take `fill_missing`, and models learn on
-/// the availability structure explicitly — never a fabricated observation).
-fn cell(example: &TrainingExample, column: &FeatureColumnSpec) -> Option<f64> {
-    let resolved = example
-        .feature_vector
-        .value(&column.feature)
-        .and_then(scalar);
-    let decimal = match resolved {
-        Some(value) => column.scale.apply(value),
-        None if column.critical => return None,
-        None => return Some(column.fill_missing),
-    };
-    finite_f64(decimal)
+/// See the module doc for why [`Self::NotApplicable`] and
+/// [`Self::MissingApplicable`] must never collapse into the same fabricated
+/// placeholder value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CellOutcome {
+    /// A genuine observed, finite value.
+    Present(f64),
+    /// The feature structurally never applies to this row: the vector's
+    /// domain slice is entirely absent (a `domain.*` column on a market whose
+    /// category maps to no vertical), or the value is explicitly
+    /// `FeatureValue::Missing(NullReason::NotApplicable)`.
+    NotApplicable,
+    /// The feature applies in principle but this instance has a data or
+    /// quality gap (any other [`NullReason`], or an out-of-kind value).
+    MissingApplicable,
+}
+
+/// Resolve one column's raw state for `example`, before scale/fill.
+fn resolve_cell(example: &TrainingExample, column: &FeatureColumnSpec) -> CellOutcome {
+    match example.feature_vector.value(&column.feature) {
+        // The key being entirely absent (`None`) is folded into the same
+        // `NotApplicable` arm as an explicit `NullReason::NotApplicable`: for
+        // a `domain.*` column this is the `domain: None` case (structurally
+        // distinct from a present-but-missing domain value, never a data
+        // gap); for a generic column this should not occur under the
+        // fixed-width schema, and failing soft to "not applicable" is the
+        // conservative choice (never a fabricated data gap).
+        Some(FeatureValue::Missing(NullReason::NotApplicable)) | None => CellOutcome::NotApplicable,
+        Some(FeatureValue::Missing(_)) => CellOutcome::MissingApplicable,
+        Some(other) => scalar(other)
+            .map(|value| column.scale.apply(value))
+            .and_then(finite_f64)
+            .map_or(CellOutcome::MissingApplicable, CellOutcome::Present),
+    }
+}
+
+/// Resolve one column cell to `(value, availability)`, or `None` to reject the row.
+///
+/// Non-critical columns always emit both: the value cell (a genuine
+/// observation, or [`FeatureColumnSpec::fill_missing`] when absent) and its
+/// availability companion (see the module doc). Critical columns emit only
+/// the value cell — any non-[`CellOutcome::Present`] state rejects the row,
+/// so there is no missingness left to signal.
+fn cell(example: &TrainingExample, column: &FeatureColumnSpec) -> Option<(f64, Option<f64>)> {
+    match resolve_cell(example, column) {
+        CellOutcome::Present(value) => {
+            Some((value, (!column.critical).then_some(AVAILABILITY_PRESENT)))
+        }
+        _ if column.critical => None,
+        CellOutcome::NotApplicable => {
+            Some((column.fill_missing, Some(AVAILABILITY_NOT_APPLICABLE)))
+        }
+        CellOutcome::MissingApplicable => Some((column.fill_missing, Some(AVAILABILITY_MISSING))),
+    }
+}
+
+/// The companion availability [`FeatureName`] for a non-critical column.
+fn availability_name(feature: &FeatureName) -> FeatureName {
+    FeatureName::new(format!("{}{AVAILABILITY_SUFFIX}", feature.as_str()))
 }
 
 /// Resolve the target label cell for one example, or `None` to reject the row.
@@ -141,7 +211,8 @@ pub fn build_training_matrix(
         }
         .into());
     }
-    let cols = spec.columns.len();
+    let feature_names = expanded_feature_names(spec);
+    let cols = feature_names.len();
     let mut data: Vec<f64> = Vec::with_capacity(examples.len() * cols);
     let mut labels: Vec<f64> = Vec::with_capacity(examples.len());
     let mut rejected = 0usize;
@@ -153,8 +224,11 @@ pub fn build_training_matrix(
         };
         let mut row = Vec::with_capacity(cols);
         for column in &spec.columns {
-            if let Some(value) = cell(example, column) {
+            if let Some((value, availability)) = cell(example, column) {
                 row.push(value);
+                if let Some(availability) = availability {
+                    row.push(availability);
+                }
             } else {
                 rejected += 1;
                 continue 'rows;
@@ -172,9 +246,22 @@ pub fn build_training_matrix(
     Ok(TrainingMatrix {
         features,
         labels: Array1::from_vec(labels),
-        feature_names: spec.columns.iter().map(|c| c.feature.clone()).collect(),
+        feature_names,
         rejected_rows: rejected,
     })
+}
+
+/// The matrix's column names in emission order: each column's own name,
+/// followed by its `{feature}.__available` companion when non-critical.
+fn expanded_feature_names(spec: &FeatureMatrixSpec) -> Vec<FeatureName> {
+    let mut names = Vec::with_capacity(spec.columns.len() * 2);
+    for column in &spec.columns {
+        names.push(column.feature.clone());
+        if !column.critical {
+            names.push(availability_name(&column.feature));
+        }
+    }
+    names
 }
 
 /// Build a diagnostic matrix spec from the governed feature schema (numeric
@@ -216,17 +303,20 @@ pub fn probe_matrix_coverage(
     label_horizon_secs: u64,
 ) -> QuantResult<MatrixCoverageProbe> {
     let spec = matrix_spec_from_schema(schema, label_name.clone(), label_horizon_secs);
-    let feature_columns = u64::try_from(spec.columns.len()).unwrap_or(u64::MAX);
     if spec.columns.is_empty() || examples.is_empty() {
         return Ok(MatrixCoverageProbe {
             accepted_rows: 0,
             rejected_rows: examples.len() as u64,
             label_name: label_name.as_str().to_owned(),
             label_horizon_secs,
-            feature_columns,
+            feature_columns: 0,
         });
     }
     let matrix = build_training_matrix(examples, &spec)?;
+    // The matrix's true width, including non-critical columns' availability
+    // companions (§ module doc) — the honest reported width, not the
+    // pre-expansion governed-schema column count.
+    let feature_columns = u64::try_from(matrix.feature_names.len()).unwrap_or(u64::MAX);
     Ok(MatrixCoverageProbe {
         accepted_rows: matrix.features.nrows() as u64,
         rejected_rows: matrix.rejected_rows as u64,
@@ -251,15 +341,27 @@ mod tests {
     use rust_decimal::prelude::FromPrimitive;
     use std::collections::BTreeMap;
 
-    fn example(spread: Option<Decimal>, label: Option<Decimal>) -> TrainingExample {
-        let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+    /// `spread` as an explicit [`FeatureValue`] (present, or a specific
+    /// missing reason) — distinct from omitting the key entirely (simulated
+    /// by [`example`] passing `None`), so tests can exercise all three
+    /// [`CellOutcome`] states precisely.
+    fn example_with_value(value: Option<FeatureValue>, label: Option<Decimal>) -> TrainingExample {
         let mut values = BTreeMap::new();
-        if let Some(spread) = spread {
-            values.insert(
-                FeatureName::from_static("spread"),
-                FeatureValue::Decimal(spread),
-            );
+        if let Some(value) = value {
+            values.insert(FeatureName::from_static("spread"), value);
         }
+        example_from_values(values, label)
+    }
+
+    fn example(spread: Option<Decimal>, label: Option<Decimal>) -> TrainingExample {
+        example_with_value(spread.map(FeatureValue::Decimal), label)
+    }
+
+    fn example_from_values(
+        values: BTreeMap<FeatureName, FeatureValue>,
+        label: Option<Decimal>,
+    ) -> TrainingExample {
+        let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         let labels = label
             .map(|value| {
                 vec![TrainingLabel {
@@ -336,10 +438,76 @@ mod tests {
         let matrix = build_training_matrix(&missing_label, &spec(true)).expect("matrix");
         assert_eq!(matrix.rejected_rows, 1);
 
-        // Non-critical missing → filled, row kept.
+        // Non-critical missing (key entirely absent) → filled, row kept, and
+        // the availability companion column reports "not applicable" (never
+        // silently indistinguishable from a real observation).
         let filled = build_training_matrix(&missing_feature, &spec(false)).expect("matrix");
-        assert_eq!(filled.features.shape(), [1, 1]);
-        assert!((filled.features[[0, 0]] - 0.0).abs() < 1e-9);
+        assert_eq!(filled.features.shape(), [1, 2]);
+        assert!(
+            (filled.features[[0, 0]] - 0.0).abs() < 1e-9,
+            "value cell filled"
+        );
+        assert!(
+            (filled.features[[0, 1]] - AVAILABILITY_NOT_APPLICABLE).abs() < 1e-9,
+            "availability cell reports not-applicable"
+        );
+        assert_eq!(
+            filled.feature_names,
+            vec![
+                FeatureName::from_static("spread"),
+                FeatureName::from_static("spread.__available"),
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_distinguishes_not_applicable_from_missing_applicable() {
+        // Explicit `NullReason::NotApplicable` → availability = 0.0.
+        let not_applicable = vec![example_with_value(
+            Some(FeatureValue::Missing(NullReason::NotApplicable)),
+            Some(Decimal::from(1000)),
+        )];
+        let matrix = build_training_matrix(&not_applicable, &spec(false)).expect("matrix");
+        assert_eq!(matrix.rejected_rows, 0);
+        assert!((matrix.features[[0, 0]] - 0.0).abs() < 1e-9);
+        assert!((matrix.features[[0, 1]] - AVAILABILITY_NOT_APPLICABLE).abs() < 1e-9);
+
+        // Any other reason (e.g. a domain source outage) → availability = -1.0,
+        // a DIFFERENT number from the not-applicable case above — the model
+        // can tell "never has this signal" apart from "data gap right now".
+        let missing_applicable = vec![example_with_value(
+            Some(FeatureValue::Missing(NullReason::DomainSourceUnavailable)),
+            Some(Decimal::from(1000)),
+        )];
+        let matrix = build_training_matrix(&missing_applicable, &spec(false)).expect("matrix");
+        assert_eq!(matrix.rejected_rows, 0);
+        assert!((matrix.features[[0, 0]] - 0.0).abs() < 1e-9);
+        assert!((matrix.features[[0, 1]] - AVAILABILITY_MISSING).abs() < 1e-9);
+
+        // A genuine present value → availability = 1.0.
+        let present = vec![example_with_value(
+            Some(FeatureValue::Decimal(Decimal::new(25, 2))),
+            Some(Decimal::from(1000)),
+        )];
+        let matrix = build_training_matrix(&present, &spec(false)).expect("matrix");
+        assert!((matrix.features[[0, 0]] - 0.25).abs() < 1e-9);
+        assert!((matrix.features[[0, 1]] - AVAILABILITY_PRESENT).abs() < 1e-9);
+    }
+
+    #[test]
+    fn matrix_critical_column_never_gains_an_availability_companion() {
+        // Critical columns reject the row on any non-present state, so there
+        // is no missingness left to signal — no companion column is emitted.
+        let present = vec![example(
+            Some(Decimal::new(25, 2)),
+            Some(Decimal::from(1000)),
+        )];
+        let matrix = build_training_matrix(&present, &spec(true)).expect("matrix");
+        assert_eq!(
+            matrix.feature_names,
+            vec![FeatureName::from_static("spread")]
+        );
+        assert_eq!(matrix.features.shape(), [1, 1]);
     }
 
     #[test]

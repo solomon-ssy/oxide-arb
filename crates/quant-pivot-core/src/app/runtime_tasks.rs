@@ -15,7 +15,7 @@ use quant_pivot_api::{
 use quant_pivot_models::clickhouse::{DomainObservationRow, TradeTapeRow};
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
-    traits::{DomainSourceCursorRepository, TradeTapeBlockCursorRepository},
+    traits::{DomainSourceCursorRepository, FactWriter, TradeTapeBlockCursorRepository},
 };
 use std::sync::Arc;
 
@@ -120,7 +120,7 @@ impl AppContext {
                     Arc::clone(&self.infra.ch),
                     Arc::clone(&self.infra.ch_write_manager),
                     "quant_domain_observation",
-                )),
+                )) as Arc<dyn FactWriter<DomainObservationRow>>,
                 self.runtime_config(),
                 sources_config.clone(),
             )),

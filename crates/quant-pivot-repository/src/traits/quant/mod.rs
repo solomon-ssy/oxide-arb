@@ -3,6 +3,7 @@
 mod account_snapshot;
 mod attribution;
 mod backtest_report;
+mod basis_alert;
 mod capital_allocation;
 mod comparison_report;
 mod dataset;
@@ -35,6 +36,7 @@ mod trade_tape_block_cursor;
 pub use account_snapshot::*;
 pub use attribution::*;
 pub use backtest_report::*;
+pub use basis_alert::*;
 pub use capital_allocation::*;
 pub use comparison_report::*;
 pub use dataset::*;

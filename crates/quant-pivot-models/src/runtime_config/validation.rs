@@ -4,6 +4,8 @@
 //! and superseded pre-quant configuration paths are not accepted (clean-break
 //! runtime configuration).
 
+use crate::runtime_config::FeatureFamily;
+
 use super::{
     DecimalString, RuntimeConfig, SizingModelConfig, sections::FeaturesConfig,
     validate_schedule_cadence,
@@ -169,6 +171,49 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
     }
     for validator in FEATURES_CONFIG_VALIDATORS {
         validator(&config.features, report);
+    }
+    validate_feature_family_domain_coherence(config, report);
+}
+
+/// `features.enabled_feature_families` containing [`FeatureFamily::Domain`]
+/// and `domain.enabled_by_family` must agree on whether the domain plane is
+/// live — each direction alone is a real misconfiguration, not a benign
+/// no-op:
+///
+/// - `Domain` enabled with **no** family turned on in `domain.enabled_by_family`
+///   permanently registers domain feature columns that every vector resolves
+///   to `domain: None` (a schema declaring signals that can never exist).
+/// - A family enabled in `domain.enabled_by_family` while `Domain` is absent
+///   from `enabled_feature_families` ingests and resolves linkages for a
+///   vertical no feature/factor ever consumes (wasted ingest with zero
+///   consumer, and a silent trap for anyone who later flips `Domain` on
+///   expecting history to already exist consistently).
+fn validate_feature_family_domain_coherence(
+    config: &RuntimeConfig,
+    report: &mut ConfigValidationReport,
+) {
+    let domain_family_enabled = config
+        .features
+        .enabled_feature_families
+        .contains(&FeatureFamily::Domain);
+    let any_vertical_enabled = config.domain.enabled_by_family.values().any(|&on| on);
+
+    if domain_family_enabled && !any_vertical_enabled {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.enabled_feature_families",
+            detail: "`Domain` is enabled but `domain.enabled_by_family` has no vertical \
+                     turned on — every vector would carry a permanently empty domain slice"
+                .to_owned(),
+        });
+    }
+    if any_vertical_enabled && !domain_family_enabled {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain.enabled_by_family",
+            detail: "a vertical is enabled but `features.enabled_feature_families` does not \
+                     contain `Domain` — the domain plane would ingest and resolve linkages \
+                     for a vertical no feature ever consumes"
+                .to_owned(),
+        });
     }
 }
 
@@ -1082,5 +1127,51 @@ mod tests {
         ];
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
+    }
+
+    #[test]
+    fn domain_feature_family_without_any_enabled_vertical_is_rejected() {
+        use crate::runtime_config::FeatureFamily;
+
+        let mut config = RuntimeConfig::default();
+        assert!(
+            config
+                .features
+                .enabled_feature_families
+                .contains(&FeatureFamily::Domain),
+            "default config enables the Domain feature family"
+        );
+        // Disable every vertical while `Domain` stays enabled.
+        for enabled in config.domain.enabled_by_family.values_mut() {
+            *enabled = false;
+        }
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn enabled_vertical_without_domain_feature_family_is_rejected() {
+        use crate::runtime_config::FeatureFamily;
+
+        let mut config = RuntimeConfig::default();
+        config
+            .features
+            .enabled_feature_families
+            .retain(|family| *family != FeatureFamily::Domain);
+        assert!(
+            config.domain.enabled_by_family.values().any(|&on| on),
+            "default config enables the crypto vertical"
+        );
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn domain_feature_family_coherent_with_enabled_vertical_is_accepted() {
+        // The default config keeps both sides coherent — no regression beyond
+        // `default_runtime_config_is_valid`, but explicit for this invariant.
+        let config = RuntimeConfig::default();
+        let report = validate_runtime_config(&config);
+        assert!(!report.has_errors());
     }
 }

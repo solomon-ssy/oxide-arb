@@ -38,6 +38,7 @@ use quant_pivot_models::{
     },
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::features::{EvidenceSourceRef, FeatureName};
 
@@ -76,14 +77,66 @@ pub struct MarketSelectionBuildRequest {
     pub source_delay_secs: u64,
 }
 
-/// Feature availability requirements imposed by the active model on selection.
+/// Feature availability requirements imposed by the routed model(s) on selection.
+///
+/// A market's actual eligibility bar depends on **which model will score it**
+/// (11.2.2 remediation R7): a market whose category routes to a
+/// category-specific artifact must be checked against that artifact's own
+/// required features, not just the generic model's — and, symmetrically, a
+/// category's domain-feature requirement must never gate a market of a
+/// *different* category that will never be scored by that artifact. Use
+/// [`Self::for_category`] to resolve the actual bar for one candidate.
 ///
 /// Hash via [`crate::hashing::ResearchHasher::model_feature_requirements`] so
-/// `required_features` order does not affect the selector digest.
+/// insertion order (of either `generic` or `by_category`'s per-category
+/// vectors) never affects the selector digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ModelFeatureRequirements {
-    /// Features that must be available for a market to be eligible.
-    pub required_features: Vec<FeatureName>,
+    /// Required by the model that scores every market with no eligible
+    /// category-specific route — checked against every candidate.
+    pub generic: Vec<FeatureName>,
+    /// Required by the category-specific model actually routed for each
+    /// category (only present for categories with a load-validated pointer;
+    /// see `resolve_model_route`), additive to `generic` and scoped to
+    /// candidates of exactly that category.
+    pub by_category: BTreeMap<MarketCategory, Vec<FeatureName>>,
+}
+
+impl ModelFeatureRequirements {
+    /// Requirements with no category-specific routing (every market uses the
+    /// same, single requirement set).
+    #[must_use]
+    pub const fn generic_only(required_features: Vec<FeatureName>) -> Self {
+        Self {
+            generic: required_features,
+            by_category: BTreeMap::new(),
+        }
+    }
+
+    /// The full, deduplicated requirement set for a candidate of `category`:
+    /// `generic` ∪ that category's specific requirements (empty when the
+    /// category has no routed pointer).
+    #[must_use]
+    pub fn for_category(&self, category: MarketCategory) -> Vec<FeatureName> {
+        let mut set: BTreeSet<FeatureName> = self.generic.iter().cloned().collect();
+        if let Some(extra) = self.by_category.get(&category) {
+            set.extend(extra.iter().cloned());
+        }
+        set.into_iter().collect()
+    }
+
+    /// Every feature required by any route (`generic` ∪ every category's
+    /// specific set), for consumers that need one flat, category-agnostic
+    /// superset (e.g. the critical-missing feature gate, which is not
+    /// selection's per-category eligibility check).
+    #[must_use]
+    pub fn union_all(&self) -> Vec<FeatureName> {
+        let mut set: BTreeSet<FeatureName> = self.generic.iter().cloned().collect();
+        for extra in self.by_category.values() {
+            set.extend(extra.iter().cloned());
+        }
+        set.into_iter().collect()
+    }
 }
 
 /// The included / excluded partition produced by the filter chain + cap, before

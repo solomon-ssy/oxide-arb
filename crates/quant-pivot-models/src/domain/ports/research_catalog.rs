@@ -14,9 +14,9 @@ use crate::{
     domain::{
         BacktestReportInfo, BacktestReportListQuery, ComparisonReportListQuery,
         FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelSpecInfo, ModelSpecListQuery,
-        ModelVersionInfo, ModelVersionListQuery, Paginated, TrainingDatasetInfo,
-        TrainingDatasetListQuery,
+        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelPublishedCatalogQuery,
+        ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        PublishedModelOptionView, TrainingDatasetInfo, TrainingDatasetListQuery,
     },
     types::FactorDefinitionId,
 };
@@ -46,6 +46,16 @@ pub trait ResearchCatalogPort: Send + Sync {
         &self,
         query: ModelSpecListQuery,
     ) -> QuantResult<Paginated<ModelSpecInfo>>;
+
+    /// The `Published`, side-and-category-eligible candidates for one
+    /// `FieldWidget::ModelVersionSelect` runtime-config field (11.2.2
+    /// remediation R8). Unlike every other catalog method this is **not**
+    /// paginated: the eligible set is bounded by the governed model registry
+    /// (a human-curated handful of specs), never a market-scale collection.
+    async fn list_published_model_options(
+        &self,
+        query: ModelPublishedCatalogQuery,
+    ) -> QuantResult<Vec<PublishedModelOptionView>>;
 
     /// Page the append-only backtest-report ledger, newest first.
     async fn list_backtest_reports(

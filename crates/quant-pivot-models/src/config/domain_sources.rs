@@ -35,6 +35,10 @@ pub struct BinanceSourceConfig {
     pub poll_secs: u64,
     /// Maximum rows written per `ClickHouse` batch. Default: 5000.
     pub batch_size: usize,
+    /// Per-request HTTP timeout in milliseconds. A hung TCP connection must
+    /// never block an ingest tick indefinitely (R10 ingest hardening).
+    /// Default: 10000.
+    pub request_timeout_ms: u64,
 }
 
 impl Default for BinanceSourceConfig {
@@ -45,6 +49,7 @@ impl Default for BinanceSourceConfig {
             weight_budget_per_min: 1_000,
             poll_secs: 30,
             batch_size: 5_000,
+            request_timeout_ms: 10_000,
         }
     }
 }
@@ -62,10 +67,22 @@ pub struct ChainlinkSourceConfig {
     pub enabled: bool,
     /// Incremental poll cadence in seconds. Default: 15.
     pub poll_secs: u64,
-    /// Maximum historical rounds back-scanned per feed on bootstrap (bounds
-    /// `getRoundData` RPC volume; older basis history stays fail-closed
-    /// missing). Default: 500.
+    /// Maximum historical rounds back-scanned per feed on the **bootstrap**
+    /// (first-ever) fetch. Bounds `getRoundData` RPC volume; older basis
+    /// history stays fail-closed missing. This is a **round-count** bound,
+    /// deliberately independent of `domain.crypto.backfill_days` (a
+    /// time-based bound applied uniformly across every source): Chainlink
+    /// round cadence varies per feed (heartbeat + deviation-threshold
+    /// updates), so a fixed round count cannot be translated into a fixed
+    /// day count without per-feed calibration. Default: 500.
     pub max_round_backscan: u32,
+    /// Maximum historical rounds walked backward per feed on an
+    /// **incremental** (steady-state) fetch to recover any rounds missed
+    /// between polls — e.g. after a poller outage (R10 ingest hardening).
+    /// The common case (no gap) costs one extra `getRoundData` call beyond
+    /// `latestRoundData`; this bounds the worst case when polling resumes
+    /// after a long gap. Default: 100.
+    pub max_incremental_gap_rounds: u32,
     /// Aggregator **proxy** addresses keyed by feed key (e.g. `BTC-USD`).
     /// Defaults cover the Polygon mainnet proxies for the launch asset set.
     pub feeds: BTreeMap<String, String>,
@@ -77,6 +94,7 @@ impl Default for ChainlinkSourceConfig {
             enabled: true,
             poll_secs: 15,
             max_round_backscan: 500,
+            max_incremental_gap_rounds: 100,
             feeds: default_polygon_feeds(),
         }
     }

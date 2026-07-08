@@ -15,6 +15,21 @@ use sea_orm::{
 
 use crate::postgres::query::paginate_mapped;
 
+/// Reduce rows already ordered `(market_id ASC, derived_at DESC, created_at
+/// DESC, linkage_id DESC)` to the first (highest-ranked) row per market.
+fn reduce_to_first_per_market(rows: Vec<quant_market_linkage::Model>) -> Vec<MarketLinkageInfo> {
+    let mut kept: Vec<MarketLinkageInfo> = Vec::new();
+    for row in rows {
+        if kept
+            .last()
+            .is_none_or(|previous| previous.market_id != row.market_id)
+        {
+            kept.push(row.into());
+        }
+    }
+    kept
+}
+
 /// Postgres-backed append-only linkage ledger.
 pub struct PgMarketLinkageRepository {
     db: DatabaseConnection,
@@ -71,6 +86,30 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn valid_at_for_markets(
+        &self,
+        market_ids: &[MarketId],
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        if market_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Same reduce-in-memory strategy as `latest_for_markets`, but with the
+        // `derived_at <= as_of` PIT filter `valid_at` applies per-market —
+        // this is the batch form of `valid_at`, not of `latest_for_markets`.
+        let rows = quant_market_linkage::Entity::find()
+            .filter(quant_market_linkage::Column::MarketId.is_in(market_ids.to_vec()))
+            .filter(quant_market_linkage::Column::DerivedAt.lte(as_of))
+            .order_by_asc(quant_market_linkage::Column::MarketId)
+            .order_by_desc(quant_market_linkage::Column::DerivedAt)
+            .order_by_desc(quant_market_linkage::Column::CreatedAt)
+            .order_by_desc(quant_market_linkage::Column::LinkageId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(reduce_to_first_per_market(rows))
+    }
+
     async fn latest_for_markets(
         &self,
         market_ids: &[MarketId],
@@ -90,16 +129,7 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
-        let mut latest: Vec<MarketLinkageInfo> = Vec::new();
-        for row in rows {
-            if latest
-                .last()
-                .is_none_or(|kept| kept.market_id != row.market_id)
-            {
-                latest.push(row.into());
-            }
-        }
-        Ok(latest)
+        Ok(reduce_to_first_per_market(rows))
     }
 
     async fn ledger_for_markets(

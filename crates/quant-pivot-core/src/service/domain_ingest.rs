@@ -18,10 +18,7 @@ use quant_pivot_models::{
     enums::domain::DomainFamily,
     types::{DomainInstrumentKey, DomainSourceId},
 };
-use quant_pivot_repository::{
-    clickhouse::ChFactWriter,
-    traits::{DomainSourceCursorRepository, FactWriter},
-};
+use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
 use quant_pivot_research::linkage::rules;
 
 use crate::runtime_config::RuntimeConfigStore;
@@ -50,7 +47,7 @@ struct InstrumentCheckpoint {
 pub struct DomainIngestor {
     sources: Vec<Arc<dyn DomainDataSource>>,
     cursor_repo: Arc<dyn DomainSourceCursorRepository>,
-    writer: Arc<ChFactWriter<DomainObservationRow>>,
+    writer: Arc<dyn FactWriter<DomainObservationRow>>,
     runtime_config: Arc<RuntimeConfigStore>,
     domain_sources: DomainSourcesConfig,
     instruments_by_source: HashMap<DomainSourceId, Vec<DomainInstrumentKey>>,
@@ -61,7 +58,7 @@ impl DomainIngestor {
     pub fn new(
         sources: Vec<Arc<dyn DomainDataSource>>,
         cursor_repo: Arc<dyn DomainSourceCursorRepository>,
-        writer: Arc<ChFactWriter<DomainObservationRow>>,
+        writer: Arc<dyn FactWriter<DomainObservationRow>>,
         runtime_config: Arc<RuntimeConfigStore>,
         domain_sources: DomainSourcesConfig,
     ) -> Self {
@@ -76,6 +73,12 @@ impl DomainIngestor {
     }
 
     /// One ingest tick across every enabled `(source, instrument)` stream.
+    ///
+    /// Each instrument is isolated (R10 ingest hardening): one symbol's fetch
+    /// failure records that instrument's cursor as [`DomainCursorStatus::Error`]
+    /// with the failure detail and is skipped, but never aborts the whole
+    /// tick — every other instrument still scans, and the batch still writes
+    /// and commits for every instrument that succeeded.
     pub async fn run_once(&self) -> QuantResult<()> {
         let runtime = self.runtime_config.load();
         if !runtime.domain.family_enabled(DomainFamily::Crypto) {
@@ -93,10 +96,21 @@ impl DomainIngestor {
                 continue;
             };
             for instrument_key in instruments {
-                outcomes.push(
-                    self.scan_instrument(source.as_ref(), instrument_key, backfill_days, now)
-                        .await?,
-                );
+                match self
+                    .scan_instrument(source.as_ref(), instrument_key, backfill_days, now)
+                    .await
+                {
+                    Ok(outcome) => outcomes.push(outcome),
+                    Err(error) => {
+                        tracing::warn!(
+                            %source_id, %instrument_key, %error,
+                            "domain ingest scan failed for this instrument; \
+                             other instruments continue this tick"
+                        );
+                        self.record_scan_failure(&source_id, instrument_key, &error)
+                            .await;
+                    }
+                }
             }
         }
 
@@ -172,10 +186,52 @@ impl DomainIngestor {
                 instrument_key: checkpoint.instrument_key,
                 last_event_time: checkpoint.last_event_time,
                 status: checkpoint.status.as_str().to_owned(),
+                // A checkpoint is only ever constructed on this tick's
+                // success path, so any error recorded on a prior failed tick
+                // is now resolved — clear it rather than let it linger.
+                last_error: None,
                 updated_at: Utc::now(),
             })
             .await?;
         Ok(())
+    }
+
+    /// Record a failed scan against the instrument's durable cursor without
+    /// advancing `last_event_time`, so the next tick simply retries
+    /// incrementally from the same resume point (self-healing once the
+    /// transient condition clears). Best-effort: a failure to persist the
+    /// failure marker is logged, never escalated (the scan failure itself is
+    /// already logged by the caller).
+    async fn record_scan_failure(
+        &self,
+        source_id: &DomainSourceId,
+        instrument_key: &DomainInstrumentKey,
+        error: &quant_pivot_error::QuantError,
+    ) {
+        let existing = self
+            .cursor_repo
+            .find(source_id, instrument_key)
+            .await
+            .ok()
+            .flatten();
+        let last_event_time = existing.map_or_else(Utc::now, |row| row.last_event_time);
+        if let Err(persist_error) = self
+            .cursor_repo
+            .upsert(UpsertDomainSourceCursor {
+                source_id: source_id.clone(),
+                instrument_key: instrument_key.clone(),
+                last_event_time,
+                status: DomainCursorStatus::Error.as_str().to_owned(),
+                last_error: Some(error.to_string()),
+                updated_at: Utc::now(),
+            })
+            .await
+        {
+            tracing::warn!(
+                %persist_error, %source_id, %instrument_key,
+                "failed to persist domain-ingest error cursor"
+            );
+        }
     }
 }
 
@@ -314,6 +370,7 @@ mod tests {
             ),
             last_event_time: last,
             status: DomainCursorStatus::Live.as_str().to_owned(),
+            last_error: None,
             created_at: last,
             updated_at: last,
         };
@@ -354,6 +411,194 @@ mod tests {
         assert_eq!(
             checkpoint_status(None, false, now, now),
             DomainCursorStatus::Live
+        );
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::{DomainIngestor, discover_instruments};
+    use crate::runtime_config::RuntimeConfigStore;
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use quant_pivot_api::domain::{DomainDataSource, DomainFetchRequest};
+    use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+    use quant_pivot_models::{
+        clickhouse::DomainObservationRow,
+        config::DomainSourcesConfig,
+        domain::{
+            DomainCursorStatus, DomainObservation, DomainSourceCursorInfo, UpsertDomainSourceCursor,
+        },
+        enums::domain::{DomainFamily, DomainMetric},
+        runtime_config::RuntimeConfig,
+        types::{DomainInstrumentKey, DomainSourceId},
+    };
+    use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
+    use rust_decimal_macros::dec;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
+    /// A source that fails `fetch` for exactly one instrument key, succeeding
+    /// (with one synthetic observation) for every other instrument it serves.
+    struct PartiallyFailingSource {
+        source_id: DomainSourceId,
+        fail_instrument: DomainInstrumentKey,
+    }
+
+    #[async_trait]
+    impl DomainDataSource for PartiallyFailingSource {
+        fn family(&self) -> DomainFamily {
+            DomainFamily::Crypto
+        }
+
+        fn source_id(&self) -> DomainSourceId {
+            self.source_id.clone()
+        }
+
+        async fn fetch(&self, request: DomainFetchRequest) -> QuantResult<Vec<DomainObservation>> {
+            if request.instrument_key == self.fail_instrument {
+                return Err(QuantError::config("synthetic fetch failure"));
+            }
+            Ok(vec![DomainObservation {
+                family: DomainFamily::Crypto,
+                source_id: self.source_id.clone(),
+                instrument_key: request.instrument_key,
+                metric: DomainMetric::Close,
+                value: dec!(1),
+                observed_at: request.to_inclusive,
+                publish_time: request.to_inclusive,
+            }])
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeCursorRepo {
+        rows: Mutex<HashMap<(DomainSourceId, DomainInstrumentKey), DomainSourceCursorInfo>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DomainSourceCursorRepository for FakeCursorRepo {
+        async fn find(
+            &self,
+            source_id: &DomainSourceId,
+            instrument_key: &DomainInstrumentKey,
+        ) -> Result<Option<DomainSourceCursorInfo>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("lock")
+                .get(&(source_id.clone(), instrument_key.clone()))
+                .cloned())
+        }
+
+        async fn upsert(
+            &self,
+            cursor: UpsertDomainSourceCursor,
+        ) -> Result<DomainSourceCursorInfo, StorageError> {
+            let now = Utc::now();
+            let info = DomainSourceCursorInfo {
+                source_id: cursor.source_id,
+                instrument_key: cursor.instrument_key,
+                last_event_time: cursor.last_event_time,
+                status: cursor.status,
+                last_error: cursor.last_error,
+                created_at: now,
+                updated_at: now,
+            };
+            self.rows.lock().expect("lock").insert(
+                (info.source_id.clone(), info.instrument_key.clone()),
+                info.clone(),
+            );
+            Ok(info)
+        }
+
+        async fn list_all(&self) -> Result<Vec<DomainSourceCursorInfo>, StorageError> {
+            Ok(self.rows.lock().expect("lock").values().cloned().collect())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeWriter {
+        written: Mutex<Vec<DomainObservationRow>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FactWriter<DomainObservationRow> for FakeWriter {
+        async fn write_batch(&self, rows: Vec<DomainObservationRow>) -> Result<(), StorageError> {
+            self.written.lock().expect("lock").extend(rows);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn one_instrument_failure_does_not_abort_the_tick() {
+        let domain_sources = DomainSourcesConfig::default();
+        let instruments = discover_instruments(&domain_sources);
+        let binance_instruments = instruments
+            .get(&DomainSourceId::binance())
+            .cloned()
+            .expect("binance instruments discovered");
+        assert!(
+            binance_instruments.len() > 1,
+            "test needs at least 2 instruments to prove isolation"
+        );
+        let fail_instrument = binance_instruments[0].clone();
+        let healthy_instrument = binance_instruments[1].clone();
+
+        let source: Arc<dyn DomainDataSource> = Arc::new(PartiallyFailingSource {
+            source_id: DomainSourceId::binance(),
+            fail_instrument: fail_instrument.clone(),
+        });
+        let cursor_repo = Arc::new(FakeCursorRepo::default());
+        let writer = Arc::new(FakeWriter::default());
+        let runtime_config = Arc::new(RuntimeConfigStore::new(RuntimeConfig::default()));
+
+        let ingestor = DomainIngestor::new(
+            vec![source],
+            Arc::clone(&cursor_repo) as Arc<dyn DomainSourceCursorRepository>,
+            Arc::clone(&writer) as Arc<dyn FactWriter<DomainObservationRow>>,
+            runtime_config,
+            domain_sources,
+        );
+
+        ingestor.run_once().await.expect("tick must not abort");
+
+        let failed_cursor = cursor_repo
+            .find(&DomainSourceId::binance(), &fail_instrument)
+            .await
+            .expect("find")
+            .expect("failed instrument gets a cursor row");
+        assert_eq!(
+            DomainCursorStatus::parse(&failed_cursor.status),
+            Some(DomainCursorStatus::Error)
+        );
+        assert!(
+            failed_cursor
+                .last_error
+                .as_deref()
+                .is_some_and(|detail| detail.contains("synthetic fetch failure")),
+            "last_error must record the failure detail"
+        );
+
+        let healthy_cursor = cursor_repo
+            .find(&DomainSourceId::binance(), &healthy_instrument)
+            .await
+            .expect("find")
+            .expect("healthy instrument still commits a cursor");
+        assert_ne!(
+            DomainCursorStatus::parse(&healthy_cursor.status),
+            Some(DomainCursorStatus::Error)
+        );
+        assert!(
+            healthy_cursor.last_error.is_none(),
+            "a successful instrument must not carry a stale error"
+        );
+
+        assert!(
+            !writer.written.lock().expect("lock").is_empty(),
+            "the healthy instrument's observation must still be written"
         );
     }
 }

@@ -13,12 +13,11 @@
 //!
 //! Eastern-Time instants convert through `America/New_York` (DST-correct);
 //! ambiguous or nonexistent local times (transition hours) fail closed. The
-//! settlement oracle is extracted from the **description** rules text: the
-//! literal `data.chain.link/streams/{feed}` reference, a "Binance … 1-minute
-//! candle" citation, or — recognized-but-unclassified — the literal
-//! "resolution source" sentence ([`ResolutionOracle::Other`], basis
-//! cross-check then fails closed). A market whose rules text grounds no oracle
-//! produces no candidate at all.
+//! settlement oracle is extracted from the **description** rules text via
+//! [`crate::linkage::oracle::extract_oracle`] — the same function Tier 0
+//! uses, so both tiers share one grounding contract. A market whose rules
+//! text grounds no oracle produces no candidate at all (never a guessed
+//! default from the ruleset).
 
 use std::sync::LazyLock;
 
@@ -27,17 +26,18 @@ use chrono_tz::America::New_York;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        CryptoSubject, GroundingField, GroundingProof, GroundingSpan, LinkageSourceMetadata,
-        MarketSubject, PriceComparator, ResolutionOracle,
+        CryptoSubject, GroundingField, GroundingKind, GroundingProof, GroundingSpan,
+        LinkageSourceMetadata, MarketSubject, PriceComparator,
     },
-    enums::domain::{KlineInterval, ResolverTier},
-    types::{ChainlinkFeedKey, Probability, Usd},
+    enums::domain::ResolverTier,
+    types::{Probability, Usd},
 };
 use regex::Regex;
 use rust_decimal::Decimal;
 
 use crate::linkage::{
     extractor::{ExtractedCandidate, SubjectExtractor},
+    oracle::extract_oracle,
     ruleset::{AssetRule, find_alias, rule_for_alias},
 };
 
@@ -64,21 +64,6 @@ static DOLLAR_BAND: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("static regex")
 });
-
-/// The literal Chainlink Data Streams reference in the rules text.
-static CHAINLINK_STREAM: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"data\.chain\.link/streams/([a-z0-9]+-[a-z0-9]+)").expect("static regex")
-});
-
-/// A Binance 1-minute candle citation in the rules text.
-static BINANCE_CANDLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)Binance[^.]{0,120}?(?:1[- ]minute|one[- ]minute)[^.]{0,40}?candle")
-        .expect("static regex")
-});
-
-/// A "resolution source" sentence (recognized-but-unclassified oracle).
-static RESOLUTION_SENTENCE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)resolution source[^.]*\.").expect("static regex"));
 
 /// Upward comparators in threshold questions.
 static ABOVE_PHRASE: LazyLock<Regex> = LazyLock::new(|| {
@@ -115,15 +100,21 @@ fn parse_hourly_updown(metadata: &LinkageSourceMetadata) -> Option<ExtractedCand
     let rule = rule_for_alias(captures.get(1)?.as_str())?;
     let month = month_number(captures.get(2)?.as_str())?;
     let day: u32 = captures.get(3)?.as_str().parse().ok()?;
-    let year = captures
-        .get(4)
-        .map_or_else(|| infer_year(metadata), |m| m.as_str().parse().ok())?;
     let hour_12: u32 = captures.get(5)?.as_str().parse().ok()?;
     let meridiem = captures.get(6)?.as_str();
     let hour = to_24h(hour_12, meridiem)?;
+    let year = captures.get(4).map_or_else(
+        || infer_year(metadata, month, day, hour, 0),
+        |m| m.as_str().parse().ok(),
+    )?;
 
     let window_open = eastern_instant(year, month, day, hour, 0)?;
-    let subject = updown_subject(rule, window_open, window_open + Duration::hours(1));
+    let subject = updown_subject(
+        rule,
+        metadata,
+        window_open,
+        window_open + Duration::hours(1),
+    )?;
     Some(templated_candidate(
         rule,
         subject,
@@ -139,14 +130,15 @@ fn parse_daily_updown(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandi
     let rule = rule_for_alias(captures.get(1)?.as_str())?;
     let month = month_number(captures.get(2)?.as_str())?;
     let day: u32 = captures.get(3)?.as_str().parse().ok()?;
-    let year = captures
-        .get(4)
-        .map_or_else(|| infer_year(metadata), |m| m.as_str().parse().ok())?;
+    let year = captures.get(4).map_or_else(
+        || infer_year(metadata, month, day, 12, 0),
+        |m| m.as_str().parse().ok(),
+    )?;
 
     // "… on March 5" spans Mar 4 noon ET → Mar 5 noon ET.
     let close = eastern_instant(year, month, day, 12, 0)?;
     let open = close - Duration::hours(24);
-    let subject = updown_subject(rule, open, close);
+    let subject = updown_subject(rule, metadata, open, close)?;
     Some(templated_candidate(
         rule,
         subject,
@@ -156,59 +148,68 @@ fn parse_daily_updown(metadata: &LinkageSourceMetadata) -> Option<ExtractedCandi
 }
 
 /// A relative (price-to-beat) subject over `[open, close)`.
+///
+/// The oracle is independently grounded to the description's literal anchor
+/// (never a ruleset default): `None` when the description does not ground a
+/// recognized oracle, which propagates to "no candidate" at the call site —
+/// fail through / `Unresolved`, never a guessed settlement source.
 fn updown_subject(
     rule: &AssetRule,
+    metadata: &LinkageSourceMetadata,
     window_open: DateTime<Utc>,
     window_close: DateTime<Utc>,
-) -> CryptoSubject {
-    CryptoSubject {
+) -> Option<CryptoSubject> {
+    let (resolution_oracle, _) = extract_oracle(rule, metadata.description.as_deref())?;
+    Some(CryptoSubject {
         asset: rule.asset(),
         quote: rule.quote(),
         comparator: PriceComparator::UpVsReference,
         strike: None,
         reference_at: Some(window_open),
         observation_at: window_close,
-        resolution_oracle: ResolutionOracle::ChainlinkDataStreams { feed: rule.feed() },
-    }
+        resolution_oracle,
+    })
 }
 
 /// Assemble a slug-templated candidate: the asset anchors to its alias span,
-/// derived fields to the full template match, and the oracle to the rules
-/// text when present (falling back to the template for the recurring series
-/// whose slug alone entails the Chainlink stream).
+/// window-derived fields to the full template match (template-entailed —
+/// never independently written anywhere in the slug), and the oracle to its
+/// own literal span in the description (re-derived here since `updown_subject`
+/// only needed the oracle value, not its span).
 fn templated_candidate(
     rule: &AssetRule,
-    mut subject: CryptoSubject,
+    subject: CryptoSubject,
     metadata: &LinkageSourceMetadata,
     alias_start: usize,
 ) -> ExtractedCandidate {
     let slug = metadata.slug.as_str();
+    let alias_end = alias_start + alias_len(rule, slug, alias_start);
     let mut spans = vec![GroundingSpan {
         subject_field: "asset".to_owned(),
         source: GroundingField::Slug,
         start: alias_start,
-        end: alias_start + alias_len(rule, slug, alias_start),
-        text: slug[alias_start..alias_start + alias_len(rule, slug, alias_start)].to_owned(),
+        end: alias_end,
+        text: slug[alias_start..alias_end].to_owned(),
+        kind: GroundingKind::LiteralSpan,
     }];
-    let full = |subject_field: &str| GroundingSpan {
+    let template_entailed = |subject_field: &str| GroundingSpan {
         subject_field: subject_field.to_owned(),
         source: GroundingField::Slug,
         start: 0,
         end: slug.len(),
         text: slug.to_owned(),
+        kind: GroundingKind::TemplateEntailed,
     };
-    spans.push(full("comparator"));
-    spans.push(full("reference_at"));
-    spans.push(full("observation_at"));
+    spans.push(template_entailed("comparator"));
+    spans.push(template_entailed("reference_at"));
+    spans.push(template_entailed("observation_at"));
 
-    // Prefer the description's literal oracle citation when the rules text is
-    // present; the slug template remains the deterministic fallback anchor.
-    if let Some((oracle, span)) = extract_oracle(rule, metadata) {
-        subject.resolution_oracle = oracle;
-        spans.push(span);
-    } else {
-        spans.push(full("resolution_oracle"));
-    }
+    // Re-derive the oracle's own literal span (the value was already resolved
+    // by `updown_subject`; `extract_oracle` is a pure re-match, not a second
+    // extraction decision).
+    let (_, oracle_span) =
+        extract_oracle(rule, metadata.description.as_deref()).expect("oracle already resolved");
+    spans.push(oracle_span);
 
     ExtractedCandidate {
         subject: MarketSubject::Crypto(subject),
@@ -237,7 +238,7 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
     let (rule, alias, alias_offset) = find_alias(&lowered)?;
     // Threshold markets settle at the market's scheduled resolution instant.
     let observation_at = metadata.end_date?;
-    let (oracle, oracle_span) = extract_oracle(rule, metadata)?;
+    let (oracle, oracle_span) = extract_oracle(rule, metadata.description.as_deref())?;
 
     let mut spans = vec![
         GroundingSpan {
@@ -246,8 +247,20 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
             start: alias_offset,
             end: alias_offset + alias.len(),
             text: question[alias_offset..alias_offset + alias.len()].to_owned(),
+            kind: GroundingKind::LiteralSpan,
         },
         oracle_span,
+        // `observation_at` is the market's own scheduled resolution instant —
+        // not independently re-stated in the question/description text, so it
+        // is template-entailed by the market record itself.
+        GroundingSpan {
+            subject_field: "observation_at".to_owned(),
+            source: GroundingField::Question,
+            start: 0,
+            end: question.len(),
+            text: question.to_owned(),
+            kind: GroundingKind::TemplateEntailed,
+        },
     ];
 
     let (comparator, strike) = if let Some(captures) = DOLLAR_BAND.captures(question) {
@@ -319,7 +332,7 @@ fn parse_threshold_question(metadata: &LinkageSourceMetadata) -> Option<Extracte
     })
 }
 
-/// A grounding span over the question text.
+/// A literal grounding span over the question text.
 fn question_span(field: &str, question: &str, start: usize, end: usize) -> GroundingSpan {
     GroundingSpan {
         subject_field: field.to_owned(),
@@ -327,6 +340,7 @@ fn question_span(field: &str, question: &str, start: usize, end: usize) -> Groun
         start,
         end,
         text: question[start..end].to_owned(),
+        kind: GroundingKind::LiteralSpan,
     }
 }
 
@@ -340,51 +354,6 @@ fn parse_dollars(digits: &str, suffix: Option<regex::Match<'_>>) -> Option<Decim
         Some(_) | None => Decimal::ONE,
     };
     Some(base * multiplier)
-}
-
-// ── settlement-oracle extraction (description rules text) ───────────────────
-
-/// Extract the settlement oracle from the rules text with its literal anchor.
-fn extract_oracle(
-    rule: &AssetRule,
-    metadata: &LinkageSourceMetadata,
-) -> Option<(ResolutionOracle, GroundingSpan)> {
-    let description = metadata.description.as_deref()?;
-    let span = |start: usize, end: usize| GroundingSpan {
-        subject_field: "resolution_oracle".to_owned(),
-        source: GroundingField::Description,
-        start,
-        end,
-        text: description[start..end].to_owned(),
-    };
-
-    if let Some(captures) = CHAINLINK_STREAM.captures(description) {
-        let feed_text = captures.get(1)?.as_str().to_uppercase();
-        let feed = ChainlinkFeedKey::parse(feed_text).ok()?;
-        let full = captures.get(0)?;
-        return Some((
-            ResolutionOracle::ChainlinkDataStreams { feed },
-            span(full.start(), full.end()),
-        ));
-    }
-    if let Some(matched) = BINANCE_CANDLE.find(description) {
-        return Some((
-            ResolutionOracle::BinanceKline {
-                symbol: rule.symbol(),
-                interval: KlineInterval::OneMinute,
-            },
-            span(matched.start(), matched.end()),
-        ));
-    }
-    if let Some(matched) = RESOLUTION_SENTENCE.find(description) {
-        return Some((
-            ResolutionOracle::Other {
-                descriptor: matched.as_str().to_owned(),
-            },
-            span(matched.start(), matched.end()),
-        ));
-    }
-    None
 }
 
 // ── Eastern-Time helpers (DST-correct, fail-closed) ─────────────────────────
@@ -439,11 +408,51 @@ fn eastern_instant(
     }
 }
 
-/// The slug year when the vintage omits it: taken from the market's scheduled
-/// resolution instant in Eastern Time (the slug's own clock).
-fn infer_year(metadata: &LinkageSourceMetadata) -> Option<i32> {
+/// The maximum plausible drift between a yearless slug's inferred instant and
+/// the market's `end_date` before the inference is rejected as ambiguous.
+///
+/// A genuine yearless slug's true instant is always within hours of
+/// `end_date` for hourly markets, or within the ~24h daily window for daily
+/// markets — never off by anything approaching a year. Three days is
+/// generous headroom over both cases while decisively rejecting a
+/// wrong-year inference (which is off by tens or hundreds of days, since the
+/// three tested candidates are exactly a year apart): fail closed rather
+/// than silently picking the "closest" wrong year.
+const MAX_PLAUSIBLE_YEAR_DRIFT: Duration = Duration::days(3);
+
+/// The slug year when the vintage omits it, resolved against `end_date`
+/// (never assumed to share `end_date`'s calendar year outright — a slug near
+/// a year boundary can name an instant in the year before or after
+/// `end_date`'s own year).
+///
+/// Tries `end_date`'s Eastern-Time year and its immediate neighbors, and
+/// accepts the reconstructed instant only when it lies within
+/// [`MAX_PLAUSIBLE_YEAR_DRIFT`] of `end_date` — fail closed (`None`) when no
+/// candidate is plausibly close, or when a valid local time cannot be built
+/// for any candidate (DST transition).
+fn infer_year(
+    metadata: &LinkageSourceMetadata,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> Option<i32> {
     use chrono::Datelike;
-    Some(metadata.end_date?.with_timezone(&New_York).year())
+
+    let end_date = metadata.end_date?;
+    let anchor_year = end_date.with_timezone(&New_York).year();
+    let mut best: Option<(i32, Duration)> = None;
+    for candidate_year in [anchor_year - 1, anchor_year, anchor_year + 1] {
+        let Some(instant) = eastern_instant(candidate_year, month, day, hour, minute) else {
+            continue;
+        };
+        let delta = (instant - end_date).abs();
+        if best.is_none_or(|(_, best_delta)| delta < best_delta) {
+            best = Some((candidate_year, delta));
+        }
+    }
+    best.filter(|(_, delta)| *delta <= MAX_PLAUSIBLE_YEAR_DRIFT)
+        .map(|(year, _)| year)
 }
 
 #[cfg(test)]
@@ -611,6 +620,80 @@ mod tests {
                 .extract(&ambiguous)
                 .expect("extract")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn up_down_template_without_description_fails_through_never_guesses_oracle() {
+        // Regression guard for the audited fail-open bug: an hourly/daily
+        // up/down slug with NO description must yield no candidate, never a
+        // ruleset-default Chainlink oracle.
+        let no_description = metadata(
+            "bitcoin-up-or-down-july-7-3pm-et",
+            "Bitcoin Up or Down - July 7, 3PM ET",
+            None,
+        );
+        assert!(
+            CryptoSubjectParser
+                .extract(&no_description)
+                .expect("extract")
+                .is_none()
+        );
+
+        let daily_no_description = metadata(
+            "bitcoin-up-or-down-on-july-7",
+            "Bitcoin Up or Down on July 7",
+            None,
+        );
+        assert!(
+            CryptoSubjectParser
+                .extract(&daily_no_description)
+                .expect("extract")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn year_boundary_slug_infers_the_correct_side_of_the_boundary() {
+        // `end_date` lands just after New Year; the yearless December slug
+        // must resolve to the PRIOR year, not `end_date`'s own year.
+        let end_date = Utc.with_ymd_and_hms(2027, 1, 1, 5, 30, 0).unwrap(); // Jan 1 00:30 ET
+        let metadata = LinkageSourceMetadata {
+            market_id: MarketId::new("0xmarket"),
+            slug: "bitcoin-up-or-down-december-31-11pm-et".to_owned(),
+            question: "Bitcoin Up or Down - Dec 31, 11PM ET".to_owned(),
+            description: Some(CHAINLINK_RULES.to_owned()),
+            series_slug: None,
+            end_date: Some(end_date),
+        };
+        let candidate = CryptoSubjectParser
+            .extract(&metadata)
+            .expect("extract")
+            .expect("recognized");
+        let MarketSubject::Crypto(subject) = &candidate.subject;
+        // Dec 31, 2026, 11pm EST = Jan 1, 2027 04:00Z.
+        let expected_open = Utc.with_ymd_and_hms(2027, 1, 1, 4, 0, 0).unwrap();
+        assert_eq!(subject.reference_at, Some(expected_open));
+    }
+
+    #[test]
+    fn implausible_year_drift_fails_closed() {
+        // `end_date` is many months away from any calendar-year candidate for
+        // this month/day — the inference must refuse to guess.
+        let metadata = LinkageSourceMetadata {
+            market_id: MarketId::new("0xmarket"),
+            slug: "bitcoin-up-or-down-june-15-3pm-et".to_owned(),
+            question: "Bitcoin Up or Down - June 15, 3PM ET".to_owned(),
+            description: Some(CHAINLINK_RULES.to_owned()),
+            series_slug: None,
+            end_date: Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()),
+        };
+        assert!(
+            CryptoSubjectParser
+                .extract(&metadata)
+                .expect("extract")
+                .is_none(),
+            "June 15 candidates are ~165+ days from a Jan 1 end_date — must fail closed"
         );
     }
 }

@@ -123,6 +123,9 @@ pub struct DomainSourceCursorInfo {
     pub instrument_key: DomainInstrumentKey,
     pub last_event_time: DateTime<Utc>,
     pub status: String,
+    /// Detail from the most recent failed tick; `None` when the last tick
+    /// for this instrument succeeded (R10 ingest hardening).
+    pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -135,6 +138,7 @@ info_from_model!(
         instrument_key,
         last_event_time,
         status,
+        last_error,
         created_at,
         updated_at,
     }
@@ -148,6 +152,9 @@ pub struct UpsertDomainSourceCursor {
     pub instrument_key: DomainInstrumentKey,
     pub last_event_time: DateTime<Utc>,
     pub status: String,
+    /// Set on a failed tick; explicitly cleared to `None` on the next
+    /// success so a resolved error never lingers in the read view.
+    pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 

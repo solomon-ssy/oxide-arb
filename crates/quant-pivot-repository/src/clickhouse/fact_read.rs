@@ -351,7 +351,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .pool
             .client()
             .query(
-                "SELECT ?fields FROM quant_domain_observation \
+                "SELECT ?fields FROM quant_domain_observation FINAL \
                  WHERE instrument_key = ? \
                  AND metric = ? \
                  AND event_time <= fromUnixTimestamp64Milli(?) \

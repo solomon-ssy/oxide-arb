@@ -18,7 +18,7 @@ use quant_pivot_core::{
     prefetch::feature_window::FeatureWindowProvider,
     service::{
         factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
-        feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
+        feature_pipeline::{FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineService},
     },
 };
 use quant_pivot_error::storage::StorageError;
@@ -64,7 +64,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     factor_governance::{publish_all_factor_definitions, register_all_factor_definitions},
     pg::setup_pg,
-    report_pipeline_harness::EmptyLinkageRepo,
+    report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
 use rust_decimal::Decimal;
@@ -325,15 +325,16 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
-    let pipeline = FeaturePipelineService::new(
+    let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         window_provider,
         feature_repo,
-        noop_feature_writer(),
-        Arc::clone(&registry),
-        live_trade_tape_block_cursor_repo(),
-        Arc::new(EmptyLinkageRepo),
-        TradeTapeOnChainConfig::default(),
-    );
+        event_writer: noop_feature_writer(),
+        market_registry: Arc::clone(&registry),
+        block_cursor_repo: live_trade_tape_block_cursor_repo(),
+        linkage_repo: Arc::new(EmptyLinkageRepo),
+        basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        trade_tape_on_chain: TradeTapeOnChainConfig::default(),
+    });
 
     let features = FeaturesConfig::default();
     let domain = DomainConfig::default();

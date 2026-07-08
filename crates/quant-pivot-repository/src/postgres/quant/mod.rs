@@ -2,6 +2,7 @@
 mod account_snapshot;
 mod attribution;
 mod backtest_report;
+mod basis_alert;
 mod capital_allocation;
 mod comparison_report;
 mod dataset;
@@ -31,7 +32,8 @@ mod trade_tape_block_cursor;
 
 pub use {
     account_snapshot::PgAccountSnapshotRepository, attribution::PgAttributionRepository,
-    backtest_report::PgBacktestReportRepository, capital_allocation::PgCapitalAllocationRepository,
+    backtest_report::PgBacktestReportRepository, basis_alert::PgBasisAlertRepository,
+    capital_allocation::PgCapitalAllocationRepository,
     comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
     domain_source_cursor::PgDomainSourceCursorRepository,
     equity_snapshot::PgEquitySnapshotRepository, execution_order::PgExecutionOrderRepository,

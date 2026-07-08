@@ -761,6 +761,18 @@ impl ModelArtifact {
         }
     }
 
+    /// The single market category this artifact declares itself scoped to
+    /// (11.2.2 category routing), or `None` for a generic cross-category
+    /// scorer. Only the weighted-factor family carries a declared scope
+    /// today; every other family is unconditionally generic.
+    #[must_use]
+    pub const fn category_scope(&self) -> Option<MarketCategory> {
+        match self {
+            Self::WeightedFactor(artifact) => artifact.category_scope,
+            Self::Classical(_) | Self::SellScorer(_) => None,
+        }
+    }
+
     /// Validate the family-specific structural invariants.
     ///
     /// # Errors

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     domain::governance::{RuntimeConfigActivationInfo, RuntimeConfigVersionInfo},
-    enums::runtime_config::RuntimeConfigVersionSource,
+    enums::{common::MarketCategory, runtime_config::RuntimeConfigVersionSource},
     runtime_config::ScheduleCadence,
     types::{ContentHash, RuntimeConfigVersionId, SchemaVersion},
 };
@@ -84,6 +84,39 @@ pub enum FieldWidget {
     /// Structured report-schedule list editor (row add/remove + cadence union).
     ScheduleList,
     JsonTree,
+    /// Governed model-version picker (11.2.2 remediation R8), backed by
+    /// `GET /research/models/published-catalog`. See [`ModelPickerProps`]
+    /// for the category/side filtering this widget requires.
+    ModelVersionSelect,
+}
+
+/// Which model-runtime slot a [`FieldWidget::ModelVersionSelect`] field fills,
+/// filtering the picker's candidate list to versions that could actually be
+/// loaded into that slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelPickerSide {
+    /// Buy-side entry ranker (`WeightedFactor` / classical families).
+    Buy,
+    /// Sell-side hold-vs-exit scorer (`HoldVsExitWeighted` family).
+    Sell,
+}
+
+/// Filtering metadata for a [`FieldWidget::ModelVersionSelect`] field.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ModelPickerProps {
+    /// Restrict candidates to this category's scope, or `None` (or an
+    /// artifact declaring `category_scope = None`) for a generic-purpose
+    /// picker (e.g. `model.active_model_version_id`). A category-pointer
+    /// field (e.g. `model.category_model_pointers.crypto`) sets this to
+    /// `Some(MarketCategory::Crypto)`; the picker still offers `None`-scoped
+    /// (generic) versions too, since a category slot may deliberately point
+    /// at the generic scorer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<MarketCategory>,
+    /// Which runtime side this slot loads (Buy ranker vs. Sell scorer);
+    /// families outside this side are never valid candidates.
+    pub side: ModelPickerSide,
 }
 
 /// Presentation hints for a field, independent of its data type / widget.
@@ -471,6 +504,9 @@ pub struct RuntimeConfigSchemaFieldView {
     pub widget: Option<FieldWidget>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantics: Option<FieldSemantics>,
+    /// Category/side filtering for [`FieldWidget::ModelVersionSelect`] fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_picker: Option<ModelPickerProps>,
     /// Compiled-in default value.
     pub default: Value,
     /// Human-readable purpose of the field (from Rustdoc; audit fallback only).

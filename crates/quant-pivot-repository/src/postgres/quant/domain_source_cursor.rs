@@ -55,6 +55,7 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
                 .update_columns([
                     quant_domain_source_cursor::Column::LastEventTime,
                     quant_domain_source_cursor::Column::Status,
+                    quant_domain_source_cursor::Column::LastError,
                     quant_domain_source_cursor::Column::UpdatedAt,
                 ])
                 .to_owned(),

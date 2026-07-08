@@ -35,6 +35,8 @@ jobs:
         run: bash scripts/lint-quant-pivot-errors.sh
       - name: Dead-semantics gate
         run: bash scripts/lint-dead-semantics.sh
+      - name: Acceptance-test-coverage gate
+        run: bash scripts/lint-acceptance-tests.sh
 
       - name: Build
         run: cargo build --workspace

@@ -95,6 +95,13 @@ async fn resolve_is_exit_scorer(
 }
 
 /// Clear runtime-config model pointers that reference a retired version.
+///
+/// Covers `category_model_pointers` alongside the generic active / shadow /
+/// exit-active slots (11.2.2 remediation R7): a category pointer left
+/// dangling after its target retires is never fatal (the online runner falls
+/// back to generic on a load failure), but it silently misroutes every
+/// inference round onto a dead version until an operator notices — the
+/// config must reflect reality the moment a version retires, not eventually.
 pub async fn sync_after_model_retire(
     deps: &RuntimeModelPointerSync,
     retired: &ModelVersionId,
@@ -110,7 +117,14 @@ pub async fn sync_after_model_retire(
     let active_matches = matches(&current.model.active_model_version_id);
     let shadow_matches = matches(&current.model.shadow_model_version_id);
     let exit_active_matches = matches(&current.model.active_exit_model_version_id);
-    if !active_matches && !shadow_matches && !exit_active_matches {
+    let stale_categories: Vec<_> = current
+        .model
+        .category_model_pointers
+        .iter()
+        .filter(|(_, reference)| reference.id == retired_ref.id)
+        .map(|(category, _)| *category)
+        .collect();
+    if !active_matches && !shadow_matches && !exit_active_matches && stale_categories.is_empty() {
         return Ok(());
     }
     let mut config = (*current).clone();
@@ -122,6 +136,14 @@ pub async fn sync_after_model_retire(
     }
     if exit_active_matches {
         config.model.active_exit_model_version_id = None;
+    }
+    for category in &stale_categories {
+        config.model.category_model_pointers.remove(category);
+        tracing::warn!(
+            %retired,
+            ?category,
+            "cleared category_model_pointers entry referencing a retired model version"
+        );
     }
     persist_and_apply(deps, config, reason, activated_by).await
 }

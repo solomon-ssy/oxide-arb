@@ -169,6 +169,36 @@ pub enum GroundingField {
     SeriesSlug,
 }
 
+/// Whether a grounding span is independently-extracted literal evidence or a
+/// value that is a deterministic function of a fully-matched template.
+///
+/// The distinction matters because "every field is grounded" cannot mean the
+/// same check for every field: `asset` / `strike` / `resolution_oracle` are
+/// each extracted from an independent literal occurrence in the source text
+/// and must anchor to their own minimal span, while `comparator` /
+/// `reference_at` / `observation_at` on a matched up/down template are not
+/// separately "written" anywhere in the slug — their value is entailed by the
+/// template match as a whole. Collapsing both into one "any span accepted"
+/// rule (a bare byte-equality check against an arbitrary span) is exactly the
+/// pseudo-grounding hole the anti-hallucination gate exists to close: this
+/// type makes the validator enforce the stronger rule (an independently
+/// literal span) precisely where it applies, never substituting a
+/// template-wide span for genuinely-extracted evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroundingKind {
+    /// A minimal literal excerpt of the source text for a value extracted
+    /// independently of any surrounding template (asset alias, dollar
+    /// amount, oracle citation).
+    LiteralSpan,
+    /// The span covers the entire recognized template match because the
+    /// field's value is a deterministic function of that template as a
+    /// whole (e.g. the comparator / window instants of a matched up/down
+    /// slug) — never used for a field whose value could vary independently
+    /// of the template match.
+    TemplateEntailed,
+}
+
 /// One extracted subject field tied to the literal source-text span it came from.
 ///
 /// The anti-hallucination contract: a candidate whose field cannot be anchored to
@@ -185,6 +215,8 @@ pub struct GroundingSpan {
     pub end: usize,
     /// The literal matched text (denormalized for audit display).
     pub text: String,
+    /// Whether this is independently-literal evidence or template-entailed.
+    pub kind: GroundingKind,
 }
 
 /// The full field → source-span mapping for one accepted subject.
@@ -192,6 +224,20 @@ pub struct GroundingSpan {
 pub struct GroundingProof {
     /// One span per grounded subject field.
     pub spans: Vec<GroundingSpan>,
+}
+
+/// The audited human justification for an operator override.
+///
+/// Present **only** on a `resolver_tier = Override` binding — every
+/// automated-tier resolution carries `None`. This is the override's real
+/// audit trail (never discarded, unlike the pre-remediation stub that dropped
+/// the operator's stated reason and never recorded who acted).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverrideContext {
+    /// Operator-supplied justification (validated non-empty on the wire).
+    pub reason: String,
+    /// The authenticated actor who performed the override.
+    pub actor: String,
 }
 
 /// A validated subject binding: the subject, the feature-source instrument it
@@ -202,8 +248,13 @@ pub struct ResolvedBinding {
     pub subject: MarketSubject,
     /// Canonical feature-source instrument key (e.g. `BINANCE:BTCUSDT:1m`).
     pub instrument_key: DomainInstrumentKey,
-    /// Field → literal-span grounding proof.
+    /// Field → literal-span grounding proof (empty for an override — an
+    /// operator decision is not text-extracted evidence; see
+    /// [`Self::override_context`] for its real audit trail).
     pub grounding: GroundingProof,
+    /// The audited justification, present iff this binding came from an
+    /// operator override.
+    pub override_context: Option<OverrideContext>,
 }
 
 /// The resolver's outcome for one `(market, metadata, ruleset)` triple.
@@ -247,6 +298,15 @@ pub struct MarketLinkage {
     pub content_hash: ContentHash,
     /// When the resolver derived this record (PIT visibility instant).
     pub derived_at: DateTime<Utc>,
+    /// Ledger insertion instant — the tie-break for [`crate::domain::linkage_valid_at`]
+    /// when two revisions share `derived_at` exactly, matching the Postgres
+    /// repository's `(derived_at, created_at, linkage_id)` ordering byte for
+    /// byte. On a freshly-constructed (not-yet-persisted) record this is an
+    /// inert placeholder — the database assigns the authoritative value on
+    /// insert ([`NewMarketLinkage`] does not carry this column at all — see
+    /// [`Self::to_new`]) — so only a value reloaded through
+    /// [`MarketLinkageInfo::into_domain`] participates in a real tie-break.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Canonical projection hashed into [`MarketLinkage::content_hash`].
@@ -415,6 +475,7 @@ impl MarketLinkageInfo {
             metadata_hash: self.metadata_hash,
             content_hash: self.content_hash,
             derived_at: self.derived_at,
+            created_at: self.created_at,
         })
     }
 }
@@ -426,6 +487,7 @@ mod tests {
         PriceComparator, ResolutionOracle, ResolvedBinding,
     };
     use crate::{
+        domain::{GroundingField, GroundingKind},
         enums::domain::{DomainFamily, KlineInterval, LinkageStatus, ResolverTier},
         types::{
             BinanceSymbol, ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey, MarketId,
@@ -453,12 +515,14 @@ mod tests {
             grounding: GroundingProof {
                 spans: vec![GroundingSpan {
                     subject_field: "asset".to_owned(),
-                    source: super::GroundingField::Slug,
+                    source: GroundingField::Slug,
                     start: 0,
                     end: 3,
                     text: "btc".to_owned(),
+                    kind: GroundingKind::LiteralSpan,
                 }],
             },
+            override_context: None,
         }
     }
 
@@ -485,6 +549,7 @@ mod tests {
             metadata_hash,
             content_hash,
             derived_at: Utc::now(),
+            created_at: Utc::now(),
         }
     }
 

@@ -549,11 +549,19 @@ pub struct CryptoCrossCheckConfig {
     /// oracle price. A wider observed basis raises the risk flag and marks the
     /// linkage for review; it never fabricates or clamps a feature value.
     pub max_basis_bps: u32,
+    /// Minimum seconds between two persisted alert rows for the same market.
+    /// A market whose basis persistently exceeds the threshold across many
+    /// consecutive report rounds raises one alert per cooldown window, not
+    /// one per round — the governance feed stays a signal, not a flood.
+    pub alert_cooldown_secs: u64,
 }
 
 impl Default for CryptoCrossCheckConfig {
     fn default() -> Self {
-        Self { max_basis_bps: 50 }
+        Self {
+            max_basis_bps: 50,
+            alert_cooldown_secs: 300,
+        }
     }
 }
 
@@ -564,7 +572,16 @@ pub struct CryptoDomainConfig {
     /// Source visibility delay (seconds) applied to domain-observation PIT
     /// reads: only rows with `event_time <= as_of - source_delay` are visible.
     pub source_delay_secs: u64,
-    /// Days of 1m kline history the ingest worker backfills on bootstrap.
+    /// Days of history the ingest worker backfills on bootstrap, applied as a
+    /// uniform **time** lower bound (`now - backfill_days`) to every domain
+    /// source's fetch window. For Binance (1m klines) this is exact: the
+    /// source pages until it reaches the bound. For Chainlink this is a
+    /// **ceiling, not a guarantee**: `domain_sources.chainlink.max_round_backscan`
+    /// additionally caps bootstrap to a fixed round count (round cadence is
+    /// feed-specific and not translatable to a day count), so a feed whose
+    /// `max_round_backscan` rounds span less than `backfill_days` returns a
+    /// shorter, fail-closed history rather than silently over-fetching RPC
+    /// calls to satisfy the day bound.
     pub backfill_days: u32,
     /// Lookback (seconds) for the underlying momentum feature.
     pub momentum_window_secs: u64,

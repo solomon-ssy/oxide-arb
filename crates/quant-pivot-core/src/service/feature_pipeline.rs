@@ -17,8 +17,9 @@ use crate::{
     },
     observability::feature_fact_writer::FeatureEventWriter,
     prefetch::feature_window::FeatureWindowProvider,
+    service::basis_alert::detect_basis_alerts,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::future::join_all;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
@@ -32,7 +33,8 @@ use quant_pivot_models::{
     types::{DomainInstrumentKey, MarketId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, MarketLinkageRepository, TradeTapeBlockCursorRepository,
+    BasisAlertRepository, FeatureRepository, MarketLinkageRepository,
+    TradeTapeBlockCursorRepository,
 };
 use quant_pivot_research::domain::{
     build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument,
@@ -117,29 +119,35 @@ pub struct FeaturePipelineService {
     market_registry: Arc<MarketRegistry>,
     block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
+    basis_alert_repo: Arc<dyn BasisAlertRepository>,
     trade_tape_on_chain: TradeTapeOnChainConfig,
+}
+
+/// Boot-time dependencies for [`FeaturePipelineService::new`].
+pub struct FeaturePipelineDeps {
+    pub window_provider: FeatureWindowProvider,
+    pub feature_repo: Arc<dyn FeatureRepository>,
+    pub event_writer: Arc<FeatureEventWriter>,
+    pub market_registry: Arc<MarketRegistry>,
+    pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
+    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
+    pub basis_alert_repo: Arc<dyn BasisAlertRepository>,
+    pub trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
 impl FeaturePipelineService {
     /// Wire the service from boot-time dependencies.
     #[must_use]
-    pub fn new(
-        window_provider: FeatureWindowProvider,
-        feature_repo: Arc<dyn FeatureRepository>,
-        event_writer: Arc<FeatureEventWriter>,
-        market_registry: Arc<MarketRegistry>,
-        block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
-        linkage_repo: Arc<dyn MarketLinkageRepository>,
-        trade_tape_on_chain: TradeTapeOnChainConfig,
-    ) -> Self {
+    pub fn new(deps: FeaturePipelineDeps) -> Self {
         Self {
-            window_provider,
-            feature_repo,
-            event_writer,
-            market_registry,
-            block_cursor_repo,
-            linkage_repo,
-            trade_tape_on_chain,
+            window_provider: deps.window_provider,
+            feature_repo: deps.feature_repo,
+            event_writer: deps.event_writer,
+            market_registry: deps.market_registry,
+            block_cursor_repo: deps.block_cursor_repo,
+            linkage_repo: deps.linkage_repo,
+            basis_alert_repo: deps.basis_alert_repo,
+            trade_tape_on_chain: deps.trade_tape_on_chain,
         }
     }
 
@@ -194,11 +202,19 @@ impl FeaturePipelineService {
         let bundles =
             Self::resolve_bundles(&builder, &request, &resolve_jobs, max_concurrent).await?;
 
-        let required = &request.model_requirements.required_features;
+        // The union across every route (generic + every category-specific
+        // model): the null-policy / critical-missing gate is a per-feature
+        // decision the builder only ever consults for a feature that is
+        // structurally applicable to the market being built (a domain
+        // feature is only evaluated when that market's domain slice exists
+        // at all — see `compute_domain_slice`), so folding in every
+        // category's requirement here never falsely gates a market outside
+        // that category.
+        let required = request.model_requirements.union_all();
         let vectors =
-            builder.build_batch(&bundles, required, request.features, request.data_quality);
+            builder.build_batch(&bundles, &required, request.features, request.data_quality);
 
-        let required_names = merged_required_features(required, request.features);
+        let required_names = merged_required_features(&required, request.features);
         let schema = builder.schema();
         let mut accepted = Vec::with_capacity(vectors.len());
         let mut rejected = Vec::new();
@@ -242,6 +258,9 @@ impl FeaturePipelineService {
             .collect::<Vec<_>>();
         self.event_writer.write_batch(ch_rows);
 
+        self.persist_basis_alerts(&accepted, &windows.domain, request.domain)
+            .await?;
+
         Ok(FeaturePipelineResult {
             accepted,
             rejected,
@@ -249,6 +268,39 @@ impl FeaturePipelineService {
             captures,
             data_quality_snapshot,
         })
+    }
+
+    /// Basis cross-check closed loop (11.2.2 remediation R6): every accepted
+    /// vector whose `domain.crypto.basis_vs_resolution_source` exceeds the
+    /// governed threshold is durably recorded — never a
+    /// computed-but-unconsumed feature value. A per-market cooldown keeps a
+    /// persistent divergence from flooding the feed with one row per report
+    /// round.
+    async fn persist_basis_alerts(
+        &self,
+        accepted: &[FeatureVector],
+        domain_inputs: &HashMap<MarketId, DomainSliceInputs>,
+        domain: &DomainConfig,
+    ) -> QuantResult<()> {
+        let cooldown = ChronoDuration::seconds(
+            i64::try_from(domain.crypto.cross_check.alert_cooldown_secs).unwrap_or(i64::MAX),
+        );
+        for alert in detect_basis_alerts(accepted, domain_inputs, domain) {
+            let recent = self
+                .basis_alert_repo
+                .latest_for_market(&alert.market_id)
+                .await
+                .map_err(QuantError::from)?;
+            let cooled_down =
+                recent.is_none_or(|previous| alert.as_of - previous.as_of >= cooldown);
+            if cooled_down {
+                self.basis_alert_repo
+                    .record(alert)
+                    .await
+                    .map_err(QuantError::from)?;
+            }
+        }
+        Ok(())
     }
 
     /// Prefetch the microstructure windows, skipping the `ClickHouse` read entirely

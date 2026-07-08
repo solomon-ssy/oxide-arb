@@ -28,7 +28,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::{DataQualityStatus, OutcomeSide},
+    enums::{
+        common::MarketCategory,
+        quant::{DataQualityStatus, OutcomeSide},
+    },
     types::{
         ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
         Usd,
@@ -305,6 +308,10 @@ impl QuantModelRuntime for WeightedFactorRuntime {
 
     fn required_features(&self) -> Vec<FeatureName> {
         self.artifact.required_features.clone()
+    }
+
+    fn category_scope(&self) -> Option<MarketCategory> {
+        self.artifact.category_scope
     }
 
     fn weight_source(&self) -> WeightSource {

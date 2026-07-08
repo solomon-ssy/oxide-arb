@@ -29,6 +29,7 @@
 
 pub mod account;
 pub mod auth;
+pub mod basis_alerts;
 pub mod bias_tables;
 pub mod data_quality;
 pub mod domain_sources;
@@ -94,6 +95,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(research_jobs::route_specs());
     specs.extend(bias_tables::route_specs());
     specs.extend(market_linkages::route_specs());
+    specs.extend(basis_alerts::route_specs());
     specs.extend(domain_sources::route_specs());
     specs.extend(structural_monitor::route_specs());
     specs.extend(model_governance::route_specs());

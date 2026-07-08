@@ -2,7 +2,7 @@
 
 use crate::{
     execution::breaker::ExecutionBreaker,
-    governance::{BiasTableApplicator, WeightOverlayApplicator},
+    governance::{BiasTableApplicator, CategoryPointerGuard, WeightOverlayApplicator},
     infra::schedule::ReportScheduleRunner,
     ingest::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
@@ -37,6 +37,10 @@ pub struct RuntimeConfigSubscribers {
     /// Reloaded (and content-hash verified) on activation; a bad ref fails the
     /// activation closed.
     pub bias_table: Arc<BiasTableApplicator>,
+    /// `model.category_model_pointers` config-apply-time validator (11.2.2
+    /// remediation R7): a dangling or mis-scoped pointer fails the activation
+    /// closed rather than surfacing only as a runtime fallback.
+    pub category_pointer_guard: Arc<CategoryPointerGuard>,
     /// Deploy-time WS subscription look-ahead (hours); this is a structural
     /// (restart-bound) parameter from `market_data.websocket`, not runtime config.
     pub subscription_window_hours: u64,
@@ -136,6 +140,15 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         self.subscribers
             .bias_table
             .reload(&arc.factors.structural.favorite_longshot)
+            .await?;
+
+        // Validate every category pointer before mutating the live snapshot:
+        // a dangling or mis-scoped pointer must fail the activation closed,
+        // never rely solely on the router's runtime fallback (11.2.2
+        // remediation R7).
+        self.subscribers
+            .category_pointer_guard
+            .validate(&arc.model)
             .await?;
 
         self.propagate(&arc);

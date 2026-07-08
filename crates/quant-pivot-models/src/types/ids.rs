@@ -171,6 +171,10 @@ pub struct ShadowComparisonId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MarketLinkageId(Arc<Uuid>);
 
+/// Basis-cross-check exceedance alert row identifier (11.2.2 remediation R6).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BasisAlertId(Arc<Uuid>);
+
 /// Durable research job identifier (async dataset build / model train / backtest).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResearchJobId(Arc<Uuid>);

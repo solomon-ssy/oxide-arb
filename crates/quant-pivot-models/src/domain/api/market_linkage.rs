@@ -3,6 +3,9 @@
 //! Read surface for the append-only, bitemporal `quant_market_linkage` ledger
 //! (catalog, unresolved review queue, per-market history) plus the governed
 //! mutations: an audited operator override and a manual re-resolution trigger.
+//! Also carries the basis-cross-check alert feed (11.2.2 remediation R6): the
+//! durable, queryable record of every feature-source-vs-settlement-oracle
+//! divergence that crossed the governed threshold.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
@@ -10,10 +13,11 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{DomainSourceCursorInfo, MarketLinkageInfo, pagination::PageRequest},
+    domain::{BasisAlertInfo, DomainSourceCursorInfo, MarketLinkageInfo, pagination::PageRequest},
     enums::domain::{DomainFamily, LinkageStatus, ResolverTier},
     types::{
-        ContentHash, DomainInstrumentKey, MarketId, MarketLinkageId, Probability, ResolverVersion,
+        BasisAlertId, Bps, ContentHash, DomainInstrumentKey, MarketId, MarketLinkageId,
+        Probability, ResolverVersion,
     },
 };
 
@@ -147,6 +151,44 @@ impl From<MarketLinkageInfo> for MarketLinkageDetailView {
     }
 }
 
+/// One historical ledger row for a market's linkage audit trail.
+///
+/// The detail drawer's "history" tab. Every append is a first-class,
+/// immutable audit entry — a resolve pass, or an operator override, in
+/// `derived_at` order (R8: UI/UX closed loop, override/resolve audit trail).
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketLinkageHistoryEntryView {
+    pub linkage_id: MarketLinkageId,
+    pub status: LinkageStatus,
+    pub resolver_tier: ResolverTier,
+    pub resolver_version: ResolverVersion,
+    pub confidence: Probability,
+    /// The full `LinkageOutcome` document (subject + grounding, or reason;
+    /// carries `override_context` when `resolver_tier = override`).
+    pub outcome: serde_json::Value,
+    pub instrument_key: Option<DomainInstrumentKey>,
+    pub content_hash: ContentHash,
+    pub derived_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<MarketLinkageInfo> for MarketLinkageHistoryEntryView {
+    fn from(info: MarketLinkageInfo) -> Self {
+        Self {
+            linkage_id: info.linkage_id,
+            status: info.status,
+            resolver_tier: info.resolver_tier,
+            resolver_version: info.resolver_version,
+            confidence: info.confidence,
+            outcome: info.outcome,
+            instrument_key: info.instrument_key,
+            content_hash: info.content_hash,
+            derived_at: info.derived_at,
+            created_at: info.created_at,
+        }
+    }
+}
+
 /// Summary of one offline resolver pass (returned by the resolve trigger).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkageResolveSummaryView {
@@ -170,6 +212,9 @@ pub struct DomainSourceCursorView {
     pub instrument_key: String,
     pub last_event_time: DateTime<Utc>,
     pub status: String,
+    /// Detail from the most recent failed tick; `null` when the last tick for
+    /// this instrument succeeded (R10 ingest hardening).
+    pub last_error: Option<String>,
     /// Seconds since the last persisted observation (ingest lag proxy).
     pub lag_secs: i64,
     pub updated_at: DateTime<Utc>,
@@ -183,8 +228,51 @@ impl From<DomainSourceCursorInfo> for DomainSourceCursorView {
             instrument_key: info.instrument_key.to_string(),
             last_event_time: info.last_event_time,
             status: info.status,
+            last_error: info.last_error,
             lag_secs,
             updated_at: info.updated_at,
+        }
+    }
+}
+
+/// Paginated filter over the basis-alert feed.
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct BasisAlertListQuery {
+    /// Filter by market.
+    pub market_id: Option<MarketId>,
+    /// Inclusive lower bound on `as_of`.
+    pub from: Option<DateTime<Utc>>,
+    /// Exclusive upper bound on `as_of`.
+    pub to: Option<DateTime<Utc>>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+/// One basis-cross-check exceedance row for the governance feed.
+#[derive(Debug, Clone, Serialize)]
+pub struct BasisAlertView {
+    pub alert_id: BasisAlertId,
+    pub market_id: MarketId,
+    pub instrument_key: String,
+    pub oracle_instrument_key: String,
+    pub basis_bps: Bps,
+    pub threshold_bps: Bps,
+    pub as_of: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<BasisAlertInfo> for BasisAlertView {
+    fn from(info: BasisAlertInfo) -> Self {
+        Self {
+            alert_id: info.alert_id,
+            market_id: info.market_id,
+            instrument_key: info.instrument_key,
+            oracle_instrument_key: info.oracle_instrument_key,
+            basis_bps: info.basis_bps,
+            threshold_bps: info.threshold_bps,
+            as_of: info.as_of,
+            created_at: info.created_at,
         }
     }
 }

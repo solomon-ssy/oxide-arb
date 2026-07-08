@@ -18,9 +18,13 @@ pub trait MarketLinkageGovernancePort: Send + Sync {
     ) -> QuantResult<LinkageResolveSummaryView>;
 
     /// Append an audited operator override binding.
+    ///
+    /// `actor` is the authenticated caller's identity, sourced from the web
+    /// layer's session — never operator-supplied JSON, to prevent spoofing.
     async fn apply_override(
         &self,
         market_id: &MarketId,
         request: OverrideLinkageRequest,
+        actor: String,
     ) -> QuantResult<MarketLinkageInfo>;
 }

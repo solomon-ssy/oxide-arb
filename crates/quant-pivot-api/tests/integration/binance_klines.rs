@@ -80,7 +80,7 @@ async fn live_klines_response_matches_typed_wire_schema() {
 
 #[tokio::test]
 #[ignore = "requires live Binance spot REST API"]
-async fn live_kline_source_fetch_emits_close_and_volume_observations() {
+async fn live_kline_source_fetch_emits_close_observations() {
     let source = BinanceKlineSource::new(live_config());
     let key = btcusdt_1m_key();
     let (from, to) = recent_completed_window();
@@ -97,33 +97,23 @@ async fn live_kline_source_fetch_emits_close_and_volume_observations() {
 
     assert!(
         observations.len() >= 4,
-        "two hours of 1m BTCUSDT should yield many close+volume pairs (got {})",
+        "two hours of 1m BTCUSDT should yield many close observations (got {})",
         observations.len()
     );
-    assert_eq!(observations.len() % 2, 0, "each kline emits close + volume");
 
-    for pair in observations.chunks_exact(2) {
-        let close = &pair[0];
-        let volume = &pair[1];
+    for close in &observations {
         assert_eq!(close.family, DomainFamily::Crypto);
         assert_eq!(close.source_id, DomainSourceId::binance());
         assert_eq!(close.instrument_key, key);
         assert_eq!(close.metric, DomainMetric::Close);
         assert!(close.value > Decimal::ZERO);
-        assert_eq!(volume.metric, DomainMetric::Volume);
-        assert!(volume.value >= Decimal::ZERO);
-        assert_eq!(close.observed_at, volume.observed_at);
         assert_eq!(close.publish_time, close.observed_at);
         assert!(close.observed_at > from);
         // Binance `endTime` filters on open time; close time may trail `to` by one interval.
         assert!(close.observed_at <= to + Duration::minutes(1));
     }
 
-    let closes: Vec<_> = observations
-        .iter()
-        .filter(|row| row.metric == DomainMetric::Close)
-        .collect();
-    for window in closes.windows(2) {
+    for window in observations.windows(2) {
         assert!(
             window[0].observed_at <= window[1].observed_at,
             "close observations must be ascending by event time"

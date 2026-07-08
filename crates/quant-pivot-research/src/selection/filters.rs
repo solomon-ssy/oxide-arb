@@ -296,12 +296,15 @@ impl SelectionFilter for ModelEligibilityFilter {
     }
 
     fn evaluate(&self, ctx: &MarketCandidateCtx<'_>) -> FilterOutcome {
-        let required = &ctx.model_requirements.required_features;
+        // Resolved per-candidate: `generic` ∪ this candidate's OWN category's
+        // specific requirements — never a different category's requirement
+        // (a crypto-only domain requirement must never gate a Sports market).
+        let required = ctx.model_requirements.for_category(ctx.candidate.category);
         if required.is_empty() {
             return FilterOutcome::Keep;
         }
         let oracle = FeatureAvailabilityOracle::new(ctx.feature_schema);
-        let missing = oracle.missing_required(ctx.candidate, required);
+        let missing = oracle.missing_required(ctx.candidate, &required);
         if missing.is_empty() {
             FilterOutcome::Keep
         } else {
