@@ -22,8 +22,12 @@ use quant_pivot_models::{
         JobProgressSink, ModelVersionInfo, NewModelRun, NewModelVersion, ResearchJobProgress,
         TrainingDatasetInfo,
     },
-    enums::quant::{
-        ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
+    enums::{
+        common::MarketCategory,
+        quant::{
+            ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus,
+            TrainingDatasetStatus,
+        },
     },
     runtime_config::sections::FactorsConfig,
     types::{
@@ -47,8 +51,9 @@ use quant_pivot_research::{
         ModelFamily, ModelTrainer, Regularization, ReturnModelSpec, ScoreMultiplierSpec,
         SellScorerOutputSpec, SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest,
         TrainSellScorerRequest, TrainedModelArtifact, TrainingObjective, ValidationSpec,
-        WeightedFactorTrainer,
+        WeightedFactorTrainer, infer_training_category_scope,
     },
+    selection::ModelFeatureRequirements,
     training::{DatasetParquetCodec, TrainingExample},
 };
 #[cfg(feature = "ml-classical")]
@@ -127,6 +132,10 @@ pub struct TrainModelInput {
     pub prediction_horizon_secs: u64,
     /// Rolling validation folds.
     pub validation_folds: u32,
+    /// Categories enabled in the frozen selection policy (for scope inference).
+    pub selection_enabled_categories: Vec<MarketCategory>,
+    /// Explicit category scope override; when `None`, inferred from spec + examples.
+    pub category_scope: Option<MarketCategory>,
 }
 
 /// Successful training outcome — version row plus the materialization run id.
@@ -350,6 +359,35 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         examples: &[TrainingExample],
     ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+        let spec = self
+            .deps
+            .model_registry_repo
+            .find_model_spec_by_id(&input.model_spec_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::InvalidModelArtifact {
+                    detail: format!("model spec {} not found for training", input.model_spec_id),
+                })
+            })?;
+        let requirements: ModelFeatureRequirements =
+            serde_json::from_value(spec.feature_requirements).map_err(|error| {
+                QuantError::config(format!(
+                    "model spec {} has invalid feature_requirements: {error}",
+                    input.model_spec_id
+                ))
+            })?;
+        let category_scope = input.category_scope.or_else(|| {
+            infer_training_category_scope(
+                examples,
+                &requirements,
+                &input.selection_enabled_categories,
+            )
+        });
+        let required_features = match category_scope {
+            Some(category) => requirements.for_category(category),
+            None => requirements.generic.clone(),
+        };
         let seed_weights = self.seed_weights(examples);
         let request = TrainModelRequest {
             examples: examples.to_vec(),
@@ -365,7 +403,8 @@ impl ModelTrainerService {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
+            required_features,
+            category_scope,
         };
         // Offload the CPU-bound fit to a blocking thread so it never occupies an
         // async runtime worker (starving other jobs' heartbeats).

@@ -219,6 +219,7 @@ impl ResearchBundle {
 
         let model_governance = Self::assemble_model_governance(
             deps,
+            &artifact_store,
             &model_registry_repo,
             &offline.backtest_report,
             &shadow_comparison_repo,
@@ -345,6 +346,7 @@ impl ResearchBundle {
     /// Wire offline publish / rollback / dataset-promotion governance (3.7).
     fn assemble_model_governance(
         deps: &ResearchBundleDeps<'_>,
+        artifact_store: &Arc<dyn ArtifactStore>,
         model_registry_repo: &Arc<dyn ModelRegistryRepository>,
         backtest_report_repo: &Arc<dyn BacktestReportRepository>,
         shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
@@ -362,6 +364,7 @@ impl ResearchBundle {
             shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
             governance_audit_repo: Arc::clone(governance_audit_repo),
             dataset_repo: Arc::clone(training_dataset_repo),
+            artifact_store: Arc::clone(artifact_store),
             gate,
             runtime_config: Arc::clone(&deps.governance.runtime_config),
             runtime_config_apply,

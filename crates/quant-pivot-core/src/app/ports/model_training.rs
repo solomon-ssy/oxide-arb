@@ -145,6 +145,9 @@ impl ModelTrainingPort for CoreModelTrainingPort {
             .model_family
             .parse()
             .map_err(|error: ModelFamilyParseError| QuantError::config(error.to_string()))?;
+        let runtime = self
+            .load_runtime_config(&request.runtime_config_version_id)
+            .await?;
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let outcome = service
             .train(
@@ -160,6 +163,8 @@ impl ModelTrainingPort for CoreModelTrainingPort {
                     },
                     prediction_horizon_secs: request.prediction_horizon_secs,
                     validation_folds: request.validation_folds,
+                    selection_enabled_categories: runtime.selection.enabled_categories.clone(),
+                    category_scope: None,
                 },
                 &*progress,
                 &cancel,

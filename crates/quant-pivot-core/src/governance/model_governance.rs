@@ -49,12 +49,14 @@ use quant_pivot_repository::traits::{
     RuntimeConfigVersionRepository, ShadowComparisonRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
+    artifact::ArtifactStore,
     backtest::BacktestReport,
     gates::{
         GateId, GateIntent, GateOutcome, GateSubject, ModelQualityGate, QualityGateDecision,
         QualityGateFailure, QualityGateInput, QualityGateReport, QualityGateThresholds,
         SellQualityGateThresholds,
     },
+    model::{ModelArtifact, load_hash_verified_artifact, validate_category_scope_weights},
     training::{DatasetCoverage, LeakageFindings},
 };
 use rust_decimal::Decimal;
@@ -78,6 +80,8 @@ pub struct ModelGovernanceDeps {
     pub governance_audit_repo: Arc<dyn ModelGovernanceAuditRepository>,
     /// Training-dataset ledger (promotion).
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Content-addressed artifact store (publish-time category-scope guard).
+    pub artifact_store: Arc<dyn ArtifactStore>,
     /// The model quality gate.
     pub gate: Arc<dyn ModelQualityGate>,
     /// Active runtime config (gate thresholds + shadow window).
@@ -169,6 +173,16 @@ impl ModelGovernanceService {
         }
     }
 
+    /// Optional publish guard (11.2.2): Crypto-scoped weighted artifacts must
+    /// carry non-zero weight on at least one domain-crypto factor column.
+    async fn validate_publish_artifact(&self, version: &ModelVersionInfo) -> QuantResult<()> {
+        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        if let ModelArtifact::WeightedFactor(weighted) = artifact {
+            validate_category_scope_weights(weighted.category_scope, &weighted.weights)?;
+        }
+        Ok(())
+    }
+
     /// Retire every currently published version for a spec (single-active invariant).
     async fn retire_published_predecessors(
         &self,
@@ -248,6 +262,8 @@ impl ModelGovernancePort for ModelGovernanceService {
                 &version.model_version_id,
             ));
         }
+
+        self.validate_publish_artifact(&version).await?;
 
         // Capture the rollback target before retiring predecessors (most recent
         // published version for this spec, if any).

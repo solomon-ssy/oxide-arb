@@ -7,7 +7,7 @@
 | [runbook.md §8](./runbook.md) | 冷启动：创建 spec → 因子 → 训练集 → train → publish → 出报告 |
 | [03-data-factor-model-pipeline.md §12](../plans/quant-pivot/03-data-factor-model-pipeline.md) | 离线研究生命周期概念规格 |
 | [phase-03/03.8-vertical-domain-closed-loop.md](../plans/quant-pivot/phase-03/03.8-vertical-domain-closed-loop.md) | 03.8 垂直闭环（**已被 11.2 取代**） |
-| [phase-11/11.2-polymarket-vertical-alpha.md](../plans/quant-pivot/phase-11/11.2-polymarket-vertical-alpha.md) | ModelRouting / category_scope 的**权威设计**（待实现） |
+| [phase-11/11.2-polymarket-vertical-alpha.md](../plans/quant-pivot/phase-11/11.2-polymarket-vertical-alpha.md) | ModelRouting / category_scope 的**权威设计**（Phase 11.2.2 已落地） |
 
 ---
 
@@ -21,14 +21,15 @@ ModelSpec（规格，研究线的「合同」）
         └── 线上只认 Published artifact
 
 RuntimeConfig.model（同时在线的「插槽」，各 1 个）
-  ├── active_model_version_id          ← Buy 侧排序（任意 family，除 exit scorer）
+  ├── active_model_version_id          ← Buy 侧默认排序（generic cross-category）
   ├── shadow_model_version_id          ← Buy 侧 shadow 对比（可选，1 个）
-  └── active_exit_model_version_id     ← Sell 侧 hold-vs-exit（HoldVsExitWeighted）
+  ├── active_exit_model_version_id     ← Sell 侧 hold-vs-exit（HoldVsExitWeighted）
+  └── category_model_pointers.{cat}    ← Buy 侧 per-category override（11.2.2；空则回落 generic）
 ```
 
 | 层级 | 存什么 | 创建入口 | 典型数量 |
 |------|--------|----------|----------|
-| **ModelSpec** | 名称、`model_family`、声明性 `prediction_horizon_secs`、schema 版本、`spec_json` | `POST /research/model-specs` | 按**研究线**规划，不是按每次实验 |
+| **ModelSpec** | 名称、`model_family`、声明性 `prediction_horizon_secs`、schema 版本、`feature_requirements`、`spec_json` | `POST /research/model-specs` | 按**研究线**规划，不是按每次实验 |
 | **ModelVersion** | 冻结 artifact（权重、乘子、horizon 等） | `POST /research/models/train` 或治理导入 | 同一 spec 下可有很多版本 |
 | **Runtime 指针** | 当前线上用哪个 version | publish 自动 sync，或 runtime-config patch | Buy 1 + Shadow 0–1 + Exit 0–1 |
 
@@ -70,7 +71,7 @@ RuntimeConfig.model（同时在线的「插槽」，各 1 个）
 | **不同 prediction_horizon 意图**（如 1h vs 24h） | ✅ | 不同 horizon = 不同标签语义 + 不同 artifact horizon 乘子 + 不同推荐持仓周期 → **独立研究线** |
 | **feature / label schema 版本升级** | ✅ | 新 schema 是新的数据合同，应新 spec（或明确命名的 v2 spec） |
 | 不同业务命名/审计线（如「bootstrap」vs「production-24h」） | ✅ 可选 | 治理清晰时可分 spec；也可只用 spec 内 version 号区分 |
-| 按 market category 分模型（crypto vs politics） | ⚠️ 未来 | **当前未实现** category routing（见 §7）；现在只有 1 个 generic Buy active |
+| 按 market category 分模型（crypto vs politics） | ✅ 可选 specialist | **已实现** category routing（见 §7 / §8.4）；为 proven vertical 增 **1 个** specialist spec + `category_model_pointers` |
 
 **经验法则**：
 
@@ -357,7 +358,51 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | P1 可选预建 | `sell-hold-vs-exit-baseline` | `hold_vs_exit_weighted` | `86400` | 可先建 spec，等平仓样本再 train |
 | 暂不建 | `classical-*` | `classical_*` | — | 无 settlement 标签，train 会 insufficient_labels |
 
-`spec_json` 冷启动示例：
+#### 5.1.1 第一次冷启动：UI「特征需求」与「规格元数据」填什么？
+
+这是 Day 0 在 **研究 → 模型规格 → 新建** 创建 `buy-weighted-baseline` 时，三个容易填错的区域。
+
+| UI 区域 | 冷启动第一次怎么填 | 为什么 |
+|---------|-------------------|--------|
+| **通用需求** | **留空**（不选任何 feature） | 第一份 spec 是 **generic 跨 category** Buy 排序器；空集合 = 不在 model-spec 层做额外 feature 门槛，只靠 runtime-config 的 selection / 因子平面过滤。Dataset plan/build 与线上一致，不会因误填 `domain.*` 把整类市场排光。 |
+| **按分类的附加需求** | **留空**（不选 category、不点 Crypto 模板） | `by_category` 留给 ** specialist spec**（§8.4）；Day 1 还没有 category pointer，也不该在 baseline 上挂 Crypto domain 特征——否则 Crypto 样本会被 Oracle fail-closed，其它 category 不受影响但合同语义混乱。 |
+| **规格元数据（JSON）** | **`{}`** 或下方备注 JSON | **后端训练/推理不读**；仅人工审计。权重、因子 enablement、category 路由都在 runtime-config + train artifact，不要写进 `spec_json`。 |
+
+**可选（v1 publish 之后若要收紧）**：在 **通用需求** 加 `book.spread_bps`，要求候选必须有可观测 spread 才进训练/排序——这是收紧，不是冷启动必做。
+
+**完整 UI/API 示例（Day 1 推荐值）**：
+
+```json
+{
+  "name": "buy-weighted-baseline",
+  "model_family": "weighted_factor",
+  "prediction_horizon_secs": 86400,
+  "feature_schema_version": 5,
+  "label_schema_version": 1,
+  "feature_requirements": {
+    "generic": [],
+    "by_category": {}
+  },
+  "spec_json": {
+    "tier": "bootstrap",
+    "intent": "day-1 generic buy ranker; no category routing yet",
+    "owner": "quant-team"
+  },
+  "reason": "bootstrap first model spec"
+}
+```
+
+> **UI 操作对照**：通用需求 / 按分类附加需求 — 两个多选框都**不要选**；规格元数据 — 粘贴上表 `spec_json` 或留 `{}`。`feature_schema_version` 填 **5**（与当前 runtime-config 默认一致，见 §6.3）。
+
+**三个字段的职责边界（避免混用）**：
+
+| 字段 | 谁消费 | 冷启动 |
+|------|--------|--------|
+| `feature_requirements` | Dataset plan/build 的 PIT selection；train 时写入 artifact `required_features` / 推断 `category_scope` | generic + by_category **皆空** |
+| `spec_json` | **无人**（元数据） | `{}` 或备注 |
+| runtime-config `features.required_features` | 线上 selection 的 generic 门槛（与 active model 合并） | 保持默认 `[]`；与 spec 独立 |
+
+`spec_json` 冷启动备注示例（与 `feature_requirements` 无关，二选一即可）：
 
 ```json
 {
@@ -419,9 +464,19 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | `name` | `buy-weighted-baseline` | 稳定治理名 |
 | `model_family` | `weighted_factor` | |
 | `prediction_horizon_secs` | `86400` | 声明意图；**线上以 artifact 为准**（train 时对齐） |
-| `feature_schema_version` | `1` | 与 active runtime-config 一致 |
+| `feature_schema_version` | `5` | 与 active runtime-config 一致（当前默认） |
 | `label_schema_version` | `1` | 与 active runtime-config 一致 |
-| `spec_json` | `{}` 或备注 JSON | **后端不消费**；见 [runbook §8.1](./runbook.md) |
+| `feature_requirements.generic` | **`[]`（留空）** | 不在 spec 层加 feature 门槛；详见 §5.1.1 |
+| `feature_requirements.by_category` | **`{}`（留空）** | Day 1 不做 category specialist；Crypto 模板留给 §8.4 |
+| `spec_json` | `{}` 或 §5.1.1 备注 JSON | **后端不消费**；勿存权重/因子配置 |
+
+**UI 速查（第一次新建）**：
+
+```text
+通用需求          → 不选
+按分类的附加需求   → 不选（勿点「Fill crypto template」）
+规格元数据 JSON   → {} 或 {"tier":"bootstrap",...}
+```
 
 ### 6.4 常见反模式
 
@@ -432,30 +487,91 @@ buy-weighted-intraday     prediction_horizon_secs=3600   label_horizon=3600
 | spec 填 horizon=3600，train 用默认 86400 | 治理声明与 artifact 不一致，推荐持仓周期「货不对板」 | train 时显式传 `prediction_horizon_secs`，与 spec 一致 |
 | 只建 classical spec 指望冷启动出报告 | 标签未成熟，train/publish 长期 blocked | 先 `weighted_factor` publish |
 | 用 `spec_json` 存权重 | 后端不读；权重在 runtime-config seed + train artifact | 权重走 train / runtime-config |
+| 冷启动 baseline 点 Crypto 模板 / 填 `by_category.crypto` | Dataset build 对 Crypto 样本 Oracle fail-closed；baseline 语义变成「半 specialist」 | Day 1 **两项特征需求皆留空**；Crypto 另建 spec（§8.4） |
 
 ---
 
 ## 7. 当前系统边界（规划 vs 现状）
 
-以下能力在 **设计文档** 中有描述，**生产代码尚未实现**——规划 spec 时不要假设已可用：
+以下能力在 **设计文档** 中有描述；标注 **已落地** 的可在生产中直接使用：
 
 | 能力 | 状态 | 对 spec 策略的影响 |
 |------|------|-------------------|
-| `ModelRouting::CategorySpecific` | ❌ 未落地（权威设计在 [11.2 §3.8](../plans/quant-pivot/phase-11/11.2-polymarket-vertical-alpha.md)） | 不能「每 category 一个 active Buy 模型」 |
-| `WeightedFactorModelArtifact.category_scope` | ❌ 未落地 | 不能按 category 过滤 artifact |
-| `FeatureAvailabilityOracle` domain 感知 | ❌ 未落地（11.2） | 不能按 category 排除缺 domain 数据的市场 |
+| `ModelRouting::CategorySpecific` + `category_model_pointers` | ✅ 已落地（11.2.2） | 可为 Crypto 等 vertical 配置 **1 个** specialist Buy 模型；无 pointer 时回落 `active_model_version_id` |
+| `WeightedFactorModelArtifact.category_scope` | ✅ 已落地 | 训练时从 spec `by_category` / 数据集 category / selection policy 推断；publish 时校验 Crypto scope 须含 domain 因子权重 |
+| `ModelSpec.feature_requirements` | ✅ 已落地 | UI 结构化编辑；驱动 selection eligibility + 训练 `required_features` |
+| `FeatureAvailabilityOracle` domain 感知 | ⚠️ 部分落地 | Chainlink oracle 可用性检查仍在推进；Crypto domain 特征已可物化 |
 | ModelSpec.prediction_horizon → train 自动继承 | ❌ 未强制 | train API 单独传 horizon，需人工对齐 |
 | spec_json 强类型 / 驱动训练超参 | ❌ 故意不做 | spec_json 仅元数据 |
 
-**现状下的最佳实践**：用 **少量 spec（按 family + horizon + schema）** + **同 spec 多 version** + **shadow** 完成迭代；category 差异通过 **market selector / factor enablement / runtime-config** 表达，而不是复制十个 WeightedFactor spec。
+**现状下的最佳实践**：用 **少量 spec（按 family + horizon + schema）** + **同 spec 多 version** + **shadow** 完成迭代；category 差异通过 **`feature_requirements.by_category` + category pointer + 因子平面** 表达，而不是为每个 category 复制十个 WeightedFactor spec。
 
 ---
 
-## 7A. 是否建议落地 ModelRouting 与 category_scope？
+## 7A. ModelRouting 与 category_scope（已落地）
 
-**结论：建议规划并落地，但要按依赖顺序分阶段；不要现在就为每个 category 建多个 spec。**
+**结论：Phase 11.2.2 已交付 category routing；仅对 proven IC lift 的 vertical（如 Crypto）增 1 个 specialist spec。**
 
-### 7A.1 为什么需要（业务动机）
+### 7A.1 运行时行为
+
+- `RuntimeConfig.model.category_model_pointers.{category}` — 指向一个 **Published** Buy 侧 `ModelVersionId`。
+- `ModelRunner::infer_routed_cross_section` — 按 `market.category` 选 specialist；pointer 为空或 load 失败时 **回落 generic** `active_model_version_id`（不 fail 整份报告）。
+- `CategoryPointerGuard` — runtime-config **激活时**拒绝 `category_scope` 与 pointer key 不一致的版本；`ModelRunner` 在 load 时再次 fail-closed。
+- `WeightedFactorModelArtifact.category_scope: Option<MarketCategory>` — 训练产物声明适用范围；`None` = generic cross-category scorer。
+
+### 7A.2 训练产物 `category_scope` 推断顺序
+
+训练服务按以下 precedence 冻结 `category_scope`（可被显式 override）：
+
+1. `TrainModelInput.category_scope` 显式传参（内部 / CLI）。
+2. Model spec `feature_requirements.by_category` **仅有 1 个 key** → 该 category。
+3. Runtime selection `enabled_categories` **仅有 1 个 entry** → 该 category。
+4. 物化样本的 `market.category` ** unanimous** → 该 category（Crypto-only dataset build 自动命中）。
+5. 否则 `None`（generic scorer）。
+
+Publish 时对 `category_scope = Crypto` 的 weighted artifact 额外校验：至少一个非零 `domain_crypto_strike_pressure` 或 `domain_crypto_beta_regime` 权重。
+
+### 7A.3 推荐 spec 策略（落地后）
+
+| | 落地前（Phase 3） | 现在（11.2.2+） |
+|---|--------------|----------------|
+| Buy active 插槽 | 1 global | 1 global default + **可选** per-category pointer |
+| spec 是否按 category 复制 | **否** | **仅 specialist vertical 增 1 个**（如 `buy-weighted-crypto`） |
+| Crypto 无 domain 数据 | selector 过滤 | Oracle fail-closed + 回落 generic |
+| 训练 | 1 个 global dataset | category-filtered dataset **可选**；`category_scope` 自动推断 |
+
+### 7A.4 Crypto specialist spec 模板
+
+```json
+{
+  "name": "buy-weighted-crypto",
+  "model_family": "weighted_factor",
+  "prediction_horizon_secs": 86400,
+  "feature_schema_version": 5,
+  "feature_requirements": {
+    "generic": ["book.spread_bps"],
+    "by_category": {
+      "crypto": [
+        "domain.crypto.distance_to_strike",
+        "domain.crypto.underlying_momentum",
+        "domain.crypto.underlying_realized_vol",
+        "domain.crypto.time_to_observation",
+        "domain.crypto.basis_vs_resolution_source"
+      ]
+    }
+  }
+}
+```
+
+训练完成后 publish → 在运行配置中将 `model.category_model_pointers.crypto` 指向该 Published version（见 §8.4）。
+
+---
+
+## 7B. 历史规划备忘（ superseded by §7A ）
+
+以下段落保留决策脉络；**以 §7 / §7A 现状为准**。
+
+### 7B.1 为什么需要 category routing（业务动机）
 
 Polymarket 不同 category 的定价机制差异很大：
 
@@ -522,7 +638,7 @@ pub enum ModelRouting {
 
 ### 8.1 冷启动第一天
 
-1. 创建 **1 个** `buy-weighted-baseline` spec（`weighted_factor`, horizon=86400）  
+1. 创建 **1 个** `buy-weighted-baseline` spec（`weighted_factor`, horizon=86400）— **特征需求两项留空**，`spec_json` 用 `{}` 或备注（§5.1.1）  
 2. 注册并 publish 启用因子（[runbook §8.1 Step 0.6](./runbook.md)）  
 3. ingest → plan → build → train → backtest → publish  
 4. 确认 `model.active_model_version_id` 非空  
@@ -533,6 +649,22 @@ pub enum ModelRouting {
 1. 创建 **1 个** `sell-hold-vs-exit-baseline` spec（`hold_vs_exit_weighted`）  
 2. 累积 exit 样本 → build exit dataset → train → publish  
 3. 确认 `model.active_exit_model_version_id` 非空  
+
+### 8.4 配置 Crypto category pointer（11.2.2 runbook）
+
+**前置**：generic Buy 模型已 publish（`active_model_version_id` 非空）；Crypto domain 因子已 publish；可选 specialist spec 已 train + publish 且 artifact `category_scope = crypto`。
+
+1. **创建 specialist spec**（若尚未有）— UI：研究 → 模型规格 → 新建；使用 **Fill crypto template** 填充 `feature_requirements.by_category.crypto`；`feature_schema_version` 建议 **5**。
+2. **构建 Crypto-only 训练集** — selection `enabled_categories` 含 `crypto`；build dataset → train → backtest → publish specialist version。
+3. **配置 pointer** — 运行配置 → `model.category_model_pointers.crypto` → 选择刚 publish 的 version（picker 仅展示 `category_scope ∈ {None, Crypto}` 的 Published Buy 版本）。
+4. **激活 runtime-config** — `CategoryPointerGuard` 在 apply 时校验 scope；通过后下一 report round 对 Crypto 市场路由 specialist，其余 category 仍走 generic。
+5. **验证** — 报告 pipeline 日志中可见 `resolve_model_route`；若 pointer 版本 retired，retire-sync 会自动清除 dangling pointer。
+
+**回落行为**：pointer 留空 → 全部 Crypto 市场使用 generic active；pointer 指向 retired / scope 不匹配版本 → load 时 fail-closed 并回落 generic（不会 silent 用错模型）。
+
+**勿做**：为每个 category 复制 spec 却不 train/publish specialist — pointer 只能指向真实 Published artifact。
+
+---
 
 ### 8.3 加 Classical shadow
 
@@ -547,11 +679,12 @@ pub enum ModelRouting {
 
 | 动作 | API | UI |
 |------|-----|-----|
-| 创建 spec | `POST /research/model-specs` | 研究 → 模型 → 新建模型规格 |
+| 创建 spec | `POST /research/model-specs` | 研究 → 模型规格 → 新建（含 `feature_requirements` 编辑器） |
 | 列出 spec | `GET /research/model-specs` | 训练 / 数据集表单的 spec 下拉 |
-| 训练 version | `POST /research/models/train` | 研究 → 模型 → 训练模型 |
+| 训练 version | `POST /research/models/train` | 研究 → 已训练模型 → 训练模型 |
 | 发布 | `POST /research/models/{id}/publish` | 模型详情 → 发布 |
 | Shadow | runtime-config patch `model.shadow_model_version_id` | 运行配置 |
+| Category pointer | runtime-config patch `model.category_model_pointers.{cat}` | 运行配置 → Buy 侧 category 模型选择器 |
 
 ---
 
@@ -565,6 +698,6 @@ pub enum ModelRouting {
 | classical 六种都要建吗？ | **否** — shadow 首选 `classical_logistic_regression`；升级候选 `classical_random_forest` |
 | 线上能同时跑几个 Buy 模型？ | **1 active + 0～1 shadow**；weighted 与 classical **互斥占 active** |
 | 完整闭环推荐几个 spec？ | **3～5 个 catalog 上限**：buy-weighted + sell-exit +（可选）classical-lr +（可选）intraday +（11.2 后）crypto specialist |
-| ModelRouting / category_scope？ | **建议落地**，跟在 11.2 因子平面之后；**现在不要**按 category 复制 spec |
+| ModelRouting / category_scope？ | **已落地**（11.2.2）；仅对 proven vertical 增 1 个 specialist spec + pointer（见 §8.4） |
 
 规范创建入口始终是 API/UI 治理写路径 — **没有 migration seed**。新建 spec 后走完整 [runbook §8.1](./runbook.md) 闭环，才是生产级做法。

@@ -724,6 +724,8 @@ async fn train_then_backtest_then_calibrate_e2e() {
                 },
                 prediction_horizon_secs: 86_400,
                 validation_folds: 3,
+                selection_enabled_categories: vec![],
+                category_scope: None,
             },
             &NoopProgressSink,
             &CancellationToken::new(),

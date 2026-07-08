@@ -8,6 +8,7 @@
 
 pub mod artifact;
 pub mod calibration;
+pub mod category_scope;
 #[cfg(feature = "ml-classical")]
 pub mod classical;
 #[cfg(feature = "ml-classical")]
@@ -40,6 +41,7 @@ pub use calibration::{
     calibrate_horizon_multipliers, calibrate_liquidity_multipliers, calibrate_return_model,
     calibrate_score_multipliers, calibrate_substitution_rules, calibrate_weighted_artifact,
 };
+pub use category_scope::{infer_training_category_scope, validate_category_scope_weights};
 #[cfg(feature = "ml-classical")]
 pub use classical::{
     CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry, ClassicalModelAdapter,

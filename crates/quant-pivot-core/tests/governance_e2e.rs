@@ -47,8 +47,14 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::{
+    artifact::{ArtifactStore, LocalArtifactStore},
     backtest::{ExpectedVsRealized, PnlSimulation},
+    factors::names::LIQUIDITY_DEPTH,
     gates::{DefaultModelQualityGate, ModelQualityGate},
+    model::{
+        FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
+        SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+    },
 };
 use quant_pivot_test_support::pg::setup_pg;
 use rust_decimal_macros::dec;
@@ -58,6 +64,7 @@ use sea_orm::DatabaseConnection;
 struct GovernanceHarness {
     service: ModelGovernanceService,
     store: Arc<RuntimeConfigStore>,
+    artifact_store: Arc<dyn ArtifactStore>,
 }
 
 /// Minimal [`RuntimeConfigPort`] for integration tests (store swap only).
@@ -94,6 +101,13 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()));
     bootstrap_runtime_config_activation(runtime_config_repo.as_ref(), &config).await;
 
+    let artifact_store: Arc<dyn ArtifactStore> =
+        Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(
+            "qp_governance_e2e_{}_{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))));
+
     let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
     let apply: Arc<dyn RuntimeConfigPort> = Arc::new(TestRuntimeConfigApply {
         store: Arc::clone(&store),
@@ -104,12 +118,17 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
         governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
         dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+        artifact_store: Arc::clone(&artifact_store),
         gate,
         runtime_config: Arc::clone(&store),
         runtime_config_apply: apply,
         runtime_config_repo,
     });
-    GovernanceHarness { service, store }
+    GovernanceHarness {
+        service,
+        store,
+        artifact_store,
+    }
 }
 
 async fn bootstrap_runtime_config_activation(
@@ -243,18 +262,20 @@ async fn seed_dataset(
 
 async fn seed_version(
     db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
     seed: char,
     version: i32,
     dataset: Option<TrainingDatasetId>,
 ) -> ModelVersionId {
     let id = ModelVersionId::from_v7();
+    let artifact_hash = store_weighted_artifact(artifact_store, &id, seed).await;
     PgModelRegistryRepository::new(db.clone())
         .create_model_version(NewModelVersion {
             model_version_id: id.clone(),
             model_spec_id: spec.clone(),
             version,
-            artifact_hash: content_hash(u32::from(seed)),
+            artifact_hash,
             training_dataset_id: dataset,
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
@@ -265,6 +286,41 @@ async fn seed_version(
         .await
         .expect("model version");
     id
+}
+
+async fn store_weighted_artifact(
+    store: &Arc<dyn ArtifactStore>,
+    model_version_id: &ModelVersionId,
+    seed: char,
+) -> ContentHash {
+    let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
+        header: ModelArtifactHeader {
+            model_version_id: model_version_id.clone(),
+            model_family: ModelFamily::WeightedFactor,
+            feature_schema_hash: content_hash(u32::from('f')),
+            factor_schema_hash: content_hash(u32::from('g')),
+        },
+        weights: vec![FactorWeight {
+            factor: LIQUIDITY_DEPTH,
+            weight: dec!(1),
+        }],
+        prediction_horizon_secs: 86_400,
+        multipliers: ScoreMultiplierSpec::conservative(),
+        substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+        return_model: ReturnModelSpec::heuristic_default(),
+        required_features: Vec::new(),
+        objective_report: None,
+        category_scope: None,
+    }));
+    artifact.validate().expect("artifact valid");
+    let artifact_hash = artifact.content_hash().expect("hash");
+    let key = ModelArtifact::artifact_key(&artifact_hash).expect("key");
+    store
+        .put(key, &artifact.to_bytes().expect("bytes"))
+        .await
+        .expect("store artifact");
+    let _ = seed;
+    artifact_hash
 }
 
 async fn seed_backtest(
@@ -372,11 +428,11 @@ async fn publish_requires_quality_gate_pass() {
     let db = pool.connection().clone();
     let _rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
     // No dataset, no backtest → coverage + sample gates fail.
-    let candidate = seed_version(&db, &spec, 'a', 1, None).await;
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None).await;
 
-    let result = harness(&db)
-        .await
+    let result = harness
         .service
         .publish(
             PublishModelCommand {
@@ -419,12 +475,12 @@ async fn publish_requires_backtest_report() {
         '1',
     )
     .await;
-    let candidate = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    let harness = harness(&db).await;
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
     // Deliberately no backtest report.
 
-    let result = harness(&db)
-        .await
+    let result = harness
         .service
         .publish(
             PublishModelCommand {
@@ -461,12 +517,12 @@ async fn publish_requires_shadow_stability() {
         '1',
     )
     .await;
-    let candidate = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    let harness = harness(&db).await;
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
     seed_backtest(&db, &candidate, &rc_id, '1').await;
     // No shadow comparisons → shadow stability not established.
 
-    let result = harness(&db)
-        .await
+    let result = harness
         .service
         .publish(
             PublishModelCommand {
@@ -498,11 +554,11 @@ async fn publish_succeeds_then_published_version_is_immutable() {
         '1',
     )
     .await;
-    let candidate = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    let harness = harness(&db).await;
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
     seed_backtest(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
-    let harness = harness(&db).await;
     let published = harness
         .service
         .publish(
@@ -600,6 +656,100 @@ async fn publish_ready_version(params: PublishReadyParams<'_>) {
         .expect("publish ready version");
 }
 
+/// Seeds for [`seed_and_publish_version`].
+struct PublishableVersionSeeds {
+    dataset_seed: char,
+    version_seed: char,
+    version_number: i32,
+    backtest_seed: char,
+    shadow_seed: char,
+    publish_reason: &'static str,
+}
+
+/// Build a Ready dataset, train a candidate version, and publish it through every gate.
+async fn seed_and_publish_version(
+    harness: &GovernanceHarness,
+    db: &DatabaseConnection,
+    spec: &ModelSpecId,
+    rc_id: &RuntimeConfigVersionId,
+    seeds: PublishableVersionSeeds,
+) -> ModelVersionId {
+    let dataset = seed_dataset(
+        db,
+        spec,
+        rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_coverage(),
+        seeds.dataset_seed,
+    )
+    .await;
+    let version = seed_version(
+        db,
+        &harness.artifact_store,
+        spec,
+        seeds.version_seed,
+        seeds.version_number,
+        Some(dataset),
+    )
+    .await;
+    publish_ready_version(PublishReadyParams {
+        governance: &harness.service,
+        db,
+        rc_id,
+        version: &version,
+        active_for_shadow: &version,
+        backtest_seed: seeds.backtest_seed,
+        shadow_seed: seeds.shadow_seed,
+        reason: seeds.publish_reason,
+    })
+    .await;
+    version
+}
+
+async fn assert_rollback_restored_predecessor(
+    db: &DatabaseConnection,
+    store: &RuntimeConfigStore,
+    rolled_back: &ModelVersionId,
+    predecessor: &ModelVersionId,
+    rollback_reason: &str,
+) {
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let rolled_back_row = registry
+        .find_model_version_by_id(rolled_back)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(rolled_back_row.publication_status, PublicationStatus::Retired);
+    let predecessor_row = registry
+        .find_model_version_by_id(predecessor)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(
+        predecessor_row.publication_status,
+        PublicationStatus::Published,
+        "rollback must re-publish the retired predecessor"
+    );
+    assert_eq!(
+        store
+            .current()
+            .model
+            .active_model_version_id
+            .as_ref()
+            .map(|reference| reference.id.as_str()),
+        Some(predecessor.to_string().as_str()),
+        "rollback must wire runtime config back to the restored version"
+    );
+    let audits = PgModelGovernanceAuditRepository::new(db.clone())
+        .list_by_version(rolled_back)
+        .await
+        .expect("audits");
+    assert!(
+        audits.iter().any(|audit| audit.reason == rollback_reason),
+        "the rollback reason is audited"
+    );
+}
+
 async fn assert_single_active_published(
     registry: &PgModelRegistryRepository,
     spec: &ModelSpecId,
@@ -647,48 +797,35 @@ async fn rollback_retains_previous_and_writes_reason() {
     let spec = seed_spec(&db).await;
     let harness = harness(&db).await;
 
-    let dataset_v1 = seed_dataset(
+    let v1 = seed_and_publish_version(
+        &harness,
         &db,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
-        healthy_coverage(),
-        '1',
+        PublishableVersionSeeds {
+            dataset_seed: '1',
+            version_seed: 'a',
+            version_number: 1,
+            backtest_seed: '1',
+            shadow_seed: 'a',
+            publish_reason: "publish v1",
+        },
     )
     .await;
-    let v1 = seed_version(&db, &spec, 'a', 1, Some(dataset_v1)).await;
-    publish_ready_version(PublishReadyParams {
-        governance: &harness.service,
-        db: &db,
-        rc_id: &rc_id,
-        version: &v1,
-        active_for_shadow: &v1,
-        backtest_seed: '1',
-        shadow_seed: 'a',
-        reason: "publish v1",
-    })
-    .await;
-
-    let dataset_v2 = seed_dataset(
+    let v2 = seed_and_publish_version(
+        &harness,
         &db,
         &spec,
         &rc_id,
-        TrainingDatasetStatus::Ready,
-        healthy_coverage(),
-        '2',
+        PublishableVersionSeeds {
+            dataset_seed: '2',
+            version_seed: 'b',
+            version_number: 2,
+            backtest_seed: '2',
+            shadow_seed: 'm',
+            publish_reason: "publish v2",
+        },
     )
-    .await;
-    let v2 = seed_version(&db, &spec, 'b', 2, Some(dataset_v2)).await;
-    publish_ready_version(PublishReadyParams {
-        governance: &harness.service,
-        db: &db,
-        rc_id: &rc_id,
-        version: &v2,
-        active_for_shadow: &v2,
-        backtest_seed: '2',
-        shadow_seed: 'm',
-        reason: "publish v2",
-    })
     .await;
 
     let registry = PgModelRegistryRepository::new(db.clone());
@@ -709,44 +846,7 @@ async fn rollback_retains_previous_and_writes_reason() {
         restored.model_version_id, v1,
         "rollback restores the predecessor"
     );
-
-    let registry = PgModelRegistryRepository::new(db.clone());
-    let v2_row = registry
-        .find_model_version_by_id(&v2)
-        .await
-        .expect("find")
-        .expect("row");
-    assert_eq!(v2_row.publication_status, PublicationStatus::Retired);
-    let v1_row = registry
-        .find_model_version_by_id(&v1)
-        .await
-        .expect("find")
-        .expect("row");
-    assert_eq!(
-        v1_row.publication_status,
-        PublicationStatus::Published,
-        "rollback must re-publish the retired predecessor"
-    );
-    assert_eq!(
-        harness
-            .store
-            .current()
-            .model
-            .active_model_version_id
-            .as_ref()
-            .map(|reference| reference.id.as_str()),
-        Some(v1.to_string().as_str()),
-        "rollback must wire runtime config back to the restored version"
-    );
-
-    let audits = PgModelGovernanceAuditRepository::new(db.clone())
-        .list_by_version(&v2)
-        .await
-        .expect("audits");
-    assert!(
-        audits.iter().any(|audit| audit.reason == "v2 regressed"),
-        "the rollback reason is audited"
-    );
+    assert_rollback_restored_predecessor(&db, &harness.store, &v2, &v1, "v2 regressed").await;
 }
 
 #[tokio::test]
@@ -767,7 +867,7 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
         '1',
     )
     .await;
-    let version = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    let version = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
     publish_ready_version(PublishReadyParams {
         governance: &harness.service,
         db: &db,
@@ -834,7 +934,7 @@ async fn retire_published_version_clears_dangling_category_pointer() {
         '1',
     )
     .await;
-    let version = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    let version = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
     publish_ready_version(PublishReadyParams {
         governance: &harness.service,
         db: &db,

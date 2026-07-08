@@ -23,6 +23,7 @@ use std::ops::Range;
 
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_models::enums::common::MarketCategory;
 use quant_pivot_models::types::ContentHash;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ use crate::{
             FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
             SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
         },
+        category_scope::validate_category_scope_weights,
         runtime::ModelFamily,
         sell_scorer::position_state::{
             is_position_state_factor, position_state_signed_contribution,
@@ -137,6 +139,9 @@ pub struct TrainModelRequest {
     pub return_model: ReturnModelSpec,
     /// Features the model requires (selection eligibility).
     pub required_features: Vec<FeatureName>,
+    /// When set, this artifact is scoped to one market category (Phase 11.2.2).
+    /// `None` means the generic cross-category scorer.
+    pub category_scope: Option<MarketCategory>,
 }
 
 /// A freshly trained, content-addressed model artifact with its metrics.
@@ -215,8 +220,9 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
         return_model: request.return_model.clone(),
         required_features: request.required_features.clone(),
         objective_report: Some(fit.objective_report.clone()),
-        category_scope: None,
+        category_scope: request.category_scope,
     };
+    validate_category_scope_weights(request.category_scope, &artifact.weights)?;
     artifact.validate()?;
     let model_artifact = ModelArtifact::WeightedFactor(Box::new(artifact));
     let artifact_hash = model_artifact.content_hash()?;
@@ -748,6 +754,7 @@ mod tests {
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
             required_features: Vec::new(),
+            category_scope: None,
         }
     }
 

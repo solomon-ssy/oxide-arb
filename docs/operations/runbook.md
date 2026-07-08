@@ -777,9 +777,10 @@ SPEC_ID=$(
       "name": "buy-weighted-baseline",
       "model_family": "weighted_factor",
       "prediction_horizon_secs": 86400,
-      "feature_schema_version": 1,
+      "feature_schema_version": 5,
       "label_schema_version": 1,
-      "spec_json": {"notes": "day-1 cold-start Buy ranker"},
+      "feature_requirements": {"generic": [], "by_category": {}},
+      "spec_json": {"tier": "bootstrap", "intent": "day-1 generic buy ranker"},
       "reason": "bootstrap first model spec"
     }' | jq -r '.data.model_spec_id'
 )
