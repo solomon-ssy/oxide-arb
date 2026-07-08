@@ -297,6 +297,7 @@ async fn seed_secondary_model_spec(registry: &PgModelRegistryRepository) -> usiz
                 "ui_demo": true,
                 "notes": "secondary spec for model-spec catalog filters"
             }),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Draft,
         })
         .await

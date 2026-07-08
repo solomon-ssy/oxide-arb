@@ -295,6 +295,7 @@ impl ResearchBundle {
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
                 linkage_repo: Arc::clone(&self.market_linkage_repo),
+                model_registry: Arc::clone(&self.model_registry_repo),
             },
             wire.config,
             wire.max_spine_samples,

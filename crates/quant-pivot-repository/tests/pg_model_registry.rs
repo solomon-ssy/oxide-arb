@@ -26,6 +26,7 @@ fn new_spec(name: &str) -> NewModelSpec {
         feature_schema_version: SchemaVersion::FIRST,
         label_schema_version: SchemaVersion::FIRST,
         spec_json: serde_json::json!({}),
+        feature_requirements: serde_json::json!({}),
         status: PublicationStatus::Draft,
     }
 }
@@ -64,6 +65,7 @@ async fn create_model_version_duplicate_spec_version_maps_to_storage_duplicate()
         feature_schema_version: SchemaVersion::FIRST,
         label_schema_version: SchemaVersion::FIRST,
         spec_json: serde_json::json!({}),
+        feature_requirements: serde_json::json!({}),
         status: PublicationStatus::Draft,
     })
     .await

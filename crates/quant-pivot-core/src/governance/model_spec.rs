@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{CreateModelSpecCommand, GovernanceActor, ModelSpecInfo, ModelSpecPort, NewModelSpec},
     enums::quant::PublicationStatus,
     types::ModelSpecId,
 };
 use quant_pivot_repository::traits::ModelRegistryRepository;
+use quant_pivot_research::selection::ModelFeatureRequirements;
 
 /// Dependencies for model-spec authoring.
 pub struct ModelSpecDeps {
@@ -39,6 +40,13 @@ impl ModelSpecPort for ModelSpecService {
         _actor: GovernanceActor,
     ) -> QuantResult<ModelSpecInfo> {
         let _reason = command.reason;
+        // Fail closed on an unparseable requirements contract (11.2.2
+        // remediation R7) — never persist a value the offline PIT selector
+        // could not later deserialize.
+        serde_json::from_value::<ModelFeatureRequirements>(command.feature_requirements.clone())
+            .map_err(|error| {
+                QuantError::config(format!("invalid feature_requirements: {error}"))
+            })?;
         self.deps
             .model_registry
             .create_model_spec(NewModelSpec {
@@ -49,6 +57,7 @@ impl ModelSpecPort for ModelSpecService {
                 feature_schema_version: command.feature_schema_version,
                 label_schema_version: command.label_schema_version,
                 spec_json: command.spec_json,
+                feature_requirements: command.feature_requirements,
                 status: PublicationStatus::Draft,
             })
             .await

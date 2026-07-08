@@ -52,6 +52,7 @@ async fn model_spec_service_authors_draft_spec() {
                 feature_schema_version: SchemaVersion::FIRST,
                 label_schema_version: SchemaVersion::FIRST,
                 spec_json: serde_json::json!({ "notes": "day-1 cold-start ranker" }),
+                feature_requirements: serde_json::json!({}),
                 reason: "bootstrap the first model spec".to_owned(),
             },
             actor(),

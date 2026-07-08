@@ -1,4 +1,19 @@
 //! Chainlink on-chain aggregator source (`AggregatorV3` `eth_call`).
+//!
+//! **Current oracle plane (11.2.2):** this module reads **Chainlink Data Feeds**
+//! on Polygon — on-chain `AggregatorV3` rounds pushed by deviation/heartbeat
+//! rules. Polymarket crypto up/down markets settle against **Chainlink Data
+//! Streams** (off-chain, sub-second signed reports; paid subscription). The two
+//! sources can diverge by 0.3–0.8% for 10–30 seconds in volatile windows.
+//!
+//! Phase 11.2.2 mitigates (but does not eliminate) that gap via:
+//! - PTB fail-closed: Chainlink-settled markets never silently fall back to
+//!   Binance for price-to-beat;
+//! - `domain.crypto.cross_check.max_oracle_staleness_secs`: reject stale Data
+//!   Feed observations in basis/PTB features (`StaleBeyondPolicy`).
+//!
+//! True Data Streams ingest is deferred to Phase 11.2.3 (requires a paid
+//! Chainlink subscription).
 
 use std::{collections::BTreeMap, str::FromStr, sync::Mutex, time::Duration};
 

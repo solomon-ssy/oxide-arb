@@ -13,13 +13,15 @@
 //!
 //! Every missing input is an explicit [`NullReason`] — never a silent zero.
 //! For up/down markets the reference price (price-to-beat) is read from the
-//! **settlement oracle's** own PIT window at the window open when available,
-//! falling back to the feature source (Binance) — the basis feature then
-//! carries the residual cross-source risk explicitly.
+//! **settlement oracle's** own PIT window at the window open when the oracle
+//! is Chainlink — never silently falling back to Binance (11.2.2 remediation).
+//! Binance-settled markets read the feature source directly. Chainlink oracle
+//! observations older than `domain.crypto.cross_check.max_oracle_staleness_secs`
+//! are rejected as [`NullReason::StaleBeyondPolicy`].
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
-    domain::{CryptoSubject, MarketSubject, PriceComparator, ResolutionOracle},
+    domain::{CryptoSubject, DomainObservation, MarketSubject, PriceComparator, ResolutionOracle},
     enums::{domain::DomainFamily, feature::EvidenceSourceKind},
 };
 use rust_decimal::Decimal;
@@ -59,6 +61,20 @@ impl DomainFeatureBuilder for CryptoDomainFeatureBuilder {
     }
 }
 
+/// Seconds between `anchor` and `observation.observed_at` (clamped non-negative).
+fn observation_age_secs(observation: &DomainObservation, anchor: DateTime<Utc>) -> u64 {
+    u64::try_from((anchor - observation.observed_at).num_seconds().max(0)).unwrap_or(u64::MAX)
+}
+
+/// Whether a Chainlink oracle observation exceeds the governed staleness ceiling.
+fn oracle_stale(
+    observation: &DomainObservation,
+    anchor: DateTime<Utc>,
+    max_staleness_secs: u64,
+) -> bool {
+    observation_age_secs(observation, anchor) > max_staleness_secs
+}
+
 /// Evidence ref anchored on one domain observation.
 fn evidence(window: &DomainObservationWindow, metric: DomainMetric) -> Option<EvidenceSourceRef> {
     window.latest(metric).map(|observation| EvidenceSourceRef {
@@ -95,16 +111,32 @@ fn distance_to_strike(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> Ra
             let Some(reference_at) = subject.reference_at else {
                 return RawFeature::missing(name, NullReason::LinkageUnresolved);
             };
-            // Price-to-beat: prefer the settlement oracle's own quote at the
-            // window open (settles the market), fall back to the feature source.
-            let reference = ctx
-                .oracle
-                .and_then(|window| window.latest_at(DomainMetric::OraclePrice, reference_at))
-                .or_else(|| ctx.primary.latest_at(DomainMetric::Close, reference_at));
-            let Some(reference) = reference else {
-                return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
+            let max_staleness = ctx.crypto.cross_check.max_oracle_staleness_secs;
+            let reference = match &subject.resolution_oracle {
+                ResolutionOracle::ChainlinkDataStreams { .. } => {
+                    let Some(oracle_window) = ctx.oracle else {
+                        return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
+                    };
+                    let Some(observation) =
+                        oracle_window.latest_at(DomainMetric::OraclePrice, reference_at)
+                    else {
+                        return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
+                    };
+                    if oracle_stale(observation, reference_at, max_staleness) {
+                        return RawFeature::missing(name, NullReason::StaleBeyondPolicy);
+                    }
+                    observation.value
+                }
+                ResolutionOracle::BinanceKline { .. } | ResolutionOracle::Other { .. } => {
+                    let Some(observation) =
+                        ctx.primary.latest_at(DomainMetric::Close, reference_at)
+                    else {
+                        return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
+                    };
+                    observation.value
+                }
             };
-            signed_relative(close_value, reference.value, false)
+            signed_relative(close_value, reference, false)
         }
         // A comparator that requires a strike but has none is a malformed
         // binding — fail closed, never guess.
@@ -204,12 +236,16 @@ fn basis_vs_resolution_source(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubjec
             let Some(oracle_window) = ctx.oracle else {
                 return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
             };
+            let max_staleness = ctx.crypto.cross_check.max_oracle_staleness_secs;
             let (Some(close), Some(oracle)) = (
                 ctx.primary.latest(DomainMetric::Close),
                 oracle_window.latest(DomainMetric::OraclePrice),
             ) else {
                 return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
             };
+            if oracle_stale(oracle, ctx.as_of, max_staleness) {
+                return RawFeature::missing(name, NullReason::StaleBeyondPolicy);
+            }
             if oracle.value.is_zero() {
                 return RawFeature::missing(name, NullReason::OutOfValidRange);
             }
@@ -287,6 +323,20 @@ mod tests {
     }
 
     fn binding(comparator: PriceComparator, strike: Option<Usd>) -> ResolvedBinding {
+        binding_with_oracle(
+            comparator,
+            strike,
+            ResolutionOracle::ChainlinkDataStreams {
+                feed: ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
+            },
+        )
+    }
+
+    fn binding_with_oracle(
+        comparator: PriceComparator,
+        strike: Option<Usd>,
+        resolution_oracle: ResolutionOracle,
+    ) -> ResolvedBinding {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         ResolvedBinding {
             subject: MarketSubject::Crypto(CryptoSubject {
@@ -296,9 +346,7 @@ mod tests {
                 strike,
                 reference_at: Some(as_of - chrono::Duration::minutes(3)),
                 observation_at: as_of + chrono::Duration::minutes(2),
-                resolution_oracle: ResolutionOracle::ChainlinkDataStreams {
-                    feed: ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
-                },
+                resolution_oracle,
             }),
             instrument_key: instrument(),
             grounding: GroundingProof { spans: Vec::new() },
@@ -428,6 +476,92 @@ mod tests {
             distance.value.as_ref().expect("present"),
             &FeatureValue::Decimal(dec!(0)),
             "close 100100 vs oracle PTB 100100 → flat"
+        );
+    }
+
+    #[test]
+    fn chainlink_ptb_fails_closed_without_oracle_window() {
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        // Binance has a ref at window open — must not be used when oracle is Chainlink.
+        let primary = window(&[(3, dec!(100000)), (1, dec!(100100))]);
+        let binding = binding(PriceComparator::UpVsReference, None);
+        let crypto = CryptoDomainConfig::default();
+        let ctx = DomainComputeCtx {
+            as_of,
+            binding: &binding,
+            primary: &primary,
+            oracle: None,
+            crypto: &crypto,
+        };
+        let features = CryptoDomainFeatureBuilder.compute(&ctx);
+        let distance = find(&features, &names::DISTANCE_TO_STRIKE);
+        assert_eq!(
+            distance.value.as_ref().expect_err("missing"),
+            &NullReason::DomainSourceUnavailable,
+            "Chainlink-settled PTB must not silently fall back to Binance"
+        );
+    }
+
+    #[test]
+    fn binance_settled_ptb_reads_feature_source_without_oracle() {
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let reference_at = as_of - chrono::Duration::minutes(3);
+        // PTB = Binance close at reference_at; latest close matches it.
+        let primary = window(&[(3, dec!(100000)), (1, dec!(100000))]);
+        let mut binding = binding_with_oracle(
+            PriceComparator::UpVsReference,
+            None,
+            ResolutionOracle::BinanceKline {
+                symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                interval: KlineInterval::OneMinute,
+            },
+        );
+        let MarketSubject::Crypto(ref mut subject) = binding.subject;
+        subject.reference_at = Some(reference_at);
+        let crypto = CryptoDomainConfig::default();
+        let ctx = DomainComputeCtx {
+            as_of,
+            binding: &binding,
+            primary: &primary,
+            oracle: None,
+            crypto: &crypto,
+        };
+        let features = CryptoDomainFeatureBuilder.compute(&ctx);
+        let distance = find(&features, &names::DISTANCE_TO_STRIKE);
+        assert_eq!(
+            distance.value.as_ref().expect("present"),
+            &FeatureValue::Decimal(dec!(0)),
+            "Binance-settled PTB reads Binance close at reference_at without an oracle window"
+        );
+    }
+
+    #[test]
+    fn stale_chainlink_oracle_triggers_stale_beyond_policy() {
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let primary = window(&[(1, dec!(100500))]);
+        let oracle = DomainObservationWindow {
+            cutoff: as_of,
+            observations: vec![oracle_observation(
+                as_of - chrono::Duration::seconds(120),
+                dec!(100000),
+            )],
+        };
+        let binding = binding(PriceComparator::UpVsReference, None);
+        let mut crypto = CryptoDomainConfig::default();
+        crypto.cross_check.max_oracle_staleness_secs = 30;
+        let ctx = DomainComputeCtx {
+            as_of,
+            binding: &binding,
+            primary: &primary,
+            oracle: Some(&oracle),
+            crypto: &crypto,
+        };
+        let features = CryptoDomainFeatureBuilder.compute(&ctx);
+        let basis = find(&features, &names::BASIS_VS_RESOLUTION_SOURCE);
+        assert_eq!(
+            basis.value.as_ref().expect_err("missing"),
+            &NullReason::StaleBeyondPolicy,
+            "oracle older than max_oracle_staleness_secs must be rejected"
         );
     }
 

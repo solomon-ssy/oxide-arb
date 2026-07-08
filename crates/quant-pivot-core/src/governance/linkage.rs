@@ -10,9 +10,9 @@ use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        GroundingProof, LinkageOutcome, LinkageResolveSummaryView, LinkageSourceMetadata,
-        MarketInfo, MarketLinkage, MarketLinkageInfo, MarketSubject, OverrideContext,
-        OverrideLinkageRequest, ResolvedBinding,
+        LinkageOutcome, LinkageResolveSummaryView, LinkageSourceMetadata, MarketInfo,
+        MarketLinkage, MarketLinkageInfo, MarketSubject, OverrideContext, OverrideLinkageRequest,
+        ResolvedBinding,
     },
     enums::{
         common::MarketCategory,
@@ -24,9 +24,7 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{EventRepository, MarketLinkageRepository, MarketRepository};
-use quant_pivot_research::linkage::{
-    LayeredResolver, ResolutionResult, validate_structural_consistency,
-};
+use quant_pivot_research::linkage::{LayeredResolver, ResolutionResult, validate_manual_override};
 
 /// Dependencies for the offline linkage resolver.
 pub struct LinkageResolverDeps {
@@ -154,22 +152,28 @@ impl LinkageResolverService {
     }
 
     /// Audited operator override: append a binding with `resolver_tier =
-    /// Override` after it passes the same [`validate_structural_consistency`]
-    /// checks every automated candidate must clear (ruleset instrument
-    /// binding + oracle↔asset consistency).
+    /// Override` after it passes the same structural-consistency checks
+    /// every automated candidate must clear (ruleset instrument binding +
+    /// oracle↔asset consistency), **and** after every load-bearing identity
+    /// field (`asset` / `resolution_oracle` / `strike` when present) is
+    /// grounded to a byte-exact literal citation from the market's real
+    /// metadata via [`validate_manual_override`] — an override is a human
+    /// decision, never text-extracted, but it is never accepted as an
+    /// unanchored assertion either (11.2.2 remediation R4).
     ///
-    /// An override carries no text-extraction evidence — it is a human
-    /// decision, not extracted from source metadata — so
-    /// [`ResolvedBinding::grounding`] stays empty; the real audit trail is
-    /// [`ResolvedBinding::override_context`] (`reason` + `actor`), which is
-    /// **never** discarded (the pre-remediation stub dropped both).
+    /// The real audit trail is [`ResolvedBinding::override_context`]
+    /// (`reason` + `actor`), persisted both inside `outcome` and projected
+    /// into the ledger's first-class `override_reason` / `override_actor`
+    /// columns (via [`MarketLinkage::to_new`]) — never discarded.
     ///
     /// # Errors
     ///
     /// Propagates catalog load, deserialization, hashing, and persistence
     /// failures, and returns [`QuantError::config`] when the proposed subject
-    /// fails structural consistency (wrong instrument for the asset, or an
-    /// oracle/asset mismatch).
+    /// fails structural consistency or grounding (wrong instrument for the
+    /// asset, an oracle/asset mismatch, a missing citation for a load-bearing
+    /// field, or a citation that does not literally occur in the cited
+    /// source field).
     pub async fn apply_override(
         &self,
         market_id: &MarketId,
@@ -199,13 +203,18 @@ impl LinkageResolverService {
             .map_err(|error| QuantError::config(error.to_string()))?;
         let instrument_key = DomainInstrumentKey::new(&request.instrument_key);
         let MarketSubject::Crypto(crypto_subject) = &subject;
-        validate_structural_consistency(crypto_subject, &instrument_key)
-            .map_err(QuantError::config)?;
+        let grounding = validate_manual_override(
+            crypto_subject,
+            &instrument_key,
+            &metadata,
+            &request.evidence,
+        )
+        .map_err(QuantError::config)?;
         let domain_family = subject.family();
         let outcome = LinkageOutcome::Resolved(ResolvedBinding {
             subject,
             instrument_key,
-            grounding: GroundingProof { spans: Vec::new() },
+            grounding,
             override_context: Some(OverrideContext {
                 reason: request.reason,
                 actor,

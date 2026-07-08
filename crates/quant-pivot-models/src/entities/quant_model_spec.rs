@@ -20,6 +20,12 @@ pub struct Model {
     pub label_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub spec_json: Json,
+    /// Structured, governed feature-requirements contract (11.2.2 remediation
+    /// R7) — deserializes to `quant_pivot_research::selection::ModelFeatureRequirements`.
+    /// Kept as opaque `Json` at this layer (models cannot depend on
+    /// `quant-pivot-research`); `quant-pivot-core` owns the typed round trip.
+    #[sea_orm(column_type = "JsonBinary")]
+    pub feature_requirements: Json,
     pub status: PublicationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

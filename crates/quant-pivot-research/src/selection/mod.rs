@@ -94,11 +94,13 @@ pub struct MarketSelectionBuildRequest {
 pub struct ModelFeatureRequirements {
     /// Required by the model that scores every market with no eligible
     /// category-specific route — checked against every candidate.
+    #[serde(default)]
     pub generic: Vec<FeatureName>,
     /// Required by the category-specific model actually routed for each
     /// category (only present for categories with a load-validated pointer;
     /// see `resolve_model_route`), additive to `generic` and scoped to
     /// candidates of exactly that category.
+    #[serde(default)]
     pub by_category: BTreeMap<MarketCategory, Vec<FeatureName>>,
 }
 

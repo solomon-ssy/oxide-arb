@@ -25,7 +25,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChPrice, ChUsd},
     domain::{
@@ -42,14 +42,14 @@ use quant_pivot_models::{
         SelectionConfig, TrainingConfig,
     },
     types::{
-        Bps, MarketId, Price, Shares, TokenId, TrainingDatasetId, TrainingExampleId,
+        Bps, MarketId, ModelSpecId, Price, Shares, TokenId, TrainingDatasetId, TrainingExampleId,
         TrainingHorizonsSecs, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, EventRepository, FeatureRepository, MarketLinkageRepository,
-    MarketRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
-    TrainingDatasetRepository,
+    MarketRepository, ModelRegistryRepository, PositionRepository, QuantFactReadRepository,
+    RecommendationRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -68,7 +68,7 @@ use quant_pivot_research::{
         sell_scorer::{LotStateInput, position_state_factor_values, position_state_features},
     },
     pit::PitQueryEngine,
-    selection::SelectedMarket,
+    selection::{ModelFeatureRequirements, SelectedMarket},
     training::{
         DatasetCoverage, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest, DecisionBook,
         ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler, LabelBuildInput,
@@ -158,6 +158,10 @@ pub struct TrainingDatasetServiceDeps {
     pub fee_calculator: Arc<FeeCalculator>,
     /// Frozen market → external-subject linkage ledger (11.2.2).
     pub linkage_repo: Arc<dyn MarketLinkageRepository>,
+    /// Model registry — resolves the target `ModelSpec`'s governed feature
+    /// requirements so offline selection genuinely mirrors the online
+    /// funnel's `ModelFeatureUnavailable` gate (11.2.2 remediation R7).
+    pub model_registry: Arc<dyn ModelRegistryRepository>,
 }
 
 /// Deploy + frozen-config bundle for wiring [`TrainingDatasetService`].
@@ -220,6 +224,7 @@ pub struct TrainingDatasetService {
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
+    model_registry: Arc<dyn ModelRegistryRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     domain: DomainConfig,
@@ -270,6 +275,7 @@ impl TrainingDatasetService {
             position_repo: deps.position_repo,
             fee_calculator: deps.fee_calculator,
             linkage_repo: deps.linkage_repo,
+            model_registry: deps.model_registry,
             features: config.features,
             factors: config.factors,
             domain: config.domain,
@@ -287,6 +293,35 @@ impl TrainingDatasetService {
             max_spine_samples,
             labelers: Arc::new(config.labelers),
             bias_table: config.bias_table,
+        })
+    }
+
+    /// Resolve the target `ModelSpec`'s governed feature-requirements
+    /// contract (11.2.2 remediation R7).
+    ///
+    /// `DatasetPlanRequest.model_spec_id` names the spec this dataset is
+    /// built for, so the requirement set is genuinely known at plan/build
+    /// time — not a hypothetical future model. Fails closed (never defaults)
+    /// when the spec is missing or its stored contract does not parse: both
+    /// indicate a governance-data problem that must surface, not silently
+    /// degrade to an unfiltered selection funnel.
+    async fn resolve_model_requirements(
+        &self,
+        model_spec_id: &ModelSpecId,
+    ) -> QuantResult<ModelFeatureRequirements> {
+        let spec = self
+            .model_registry
+            .find_model_spec_by_id(model_spec_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_model_spec",
+                id: model_spec_id.to_string(),
+            })?;
+        serde_json::from_value(spec.feature_requirements).map_err(|error| {
+            QuantError::config(format!(
+                "model spec {model_spec_id} has an invalid feature_requirements contract: {error}"
+            ))
         })
     }
 
@@ -495,7 +530,10 @@ impl TrainingDatasetService {
             Arc::clone(&self.market_repo),
             self.max_book_staleness,
         );
-        let selector = self.offline_pit_selector(request);
+        let model_requirements = self
+            .resolve_model_requirements(&request.model_spec_id)
+            .await?;
+        let selector = self.offline_pit_selector(request, model_requirements);
         let span_secs = (request.window_end - request.window_start)
             .num_seconds()
             .max(1);
@@ -672,14 +710,16 @@ impl TrainingDatasetService {
         let mut spine = HistoricalSpine::default();
         let mut coverage = coverage;
         if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
-            let inputs = self.historical_inputs(
-                &plan,
-                Arc::clone(&pit),
-                Arc::clone(&prefetched),
-                Arc::clone(&sink),
-                cancel.clone(),
-                coverage,
-            );
+            let inputs = self
+                .historical_inputs(
+                    &plan,
+                    Arc::clone(&pit),
+                    Arc::clone(&prefetched),
+                    Arc::clone(&sink),
+                    cancel.clone(),
+                    coverage,
+                )
+                .await?;
             let output = task::spawn_blocking(move || run_historical_spine_blocking(inputs))
                 .await
                 .map_err(|error| {
@@ -737,11 +777,10 @@ impl TrainingDatasetService {
         let cancel = CancellationToken::new();
         let mut spine = HistoricalSpine::default();
         if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
-            let output = run_historical_spine(
-                self.historical_params(&plan, pit, &prefetched, &NoopProgressSink, &cancel),
-                coverage,
-            )
-            .await?;
+            let params = self
+                .historical_params(&plan, pit, &prefetched, &NoopProgressSink, &cancel)
+                .await?;
+            let output = run_historical_spine(params, coverage).await?;
             coverage = output.coverage;
             spine.examples = output.examples;
             spine.market_set = output.market_set;
@@ -761,7 +800,7 @@ impl TrainingDatasetService {
     }
 
     /// Owned inputs for the blocking historical spine (moved into `spawn_blocking`).
-    fn historical_inputs(
+    async fn historical_inputs(
         &self,
         plan: &DatasetPlan,
         pit: Arc<dyn PitQueryEngine>,
@@ -769,8 +808,11 @@ impl TrainingDatasetService {
         sink: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
         coverage: DatasetCoverage,
-    ) -> HistoricalSpineInputs {
-        HistoricalSpineInputs {
+    ) -> QuantResult<HistoricalSpineInputs> {
+        let model_requirements = self
+            .resolve_model_requirements(&plan.request.model_spec_id)
+            .await?;
+        Ok(HistoricalSpineInputs {
             pit,
             prefetched,
             sink,
@@ -783,24 +825,28 @@ impl TrainingDatasetService {
             domain: self.domain.clone(),
             selection: self.selection.clone(),
             min_selection_depth: self.min_selection_depth.clone(),
+            model_requirements,
             labelers: Arc::clone(&self.labelers),
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: self.bias_table.as_ref().map(Arc::clone),
             context: ReplayContext::new(plan, &self.features),
             coverage,
-        }
+        })
     }
 
     /// Borrowed params for the historical spine (async/inline callers).
-    fn historical_params<'a>(
+    async fn historical_params<'a>(
         &'a self,
         plan: &'a DatasetPlan,
         pit: &'a dyn PitQueryEngine,
         prefetched: &'a Prefetched,
         sink: &'a dyn JobProgressSink,
         cancel: &'a CancellationToken,
-    ) -> HistoricalSpineParams<'a> {
-        HistoricalSpineParams {
+    ) -> QuantResult<HistoricalSpineParams<'a>> {
+        let model_requirements = self
+            .resolve_model_requirements(&plan.request.model_spec_id)
+            .await?;
+        Ok(HistoricalSpineParams {
             pit,
             prefetched,
             sink,
@@ -813,11 +859,12 @@ impl TrainingDatasetService {
             domain: &self.domain,
             selection: &self.selection,
             min_selection_depth: &self.min_selection_depth,
+            model_requirements,
             labelers: &self.labelers,
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: &self.bias_table,
             context: ReplayContext::new(plan, &self.features),
-        }
+        })
     }
 
     /// Append the live-attribution + exit-decision sources (bounded DB reads,
@@ -909,8 +956,13 @@ impl TrainingDatasetService {
     }
 
     /// The offline point-in-time selection funnel for a build/plan, wired from
-    /// the frozen selection/data-quality/feature config + the book-depth floor.
-    fn offline_pit_selector(&self, request: &DatasetPlanRequest) -> OfflinePitSelector {
+    /// the frozen selection/data-quality/feature config + the book-depth floor
+    /// + the target `ModelSpec`'s resolved feature requirements (R7).
+    fn offline_pit_selector(
+        &self,
+        request: &DatasetPlanRequest,
+        model_requirements: ModelFeatureRequirements,
+    ) -> OfflinePitSelector {
         OfflinePitSelector::new(
             &self.selection,
             &self.data_quality,
@@ -918,6 +970,7 @@ impl TrainingDatasetService {
             &self.min_selection_depth,
             request.runtime_config_version_id.clone(),
             request.source_delay_secs,
+            model_requirements,
         )
     }
 
@@ -1393,6 +1446,8 @@ struct HistoricalSpineParams<'a> {
     domain: &'a DomainConfig,
     selection: &'a SelectionConfig,
     min_selection_depth: &'a DecimalString,
+    /// Target `ModelSpec`'s resolved feature requirements (R7).
+    model_requirements: ModelFeatureRequirements,
     labelers: &'a [Box<dyn Labeler>],
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
@@ -1416,6 +1471,8 @@ struct HistoricalSpineInputs {
     domain: DomainConfig,
     selection: SelectionConfig,
     min_selection_depth: DecimalString,
+    /// Target `ModelSpec`'s resolved feature requirements (R7).
+    model_requirements: ModelFeatureRequirements,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
@@ -1447,6 +1504,7 @@ fn run_historical_spine_blocking(
             domain: &inputs.domain,
             selection: &inputs.selection,
             min_selection_depth: &inputs.min_selection_depth,
+            model_requirements: inputs.model_requirements,
             labelers: &inputs.labelers,
             min_exit_depth_usd: inputs.min_exit_depth_usd,
             bias_table: &inputs.bias_table,
@@ -1486,6 +1544,7 @@ async fn run_historical_spine(
         params.min_selection_depth,
         params.request.runtime_config_version_id.clone(),
         params.request.source_delay_secs,
+        params.model_requirements.clone(),
     );
     let mut examples: Vec<TrainingExample> = Vec::new();
     let mut market_set: HashSet<MarketId> = HashSet::new();

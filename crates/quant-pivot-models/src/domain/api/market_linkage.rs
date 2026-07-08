@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::{
-    domain::{BasisAlertInfo, DomainSourceCursorInfo, MarketLinkageInfo, pagination::PageRequest},
+    domain::{
+        BasisAlertInfo, DomainSourceCursorInfo, ManualEvidenceInput, MarketLinkageInfo,
+        pagination::PageRequest,
+    },
     enums::domain::{DomainFamily, LinkageStatus, ResolverTier},
     types::{
         BasisAlertId, Bps, ContentHash, DomainInstrumentKey, MarketId, MarketLinkageId,
@@ -48,9 +51,11 @@ pub struct MarketLinkageListQuery {
 
 /// Inbound body for `POST /research/market-linkages/{market_id}/override`.
 ///
-/// The operator supplies a full subject JSON (validated against the same
-/// grounding-free operator contract — overrides are audited human decisions,
-/// recorded with `resolver_tier = override`).
+/// The operator supplies a full subject JSON plus literal-text citations for
+/// every load-bearing identity field (11.2.2 remediation R4) — an override is
+/// a human decision, never text-extracted, but it must still cite real
+/// source text for `asset` / `resolution_oracle` / `strike` (when present),
+/// verified byte-exact by [`quant_pivot_research::linkage::validate_manual_override`].
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct OverrideLinkageRequest {
     /// The full `MarketSubject` document to bind.
@@ -61,6 +66,11 @@ pub struct OverrideLinkageRequest {
     /// Operator reason recorded on the operation log and the ledger row.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
+    /// Literal-text citations grounding `asset` / `resolution_oracle` / and
+    /// `strike` (when the subject has one) — checked byte-exact against the
+    /// market's real metadata, never trusted as submitted.
+    #[serde(default)]
+    pub evidence: Vec<ManualEvidenceInput>,
 }
 
 /// Inbound body for `POST /research/market-linkages/resolve`.
@@ -90,6 +100,9 @@ pub struct MarketLinkageSummaryView {
     pub instrument_key: Option<DomainInstrumentKey>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
+    /// Populated only for `resolver_tier = override` rows (R4 audit columns).
+    pub override_reason: Option<String>,
+    pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -106,6 +119,8 @@ impl From<MarketLinkageInfo> for MarketLinkageSummaryView {
             instrument_key: info.instrument_key,
             content_hash: info.content_hash,
             derived_at: info.derived_at,
+            override_reason: info.override_reason,
+            override_actor: info.override_actor,
             created_at: info.created_at,
         }
     }
@@ -128,6 +143,9 @@ pub struct MarketLinkageDetailView {
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
+    /// Populated only for `resolver_tier = override` rows (R4 audit columns).
+    pub override_reason: Option<String>,
+    pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -146,6 +164,8 @@ impl From<MarketLinkageInfo> for MarketLinkageDetailView {
             metadata_hash: info.metadata_hash,
             content_hash: info.content_hash,
             derived_at: info.derived_at,
+            override_reason: info.override_reason,
+            override_actor: info.override_actor,
             created_at: info.created_at,
         }
     }
@@ -169,6 +189,9 @@ pub struct MarketLinkageHistoryEntryView {
     pub instrument_key: Option<DomainInstrumentKey>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
+    /// Populated only for `resolver_tier = override` rows (R4 audit columns).
+    pub override_reason: Option<String>,
+    pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -184,6 +207,8 @@ impl From<MarketLinkageInfo> for MarketLinkageHistoryEntryView {
             instrument_key: info.instrument_key,
             content_hash: info.content_hash,
             derived_at: info.derived_at,
+            override_reason: info.override_reason,
+            override_actor: info.override_actor,
             created_at: info.created_at,
         }
     }
@@ -244,9 +269,22 @@ pub struct BasisAlertListQuery {
     pub from: Option<DateTime<Utc>>,
     /// Exclusive upper bound on `as_of`.
     pub to: Option<DateTime<Utc>>,
+    /// When true, return only unacknowledged alerts (the review-queue default
+    /// view; R6 remediation).
+    #[serde(default)]
+    pub open_only: bool,
     #[normalize_page]
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+/// Inbound body for `POST /research/basis-alerts/{alert_id}/acknowledge`.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AcknowledgeBasisAlertRequest {
+    /// Operator reason recorded on the operation log (not on the ledger row —
+    /// the row only carries who/when, mirroring the linkage `resolve` action).
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
 }
 
 /// One basis-cross-check exceedance row for the governance feed.
@@ -259,6 +297,9 @@ pub struct BasisAlertView {
     pub basis_bps: Bps,
     pub threshold_bps: Bps,
     pub as_of: DateTime<Utc>,
+    pub acknowledged: bool,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -272,6 +313,9 @@ impl From<BasisAlertInfo> for BasisAlertView {
             basis_bps: info.basis_bps,
             threshold_bps: info.threshold_bps,
             as_of: info.as_of,
+            acknowledged: info.acknowledged,
+            acknowledged_at: info.acknowledged_at,
+            acknowledged_by: info.acknowledged_by,
             created_at: info.created_at,
         }
     }

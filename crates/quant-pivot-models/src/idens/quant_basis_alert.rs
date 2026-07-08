@@ -22,9 +22,11 @@ use crate::{
 // settlement-oracle (Chainlink) basis exceeded the governed threshold —
 // `domain.crypto.cross_check.max_basis_bps` at write time. `threshold_bps` is
 // captured per row (not just read from live config) so historical alerts
-// remain interpretable after an operator changes the threshold. Never
-// updated or deleted: an operator "acknowledging" an alert is a UI/read
-// concern layered over this immutable feed, not a row mutation.
+// remain interpretable after an operator changes the threshold. The row
+// itself is never updated once written except through the single governed
+// `acknowledge` mutation (R6 review-queue closed loop): an operator marks an
+// alert as triaged, recording who and when — this is the *only* mutation
+// this ledger ever accepts; every other column is write-once.
 #[quant_schema(lifecycle = "ledger")]
 pub enum QuantBasisAlert {
     Table,
@@ -35,6 +37,9 @@ pub enum QuantBasisAlert {
     BasisBps,
     ThresholdBps,
     AsOf,
+    Acknowledged,
+    AcknowledgedAt,
+    AcknowledgedBy,
     CreatedAt,
 }
 
@@ -60,6 +65,22 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantBasisAlert::AsOf)
                 .timestamp_with_time_zone()
                 .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantBasisAlert::Acknowledged)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .col(
+            ColumnDef::new(QuantBasisAlert::AcknowledgedAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantBasisAlert::AcknowledgedBy)
+                .text()
+                .null(),
         )
         .col(timestamp_with_write_default(QuantBasisAlert::CreatedAt))
         .foreign_key(
@@ -96,6 +117,18 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .col((QuantBasisAlert::AsOf, IndexOrder::Desc))
                 .to_owned(),
             "governance feed: recent basis alerts across all markets",
+        ),
+        IndexSpec::sea_query(
+            "idx_quant_basis_alert_open",
+            quant_basis_alert_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_basis_alert_open")
+                .table(QuantBasisAlert::Table)
+                .col(QuantBasisAlert::Acknowledged)
+                .col((QuantBasisAlert::AsOf, IndexOrder::Desc))
+                .to_owned(),
+            "R6 review queue: unacknowledged alerts, newest first",
         ),
     ]
 }

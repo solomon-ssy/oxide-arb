@@ -159,6 +159,7 @@ async fn quant_model_comparison_report_migration_and_crud() {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Published,
         })
         .await

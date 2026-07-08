@@ -40,6 +40,13 @@ pub struct CreateModelSpecRequest {
     /// Free-form authoring metadata (notes, tuning intent). Defaults to `{}`.
     #[serde(default)]
     pub spec_json: serde_json::Value,
+    /// Governed feature-requirements contract (11.2.2 remediation R7): the
+    /// generic + per-category domain feature names the eventual model
+    /// requires, mirroring `quant_pivot_research::selection::ModelFeatureRequirements`'s
+    /// wire shape (`{"generic": [...], "by_category": {...}}`). Defaults to
+    /// an empty requirement set (no gating) when omitted.
+    #[serde(default)]
+    pub feature_requirements: serde_json::Value,
     /// Operator reason recorded on the operation log (UI should require non-empty).
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
@@ -60,6 +67,7 @@ pub struct QuantModelSpecView {
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
+    pub feature_requirements: serde_json::Value,
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -75,6 +83,7 @@ impl From<ModelSpecInfo> for QuantModelSpecView {
             feature_schema_version: info.feature_schema_version,
             label_schema_version: info.label_schema_version,
             spec_json: info.spec_json,
+            feature_requirements: info.feature_requirements,
             status: info.status.as_str().to_owned(),
             created_at: info.created_at,
             updated_at: info.updated_at,

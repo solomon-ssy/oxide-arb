@@ -15,6 +15,9 @@ pub struct Model {
     pub basis_bps: Bps,
     pub threshold_bps: Bps,
     pub as_of: DateTime<Utc>,
+    pub acknowledged: bool,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

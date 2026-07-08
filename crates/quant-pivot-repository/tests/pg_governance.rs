@@ -40,6 +40,7 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Published,
         })
         .await

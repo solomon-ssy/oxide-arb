@@ -219,6 +219,22 @@ pub fn validate_structural_consistency(
         ));
     }
 
+    // Same consistency check for the Binance-settled path (R4 hardening):
+    // automated extraction always binds `symbol` from `rule.symbol()` so this
+    // can never fire there, but an operator override supplies the oracle
+    // independently — a mismatched symbol would silently join the basis
+    // cross-check (or the settlement price itself) to the wrong venue series.
+    if let ResolutionOracle::BinanceKline { symbol, .. } = &subject.resolution_oracle
+        && *symbol != rule.symbol()
+    {
+        return Err(format!(
+            "resolution oracle cites Binance symbol `{symbol}`, which disagrees with the \
+             ruleset's `{}` symbol for asset `{}`",
+            rule.symbol(),
+            subject.asset
+        ));
+    }
+
     Ok(())
 }
 
@@ -245,7 +261,13 @@ fn has_span_of_kind(
 }
 
 /// The text of one metadata field, when present.
-fn source_field_text(metadata: &LinkageSourceMetadata, field: GroundingField) -> Option<&str> {
+///
+/// `pub(crate)`: also used by [`crate::linkage::manual_evidence`] to anchor
+/// operator-submitted override evidence against the same source fields.
+pub(crate) fn source_field_text(
+    metadata: &LinkageSourceMetadata,
+    field: GroundingField,
+) -> Option<&str> {
     match field {
         GroundingField::Slug => Some(&metadata.slug),
         GroundingField::Question => Some(&metadata.question),

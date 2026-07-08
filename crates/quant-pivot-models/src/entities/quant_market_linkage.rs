@@ -26,6 +26,8 @@ pub struct Model {
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
+    pub override_reason: Option<String>,
+    pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

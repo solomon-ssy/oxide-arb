@@ -25,6 +25,11 @@ pub struct ModelSpecInfo {
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
+    /// Governed feature-requirements contract (11.2.2 remediation R7) —
+    /// deserializes to `quant_pivot_research::selection::ModelFeatureRequirements`
+    /// in `quant-pivot-core` (kept opaque here; this crate cannot depend on
+    /// `quant-pivot-research`).
+    pub feature_requirements: serde_json::Value,
     pub status: PublicationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -32,7 +37,7 @@ pub struct ModelSpecInfo {
 
 info_from_model!(ModelSpecInfo, crate::entities::quant_model_spec::Model, {
     model_spec_id, name, model_family, prediction_horizon_secs, feature_schema_version,
-    label_schema_version, spec_json, status, created_at, updated_at,
+    label_schema_version, spec_json, feature_requirements, status, created_at, updated_at,
 });
 
 /// Insert payload for `quant_model_spec`.
@@ -46,6 +51,7 @@ pub struct NewModelSpec {
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
+    pub feature_requirements: serde_json::Value,
     pub status: PublicationStatus,
 }
 

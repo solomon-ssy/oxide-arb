@@ -1,7 +1,7 @@
 use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, Index, Table, TableCreateStatement},
+    sea_query::{ColumnDef, Expr, Index, Table, TableCreateStatement},
 };
 
 use crate::{
@@ -15,6 +15,13 @@ use crate::{
     },
 };
 
+// `feature_requirements` (11.2.2 remediation R7) is the governed contract a
+// dataset build's offline point-in-time selector gates on: it is the exact
+// requirement set the eventual model (trained under this spec) would impose
+// online, so the offline funnel mirrors the real serving population instead
+// of guessing. Structured JSON deserializing to
+// `quant_pivot_research::selection::ModelFeatureRequirements`; validated at
+// authoring time in `quant-pivot-core`'s `ModelSpecService`.
 #[quant_schema(lifecycle = "control")]
 pub enum QuantModelSpec {
     Table,
@@ -25,6 +32,7 @@ pub enum QuantModelSpec {
     FeatureSchemaVersion,
     LabelSchemaVersion,
     SpecJson,
+    FeatureRequirements,
     Status,
     CreatedAt,
     UpdatedAt,
@@ -61,6 +69,12 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantModelSpec::SpecJson)
                 .json_binary()
                 .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantModelSpec::FeatureRequirements)
+                .json_binary()
+                .not_null()
+                .default(Expr::cust("'{}'::jsonb")),
         )
         .col(column::pg_enum::<PublicationStatus>(QuantModelSpec::Status))
         .col(timestamp_with_write_default(QuantModelSpec::CreatedAt))

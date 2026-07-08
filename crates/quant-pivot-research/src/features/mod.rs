@@ -11,6 +11,7 @@
 
 mod availability;
 mod builder;
+pub mod cell_availability;
 mod decision_capture;
 pub mod domain;
 pub mod generic;
@@ -18,6 +19,7 @@ pub mod names;
 mod null_policy;
 mod persistence;
 mod resolved;
+mod scalar;
 mod schema;
 mod value;
 mod writer;
@@ -29,6 +31,10 @@ pub use availability::FeatureAvailabilityOracle;
 pub use builder::{
     ConfiguredFeatureBuilder, FeatureComputeCtx, FeatureGroupBuilder, FeatureSourceWindows,
     RawFeature, ResolvedInputs,
+};
+pub use cell_availability::{
+    AVAILABILITY_MISSING, AVAILABILITY_NOT_APPLICABLE, AVAILABILITY_PRESENT, CellAvailability,
+    availability_column_name, availability_of, base_name_if_availability_column,
 };
 pub use decision_capture::{
     MarketDecisionCapture, RejectedMarketDraft, ResolvedMarketBundle, draft_data_quality_snapshot,
@@ -42,6 +48,7 @@ pub use resolved::{
     MarketWindowSnapshot, MicrostructureBucket, ResolvedBook, ResolvedMarketContext,
     TradeTapeWindowSnapshot,
 };
+pub use scalar::{feature_scalar, finite_f64};
 pub use schema::{
     FeatureSchema, FeatureSpec, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule,
     validate_required_features,

@@ -24,6 +24,18 @@
 //! Every other gate (status, category, spread, book freshness, resolution window,
 //! model eligibility) runs against exact point-in-time facts with the frozen
 //! config's own thresholds.
+//!
+//! # Model-feature gating (11.2.2 remediation R7)
+//!
+//! `DatasetPlanRequest.model_spec_id` names the `ModelSpec` this dataset is
+//! built **for** — the target model's requirements are therefore knowable at
+//! plan/build time, not a hypothetical future unknown. The caller resolves
+//! the target spec's governed `feature_requirements` and passes it into
+//! [`OfflinePitSelector::new`], so `ModelFeatureUnavailable` genuinely
+//! excludes a market whose domain features that spec's model would need are
+//! unavailable — mirroring exactly what the online funnel enforces once a
+//! version trained under this spec is routed, rather than a permissive
+//! `ModelFeatureRequirements::default()` placeholder.
 
 use chrono::{DateTime, Utc};
 
@@ -53,6 +65,11 @@ pub struct OfflinePitSelector {
     features: FeaturesConfig,
     runtime_config_version_id: RuntimeConfigVersionId,
     source_delay_secs: u64,
+    /// The target `ModelSpec`'s declared feature requirements (11.2.2
+    /// remediation R7) — genuinely gates `ModelFeatureUnavailable`, mirroring
+    /// exactly what the online funnel would enforce once this spec's model is
+    /// trained and routed, rather than a permissive placeholder.
+    model_requirements: ModelFeatureRequirements,
 }
 
 impl OfflinePitSelector {
@@ -65,6 +82,7 @@ impl OfflinePitSelector {
         min_selection_depth_usd: &DecimalString,
         runtime_config_version_id: RuntimeConfigVersionId,
         source_delay_secs: u64,
+        model_requirements: ModelFeatureRequirements,
     ) -> Self {
         // Override only the two Gamma-sourced floors the offline plane cannot
         // reproduce; every other threshold stays at its frozen value.
@@ -78,6 +96,7 @@ impl OfflinePitSelector {
             features: features.clone(),
             runtime_config_version_id,
             source_delay_secs,
+            model_requirements,
         }
     }
 
@@ -114,9 +133,7 @@ impl OfflinePitSelector {
             selection: self.selection.clone(),
             data_quality: self.data_quality.clone(),
             features: self.features.clone(),
-            // A dataset is built before its model is trained, so selection does
-            // not gate on a specific model's feature requirements.
-            model_requirements: ModelFeatureRequirements::default(),
+            model_requirements: self.model_requirements.clone(),
             source_delay_secs: self.source_delay_secs,
         }
     }

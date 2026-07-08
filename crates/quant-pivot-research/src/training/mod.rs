@@ -29,7 +29,7 @@ pub use lot_hold_value::{
 };
 pub use matrix::{
     FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
-    probe_matrix_coverage,
+    matrix_spec_from_schema, probe_matrix_coverage,
 };
 #[cfg(feature = "dataframe")]
 pub use parquet::DatasetParquetCodec;

@@ -16,6 +16,7 @@
 //! `MarketLinkageRepository`.
 
 pub mod extractor;
+pub mod manual_evidence;
 pub mod oracle;
 pub mod ruleset;
 pub mod tier0_slug;
@@ -25,6 +26,7 @@ pub use extractor::{
     DefaultSubjectValidator, ExtractedCandidate, SubjectExtractor, SubjectValidator,
     ValidationOutcome, validate_structural_consistency,
 };
+pub use manual_evidence::validate_manual_override;
 pub use ruleset::{AssetRule, CRYPTO_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
 pub use tier0_slug::Tier0SlugExtractor;
 pub use tier1_template::CryptoSubjectParser;

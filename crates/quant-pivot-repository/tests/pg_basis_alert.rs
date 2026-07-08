@@ -163,6 +163,7 @@ async fn page_filters_by_market_and_time_range() {
             market_id: Some(MarketId::new("0xbasis3")),
             from: Some(t0 + ChronoDuration::minutes(30)),
             to: None,
+            open_only: false,
             page: PageRequest::default(),
         })
         .await
@@ -171,4 +172,69 @@ async fn page_filters_by_market_and_time_range() {
     // Newest first.
     assert_eq!(page.items[0].basis_bps.inner(), dec!(80));
     assert_eq!(page.items[1].basis_bps.inner(), dec!(70));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn acknowledge_marks_the_alert_and_is_idempotent() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_market(&db, "0xbasis4").await;
+
+    let repo = PgBasisAlertRepository::new(db.clone());
+    let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+    let recorded = repo
+        .record(alert("0xbasis4", 75, as_of))
+        .await
+        .expect("record");
+    assert!(!recorded.acknowledged, "freshly recorded alert is open");
+    assert!(recorded.acknowledged_at.is_none());
+    assert!(recorded.acknowledged_by.is_none());
+
+    let acknowledged = repo
+        .acknowledge(&recorded.alert_id, "alice".to_owned())
+        .await
+        .expect("acknowledge");
+    assert!(acknowledged.acknowledged);
+    assert_eq!(acknowledged.acknowledged_by.as_deref(), Some("alice"));
+    let first_ack_at = acknowledged.acknowledged_at.expect("timestamp set");
+
+    // Idempotent: re-acknowledging by a different actor never overwrites the
+    // first acknowledgement (first triage wins).
+    let replay = repo
+        .acknowledge(&recorded.alert_id, "bob".to_owned())
+        .await
+        .expect("acknowledge replay");
+    assert_eq!(replay.acknowledged_by.as_deref(), Some("alice"));
+    assert_eq!(replay.acknowledged_at, Some(first_ack_at));
+
+    // `open_only` excludes the now-acknowledged alert from the review queue.
+    let open_page = repo
+        .page(BasisAlertListQuery {
+            market_id: Some(MarketId::new("0xbasis4")),
+            from: None,
+            to: None,
+            open_only: true,
+            page: PageRequest::default(),
+        })
+        .await
+        .expect("page");
+    assert!(open_page.items.is_empty(), "acknowledged alert is not open");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn acknowledge_missing_alert_fails_closed() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let repo = PgBasisAlertRepository::new(db.clone());
+    let missing = BasisAlertId::from_v7();
+    let result = repo.acknowledge(&missing, "alice".to_owned()).await;
+    assert!(
+        matches!(
+            result,
+            Err(quant_pivot_error::storage::StorageError::NotFound { .. })
+        ),
+        "acknowledging a non-existent alert must fail closed, not silently succeed"
+    );
 }

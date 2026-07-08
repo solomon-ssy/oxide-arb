@@ -554,6 +554,13 @@ pub struct CryptoCrossCheckConfig {
     /// consecutive report rounds raises one alert per cooldown window, not
     /// one per round — the governance feed stays a signal, not a flood.
     pub alert_cooldown_secs: u64,
+    /// Maximum tolerated age (seconds) of a Chainlink oracle observation
+    /// before it is rejected as [`NullReason::StaleBeyondPolicy`] in basis and
+    /// price-to-beat features. Mitigates the freshness gap between on-chain
+    /// Data Feeds (deviation/heartbeat updates) and Polymarket's Data Streams
+    /// settlement path — does not eliminate it; true Data Streams ingest is
+    /// deferred to Phase 11.2.3.
+    pub max_oracle_staleness_secs: u64,
 }
 
 impl Default for CryptoCrossCheckConfig {
@@ -561,6 +568,7 @@ impl Default for CryptoCrossCheckConfig {
         Self {
             max_basis_bps: 50,
             alert_cooldown_secs: 300,
+            max_oracle_staleness_secs: 60,
         }
     }
 }

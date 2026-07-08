@@ -11,33 +11,26 @@
 //! when absent, but that placeholder is **never** presented to the model alone: a
 //! companion `{feature}.__available` column is emitted immediately after it,
 //! carrying which of three structurally distinct states produced the row —
-//! [`CellOutcome::Present`] (`1.0`), [`CellOutcome::NotApplicable`] (`0.0`, the
-//! feature structurally never applies to this row — e.g. `domain: None` or an
-//! explicit `NullReason::NotApplicable`), or [`CellOutcome::MissingApplicable`]
-//! (`-1.0`, the feature applies in principle but this instance has a data/quality
-//! gap). A learner can therefore never confuse a fabricated placeholder with a
-//! real observation, and never conflates "this market has no such vertical" with
-//! "this market's vertical had a data outage."
+//! see [`crate::features::CellAvailability`]. That classification, and the
+//! `.__available` naming convention, are shared with the online/backtest
+//! classical-inference matrix assembler
+//! (`quant-pivot-core::projection::inference_batch::build_feature_matrix`) via
+//! [`crate::features::availability_of`] — the same rule must produce the same
+//! signal whether a row comes from a training batch or a live/replayed
+//! [`crate::features::FeatureVector`], or a classical model's learned
+//! availability weights are trained on a real distinction and served a
+//! fabricated constant (11.2.2 remediation R2).
 
 use ndarray::{Array1, Array2};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 
 use super::{LabelName, TrainingExample};
 use crate::features::{
-    FeatureName, FeatureSchema, FeatureUnit, FeatureValue, FeatureValueKind, NullReason,
+    CellAvailability, FeatureName, FeatureSchema, FeatureUnit, FeatureValueKind,
+    availability_column_name, availability_of, feature_scalar, finite_f64,
 };
 use quant_pivot_models::types::MatrixCoverageProbe;
-
-/// Availability-column value: the cell was a genuine observation.
-const AVAILABILITY_PRESENT: f64 = 1.0;
-/// Availability-column value: the feature structurally does not apply to this row.
-const AVAILABILITY_NOT_APPLICABLE: f64 = 0.0;
-/// Availability-column value: the feature applies but is missing this instance.
-const AVAILABILITY_MISSING: f64 = -1.0;
-/// Suffix appended to a non-critical column's feature name for its
-/// availability companion column.
-const AVAILABILITY_SUFFIX: &str = ".__available";
 
 /// How a column's decimal value is scaled before the `f64` cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,58 +88,37 @@ pub struct TrainingMatrix {
     pub rejected_rows: usize,
 }
 
-/// Project a [`FeatureValue`] to a scalar decimal, or `None` when it is missing
-/// or not a numeric/boolean scalar (categoricals are intentionally rejected).
-fn scalar(value: &FeatureValue) -> Option<Decimal> {
-    match value {
-        FeatureValue::Decimal(d) | FeatureValue::Bps(d) => Some(*d),
-        FeatureValue::Probability(p) => Some(p.inner()),
-        FeatureValue::Usd(u) => Some(u.inner()),
-        FeatureValue::Count(c) => Some(Decimal::from(*c)),
-        FeatureValue::Bool(b) => Some(if *b { Decimal::ONE } else { Decimal::ZERO }),
-        FeatureValue::Category(_) | FeatureValue::Missing(_) => None,
-    }
-}
-
-/// Cast a decimal to a finite `f64`, rejecting non-finite and unrepresentable values.
-fn finite_f64(decimal: Decimal) -> Option<f64> {
-    decimal
-        .to_f64()
-        .and_then(|value| value.is_finite().then_some(value))
-}
-
-/// The three structurally distinct states a training-matrix cell can be in.
+/// The three structurally distinct states a training-matrix cell can be in —
+/// [`CellAvailability`] plus the genuine value when present.
 ///
-/// See the module doc for why [`Self::NotApplicable`] and
-/// [`Self::MissingApplicable`] must never collapse into the same fabricated
-/// placeholder value.
+/// See the module doc for why the not-applicable and missing-applicable
+/// states must never collapse into the same fabricated placeholder value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CellOutcome {
     /// A genuine observed, finite value.
     Present(f64),
-    /// The feature structurally never applies to this row: the vector's
-    /// domain slice is entirely absent (a `domain.*` column on a market whose
-    /// category maps to no vertical), or the value is explicitly
-    /// `FeatureValue::Missing(NullReason::NotApplicable)`.
+    /// The feature structurally never applies to this row.
     NotApplicable,
     /// The feature applies in principle but this instance has a data or
-    /// quality gap (any other [`NullReason`], or an out-of-kind value).
+    /// quality gap (any other `NullReason`, or an out-of-kind value).
     MissingApplicable,
 }
 
 /// Resolve one column's raw state for `example`, before scale/fill.
+///
+/// Availability is classified by the shared [`availability_of`] rule (also
+/// used by the online/backtest inference-row assembler — see the module
+/// doc); only the scaled numeric value for the `Present` case is local to
+/// training, since serving never needs a scaled scalar, only the raw
+/// [`FeatureValue`].
 fn resolve_cell(example: &TrainingExample, column: &FeatureColumnSpec) -> CellOutcome {
-    match example.feature_vector.value(&column.feature) {
-        // The key being entirely absent (`None`) is folded into the same
-        // `NotApplicable` arm as an explicit `NullReason::NotApplicable`: for
-        // a `domain.*` column this is the `domain: None` case (structurally
-        // distinct from a present-but-missing domain value, never a data
-        // gap); for a generic column this should not occur under the
-        // fixed-width schema, and failing soft to "not applicable" is the
-        // conservative choice (never a fabricated data gap).
-        Some(FeatureValue::Missing(NullReason::NotApplicable)) | None => CellOutcome::NotApplicable,
-        Some(FeatureValue::Missing(_)) => CellOutcome::MissingApplicable,
-        Some(other) => scalar(other)
+    match availability_of(&example.feature_vector, &column.feature) {
+        CellAvailability::NotApplicable => CellOutcome::NotApplicable,
+        CellAvailability::MissingApplicable => CellOutcome::MissingApplicable,
+        CellAvailability::Present => example
+            .feature_vector
+            .value(&column.feature)
+            .and_then(feature_scalar)
             .map(|value| column.scale.apply(value))
             .and_then(finite_f64)
             .map_or(CellOutcome::MissingApplicable, CellOutcome::Present),
@@ -162,20 +134,20 @@ fn resolve_cell(example: &TrainingExample, column: &FeatureColumnSpec) -> CellOu
 /// so there is no missingness left to signal.
 fn cell(example: &TrainingExample, column: &FeatureColumnSpec) -> Option<(f64, Option<f64>)> {
     match resolve_cell(example, column) {
-        CellOutcome::Present(value) => {
-            Some((value, (!column.critical).then_some(AVAILABILITY_PRESENT)))
-        }
+        CellOutcome::Present(value) => Some((
+            value,
+            (!column.critical).then_some(CellAvailability::Present.as_f64()),
+        )),
         _ if column.critical => None,
-        CellOutcome::NotApplicable => {
-            Some((column.fill_missing, Some(AVAILABILITY_NOT_APPLICABLE)))
-        }
-        CellOutcome::MissingApplicable => Some((column.fill_missing, Some(AVAILABILITY_MISSING))),
+        CellOutcome::NotApplicable => Some((
+            column.fill_missing,
+            Some(CellAvailability::NotApplicable.as_f64()),
+        )),
+        CellOutcome::MissingApplicable => Some((
+            column.fill_missing,
+            Some(CellAvailability::MissingApplicable.as_f64()),
+        )),
     }
-}
-
-/// The companion availability [`FeatureName`] for a non-critical column.
-fn availability_name(feature: &FeatureName) -> FeatureName {
-    FeatureName::new(format!("{}{AVAILABILITY_SUFFIX}", feature.as_str()))
 }
 
 /// Resolve the target label cell for one example, or `None` to reject the row.
@@ -258,7 +230,7 @@ fn expanded_feature_names(spec: &FeatureMatrixSpec) -> Vec<FeatureName> {
     for column in &spec.columns {
         names.push(column.feature.clone());
         if !column.critical {
-            names.push(availability_name(&column.feature));
+            names.push(availability_column_name(&column.feature));
         }
     }
     names
@@ -330,7 +302,10 @@ pub fn probe_matrix_coverage(
 mod tests {
     use super::*;
     use crate::{
-        features::FeatureVector,
+        features::{
+            AVAILABILITY_MISSING, AVAILABILITY_NOT_APPLICABLE, AVAILABILITY_PRESENT, FeatureValue,
+            FeatureVector, NullReason,
+        },
         training::{LabelName, TrainingExample, TrainingLabel},
     };
     use chrono::{TimeZone, Utc};

@@ -66,12 +66,12 @@ use quant_pivot_models::{
         RUNTIME_CONFIG_SCHEMA_VERSION, ReportsConfig, RuntimeConfig, SelectionConfig,
     },
     types::{
-        AccountPositions, ContentHash, DomainInstrumentKey, EventId, ExposureBreakdown, MarketId,
-        MarketLinkageId, MarketSelectionId, ModelSpecId, ModelVersionId, OperationLogId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
-        PortfolioRiskBudget, Price, RecommendationId, RecommendationReportId,
-        ReportDataQualityTokens, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        SelectionExclusionSummary, Shares, TokenId, Usd,
+        AccountPositions, BasisAlertId, ContentHash, DomainInstrumentKey, EventId,
+        ExposureBreakdown, MarketId, MarketLinkageId, MarketSelectionId, ModelSpecId,
+        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioRejectedSummary, PortfolioRiskBudget, Price, RecommendationId,
+        RecommendationReportId, ReportDataQualityTokens, RuntimeConfigActivationId,
+        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -299,6 +299,17 @@ impl BasisAlertRepository for EmptyBasisAlertRepo {
         query: BasisAlertListQuery,
     ) -> Result<Paginated<BasisAlertInfo>, StorageError> {
         Ok(Paginated::empty_for(&query))
+    }
+
+    async fn acknowledge(
+        &self,
+        alert_id: &BasisAlertId,
+        _actor: String,
+    ) -> Result<BasisAlertInfo, StorageError> {
+        Err(StorageError::NotFound {
+            entity: "quant_basis_alert",
+            id: alert_id.to_string(),
+        })
     }
 }
 
@@ -1191,6 +1202,7 @@ async fn publish_weighted_model(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Published,
         })
         .await

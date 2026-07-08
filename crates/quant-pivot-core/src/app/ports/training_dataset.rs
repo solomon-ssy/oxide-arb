@@ -17,8 +17,9 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, EventRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
-    MarketLinkageRepository, MarketRepository, PositionRepository, QuantFactReadRepository,
-    RecommendationRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -49,6 +50,7 @@ pub struct CoreTrainingDatasetPort {
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
+    model_registry: Arc<dyn ModelRegistryRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
@@ -82,6 +84,7 @@ impl CoreTrainingDatasetPort {
             position_repo: Arc::clone(&research.position_repo),
             fee_calculator: Arc::clone(&research.fee_calculator),
             linkage_repo: Arc::clone(&research.market_linkage_repo),
+            model_registry: Arc::clone(&research.model_registry_repo),
             runtime_config,
             bias_table_repo,
             max_spine_samples,
@@ -118,6 +121,7 @@ impl CoreTrainingDatasetPort {
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
                 linkage_repo: Arc::clone(&self.linkage_repo),
+                model_registry: Arc::clone(&self.model_registry),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,

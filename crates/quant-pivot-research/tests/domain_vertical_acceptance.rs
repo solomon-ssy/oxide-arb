@@ -763,8 +763,18 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
     assert!(linkage_valid_at(&ledger, before).is_none());
 }
 
+/// Focused, pure feature-computation test: `basis_vs_resolution_source` is
+/// the Binance-close-vs-Chainlink-oracle bps divergence itself. Whether that
+/// divergence is *actionable* (crosses `max_basis_bps`, gets persisted, and
+/// enters the operator review queue) is a distinct concern owned by
+/// `detect_basis_alerts` — see
+/// `crates/quant-pivot-core/src/service/basis_alert.rs`'s own unit tests and
+/// `crates/quant-pivot-repository/tests/pg_basis_alert.rs`'s
+/// `acknowledge_marks_the_alert_and_is_idempotent` for that closed loop
+/// (11.2.2 remediation R6 — this test was previously misnamed as asserting
+/// "flagging", which it never did).
 #[test]
-fn basis_vs_resolution_source_flags_divergence_for_chainlink_oracle() {
+fn basis_vs_resolution_source_computes_bps_from_close_and_oracle() {
     use quant_pivot_models::runtime_config::CryptoDomainConfig;
     use quant_pivot_research::domain::DomainObservationWindow;
 

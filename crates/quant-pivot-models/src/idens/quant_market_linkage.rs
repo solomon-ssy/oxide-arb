@@ -25,7 +25,11 @@ use crate::{
 // instrument binding + grounding proof, or the unresolved reason) lives in one
 // canonical JSONB payload; scalar provenance (family, status, tier, version,
 // hashes, instrument key) is typed so governance queries never deserialize the
-// payload. Rows are never updated or deleted (SCD2 knowledge history).
+// payload. `override_reason` / `override_actor` (11.2.2 remediation R4) are a
+// first-class, queryable projection of `outcome.override_context` — populated
+// only for `resolver_tier = override` rows, from the same write that builds
+// the JSONB outcome (no independent source of truth, no drift risk). Rows are
+// never updated or deleted (SCD2 knowledge history).
 #[quant_schema(lifecycle = "ledger")]
 pub enum QuantMarketLinkage {
     Table,
@@ -41,6 +45,8 @@ pub enum QuantMarketLinkage {
     MetadataHash,
     ContentHash,
     DerivedAt,
+    OverrideReason,
+    OverrideActor,
     CreatedAt,
 }
 
@@ -87,6 +93,16 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantMarketLinkage::DerivedAt)
                 .timestamp_with_time_zone()
                 .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantMarketLinkage::OverrideReason)
+                .text()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantMarketLinkage::OverrideActor)
+                .text()
+                .null(),
         )
         .col(timestamp_with_write_default(QuantMarketLinkage::CreatedAt))
         .foreign_key(

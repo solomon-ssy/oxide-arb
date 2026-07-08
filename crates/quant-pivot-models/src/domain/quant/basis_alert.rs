@@ -3,8 +3,9 @@
 //! One row per `(market, as_of)` where `domain.crypto.basis_vs_resolution_source`
 //! exceeded the governed `domain.crypto.cross_check.max_basis_bps` threshold —
 //! the feature-source (Binance) and the settlement oracle (Chainlink) disagreed
-//! enough to warrant operator review. Append-only, immutable: an operator
-//! "acknowledging" an alert is a UI/read concern, never a row mutation.
+//! enough to warrant operator review. The row is append-only except for the
+//! single governed `acknowledge` mutation (R6 review-queue closed loop): an
+//! operator marks an alert as triaged, recording who and when.
 
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -23,12 +24,15 @@ pub struct BasisAlertInfo {
     pub basis_bps: Bps,
     pub threshold_bps: Bps,
     pub as_of: DateTime<Utc>,
+    pub acknowledged: bool,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
 info_from_model!(BasisAlertInfo, crate::entities::quant_basis_alert::Model, {
     alert_id, market_id, instrument_key, oracle_instrument_key, basis_bps,
-    threshold_bps, as_of, created_at,
+    threshold_bps, as_of, acknowledged, acknowledged_at, acknowledged_by, created_at,
 });
 
 /// Insert payload for `quant_basis_alert`.

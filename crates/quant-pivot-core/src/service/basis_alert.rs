@@ -3,7 +3,14 @@
 //! Closes the loop the design promised but never built: `domain.crypto.
 //! basis_vs_resolution_source` was computed and persisted as a feature value,
 //! but exceeding `domain.crypto.cross_check.max_basis_bps` never produced a
-//! risk signal or a linkage-review artifact — this module is that signal.
+//! durable, operator-actionable artifact — this module is that artifact.
+//!
+//! The review queue is the `quant_basis_alert` ledger itself, filtered to
+//! unacknowledged rows (`BasisAlertListQuery::open_only`) and triaged through
+//! the single governed `BasisAlertRepository::acknowledge` mutation — this is
+//! deliberately **not** a `MarketLinkage` state change: a basis divergence is
+//! a live feature-vs-oracle observation, not evidence the market's subject
+//! binding itself is wrong, so it never mutates the linkage ledger.
 //!
 //! The feature itself is only ever `Present` for a Chainlink-oracle-settled
 //! subject (a Binance-settled market's basis feature is
@@ -200,5 +207,162 @@ mod tests {
         let vec = vector(Some(FeatureValue::Bps(dec!(999))));
         let alerts = detect_basis_alerts(&[vec], &HashMap::new(), &domain);
         assert!(alerts.is_empty());
+    }
+
+    // ── R6: detect → record → acknowledge closed loop ───────────────────────
+
+    use quant_pivot_error::storage::StorageError;
+    use quant_pivot_models::{
+        domain::{BasisAlertInfo, BasisAlertListQuery, Paginated, pagination::PageRequest},
+        types::BasisAlertId,
+    };
+    use quant_pivot_repository::traits::BasisAlertRepository;
+    use std::sync::Mutex;
+
+    /// A minimal in-memory `BasisAlertRepository`, real enough to prove the
+    /// `detect_basis_alerts` → `record` → `acknowledge` wiring end to end
+    /// without a database (the Postgres-backed SQL semantics for the same
+    /// contract are covered separately by `pg_basis_alert.rs`, which requires
+    /// Docker).
+    #[derive(Default)]
+    struct InMemoryBasisAlertRepo {
+        rows: Mutex<Vec<BasisAlertInfo>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BasisAlertRepository for InMemoryBasisAlertRepo {
+        async fn record(
+            &self,
+            alert: quant_pivot_models::domain::NewBasisAlert,
+        ) -> Result<BasisAlertInfo, StorageError> {
+            let row = BasisAlertInfo {
+                alert_id: alert.alert_id,
+                market_id: alert.market_id,
+                instrument_key: alert.instrument_key,
+                oracle_instrument_key: alert.oracle_instrument_key,
+                basis_bps: alert.basis_bps,
+                threshold_bps: alert.threshold_bps,
+                as_of: alert.as_of,
+                acknowledged: false,
+                acknowledged_at: None,
+                acknowledged_by: None,
+                created_at: Utc::now(),
+            };
+            self.rows.lock().expect("lock").push(row.clone());
+            Ok(row)
+        }
+
+        async fn latest_for_market(
+            &self,
+            market_id: &MarketId,
+        ) -> Result<Option<BasisAlertInfo>, StorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|row| &row.market_id == market_id)
+                .max_by_key(|row| row.as_of)
+                .cloned())
+        }
+
+        async fn page(
+            &self,
+            query: BasisAlertListQuery,
+        ) -> Result<Paginated<BasisAlertInfo>, StorageError> {
+            let items: Vec<_> = self
+                .rows
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|row| !query.open_only || !row.acknowledged)
+                .cloned()
+                .collect();
+            Ok(Paginated {
+                total: items.len() as u64,
+                items,
+                page: 1,
+                size: 0,
+                has_next: false,
+            })
+        }
+
+        async fn acknowledge(
+            &self,
+            alert_id: &BasisAlertId,
+            actor: String,
+        ) -> Result<BasisAlertInfo, StorageError> {
+            let mut rows = self.rows.lock().expect("lock");
+            let row = rows
+                .iter_mut()
+                .find(|row| &row.alert_id == alert_id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "quant_basis_alert",
+                    id: alert_id.to_string(),
+                })?;
+            if !row.acknowledged {
+                row.acknowledged = true;
+                row.acknowledged_at = Some(Utc::now());
+                row.acknowledged_by = Some(actor);
+            }
+            let result = row.clone();
+            drop(rows);
+            Ok(result)
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_record_acknowledge_closes_the_review_loop() {
+        let domain = DomainConfig::default(); // default max_basis_bps = 50
+        let vec = vector(Some(FeatureValue::Bps(dec!(75))));
+        let alerts = detect_basis_alerts(
+            std::slice::from_ref(&vec),
+            &domain_inputs_for(&vec.market_id),
+            &domain,
+        );
+        assert_eq!(alerts.len(), 1, "exceedance produces exactly one alert");
+
+        let repo = InMemoryBasisAlertRepo::default();
+        let recorded = repo
+            .record(alerts.into_iter().next().unwrap())
+            .await
+            .expect("record");
+        assert!(!recorded.acknowledged, "newly recorded alert is open");
+
+        // It shows up in the open-only review queue.
+        let open = repo
+            .page(BasisAlertListQuery {
+                market_id: None,
+                from: None,
+                to: None,
+                open_only: true,
+                page: PageRequest::default(),
+            })
+            .await
+            .expect("page");
+        assert_eq!(open.items.len(), 1);
+
+        // Acknowledging it removes it from the open queue and records who/when.
+        let acked = repo
+            .acknowledge(&recorded.alert_id, "alice".to_owned())
+            .await
+            .expect("acknowledge");
+        assert!(acked.acknowledged);
+        assert_eq!(acked.acknowledged_by.as_deref(), Some("alice"));
+
+        let open_after = repo
+            .page(BasisAlertListQuery {
+                market_id: None,
+                from: None,
+                to: None,
+                open_only: true,
+                page: PageRequest::default(),
+            })
+            .await
+            .expect("page");
+        assert!(
+            open_after.items.is_empty(),
+            "acknowledged alert leaves the open review queue"
+        );
     }
 }

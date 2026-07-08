@@ -29,6 +29,11 @@ pub struct CreateModelSpecCommand {
     pub label_schema_version: SchemaVersion,
     /// Free-form authoring metadata.
     pub spec_json: serde_json::Value,
+    /// Governed feature-requirements contract (11.2.2 remediation R7):
+    /// deserializes to `quant_pivot_research::selection::ModelFeatureRequirements`.
+    /// Validated by `ModelSpecService::create` before persistence — an
+    /// unparseable value fails the request closed, never silently defaults.
+    pub feature_requirements: serde_json::Value,
     /// Operator reason (HTTP op-log only).
     pub reason: String,
 }

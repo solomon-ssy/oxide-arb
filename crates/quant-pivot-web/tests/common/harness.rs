@@ -64,7 +64,7 @@ use quant_pivot_models::{
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, DomainInstrumentKey, DomainSourceId, FactorDefinitionId,
+        BacktestReportId, BasisAlertId, DomainInstrumentKey, DomainSourceId, FactorDefinitionId,
         FavoriteLongshotBiasTableId, MarketId, MarketLinkageId, ModelComparisonReportId,
         ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId, RuntimeConfigVersionId, TokenId,
         TrainingDatasetId,
@@ -1327,5 +1327,16 @@ impl BasisAlertRepository for MockBasisAlertRepository {
         query: BasisAlertListQuery,
     ) -> Result<Paginated<BasisAlertInfo>, StorageError> {
         Ok(Paginated::empty_for(&query))
+    }
+
+    async fn acknowledge(
+        &self,
+        alert_id: &BasisAlertId,
+        _actor: String,
+    ) -> Result<BasisAlertInfo, StorageError> {
+        Err(StorageError::NotFound {
+            entity: "quant_basis_alert",
+            id: alert_id.to_string(),
+        })
     }
 }

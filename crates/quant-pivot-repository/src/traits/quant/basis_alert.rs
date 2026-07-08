@@ -3,10 +3,12 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{BasisAlertInfo, BasisAlertListQuery, NewBasisAlert, Paginated},
-    types::MarketId,
+    types::{BasisAlertId, MarketId},
 };
 
-/// Append-only persistence port for the basis-cross-check exceedance feed.
+/// Append-only persistence port for the basis-cross-check exceedance feed,
+/// plus the single governed `acknowledge` mutation (R6 review-queue closed
+/// loop).
 #[async_trait::async_trait]
 pub trait BasisAlertRepository: Send + Sync {
     /// Record one exceedance (never updated or deleted).
@@ -25,4 +27,17 @@ pub trait BasisAlertRepository: Send + Sync {
         &self,
         query: BasisAlertListQuery,
     ) -> Result<Paginated<BasisAlertInfo>, StorageError>;
+
+    /// Mark one alert as triaged by `actor` (idempotent: re-acknowledging an
+    /// already-acknowledged alert leaves its original `acknowledged_at` /
+    /// `acknowledged_by` untouched and simply returns the current row).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] when `alert_id` does not exist.
+    async fn acknowledge(
+        &self,
+        alert_id: &BasisAlertId,
+        actor: String,
+    ) -> Result<BasisAlertInfo, StorageError>;
 }

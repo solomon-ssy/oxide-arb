@@ -54,6 +54,7 @@ async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Published,
         })
         .await

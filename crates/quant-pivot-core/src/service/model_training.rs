@@ -54,14 +54,12 @@ use quant_pivot_research::{
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
-    features::{FeatureName, FeatureValue},
+    features::FeatureSchema,
     model::{
         ClassicalAdapterRegistry, ClassicalTrainOutput, ValidationReport,
         artifact::ClassicalModelArtifact,
     },
-    training::{
-        FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
-    },
+    training::{TrainingMatrix, build_training_matrix, matrix_spec_from_schema},
 };
 use rust_decimal::Decimal;
 
@@ -566,7 +564,8 @@ impl ModelTrainerService {
         examples: &[TrainingExample],
         kind: ClassicalKind,
     ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
-        let matrix = build_classical_matrix(examples, &input.label)?;
+        let schema = FeatureSchema::build(&self.replay.features);
+        let matrix = build_classical_matrix(examples, &input.label, &schema)?;
         let folds = input.validation_folds.max(2);
         // Offload the CPU-bound classical fit + rolling validation to a blocking
         // thread (keeps the async runtime free for other jobs' heartbeats).
@@ -615,25 +614,21 @@ impl ModelTrainerService {
 /// Build the standardizable classical feature matrix from the dataset examples.
 ///
 /// Examples are time-ordered (so the rolling-validation holdout splits on
-/// wall-clock time, never leaking) and reduced to their numeric feature columns.
+/// wall-clock time, never leaking). Columns come from the governed
+/// [`FeatureSchema`] (11.2.2 remediation R2) — not an ad hoc scan of whichever
+/// numeric names happen to appear in this particular example batch — so the
+/// classical path respects the same `critical` / `unit` / `value_kind`
+/// contract the online governed path enforces (e.g. `Bps`-unit features are
+/// correctly scaled, and a schema-`critical` column genuinely gates row
+/// admission instead of silently being treated as fillable). This also makes
+/// the column set reproducible across runs and comparable to the schema
+/// hash, rather than an artifact of which markets happened to be sampled.
 #[cfg(feature = "ml-classical")]
 fn build_classical_matrix(
     examples: &[TrainingExample],
     label: &LabelSelector,
+    schema: &FeatureSchema,
 ) -> QuantResult<TrainingMatrix> {
-    /// Numeric (non-categorical, present) feature columns enter the matrix.
-    const fn is_numeric(value: &FeatureValue) -> bool {
-        matches!(
-            value,
-            FeatureValue::Decimal(_)
-                | FeatureValue::Bps(_)
-                | FeatureValue::Probability(_)
-                | FeatureValue::Usd(_)
-                | FeatureValue::Count(_)
-                | FeatureValue::Bool(_)
-        )
-    }
-
     let mut sorted: Vec<_> = examples.to_vec();
     sorted.sort_by(|a, b| {
         a.as_of
@@ -642,28 +637,7 @@ fn build_classical_matrix(
             .then_with(|| a.token_id.as_str().cmp(b.token_id.as_str()))
     });
 
-    let mut feature_names: BTreeSet<String> = BTreeSet::new();
-    for example in &sorted {
-        for (name, value) in example.feature_vector.iter_values() {
-            if is_numeric(value) {
-                feature_names.insert(name.as_str().to_owned());
-            }
-        }
-    }
-    let columns: Vec<FeatureColumnSpec> = feature_names
-        .into_iter()
-        .map(|name| FeatureColumnSpec {
-            feature: FeatureName::new(name),
-            scale: MatrixScale::Identity,
-            critical: false,
-            fill_missing: 0.0,
-        })
-        .collect();
-    let spec = FeatureMatrixSpec {
-        columns,
-        label_name: label.name.clone(),
-        label_horizon_secs: label.horizon_secs,
-    };
+    let spec = matrix_spec_from_schema(schema, label.name.clone(), label.horizon_secs);
     build_training_matrix(&sorted, &spec)
 }
 

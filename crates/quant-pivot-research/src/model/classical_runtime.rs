@@ -26,7 +26,7 @@ use rust_decimal::{
 use smartcore::linalg::basic::matrix::DenseMatrix;
 
 use crate::{
-    features::{FeatureName, FeatureValue},
+    features::{FeatureName, FeatureValue, feature_scalar, finite_f64},
     model::{
         artifact::ClassicalModelArtifact,
         classical::{CLASSICAL_CRATE_VERSION, SmartcoreModel},
@@ -300,23 +300,12 @@ fn expect_feature_matrix(input: ModelRuntimeInput) -> QuantResult<InferenceMatri
     }
 }
 
-/// Project a [`FeatureValue`] to a finite `f64`, mirroring the training matrix.
+/// Project a [`FeatureValue`] to a finite `f64` via the shared
+/// [`feature_scalar`] projection — the identical rule
+/// `training::matrix` uses, so training and serving can never silently
+/// diverge on which `FeatureValue` variants are numeric.
 fn feature_scalar_f64(value: &FeatureValue) -> Option<f64> {
-    let decimal = match value {
-        FeatureValue::Decimal(d) | FeatureValue::Bps(d) => *d,
-        FeatureValue::Probability(p) => p.inner(),
-        FeatureValue::Usd(u) => u.inner(),
-        FeatureValue::Count(c) => Decimal::from(*c),
-        FeatureValue::Bool(b) => {
-            if *b {
-                Decimal::ONE
-            } else {
-                Decimal::ZERO
-            }
-        }
-        FeatureValue::Category(_) | FeatureValue::Missing(_) => return None,
-    };
-    decimal.to_f64().filter(|v| v.is_finite())
+    feature_scalar(value).and_then(finite_f64)
 }
 
 /// Convert an `f64` to a research-scale `Decimal`.

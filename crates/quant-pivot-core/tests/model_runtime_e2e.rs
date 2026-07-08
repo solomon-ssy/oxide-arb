@@ -683,6 +683,7 @@ async fn publish_weighted_model(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Published,
         })
         .await

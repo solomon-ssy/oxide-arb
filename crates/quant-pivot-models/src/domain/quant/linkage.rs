@@ -197,6 +197,32 @@ pub enum GroundingKind {
     /// slug) — never used for a field whose value could vary independently
     /// of the template match.
     TemplateEntailed,
+    /// A literal excerpt an operator cited as justification for a manual
+    /// override (11.2.2 remediation R4). Distinct from [`Self::LiteralSpan`]
+    /// because the citation was never produced by a deterministic extractor
+    /// pattern — it is still required to be a byte-exact substring of the
+    /// cited source field (the anti-hallucination bar is never relaxed), but
+    /// the *provenance* (human judgment vs. automated pattern match) is
+    /// audited separately.
+    ManualEvidence,
+}
+
+/// One operator-submitted literal-text justification for a manual override.
+///
+/// (11.2.2 remediation R4). The operator names which subject field the text
+/// evidences and which metadata field the text was copied from; the
+/// resolver-side validator (never the wire layer) verifies the text is a
+/// real, byte-exact substring of that field before it becomes a
+/// [`GroundingSpan`] — an override can cite real text, never fabricate it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualEvidenceInput {
+    /// Dotted subject field path this evidence justifies (e.g. `asset`).
+    pub subject_field: String,
+    /// Which metadata field the operator copied the text from.
+    pub source: GroundingField,
+    /// The literal text the operator cites — verified as a byte-exact
+    /// substring of `source`'s content, never trusted as-is.
+    pub text: String,
 }
 
 /// One extracted subject field tied to the literal source-text span it came from.
@@ -387,6 +413,11 @@ pub struct MarketLinkageInfo {
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
+    /// First-class projection of `outcome.override_context.reason` (11.2.2
+    /// remediation R4) — `None` unless `resolver_tier = override`.
+    pub override_reason: Option<String>,
+    /// First-class projection of `outcome.override_context.actor`.
+    pub override_actor: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -406,6 +437,8 @@ info_from_model!(
         metadata_hash,
         content_hash,
         derived_at,
+        override_reason,
+        override_actor,
         created_at,
     }
 );
@@ -428,6 +461,8 @@ pub struct NewMarketLinkage {
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
+    pub override_reason: Option<String>,
+    pub override_actor: Option<String>,
 }
 
 impl MarketLinkage {
@@ -435,11 +470,18 @@ impl MarketLinkage {
     ///
     /// The derived status and denormalized instrument key are computed here so
     /// no writer can persist a row that disagrees with its own outcome.
+    /// `override_reason` / `override_actor` are projected from the same
+    /// `binding.override_context` that is also serialized inside `outcome` —
+    /// one source of truth, two representations (queryable columns +
+    /// complete audit document).
     ///
     /// # Errors
     ///
     /// Propagates outcome-payload serialization failures.
     pub fn to_new(&self) -> Result<NewMarketLinkage, serde_json::Error> {
+        let override_context = self
+            .binding()
+            .and_then(|binding| binding.override_context.as_ref());
         Ok(NewMarketLinkage {
             linkage_id: self.linkage_id.clone(),
             market_id: self.market_id.clone(),
@@ -453,6 +495,8 @@ impl MarketLinkage {
             metadata_hash: self.metadata_hash.clone(),
             content_hash: self.content_hash.clone(),
             derived_at: self.derived_at,
+            override_reason: override_context.map(|ctx| ctx.reason.clone()),
+            override_actor: override_context.map(|ctx| ctx.actor.clone()),
         })
     }
 }

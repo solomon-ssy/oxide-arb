@@ -742,8 +742,8 @@ fn domain_fields() -> Vec<FieldUiEntry> {
             "domain.crypto.cross_check.max_basis_bps",
             "Maximum Binance–Chainlink basis",
             "Binance–Chainlink 最大基差",
-            "When the settlement oracle is Chainlink, basis between Binance and Chainlink PIT quotes above this (bps) raises a cross-check risk signal and flags linkage for review — never silently clamps a feature.",
-            "结算预言机为 Chainlink 时，Binance 与 Chainlink PIT 报价基差超过此值（bps）会触发交叉核验风险信号并标记联动待复核——绝不静默钳制特征值。",
+            "When the settlement oracle is Chainlink, basis between Binance and Chainlink PIT quotes above this (bps) raises a cross-check risk signal and appends a durable, operator-acknowledgeable alert to the basis-alert queue — never silently clamps a feature.",
+            "结算预言机为 Chainlink 时，Binance 与 Chainlink PIT 报价基差超过此值（bps）会触发交叉核验风险信号，并写入 basis 告警队列供操作员确认处理——绝不静默钳制特征值。",
         ),
         secs(
             "domain.crypto.cross_check.alert_cooldown_secs",
@@ -751,6 +751,13 @@ fn domain_fields() -> Vec<FieldUiEntry> {
             "基差告警冷却期",
             "Minimum seconds between two persisted basis-exceedance alerts for the same market. A market whose basis persistently exceeds the threshold raises one alert per cooldown window, not one per report round.",
             "同一市场两次持久化基差超限告警之间的最小间隔（秒）。持续超限的市场每个冷却窗口只触发一次告警，而非每轮报告都触发。",
+        ),
+        secs(
+            "domain.crypto.cross_check.max_oracle_staleness_secs",
+            "Max Chainlink oracle staleness",
+            "Chainlink 预言机最大滞后",
+            "Risk control for the freshness gap between on-chain Chainlink Data Feeds (push, deviation/heartbeat cadence) and Polymarket's Data Streams settlement path. Oracle observations older than this (seconds) are rejected as stale in basis and price-to-beat features — mitigates but does not eliminate cross-source drift; true Data Streams ingest requires a paid subscription (Phase 11.2.3).",
+            "缓解链上 Chainlink Data Feeds（推送式、按偏差/心跳更新）与 Polymarket Data Streams 结算路径之间新鲜度差异的风险控制。超过此秒数的预言机观测在基差与 PTB 特征中被拒绝为滞后——缓解而非消除跨源偏离；真正的 Data Streams 接入需付费订阅（11.2.3 阶段）。",
         ),
     ]
 }
@@ -2221,6 +2228,7 @@ fn domain_section() -> SchemaNode {
             "domain.crypto.volatility_window_secs",
             "domain.crypto.cross_check.max_basis_bps",
             "domain.crypto.cross_check.alert_cooldown_secs",
+            "domain.crypto.cross_check.max_oracle_staleness_secs",
         ]),
     )
 }

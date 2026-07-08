@@ -450,13 +450,16 @@ fn factors_config() -> FactorsConfig {
 }
 
 async fn seed_catalog(db: &DatabaseConnection, window_start: chrono::DateTime<Utc>) {
+    seed_catalog_with_category(db, window_start, MarketCategory::Sports).await;
+}
+
+async fn seed_catalog_with_category(
+    db: &DatabaseConnection,
+    window_start: chrono::DateTime<Utc>,
+    category: MarketCategory,
+) {
     PgEventRepository::new(db.clone())
-        .upsert(make_event(
-            EVENT_ID,
-            "Dataset E2E",
-            "dataset-e2e",
-            MarketCategory::Sports,
-        ))
+        .upsert(make_event(EVENT_ID, "Dataset E2E", "dataset-e2e", category))
         .await
         .expect("seed event");
     let mut market = make_market(
@@ -464,7 +467,7 @@ async fn seed_catalog(db: &DatabaseConnection, window_start: chrono::DateTime<Ut
         EVENT_ID,
         "Dataset E2E?",
         "dataset-e2e",
-        MarketCategory::Sports,
+        category,
         Some(window_start + ChronoDuration::days(7)),
     );
     market.yes_token_id = TokenId::new(YES_TOKEN);
@@ -484,6 +487,13 @@ async fn seed_catalog(db: &DatabaseConnection, window_start: chrono::DateTime<Ut
 }
 
 async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
+    seed_model_spec_with_requirements(db, serde_json::json!({})).await
+}
+
+async fn seed_model_spec_with_requirements(
+    db: &DatabaseConnection,
+    feature_requirements: serde_json::Value,
+) -> ModelSpecId {
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
         .create_model_spec(NewModelSpec {
@@ -494,6 +504,7 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements,
             status: PublicationStatus::Published,
         })
         .await
@@ -538,6 +549,7 @@ fn service_with_selection(
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
             fee_calculator: Arc::new(FeeCalculator::new()),
             linkage_repo: Arc::new(EmptyLinkageRepo),
+            model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features: features_config(),
@@ -743,6 +755,59 @@ async fn pit_selection_excludes_disabled_category_market() {
     assert!(
         artifact.examples.is_empty(),
         "no examples should be materialized when selection excludes every market",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pit_selection_excludes_crypto_market_when_model_requires_unavailable_domain_feature() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
+    let model_spec_id = seed_model_spec_with_requirements(
+        &db,
+        serde_json::json!({
+            "generic": [],
+            "by_category": {
+                "crypto": ["domain.crypto.distance_to_strike"]
+            }
+        }),
+    )
+    .await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service_with_selection(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+        SelectionConfig {
+            enabled_categories: vec![MarketCategory::Crypto],
+            ..SelectionConfig::default()
+        },
+        DecimalString::new("0"),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(
+        artifact.coverage.pit_selection_candidates > 0,
+        "the crypto market should enter the PIT funnel as a candidate",
+    );
+    assert_eq!(
+        artifact.coverage.pit_selection_included, 0,
+        "unresolved linkage ⇒ domain feature unavailable ⇒ market excluded",
+    );
+    assert!(
+        artifact.coverage.pit_selection_excluded.other_count > 0,
+        "exclusion must be attributed to ModelFeatureUnavailable (counted in other_count)",
+    );
+    assert!(
+        artifact.examples.is_empty(),
+        "no examples when selection excludes every market",
     );
 }
 

@@ -240,6 +240,7 @@ mod tests {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
             status: PublicationStatus::Published,
             created_at: Utc::now(),
             updated_at: Utc::now(),

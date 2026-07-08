@@ -170,6 +170,7 @@ pub async fn create_model_spec(
                 feature_schema_version: request.feature_schema_version,
                 label_schema_version: request.label_schema_version,
                 spec_json: request.spec_json,
+                feature_requirements: request.feature_requirements,
                 reason: reason.clone(),
             },
             GovernanceActor {
