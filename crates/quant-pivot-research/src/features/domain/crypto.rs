@@ -208,7 +208,14 @@ fn time_to_observation(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> R
     let name = names::TIME_TO_OBSERVATION;
     let seconds = (subject.observation_at - ctx.as_of).num_seconds().max(0);
     let value = FeatureValue::Count(u64::try_from(seconds).unwrap_or(0));
-    // Intrinsically point-in-time: the anchor is the frozen subject itself.
+    // The subject is frozen linkage metadata (resolved well before `as_of`),
+    // so this feature reads no time-sensitive external state — but the
+    // dataset-wide leakage gate (`assert_no_future_leakage`) still requires
+    // every evidence timestamp to respect the domain plane's own visibility
+    // bound. Anchoring to the primary window's cutoff (`as_of -
+    // domain.crypto.source_delay_secs`), exactly like every other domain
+    // feature's evidence, keeps this reference PIT-compliant instead of
+    // unconditionally violating it at `ctx.as_of` for any positive delay.
     RawFeature::present(
         name,
         value,
@@ -218,7 +225,7 @@ fn time_to_observation(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> R
                 "subject:observation_at@{}",
                 subject.observation_at.timestamp_millis()
             ),
-            observed_at: ctx.as_of,
+            observed_at: ctx.primary.cutoff,
         },
     )
 }

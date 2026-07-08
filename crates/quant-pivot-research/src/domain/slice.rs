@@ -20,8 +20,14 @@ use std::hash::BuildHasher;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
-    domain::{DomainObservation, MarketLinkage, MarketSubject, ResolutionOracle, ResolvedBinding},
-    enums::{common::MarketCategory, domain::DomainFamily},
+    domain::{
+        DomainAvailability, DomainObservation, MarketLinkage, MarketSubject, ResolutionOracle,
+        ResolvedBinding,
+    },
+    enums::{
+        common::MarketCategory,
+        domain::{DomainFamily, DomainMetric},
+    },
     runtime_config::DomainConfig,
     types::DomainInstrumentKey,
 };
@@ -62,6 +68,63 @@ pub fn linkage_valid_at(
                 &b.linkage_id.to_string(),
             ))
         })
+}
+
+/// Frozen domain-plane availability for one `(category, as_of)` (Phase
+/// 11.2.2 §3.8), computed purely from a market's PIT-bounded linkage history
+/// and a prefetched observation series.
+///
+/// This is the **zero-I/O, offline-replay counterpart** to the live batched
+/// projector (`resolve_domain_availability` in `quant-pivot-core`'s
+/// `prefetch::domain_availability`): both apply byte-identical rules —
+/// mapped ∧ family-enabled ∧ a PIT-valid `Resolved` linkage at `as_of` ∧ a
+/// visible `Close` observation for the bound instrument at or before
+/// `as_of - source_delay_secs` — so a training-dataset build can never see a
+/// different verdict than the live report pipeline would have, for the same
+/// evidence. [`linkage_valid_at`] supplies the shared bitemporal tie-break.
+///
+/// # Honest approximation
+///
+/// `observations` is whatever window the caller prefetched (bounded below by
+/// the build's lookback horizon), not an unbounded "ever observed before
+/// cutoff" scan like the live `domain_observation_at` query. A source that
+/// stopped publishing long before the prefetch window and never resumed
+/// would read `SourceEmpty` here but `Available` online — a fail-safe
+/// direction (never a false `Available`), acceptable for a continuously
+/// live source like Binance/Chainlink.
+#[must_use]
+pub fn domain_availability_at<S: BuildHasher>(
+    category: MarketCategory,
+    linkages: &[MarketLinkage],
+    as_of: DateTime<Utc>,
+    domain: &DomainConfig,
+    observations: &HashMap<DomainInstrumentKey, Vec<DomainObservation>, S>,
+) -> DomainAvailability {
+    let Some(family) = DomainFamily::for_category(category) else {
+        return DomainAvailability::NotMapped;
+    };
+    if !domain.family_enabled(family) {
+        return DomainAvailability::NotMapped;
+    }
+    let Some(binding) = linkage_valid_at(linkages, as_of).and_then(MarketLinkage::binding) else {
+        return DomainAvailability::Unresolved;
+    };
+
+    let source_delay =
+        ChronoDuration::seconds(i64::try_from(domain.crypto.source_delay_secs).unwrap_or(0));
+    let cutoff = as_of - source_delay;
+    let has_close_observation = observations
+        .get(&binding.instrument_key)
+        .is_some_and(|series| {
+            series.iter().any(|observation| {
+                observation.metric == DomainMetric::Close && observation.observed_at <= cutoff
+            })
+        });
+    if has_close_observation {
+        DomainAvailability::Available
+    } else {
+        DomainAvailability::SourceEmpty
+    }
 }
 
 /// Assemble the optional domain-slice inputs for one `(market, as_of)`.
@@ -148,12 +211,12 @@ fn observation_window<S: BuildHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_domain_slice_inputs, linkage_valid_at};
-    use chrono::{Duration, TimeZone, Utc};
+    use super::{build_domain_slice_inputs, domain_availability_at, linkage_valid_at};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CryptoSubject, DomainObservation, GroundingProof, LinkageOutcome, MarketLinkage,
-            MarketSubject, PriceComparator, ResolutionOracle, ResolvedBinding,
+            CryptoSubject, DomainAvailability, DomainObservation, GroundingProof, LinkageOutcome,
+            MarketLinkage, MarketSubject, PriceComparator, ResolutionOracle, ResolvedBinding,
         },
         enums::{
             common::MarketCategory,
@@ -346,5 +409,132 @@ mod tests {
             "only the observation at or before as_of - source_delay is visible"
         );
         assert_eq!(inputs.primary.observations[0].observed_at, visible);
+    }
+
+    fn close_observation(at: DateTime<Utc>) -> DomainObservation {
+        DomainObservation {
+            family: DomainFamily::Crypto,
+            source_id: DomainSourceId::binance(),
+            instrument_key: instrument(),
+            metric: DomainMetric::Close,
+            value: dec!(100000),
+            observed_at: at,
+            publish_time: at,
+        }
+    }
+
+    #[test]
+    fn availability_is_not_mapped_for_an_unrouted_category_or_disabled_family() {
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let domain = DomainConfig::default();
+        let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
+
+        assert_eq!(
+            domain_availability_at(
+                MarketCategory::Sports,
+                &resolved,
+                as_of,
+                &domain,
+                &HashMap::new()
+            ),
+            DomainAvailability::NotMapped,
+            "a category with no domain family must never gate on domain evidence"
+        );
+
+        let mut disabled_domain = DomainConfig::default();
+        disabled_domain
+            .enabled_by_family
+            .insert(DomainFamily::Crypto, false);
+        assert_eq!(
+            domain_availability_at(
+                MarketCategory::Crypto,
+                &resolved,
+                as_of,
+                &disabled_domain,
+                &HashMap::new()
+            ),
+            DomainAvailability::NotMapped,
+            "a disabled vertical must behave exactly like an unmapped category"
+        );
+    }
+
+    #[test]
+    fn availability_is_unresolved_without_a_pit_valid_resolved_linkage() {
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let domain = DomainConfig::default();
+
+        assert_eq!(
+            domain_availability_at(MarketCategory::Crypto, &[], as_of, &domain, &HashMap::new()),
+            DomainAvailability::Unresolved,
+            "no ledger row at all must fail closed to Unresolved"
+        );
+
+        let unresolved = vec![linkage(
+            LinkageOutcome::Unresolved {
+                reason: "no template matched".to_owned(),
+            },
+            0,
+        )];
+        assert_eq!(
+            domain_availability_at(
+                MarketCategory::Crypto,
+                &unresolved,
+                as_of,
+                &domain,
+                &HashMap::new()
+            ),
+            DomainAvailability::Unresolved,
+            "an Unresolved outcome must never be treated as mapped-but-missing-data"
+        );
+    }
+
+    #[test]
+    fn availability_distinguishes_source_empty_from_available_at_the_cutoff() {
+        let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let domain = DomainConfig::default();
+        let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
+
+        assert_eq!(
+            domain_availability_at(
+                MarketCategory::Crypto,
+                &resolved,
+                as_of,
+                &domain,
+                &HashMap::new()
+            ),
+            DomainAvailability::SourceEmpty,
+            "resolved linkage with no observation series must be SourceEmpty, never fabricated"
+        );
+
+        // Chainlink source_delay_secs default is 5s; an observation exactly at
+        // the cutoff (as_of - 5s) is visible, one strictly inside the delay
+        // window is not.
+        let visible_at = as_of - Duration::seconds(5);
+        let too_fresh_at = as_of - Duration::seconds(1);
+        let visible_only = HashMap::from([(instrument(), vec![close_observation(visible_at)])]);
+        assert_eq!(
+            domain_availability_at(
+                MarketCategory::Crypto,
+                &resolved,
+                as_of,
+                &domain,
+                &visible_only
+            ),
+            DomainAvailability::Available,
+            "an observation at or before the source-delayed cutoff must be Available"
+        );
+
+        let too_fresh_only = HashMap::from([(instrument(), vec![close_observation(too_fresh_at)])]);
+        assert_eq!(
+            domain_availability_at(
+                MarketCategory::Crypto,
+                &resolved,
+                as_of,
+                &domain,
+                &too_fresh_only
+            ),
+            DomainAvailability::SourceEmpty,
+            "an observation still inside the source-delay window must not count as visible"
+        );
     }
 }

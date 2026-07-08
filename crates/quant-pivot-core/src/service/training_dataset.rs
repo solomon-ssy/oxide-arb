@@ -12,8 +12,11 @@
 
 use crate::{
     pit::platform::ch_historical::ChHistoricalPitSource,
-    prefetch::historical_window::{
-        HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
+    prefetch::{
+        domain_availability::{LiveDomainAvailabilitySource, PrefetchedDomainAvailabilitySource},
+        historical_window::{
+            HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
+        },
     },
     service::{
         historical_replay::{
@@ -534,6 +537,15 @@ impl TrainingDatasetService {
             .resolve_model_requirements(&request.model_spec_id)
             .await?;
         let selector = self.offline_pit_selector(request, model_requirements);
+        // Bounded live linkage/domain-fact reads (one per slice, batched over
+        // `sampled`), the same projector the live pipeline uses — never a
+        // hardcoded conservative placeholder — so the dry-run estimate isn't
+        // biased against domain-gated models.
+        let domain_source = LiveDomainAvailabilitySource::new(
+            Arc::clone(&self.linkage_repo),
+            Arc::clone(&self.fact_read),
+            self.domain.clone(),
+        );
         let span_secs = (request.window_end - request.window_start)
             .num_seconds()
             .max(1);
@@ -543,7 +555,9 @@ impl TrainingDatasetService {
             #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
             let offset = ((f64::from(index) + 0.5) / f64::from(slices) * span_secs as f64) as i64;
             let as_of = request.window_start + ChronoDuration::seconds(offset);
-            let result = selector.select_at(as_of, &sampled, &pit).await?;
+            let result = selector
+                .select_at(as_of, &sampled, &pit, &domain_source)
+                .await?;
             included += result.included.len() as u64;
             trials += sampled.len() as u64;
         }
@@ -1573,6 +1587,7 @@ async fn run_historical_spine(
             &group,
             params.pit,
             params.prefetched,
+            params.domain,
             &mut coverage,
         )
         .await?;
@@ -1629,6 +1644,7 @@ async fn pit_selected_replay_group(
     group: &[&SamplePlan],
     pit: &dyn PitQueryEngine,
     prefetched: &Prefetched,
+    domain: &DomainConfig,
     coverage: &mut DatasetCoverage,
 ) -> QuantResult<Vec<ReplaySample>> {
     let market_infos: Vec<&MarketInfo> = group
@@ -1640,7 +1656,13 @@ async fn pit_selected_replay_group(
                 .map(AsRef::as_ref)
         })
         .collect();
-    let selection = pit_selector.select_at(as_of, &market_infos, pit).await?;
+    // Zero-I/O: replayed from the same batch-prefetched linkage +
+    // domain-observation window `build_domain_slice_inputs` already uses for
+    // this build's actual feature computation (Phase 11.2.2 §3.8 parity).
+    let domain_source = PrefetchedDomainAvailabilitySource::new(prefetched, domain);
+    let selection = pit_selector
+        .select_at(as_of, &market_infos, pit, &domain_source)
+        .await?;
     coverage.pit_selection_candidates += market_infos.len() as u64;
     coverage.pit_selection_included += selection.included.len() as u64;
     coverage.pit_selection_excluded += selection.exclusion_summary;

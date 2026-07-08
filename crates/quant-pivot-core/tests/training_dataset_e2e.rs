@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_core::service::training_dataset::{
     TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
@@ -17,17 +17,20 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
+        BookMicrostructureRow, BookSnapshotRow, ChDecimal64, ChPrice, ChSchemaVersion, ChUsd,
         DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
-        JobProgressSink, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
-        NewTrainingDataset, NoopProgressSink, market::book::BookLevel,
+        CryptoSubject, GroundingProof, JobProgressSink, LinkageOutcome, MarketLinkage,
+        MarketSubject, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset,
+        NoopProgressSink, PriceComparator, ResolutionOracle, ResolvedBinding,
+        market::book::BookLevel,
     },
     entities::market::{Column as MarketColumn, Entity as MarketEntity},
     enums::{
         clickhouse::{ChFactSource, ChSnapshotReason},
         common::MarketCategory,
+        domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
         factor::FactorFamily,
         market::MarketStatus,
         model::ModelFamily,
@@ -39,24 +42,27 @@ use quant_pivot_models::{
         FeaturesConfig, SelectionConfig, TrainingConfig,
     },
     types::{
-        ArtifactUri, ContentHash, DatasetCoverage, DomainInstrumentKey, MarketId, ModelSpecId,
-        ModelVersionId, Price, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId,
-        TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource, default_sample_sources,
+        ArtifactUri, BinanceSymbol, ContentHash, CryptoAsset, CryptoQuote, DatasetCoverage,
+        DomainInstrumentKey, DomainSourceId, MarketId, MarketLinkageId, ModelSpecId,
+        ModelVersionId, Price, Probability, ResolverVersion, RuntimeConfigVersionId, SchemaVersion,
+        Shares, TokenId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
+        default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAttributionRepository, PgEventRepository, PgFeatureRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgPositionRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgAttributionRepository, PgEventRepository, PgFeatureRepository, PgMarketLinkageRepository,
+        PgMarketRepository, PgModelRegistryRepository, PgPositionRepository,
+        PgRecommendationRepository, PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        EventRepository, MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
-        RuntimeConfigVersionRepository, TrainingDatasetRepository,
+        EventRepository, MarketLinkageRepository, MarketRepository, ModelRegistryRepository,
+        QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
+    features::FeatureName,
     pit::{BookSnapshotAt, MarketContextAt, PitQueryEngine},
     training::{
         DatasetPlan, DatasetPlanRequest, LabelName, TrainingDatasetArtifact,
@@ -69,6 +75,7 @@ use quant_pivot_test_support::{
     report_pipeline_harness::EmptyLinkageRepo,
 };
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
 use tokio_util::sync::CancellationToken;
 
@@ -117,6 +124,7 @@ struct FactScenario {
     books: HashMap<TokenId, Vec<BookSnapshotRow>>,
     micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
     resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
+    domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservationRow>>,
 }
 
 struct ControllableFactRead {
@@ -268,20 +276,40 @@ impl QuantFactReadRepository for ControllableFactRead {
 
     async fn domain_observations_between(
         &self,
-        _instrument_keys: Vec<DomainInstrumentKey>,
-        _from_ms: i64,
-        _to_ms: i64,
+        instrument_keys: Vec<DomainInstrumentKey>,
+        from_ms: i64,
+        to_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
-        Ok(Vec::new())
+        let scenario = self.scenario.lock().expect("lock");
+        let mut rows = Vec::new();
+        for instrument_key in instrument_keys {
+            if let Some(series) = scenario.domain_observations.get(&instrument_key) {
+                for row in series {
+                    if row.event_time >= from_ms && row.event_time < to_ms {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+        }
+        Ok(rows)
     }
 
     async fn domain_observation_at(
         &self,
-        _instrument_key: &DomainInstrumentKey,
-        _metric: &str,
-        _as_of_ms: i64,
+        instrument_key: &DomainInstrumentKey,
+        metric: &str,
+        as_of_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
-        Ok(None)
+        let scenario = self.scenario.lock().expect("lock");
+        Ok(scenario
+            .domain_observations
+            .get(instrument_key)
+            .and_then(|rows| {
+                rows.iter()
+                    .filter(|row| row.metric == metric && row.event_time <= as_of_ms)
+                    .max_by_key(|row| (row.event_time, row.ingestion_time))
+                    .cloned()
+            }))
     }
 
     async fn mid_price_series(
@@ -432,12 +460,29 @@ fn pit_scenario(as_of_ms: i64) -> FactScenario {
         books,
         micro,
         resolutions: HashMap::new(),
+        domain_observations: HashMap::new(),
     }
 }
 
 fn features_config() -> FeaturesConfig {
     FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::PriceBook, FeatureFamily::MarketMetadata],
+        ..FeaturesConfig::default()
+    }
+}
+
+/// As [`features_config`], plus `Domain` — required for any test whose model
+/// spec requires a `domain.crypto.*` feature, so the governed
+/// [`quant_pivot_research::features::FeatureSchema`] actually registers the
+/// spec (an unregistered name is unavailable regardless of
+/// `domain_availability` — see `FeatureAvailabilityOracle::is_available`).
+fn crypto_features_config() -> FeaturesConfig {
+    FeaturesConfig {
+        enabled_feature_families: vec![
+            FeatureFamily::PriceBook,
+            FeatureFamily::MarketMetadata,
+            FeatureFamily::Domain,
+        ],
         ..FeaturesConfig::default()
     }
 }
@@ -536,6 +581,33 @@ fn service_with_selection(
     selection: SelectionConfig,
     min_selection_depth_usd: DecimalString,
 ) -> TrainingDatasetService {
+    service_with_selection_and_linkage(
+        db,
+        store,
+        fact_read,
+        Arc::new(EmptyLinkageRepo),
+        features_config(),
+        selection,
+        min_selection_depth_usd,
+    )
+}
+
+/// As [`service_with_selection`], but with an injectable linkage-ledger
+/// repository (lets a test seed real `quant_market_linkage` rows, e.g. a
+/// `Resolved` crypto binding, via [`PgMarketLinkageRepository`] instead of
+/// the always-empty read-only fake) and an injectable [`FeaturesConfig`]
+/// (`features_config()` intentionally excludes `Domain` for the plain
+/// Sports-market fixtures; a crypto-domain test needs it enabled so the
+/// governed schema actually registers `domain.crypto.*` feature specs).
+fn service_with_selection_and_linkage(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    fact_read: Arc<dyn QuantFactReadRepository>,
+    linkage_repo: Arc<dyn MarketLinkageRepository>,
+    features: FeaturesConfig,
+    selection: SelectionConfig,
+    min_selection_depth_usd: DecimalString,
+) -> TrainingDatasetService {
     TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             fact_read,
@@ -548,11 +620,11 @@ fn service_with_selection(
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
             fee_calculator: Arc::new(FeeCalculator::new()),
-            linkage_repo: Arc::new(EmptyLinkageRepo),
+            linkage_repo,
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
-            features: features_config(),
+            features,
             factors: factors_config(),
             domain: DomainConfig::default(),
             data_quality: DataQualityConfig {
@@ -780,10 +852,15 @@ async fn pit_selection_excludes_crypto_market_when_model_requires_unavailable_do
     let as_of_ms = as_of.timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
     let store = temp_artifact_store();
-    let svc = service_with_selection(
+    // `EmptyLinkageRepo` never resolves a binding ⇒ `DomainAvailability::Unresolved`
+    // ⇒ the required domain feature is genuinely unavailable (not a schema gap:
+    // `crypto_features_config` enables `Domain` so the spec IS registered).
+    let svc = service_with_selection_and_linkage(
         &db,
         Arc::clone(&store),
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+        Arc::new(EmptyLinkageRepo),
+        crypto_features_config(),
         SelectionConfig {
             enabled_categories: vec![MarketCategory::Crypto],
             ..SelectionConfig::default()
@@ -808,6 +885,195 @@ async fn pit_selection_excludes_crypto_market_when_model_requires_unavailable_do
     assert!(
         artifact.examples.is_empty(),
         "no examples when selection excludes every market",
+    );
+}
+
+fn crypto_instrument() -> DomainInstrumentKey {
+    DomainInstrumentKey::binance_kline(
+        &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+        KlineInterval::OneMinute,
+    )
+}
+
+/// A `Resolved` crypto linkage binding `MARKET_ID` to the Binance BTCUSDT
+/// kline instrument, settled directly against the feature source (no
+/// Chainlink cross-check needed).
+fn resolved_crypto_linkage(
+    derived_at: DateTime<Utc>,
+    reference_at: DateTime<Utc>,
+) -> MarketLinkage {
+    let market_id = MarketId::new(MARKET_ID);
+    let outcome = LinkageOutcome::Resolved(ResolvedBinding {
+        subject: MarketSubject::Crypto(CryptoSubject {
+            asset: CryptoAsset::parse("BTC").expect("asset"),
+            quote: CryptoQuote::parse("USD").expect("quote"),
+            comparator: PriceComparator::UpVsReference,
+            strike: None,
+            reference_at: Some(reference_at),
+            observation_at: reference_at + ChronoDuration::days(1),
+            resolution_oracle: ResolutionOracle::BinanceKline {
+                symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                interval: KlineInterval::OneMinute,
+            },
+        }),
+        instrument_key: crypto_instrument(),
+        grounding: GroundingProof { spans: Vec::new() },
+        override_context: None,
+    });
+    let metadata_hash = ContentHash::parse(format!("blake3:{}", "7".repeat(64))).expect("hash");
+    let content_hash = MarketLinkage::compute_content_hash(
+        &market_id,
+        DomainFamily::Crypto,
+        &outcome,
+        ResolverTier::Tier0Slug,
+        ResolverVersion::FIRST,
+        &metadata_hash,
+    )
+    .expect("content hash");
+    MarketLinkage {
+        linkage_id: MarketLinkageId::from_v7(),
+        market_id,
+        domain_family: DomainFamily::Crypto,
+        outcome,
+        confidence: Probability::ONE,
+        resolver_tier: ResolverTier::Tier0Slug,
+        resolver_version: ResolverVersion::FIRST,
+        metadata_hash,
+        content_hash,
+        derived_at,
+        created_at: derived_at,
+    }
+}
+
+fn crypto_close_observation(event_time_ms: i64) -> DomainObservationRow {
+    DomainObservationRow {
+        family: DomainFamily::Crypto.as_str().to_owned(),
+        source_id: DomainSourceId::binance(),
+        instrument_key: crypto_instrument(),
+        metric: DomainMetric::Close.as_str().to_owned(),
+        value: ChDecimal64::from(dec!(100_000)),
+        event_time: event_time_ms,
+        publish_time: event_time_ms,
+        ingestion_time: event_time_ms,
+        schema_version: ChSchemaVersion::FIRST,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_and_available() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
+    let model_spec_id = seed_model_spec_with_requirements(
+        &db,
+        serde_json::json!({
+            "generic": [],
+            "by_category": {
+                "crypto": ["domain.crypto.distance_to_strike"]
+            }
+        }),
+    )
+    .await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let domain_config = DomainConfig::default();
+    let mut fact = pit_scenario(as_of_ms);
+    // Visible strictly before `as_of - domain.crypto.source_delay_secs` (5s
+    // default) and before the subject's `reference_at`, so both the
+    // `latest(Close)` and `latest_at(Close, reference_at)` reads resolve it.
+    let observed_ms = as_of_ms - 15_000;
+    fact.domain_observations.insert(
+        crypto_instrument(),
+        vec![crypto_close_observation(observed_ms)],
+    );
+    let scenario = Arc::new(Mutex::new(fact));
+    let store = temp_artifact_store();
+
+    let linkage_repo = Arc::new(PgMarketLinkageRepository::new(db.clone()));
+    linkage_repo
+        .append(
+            resolved_crypto_linkage(
+                as_of - ChronoDuration::hours(1),
+                as_of - ChronoDuration::seconds(10),
+            )
+            .to_new()
+            .expect("linkage to_new"),
+        )
+        .await
+        .expect("seed resolved crypto linkage");
+
+    let svc = service_with_selection_and_linkage(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+        linkage_repo,
+        crypto_features_config(),
+        SelectionConfig {
+            enabled_categories: vec![MarketCategory::Crypto],
+            ..SelectionConfig::default()
+        },
+        DecimalString::new("0"),
+    );
+
+    // `source_delay_secs` matches `DomainConfig::default().crypto.source_delay_secs`
+    // (5s): the domain feature evidence is anchored to the domain plane's own
+    // visibility cutoff (`as_of - domain.crypto.source_delay_secs`), so the
+    // dataset-wide leakage gate must be configured coherently with it — the
+    // same governance discipline a real deploy's runtime config must uphold.
+    let plan = svc
+        .plan(DatasetPlanRequest {
+            model_spec_id,
+            runtime_config_version_id: rc_id,
+            window_start,
+            window_end,
+            sample_interval_secs: 60,
+            horizons_secs: vec![60],
+            source_delay_secs: domain_config.crypto.source_delay_secs,
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: default_sample_sources(),
+            training_dataset_id: None,
+        })
+        .await
+        .expect("plan");
+    let artifact = svc.build(plan).await.expect("build");
+
+    assert!(
+        artifact.coverage.pit_selection_candidates > 0,
+        "the crypto market should enter the PIT funnel as a candidate",
+    );
+    assert!(
+        artifact.coverage.pit_selection_included > 0,
+        "a resolved linkage with a visible Binance observation must be Available, \
+         never a hardcoded Unresolved that fails ModelFeatureUnavailable: excluded = {:?}",
+        artifact.coverage.pit_selection_excluded,
+    );
+    assert_eq!(
+        artifact.coverage.pit_selection_excluded.other_count, 0,
+        "no market should be excluded via ModelFeatureUnavailable once the domain \
+         evidence is genuinely available",
+    );
+    assert!(
+        !artifact.examples.is_empty(),
+        "the surviving crypto market must materialize training examples",
+    );
+
+    let distance_to_strike = FeatureName::from_static("domain.crypto.distance_to_strike");
+    let computed = artifact.examples.iter().any(|example| {
+        example
+            .feature_vector
+            .domain
+            .as_ref()
+            .and_then(|slice| slice.values.get(&distance_to_strike))
+            .is_some_and(|value| !value.is_missing())
+    });
+    assert!(
+        computed,
+        "once selection genuinely includes the market, the domain feature-value \
+         pipeline (build_domain_slice_inputs, already correct) must actually compute \
+         domain.crypto.distance_to_strike from the same prefetched linkage/observations"
     );
 }
 
@@ -1168,6 +1434,7 @@ async fn settlement_label_visible_without_micro_past_resolution() {
                 schema_version: ChSchemaVersion::FIRST,
             }],
         )]),
+        domain_observations: HashMap::new(),
     };
     let scenario = Arc::new(Mutex::new(fact));
     let store = temp_artifact_store();

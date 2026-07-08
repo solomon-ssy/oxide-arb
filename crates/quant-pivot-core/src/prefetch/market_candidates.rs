@@ -10,25 +10,23 @@
 //! database reads happen up front in one batch; the per-market projection is
 //! pure over the frozen readings.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use quant_pivot_api::ws::WsShardHealthPort;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{DomainAvailability, LinkageOutcome, MarketCandidate, MarketRegistryInfo},
-    enums::domain::{DomainFamily, DomainMetric, LinkageStatus},
+    domain::{DomainAvailability, MarketCandidate, MarketRegistryInfo},
+    enums::common::MarketCategory,
     runtime_config::DomainConfig,
-    types::{DomainInstrumentKey, MarketId, Usd},
+    types::{MarketId, Usd},
 };
 use quant_pivot_repository::traits::{MarketLinkageRepository, QuantFactReadRepository};
 
 use crate::{
     ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::fact_lag::IngestPipelineLagTracker,
+    prefetch::domain_availability::resolve_domain_availability,
 };
 
 /// Projects the decision-time market world into frozen candidate facts.
@@ -116,85 +114,29 @@ impl MarketCandidateProvider {
     /// One batched domain-availability reading for the category-mapped subset
     /// (Phase 11.2.2 §3.8): mapped ∧ enabled ∧ `Resolved` linkage ∧ the linked
     /// instrument has a visible PIT observation at `as_of`.
+    ///
+    /// Thin wrapper over [`resolve_domain_availability`] — the same batched
+    /// projector the offline keep-rate estimator uses, so the live and
+    /// offline planes can never drift on this decision (Phase 11.2.2 §3.8
+    /// train-serve parity).
     async fn project_domain_availability(
         &self,
         infos: &[Arc<MarketRegistryInfo>],
         as_of: DateTime<Utc>,
         domain: &DomainConfig,
     ) -> QuantResult<HashMap<MarketId, DomainAvailability>> {
-        let mapped: Vec<MarketId> = infos
+        let markets: Vec<(MarketId, MarketCategory)> = infos
             .iter()
-            .filter(|info| {
-                DomainFamily::for_category(info.fee_category())
-                    .is_some_and(|family| domain.family_enabled(family))
-            })
-            .map(|info| info.market_id.clone())
+            .map(|info| (info.market_id.clone(), info.fee_category()))
             .collect();
-        if mapped.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        // PIT-correct: the record that was actually valid at `as_of`, never
-        // the ledger's latest-ever row for the market — a metadata revision
-        // resolved *after* `as_of` must never leak into this decision
-        // (`latest_for_markets` is reserved for resolver idempotence only).
-        let valid_at = self
-            .linkage_repo
-            .valid_at_for_markets(&mapped, as_of)
-            .await
-            .map_err(QuantError::from)?;
-        let mut by_market: HashMap<MarketId, DomainAvailability> = mapped
-            .iter()
-            .map(|market_id| (market_id.clone(), DomainAvailability::Unresolved))
-            .collect();
-
-        // Resolve source presence once per distinct instrument.
-        let mut instrument_by_market: HashMap<MarketId, DomainInstrumentKey> = HashMap::new();
-        let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
-        for info in valid_at {
-            if info.status == LinkageStatus::Unresolved {
-                continue;
-            }
-            let market_id = info.market_id.clone();
-            let outcome: LinkageOutcome =
-                serde_json::from_value(info.outcome).map_err(|error| {
-                    QuantError::config(format!(
-                        "linkage ledger row for market {market_id} has an undecodable \
-                         outcome payload: {error}"
-                    ))
-                })?;
-            if let LinkageOutcome::Resolved(binding) = outcome {
-                instruments.insert(binding.instrument_key.clone());
-                instrument_by_market.insert(market_id, binding.instrument_key);
-            }
-        }
-
-        let cutoff_ms = (as_of
-            - ChronoDuration::seconds(i64::try_from(domain.crypto.source_delay_secs).unwrap_or(0)))
-        .timestamp_millis();
-        let mut instrument_has_data: HashMap<DomainInstrumentKey, bool> = HashMap::new();
-        for instrument in instruments {
-            let observation = self
-                .fact_read
-                .domain_observation_at(&instrument, DomainMetric::Close.as_str(), cutoff_ms)
-                .await
-                .map_err(QuantError::from)?;
-            instrument_has_data.insert(instrument, observation.is_some());
-        }
-
-        for (market_id, instrument) in instrument_by_market {
-            let availability = if instrument_has_data
-                .get(&instrument)
-                .copied()
-                .unwrap_or(false)
-            {
-                DomainAvailability::Available
-            } else {
-                DomainAvailability::SourceEmpty
-            };
-            by_market.insert(market_id, availability);
-        }
-        Ok(by_market)
+        resolve_domain_availability(
+            self.linkage_repo.as_ref(),
+            self.fact_read.as_ref(),
+            domain,
+            as_of,
+            &markets,
+        )
+        .await
     }
 
     /// Project one registry row plus its primary-token book into a candidate.

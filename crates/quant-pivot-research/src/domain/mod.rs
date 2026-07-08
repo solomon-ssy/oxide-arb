@@ -14,7 +14,8 @@
 pub mod slice;
 
 pub use slice::{
-    build_domain_slice_inputs, crypto_lookback_secs, linkage_valid_at, oracle_instrument,
+    build_domain_slice_inputs, crypto_lookback_secs, domain_availability_at, linkage_valid_at,
+    oracle_instrument,
 };
 
 use chrono::{DateTime, Utc};
