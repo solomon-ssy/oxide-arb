@@ -840,6 +840,21 @@ impl ModelArtifact {
             Self::Classical(_) | Self::SellScorer(_) => false,
         }
     }
+
+    /// The bound `model_score` calibrator id, when the return model is
+    /// `Calibrated` — the target for a deep, calibrator-liveness admission
+    /// check (the enum variant alone only proves *a* calibrator was bound at
+    /// publish time, not that it is still active today).
+    #[must_use]
+    pub const fn calibrator_ref(&self) -> Option<&CalibrationArtifactId> {
+        match self {
+            Self::WeightedFactor(weighted) => match &weighted.return_model {
+                ReturnModelSpec::Calibrated(calibrated) => Some(&calibrated.calibrator_ref),
+                ReturnModelSpec::Heuristic(_) => None,
+            },
+            Self::Classical(_) | Self::SellScorer(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -908,6 +923,25 @@ mod tests {
             back.content_hash().expect("hash"),
             "round-trip must preserve the canonical content hash"
         );
+    }
+
+    #[test]
+    fn calibrator_ref_present_only_for_calibrated_weighted_factor() {
+        let heuristic = ModelArtifact::WeightedFactor(Box::new(sample_artifact()));
+        assert!(heuristic.calibrator_ref().is_none());
+
+        let calibrator_ref = CalibrationArtifactId::from_v7();
+        let mut calibrated = sample_artifact();
+        calibrated.return_model = ReturnModelSpec::Calibrated(CalibratedReturnModel {
+            calibrator_ref: calibrator_ref.clone(),
+            downside_source: DownsideSource::MfeMae,
+        });
+        let calibrated = ModelArtifact::WeightedFactor(Box::new(calibrated));
+        assert_eq!(calibrated.calibrator_ref(), Some(&calibrator_ref));
+
+        let sell =
+            ModelArtifact::SellScorer(Box::new(sell_artifact(ModelFamily::HoldVsExitWeighted)));
+        assert!(sell.calibrator_ref().is_none());
     }
 
     #[test]
@@ -1038,8 +1072,8 @@ mod tests {
             },
             reliability: ReliabilityReport {
                 bins: vec![ReliabilityBin {
-                    score_lo: dec!(0),
-                    score_hi: dec!(1),
+                    predicted_lo: dec!(0),
+                    predicted_hi: dec!(1),
                     sample_count: 100,
                     mean_predicted: Probability::new(dec!(0.5)),
                     empirical_frequency: Probability::new(dec!(0.5)),
@@ -1052,13 +1086,13 @@ mod tests {
                 n_samples: 100,
             },
         };
-        // score=0.5 sits at/after the score=0 knot -> isotonic step yields
-        // p_win=0.2 (piecewise-constant at the last knot <= score).
-        // E[r] = 0.2*(1-0.4)/0.4 - 0.8 = -0.5 -> -5000 bps.
+        // score=0.5 sits exactly halfway between the score=0 (p=0.2) and
+        // score=1 (p=0.8) knots -> linear interpolation yields p_win=0.5.
+        // E[r] = 0.5*(1-0.4)/0.4 - 0.5 = 0.75 - 0.5 = 0.25 -> 2500 bps.
         let mid = calibrated.estimate(dec!(0.5), dec!(0.8), Price::new(dec!(0.4)), Some(&resolved));
         assert!(mid.calibrated);
         assert_eq!(mid.downside_bps, dec!(300));
-        assert_eq!(mid.expected_return_bps, dec!(-5000));
+        assert_eq!(mid.expected_return_bps, dec!(2500));
 
         // Missing resolved calibration never fabricates a value.
         let missing = calibrated.estimate(dec!(0.5), dec!(0.8), Price::new(dec!(0.4)), None);

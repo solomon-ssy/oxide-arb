@@ -33,6 +33,12 @@ pub trait CalibrationArtifactRepository: Send + Sync {
     /// Mark an artifact `active` (idempotent) — recorded when an operator
     /// binds/activates it (bias-table runtime-config ref, or a model
     /// version's `return_model`).
+    ///
+    /// `market_price_bias` is single-active: every other `market_price_bias`
+    /// row is deactivated in the same transaction, since it is referenced by
+    /// exactly one global runtime-config pointer. `model_score` has no such
+    /// exclusivity — concurrently published/candidate model versions may
+    /// each bind (and keep active) a different calibrator.
     async fn mark_active(
         &self,
         artifact_id: &CalibrationArtifactId,

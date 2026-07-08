@@ -27,7 +27,11 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic runtime-config v5 invariants.
+/// Mode-agnostic runtime-config v6 invariants.
+///
+/// Phase 11.3 added the `model.calibration` embargo/confidence bounds and the
+/// `portfolio.kelly_safety` edge-uncertainty bounds — see [`validate_model`]
+/// and [`validate_kelly_safety`].
 #[must_use]
 pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
@@ -568,11 +572,43 @@ fn validate_model(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
             detail: "must be > 0".to_owned(),
         });
     }
-    unit_ratio(
-        "model.calibration.ci_confidence",
-        &config.model.calibration.ci_confidence,
-        report,
-    );
+    // Must be strictly positive: `0` would make the calibration-dataset
+    // purge/embargo primitive (Phase 11.3 §0) a no-op disjoint-only check,
+    // silently defeating the anti-leakage guarantee the embargo gap exists
+    // to enforce.
+    if config.model.calibration.embargo_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "model.calibration.embargo_secs",
+            detail: "must be > 0 (an embargo of 0 is a no-op and defeats the \
+                      purge/embargo anti-leakage guarantee)"
+                .to_owned(),
+        });
+    }
+    // Confidence level must sit in (0.5, 1) for a meaningful two-sided Wilson
+    // interval — mirrors `factors.structural.favorite_longshot.ci_confidence`
+    // (the sibling calibration-artifact family); `unit_ratio`'s full `[0, 1]`
+    // range would let `0` reach the Wilson-interval math, which degenerates
+    // at that boundary.
+    match config
+        .model
+        .calibration
+        .ci_confidence
+        .value
+        .parse::<Decimal>()
+    {
+        Ok(parsed) if parsed > Decimal::new(5, 1) && parsed < Decimal::ONE => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "model.calibration.ci_confidence",
+            detail: format!("`{parsed}` must be within (0.5, 1)"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "model.calibration.ci_confidence",
+            detail: format!(
+                "`{}` is not a valid decimal string",
+                config.model.calibration.ci_confidence.value
+            ),
+        }),
+    }
 }
 
 fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -763,14 +799,27 @@ fn validate_portfolio(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     validate_optimizer(config, report);
 }
 
+/// Highest sane `edge_uncertainty_k` (Phase 11.3 §6.1 `shrink = clamp(1 -
+/// k·edge_std, floor, 1)`): `edge_std` is a Wilson-CI half-width in `[0, 0.5]`,
+/// so `k = 10` already drives `shrink` to `floor` for any half-width above
+/// `0.1` — an unbounded `k` has no further governance effect beyond making
+/// every calibrated candidate collapse to the floor, i.e. a de facto (and
+/// silent) disabling of edge-sensitivity rather than a deliberate one.
+const MAX_EDGE_UNCERTAINTY_K: Decimal = Decimal::TEN;
+
 /// Validate Kelly safety-layer parameters (Phase 11.3).
 fn validate_kelly_safety(kelly: &KellySafetyConfig, report: &mut ConfigValidationReport) {
-    non_negative_decimal(
+    bounded_decimal(
         "portfolio.kelly_safety.edge_uncertainty_k",
         &kelly.edge_uncertainty_k,
+        Decimal::ZERO,
+        MAX_EDGE_UNCERTAINTY_K,
         report,
     );
-    unit_ratio(
+    // Must be strictly positive: a `0` floor lets `shrink` collapse all the
+    // way to `0`, silently zeroing every calibrated candidate's Kelly size
+    // instead of the intended "shrink, never eliminate" governance.
+    half_open_unit(
         "portfolio.kelly_safety.edge_uncertainty_floor",
         &kelly.edge_uncertainty_floor,
         report,
@@ -966,6 +1015,27 @@ fn non_negative_decimal(
     }
 }
 
+/// Validate a decimal within an explicit inclusive `[min, max]` range.
+fn bounded_decimal(
+    field: &'static str,
+    value: &DecimalString,
+    min: Decimal,
+    max: Decimal,
+    report: &mut ConfigValidationReport,
+) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if (min..=max).contains(&parsed) => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within [{min}, {max}]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
 /// Validate a `[0, 1]` ratio: parses as a decimal and lies within the unit range.
 fn unit_ratio(field: &'static str, value: &DecimalString, report: &mut ConfigValidationReport) {
     match value.value.parse::<Decimal>() {
@@ -1076,6 +1146,71 @@ mod tests {
         config.execution.kill_switch.emergency_exit.max_slippage_bps = 0;
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
+    }
+
+    #[test]
+    fn runtime_config_rejects_zero_embargo_secs() {
+        let mut config = RuntimeConfig::default();
+        config.model.calibration.embargo_secs = 0;
+        let report = validate_runtime_config(&config);
+        assert!(
+            report.has_errors(),
+            "a zero embargo defeats the purge/embargo anti-leakage guarantee"
+        );
+    }
+
+    #[test]
+    fn runtime_config_rejects_calibration_ci_confidence_outside_open_interval() {
+        let mut config = RuntimeConfig::default();
+        config.model.calibration.ci_confidence = DecimalString::new("0.5");
+        let report = validate_runtime_config(&config);
+        assert!(
+            report.has_errors(),
+            "ci_confidence must be strictly greater than 0.5"
+        );
+
+        let mut config = RuntimeConfig::default();
+        config.model.calibration.ci_confidence = DecimalString::new("1.0");
+        let report = validate_runtime_config(&config);
+        assert!(
+            report.has_errors(),
+            "ci_confidence must be strictly less than 1.0"
+        );
+
+        let mut config = RuntimeConfig::default();
+        config.model.calibration.ci_confidence = DecimalString::new("0.90");
+        let report = validate_runtime_config(&config);
+        assert!(
+            !report.has_errors(),
+            "0.90 is within the valid (0.5, 1) range"
+        );
+    }
+
+    #[test]
+    fn runtime_config_rejects_unbounded_edge_uncertainty_k() {
+        let mut config = RuntimeConfig::default();
+        config.portfolio.kelly_safety.edge_uncertainty_k = DecimalString::new("10.01");
+        let report = validate_runtime_config(&config);
+        assert!(
+            report.has_errors(),
+            "an unbounded k silently collapses every calibrated candidate's shrink to the floor"
+        );
+
+        let mut config = RuntimeConfig::default();
+        config.portfolio.kelly_safety.edge_uncertainty_k = DecimalString::new("10");
+        let report = validate_runtime_config(&config);
+        assert!(!report.has_errors(), "10 is the inclusive upper bound");
+    }
+
+    #[test]
+    fn runtime_config_rejects_zero_edge_uncertainty_floor() {
+        let mut config = RuntimeConfig::default();
+        config.portfolio.kelly_safety.edge_uncertainty_floor = DecimalString::new("0");
+        let report = validate_runtime_config(&config);
+        assert!(
+            report.has_errors(),
+            "a zero floor lets edge-uncertainty shrink zero out Kelly sizing entirely"
+        );
     }
 
     #[test]

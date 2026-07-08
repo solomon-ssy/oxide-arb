@@ -1,4 +1,4 @@
-//! The 22 admission checks (parent §4.2), each a pure function of the frozen
+//! The 23 admission checks (parent §4.2), each a pure function of the frozen
 //! [`AdmissionInput`]. Every check is hard: a violation is `Deny`, a
 //! not-now-but-retryable condition is `Defer`, otherwise `Allow`.
 

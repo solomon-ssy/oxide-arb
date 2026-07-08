@@ -85,6 +85,42 @@ pub struct BindCalibrationRequest {
     pub reason: String,
 }
 
+/// Query for `GET /research/models/{model_version_id}/calibration-fit-preflight`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelCalibrationFitPreflightQuery {
+    /// The candidate calibration dataset the operator is considering.
+    pub calibration_dataset_id: TrainingDatasetId,
+}
+
+/// Read-only disjoint + embargo preflight result for the "Fit Model
+/// Calibrator" wizard (Phase 11.3 §10).
+///
+/// Reuses the exact purge/embargo primitive
+/// `ModelCalibrationFitService::fit` enforces fail-closed, surfaced *before*
+/// the operator submits the async fit job — the UI renders a live red/green
+/// check instead of only discovering a violation after the job fails.
+/// Read-only: never mutates state, never enqueues a job.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCalibrationFitPreflightView {
+    /// Whether the calibration dataset's window is disjoint from every
+    /// `Built`/`Ready` training dataset in the system (purge).
+    pub disjoint_ok: bool,
+    /// Whether the calibration dataset starts at/after the target model's own
+    /// training-dataset window end plus the governed embargo gap. `true` when
+    /// the model version has no training dataset (embargo is vacuous).
+    pub embargo_ok: bool,
+    pub calibration_window_start: DateTime<Utc>,
+    pub calibration_window_end: DateTime<Utc>,
+    /// The target model version's own training-dataset window, when it has one.
+    pub training_window_start: Option<DateTime<Utc>>,
+    pub training_window_end: Option<DateTime<Utc>>,
+    /// The earliest `calibration_window_start` the embargo gap allows
+    /// (`training_window_end + embargo_secs`), when applicable.
+    pub required_start: Option<DateTime<Utc>>,
+    /// Human-readable explanation for each failing check (empty when both pass).
+    pub messages: Vec<String>,
+}
+
 /// Paginated filter for the append-only calibration-artifact ledger catalog.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct CalibrationArtifactListQuery {

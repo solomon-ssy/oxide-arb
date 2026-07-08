@@ -1627,6 +1627,12 @@ fn sizing_plan() -> SizingPlan {
         kelly_fraction_applied: Some(dec!(0.5)),
         edge_uncertainty_shrink_applied: None,
         correlation_shrink_applied: None,
+        f_star_applied: None,
+        kelly_fraction_config_applied: None,
+        confidence_shrink_applied: None,
+        drawdown_shrink_applied: None,
+        raw_fraction_applied: None,
+        position_cap_fraction_applied: None,
     }
 }
 
@@ -1744,6 +1750,7 @@ fn report_summary() -> ReportSummary {
         published_recommendation_count: 1,
         total_suggested_usd: Usd::new(NOTIONAL),
         max_single_recommendation_usd: Usd::new(NOTIONAL),
+        aggregate_exposure_cap_usd: None,
         category_allocation: BTreeMap::new(),
         event_allocation: BTreeMap::new(),
         average_score: Probability::new(dec!(0.7)),

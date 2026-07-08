@@ -78,6 +78,14 @@ pub struct AllocationInput<'a> {
     /// `min(caps.total_budget_usd, available_usd)`; the binding is attributed to
     /// [`BindingConstraint::AvailableCash`] when cash is the tighter limit.
     pub available_usd: Decimal,
+    /// The governed sizing anchor (`min(venue_net_liquidation_usd, budget
+    /// cap)` — see `portfolio::account::AccountSnapshot`), the denominator
+    /// for `caps.max_aggregate_exposure_pct`. Kept a distinct field from
+    /// `caps.total_budget_usd` (a raw, venue-unaware config value): the
+    /// aggregate-exposure hard cap must use the *same* capital basis as every
+    /// other Kelly-safety mechanism, or a configured budget above the venue's
+    /// real equity would let the cap exceed the account's actual bankroll.
+    pub capital_base_usd: Decimal,
     /// Correlated-cluster exposure constraint, when correlation is enabled.
     /// `None` ⇒ the correlation cap does not bind (Phase 4 behavior).
     pub correlation: Option<&'a CorrelationConstraint>,
@@ -156,6 +164,12 @@ pub(crate) struct CeilingInputs<'a> {
     pub(crate) correlated_cap: Decimal,
     /// Total portfolio exposure held by other candidates (aggregate cap room).
     pub(crate) aggregate_held: Decimal,
+    /// The governed capital base (`AllocationInput::capital_base_usd`) — the
+    /// aggregate-exposure ceiling's denominator, kept identical to the LP
+    /// solver's own bucket constraint (`lp.rs::build_buckets`) so this
+    /// explanatory re-derivation never disagrees with what was actually
+    /// solved.
+    pub(crate) capital_base_usd: Decimal,
 }
 
 /// The chosen pre-min size, its binding cap, and liquidity feasibility.
@@ -224,9 +238,9 @@ pub(crate) fn decide_ceiling(input: &CeilingInputs<'_>) -> SizeDecision {
             constraint: BindingConstraint::CorrelationCap,
         });
     }
-    if caps.max_aggregate_exposure_pct > Decimal::ZERO && caps.total_budget_usd > Decimal::ZERO {
+    if caps.max_aggregate_exposure_pct > Decimal::ZERO && input.capital_base_usd > Decimal::ZERO {
         let aggregate_cap =
-            (caps.max_aggregate_exposure_pct * caps.total_budget_usd).max(Decimal::ZERO);
+            (caps.max_aggregate_exposure_pct * input.capital_base_usd).max(Decimal::ZERO);
         ceilings.push(Ceiling {
             value: (aggregate_cap - input.aggregate_held).max(Decimal::ZERO),
             constraint: BindingConstraint::AggregateExposureCap,
@@ -264,9 +278,20 @@ pub(crate) struct ExposureLedger {
 
 impl ExposureLedger {
     /// Seed from the account's current net exposure (zero round spend).
+    ///
+    /// `total` is the sum of `per_market` (every position contributes there —
+    /// see `ExposureBreakdown::from_positions`), matching the aggregate-cap
+    /// `held` computation in `lp.rs`. Leaving it at `ZERO` here (as opposed to
+    /// every other bucket, which *is* correctly seeded) previously made
+    /// `AggregateExposureCap` binding attribution blind to existing holdings —
+    /// the LP's own hard constraint was never affected (it sums
+    /// `initial_exposures` independently), but the human-readable "why was
+    /// this capped" binding could misattribute or omit the aggregate cap
+    /// whenever the account already held positions.
     pub(crate) fn seed(exposures: &ExposureBreakdown) -> Self {
+        let total = exposures.per_market.values().map(|usd| usd.inner()).sum();
         Self {
-            total: Decimal::ZERO,
+            total,
             market: exposures
                 .per_market
                 .iter()

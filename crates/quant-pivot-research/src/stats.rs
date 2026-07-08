@@ -142,35 +142,59 @@ pub fn wilson_interval(p_hat: f64, n: u64, z: f64, scale: u32) -> (Decimal, Deci
     (lo, hi)
 }
 
-/// Pool-adjacent-violators isotonic regression producing a non-decreasing
-/// series (the shared PAVA core: sorted-input mean-pooling with backward
-/// merge on any monotonicity violation).
-///
-/// Shared by the governed return-curve/multiplier tightening
-/// ([`crate::model::calibration`]) and the `ProbabilityCalibrator` isotonic
-/// method ([`crate::model::calibrator::isotonic`]) — same algorithm, same
-/// numerical behavior, one implementation.
-#[must_use]
-pub fn pava_non_decreasing(values: &[Decimal]) -> Vec<Decimal> {
-    // Each pool: (weighted sum, count).
-    let mut pools: Vec<(Decimal, u64)> = Vec::with_capacity(values.len());
-    for &value in values {
-        pools.push((value, 1));
+/// Pool-adjacent-violators core: `group_means[i]` (weight `group_weights[i]`)
+/// are already-aggregated observations sharing one x-position (e.g. tied
+/// isotonic-calibration scores, or one observation per group when every
+/// weight is `1`). Merges backward on any monotonicity violation, tracking
+/// both the pooled weight (for the running mean) and the number of original
+/// groups folded into each pool (so the caller can expand back to one output
+/// per input group, not per unit of weight).
+fn pava_pool_groups(group_means: &[Decimal], group_weights: &[u64]) -> Vec<(Decimal, u64, usize)> {
+    // Each pool: (weighted sum, total weight, number of original groups merged in).
+    let mut pools: Vec<(Decimal, u64, usize)> = Vec::with_capacity(group_means.len());
+    for (&mean, &weight) in group_means.iter().zip(group_weights) {
+        pools.push((mean * Decimal::from(weight), weight, 1));
         // Merge while the last pool's mean violates monotonicity.
         while pools.len() >= 2 {
-            let (sum_b, n_b) = pools[pools.len() - 1];
-            let (sum_a, n_a) = pools[pools.len() - 2];
+            let (sum_b, n_b, _) = pools[pools.len() - 1];
+            let (sum_a, n_a, _) = pools[pools.len() - 2];
             let mean_a = sum_a / Decimal::from(n_a);
             let mean_b = sum_b / Decimal::from(n_b);
             if mean_a <= mean_b {
                 break;
             }
-            pools.pop();
-            pools.pop();
-            pools.push((sum_a + sum_b, n_a + n_b));
+            let (sum_b, n_b, groups_b) = pools.pop().expect("checked len >= 2 above");
+            let (sum_a, n_a, groups_a) = pools.pop().expect("checked len >= 2 above");
+            pools.push((sum_a + sum_b, n_a + n_b, groups_a + groups_b));
         }
     }
-    expand_pava_pools(&pools, values.len())
+    pools
+}
+
+/// Expand merged PAVA pools back into one pooled mean per original input
+/// group (repeating a merged pool's mean for every group folded into it).
+fn expand_pava_pools(pools: &[(Decimal, u64, usize)]) -> Vec<Decimal> {
+    let mut out = Vec::with_capacity(pools.iter().map(|&(_, _, groups)| groups).sum());
+    for &(sum, weight, groups) in pools {
+        let mean = (sum / Decimal::from(weight)).round_dp(RESEARCH_DECIMAL_SCALE);
+        for _ in 0..groups {
+            out.push(mean);
+        }
+    }
+    out
+}
+
+/// Pool-adjacent-violators isotonic regression producing a non-decreasing
+/// series (unweighted: one input value per group).
+///
+/// Used by the `ProbabilityCalibrator` isotonic method
+/// ([`crate::model::calibrator::isotonic`]) and available generically to any
+/// other monotone-regression need in this crate — one shared implementation
+/// rather than a per-caller PAVA.
+#[must_use]
+pub fn pava_non_decreasing(values: &[Decimal]) -> Vec<Decimal> {
+    let weights = vec![1_u64; values.len()];
+    expand_pava_pools(&pava_pool_groups(values, &weights))
 }
 
 /// Isotonic regression producing a non-increasing series (PAVA on the reverse).
@@ -182,21 +206,26 @@ pub fn pava_non_increasing(values: &[Decimal]) -> Vec<Decimal> {
     out
 }
 
-/// Expand merged PAVA pools back into a per-knot series of pool means.
-fn expand_pava_pools(pools: &[(Decimal, u64)], len: usize) -> Vec<Decimal> {
-    let mut out = Vec::with_capacity(len);
-    for &(sum, count) in pools {
-        let mean = (sum / Decimal::from(count)).round_dp(RESEARCH_DECIMAL_SCALE);
-        for _ in 0..count {
-            out.push(mean);
-        }
-    }
-    out
+/// Weighted, grouped pool-adjacent-violators regression.
+///
+/// `group_means[i]` (weight `group_weights[i]`) are observations already
+/// aggregated per distinct x-position — the sklearn `_make_unique`-style
+/// aggregation that must happen **before** PAVA when the input carries ties,
+/// so tied x-positions are pooled by their true weighted mean rather than by
+/// PAVA treating each tied sample as an independent unit-weight point.
+/// Returns one pooled, non-decreasing mean per input group (same
+/// length/order as `group_means`).
+#[must_use]
+pub fn pava_non_decreasing_grouped(group_means: &[Decimal], group_weights: &[u64]) -> Vec<Decimal> {
+    expand_pava_pools(&pava_pool_groups(group_means, group_weights))
 }
 
 #[cfg(test)]
 mod calibration_stat_tests {
-    use super::{pava_non_decreasing, pava_non_increasing, wilson_interval, wilson_z};
+    use super::{
+        pava_non_decreasing, pava_non_decreasing_grouped, pava_non_increasing, wilson_interval,
+        wilson_z,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -224,5 +253,42 @@ mod calibration_stat_tests {
         let (lo, hi) = wilson_interval(0.5, 100, z, 6);
         assert!(lo < Decimal::new(5, 1));
         assert!(hi > Decimal::new(5, 1));
+    }
+
+    #[test]
+    fn pava_non_decreasing_grouped_pools_ties_before_pava() {
+        // scores [1, 2, 2, 3], outcomes [0, 1, 0, 1] grouped as
+        // (x=1, mean=0, w=1), (x=2, mean=0.5, w=2), (x=3, mean=1, w=1).
+        // Group means (0, 0.5, 1) are already non-decreasing, so the
+        // grouped-before-pooling x=2 mean of 0.5 must survive unmerged --
+        // the value a per-sample PAVA run (treating the two x=2 samples as
+        // independent unit-weight points interleaved with x=1/x=3) would
+        // instead pool into something else entirely.
+        let group_means = vec![dec!(0), dec!(0.5), dec!(1)];
+        let group_weights = vec![1_u64, 2, 1];
+        let pooled = pava_non_decreasing_grouped(&group_means, &group_weights);
+        assert_eq!(pooled, vec![dec!(0), dec!(0.5), dec!(1)]);
+    }
+
+    #[test]
+    fn pava_non_decreasing_grouped_merges_violating_groups_by_weight() {
+        // Group means [0, 1, 0.4] with weights [1, 1, 3]: the middle group
+        // (mean=1, weight=1) violates monotonicity against the heavier last
+        // group (mean=0.4, weight=3) and must merge into a weighted mean of
+        // (1*1 + 0.4*3) / 4 = 0.55, applied to both merged groups.
+        let group_means = vec![dec!(0), dec!(1), dec!(0.4)];
+        let group_weights = vec![1_u64, 1, 3];
+        let pooled = pava_non_decreasing_grouped(&group_means, &group_weights);
+        assert_eq!(pooled, vec![dec!(0), dec!(0.55), dec!(0.55)]);
+    }
+
+    #[test]
+    fn pava_non_decreasing_grouped_matches_unweighted_pava_at_unit_weight() {
+        let values = vec![dec!(1), dec!(3), dec!(2), dec!(5), dec!(4)];
+        let weights = vec![1_u64; values.len()];
+        assert_eq!(
+            pava_non_decreasing_grouped(&values, &weights),
+            pava_non_decreasing(&values)
+        );
     }
 }

@@ -19,6 +19,7 @@ use crate::{
         },
     },
     service::{
+        calibration_shared::assert_disjoint_from_all_training_datasets,
         historical_replay::{
             CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
         },
@@ -38,7 +39,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::MarketCategory,
-        quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
+        quant::{DatasetPurpose, RecommendationAttributionOutcome, TrainingDatasetStatus},
     },
     runtime_config::{
         DataQualityConfig, DecimalString, DomainConfig, FactorsConfig, FeaturesConfig,
@@ -1307,6 +1308,26 @@ impl TrainingDatasetService {
         // Hard, money-critical gate: no feature may observe state past its cutoff.
         assert_no_future_leakage(&examples, plan.request.source_delay_secs)?;
 
+        // Build-time purge precheck (Phase 11.3 P1-8): a `Calibration`-purpose
+        // dataset whose window overlaps any `Built`/`Ready` training dataset
+        // is fail-closed here, *before* paying for schema hashing / Parquet
+        // encoding / artifact-store writes that would only be discovered
+        // wasted at fit time (`ModelCalibrationFitService`/
+        // `FavoriteLongshotFitService` already re-check this at fit time —
+        // this is strictly earlier, not a replacement). The model-specific
+        // embargo gap is not checked here: it depends on a target model
+        // version's own training window, which is not yet known for a
+        // dataset that may calibrate any of several model versions later.
+        if plan.request.purpose == DatasetPurpose::Calibration {
+            let window = TimeWindow::new(plan.request.window_start, plan.request.window_end);
+            assert_disjoint_from_all_training_datasets(
+                self.dataset_repo.as_ref(),
+                &window,
+                "calibration dataset build",
+            )
+            .await?;
+        }
+
         let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
         let factor_schema_hash = ResearchHasher::factor_schema(&engine.factor_set())?;
         let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
@@ -1328,6 +1349,7 @@ impl TrainingDatasetService {
             &plan.request.model_spec_id,
             plan.request.window_start,
             plan.request.window_end,
+            plan.request.purpose,
             &feature_schema_hash,
             &factor_schema_hash,
             &label_schema_hash,

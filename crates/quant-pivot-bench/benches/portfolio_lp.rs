@@ -80,6 +80,7 @@ fn bench_input(candidate_count: usize) -> AllocationInput<'static> {
         caps,
         initial_exposures: Box::leak(Box::new(ExposureBreakdown::default())),
         available_usd: caps.total_budget_usd,
+        capital_base_usd: caps.total_budget_usd,
         correlation: None,
         top_n: 20,
     }

@@ -12,7 +12,7 @@ use quant_pivot_models::{
     enums::{
         common::MarketCategory,
         domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
-        quant::DataQualityStatus,
+        quant::{DataQualityStatus, DatasetPurpose},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
@@ -343,11 +343,25 @@ fn dataset_hash_changes_when_domain_slice_added() {
     let without = vec![make(None)];
     let with = vec![make(Some(crypto_slice()))];
     let h0 = TrainingDatasetArtifact::compute_dataset_hash(
-        &spec, as_of, as_of, &feature, &factor, &label, &without,
+        &spec,
+        as_of,
+        as_of,
+        DatasetPurpose::Training,
+        &feature,
+        &factor,
+        &label,
+        &without,
     )
     .expect("hash");
     let h1 = TrainingDatasetArtifact::compute_dataset_hash(
-        &spec, as_of, as_of, &feature, &factor, &label, &with,
+        &spec,
+        as_of,
+        as_of,
+        DatasetPurpose::Training,
+        &feature,
+        &factor,
+        &label,
+        &with,
     )
     .expect("hash");
     assert_ne!(h0, h1);

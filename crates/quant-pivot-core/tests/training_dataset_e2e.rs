@@ -736,6 +736,84 @@ async fn historical_pit_no_look_ahead_via_dataset_build() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
+    // Phase 11.3 P1-8: a `purpose = Calibration` dataset whose window
+    // overlaps a `Built` training dataset must fail closed at *build* time
+    // (not only later, at calibrator-fit time) — the purge primitive shared
+    // with `ModelCalibrationFitService`/`FavoriteLongshotFitService`. The
+    // existing training dataset is seeded directly (its own materialization
+    // pipeline is irrelevant here — only its ledger row's window/status
+    // matter to the purge check).
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let hash = ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash");
+    PgTrainingDatasetRepository::new(db.clone())
+        .create(NewTrainingDataset {
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            model_spec_id: model_spec_id.clone(),
+            window_start,
+            window_end,
+            status: TrainingDatasetStatus::Built,
+            purpose: DatasetPurpose::Training,
+            feature_schema_hash: hash.clone(),
+            factor_schema_hash: hash.clone(),
+            label_schema_hash: hash.clone(),
+            dataset_hash: hash,
+            parquet_uri: ArtifactUri::parse("file:///tmp/existing-training.parquet").expect("uri"),
+            sample_count: 10,
+            source_delay_secs: 10,
+            sample_interval_secs: 3600,
+            horizons_secs: TrainingHorizonsSecs(vec![3600]),
+            coverage_json: DatasetCoverage::default(),
+            runtime_config_version_id: rc_id.clone(),
+        })
+        .await
+        .expect("seed existing Built training dataset");
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let calibration_plan = svc
+        .plan(DatasetPlanRequest {
+            model_spec_id,
+            runtime_config_version_id: rc_id,
+            window_start,
+            window_end,
+            sample_interval_secs: 60,
+            horizons_secs: vec![60],
+            source_delay_secs: 10,
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: default_sample_sources(),
+            training_dataset_id: None,
+            purpose: DatasetPurpose::Calibration,
+        })
+        .await
+        .expect("plan calibration dataset");
+    let err = svc
+        .build(calibration_plan)
+        .await
+        .expect_err("a calibration dataset overlapping a Built training dataset must fail closed");
+    assert!(
+        matches!(
+            err,
+            QuantError::Research(ResearchError::DatasetBuild { .. })
+        ),
+        "expected a DatasetBuild purge error, got {err:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();

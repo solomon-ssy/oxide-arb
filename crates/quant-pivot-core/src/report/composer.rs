@@ -704,6 +704,43 @@ fn auto_execution_gate(
     Ok(AutoExecutionGate { allowed, reasons })
 }
 
+/// The aggregate-exposure hard cap actually enforced by the LP for this
+/// report (`capital_base_usd × portfolio.kelly_safety.max_aggregate_exposure_pct`),
+/// frozen at compose time from the *exact* account snapshot + runtime-config
+/// this report solved against.
+///
+/// `None` when the cap is disabled (`max_aggregate_exposure_pct <= 0`, the LP
+/// applies no aggregate bucket) or the capital base is non-positive — the UI
+/// must render "no cap", never a fabricated fallback value re-derived from a
+/// separately-fetched, possibly-mismatched runtime-config version.
+fn aggregate_exposure_cap_usd(input: &ComposeReportInput<'_>) -> Option<Usd> {
+    let pct: Decimal = input
+        .runtime_config
+        .portfolio
+        .kelly_safety
+        .max_aggregate_exposure_pct
+        .value
+        .trim()
+        .parse()
+        .ok()?;
+    compute_aggregate_exposure_cap_usd(input.account.capital_base_usd.inner(), pct)
+}
+
+/// Pure `capital_base_usd × max_aggregate_exposure_pct`, matching the LP's own
+/// `lp.rs::build_buckets` gate exactly (`pct <= 0` or `capital_base <= 0`
+/// disables the cap — `None`, never a fabricated `0`).
+fn compute_aggregate_exposure_cap_usd(
+    capital_base_usd: Decimal,
+    max_aggregate_exposure_pct: Decimal,
+) -> Option<Usd> {
+    if max_aggregate_exposure_pct <= Decimal::ZERO || capital_base_usd <= Decimal::ZERO {
+        return None;
+    }
+    Some(Usd::new(
+        (max_aggregate_exposure_pct * capital_base_usd).round_dp(2),
+    ))
+}
+
 fn report_summary(
     input: &ComposeReportInput<'_>,
     recommendations: &[NewRecommendation],
@@ -754,6 +791,7 @@ fn report_summary(
         published_recommendation_count: u32::try_from(recommendations.len()).unwrap_or(u32::MAX),
         total_suggested_usd,
         max_single_recommendation_usd,
+        aggregate_exposure_cap_usd: aggregate_exposure_cap_usd(input),
         category_allocation,
         event_allocation,
         average_score,
@@ -1079,6 +1117,41 @@ mod tests {
         assert_eq!(entry_window_secs(1, dec!(0.5)), 1);
     }
 
+    #[test]
+    fn aggregate_exposure_cap_usd_matches_lp_gate() {
+        assert_eq!(
+            super::compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0.25)),
+            Some(Usd::new(dec!(2500))),
+            "capital_base_usd × pct, rounded to cent precision"
+        );
+    }
+
+    #[test]
+    fn aggregate_exposure_cap_usd_none_when_pct_disabled() {
+        assert_eq!(
+            super::compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0)),
+            None,
+            "pct <= 0 must report no cap, never a fabricated 0 cap"
+        );
+        assert_eq!(
+            super::compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(-1)),
+            None
+        );
+    }
+
+    #[test]
+    fn aggregate_exposure_cap_usd_none_when_capital_base_non_positive() {
+        assert_eq!(
+            super::compute_aggregate_exposure_cap_usd(dec!(0), dec!(0.25)),
+            None,
+            "a non-positive capital base must never report a fabricated cap"
+        );
+        assert_eq!(
+            super::compute_aggregate_exposure_cap_usd(dec!(-500), dec!(0.25)),
+            None
+        );
+    }
+
     fn candidate() -> SignalCandidate {
         SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
@@ -1196,6 +1269,12 @@ mod tests {
             kelly_fraction_applied: Some(dec!(0.5)),
             edge_uncertainty_shrink_applied: None,
             correlation_shrink_applied: None,
+            f_star_applied: None,
+            kelly_fraction_config_applied: None,
+            confidence_shrink_applied: None,
+            drawdown_shrink_applied: None,
+            raw_fraction_applied: None,
+            position_cap_fraction_applied: None,
         }
     }
 
@@ -1264,6 +1343,12 @@ mod tests {
                 kelly_fraction_applied: Some(dec!(0.5)),
                 edge_uncertainty_shrink_applied: None,
                 correlation_shrink_applied: None,
+                f_star_applied: None,
+                kelly_fraction_config_applied: None,
+                confidence_shrink_applied: None,
+                drawdown_shrink_applied: None,
+                raw_fraction_applied: None,
+                position_cap_fraction_applied: None,
             },
             risk_envelope: RiskEnvelope {
                 max_loss_usd: Usd::new(dec!(120)),

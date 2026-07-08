@@ -12,9 +12,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     domain::{
         CalibrationArtifactInfo, CalibrationArtifactListQuery, FitBiasTableRequest,
-        FitModelCalibratorRequest, JobProgressSink, Paginated,
+        FitModelCalibratorRequest, JobProgressSink, ModelCalibrationFitPreflightView, Paginated,
     },
-    types::{CalibrationArtifactId, RuntimeConfigVersionId},
+    types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_error::QuantResult;
 
@@ -33,21 +33,27 @@ pub struct BiasTableFitJobParams {
 
 /// Terminal outcome of a bias-table fit.
 ///
-/// `bias_table_id` is `None` when the fit was **fail-closed**: no category
+/// `artifact_id` is `None` when the fit was **fail-closed**: no category
 /// cleared its sample gate, so no artifact was minted (the job still succeeds).
 pub struct BiasTableFitOutcome {
     /// The persisted artifact id, or `None` when the fit produced no table.
-    pub bias_table_id: Option<CalibrationArtifactId>,
+    pub artifact_id: Option<CalibrationArtifactId>,
     /// Number of qualifying categories in the fitted table (0 when none).
     pub category_count: u64,
     /// Total samples the fit drew from the settlement spine.
     pub total_sample_count: u64,
 }
 
-/// Dependency-inversion boundary between the HTTP / job layer and the core
-/// favorite-longshot bias-table fitter.
+/// Dependency-inversion boundary between the HTTP / job layer and the unified
+/// calibration-artifact ledger.
+///
+/// Combines the favorite-longshot bias-table fitter *plus* the generic
+/// catalog reads/activation shared by every artifact kind (`model_score` and
+/// `market_price_bias` alike) — the web/job layer's only calibration-artifact
+/// dependency, so it is scoped to the whole family, not just the
+/// favorite-longshot fit.
 #[async_trait]
-pub trait FavoriteLongshotFitPort: Send + Sync {
+pub trait CalibrationArtifactFitPort: Send + Sync {
     /// Fit a bias table over the request window, persisting it when any category
     /// qualifies (fail-closed otherwise).
     async fn fit(
@@ -60,7 +66,7 @@ pub trait FavoriteLongshotFitPort: Send + Sync {
     /// Load a persisted calibration artifact by id (any kind).
     async fn find(
         &self,
-        bias_table_id: &CalibrationArtifactId,
+        artifact_id: &CalibrationArtifactId,
     ) -> QuantResult<Option<CalibrationArtifactInfo>>;
 
     /// Page the unified calibration-artifact catalog, newest first.
@@ -68,6 +74,14 @@ pub trait FavoriteLongshotFitPort: Send + Sync {
         &self,
         query: CalibrationArtifactListQuery,
     ) -> QuantResult<Paginated<CalibrationArtifactInfo>>;
+
+    /// Mark an artifact `active` (any kind); `market_price_bias` is
+    /// single-active (deactivates every other bias table), `model_score` has
+    /// no cross-model exclusivity (see the repository-layer `mark_active`).
+    async fn mark_active(
+        &self,
+        artifact_id: &CalibrationArtifactId,
+    ) -> QuantResult<CalibrationArtifactInfo>;
 }
 
 /// Frozen params for a durable `ModelCalibrationFit` research job (Phase 11.3 §4).
@@ -103,4 +117,13 @@ pub trait ModelCalibrationFitPort: Send + Sync {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<ModelCalibrationFitOutcome>;
+
+    /// Read-only disjoint + embargo preflight check (Phase 11.3 §10) — the
+    /// same purge/embargo primitive `fit` enforces fail-closed, without
+    /// enqueueing a job or mutating any state.
+    async fn preflight(
+        &self,
+        model_version_id: &ModelVersionId,
+        calibration_dataset_id: &TrainingDatasetId,
+    ) -> QuantResult<ModelCalibrationFitPreflightView>;
 }

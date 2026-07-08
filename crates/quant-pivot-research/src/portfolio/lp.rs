@@ -401,6 +401,7 @@ impl<'a> PreparedModel<'a> {
                 cluster_held: cluster_total.map(others),
                 correlated_cap,
                 aggregate_held: others(ledger.total),
+                capital_base_usd: self.input.capital_base_usd,
             });
 
             let binding = if allocated > Decimal::ZERO {
@@ -523,9 +524,12 @@ fn build_buckets(
         }
     }
 
-    if caps.max_aggregate_exposure_pct > Decimal::ZERO && caps.total_budget_usd > Decimal::ZERO {
+    if caps.max_aggregate_exposure_pct > Decimal::ZERO && input.capital_base_usd > Decimal::ZERO {
+        // Denominator is the governed `capital_base_usd` (same basis as
+        // per-position Kelly / drawdown scaling), never the raw
+        // `caps.total_budget_usd` — see `AllocationInput::capital_base_usd`.
         let aggregate_cap =
-            (caps.max_aggregate_exposure_pct * caps.total_budget_usd).max(Decimal::ZERO);
+            (caps.max_aggregate_exposure_pct * input.capital_base_usd).max(Decimal::ZERO);
         let held: Decimal = input
             .initial_exposures
             .per_market

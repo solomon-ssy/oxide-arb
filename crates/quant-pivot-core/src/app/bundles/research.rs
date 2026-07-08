@@ -20,7 +20,7 @@ use crate::{
 use quant_pivot_api::{fees::FeeCalculator, ws::WsShardHealthPort};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::{
-    FactorGovernancePort, FavoriteLongshotFitPort, ModelGovernancePort, ModelSpecPort,
+    CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
 };
 use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
@@ -113,8 +113,9 @@ pub struct ResearchBundle {
     pub position_repo: Arc<dyn PositionRepository>,
     /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
     pub fee_calculator: Arc<FeeCalculator>,
-    /// Favorite-longshot bias-table fitter + read port (11.2.1).
-    pub favorite_longshot_fit: Arc<dyn FavoriteLongshotFitPort>,
+    /// Unified calibration-artifact ledger port: favorite-longshot bias-table
+    /// fitter + generic catalog read/activate for every artifact kind (11.2.1, 11.3).
+    pub calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort>,
 }
 
 struct OfflineResearchRepos {
@@ -239,7 +240,7 @@ impl ResearchBundle {
         let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
             model_registry: Arc::clone(&model_registry_repo),
         }));
-        let favorite_longshot_fit: Arc<dyn FavoriteLongshotFitPort> =
+        let calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort> =
             Arc::new(FavoriteLongshotFitService::new(
                 Arc::clone(&deps.infra.quant_fact_read),
                 Arc::clone(&deps.data.market_repo),
@@ -280,7 +281,7 @@ impl ResearchBundle {
             market_linkage_repo: Arc::clone(&market_linkage_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             fee_calculator: Arc::clone(&deps.data.fee_calculator),
-            favorite_longshot_fit,
+            calibration_artifact_fit,
         }
     }
 

@@ -146,7 +146,7 @@ async fn build_app_state(
         model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
-        favorite_longshot: Arc::clone(&ctx.research.favorite_longshot_fit),
+        calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
             as Arc<dyn ModelCalibrationFitPort>,
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),

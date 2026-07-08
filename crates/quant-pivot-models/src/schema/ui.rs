@@ -252,6 +252,44 @@ fn ratio_half_open(
         .slider_range(0.01, 1.0, 0.01)
 }
 
+/// A bounded decimal slider over an explicit `[min, max]` range — for
+/// non-ratio decimals that still benefit from slider UX (e.g. a shrink
+/// coefficient), matching `validation::bounded_decimal`'s range exactly so
+/// the UI never offers a value the backend would reject.
+#[allow(clippy::too_many_arguments)]
+fn decimal_bounded(
+    path: &'static str,
+    le: &'static str,
+    lz: &'static str,
+    he: &'static str,
+    hz: &'static str,
+    min: f64,
+    max: f64,
+    step: f64,
+) -> FieldUiEntry {
+    f(path, le, lz, he, hz)
+        .widget(FieldWidget::RatioSlider)
+        .slider_range(min, max, step)
+}
+
+/// A two-sided confidence level, strictly within `(0.5, 1)` (matches
+/// `validation::bounded_decimal`/the `(0.5, 1)` checks for both
+/// `factors.structural.favorite_longshot.ci_confidence` and
+/// `model.calibration.ci_confidence` — a Wilson interval degenerates at or
+/// below `0.5` confidence, so the slider never offers a value validation
+/// would reject).
+fn ratio_confidence(
+    path: &'static str,
+    le: &'static str,
+    lz: &'static str,
+    he: &'static str,
+    hz: &'static str,
+) -> FieldUiEntry {
+    f(path, le, lz, he, hz)
+        .widget(FieldWidget::RatioSlider)
+        .slider_range(0.51, 0.99, 0.01)
+}
+
 fn decimal(
     path: &'static str,
     le: &'static str,
@@ -1006,12 +1044,12 @@ fn favorite_longshot_factor_fields() -> Vec<FieldUiEntry> {
             "Minimum samples per `(category, ttr_bucket)` curve for it to be retained (fail-closed below this).",
             "每个 `(category, ttr_bucket)` 曲线保留所需的最小样本数（低于此 fail-closed）。",
         ),
-        ratio(
+        ratio_confidence(
             "factors.structural.favorite_longshot.ci_confidence",
             "Bias-table CI confidence",
             "偏差表置信区间",
-            "Two-sided confidence level for the Wilson interval and the IC significance test during bias-table fit (e.g. 0.95).",
-            "偏差表拟合 Wilson 区间与 IC 显著性检验的双侧置信水平（如 0.95）。",
+            "Two-sided confidence level for the Wilson interval and the IC significance test during bias-table fit (e.g. 0.95). Must be within (0.5, 1) — a Wilson interval degenerates at or below 0.5.",
+            "偏差表拟合 Wilson 区间与 IC 显著性检验的双侧置信水平（如 0.95）。必须严格落在 (0.5, 1) 之间——置信水平不高于 0.5 时 Wilson 区间会退化。",
         ),
         decimal(
             "factors.structural.favorite_longshot.ic_significance_min",
@@ -1128,12 +1166,12 @@ fn model_calibration_fields() -> Vec<FieldUiEntry> {
             "Minimum seconds between a model's training-dataset window end and its calibration-dataset window start (purge + embargo).",
             "模型训练集窗口结束与校准集窗口开始之间的最小间隔秒数（purge + embargo）。",
         ),
-        ratio(
+        ratio_confidence(
             "model.calibration.ci_confidence",
             "Reliability CI confidence",
             "可靠性置信水平",
-            "Two-sided confidence level for Wilson intervals in reliability bins (edge-uncertainty shrink source).",
-            "可靠性分箱 Wilson 区间的双侧置信水平（edge 不确定性收缩来源）。",
+            "Two-sided confidence level for Wilson intervals in reliability bins (edge-uncertainty shrink source). Must be within (0.5, 1).",
+            "可靠性分箱 Wilson 区间的双侧置信水平（edge 不确定性收缩来源）。必须严格落在 (0.5, 1) 之间。",
         ),
     ]
 }
@@ -1600,26 +1638,32 @@ fn portfolio_sizing_fields() -> Vec<FieldUiEntry> {
 
 fn portfolio_kelly_safety_fields() -> Vec<FieldUiEntry> {
     vec![
-        ratio(
+        decimal_bounded(
             "portfolio.kelly_safety.edge_uncertainty_k",
             "Edge uncertainty k",
             "Edge 不确定性系数",
-            "Shrink coefficient k in shrink = clamp(1 − k·edge_std, floor, 1) from reliability-bin Wilson half-width.",
-            "由可靠性分箱 Wilson 半宽计算的收缩系数 k：shrink = clamp(1 − k·edge_std, floor, 1)。",
+            "Shrink coefficient k in shrink = clamp(1 − k·edge_std, floor, 1) from reliability-bin Wilson half-width. Must be within [0, 10] — beyond 10 every calibrated candidate collapses to the floor regardless of its actual edge uncertainty.",
+            "由可靠性分箱 Wilson 半宽计算的收缩系数 k：shrink = clamp(1 − k·edge_std, floor, 1)。必须在 [0, 10] 之间——超过 10 后所有已校准候选都会被收缩到下限，与其真实 edge 不确定性无关。",
+            0.0,
+            10.0,
+            0.1,
         ),
-        ratio(
+        // (0, 1] — a zero floor would let edge-uncertainty shrink zero out
+        // Kelly sizing entirely instead of merely shrinking it.
+        ratio_half_open(
             "portfolio.kelly_safety.edge_uncertainty_floor",
             "Edge uncertainty floor",
             "Edge 不确定性下限",
-            "Minimum edge-uncertainty shrink multiplier (never sizes above this floor when uncertainty binds).",
-            "Edge 不确定性收缩乘数下限（不确定性绑定时不会高于此值）。",
+            "Minimum edge-uncertainty shrink multiplier (never sizes above this floor when uncertainty binds). Must be > 0.",
+            "Edge 不确定性收缩乘数下限（不确定性绑定时不会高于此值）。必须大于 0。",
         ),
-        ratio(
+        // (0, 1] — a zero cap would allocate nothing at all.
+        ratio_half_open(
             "portfolio.kelly_safety.max_aggregate_exposure_pct",
             "Max aggregate exposure",
             "总敞口上限",
-            "Hard cap on total simultaneous portfolio exposure as a fraction of bankroll (LP bucket constraint).",
-            "同时组合总敞口占 bankroll 的硬上限（LP bucket 约束）。",
+            "Hard cap on total simultaneous portfolio exposure as a fraction of the governed capital base (LP bucket constraint). Must be > 0.",
+            "同时组合总敞口占治理后资金基准（capital base）的硬上限（LP bucket 约束）。必须大于 0。",
         )
         .critical(),
         ratio(

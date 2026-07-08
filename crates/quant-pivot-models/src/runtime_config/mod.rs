@@ -1,4 +1,5 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 1`).
+//! Versioned, hot-reloadable runtime configuration
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `6`).
 
 pub mod json_schema;
 pub mod preferences_schema;

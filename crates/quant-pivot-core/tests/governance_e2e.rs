@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::governance::{
     ModelGovernanceDeps, ModelGovernanceService, ModelScoreCalibrationPayload,
+    model_score_content_hash,
 };
 use quant_pivot_core::runtime_config::RuntimeConfigStore;
 use quant_pivot_error::control::ControlError;
@@ -350,7 +351,11 @@ async fn seed_model_score_calibrator(db: &DatabaseConnection) -> CalibrationArti
     let artifact_id = CalibrationArtifactId::from_v7();
     let window_start = Utc::now() - ChronoDuration::days(90);
     let window_end = Utc::now() - ChronoDuration::days(1);
+    let fit_window = quant_pivot_models::domain::query::TimeWindow::new(window_start, window_end);
+    let split_hash = content_hash(u32::from('s'));
     let payload = ModelScoreCalibrationPayload {
+        model_version_id: ModelVersionId::from_v7(),
+        calibration_dataset_id: TrainingDatasetId::from_v7(),
         mapping: MonotoneMapping::Isotonic { knots: vec![] },
         reliability: ReliabilityReport {
             bins: vec![],
@@ -360,17 +365,24 @@ async fn seed_model_score_calibrator(db: &DatabaseConnection) -> CalibrationArti
             n_samples: 100,
         },
     };
+    // Content hash + `active: true` mirror what `bind_calibration` produces
+    // in production (self-contained hash, activated on bind) — a seeded
+    // fixture that would pass `CoreCalibrationArtifactLoader`'s fail-closed
+    // hash/active verification exactly like a real one, not a shortcut that
+    // only happens to work because these tests never load it.
+    let content_hash = model_score_content_hash(&fit_window, &split_hash, &payload)
+        .expect("model-score content hash");
     PgCalibrationArtifactRepository::new(db.clone())
         .create(NewCalibrationArtifact {
             artifact_id: artifact_id.clone(),
             kind: CalibrationKind::ModelScore,
-            content_hash: content_hash(u32::from('c')),
+            content_hash,
             fit_window_start: window_start,
             fit_window_end: window_end,
-            calibration_split_hash: content_hash(u32::from('s')),
+            calibration_split_hash: split_hash,
             sample_count: 100,
             payload_json: serde_json::to_value(payload).expect("payload"),
-            active: false,
+            active: true,
         })
         .await
         .expect("calibration artifact");

@@ -79,7 +79,7 @@ pub async fn list(
     query: web::Query<CalibrationArtifactListQuery>,
 ) -> Result<WebResponse<Paginated<CalibrationArtifactSummaryView>>, WebError> {
     let page = state
-        .favorite_longshot
+        .calibration_artifacts
         .page(query.into_inner())
         .await?
         .map(CalibrationArtifactSummaryView::from);
@@ -92,7 +92,7 @@ pub async fn get(
     id: web::Path<CalibrationArtifactId>,
 ) -> Result<WebResponse<CalibrationArtifactDetailView>, WebError> {
     let info = state
-        .favorite_longshot
+        .calibration_artifacts
         .find(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("calibration artifact not found: {id}")))?;
@@ -200,7 +200,7 @@ pub async fn activate(
     let artifact_id = id.into_inner();
     let reason = body.into_inner().reason;
     let info = state
-        .favorite_longshot
+        .calibration_artifacts
         .find(&artifact_id)
         .await?
         .ok_or_else(|| {
@@ -212,6 +212,15 @@ pub async fn activate(
             info.kind
         )));
     }
+    // Mark this bias table active (deactivating any previously-active one)
+    // before staging the runtime-config version that points at it — the
+    // operator-facing "activate" intent must be recorded on the artifact
+    // ledger itself, not only implied by a config field (Phase 11.3 §3.4
+    // `active` governance).
+    state
+        .calibration_artifacts
+        .mark_active(&artifact_id)
+        .await?;
     let mut config = state.runtime_config_apply.current().as_ref().clone();
     config.factors.structural.favorite_longshot.bias_table_ref =
         Some(artifact_id.as_uuid().to_string());

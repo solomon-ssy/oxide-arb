@@ -3,7 +3,7 @@
 //! submission (05.4).
 //!
 //! Admission never mutates the report and never submits an order. It runs a
-//! fixed sequence of 22 hard checks over a frozen [`AdmissionInput`] (built once
+//! fixed sequence of 23 hard checks over a frozen [`AdmissionInput`] (built once
 //! by the [`AdmissionInputBuilder`], which owns *all* I/O) and produces an
 //! [`AdmissionDecision`] of allow / deny / defer plus a full per-check trace and
 //! replayable [`StateVersion`].

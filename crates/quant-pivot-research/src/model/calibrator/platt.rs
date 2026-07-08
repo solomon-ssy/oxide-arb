@@ -134,11 +134,11 @@ fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
             let linear_term = param_a.mul_add(scores[idx], param_b);
             let (sigmoid_prob, sigmoid_complement) = sigmoid_pair(linear_term);
             let hess_term = sigmoid_prob * sigmoid_complement;
-            hess_aa = hess_aa.mul_add(scores[idx] * scores[idx], hess_term);
+            hess_aa = (scores[idx] * scores[idx]).mul_add(hess_term, hess_aa);
             hess_bb += hess_term;
-            hess_cross = hess_cross.mul_add(scores[idx], hess_term);
+            hess_cross = scores[idx].mul_add(hess_term, hess_cross);
             let likelihood_grad = targets[idx] - sigmoid_prob;
-            grad_a = grad_a.mul_add(scores[idx], likelihood_grad);
+            grad_a = scores[idx].mul_add(likelihood_grad, grad_a);
             grad_b += likelihood_grad;
         }
         if grad_a.abs() < STOPPING_GRAD && grad_b.abs() < STOPPING_GRAD {
@@ -217,7 +217,42 @@ mod tests {
         }
         let (param_a, param_b) = fit_platt(&scores, &outcomes).expect("fit");
         // P(win) increasing in score requires param_a < 0 (since P = 1/(1+exp(a*f+b))).
-        assert!(param_a < 0.0, "param_a={param_a} param_b={param_b}");
+        // The magnitude check (not just the sign) guards against a degenerate fit that
+        // "converges" to ~0 after a single corrupted Newton step — the exact failure
+        // mode of a `mul_add` accumulator-order regression: the sign check alone
+        // passed for `param_a ≈ -1e-7` while the true fit on this data is `≈ -6.5`.
+        assert!(
+            param_a < -1.0,
+            "param_a={param_a} param_b={param_b} (near-zero param_a means the sigmoid \
+             barely depends on score — a degenerate, uninformative calibration)"
+        );
+    }
+
+    #[test]
+    fn platt_calibration_matches_known_closed_form() {
+        // Golden (A, B) independently computed in Python from the same
+        // Lin-Lin-Weng (2007) Newton-with-backtracking algorithm (correct
+        // `Σ f_i·d_i`-style accumulation, not the buggy `mul_add` order this
+        // test guards against regressing to) on this exact fixed dataset.
+        let mut scores = Vec::new();
+        let mut outcomes = Vec::new();
+        for i in 0..40_i32 {
+            let score = f64::from(i - 20) / 10.0;
+            scores.push(score);
+            let base = score > 0.0;
+            outcomes.push(if i % 6 == 0 { !base } else { base });
+        }
+        let (param_a, param_b) = fit_platt(&scores, &outcomes).expect("fit");
+        let golden_a = -1.026_860_098_423_914;
+        let golden_b = -0.051_343_004_921_195_81;
+        assert!(
+            (param_a - golden_a).abs() < 1e-6,
+            "param_a={param_a} golden={golden_a}"
+        );
+        assert!(
+            (param_b - golden_b).abs() < 1e-6,
+            "param_b={param_b} golden={golden_b}"
+        );
     }
 
     #[test]

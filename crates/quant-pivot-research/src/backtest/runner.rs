@@ -161,6 +161,10 @@ fn process_tick(
         caps,
         initial_exposures: &ExposureBreakdown::default(),
         available_usd: caps.total_budget_usd,
+        // Backtest has no live venue account to reconcile against; the
+        // configured budget itself is the capital base (mirrors
+        // `available_usd` above).
+        capital_base_usd: caps.total_budget_usd,
         correlation: None,
         top_n,
     })?;

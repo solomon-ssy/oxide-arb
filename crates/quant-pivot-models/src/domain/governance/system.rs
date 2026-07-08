@@ -188,7 +188,8 @@ pub struct ShutdownProgress {
 // ── Runtime config ───────────────────────────────────────────────────
 //
 // The typed schema for `config_json` is `crate::runtime_config::RuntimeConfig`
-// (`schema_version = 1`). This module only carries the persistence DTOs.
+// (`schema_version` — see `RUNTIME_CONFIG_SCHEMA_VERSION`). This module only
+// carries the persistence DTOs.
 
 /// DB row projection for the immutable `runtime_config_version` table.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]

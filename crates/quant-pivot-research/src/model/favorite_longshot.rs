@@ -455,8 +455,8 @@ fn fit_bins(samples: &[&BiasSample], config: &BiasFitConfig, z: f64) -> Vec<Pric
 /// A high, sign-consistent correlation means the empirical bias genuinely
 /// predicts the settlement residual (not a statistical artifact).
 fn curve_ic(samples: &[&BiasSample], curve: &[PriceBiasBin]) -> Decimal {
-    let mut xs: Vec<f64> = Vec::new();
-    let mut ys: Vec<f64> = Vec::new();
+    let mut xs: Vec<Decimal> = Vec::new();
+    let mut ys: Vec<Decimal> = Vec::new();
     for sample in samples {
         let mid = sample.entry_mid.inner();
         let Some(bias) = curve
@@ -471,15 +471,13 @@ fn curve_ic(samples: &[&BiasSample], curve: &[PriceBiasBin]) -> Decimal {
         } else {
             -mid
         };
-        let (Some(x), Some(y)) = (bias.to_f64(), residual.to_f64()) else {
-            continue;
-        };
-        xs.push(x);
-        ys.push(y);
+        xs.push(bias);
+        ys.push(residual);
     }
-    Decimal::from_f64(pearson(&xs, &ys))
-        .unwrap_or(Decimal::ZERO)
-        .round_dp(STAT_SCALE)
+    // Decimal-domain throughout — no f64 round-trip needed (unlike the
+    // t-test significance check below, which crosses `f64` only for the
+    // Student-t inverse-CDF, which has no closed Decimal form).
+    crate::stats::pearson(&xs, &ys).round_dp(STAT_SCALE)
 }
 
 /// Whether a correlation `ic` over `n` paired samples is significant: it must
@@ -503,32 +501,6 @@ fn ic_is_significant(ic: Decimal, n: u64, ci_confidence: Decimal, ic_floor: Deci
     let df = nn - 2.0;
     let t_crit = StudentsT::new(0.0, 1.0, df).map_or(1.96, |dist| dist.inverse_cdf(upper));
     t.abs() >= t_crit
-}
-
-/// Pearson correlation (0.0 for degenerate/empty inputs).
-fn pearson(xs: &[f64], ys: &[f64]) -> f64 {
-    let n = xs.len();
-    if n < 2 || n != ys.len() {
-        return 0.0;
-    }
-    let count = count_f64(u64::try_from(n).unwrap_or(u64::MAX));
-    let mean_x = xs.iter().sum::<f64>() / count;
-    let mean_y = ys.iter().sum::<f64>() / count;
-    let mut cov = 0.0;
-    let mut var_x = 0.0;
-    let mut var_y = 0.0;
-    for (x, y) in xs.iter().zip(ys) {
-        let dx = x - mean_x;
-        let dy = y - mean_y;
-        cov = dx.mul_add(dy, cov);
-        var_x = dx.mul_add(dx, var_x);
-        var_y = dy.mul_add(dy, var_y);
-    }
-    if var_x <= 0.0 || var_y <= 0.0 {
-        return 0.0;
-    }
-    let corr = cov / (var_x.sqrt() * var_y.sqrt());
-    if corr.is_finite() { corr } else { 0.0 }
 }
 
 #[cfg(test)]

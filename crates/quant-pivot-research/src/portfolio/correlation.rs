@@ -193,6 +193,14 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
 
         let threshold = decimal_to_f64(input.cluster_threshold).abs();
         let mut uf = UnionFind::new(input.markets.len());
+        // Every evaluated pair's |ρ| (not just the above-threshold ones that
+        // drove clustering) — a cluster formed via transitive closure (A-B and
+        // B-C above threshold, A-C below) must still average in the A-C pair
+        // when computing the cluster's mean correlation (Phase 11.3 §4.2:
+        // "ρ̄ = 平均因子/事件相关" is the full within-cluster pairwise mean,
+        // not only the pairs that happened to clear the clustering threshold —
+        // restricting to threshold-clearing pairs only would systematically
+        // bias ρ̄ upward for any cluster joined by transitivity).
         let mut pair_corrs: Vec<(usize, usize, f64)> = Vec::new();
         for i in 0..returns.len() {
             for j in (i + 1)..returns.len() {
@@ -200,11 +208,12 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
                 if overlap < min_obs {
                     continue;
                 }
-                if let Some(corr) = pearson(&returns[i][..overlap], &returns[j][..overlap])
-                    && corr.abs() >= threshold
-                {
+                let Some(corr) = pearson(&returns[i][..overlap], &returns[j][..overlap]) else {
+                    continue;
+                };
+                pair_corrs.push((i, j, corr.abs()));
+                if corr.abs() >= threshold {
                     uf.union(i, j);
-                    pair_corrs.push((i, j, corr.abs()));
                 }
             }
         }
@@ -373,6 +382,7 @@ impl UnionFind {
 }
 
 #[cfg(test)]
+#[allow(clippy::unreadable_literal)]
 mod tests {
     use super::{
         CorrelationEstimator, CorrelationInput, CorrelationMarket, HistoricalCorrelationEstimator,
@@ -461,6 +471,76 @@ mod tests {
         assert_eq!(groups.source, CorrelationSource::Proxy);
         assert_eq!(groups.clusters.len(), 1, "same event clusters via proxy");
     }
+
+    #[test]
+    fn cluster_mean_rho_averages_every_pair_not_only_threshold_clearing_ones() {
+        // a-b and b-c both clear the 0.7 threshold and union transitively into
+        // one 3-market cluster; a-c does NOT clear it directly (~0.26) but
+        // must still be averaged into the cluster's mean ρ̄ once all three
+        // share a cluster — the regression this guards against averaged only
+        // the threshold-clearing pairs (a-b, b-c ≈ 0.79), which is
+        // systematically biased high relative to the true within-cluster mean
+        // (≈ 0.62 including the weak a-c pair).
+        let a = market("0xa", None, MarketCategory::Crypto, A_MIDS);
+        let b = market("0xb", None, MarketCategory::Sports, B_MIDS);
+        let c = market("0xc", None, MarketCategory::Politics, C_MIDS);
+        let markets = vec![a, b, c];
+        let groups = HistoricalCorrelationEstimator::new()
+            .estimate(&CorrelationInput {
+                markets: &markets,
+                min_observations: 10,
+                cluster_threshold: dec!(0.7),
+            })
+            .expect("estimate");
+        assert_eq!(groups.source, CorrelationSource::Historical);
+        assert_eq!(
+            groups.clusters.len(),
+            1,
+            "all three markets share a cluster"
+        );
+        assert_eq!(groups.clusters[0].len(), 3);
+        let mean_rho = *groups.cluster_mean_rho.get(&0).expect("cluster 0 mean rho");
+        // Naive (buggy) mean of only the two threshold-clearing pairs would
+        // land close to 0.79; the correct full-cluster mean (including the
+        // weak a-c pair) must be materially lower.
+        assert!(
+            mean_rho < dec!(0.75),
+            "mean_rho={mean_rho} must include the weak a-c pair, not just the \
+             threshold-clearing a-b/b-c pairs"
+        );
+        assert!(
+            mean_rho > dec!(0.5),
+            "mean_rho={mean_rho} should still reflect two strong pairs out of three"
+        );
+    }
+
+    const A_MIDS: &[f64] = &[
+        0.500000, 0.500171, 0.497625, 0.500468, 0.491308, 0.494662, 0.496958, 0.496199, 0.488742,
+        0.479446, 0.473759, 0.478029, 0.479873, 0.482494, 0.478584, 0.483872, 0.479833, 0.482373,
+        0.486354, 0.491024, 0.493993, 0.492757, 0.492667, 0.495625, 0.493046, 0.492169, 0.501064,
+        0.503399, 0.509768, 0.516448, 0.509731, 0.520150, 0.523823, 0.519929, 0.518871, 0.520471,
+        0.513826, 0.512848, 0.515574, 0.513201, 0.526559, 0.529707, 0.527857, 0.527974, 0.529707,
+        0.533940, 0.536844, 0.542331, 0.538378, 0.535439, 0.533628, 0.534831, 0.531401, 0.535437,
+        0.531074, 0.534054, 0.534985, 0.531000, 0.534295, 0.535987, 0.535106,
+    ];
+    const B_MIDS: &[f64] = &[
+        0.500000, 0.503741, 0.500774, 0.503056, 0.499322, 0.501857, 0.506030, 0.507202, 0.501758,
+        0.491522, 0.482751, 0.485850, 0.489288, 0.494266, 0.491760, 0.493027, 0.485076, 0.485364,
+        0.490385, 0.490928, 0.488876, 0.489849, 0.490658, 0.492889, 0.493523, 0.494420, 0.497861,
+        0.499586, 0.501608, 0.502934, 0.498008, 0.501924, 0.509153, 0.506727, 0.503897, 0.504970,
+        0.498207, 0.493643, 0.501410, 0.495653, 0.504412, 0.504762, 0.503772, 0.506311, 0.502037,
+        0.503876, 0.509743, 0.513866, 0.509369, 0.506757, 0.500205, 0.504035, 0.499378, 0.507473,
+        0.504980, 0.508838, 0.505574, 0.502705, 0.507541, 0.509156, 0.507118,
+    ];
+    const C_MIDS: &[f64] = &[
+        0.500000, 0.506766, 0.504003, 0.505421, 0.508206, 0.508954, 0.513658, 0.515991, 0.513943,
+        0.505618, 0.496311, 0.496921, 0.500812, 0.506604, 0.506438, 0.502848, 0.493367, 0.491986,
+        0.496765, 0.493345, 0.487153, 0.489777, 0.490801, 0.491907, 0.495806, 0.498820, 0.496320,
+        0.496448, 0.493983, 0.489734, 0.488649, 0.485121, 0.493735, 0.493372, 0.489906, 0.490072,
+        0.485732, 0.479791, 0.490050, 0.483428, 0.485188, 0.482789, 0.483378, 0.487181, 0.478038,
+        0.477523, 0.484732, 0.486135, 0.481901, 0.480441, 0.471555, 0.476872, 0.473395, 0.483818,
+        0.483912, 0.487569, 0.481409, 0.480105, 0.485105, 0.485980, 0.483676,
+    ];
 
     #[test]
     fn proxy_clusters_same_event() {

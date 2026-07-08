@@ -107,9 +107,16 @@ pub struct ModelGovernanceService {
 /// A shared gate evaluation: the report plus the shadow summary, which is
 /// present only for shadow-gated intents (`Publish` / `AutoExecution`) and
 /// feeds the publish audit's shadow-overlap evidence.
+///
+/// Also carries the hash-verified [`ModelArtifact`] this evaluation loaded to
+/// compute `return_model_calibrated` — `publish()` reuses it for
+/// [`ModelGovernanceService::validate_publish_artifact`] instead of a second,
+/// redundant `load_hash_verified_artifact` round-trip (Phase 11.3 §8: "one
+/// load, two checks").
 struct GateEvaluation {
     report: QualityGateReport,
     shadow_summary: Option<ShadowStabilitySummary>,
+    artifact: ModelArtifact,
 }
 
 impl ModelGovernanceService {
@@ -182,8 +189,10 @@ impl ModelGovernanceService {
 
     /// Optional publish guard (11.2.2): Crypto-scoped weighted artifacts must
     /// carry non-zero weight on at least one domain-crypto factor column.
-    async fn validate_publish_artifact(&self, version: &ModelVersionInfo) -> QuantResult<()> {
-        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+    ///
+    /// Takes the already hash-verified `artifact` `evaluate_gate` loaded —
+    /// never re-loads it (single-load publish path, Phase 11.3 §8).
+    fn validate_publish_artifact(artifact: &ModelArtifact) -> QuantResult<()> {
         if let ModelArtifact::WeightedFactor(weighted) = artifact {
             validate_category_scope_weights(weighted.category_scope, &weighted.weights)?;
         }
@@ -266,7 +275,7 @@ impl ModelGovernancePort for ModelGovernanceService {
             ));
         }
 
-        self.validate_publish_artifact(&version).await?;
+        Self::validate_publish_artifact(&evaluation.artifact)?;
         self.commit_publish(version, report, summary, required_window, command, actor)
             .await
     }
@@ -709,6 +718,16 @@ impl ModelGovernanceService {
             })
             .await?;
 
+        // Activate the bound calibrator (Phase 11.3 `active` governance —
+        // §3.4): a `Calibrated` return model's `calibrator_ref` must resolve
+        // through `CoreCalibrationArtifactLoader`, which fails closed on
+        // `active == false`. `model_score` has no cross-model exclusivity, so
+        // this never deactivates another model version's calibrator.
+        self.deps
+            .calibration_repo
+            .mark_active(&request.calibrator_ref)
+            .await?;
+
         self.write_audit(NewModelGovernanceAudit {
             audit_id: ModelGovernanceAuditId::from_v7(),
             model_version_id: Some(created.model_version_id.clone()),
@@ -751,10 +770,8 @@ impl ModelGovernanceService {
         let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
         let model_family = self.model_family_for_version(version).await?;
 
-        let return_model_calibrated = {
-            let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
-            artifact.return_model_is_calibrated()
-        };
+        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        let return_model_calibrated = artifact.return_model_is_calibrated();
 
         let backtest = match backtest_report_id {
             Some(id) => self.backtest_by_id(id).await?,
@@ -787,6 +804,7 @@ impl ModelGovernanceService {
         Ok(GateEvaluation {
             report: decision.report().clone(),
             shadow_summary,
+            artifact,
         })
     }
 

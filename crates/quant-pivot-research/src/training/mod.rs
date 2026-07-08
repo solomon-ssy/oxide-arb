@@ -387,6 +387,12 @@ struct DatasetHashInput<'a> {
     model_spec_id: &'a ModelSpecId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
+    /// Included so a `Training` dataset never collides with a `Calibration`
+    /// dataset over identical content — `uq_quant_training_dataset_hash` is a
+    /// single global unique index across every purpose, and the purge/embargo
+    /// invariant (Phase 11.3 §0) depends on the two ledgers never being
+    /// silently conflated by a shared hash.
+    purpose: DatasetPurpose,
     feature_schema_hash: &'a ContentHash,
     factor_schema_hash: &'a ContentHash,
     label_schema_hash: &'a ContentHash,
@@ -417,10 +423,12 @@ impl TrainingDatasetArtifact {
     /// # Errors
     ///
     /// Propagates canonical-serialization failures.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_dataset_hash(
         model_spec_id: &ModelSpecId,
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
+        purpose: DatasetPurpose,
         feature_schema_hash: &ContentHash,
         factor_schema_hash: &ContentHash,
         label_schema_hash: &ContentHash,
@@ -466,6 +474,7 @@ impl TrainingDatasetArtifact {
             model_spec_id,
             window_start,
             window_end,
+            purpose,
             feature_schema_hash,
             factor_schema_hash,
             label_schema_hash,
@@ -583,6 +592,7 @@ mod tests {
     use super::{TrainingDatasetArtifact, TrainingExample, fixtures::example};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
+        enums::quant::DatasetPurpose,
         hashing::CanonicalDigest,
         types::{ContentHash, ModelSpecId},
     };
@@ -596,12 +606,21 @@ mod tests {
     }
 
     fn dataset_hash(model_spec_id: &ModelSpecId, examples: &[TrainingExample]) -> ContentHash {
+        dataset_hash_with_purpose(model_spec_id, examples, DatasetPurpose::Training)
+    }
+
+    fn dataset_hash_with_purpose(
+        model_spec_id: &ModelSpecId,
+        examples: &[TrainingExample],
+        purpose: DatasetPurpose,
+    ) -> ContentHash {
         let (feature, factor, label) = hashes();
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         TrainingDatasetArtifact::compute_dataset_hash(
             model_spec_id,
             start,
             start,
+            purpose,
             &feature,
             &factor,
             &label,
@@ -625,5 +644,17 @@ mod tests {
         let base = vec![example("aaa", 100)];
         let changed = vec![example("aaa", 101)];
         assert_ne!(dataset_hash(&spec, &base), dataset_hash(&spec, &changed));
+    }
+
+    #[test]
+    fn dataset_hash_differs_by_purpose_for_identical_content() {
+        // A `Training` and a `Calibration` dataset with byte-identical
+        // examples/schemas must never collide on `uq_quant_training_dataset_hash`
+        // (Phase 11.3 P2 — the two ledgers must never be silently conflated).
+        let spec = ModelSpecId::from_v7();
+        let examples = vec![example("aaa", 100)];
+        let training = dataset_hash_with_purpose(&spec, &examples, DatasetPurpose::Training);
+        let calibration = dataset_hash_with_purpose(&spec, &examples, DatasetPurpose::Calibration);
+        assert_ne!(training, calibration);
     }
 }

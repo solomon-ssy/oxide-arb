@@ -6,7 +6,8 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BindCalibrationRequest, GovernanceActor, PublishModelCommand, PublishModelRequest,
+        BindCalibrationRequest, GovernanceActor, ModelCalibrationFitPreflightQuery,
+        ModelCalibrationFitPreflightView, PublishModelCommand, PublishModelRequest,
         RetireModelCommand, RetireModelRequest, RollbackModelCommand, RollbackModelRequest,
         TrainedModelView,
     },
@@ -55,6 +56,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models/{id}/bind-calibration",
             Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Create),
             bind_calibration,
+        ),
+        spec(
+            Method::GET,
+            "/research/models/{id}/calibration-fit-preflight",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            calibration_fit_preflight,
         ),
     ]
 }
@@ -235,6 +242,23 @@ pub async fn bind_calibration(
         "request_id": request_id.0,
         "reason": request.reason,
     }));
+    Ok(WebResponse::ok(view))
+}
+
+/// `GET /api/research/models/{id}/calibration-fit-preflight` — read-only
+/// disjoint + embargo check for the "Fit Model Calibrator" wizard.
+///
+/// Surfaced live as the operator picks a model/dataset pair (Phase 11.3
+/// §10). Never enqueues a job or mutates state.
+pub async fn calibration_fit_preflight(
+    state: web::Data<AppState>,
+    id: web::Path<ModelVersionId>,
+    query: web::Query<ModelCalibrationFitPreflightQuery>,
+) -> Result<WebResponse<ModelCalibrationFitPreflightView>, WebError> {
+    let view = state
+        .model_calibration_fit
+        .preflight(&id.into_inner(), &query.into_inner().calibration_dataset_id)
+        .await?;
     Ok(WebResponse::ok(view))
 }
 

@@ -3,10 +3,11 @@
 //! Also per-bin reliability-diagram data for a fitted
 //! [`crate::model::calibrator::ProbabilityCalibrator`] (Phase 11.3 §3.2/§6.1).
 //!
-//! Also the source of the per-score-bucket `mean_adverse_excursion_bps` the
-//! `Calibrated` return model's `DownsideSource::MfeMae` reads at serving time
-//! (§3.3) — computed on the **same** independent calibration split the
-//! probability mapping was fit on, never re-derived from training data.
+//! Also the source of the per-calibrated-probability-bucket
+//! `mean_adverse_excursion_bps` the `Calibrated` return model's
+//! `DownsideSource::MfeMae` reads at serving time (§3.3) — computed on the
+//! **same** independent calibration split the probability mapping was fit
+//! on, never re-derived from training data.
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::types::Probability;
@@ -16,21 +17,28 @@ use serde::{Deserialize, Serialize};
 use crate::{
     model::calibrator::{MonotoneMapping, apply_mapping},
     precision::RESEARCH_DECIMAL_SCALE,
-    stats::{wilson_interval, wilson_z},
+    stats::{count_f64, wilson_interval, wilson_z},
 };
 
-/// Number of equal-width `[0, 1]` score buckets in a reliability report.
+/// Number of equal-width `[0, 1]` calibrated-probability buckets in a
+/// reliability report.
 const RELIABILITY_BINS: usize = 10;
 /// `f64` floor/ceiling probabilities never touched exactly (avoids `ln(0)`).
 const LOG_LOSS_EPS: f64 = 1e-12;
 
-/// One score-bucket's reliability-diagram row.
+/// One calibrated-probability-bucket reliability-diagram row.
+///
+/// Buckets partition the **calibrated probability** axis (`[0, 1]`), matching
+/// the standard ECE definition (Naeini et al.; sklearn `calibration_curve`) —
+/// not the raw, pre-calibration model score, which would make bucket edges
+/// (and any downstream MAE-by-bucket lookup) incomparable across calibration
+/// methods with different score→probability curvature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliabilityBin {
-    /// Inclusive lower score edge.
-    pub score_lo: Decimal,
-    /// Exclusive upper score edge (inclusive for the top bin).
-    pub score_hi: Decimal,
+    /// Inclusive lower calibrated-probability edge.
+    pub predicted_lo: Decimal,
+    /// Exclusive upper calibrated-probability edge (inclusive for the top bin).
+    pub predicted_hi: Decimal,
     /// Samples in the bucket.
     pub sample_count: u64,
     /// Mean calibrated probability in the bucket (reliability-diagram x-axis).
@@ -56,14 +64,17 @@ pub struct ReliabilityReport {
 }
 
 impl ReliabilityReport {
-    /// The bucket containing `score`, or `None` when no bucket was retained
-    /// (empty report) — callers must treat this as "no downside data",
-    /// never fabricate a value.
+    /// The bucket containing a **calibrated probability** (never a raw model
+    /// score — callers must calibrate first), or `None` when no bucket was
+    /// retained (empty report) — callers must treat this as "no downside
+    /// data", never fabricate a value.
     #[must_use]
-    pub fn bin_for(&self, score: Decimal) -> Option<&ReliabilityBin> {
+    pub fn bin_for(&self, calibrated_probability: Decimal) -> Option<&ReliabilityBin> {
         let top = Decimal::ONE;
         self.bins.iter().find(|bin| {
-            score >= bin.score_lo && (score < bin.score_hi || (bin.score_hi == top && score <= top))
+            calibrated_probability >= bin.predicted_lo
+                && (calibrated_probability < bin.predicted_hi
+                    || (bin.predicted_hi == top && calibrated_probability <= top))
         })
     }
 }
@@ -135,6 +146,13 @@ pub fn compute_reliability(
     })
 }
 
+/// Partition samples into `RELIABILITY_BINS` equal-width buckets over the
+/// **calibrated probability** axis (`calibrated[i]`), not the raw pre-
+/// calibration `score` — the standard ECE bucketing (Naeini et al.; sklearn
+/// `calibration_curve`). Binning on the raw score instead would make ECE, the
+/// reliability diagram, and the `mean_adverse_excursion_bps` bucket lookup
+/// depend on the (arbitrary, method-specific) score→probability curvature
+/// rather than the probability itself.
 fn build_bins(
     samples: &[ReliabilitySample],
     calibrated: &[Probability],
@@ -150,11 +168,11 @@ fn build_bins(
         } else {
             width * Decimal::from((index + 1) as u64)
         };
-        let members: Vec<usize> = samples
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.score >= lo && (s.score < hi || (top && s.score <= hi)))
-            .map(|(i, _)| i)
+        let members: Vec<usize> = (0..samples.len())
+            .filter(|&i| {
+                let p = calibrated[i].inner();
+                p >= lo && (p < hi || (top && p <= hi))
+            })
             .collect();
         if members.is_empty() {
             continue;
@@ -180,8 +198,8 @@ fn build_bins(
             Some(mean_decimal(&mae_values))
         };
         bins.push(ReliabilityBin {
-            score_lo: lo,
-            score_hi: hi,
+            predicted_lo: lo,
+            predicted_hi: hi,
             sample_count: n,
             mean_predicted: Probability::new(mean_predicted.round_dp(RESEARCH_DECIMAL_SCALE)),
             empirical_frequency: Probability::new(
@@ -231,29 +249,38 @@ fn mean_decimal(values: &[Decimal]) -> Decimal {
         .round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
-fn count_f64(n: u64) -> f64 {
-    Decimal::from(n).to_f64().unwrap_or(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ReliabilitySample, compute_reliability};
     use crate::model::calibrator::{
-        MonotoneMapping, ProbabilityCalibrator, isotonic::IsotonicCalibrator,
+        IsotonicKnot, MonotoneMapping, ProbabilityCalibrator, isotonic::IsotonicCalibrator,
     };
-    use rust_decimal::Decimal;
+    use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
 
     #[test]
-    fn perfectly_calibrated_isotonic_has_near_zero_ece() {
-        let calibrator = IsotonicCalibrator::new(10);
+    fn truly_calibrated_isotonic_has_near_zero_ece() {
+        // Ten groups, one per reliability bin, each carrying a score that
+        // *is* its own bin midpoint and an empirical win rate exactly equal
+        // to that midpoint. A perfect isotonic fit reproduces `calibrated ==
+        // score` here (the group means are already non-decreasing), so
+        // `mean_predicted` must match `empirical_frequency` almost exactly
+        // in every bin — a real ECE-near-zero assertion, unlike the previous
+        // `i % 2` alternating-outcome fixture (which is not perfectly
+        // calibrated at all) with a vacuous `ece <= 0.5` bound that nearly
+        // any report would satisfy.
         let mut scores = Vec::new();
         let mut outcomes = Vec::new();
-        for i in 0..200 {
-            let score = Decimal::from(i) / dec!(200);
-            scores.push(score);
-            outcomes.push(i % 2 == 0);
+        for bucket in 0..10_i64 {
+            let target_p = (Decimal::from(bucket) + dec!(0.5)) / dec!(10);
+            let score = target_p;
+            let positives = (target_p * dec!(100)).round().to_i64().unwrap_or(0);
+            for i in 0..100_i64 {
+                scores.push(score);
+                outcomes.push(i < positives);
+            }
         }
+        let calibrator = IsotonicCalibrator::new(10);
         let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
         let samples: Vec<ReliabilitySample> = scores
             .iter()
@@ -265,12 +292,91 @@ mod tests {
             })
             .collect();
         let report = compute_reliability(&mapping, &samples, dec!(0.95)).expect("reliability");
-        assert_eq!(report.n_samples, 200);
-        assert!(report.ece <= dec!(0.5));
-        assert!(!report.bins.is_empty());
+        assert_eq!(report.n_samples, 1000);
+        assert_eq!(report.bins.len(), 10, "{:?}", report.bins);
+        assert!(
+            report.ece <= dec!(0.001),
+            "truly calibrated data must yield near-zero ECE, got {}",
+            report.ece
+        );
         for bin in &report.bins {
             assert_eq!(bin.mean_adverse_excursion_bps, Some(dec!(-150)));
         }
+    }
+
+    #[test]
+    fn reliability_ece_bins_on_predicted_probability_not_raw_score() {
+        // A steep Platt sigmoid (a=-10, b=5) maps score=0.55 to a calibrated
+        // probability of ≈0.622. Binning on the *raw score* would place this
+        // sample in bucket 5 (`[0.5, 0.6)`); binning on the *calibrated
+        // probability* (the correct, standard-ECE behavior) must place it in
+        // bucket 6 (`[0.6, 0.7)`) instead.
+        let mapping = MonotoneMapping::Platt {
+            a: dec!(-10),
+            b: dec!(5),
+        };
+        let mut scores = Vec::new();
+        for i in 0..=20_i64 {
+            scores.push(Decimal::from(i) / dec!(20));
+        }
+        let samples: Vec<ReliabilitySample> = scores
+            .iter()
+            .map(|&score| ReliabilitySample {
+                score,
+                won: true,
+                max_adverse_excursion_bps: None,
+            })
+            .collect();
+        let report = compute_reliability(&mapping, &samples, dec!(0.95)).expect("reliability");
+        let bin_with_score_point_five_five = report
+            .bins
+            .iter()
+            .find(|bin| dec!(0.622) >= bin.predicted_lo && dec!(0.622) < bin.predicted_hi)
+            .expect("a bin covering the calibrated probability at score=0.55");
+        // The correct calibrated-probability bucket is [0.6, 0.7); binning on
+        // the raw score would have (incorrectly) placed it in [0.5, 0.6).
+        assert_eq!(bin_with_score_point_five_five.predicted_lo, dec!(0.6));
+        assert_eq!(bin_with_score_point_five_five.predicted_hi, dec!(0.7));
+    }
+
+    #[test]
+    fn log_loss_never_infinite_at_extreme_probabilities() {
+        let mapping = MonotoneMapping::Isotonic {
+            knots: vec![
+                IsotonicKnot {
+                    score: dec!(0),
+                    probability: dec!(0),
+                },
+                IsotonicKnot {
+                    score: dec!(1),
+                    probability: dec!(1),
+                },
+            ],
+        };
+        let samples = vec![
+            ReliabilitySample {
+                score: dec!(0),
+                won: true,
+                max_adverse_excursion_bps: None,
+            },
+            ReliabilitySample {
+                score: dec!(1),
+                won: false,
+                max_adverse_excursion_bps: None,
+            },
+        ];
+        let report = compute_reliability(&mapping, &samples, dec!(0.95)).expect("reliability");
+        // `p=0`/`p=1` is clamped to `LOG_LOSS_EPS` before taking `ln`, so the
+        // term is a large-but-bounded finite number (`-ln(1e-12) ≈ 27.63`),
+        // never `+inf`/`NaN` (which `Decimal` cannot even represent, but an
+        // unclamped `f64::ln(0.0)` boundary would silently poison the mean
+        // via `Decimal::from_f64` returning `None` -> `unwrap_or(ZERO)`,
+        // masking the failure instead of bounding it).
+        assert!(
+            report.log_loss > dec!(20) && report.log_loss < dec!(30),
+            "log_loss={}",
+            report.log_loss
+        );
     }
 
     #[test]

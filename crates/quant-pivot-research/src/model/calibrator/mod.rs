@@ -99,10 +99,12 @@ impl ResolvedCalibration {
 
     /// Derive the expected return / downside (bps) per Phase 11.3 §3.3:
     /// `E[r] = P(win)·(1-p)/p − (1−P(win))`, `downside` = the calibration
-    /// split's mean `max_adverse_excursion_bps` in the candidate's score
-    /// bucket. An invalid market price (outside `(0, 1)`) or a score bucket
-    /// with no MAE evidence yields a zero estimate — never fabricated —
-    /// which downstream Kelly sizing rejects via `InvalidEdgeInputs`.
+    /// split's mean `max_adverse_excursion_bps` in the candidate's
+    /// **calibrated-probability** bucket (matching the reliability report's
+    /// ECE bucketing — never the raw pre-calibration score bucket). An
+    /// invalid market price (outside `(0, 1)`) or a probability bucket with
+    /// no MAE evidence yields a zero estimate — never fabricated — which
+    /// downstream Kelly sizing rejects via `InvalidEdgeInputs`.
     #[must_use]
     pub fn estimate_return(&self, composite_score: Decimal, market_price: Price) -> ReturnEstimate {
         let p = market_price.inner();
@@ -119,7 +121,7 @@ impl ResolvedCalibration {
             .round_dp(RESEARCH_DECIMAL_SCALE);
         let downside_bps = self
             .reliability
-            .bin_for(composite_score)
+            .bin_for(p_win)
             .and_then(|bin| bin.mean_adverse_excursion_bps)
             .map_or(Decimal::ZERO, |mae| {
                 mae.abs().round_dp(RESEARCH_DECIMAL_SCALE)

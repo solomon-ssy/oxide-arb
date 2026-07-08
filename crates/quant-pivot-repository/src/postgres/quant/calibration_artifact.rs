@@ -12,11 +12,12 @@ use quant_pivot_models::{
         Paginated,
     },
     entities::quant_calibration_artifact,
+    enums::quant::CalibrationKind,
     types::CalibrationArtifactId,
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder,
+    IntoActiveModel, QueryFilter, QueryOrder, TransactionTrait, sea_query::Expr,
 };
 
 /// Postgres-backed unified calibration-artifact ledger repository.
@@ -36,10 +37,17 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         &self,
         artifact: NewCalibrationArtifact,
     ) -> Result<CalibrationArtifactInfo, StorageError> {
+        let content_hash = artifact.content_hash.clone();
         quant_calibration_artifact::Entity::insert(artifact.into_active_model())
             .exec_with_returning(&self.db)
             .await
-            .map_err(StorageError::from)
+            .map_err(|err| {
+                error::map_unique(
+                    err,
+                    entity::QUANT_CALIBRATION_ARTIFACT,
+                    content_hash.as_str(),
+                )
+            })
             .map(Into::into)
     }
 
@@ -89,8 +97,9 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
         &self,
         artifact_id: &CalibrationArtifactId,
     ) -> Result<CalibrationArtifactInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
         let Some(row) = quant_calibration_artifact::Entity::find_by_id(artifact_id.clone())
-            .one(&self.db)
+            .one(&txn)
             .await
             .map_err(StorageError::from)?
         else {
@@ -99,12 +108,32 @@ impl CalibrationArtifactRepository for PgCalibrationArtifactRepository {
                 artifact_id,
             ));
         };
+        // `market_price_bias` has exactly one global governance pointer
+        // (runtime-config `bias_table_ref`), so activating one deactivates
+        // every other bias table in the same transaction — the ledger must
+        // never have two concurrently active bias tables. `model_score` has
+        // no such exclusivity: each model version binds its own calibrator
+        // independently (a published version's candidate and its successor
+        // candidate can legitimately reference different active calibrators
+        // at once), so activating one never touches another.
+        if row.kind == CalibrationKind::MarketPriceBias {
+            quant_calibration_artifact::Entity::update_many()
+                .col_expr(
+                    quant_calibration_artifact::Column::Active,
+                    Expr::value(false),
+                )
+                .filter(
+                    quant_calibration_artifact::Column::Kind.eq(CalibrationKind::MarketPriceBias),
+                )
+                .filter(quant_calibration_artifact::Column::Active.eq(true))
+                .exec(&txn)
+                .await
+                .map_err(StorageError::from)?;
+        }
         let mut active = row.into_active_model();
         active.active = ActiveValue::Set(true);
-        active
-            .update(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(Into::into)
+        let updated = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated.into())
     }
 }

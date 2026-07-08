@@ -107,7 +107,7 @@ pub struct SizingInput<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SizingOutcome {
     /// The candidate carries a fundable size (before portfolio caps).
-    Sized(SizingSuggestion),
+    Sized(Box<SizingSuggestion>),
     /// The candidate must not be funded for the given reason.
     Rejected(RejectionReason),
 }
@@ -130,6 +130,43 @@ pub struct SizingSuggestion {
     pub correlation_shrink_applied: Option<Decimal>,
     /// Kelly-stage soft binding (confidence / drawdown / correlation shrink).
     pub kelly_stage_binding: Option<BindingConstraint>,
+    /// The full per-stage derivation of `kelly_fraction_applied` (Phase 11.3
+    /// §10 "sizing waterfall"), for the report UI to render each multiplier
+    /// step rather than only the already-merged product. `None` for the
+    /// edge-free curve model (mirrors `kelly_fraction_applied`).
+    pub provenance: Option<SizingProvenance>,
+}
+
+/// Every intermediate factor between the raw full-Kelly fraction `f*` and the
+/// final, capped position-sizing fraction — the audit trail a "sizing
+/// waterfall" visualization renders step by step.
+///
+/// `f_star × kelly_fraction_config × confidence_shrink × drawdown_shrink ×
+/// edge_uncertainty_shrink × correlation_shrink == raw_fraction`, then
+/// `raw_fraction` is capped at `position_cap_fraction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizingProvenance {
+    /// The raw, uncapped full-Kelly fraction (`edge / (gain · loss)`), before
+    /// any fractional-Kelly or safety-layer shrink.
+    pub f_star: Decimal,
+    /// The governed static fractional-Kelly constant (e.g. `0.5` for half-Kelly).
+    pub kelly_fraction_config: Decimal,
+    /// Confidence-curve shrink multiplier.
+    pub confidence_shrink: Decimal,
+    /// Drawdown-scaling multiplier.
+    pub drawdown_shrink: Decimal,
+    /// Edge-uncertainty shrink multiplier (duplicated from
+    /// `edge_uncertainty_shrink_applied` for a self-contained provenance record).
+    pub edge_uncertainty_shrink: Decimal,
+    /// Correlation-cluster shrink multiplier (duplicated from
+    /// `correlation_shrink_applied` for a self-contained provenance record).
+    pub correlation_shrink: Decimal,
+    /// `f_star × (product of every multiplier above)` — the fraction before
+    /// the per-position equity cap.
+    pub raw_fraction: Decimal,
+    /// The per-position equity cap (`max_position_pct`) `raw_fraction` was
+    /// clamped against.
+    pub position_cap_fraction: Decimal,
 }
 
 /// A position-sizing model (pure: no I/O, no clock, no mutable state).
@@ -261,17 +298,26 @@ impl SizingModel for KellySizingModel {
             self.kelly_safety.binding_materiality_threshold,
         );
 
-        Ok(SizingOutcome::Sized(SizingSuggestion {
+        let round = |value: Decimal| value.round_dp(RESEARCH_DECIMAL_SCALE);
+        Ok(SizingOutcome::Sized(Box::new(SizingSuggestion {
             desired_usd,
             edge_bps: Some(edge_bps),
-            kelly_fraction_applied: Some(multiplier.round_dp(RESEARCH_DECIMAL_SCALE)),
+            kelly_fraction_applied: Some(round(multiplier)),
             binding_kelly_cap,
-            edge_uncertainty_shrink_applied: Some(
-                edge_uncertainty_shrink.round_dp(RESEARCH_DECIMAL_SCALE),
-            ),
-            correlation_shrink_applied: Some(correlation_shrink.round_dp(RESEARCH_DECIMAL_SCALE)),
+            edge_uncertainty_shrink_applied: Some(round(edge_uncertainty_shrink)),
+            correlation_shrink_applied: Some(round(correlation_shrink)),
             kelly_stage_binding,
-        }))
+            provenance: Some(SizingProvenance {
+                f_star: round(f_star),
+                kelly_fraction_config: round(self.kelly_fraction),
+                confidence_shrink: round(shrink),
+                drawdown_shrink: round(drawdown),
+                edge_uncertainty_shrink: round(edge_uncertainty_shrink),
+                correlation_shrink: round(correlation_shrink),
+                raw_fraction: round(raw_fraction),
+                position_cap_fraction: round(self.max_position_pct),
+            }),
+        })))
     }
 }
 
@@ -478,7 +524,7 @@ mod tests {
 
     fn sized(outcome: SizingOutcome) -> super::SizingSuggestion {
         match outcome {
-            SizingOutcome::Sized(s) => s,
+            SizingOutcome::Sized(s) => *s,
             SizingOutcome::Rejected(r) => panic!("expected sized, got {r:?}"),
         }
     }
@@ -812,6 +858,52 @@ mod tests {
             "correlation shrink must not increase size"
         );
         assert!(clustered.correlation_shrink_applied.expect("audit") < Decimal::ONE);
+    }
+
+    #[test]
+    fn sizing_provenance_waterfall_reproduces_kelly_fraction_applied() {
+        let model = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Conservative,
+            kelly_safety(),
+        );
+        let suggestion = sized(
+            model
+                .suggest(&SizingInput {
+                    candidate: &candidate(dec!(10), dec!(200), dec!(0.8)),
+                    capital_base_usd: Usd::new(dec!(10000)),
+                    drawdown_state: DrawdownState {
+                        current_drawdown: dec!(0.1),
+                    },
+                    edge_uncertainty_half_width: Some(dec!(0.05)),
+                    correlation: Some(CorrelationShrinkInput {
+                        cluster_size: 3,
+                        mean_rho: dec!(0.3),
+                    }),
+                })
+                .expect("suggest"),
+        );
+        let provenance = suggestion.provenance.expect("provenance recorded");
+        let reproduced = (provenance.f_star
+            * provenance.kelly_fraction_config
+            * provenance.confidence_shrink
+            * provenance.drawdown_shrink
+            * provenance.edge_uncertainty_shrink
+            * provenance.correlation_shrink)
+            .round_dp(super::RESEARCH_DECIMAL_SCALE);
+        assert_eq!(
+            reproduced, provenance.raw_fraction,
+            "the waterfall's per-stage product must reproduce raw_fraction exactly"
+        );
+        assert_eq!(
+            provenance.kelly_fraction_config,
+            dec!(0.5),
+            "kelly_fraction_config must be the static config constant, not the merged multiplier"
+        );
+        assert_eq!(provenance.position_cap_fraction, dec!(0.9));
     }
 
     #[test]

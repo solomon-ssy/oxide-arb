@@ -99,7 +99,9 @@ pub struct SizingPlan {
     pub sizing_model: SizingModelKind,
     /// Estimated edge over the entry price (Kelly provenance).
     pub edge_bps: Option<Bps>,
-    /// The fractional-Kelly multiplier actually applied.
+    /// The fractional-Kelly multiplier actually applied (the *merged* product
+    /// of every stage below — not the governed `portfolio.sizing.kelly_fraction`
+    /// config constant, which is `kelly_fraction_config_applied`).
     pub kelly_fraction_applied: Option<Decimal>,
     /// Edge-uncertainty shrink multiplier (Phase 11.3 §6.1).
     #[serde(default)]
@@ -107,6 +109,31 @@ pub struct SizingPlan {
     /// Correlation-cluster shrink multiplier (Phase 11.3 §6.2).
     #[serde(default)]
     pub correlation_shrink_applied: Option<Decimal>,
+    /// The raw, uncapped full-Kelly fraction (`edge / (gain · loss)`) —
+    /// the sizing waterfall's starting point (Phase 11.3 §10).
+    #[serde(default)]
+    pub f_star_applied: Option<Decimal>,
+    /// The governed static fractional-Kelly constant (e.g. `0.5` for
+    /// half-Kelly) — distinct from `kelly_fraction_applied`, the merged
+    /// product of this and every shrink multiplier below.
+    #[serde(default)]
+    pub kelly_fraction_config_applied: Option<Decimal>,
+    /// Confidence-curve shrink multiplier.
+    #[serde(default)]
+    pub confidence_shrink_applied: Option<Decimal>,
+    /// Drawdown-scaling multiplier.
+    #[serde(default)]
+    pub drawdown_shrink_applied: Option<Decimal>,
+    /// `f_star_applied × kelly_fraction_config_applied × confidence_shrink_applied
+    /// × drawdown_shrink_applied × edge_uncertainty_shrink_applied ×
+    /// correlation_shrink_applied` — the fraction before the per-position
+    /// equity cap (`position_cap_fraction_applied`).
+    #[serde(default)]
+    pub raw_fraction_applied: Option<Decimal>,
+    /// The per-position equity cap (`portfolio.sizing.max_position_pct`)
+    /// `raw_fraction_applied` was clamped against.
+    #[serde(default)]
+    pub position_cap_fraction_applied: Option<Decimal>,
 }
 
 // ── Exit plan (parent §10 "when / how much to sell") ─────────────────────────
@@ -384,6 +411,14 @@ pub struct ReportSummary {
     pub total_suggested_usd: Usd,
     /// Largest single suggested USD.
     pub max_single_recommendation_usd: Usd,
+    /// The aggregate-exposure hard cap actually enforced by the LP
+    /// (`capital_base_usd × portfolio.kelly_safety.max_aggregate_exposure_pct`),
+    /// frozen from the exact account + runtime-config this report solved
+    /// against. `None` when the cap is disabled or the capital base is
+    /// non-positive — never re-derived client-side from a separately-fetched
+    /// runtime-config version, which may not even be the one this report used.
+    #[serde(default)]
+    pub aggregate_exposure_cap_usd: Option<Usd>,
     /// Suggested USD allocated per category.
     pub category_allocation: BTreeMap<MarketCategory, Usd>,
     /// Suggested USD allocated per event.

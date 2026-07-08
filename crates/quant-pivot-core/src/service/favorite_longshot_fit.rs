@@ -34,8 +34,8 @@ use tokio_util::sync::CancellationToken;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactInfo,
-        CalibrationArtifactListQuery, FavoriteLongshotFitPort, JobProgressSink, Paginated,
+        BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
+        CalibrationArtifactInfo, CalibrationArtifactListQuery, JobProgressSink, Paginated,
         WindowBoundsError, query::TimeWindow,
     },
     enums::common::MarketCategory,
@@ -344,7 +344,7 @@ impl FavoriteLongshotFitService {
 }
 
 #[async_trait]
-impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
+impl CalibrationArtifactFitPort for FavoriteLongshotFitService {
     async fn fit(
         &self,
         params: BiasTableFitJobParams,
@@ -413,7 +413,7 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
         else {
             // Fail-closed: no category/ttr curve qualified, so no artifact is minted.
             return Ok(BiasTableFitOutcome {
-                bias_table_id: None,
+                artifact_id: None,
                 category_count: 0,
                 total_sample_count,
             });
@@ -426,7 +426,7 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
             .as_object()
             .map_or(0, |obj| obj.len() as u64);
         Ok(BiasTableFitOutcome {
-            bias_table_id: Some(persisted.artifact_id),
+            artifact_id: Some(persisted.artifact_id),
             category_count,
             total_sample_count,
         })
@@ -434,10 +434,10 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
 
     async fn find(
         &self,
-        bias_table_id: &CalibrationArtifactId,
+        artifact_id: &CalibrationArtifactId,
     ) -> QuantResult<Option<CalibrationArtifactInfo>> {
         self.calibration_repo
-            .find_by_id(bias_table_id)
+            .find_by_id(artifact_id)
             .await
             .map_err(QuantError::from)
     }
@@ -448,6 +448,16 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
     ) -> QuantResult<Paginated<CalibrationArtifactInfo>> {
         self.calibration_repo
             .page(query)
+            .await
+            .map_err(QuantError::from)
+    }
+
+    async fn mark_active(
+        &self,
+        artifact_id: &CalibrationArtifactId,
+    ) -> QuantResult<CalibrationArtifactInfo> {
+        self.calibration_repo
+            .mark_active(artifact_id)
             .await
             .map_err(QuantError::from)
     }

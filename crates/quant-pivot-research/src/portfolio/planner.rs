@@ -208,6 +208,7 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
             caps: input.caps,
             initial_exposures: &input.account.exposures,
             available_usd: input.account.available_usd.inner(),
+            capital_base_usd: capital_base.inner(),
             correlation: input.correlation,
             top_n: input.top_n,
         })?;
@@ -259,13 +260,17 @@ fn size_candidates<'a>(
     let mut sized: SizedLookup<'a> = BTreeMap::new();
     for plan_candidate in candidates {
         let edge_half_width = calibration.and_then(|resolved| {
-            resolved
-                .reliability
-                .bin_for(plan_candidate.candidate.composite_score.inner())
-                .map(|bin| {
-                    let (lo, hi) = (bin.wilson_ci.0.inner(), bin.wilson_ci.1.inner());
-                    ((hi - lo) / Decimal::from(2)).max(Decimal::ZERO)
-                })
+            // The reliability report's buckets partition the *calibrated*
+            // probability axis (Phase 11.3 ECE fix), not the raw composite
+            // score — look up the bucket via `resolved.calibrate(..)`, the
+            // same P(win) the return model itself derives from this score.
+            let p_win = resolved
+                .calibrate(plan_candidate.candidate.composite_score.inner())
+                .inner();
+            resolved.reliability.bin_for(p_win).map(|bin| {
+                let (lo, hi) = (bin.wilson_ci.0.inner(), bin.wilson_ci.1.inner());
+                ((hi - lo) / Decimal::from(2)).max(Decimal::ZERO)
+            })
         });
         let correlation = correlation_shrink
             .get(plan_candidate.candidate.market_id.as_str())
@@ -294,7 +299,7 @@ fn size_candidates<'a>(
                 });
                 sized.insert(
                     plan_candidate.candidate.signal_candidate_id.to_string(),
-                    (suggestion, plan_candidate),
+                    (*suggestion, plan_candidate),
                 );
             }
         }
@@ -530,6 +535,12 @@ fn build_sizing_plan(
         kelly_fraction_applied: item.suggestion.kelly_fraction_applied,
         edge_uncertainty_shrink_applied: item.suggestion.edge_uncertainty_shrink_applied,
         correlation_shrink_applied: item.suggestion.correlation_shrink_applied,
+        f_star_applied: item.suggestion.provenance.map(|p| p.f_star),
+        kelly_fraction_config_applied: item.suggestion.provenance.map(|p| p.kelly_fraction_config),
+        confidence_shrink_applied: item.suggestion.provenance.map(|p| p.confidence_shrink),
+        drawdown_shrink_applied: item.suggestion.provenance.map(|p| p.drawdown_shrink),
+        raw_fraction_applied: item.suggestion.provenance.map(|p| p.raw_fraction),
+        position_cap_fraction_applied: item.suggestion.provenance.map(|p| p.position_cap_fraction),
     }
 }
 

@@ -450,8 +450,8 @@ impl DefaultReportBuilder {
                 as_of,
             })
             .await?;
-        let return_model_calibrated = self.return_model_calibrated(&active.version).await?;
-        let resolved_calibration = self.load_resolved_calibration(&active.version).await?;
+        let (return_model_calibrated, resolved_calibration) =
+            self.resolve_calibration_state(&active.version).await?;
 
         Ok(BuildContext {
             version,
@@ -465,34 +465,24 @@ impl DefaultReportBuilder {
         })
     }
 
-    async fn load_resolved_calibration(
+    /// Single hash-verified artifact load resolving both `return_model_calibrated`
+    /// and the (optional) [`ResolvedCalibration`] — never two independent loads
+    /// of the same artifact (Phase 11.3 §8: "one load, two checks").
+    async fn resolve_calibration_state(
         &self,
         version: &ModelVersionInfo,
-    ) -> QuantResult<Option<ResolvedCalibration>> {
+    ) -> QuantResult<(bool, Option<ResolvedCalibration>)> {
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
         let ModelArtifact::WeightedFactor(weighted) = artifact else {
-            return Ok(None);
+            return Ok((false, None));
         };
         let ReturnModelSpec::Calibrated(CalibratedReturnModel { calibrator_ref, .. }) =
             weighted.return_model
         else {
-            return Ok(None);
+            return Ok((false, None));
         };
-        self.deps
-            .calibration_loader
-            .load(&calibrator_ref)
-            .await
-            .map(Some)
-    }
-
-    async fn return_model_calibrated(&self, version: &ModelVersionInfo) -> QuantResult<bool> {
-        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
-        Ok(match artifact {
-            ModelArtifact::WeightedFactor(weighted) => {
-                matches!(weighted.return_model, ReturnModelSpec::Calibrated(_))
-            }
-            ModelArtifact::SellScorer(_) | ModelArtifact::Classical(_) => false,
-        })
+        let resolved = self.deps.calibration_loader.load(&calibrator_ref).await?;
+        Ok((true, Some(resolved)))
     }
 
     async fn build_selection(

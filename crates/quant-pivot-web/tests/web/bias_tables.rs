@@ -7,7 +7,7 @@ use actix_web::{
     http::{StatusCode, header::AUTHORIZATION},
     test::TestRequest,
 };
-use quant_pivot_models::types::CalibrationArtifactId;
+use quant_pivot_models::types::{CalibrationArtifactId, ModelVersionId, TrainingDatasetId};
 use serde_json::json;
 
 use crate::harness::{self, API_VERSION, TestEnv};
@@ -54,6 +54,46 @@ async fn calibration_artifact_detail_not_found_returns_404() {
         .insert_header(bearer(&admin));
     let res = harness::call(&env.state, req).await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn calibration_fit_preflight_requires_dataset_id_query_param() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let model_version_id = ModelVersionId::from_v7();
+    let req = TestRequest::get()
+        .uri(&format!(
+            "/api/research/models/{model_version_id}/calibration-fit-preflight"
+        ))
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&admin));
+    let res = harness::call(&env.state, req).await;
+    assert_eq!(
+        res.status,
+        StatusCode::BAD_REQUEST,
+        "calibration_dataset_id is a required query param"
+    );
+}
+
+#[tokio::test]
+async fn calibration_fit_preflight_route_is_wired_to_the_service() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let model_version_id = ModelVersionId::from_v7();
+    let dataset_id = TrainingDatasetId::from_v7();
+    let req = TestRequest::get()
+        .uri(&format!(
+            "/api/research/models/{model_version_id}/calibration-fit-preflight?calibration_dataset_id={dataset_id}"
+        ))
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&admin));
+    let res = harness::call(&env.state, req).await;
+    // The harness wires a mock `ModelCalibrationFitPort` that always returns
+    // `NotImplemented` — this test only asserts the route/query wiring
+    // reaches the port (501), never a 404 (unregistered route) or 400
+    // (query deserialization failure), proving the endpoint is correctly
+    // registered end to end.
+    assert_eq!(res.status, StatusCode::NOT_IMPLEMENTED);
 }
 
 #[tokio::test]

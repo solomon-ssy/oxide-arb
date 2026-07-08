@@ -5,9 +5,9 @@ use std::sync::Arc;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        AccountReadPort, BacktestPort, CatalogStatusPort, CoreEvent, CoreEventPublisher,
-        DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort, ExecutionSubmitPort,
-        FactorGovernancePort, FavoriteLongshotFitPort, KillSwitchPort, MarketDataPort,
+        AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort, CoreEvent,
+        CoreEventPublisher, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+        ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort, MarketDataPort,
         MarketLinkageGovernancePort, MaterializationRunEvent, MaterializationRunKind,
         MaterializationRunStatus, MetricsScrapePort, ModelCalibrationFitPort, ModelGovernancePort,
         ModelSpecPort, ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort,
@@ -80,8 +80,8 @@ pub struct AppState {
     /// / bias-table fit): enqueue + task-center list/get/cancel/retry.
     pub research_jobs: Arc<dyn ResearchJobPort>,
     /// Favorite-longshot bias-table fit enqueue + unified calibration-artifact
-    /// read (Phase 11.2.1, unified under Phase 11.3 §3.4).
-    pub favorite_longshot: Arc<dyn FavoriteLongshotFitPort>,
+    /// read/activate, any kind (Phase 11.2.1, unified under Phase 11.3 §3.4).
+    pub calibration_artifacts: Arc<dyn CalibrationArtifactFitPort>,
     /// Model-score `ProbabilityCalibrator` fit enqueue (Phase 11.3 §4).
     pub model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
     /// Market → external-subject linkage ledger (Phase 11.2.2).

@@ -64,7 +64,13 @@ expression: recommendation_partial_exits()
     "edge_bps": "120",
     "kelly_fraction_applied": "0.5",
     "edge_uncertainty_shrink_applied": null,
-    "correlation_shrink_applied": null
+    "correlation_shrink_applied": null,
+    "f_star_applied": "1.0",
+    "kelly_fraction_config_applied": "0.5",
+    "confidence_shrink_applied": "1.0",
+    "drawdown_shrink_applied": "1.0",
+    "raw_fraction_applied": "0.5",
+    "position_cap_fraction_applied": "0.05"
   },
   "exit_plan": {
     "take_profit_price": "0.7",

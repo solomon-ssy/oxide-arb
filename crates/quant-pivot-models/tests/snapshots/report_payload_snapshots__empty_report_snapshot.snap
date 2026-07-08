@@ -27,6 +27,7 @@ expression: empty_report()
     "published_recommendation_count": 0,
     "total_suggested_usd": "0",
     "max_single_recommendation_usd": "0",
+    "aggregate_exposure_cap_usd": "2500",
     "category_allocation": {},
     "event_allocation": {},
     "average_score": "0.7",

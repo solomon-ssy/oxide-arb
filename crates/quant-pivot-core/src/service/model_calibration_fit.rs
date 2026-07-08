@@ -18,12 +18,11 @@ use quant_pivot_models::{
     domain::{
         CalibrationArtifactInfo, FitModelCalibratorRequest, JobProgressSink,
         ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
-        NewCalibrationArtifact, query::TimeWindow,
+        ModelCalibrationFitPreflightView, NewCalibrationArtifact, query::TimeWindow,
     },
     enums::quant::{CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide},
-    hashing::CanonicalDigest,
     runtime_config::RuntimeConfig,
-    types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId},
+    types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, ModelRegistryRepository, RuntimeConfigVersionRepository,
@@ -40,7 +39,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     app::ports::backtest::CoreBacktestPort,
-    governance::ModelScoreCalibrationPayload,
+    governance::{ModelScoreCalibrationPayload, model_score_content_hash},
     service::{
         backtest::BacktestInput,
         calibration_shared::{
@@ -126,6 +125,30 @@ impl ModelCalibrationFitService {
             embargo_secs: i64::try_from(calibration.embargo_secs).unwrap_or(i64::MAX),
             ci_confidence,
         })
+    }
+
+    /// Governed embargo gap from the *current* runtime-config version — used
+    /// by the read-only preflight check, which (unlike `fit`) has no pinned
+    /// `runtime_config_version_id` to freeze against yet (no job has been
+    /// enqueued). The actual fit still freezes whatever version is current at
+    /// enqueue time, so this is a consistent, good-enough preflight estimate.
+    async fn current_embargo_secs(&self) -> QuantResult<i64> {
+        let version = self
+            .runtime_config_repo
+            .load_current()
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: "no current runtime config version".to_owned(),
+                })
+            })?;
+        let config = RuntimeConfig::from_json(&version.config_json).map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("current runtime config parse failed: {error}"),
+            })
+        })?;
+        Ok(i64::try_from(config.model.calibration.embargo_secs).unwrap_or(i64::MAX))
     }
 
     /// Validate the calibration dataset's purpose/spec-match and its
@@ -290,12 +313,15 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             samples.iter().map(|s| s.as_of).min().unwrap_or_default(),
             samples.iter().map(|s| s.as_of).max().unwrap_or_default(),
         );
+        let fit_window = TimeWindow::new(window_start, window_end);
         let split_hash = calibration_split_hash(
-            &TimeWindow::new(window_start, window_end),
+            &fit_window,
             samples.iter().map(|s| (s.market_id.to_string(), s.as_of)),
         )?;
 
         let payload = ModelScoreCalibrationPayload {
+            model_version_id: request.model_version_id.clone(),
+            calibration_dataset_id: request.calibration_dataset_id.clone(),
             mapping,
             reliability,
         };
@@ -304,17 +330,10 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
                 detail: format!("calibration payload serialization failed: {error}"),
             })
         })?;
-        let content_hash = CanonicalDigest::content_hash_json(&serde_json::json!({
-            "model_version_id": request.model_version_id.to_string(),
-            "calibration_dataset_id": request.calibration_dataset_id.to_string(),
-            "split_hash": split_hash.as_str(),
-            "payload": payload_json,
-        }))
-        .map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("calibration content hash failed: {error}"),
-            })
-        })?;
+        // Self-contained hash (fit_window + split_hash + the full,
+        // provenance-carrying payload) — recomputable by the loader from the
+        // persisted row alone, symmetric with `market_price_bias`.
+        let content_hash = model_score_content_hash(&fit_window, &split_hash, &payload)?;
 
         let artifact_id = CalibrationArtifactId::from_v7();
         let created = self
@@ -337,6 +356,111 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
         Ok(ModelCalibrationFitOutcome {
             artifact_id: Some(artifact_id),
             sample_count: u64::try_from(samples.len()).unwrap_or(u64::MAX),
+        })
+    }
+
+    async fn preflight(
+        &self,
+        model_version_id: &ModelVersionId,
+        calibration_dataset_id: &TrainingDatasetId,
+    ) -> QuantResult<ModelCalibrationFitPreflightView> {
+        let mut messages = Vec::new();
+
+        let version = self
+            .model_registry_repo
+            .find_model_version_by_id(model_version_id)
+            .await?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!("model version `{model_version_id}` not found"),
+                })
+            })?;
+        let calibration_dataset = self
+            .training_dataset_repo
+            .find_by_id(calibration_dataset_id)
+            .await?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!("calibration dataset `{calibration_dataset_id}` not found"),
+                })
+            })?;
+
+        if calibration_dataset.purpose != DatasetPurpose::Calibration {
+            messages.push(format!(
+                "dataset `{calibration_dataset_id}` has purpose `{}`, expected `calibration` \
+                 — a model calibrator must never fit on a `training` dataset",
+                calibration_dataset.purpose.as_str()
+            ));
+        }
+        if calibration_dataset.model_spec_id != version.model_spec_id {
+            messages.push(
+                "calibration dataset model_spec_id does not match the target model version"
+                    .to_owned(),
+            );
+        }
+
+        let calibration_window = TimeWindow::new(
+            calibration_dataset.window_start,
+            calibration_dataset.window_end,
+        );
+
+        let disjoint_ok = match assert_disjoint_from_all_training_datasets(
+            self.training_dataset_repo.as_ref(),
+            &calibration_window,
+            "model calibration fit preflight",
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                messages.push(error.to_string());
+                false
+            }
+        };
+
+        let mut training_window_start = None;
+        let mut training_window_end = None;
+        let mut required_start = None;
+        let mut embargo_ok = true;
+        if let Some(training_dataset_id) = &version.training_dataset_id {
+            if let Some(training_dataset) = self
+                .training_dataset_repo
+                .find_by_id(training_dataset_id)
+                .await?
+            {
+                let training_window =
+                    TimeWindow::new(training_dataset.window_start, training_dataset.window_end);
+                training_window_start = Some(training_window.from);
+                training_window_end = Some(training_window.to);
+                let embargo_secs = self.current_embargo_secs().await?;
+                required_start =
+                    Some(training_window.to + chrono::Duration::seconds(embargo_secs.max(0)));
+                if let Err(error) = assert_embargoed_after(
+                    &calibration_window,
+                    &training_window,
+                    embargo_secs,
+                    "model calibration fit preflight",
+                ) {
+                    messages.push(error.to_string());
+                    embargo_ok = false;
+                }
+            } else {
+                messages.push(format!(
+                    "training dataset `{training_dataset_id}` not found"
+                ));
+                embargo_ok = false;
+            }
+        }
+
+        Ok(ModelCalibrationFitPreflightView {
+            disjoint_ok,
+            embargo_ok,
+            calibration_window_start: calibration_window.from,
+            calibration_window_end: calibration_window.to,
+            training_window_start,
+            training_window_end,
+            required_start,
+            messages,
         })
     }
 }

@@ -27,6 +27,7 @@ expression: revoked_report()
     "published_recommendation_count": 2,
     "total_suggested_usd": "500",
     "max_single_recommendation_usd": "300",
+    "aggregate_exposure_cap_usd": "2500",
     "category_allocation": {},
     "event_allocation": {},
     "average_score": "0.7",

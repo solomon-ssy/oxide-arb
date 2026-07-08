@@ -504,8 +504,11 @@ impl ModelQualityGate for DefaultModelQualityGate {
                 evaluate_backtest_gates(report, &input.thresholds, &mut ledger);
             }
             evaluate_intent_gates(&input, &mut ledger);
-            evaluate_calibration_gate(&input, &mut ledger);
         }
+        // Sell scorers structurally never carry a return model — record an
+        // explicit `NotApplicable` row (not an absent one) so the gate report
+        // is auditable end to end regardless of family.
+        evaluate_calibration_gate(&input, is_exit, &mut ledger);
 
         let gates = ledger.outcomes;
         let hard_failures: Vec<QualityGateFailure> = gates
@@ -746,18 +749,25 @@ fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
 /// model require a `Calibrated` return model. `uncalibrated` (`Heuristic`)
 /// artifacts are bootstrap-only and must never reach publish or
 /// auto-execution — fail-closed, never a silent downgrade to the heuristic
-/// default.
-fn evaluate_calibration_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
-    let applies = matches!(
-        input.intent,
-        GateIntent::Publish | GateIntent::AutoExecution
-    );
+/// default. `is_exit` (Sell/Hold-vs-Exit scorers) never carries a return
+/// model, so it is always `NotApplicable` regardless of intent.
+fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &mut GateLedger) {
+    let applies = !is_exit
+        && matches!(
+            input.intent,
+            GateIntent::Publish | GateIntent::AutoExecution
+        );
     if !applies {
+        let detail = if is_exit {
+            "sell / hold-vs-exit scorers never carry a return model"
+        } else {
+            "only evaluated for publish / auto-execution"
+        };
         ledger.not_applicable(
             GateId::CalibrationRequired,
             GateClass::Hard,
             "calibrated",
-            "only evaluated for publish / auto-execution",
+            detail,
         );
         return;
     }
@@ -828,13 +838,16 @@ fn max_category_concentration(report: &BacktestReport) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::{
-        DefaultModelQualityGate, GateId, GateIntent, GateSubject, QualityGateInput,
+        DefaultModelQualityGate, GateId, GateIntent, GateStatus, GateSubject, QualityGateInput,
         QualityGateThresholds, SellQualityGateThresholds,
     };
     use chrono::Utc;
-    use quant_pivot_models::types::{
-        BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
-        RuntimeConfigVersionId, TokenId, TrainingDatasetId,
+    use quant_pivot_models::{
+        enums::model::ModelFamily,
+        types::{
+            BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
+            RuntimeConfigVersionId, TokenId, TrainingDatasetId,
+        },
     };
     use rust_decimal_macros::dec;
 
@@ -945,6 +958,28 @@ mod tests {
             candidate.is_pass(),
             "candidate intent does not require calibration"
         );
+    }
+
+    #[test]
+    fn sell_family_records_calibration_required_as_not_applicable() {
+        // Sell / hold-vs-exit scorers never carry a return model, so the
+        // gate report must record an explicit `NotApplicable` row for
+        // `CalibrationRequired` (auditable end to end) rather than omitting
+        // it entirely, regardless of the overall pass/fail outcome.
+        let input = QualityGateInput {
+            model_family: Some(ModelFamily::HoldVsExitWeighted),
+            ..passing_input(GateIntent::Publish)
+        };
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        let calibration_row = decision
+            .report()
+            .gates
+            .iter()
+            .find(|outcome| outcome.gate == GateId::CalibrationRequired)
+            .expect("CalibrationRequired row must be present for the sell family");
+        assert_eq!(calibration_row.status, GateStatus::NotApplicable);
     }
 
     #[test]

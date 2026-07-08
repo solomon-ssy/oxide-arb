@@ -123,6 +123,7 @@ fn lp_milp_respects_all_caps() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: None,
             top_n: 10,
         })
@@ -170,6 +171,7 @@ fn lp_only_consumes_budget_on_published_names() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: None,
             top_n: 1,
         })
@@ -213,6 +215,7 @@ fn correlation_cap_binds_clustered_markets() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: Some(&constraint),
             top_n: 10,
         })
@@ -252,6 +255,7 @@ fn lp_output_is_deterministic_for_same_input() {
                 caps: &caps,
                 initial_exposures: &empty,
                 available_usd: caps.total_budget_usd,
+                capital_base_usd: caps.total_budget_usd,
                 correlation: None,
                 top_n: 10,
             })
@@ -271,6 +275,7 @@ fn lp_money_is_rounded_no_f64_leak() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: None,
             top_n: 10,
         })
@@ -296,6 +301,7 @@ fn relaxation_mode_is_feasible_and_labeled() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: None,
             top_n: 10,
         })
@@ -330,6 +336,7 @@ fn lambda_tilts_capital_toward_higher_expected_return() {
                 caps: &caps,
                 initial_exposures: &empty,
                 available_usd: caps.total_budget_usd,
+                capital_base_usd: caps.total_budget_usd,
                 correlation: None,
                 top_n: 10,
             })
@@ -387,6 +394,7 @@ fn lp_milp_falls_back_to_relaxation() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: None,
             top_n: 10,
         })
@@ -435,6 +443,7 @@ fn solver_failure_yields_empty_plan_not_panic() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd: caps.total_budget_usd,
             correlation: None,
             top_n: 10,
         })
@@ -459,7 +468,8 @@ fn aggregate_exposure_never_exceeds_cap() {
     let c3 = candidate("0xc", dec!(0.8), dec!(100));
     let mut caps = caps(dec!(1000), dec!(500), dec!(500), dec!(2000));
     caps.max_aggregate_exposure_pct = dec!(0.25);
-    let aggregate_cap = caps.max_aggregate_exposure_pct * caps.total_budget_usd;
+    let capital_base_usd = caps.total_budget_usd;
+    let aggregate_cap = caps.max_aggregate_exposure_pct * capital_base_usd;
     let empty = ExposureBreakdown::default();
     let out = allocator(true, Decimal::ZERO)
         .allocate(&AllocationInput {
@@ -471,6 +481,7 @@ fn aggregate_exposure_never_exceeds_cap() {
             caps: &caps,
             initial_exposures: &empty,
             available_usd: caps.total_budget_usd,
+            capital_base_usd,
             correlation: None,
             top_n: 10,
         })
@@ -492,4 +503,97 @@ fn aggregate_exposure_never_exceeds_cap() {
             "binding must attribute aggregate cap when it limits allocation"
         );
     }
+}
+
+#[test]
+fn aggregate_exposure_with_existing_holdings_attributes_binding_correctly() {
+    // The account already holds $800 net exposure; the aggregate cap is
+    // $1,000 (25% of a $4,000 capital base). Only $200 of headroom remains,
+    // so a $1,000 desired allocation must be capped down to (near) $200 and
+    // the binding must cite `AggregateExposureCap` — not `None` or another
+    // cap — proving `ExposureLedger::seed` folds existing holdings into
+    // `total` (Phase 11.3 P1-6).
+    let c1 = candidate("0xa", dec!(0.9), dec!(100));
+    let mut caps = caps(dec!(10_000), dec!(5_000), dec!(5_000), dec!(10_000));
+    caps.max_aggregate_exposure_pct = dec!(0.25);
+    let capital_base_usd = dec!(4_000);
+    let aggregate_cap = caps.max_aggregate_exposure_pct * capital_base_usd;
+    let held = dec!(800);
+    let mut initial_exposures = ExposureBreakdown::default();
+    initial_exposures
+        .per_market
+        .insert(MarketId::new("0xheld"), Usd::new(held));
+    let out = allocator(true, Decimal::ZERO)
+        .allocate(&AllocationInput {
+            candidates: vec![meta(&c1, dec!(1_000), MarketCategory::Crypto, None)],
+            caps: &caps,
+            initial_exposures: &initial_exposures,
+            available_usd: caps.total_budget_usd,
+            capital_base_usd,
+            correlation: None,
+            top_n: 10,
+        })
+        .expect("allocate");
+    let total: Decimal = out
+        .allocations
+        .iter()
+        .map(|a| a.allocated_usd.inner())
+        .sum();
+    let remaining_headroom = aggregate_cap - held;
+    assert!(
+        total <= remaining_headroom,
+        "new allocation {total} must respect remaining aggregate headroom {remaining_headroom}"
+    );
+    assert!(
+        out.allocations
+            .iter()
+            .any(|a| a.binding_constraint == BindingConstraint::AggregateExposureCap),
+        "binding must attribute AggregateExposureCap when existing holdings exhaust headroom: {:?}",
+        out.allocations
+    );
+}
+
+#[test]
+fn aggregate_exposure_denominator_is_capital_base_not_total_budget() {
+    // `total_budget_usd` (a raw, venue-unaware config value) is set far above
+    // `capital_base_usd` (the governed, venue-net-liquidation-capped sizing
+    // anchor) — the aggregate cap must track `capital_base_usd`, never the
+    // larger, ungoverned config budget (Phase 11.3 §4.3 / P1-5).
+    let c1 = candidate("0xa", dec!(0.9), dec!(100));
+    let c2 = candidate("0xb", dec!(0.85), dec!(100));
+    let mut caps = caps(dec!(100_000), dec!(50_000), dec!(50_000), dec!(100_000));
+    caps.max_aggregate_exposure_pct = dec!(0.25);
+    let capital_base_usd = dec!(1_000);
+    let aggregate_cap_from_capital_base = caps.max_aggregate_exposure_pct * capital_base_usd;
+    let aggregate_cap_from_total_budget = caps.max_aggregate_exposure_pct * caps.total_budget_usd;
+    assert!(
+        aggregate_cap_from_capital_base < aggregate_cap_from_total_budget,
+        "fixture must set total_budget_usd far above capital_base_usd"
+    );
+    let empty = ExposureBreakdown::default();
+    let out = allocator(true, Decimal::ZERO)
+        .allocate(&AllocationInput {
+            candidates: vec![
+                meta(&c1, dec!(2_000), MarketCategory::Crypto, None),
+                meta(&c2, dec!(2_000), MarketCategory::Sports, None),
+            ],
+            caps: &caps,
+            initial_exposures: &empty,
+            available_usd: caps.total_budget_usd,
+            capital_base_usd,
+            correlation: None,
+            top_n: 10,
+        })
+        .expect("allocate");
+    let total: Decimal = out
+        .allocations
+        .iter()
+        .map(|a| a.allocated_usd.inner())
+        .sum();
+    assert!(
+        total <= aggregate_cap_from_capital_base,
+        "total {total} must respect the capital_base_usd-denominated cap \
+         {aggregate_cap_from_capital_base}, not the much larger \
+         total_budget_usd-denominated cap {aggregate_cap_from_total_budget}"
+    );
 }

@@ -91,6 +91,7 @@ pub fn report_summary() -> ReportSummary {
         published_recommendation_count: 2,
         total_suggested_usd: Usd::new(dec!(500)),
         max_single_recommendation_usd: Usd::new(dec!(300)),
+        aggregate_exposure_cap_usd: Some(Usd::new(dec!(2500))),
         category_allocation,
         event_allocation,
         average_score: Probability::new(dec!(0.7)),
@@ -193,6 +194,12 @@ fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
         kelly_fraction_applied: Some(dec!(0.5)),
         edge_uncertainty_shrink_applied: None,
         correlation_shrink_applied: None,
+        f_star_applied: Some(dec!(1.0)),
+        kelly_fraction_config_applied: Some(dec!(0.5)),
+        confidence_shrink_applied: Some(dec!(1.0)),
+        drawdown_shrink_applied: Some(dec!(1.0)),
+        raw_fraction_applied: Some(dec!(0.5)),
+        position_cap_fraction_applied: Some(dec!(0.05)),
     }
 }
 

@@ -25,7 +25,9 @@ use quant_pivot_repository::traits::{
     RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::{
-    artifact::ArtifactStore, model::load_hash_verified_artifact, portfolio::AccountSnapshot,
+    artifact::ArtifactStore,
+    model::{CalibrationArtifactLoader, load_hash_verified_artifact},
+    portfolio::AccountSnapshot,
 };
 use rust_decimal::Decimal;
 
@@ -46,6 +48,11 @@ pub struct AdmissionInputBuilderDeps {
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+    /// Re-verifies a bound `model_score` calibrator's liveness (hash + `active`)
+    /// at submit time — the enum tag alone (`ReturnModelSpec::Calibrated`) only
+    /// proves a calibrator was bound at publish time, not that it still
+    /// resolves today (admission check #23 deep verification, Phase 11.3).
+    pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
@@ -226,7 +233,20 @@ impl AdmissionInputBuilder {
             Some(version) => {
                 let artifact =
                     load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
-                artifact.return_model_is_calibrated()
+                // The enum tag alone only proves a calibrator was bound at
+                // publish time; re-resolve it now so a calibrator that has
+                // since been deactivated/superseded denies at submit time
+                // (TOCTOU close — admission check #23 deep verification)
+                // rather than silently continuing to trust a stale reference.
+                match artifact.calibrator_ref() {
+                    Some(calibrator_ref) => self
+                        .deps
+                        .calibration_loader
+                        .load(calibrator_ref)
+                        .await
+                        .is_ok(),
+                    None => false,
+                }
             }
             None => false,
         };

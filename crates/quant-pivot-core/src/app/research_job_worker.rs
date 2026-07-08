@@ -22,6 +22,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::{sync::mpsc, task::JoinSet, time::interval};
 use tokio_util::sync::CancellationToken;
@@ -33,7 +34,7 @@ use quant_pivot_models::{
     config::ResearchJobsConfig,
     domain::{
         BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        FavoriteLongshotFitPort, JobProgressSink, ModelCalibrationFitJobParams,
+        CalibrationArtifactFitPort, JobProgressSink, ModelCalibrationFitJobParams,
         ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError, ResearchJobInfo,
         ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
     },
@@ -80,7 +81,7 @@ struct ResearchJobExecutor {
     datasets: Arc<dyn TrainingDatasetPort>,
     training: Arc<dyn ModelTrainingPort>,
     backtests: Arc<dyn BacktestPort>,
-    bias_tables: Arc<dyn FavoriteLongshotFitPort>,
+    bias_tables: Arc<dyn CalibrationArtifactFitPort>,
     model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
 }
 
@@ -170,7 +171,7 @@ impl ResearchJobExecutor {
                 let outcome = self.bias_tables.fit(params, progress, cancel).await?;
                 // Fail-closed fits succeed with no artifact (result_ref = None).
                 Ok(JobOutcome {
-                    result_ref: outcome.bias_table_id.map(|id| id.as_uuid()),
+                    result_ref: outcome.artifact_id.map(|id| id.as_uuid()),
                     coverage: None,
                 })
             }
@@ -189,7 +190,7 @@ impl ResearchJobExecutor {
     }
 }
 
-fn from_params<T: serde::de::DeserializeOwned>(params: &Value) -> QuantResult<T> {
+fn from_params<T: DeserializeOwned>(params: &Value) -> QuantResult<T> {
     serde_json::from_value(params.clone()).map_err(|error| {
         QuantError::from(ResearchError::Serialization {
             detail: format!("research job params deserialization failed: {error}"),
@@ -233,7 +234,7 @@ impl AppContext {
                 Arc::clone(&bias_table_repo),
             )),
             backtests: backtest_port as Arc<dyn BacktestPort>,
-            bias_tables: Arc::clone(&self.research.favorite_longshot_fit),
+            bias_tables: Arc::clone(&self.research.calibration_artifact_fit),
             model_calibration_fit,
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
