@@ -1101,7 +1101,41 @@ fn model_fields() -> Vec<FieldUiEntry> {
             "活动与影子模型分数的绝对偏离超过该阈值时，会触发并记录偏离告警。调低会更早暴露漂移（告警更多）。",
         ),
     ])
+    .chain(model_calibration_fields())
     .collect()
+}
+
+fn model_calibration_fields() -> Vec<FieldUiEntry> {
+    vec![
+        enum_select(
+            "model.calibration.method",
+            "Calibrator method",
+            "校准方法",
+            "Default probability calibrator for model-score fits: isotonic (monotone, needs enough samples) or Platt (sigmoid, small-sample friendly).",
+            "模型分数校准默认方法：等张（单调，需足够样本）或 Platt（sigmoid，小样本友好）。",
+        ),
+        integer(
+            "model.calibration.min_samples_isotonic",
+            "Minimum isotonic samples",
+            "等张最小样本数",
+            "Minimum calibration-split samples required to select isotonic; below this the fit must use Platt (fail-closed, never silent downgrade).",
+            "选用等张校准所需的最小校准集样本数；低于此值必须使用 Platt（fail-closed，禁止静默降级）。",
+        ),
+        secs(
+            "model.calibration.embargo_secs",
+            "Calibration embargo gap",
+            "校准 embargo 间隔",
+            "Minimum seconds between a model's training-dataset window end and its calibration-dataset window start (purge + embargo).",
+            "模型训练集窗口结束与校准集窗口开始之间的最小间隔秒数（purge + embargo）。",
+        ),
+        ratio(
+            "model.calibration.ci_confidence",
+            "Reliability CI confidence",
+            "可靠性置信水平",
+            "Two-sided confidence level for Wilson intervals in reliability bins (edge-uncertainty shrink source).",
+            "可靠性分箱 Wilson 区间的双侧置信水平（edge 不确定性收缩来源）。",
+        ),
+    ]
 }
 
 fn category_model_pointer_fields() -> Vec<FieldUiEntry> {
@@ -1401,6 +1435,7 @@ fn portfolio_fields() -> Vec<FieldUiEntry> {
     fields.extend(portfolio_constraint_fields());
     fields.extend(portfolio_correlation_fields());
     fields.extend(portfolio_sizing_fields());
+    fields.extend(portfolio_kelly_safety_fields());
     fields.extend(portfolio_optimizer_fields());
     fields
 }
@@ -1552,6 +1587,47 @@ fn portfolio_sizing_fields() -> Vec<FieldUiEntry> {
             "回撤缩放策略",
             "How sizing responds to drawdown: 'Fixed' keeps sizing flat; 'Conservative' de-risks as drawdown grows.",
             "定量对回撤的响应：『固定』保持不变；『保守』随回撤加深自动降险。",
+        ),
+        enum_select(
+            "portfolio.sizing.downside_source",
+            "Downside source",
+            "下行来源",
+            "How calibrated return models map score buckets to downside (bps) for Kelly: MfeMae uses mean adverse excursion from the calibration split.",
+            "校准收益模型如何将分数分箱映射为 Kelly 下行（bps）：MfeMae 使用校准集的平均不利偏移。",
+        ),
+    ]
+}
+
+fn portfolio_kelly_safety_fields() -> Vec<FieldUiEntry> {
+    vec![
+        ratio(
+            "portfolio.kelly_safety.edge_uncertainty_k",
+            "Edge uncertainty k",
+            "Edge 不确定性系数",
+            "Shrink coefficient k in shrink = clamp(1 − k·edge_std, floor, 1) from reliability-bin Wilson half-width.",
+            "由可靠性分箱 Wilson 半宽计算的收缩系数 k：shrink = clamp(1 − k·edge_std, floor, 1)。",
+        ),
+        ratio(
+            "portfolio.kelly_safety.edge_uncertainty_floor",
+            "Edge uncertainty floor",
+            "Edge 不确定性下限",
+            "Minimum edge-uncertainty shrink multiplier (never sizes above this floor when uncertainty binds).",
+            "Edge 不确定性收缩乘数下限（不确定性绑定时不会高于此值）。",
+        ),
+        ratio(
+            "portfolio.kelly_safety.max_aggregate_exposure_pct",
+            "Max aggregate exposure",
+            "总敞口上限",
+            "Hard cap on total simultaneous portfolio exposure as a fraction of bankroll (LP bucket constraint).",
+            "同时组合总敞口占 bankroll 的硬上限（LP bucket 约束）。",
+        )
+        .critical(),
+        ratio(
+            "portfolio.kelly_safety.binding_materiality_threshold",
+            "Kelly binding materiality",
+            "Kelly 绑定显著性阈值",
+            "Emit ConfidenceCap / DrawdownCap / CorrelationCap when the dominant Kelly-stage shrink falls below this threshold.",
+            "当主导 Kelly 阶段收缩低于此阈值时发出 ConfidenceCap / DrawdownCap / CorrelationCap 绑定。",
         ),
     ]
 }
@@ -2278,7 +2354,44 @@ fn factors_section() -> SchemaNode {
 }
 
 fn model_section() -> SchemaNode {
-    section(
+    let mut children = fields_in_order(&[
+        "model.active_model_version_id",
+        "model.shadow_model_version_id",
+        "model.active_exit_model_version_id",
+        "model.category_model_pointers.crypto",
+        "model.category_model_pointers.sports",
+        "model.category_model_pointers.politics",
+        "model.category_model_pointers.finance",
+        "model.category_model_pointers.tech",
+        "model.category_model_pointers.culture",
+        "model.category_model_pointers.weather",
+        "model.category_model_pointers.economics",
+        "model.category_model_pointers.geopolitics",
+        "model.category_model_pointers.other",
+        "model.min_model_confidence",
+        "model.min_quality_gate_age_secs",
+        "model.candidate_score_floor",
+        "model.shadow_diff_threshold",
+    ]);
+    children.push(subsection(
+        section_spec(
+            "model.calibration",
+            20,
+            "lucide:chart-spline",
+            ls("Calibration", "校准"),
+            ls(
+                "Model-score calibrator fit policy (Phase 11.3).",
+                "模型分数校准器拟合策略（Phase 11.3）。",
+            ),
+        ),
+        fields_in_order(&[
+            "model.calibration.method",
+            "model.calibration.min_samples_isotonic",
+            "model.calibration.embargo_secs",
+            "model.calibration.ci_confidence",
+        ]),
+    ));
+    section_node(
         section_spec(
             "model",
             50,
@@ -2289,25 +2402,7 @@ fn model_section() -> SchemaNode {
                 "活动/影子/退出模型指针与在线打分门禁。",
             ),
         ),
-        fields_in_order(&[
-            "model.active_model_version_id",
-            "model.shadow_model_version_id",
-            "model.active_exit_model_version_id",
-            "model.category_model_pointers.crypto",
-            "model.category_model_pointers.sports",
-            "model.category_model_pointers.politics",
-            "model.category_model_pointers.finance",
-            "model.category_model_pointers.tech",
-            "model.category_model_pointers.culture",
-            "model.category_model_pointers.weather",
-            "model.category_model_pointers.economics",
-            "model.category_model_pointers.geopolitics",
-            "model.category_model_pointers.other",
-            "model.min_model_confidence",
-            "model.min_quality_gate_age_secs",
-            "model.candidate_score_floor",
-            "model.shadow_diff_threshold",
-        ]),
+        children,
     )
 }
 
@@ -2422,7 +2517,7 @@ fn quality_gate_section() -> SchemaNode {
     )
 }
 
-fn portfolio_section() -> SchemaNode {
+fn portfolio_constraints_subsection() -> SchemaNode {
     let mut constraints = fields_in_order(&[
         "portfolio.constraints.max_market_exposure_usd",
         "portfolio.constraints.max_event_exposure_usd",
@@ -2448,8 +2543,20 @@ fn portfolio_section() -> SchemaNode {
             "portfolio.constraints.correlation.cluster_threshold",
         ]),
     ));
+    subsection(
+        section_spec(
+            "portfolio.constraints",
+            20,
+            "lucide:scale",
+            ls("Constraints", "约束"),
+            ls("Exposure and liquidity constraints.", "敞口与流动性约束。"),
+        ),
+        constraints,
+    )
+}
 
-    let children = vec![
+fn portfolio_section_children() -> Vec<SchemaNode> {
+    vec![
         subsection(
             section_spec(
                 "portfolio.budget",
@@ -2464,16 +2571,7 @@ fn portfolio_section() -> SchemaNode {
                 "portfolio.budget.max_single_recommendation_usd",
             ]),
         ),
-        subsection(
-            section_spec(
-                "portfolio.constraints",
-                20,
-                "lucide:scale",
-                ls("Constraints", "约束"),
-                ls("Exposure and liquidity constraints.", "敞口与流动性约束。"),
-            ),
-            constraints,
-        ),
+        portfolio_constraints_subsection(),
         subsection(
             section_spec(
                 "portfolio.sizing",
@@ -2488,6 +2586,25 @@ fn portfolio_section() -> SchemaNode {
                 "portfolio.sizing.target_reward_multiple",
                 "portfolio.sizing.confidence_weighting",
                 "portfolio.sizing.drawdown_scaling",
+                "portfolio.sizing.downside_source",
+            ]),
+        ),
+        subsection(
+            section_spec(
+                "portfolio.kelly_safety",
+                35,
+                "lucide:shield",
+                ls("Kelly safety", "Kelly 安全层"),
+                ls(
+                    "Edge-uncertainty shrink, correlation shrink, and aggregate exposure cap (Phase 11.3).",
+                    "Edge 不确定性收缩、相关性收缩与总敞口硬上限（Phase 11.3）。",
+                ),
+            ),
+            fields_in_order(&[
+                "portfolio.kelly_safety.edge_uncertainty_k",
+                "portfolio.kelly_safety.edge_uncertainty_floor",
+                "portfolio.kelly_safety.max_aggregate_exposure_pct",
+                "portfolio.kelly_safety.binding_materiality_threshold",
             ]),
         ),
         subsection(
@@ -2507,7 +2624,10 @@ fn portfolio_section() -> SchemaNode {
                 "portfolio.optimizer.objective_return_weight",
             ]),
         ),
-    ];
+    ]
+}
+
+fn portfolio_section() -> SchemaNode {
     section_node(
         section_spec(
             "portfolio",
@@ -2519,7 +2639,7 @@ fn portfolio_section() -> SchemaNode {
                 "预算、敞口约束、定量与配置优化器。",
             ),
         ),
-        children,
+        portfolio_section_children(),
     )
 }
 

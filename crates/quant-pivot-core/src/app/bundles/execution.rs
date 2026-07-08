@@ -299,6 +299,7 @@ fn build_admission_builder(
         reports: Arc::clone(&repos.recommendation_report)
             as Arc<dyn RecommendationReportRepository>,
         model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+        artifact_store: Arc::clone(&deps.research.artifact_store),
         reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         execution_orders: Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,

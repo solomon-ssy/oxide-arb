@@ -15,7 +15,7 @@ use quant_pivot_models::{
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, EventRepository, FavoriteLongshotBiasTableRepository,
+    BacktestReportRepository, CalibrationArtifactRepository, EventRepository,
     MarketLinkageRepository, MarketRepository, ModelComparisonReportRepository,
     ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
     RuntimeConfigVersionRepository, TrainingDatasetRepository,
@@ -45,7 +45,7 @@ pub struct CoreBacktestPort {
     event_repo: Arc<dyn EventRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+    bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
 impl CoreBacktestPort {
@@ -54,7 +54,7 @@ impl CoreBacktestPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+        bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self {
             dataset_repo: Arc::clone(&research.training_dataset_repo),
@@ -73,7 +73,12 @@ impl CoreBacktestPort {
         }
     }
 
-    async fn service_for(
+    /// Build a fresh [`BacktestService`] bound to a frozen runtime-config
+    /// version (bias table, replay config, portfolio caps). `pub` so
+    /// [`crate::service::model_calibration_fit::ModelCalibrationFitService`]
+    /// can reuse the exact same replay-engine assembly for calibration fits
+    /// (Phase 11.3 §4) — one construction path, never duplicated.
+    pub async fn backtest_service_for(
         &self,
         runtime_config_version_id: &RuntimeConfigVersionId,
     ) -> QuantResult<BacktestService> {
@@ -137,7 +142,9 @@ impl BacktestPort for CoreBacktestPort {
         {
             return Ok(view);
         }
-        let service = self.service_for(&request.runtime_config_version_id).await?;
+        let service = self
+            .backtest_service_for(&request.runtime_config_version_id)
+            .await?;
         let input = BacktestInput {
             model_version_id,
             training_dataset_id: request.training_dataset_id,

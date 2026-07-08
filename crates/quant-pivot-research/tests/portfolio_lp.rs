@@ -7,6 +7,8 @@
 //! the expected-return tilt behaves, and `HiGHS` downgrades to microlp when its
 //! native feature is not built (no native solver in the default build).
 
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use quant_pivot_models::{
     enums::{
@@ -89,6 +91,7 @@ const fn caps(
         max_event_exposure_usd: dec!(0),
         max_category_exposure_usd: max_category,
         liquidity_usage_cap_pct: dec!(0.1),
+        max_aggregate_exposure_pct: dec!(0),
     }
 }
 
@@ -197,6 +200,7 @@ fn correlation_cap_binds_clustered_markets() {
     let empty = ExposureBreakdown::default();
     let constraint = CorrelationConstraint {
         clusters: vec![vec![MarketId::new("0xa"), MarketId::new("0xb")]],
+        cluster_mean_rho: BTreeMap::new(),
         cap_usd: Usd::new(dec!(300)),
         source: CorrelationSource::Historical,
     };
@@ -446,4 +450,46 @@ fn solver_failure_yields_empty_plan_not_panic() {
         !out.outcome.constraint_conflicts.is_empty(),
         "conflicts must be recorded for observability"
     );
+}
+
+#[test]
+fn aggregate_exposure_never_exceeds_cap() {
+    let c1 = candidate("0xa", dec!(0.9), dec!(100));
+    let c2 = candidate("0xb", dec!(0.85), dec!(100));
+    let c3 = candidate("0xc", dec!(0.8), dec!(100));
+    let mut caps = caps(dec!(1000), dec!(500), dec!(500), dec!(2000));
+    caps.max_aggregate_exposure_pct = dec!(0.25);
+    let aggregate_cap = caps.max_aggregate_exposure_pct * caps.total_budget_usd;
+    let empty = ExposureBreakdown::default();
+    let out = allocator(true, Decimal::ZERO)
+        .allocate(&AllocationInput {
+            candidates: vec![
+                meta(&c1, dec!(400), MarketCategory::Crypto, None),
+                meta(&c2, dec!(400), MarketCategory::Sports, None),
+                meta(&c3, dec!(400), MarketCategory::Politics, None),
+            ],
+            caps: &caps,
+            initial_exposures: &empty,
+            available_usd: caps.total_budget_usd,
+            correlation: None,
+            top_n: 10,
+        })
+        .expect("allocate");
+    let total: Decimal = out
+        .allocations
+        .iter()
+        .map(|a| a.allocated_usd.inner())
+        .sum();
+    assert!(
+        total <= aggregate_cap,
+        "aggregate exposure {total} must not exceed cap {aggregate_cap}"
+    );
+    if total > Decimal::ZERO {
+        assert!(
+            out.allocations
+                .iter()
+                .any(|a| a.binding_constraint == BindingConstraint::AggregateExposureCap),
+            "binding must attribute aggregate cap when it limits allocation"
+        );
+    }
 }

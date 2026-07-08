@@ -24,7 +24,8 @@ use crate::model::{artifact::ClassicalModelArtifact, classical_runtime::Classica
 use crate::{
     artifact::ArtifactStore,
     model::{
-        artifact::{ModelArtifact, ModelArtifactHeader},
+        artifact::{ModelArtifact, ModelArtifactHeader, ReturnModelSpec},
+        calibrator::CalibrationArtifactLoader,
         overlay::WeightOverlay,
         runtime::{ModelRuntimeFactory, QuantModelRuntime},
         sell_scorer::{SellScorerRuntime, WeightedSellScorerRuntime},
@@ -55,6 +56,7 @@ pub struct ActiveSchemaBinding {
 pub struct DefaultModelRuntimeFactory {
     store: Arc<dyn ArtifactStore>,
     binding: ActiveSchemaBinding,
+    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
 }
 
 /// Builds a schema-bound [`ModelRuntimeFactory`] for one inference round.
@@ -69,13 +71,22 @@ pub trait ModelRuntimeFactoryBuilder: Send + Sync {
 /// Default builder backed by the content-addressed [`ArtifactStore`].
 pub struct DefaultModelRuntimeFactoryBuilder {
     store: Arc<dyn ArtifactStore>,
+    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
 }
 
 impl DefaultModelRuntimeFactoryBuilder {
-    /// Wrap the shared artifact store used for model bytes.
+    /// Wrap the shared artifact store used for model bytes + the
+    /// `CalibrationArtifactLoader` used to resolve `Calibrated` return models
+    /// (Phase 11.3 §5).
     #[must_use]
-    pub fn new(store: Arc<dyn ArtifactStore>) -> Self {
-        Self { store }
+    pub fn new(
+        store: Arc<dyn ArtifactStore>,
+        calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    ) -> Self {
+        Self {
+            store,
+            calibration_loader,
+        }
     }
 }
 
@@ -84,6 +95,7 @@ impl ModelRuntimeFactoryBuilder for DefaultModelRuntimeFactoryBuilder {
         Arc::new(DefaultModelRuntimeFactory::new(
             Arc::clone(&self.store),
             binding,
+            Arc::clone(&self.calibration_loader),
         ))
     }
 }
@@ -91,8 +103,16 @@ impl ModelRuntimeFactoryBuilder for DefaultModelRuntimeFactoryBuilder {
 impl DefaultModelRuntimeFactory {
     /// Build a factory bound to the active schema for this round.
     #[must_use]
-    pub fn new(store: Arc<dyn ArtifactStore>, binding: ActiveSchemaBinding) -> Self {
-        Self { store, binding }
+    pub fn new(
+        store: Arc<dyn ArtifactStore>,
+        binding: ActiveSchemaBinding,
+        calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    ) -> Self {
+        Self {
+            store,
+            binding,
+            calibration_loader,
+        }
     }
 
     /// Reject an artifact whose schema hashes do not bind to the active schema,
@@ -191,7 +211,19 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
             // the weighted family; classical models score on a feature matrix and
             // ignore it.
             ModelArtifact::WeightedFactor(weighted) => {
-                Ok(Box::new(WeightedFactorRuntime::new(*weighted, overlay)?))
+                let calibration = match &weighted.return_model {
+                    ReturnModelSpec::Heuristic(_) => None,
+                    ReturnModelSpec::Calibrated(calibrated) => Some(
+                        self.calibration_loader
+                            .load(&calibrated.calibrator_ref)
+                            .await?,
+                    ),
+                };
+                Ok(Box::new(WeightedFactorRuntime::new(
+                    *weighted,
+                    overlay,
+                    calibration,
+                )?))
             }
             ModelArtifact::Classical(classical) => {
                 #[cfg(feature = "ml-classical")]
@@ -270,11 +302,35 @@ mod tests {
                 FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
                 ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
             },
+            calibrator::{CalibrationArtifactLoader, ResolvedCalibration},
             runtime::{ModelFamily, ModelRuntimeFactory},
         },
     };
 
+    use async_trait::async_trait;
+    use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+    use quant_pivot_models::types::CalibrationArtifactId;
     use std::fmt::Write;
+
+    /// Test-only loader: these fixtures never construct a `Calibrated` return
+    /// model, so `load` is unreachable in practice; errors closed if it is.
+    struct UnreachableCalibrationLoader;
+
+    #[async_trait]
+    impl CalibrationArtifactLoader for UnreachableCalibrationLoader {
+        async fn load(
+            &self,
+            _artifact_id: &CalibrationArtifactId,
+        ) -> QuantResult<ResolvedCalibration> {
+            Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: "test fixture never resolves a calibrator".to_owned(),
+            }))
+        }
+    }
+
+    fn calibration_loader() -> Arc<dyn CalibrationArtifactLoader> {
+        Arc::new(UnreachableCalibrationLoader)
+    }
 
     fn hash(seed: &str) -> ContentHash {
         let hex = seed
@@ -355,8 +411,11 @@ mod tests {
             .await
             .expect("put");
 
-        let factory =
-            DefaultModelRuntimeFactory::new(Arc::clone(&store), binding(feature_hash.clone()));
+        let factory = DefaultModelRuntimeFactory::new(
+            Arc::clone(&store),
+            binding(feature_hash.clone()),
+            calibration_loader(),
+        );
         let runtime = factory
             .load(&version_info(&version, digest), None)
             .await
@@ -389,7 +448,11 @@ mod tests {
             .await
             .expect("put");
 
-        let factory = DefaultModelRuntimeFactory::new(Arc::clone(&store), binding(feature_hash));
+        let factory = DefaultModelRuntimeFactory::new(
+            Arc::clone(&store),
+            binding(feature_hash),
+            calibration_loader(),
+        );
         let Err(err) = factory.load(&version_info(&version, wrong), None).await else {
             panic!("hash mismatch must be rejected");
         };
@@ -409,8 +472,11 @@ mod tests {
             .expect("put");
 
         // Active schema differs from what the artifact was built against.
-        let factory =
-            DefaultModelRuntimeFactory::new(Arc::clone(&store), binding(hash("active_feat")));
+        let factory = DefaultModelRuntimeFactory::new(
+            Arc::clone(&store),
+            binding(hash("active_feat")),
+            calibration_loader(),
+        );
         let Err(err) = factory.load(&version_info(&version, digest), None).await else {
             panic!("schema mismatch must be rejected");
         };

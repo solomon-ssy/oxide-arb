@@ -10,40 +10,48 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
-use quant_pivot_core::governance::{ModelGovernanceDeps, ModelGovernanceService};
+use quant_pivot_core::governance::{
+    ModelGovernanceDeps, ModelGovernanceService, ModelScoreCalibrationPayload,
+};
 use quant_pivot_core::runtime_config::RuntimeConfigStore;
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     domain::{
-        GovernanceActor, ModelGovernancePort, NewBacktestReport, NewModelRun, NewModelSpec,
-        NewModelVersion, NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
+        BindCalibrationRequest, GovernanceActor, ModelGovernancePort, NewBacktestReport,
+        NewCalibrationArtifact, NewModelRun, NewModelSpec, NewModelVersion,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
         NewTrainingDataset, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
         RollbackModelCommand, RuntimeConfigPort,
     },
     enums::{
         common::MarketCategory,
         model::ModelFamily,
-        quant::{ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus},
+        quant::{
+            CalibrationKind, DownsideSource, ModelRunKind, ModelRunStatus, PublicationStatus,
+            TrainingDatasetStatus,
+        },
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
     runtime_config::{ModelVersionRef, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
     types::{
-        ArtifactUri, BacktestReportId, ContentHash, DatasetCoverage, ModelRunId, ModelSpecId,
-        ModelVersionId, Probability, RuntimeConfigActivationId, RuntimeConfigVersionId,
-        SchemaVersion, ShadowComparisonId, TrainingDatasetId, TrainingHorizonsSecs,
+        ArtifactUri, BacktestReportId, CalibrationArtifactId, ContentHash, DatasetCoverage,
+        ModelRunId, ModelSpecId, ModelVersionId, Probability, RuntimeConfigActivationId,
+        RuntimeConfigVersionId, SchemaVersion, ShadowComparisonId, TrainingDatasetId,
+        TrainingHorizonsSecs,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgBacktestReportRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
+        PgBacktestReportRepository, PgCalibrationArtifactRepository,
+        PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
-        BacktestReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-        ModelRunRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-        TrainingDatasetRepository,
+        BacktestReportRepository, CalibrationArtifactRepository, ModelGovernanceAuditRepository,
+        ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
+        ShadowComparisonRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -52,9 +60,10 @@ use quant_pivot_research::{
     factors::names::LIQUIDITY_DEPTH,
     gates::{DefaultModelQualityGate, ModelQualityGate},
     model::{
-        FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
-        SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+        CalibratedReturnModel, FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
+        ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
     },
+    model::{MonotoneMapping, ReliabilityReport},
 };
 use quant_pivot_test_support::pg::setup_pg;
 use rust_decimal_macros::dec;
@@ -119,6 +128,8 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
         dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
         artifact_store: Arc::clone(&artifact_store),
+        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
+            as Arc<dyn CalibrationArtifactRepository>,
         gate,
         runtime_config: Arc::clone(&store),
         runtime_config_apply: apply,
@@ -243,6 +254,7 @@ async fn seed_dataset(
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             status,
+            purpose: quant_pivot_models::enums::quant::DatasetPurpose::Training,
             feature_schema_hash: content_hash(u32::from('f')),
             factor_schema_hash: content_hash(u32::from('g')),
             label_schema_hash: content_hash(u32::from('l')),
@@ -267,9 +279,19 @@ async fn seed_version(
     seed: char,
     version: i32,
     dataset: Option<TrainingDatasetId>,
+    calibrator_ref: Option<CalibrationArtifactId>,
 ) -> ModelVersionId {
     let id = ModelVersionId::from_v7();
-    let artifact_hash = store_weighted_artifact(artifact_store, &id, seed).await;
+    let return_model =
+        calibrator_ref
+            .as_ref()
+            .map_or_else(ReturnModelSpec::heuristic_default, |calibrator| {
+                ReturnModelSpec::Calibrated(CalibratedReturnModel {
+                    calibrator_ref: calibrator.clone(),
+                    downside_source: DownsideSource::MfeMae,
+                })
+            });
+    let artifact_hash = store_weighted_artifact(artifact_store, &id, seed, return_model).await;
     PgModelRegistryRepository::new(db.clone())
         .create_model_version(NewModelVersion {
             model_version_id: id.clone(),
@@ -292,6 +314,7 @@ async fn store_weighted_artifact(
     store: &Arc<dyn ArtifactStore>,
     model_version_id: &ModelVersionId,
     seed: char,
+    return_model: ReturnModelSpec,
 ) -> ContentHash {
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
@@ -307,7 +330,7 @@ async fn store_weighted_artifact(
         prediction_horizon_secs: 86_400,
         multipliers: ScoreMultiplierSpec::conservative(),
         substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-        return_model: ReturnModelSpec::heuristic_default(),
+        return_model,
         required_features: Vec::new(),
         objective_report: None,
         category_scope: None,
@@ -321,6 +344,37 @@ async fn store_weighted_artifact(
         .expect("store artifact");
     let _ = seed;
     artifact_hash
+}
+
+async fn seed_model_score_calibrator(db: &DatabaseConnection) -> CalibrationArtifactId {
+    let artifact_id = CalibrationArtifactId::from_v7();
+    let window_start = Utc::now() - ChronoDuration::days(90);
+    let window_end = Utc::now() - ChronoDuration::days(1);
+    let payload = ModelScoreCalibrationPayload {
+        mapping: MonotoneMapping::Isotonic { knots: vec![] },
+        reliability: ReliabilityReport {
+            bins: vec![],
+            brier_score: dec!(0.1),
+            log_loss: dec!(0.4),
+            ece: dec!(0.05),
+            n_samples: 100,
+        },
+    };
+    PgCalibrationArtifactRepository::new(db.clone())
+        .create(NewCalibrationArtifact {
+            artifact_id: artifact_id.clone(),
+            kind: CalibrationKind::ModelScore,
+            content_hash: content_hash(u32::from('c')),
+            fit_window_start: window_start,
+            fit_window_end: window_end,
+            calibration_split_hash: content_hash(u32::from('s')),
+            sample_count: 100,
+            payload_json: serde_json::to_value(payload).expect("payload"),
+            active: false,
+        })
+        .await
+        .expect("calibration artifact");
+    artifact_id
 }
 
 async fn seed_backtest(
@@ -430,7 +484,7 @@ async fn publish_requires_quality_gate_pass() {
     let spec = seed_spec(&db).await;
     let harness = harness(&db).await;
     // No dataset, no backtest → coverage + sample gates fail.
-    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None).await;
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None, None).await;
 
     let result = harness
         .service
@@ -476,7 +530,16 @@ async fn publish_requires_backtest_report() {
     )
     .await;
     let harness = harness(&db).await;
-    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        None,
+    )
+    .await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
     // Deliberately no backtest report.
 
@@ -518,7 +581,16 @@ async fn publish_requires_shadow_stability() {
     )
     .await;
     let harness = harness(&db).await;
-    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        None,
+    )
+    .await;
     seed_backtest(&db, &candidate, &rc_id, '1').await;
     // No shadow comparisons → shadow stability not established.
 
@@ -555,7 +627,17 @@ async fn publish_succeeds_then_published_version_is_immutable() {
     )
     .await;
     let harness = harness(&db).await;
-    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
+    let calibrator = seed_model_score_calibrator(&db).await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        Some(calibrator),
+    )
+    .await;
     seed_backtest(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
@@ -683,6 +765,7 @@ async fn seed_and_publish_version(
         seeds.dataset_seed,
     )
     .await;
+    let calibrator = seed_model_score_calibrator(db).await;
     let version = seed_version(
         db,
         &harness.artifact_store,
@@ -690,6 +773,7 @@ async fn seed_and_publish_version(
         seeds.version_seed,
         seeds.version_number,
         Some(dataset),
+        Some(calibrator),
     )
     .await;
     publish_ready_version(PublishReadyParams {
@@ -719,7 +803,10 @@ async fn assert_rollback_restored_predecessor(
         .await
         .expect("find")
         .expect("row");
-    assert_eq!(rolled_back_row.publication_status, PublicationStatus::Retired);
+    assert_eq!(
+        rolled_back_row.publication_status,
+        PublicationStatus::Retired
+    );
     let predecessor_row = registry
         .find_model_version_by_id(predecessor)
         .await
@@ -867,7 +954,17 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
         '1',
     )
     .await;
-    let version = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
+    let calibrator = seed_model_score_calibrator(&db).await;
+    let version = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        Some(calibrator),
+    )
+    .await;
     publish_ready_version(PublishReadyParams {
         governance: &harness.service,
         db: &db,
@@ -934,7 +1031,17 @@ async fn retire_published_version_clears_dangling_category_pointer() {
         '1',
     )
     .await;
-    let version = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, Some(dataset)).await;
+    let calibrator = seed_model_score_calibrator(&db).await;
+    let version = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        Some(calibrator),
+    )
+    .await;
     publish_ready_version(PublishReadyParams {
         governance: &harness.service,
         db: &db,
@@ -997,6 +1104,108 @@ async fn retire_published_version_clears_dangling_category_pointer() {
             .contains_key(&MarketCategory::Crypto),
         "retire must also clear a dangling category_model_pointers entry"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn uncalibrated_return_model_cannot_publish() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let dataset = seed_dataset(
+        &db,
+        &spec,
+        &rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_coverage(),
+        '1',
+    )
+    .await;
+    let harness = harness(&db).await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        None,
+    )
+    .await;
+    seed_backtest(&db, &candidate, &rc_id, '1').await;
+    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+
+    let result = harness
+        .service
+        .publish(
+            PublishModelCommand {
+                model_version_id: candidate.clone(),
+                reason: "uncalibrated attempt".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await;
+    assert!(result.is_err(), "heuristic return model must block publish");
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let row = registry
+        .find_model_version_by_id(&candidate)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(row.publication_status, PublicationStatus::Candidate);
+    let gate = row.quality_gate_report;
+    assert!(
+        gate.get("hard_failures")
+            .and_then(|v| v.as_array())
+            .is_some_and(|failures| {
+                failures.iter().any(|failure| {
+                    failure.get("gate").and_then(|g| g.as_str()) == Some("calibration_required")
+                })
+            }),
+        "publish gate must record CalibrationRequired failure"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn bind_calibration_creates_candidate_version_with_calibrated_return_model() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None, None).await;
+    let calibrator = seed_model_score_calibrator(&db).await;
+
+    let bound = harness
+        .service
+        .bind_calibration(
+            &candidate,
+            BindCalibrationRequest {
+                calibrator_ref: calibrator.clone(),
+                downside_source: DownsideSource::MfeMae,
+                reason: "bind test".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect("bind calibration");
+
+    assert_ne!(bound.model_version_id, candidate);
+    assert_eq!(bound.publication_status, PublicationStatus::Candidate);
+    let bytes = harness
+        .artifact_store
+        .get_by_key(&ModelArtifact::artifact_key(&bound.artifact_hash).expect("artifact key"))
+        .await
+        .expect("artifact bytes");
+    let artifact = ModelArtifact::from_bytes(&bytes).expect("decode");
+    let ModelArtifact::WeightedFactor(weighted) = artifact else {
+        panic!("expected weighted factor artifact");
+    };
+    let ReturnModelSpec::Calibrated(calibrated) = weighted.return_model else {
+        panic!("bound version must carry Calibrated return model");
+    };
+    assert_eq!(calibrated.calibrator_ref, calibrator);
 }
 
 #[tokio::test]

@@ -75,6 +75,7 @@ pub struct ComposeReportInput<'a> {
     pub market_selection_count: u32,
     pub empty: Option<EmptyReportContext>,
     pub top_n: u32,
+    pub return_model_calibrated: bool,
 }
 
 /// Converts builder/planner output into persistence rows and post-commit events.
@@ -304,14 +305,41 @@ fn compose_recommendation(
         }
     })?;
 
-    // Per-recommendation, data-driven validity: the model's effective horizon
-    // (capped by time-to-resolution) drives the exit/time-stop; the entry-by
-    // deadline is the early `entry_window_ratio` slice of it (enter while fresh).
     let horizon_secs = effective_horizon_secs(candidate, capture, fallback_horizon_secs);
     let valid_until = as_of_plus_secs(
         input.as_of,
         entry_window_secs(horizon_secs, entry_window_ratio),
     )?;
+    let compose_context = resolve_compose_context(candidate, input)?;
+    let auto_gate = calibrated_auto_execution_gate(
+        candidate,
+        planned.rank,
+        &planned.sizing,
+        input.runtime_config,
+        input.return_model_calibrated,
+    )?;
+    let risk_envelope = compose_risk_envelope(planned, candidate, &auto_gate);
+
+    let assembly = NewRecommendationAssembly {
+        report_id,
+        planned,
+        candidate,
+        capture,
+        input,
+        compose_context,
+        horizon_secs,
+        valid_until,
+        data_quality_snapshot_ref,
+        auto_gate: &auto_gate,
+        risk_envelope,
+    };
+    build_new_recommendation(assembly)
+}
+
+fn resolve_compose_context(
+    candidate: &SignalCandidate,
+    input: &ComposeReportInput<'_>,
+) -> QuantResult<ComposeRecommendationContext> {
     let feature_vector_id = input
         .feature_vector_by_market
         .get(&candidate.market_id)
@@ -331,15 +359,69 @@ fn compose_recommendation(
                 stage: "compose",
                 detail: "non-empty recommendation missing model_run_id".into(),
             })?;
+    Ok(ComposeRecommendationContext {
+        feature_vector_id,
+        model_run_id,
+    })
+}
 
-    let auto_gate = auto_execution_gate(
+struct ComposeRecommendationContext {
+    feature_vector_id: FeatureVectorId,
+    model_run_id: ModelRunId,
+}
+
+fn calibrated_auto_execution_gate(
+    candidate: &SignalCandidate,
+    rank: u32,
+    sizing: &SizingPlan,
+    runtime_config: &RuntimeConfig,
+    return_model_calibrated: bool,
+) -> QuantResult<AutoExecutionGate> {
+    let mut auto_gate = auto_execution_gate(candidate, rank, sizing, runtime_config)?;
+    if !return_model_calibrated {
+        auto_gate.allowed = false;
+        if !auto_gate
+            .reasons
+            .contains(&IneligibilityReason::ReturnModelUncalibrated)
+        {
+            auto_gate
+                .reasons
+                .push(IneligibilityReason::ReturnModelUncalibrated);
+        }
+    }
+    Ok(auto_gate)
+}
+
+struct NewRecommendationAssembly<'a> {
+    report_id: &'a RecommendationReportId,
+    planned: &'a PlannedRecommendation,
+    candidate: &'a SignalCandidate,
+    capture: &'a MarketDecisionCapture,
+    input: &'a ComposeReportInput<'a>,
+    compose_context: ComposeRecommendationContext,
+    horizon_secs: u64,
+    valid_until: DateTime<Utc>,
+    data_quality_snapshot_ref: &'a ReportDataQualitySnapshotId,
+    auto_gate: &'a AutoExecutionGate,
+    risk_envelope: RiskEnvelope,
+}
+
+fn build_new_recommendation(
+    assembly: NewRecommendationAssembly<'_>,
+) -> QuantResult<NewRecommendation> {
+    let NewRecommendationAssembly {
+        report_id,
+        planned,
         candidate,
-        planned.rank,
-        &planned.sizing,
-        input.runtime_config,
-    )?;
-    let risk_envelope = compose_risk_envelope(planned, candidate, &auto_gate);
-
+        capture,
+        input,
+        compose_context,
+        horizon_secs,
+        valid_until,
+        data_quality_snapshot_ref,
+        auto_gate,
+        risk_envelope,
+    } = assembly;
     Ok(NewRecommendation {
         recommendation_id: RecommendationId::from_v7(),
         recommendation_report_id: report_id.clone(),
@@ -380,8 +462,8 @@ fn compose_recommendation(
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
             signal_candidate_id: candidate.signal_candidate_id.clone(),
-            feature_vector_id,
-            model_run_id,
+            feature_vector_id: compose_context.feature_vector_id,
+            model_run_id: compose_context.model_run_id,
             market_selection_id: input.market_selection_id.clone(),
             book_snapshot_ref: capture.book_snapshot_ref.clone(),
             runtime_config_version_id: input.runtime_config_version_id.clone(),
@@ -389,7 +471,7 @@ fn compose_recommendation(
             factor_definition_versions: factor_definition_versions(candidate),
             data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
         }),
-        execution_eligibility: execution_eligibility(&auto_gate),
+        execution_eligibility: execution_eligibility(auto_gate, input.return_model_calibrated),
         valid_from: input.as_of,
         valid_until,
         status: RecommendationStatus::Published,
@@ -547,21 +629,31 @@ struct AutoExecutionGate {
     reasons: Vec<IneligibilityReason>,
 }
 
-fn execution_eligibility(gate: &AutoExecutionGate) -> ExecutionEligibility {
-    let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto];
-    if gate.allowed {
+fn execution_eligibility(
+    gate: &AutoExecutionGate,
+    return_model_calibrated: bool,
+) -> ExecutionEligibility {
+    let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly];
+    if return_model_calibrated {
+        eligible_modes.push(QuantRuntimeMode::SemiAuto);
+    }
+    if gate.allowed && return_model_calibrated {
         eligible_modes.push(QuantRuntimeMode::AutoExecution);
+    }
+    let mut reasons = if gate.allowed {
+        Vec::new()
+    } else {
+        gate.reasons.clone()
+    };
+    if !return_model_calibrated && !reasons.contains(&IneligibilityReason::ReturnModelUncalibrated)
+    {
+        reasons.push(IneligibilityReason::ReturnModelUncalibrated);
     }
     ExecutionEligibility {
         eligible_modes,
-        ineligibility_reasons: if gate.allowed {
-            Vec::new()
-        } else {
-            gate.reasons.clone()
-        },
-        approval_required: !gate.allowed,
-        auto_policy_id: gate
-            .allowed
+        ineligibility_reasons: reasons,
+        approval_required: !gate.allowed || !return_model_calibrated,
+        auto_policy_id: (gate.allowed && return_model_calibrated)
             .then(|| "runtime_config.execution.auto_execution".to_owned()),
     }
 }
@@ -1102,6 +1194,8 @@ mod tests {
             sizing_model: SizingModelKind::Kelly,
             edge_bps: Some(Bps::new(dec!(120))),
             kelly_fraction_applied: Some(dec!(0.5)),
+            edge_uncertainty_shrink_applied: None,
+            correlation_shrink_applied: None,
         }
     }
 
@@ -1118,7 +1212,7 @@ mod tests {
         assert!(!gate.allowed);
         assert_eq!(gate.reasons, vec![IneligibilityReason::LowConfidence]);
 
-        let eligibility = execution_eligibility(&gate);
+        let eligibility = execution_eligibility(&gate, true);
         assert!(eligibility.is_eligible(QuantRuntimeMode::ReportOnly));
         assert!(eligibility.is_eligible(QuantRuntimeMode::SemiAuto));
         assert!(!eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
@@ -1147,7 +1241,7 @@ mod tests {
         assert!(gate.allowed);
         assert!(gate.reasons.is_empty());
 
-        let eligibility = execution_eligibility(&gate);
+        let eligibility = execution_eligibility(&gate, true);
         assert!(eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
     }
 
@@ -1168,6 +1262,8 @@ mod tests {
                 sizing_model: SizingModelKind::Kelly,
                 edge_bps: Some(Bps::new(dec!(120))),
                 kelly_fraction_applied: Some(dec!(0.5)),
+                edge_uncertainty_shrink_applied: None,
+                correlation_shrink_applied: None,
             },
             risk_envelope: RiskEnvelope {
                 max_loss_usd: Usd::new(dec!(120)),
@@ -1277,6 +1373,7 @@ mod tests {
             market_selection_count: 1,
             empty: None,
             top_n: 5,
+            return_model_calibrated: true,
         });
 
         assert!(matches!(

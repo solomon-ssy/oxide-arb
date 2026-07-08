@@ -2,10 +2,10 @@
 
 pub mod account_read;
 pub mod backtest;
+pub mod calibration_artifact;
 pub mod execution_read;
 pub mod execution_recovery;
 pub mod factor_governance;
-pub mod favorite_longshot;
 pub mod market_linkage;
 pub mod model_governance;
 pub mod model_spec;
@@ -21,10 +21,10 @@ pub mod training_dataset;
 
 pub use account_read::*;
 pub use backtest::*;
+pub use calibration_artifact::*;
 pub use execution_read::*;
 pub use execution_recovery::*;
 pub use factor_governance::*;
-pub use favorite_longshot::*;
 pub use market_linkage::*;
 pub use model_governance::*;
 pub use model_spec::*;

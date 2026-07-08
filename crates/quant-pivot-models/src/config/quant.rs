@@ -34,6 +34,8 @@ pub struct ResearchJobsConfig {
     pub backtest_concurrency: usize,
     /// Per-kind concurrency cap for favorite-longshot bias-table fits.
     pub bias_table_fit_concurrency: usize,
+    /// Per-kind concurrency cap for model-score calibrator fits (Phase 11.3).
+    pub model_calibration_fit_concurrency: usize,
     /// Lease time-to-live: a lease not renewed within this window is reclaimable.
     pub lease_ttl_secs: i64,
     /// How often a running job renews its lease + emits a liveness heartbeat.
@@ -68,6 +70,7 @@ impl Default for ResearchJobsConfig {
             model_train_concurrency: 1,
             backtest_concurrency: 2,
             bias_table_fit_concurrency: 1,
+            model_calibration_fit_concurrency: 1,
             lease_ttl_secs: 90,
             heartbeat_secs: 30,
             poll_secs: 3,
@@ -90,6 +93,7 @@ impl ResearchJobsConfig {
             ResearchJobKind::ModelTrain => self.model_train_concurrency,
             ResearchJobKind::Backtest => self.backtest_concurrency,
             ResearchJobKind::BiasTableFit => self.bias_table_fit_concurrency,
+            ResearchJobKind::ModelCalibrationFit => self.model_calibration_fit_concurrency,
         }
     }
 }

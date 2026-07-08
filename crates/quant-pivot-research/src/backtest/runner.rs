@@ -209,6 +209,8 @@ fn process_tick(
             confidence: candidate.confidence,
             expected_return_bps: candidate.expected_return_bps,
             realized_return_bps: realized,
+            settled_yes: outcome.settled_yes,
+            max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
             allocated_usd,
             liquidity_feasible,
             data_quality: market_context
@@ -442,6 +444,7 @@ mod tests {
                 category_scope: None,
             },
             None,
+            None,
         )
         .expect("runtime")
     }
@@ -510,11 +513,13 @@ mod tests {
                     market_id: MarketId::new("0xbull"),
                     settled_yes: true,
                     matured: true,
+                    max_adverse_excursion_bps: None,
                 },
                 MarketOutcome {
                     market_id: MarketId::new("0xbear"),
                     settled_yes: false,
                     matured: true,
+                    max_adverse_excursion_bps: None,
                 },
             ],
             market_meta: meta,
@@ -530,6 +535,7 @@ mod tests {
             max_event_exposure_usd: dec!(0),
             max_category_exposure_usd: dec!(0),
             liquidity_usage_cap_pct: dec!(0.1),
+            max_aggregate_exposure_pct: dec!(0),
         }
     }
 

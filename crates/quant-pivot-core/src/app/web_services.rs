@@ -15,21 +15,22 @@ use crate::{
         task_registry::AppRunner,
     },
     prefetch::feature_window::FeatureWindowProvider,
+    service::model_calibration_fit::ModelCalibrationFitService,
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
     CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-    MarketLinkageGovernancePort, NewOperationLog, OrderIntentPort, ReconciliationPort,
-    ResearchJobPort, RuntimeConfigPort,
+    MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog, OrderIntentPort,
+    ReconciliationPort, ResearchJobPort, RuntimeConfigPort,
 };
 use quant_pivot_repository::traits::{
     AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
-    DomainSourceCursorRepository, EquitySnapshotRepository, ExecutionOrderRepository,
-    FavoriteLongshotBiasTableRepository, MenuRepository, OperationLogRepository,
-    OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-    RecommendationRepository, ReconciliationRepository, RoleMenuRepository,
-    RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
-    SettlementRedeemRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+    CalibrationArtifactRepository, DomainSourceCursorRepository, EquitySnapshotRepository,
+    ExecutionOrderRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
+    PositionRepository, RecommendationReportRepository, RecommendationRepository,
+    ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+    RuntimeConfigVersionRepository, SettlementRedeemRepository, TradeTapeBlockCursorRepository,
+    UserRepository, UserRoleRepository,
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
@@ -146,6 +147,8 @@ async fn build_app_state(
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
         favorite_longshot: Arc::clone(&ctx.research.favorite_longshot_fit),
+        model_calibration_fit: research_ports.model_calibration_fit
+            as Arc<dyn ModelCalibrationFitPort>,
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
         domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
             as Arc<dyn DomainSourceCursorRepository>,
@@ -276,14 +279,27 @@ struct ResearchWebPorts {
     training_datasets: Arc<CoreTrainingDatasetPort>,
     model_training: Arc<CoreModelTrainingPort>,
     backtests: Arc<CoreBacktestPort>,
+    model_calibration_fit: Arc<ModelCalibrationFitService>,
 }
 
 fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
     let repos = &ctx.infra.repos;
     let runtime_config =
         Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
-    let bias_table = Arc::clone(&repos.favorite_longshot_bias_table)
-        as Arc<dyn FavoriteLongshotBiasTableRepository>;
+    let bias_table =
+        Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>;
+    let backtests = Arc::new(CoreBacktestPort::from_research(
+        &ctx.research,
+        Arc::clone(&runtime_config),
+        Arc::clone(&bias_table),
+    ));
+    let model_calibration_fit = Arc::new(ModelCalibrationFitService::new(
+        Arc::clone(&backtests),
+        Arc::clone(&ctx.research.model_registry_repo),
+        Arc::clone(&ctx.research.training_dataset_repo),
+        Arc::clone(&bias_table),
+        Arc::clone(&runtime_config),
+    ));
     ResearchWebPorts {
         training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
             &ctx.research,
@@ -298,10 +314,7 @@ fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
             Arc::clone(&runtime_config),
             Arc::clone(&bias_table),
         )),
-        backtests: Arc::new(CoreBacktestPort::from_research(
-            &ctx.research,
-            runtime_config,
-            bias_table,
-        )),
+        backtests,
+        model_calibration_fit,
     }
 }

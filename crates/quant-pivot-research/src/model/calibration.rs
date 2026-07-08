@@ -1,18 +1,20 @@
-//! Return-model + governed-multiplier calibration from realized backtest
-//! outcomes (Phase 3.6, §1.1 / §4).
+//! Governed score-multiplier calibration from realized backtest outcomes
+//! (Phase 3.6, §1.1 / §4).
 //!
-//! After a candidate model is backtested, this module fits a **monotone**
-//! [`ReturnModelSpec::Calibrated`] curve from realized vs. predicted outcomes
-//! (replacing the 3.4 `Heuristic` default), and tightens every governed score
-//! multiplier — data-quality, liquidity, horizon — plus the substitution
-//! confidence penalties from realized **stratified** performance.
+//! After a candidate model is backtested, this module tightens every governed
+//! score multiplier — data-quality, liquidity, horizon — plus the substitution
+//! confidence penalties, from realized **stratified** performance.
 //!
-//! Every calibration is **fail-closed**: insufficient evidence keeps the
-//! conservative baseline, a stratum that lost money on average collapses to the
-//! harshest multiplier, and a calibrated multiplier is **never** more optimistic
-//! than the governed baseline it refines. The unified [`calibrate_weighted_artifact`]
-//! returns `None` (keep the artifact verbatim) unless there is enough evidence to
-//! fit a real return curve, so a thin backtest can never silently relax governance.
+//! **Not** the return-model calibration path: `ReturnModelSpec::Calibrated`
+//! (Phase 11.3 §3.3/§5) is derived from an independently-fit
+//! `ProbabilityCalibrator` (see [`crate::model::calibrator`]) on a held-out
+//! split, never from this module's same-backtest realized samples (that would
+//! be a leaked, non-independent "calibration").
+//!
+//! Every multiplier calibration is **fail-closed**: insufficient evidence keeps
+//! the conservative baseline, a stratum that lost money on average collapses to
+//! the harshest multiplier, and a calibrated multiplier is **never** more
+//! optimistic than the governed baseline it refines.
 
 use quant_pivot_models::enums::quant::DataQualityStatus;
 use rust_decimal::Decimal;
@@ -21,9 +23,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     features::NullReason,
     model::artifact::{
-        CalibratedReturnModel, DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers,
-        LiquidityTier, ReturnCurvePoint, ReturnModelSpec, ScoreMultiplierSpec,
-        SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+        DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers, LiquidityTier,
+        ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -51,14 +52,8 @@ pub struct CalibrationSample {
     pub substitution_reasons: Vec<NullReason>,
 }
 
-/// Number of equal-width `[0, 1]` score buckets.
-const SCORE_BUCKETS: usize = 10;
-
 /// Minimum samples in a bucket / stratum for it to inform calibration.
 const MIN_BUCKET_SAMPLES: usize = 3;
-
-/// Minimum total samples to attempt return-curve calibration.
-const MIN_TOTAL_SAMPLES: usize = 30;
 
 /// One calibrated stratum's provenance (sample count + mean realized return),
 /// emitted into the run's `metrics_json` for auditability.
@@ -77,8 +72,6 @@ pub struct StratumFit {
 pub struct CalibrationReport {
     /// Total realized samples the calibration consumed.
     pub total_samples: u64,
-    /// Number of knots in the fitted expected-return curve.
-    pub return_curve_points: u64,
     /// Per data-quality stratum fit.
     pub data_quality_strata: Vec<StratumFit>,
     /// Per liquidity-tier stratum fit.
@@ -89,13 +82,13 @@ pub struct CalibrationReport {
     pub substitution_strata: Vec<StratumFit>,
 }
 
-/// The full calibration of a weighted artifact: the refined return model, the
-/// tightened score multipliers, the tightened substitution rules, and the
-/// stratified provenance report.
+/// Multiplier calibration of a weighted artifact (score multipliers + substitution rules).
+///
+/// Does **not** touch `return_model` (Phase 11.3 §5 — that is a separate,
+/// independently-fit `ProbabilityCalibrator` governance action, never a same-backtest
+/// side effect).
 #[derive(Debug, Clone)]
 pub struct CalibrationResult {
-    /// Calibrated return / downside curve.
-    pub return_model: ReturnModelSpec,
     /// Tightened governed score multipliers (data-quality / liquidity / horizon).
     pub multipliers: ScoreMultiplierSpec,
     /// Tightened governed substitution confidence penalties.
@@ -104,20 +97,20 @@ pub struct CalibrationResult {
     pub report: CalibrationReport,
 }
 
-/// Calibrate a weighted artifact end-to-end from realized outcomes.
+/// Tighten a weighted artifact's governed score multipliers + substitution
+/// rules from realized backtest outcomes.
 ///
-/// Returns `None` (keep the baseline artifact verbatim) when there is
-/// insufficient evidence to fit a return curve — the conservative governed
-/// defaults stay in force. When `Some`, the return model is calibrated and every
-/// governed multiplier is tightened (never loosened) by stratified performance.
+/// Always attempts multiplier tightening (each stratum fails closed to its
+/// baseline independently on insufficient evidence — see [`fail_closed`]); the
+/// return model is never touched here.
 #[must_use]
 pub fn calibrate_weighted_artifact(
     samples: &[CalibrationSample],
     baseline: &WeightedFactorModelArtifact,
 ) -> Option<CalibrationResult> {
-    let curve = calibrate_return_model(samples)?;
-    let return_curve_points = curve.expected_return_curve.len() as u64;
-
+    if samples.is_empty() {
+        return None;
+    }
     let (data_quality, data_quality_strata) =
         calibrate_data_quality(samples, &baseline.multipliers.data_quality);
     let (liquidity, liquidity_strata) =
@@ -128,7 +121,6 @@ pub fn calibrate_weighted_artifact(
         calibrate_substitution_rules(samples, &baseline.substitution_confidence_rules);
 
     Some(CalibrationResult {
-        return_model: ReturnModelSpec::Calibrated(curve),
         multipliers: ScoreMultiplierSpec {
             data_quality,
             liquidity,
@@ -137,94 +129,11 @@ pub fn calibrate_weighted_artifact(
         substitution_rules,
         report: CalibrationReport {
             total_samples: samples.len() as u64,
-            return_curve_points,
             data_quality_strata,
             liquidity_strata,
             horizon_strata,
             substitution_strata,
         },
-    })
-}
-
-/// Fit a monotone calibrated return model from realized outcomes.
-///
-/// Returns `None` (keep the heuristic) when there is insufficient evidence
-/// (`< MIN_TOTAL_SAMPLES`, or fewer than two populated score buckets).
-#[must_use]
-pub fn calibrate_return_model(samples: &[CalibrationSample]) -> Option<CalibratedReturnModel> {
-    if samples.len() < MIN_TOTAL_SAMPLES {
-        return None;
-    }
-
-    // Bucket by composite score; collect mean realized return and mean downside
-    // (loss magnitude) per populated bucket.
-    let mut expected_knots: Vec<(Decimal, Decimal)> = Vec::new();
-    let mut downside_knots: Vec<(Decimal, Decimal)> = Vec::new();
-    for bucket in 0..SCORE_BUCKETS {
-        let lo = Decimal::from(bucket as u64) / Decimal::from(SCORE_BUCKETS as u64);
-        let hi = Decimal::from((bucket + 1) as u64) / Decimal::from(SCORE_BUCKETS as u64);
-        let midpoint = ((lo + hi) / Decimal::from(2)).round_dp(RESEARCH_DECIMAL_SCALE);
-        let in_bucket: Vec<&CalibrationSample> = samples
-            .iter()
-            .filter(|s| {
-                let score = s.composite_score;
-                if bucket + 1 == SCORE_BUCKETS {
-                    score >= lo && score <= hi
-                } else {
-                    score >= lo && score < hi
-                }
-            })
-            .collect();
-        if in_bucket.len() < MIN_BUCKET_SAMPLES {
-            continue;
-        }
-        let count = Decimal::from(in_bucket.len() as u64);
-        let mean_return: Decimal = in_bucket
-            .iter()
-            .map(|s| s.realized_return_bps)
-            .sum::<Decimal>()
-            / count;
-        let mean_downside: Decimal = in_bucket
-            .iter()
-            .map(|s| (-s.realized_return_bps).max(Decimal::ZERO))
-            .sum::<Decimal>()
-            / count;
-        expected_knots.push((midpoint, mean_return.round_dp(RESEARCH_DECIMAL_SCALE)));
-        downside_knots.push((midpoint, mean_downside.round_dp(RESEARCH_DECIMAL_SCALE)));
-    }
-
-    if expected_knots.len() < 2 {
-        return None;
-    }
-
-    // Enforce monotonicity: expected return non-decreasing in score, downside
-    // non-increasing in score (higher conviction ⇒ more upside, less downside).
-    let expected_values =
-        pava_non_decreasing(&expected_knots.iter().map(|(_, v)| *v).collect::<Vec<_>>());
-    let downside_values =
-        pava_non_increasing(&downside_knots.iter().map(|(_, v)| *v).collect::<Vec<_>>());
-
-    let expected_return_curve = expected_knots
-        .iter()
-        .zip(&expected_values)
-        .map(|((score, _), bps)| ReturnCurvePoint {
-            score: *score,
-            bps: bps.round_dp(RESEARCH_DECIMAL_SCALE),
-        })
-        .collect();
-    let downside_curve = downside_knots
-        .iter()
-        .zip(&downside_values)
-        .map(|((score, _), bps)| ReturnCurvePoint {
-            score: *score,
-            bps: bps.round_dp(RESEARCH_DECIMAL_SCALE),
-        })
-        .collect();
-
-    Some(CalibratedReturnModel {
-        expected_return_curve,
-        downside_curve,
-        fit_sample_size: samples.len() as u64,
     })
 }
 
@@ -595,54 +504,11 @@ fn best_of(means: &[Option<Decimal>]) -> Decimal {
         .fold(Decimal::ZERO, Decimal::max)
 }
 
-/// Pool-adjacent-violators isotonic regression producing a non-decreasing series.
-fn pava_non_decreasing(values: &[Decimal]) -> Vec<Decimal> {
-    // Each pool: (weighted sum, count).
-    let mut pools: Vec<(Decimal, u64)> = Vec::with_capacity(values.len());
-    for &value in values {
-        pools.push((value, 1));
-        // Merge while the last pool's mean violates monotonicity.
-        while pools.len() >= 2 {
-            let (sum_b, n_b) = pools[pools.len() - 1];
-            let (sum_a, n_a) = pools[pools.len() - 2];
-            let mean_a = sum_a / Decimal::from(n_a);
-            let mean_b = sum_b / Decimal::from(n_b);
-            if mean_a <= mean_b {
-                break;
-            }
-            pools.pop();
-            pools.pop();
-            pools.push((sum_a + sum_b, n_a + n_b));
-        }
-    }
-    expand_pools(&pools, values.len())
-}
-
-/// Isotonic regression producing a non-increasing series (PAVA on the reverse).
-fn pava_non_increasing(values: &[Decimal]) -> Vec<Decimal> {
-    let reversed: Vec<Decimal> = values.iter().rev().copied().collect();
-    let mut out = pava_non_decreasing(&reversed);
-    out.reverse();
-    out
-}
-
-/// Expand merged pools back into a per-knot series of pool means.
-fn expand_pools(pools: &[(Decimal, u64)], len: usize) -> Vec<Decimal> {
-    let mut out = Vec::with_capacity(len);
-    for &(sum, count) in pools {
-        let mean = (sum / Decimal::from(count)).round_dp(RESEARCH_DECIMAL_SCALE);
-        for _ in 0..count {
-            out.push(mean);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CalibrationSample, calibrate_liquidity_multipliers, calibrate_return_model,
-        calibrate_score_multipliers, calibrate_substitution_rules,
+        CalibrationSample, calibrate_liquidity_multipliers, calibrate_score_multipliers,
+        calibrate_substitution_rules,
     };
     use quant_pivot_models::enums::quant::DataQualityStatus;
     use rust_decimal::Decimal;
@@ -667,41 +533,6 @@ mod tests {
             prediction_horizon_secs: 0,
             substitution_reasons: Vec::new(),
         }
-    }
-
-    /// Higher-score candidates realize higher returns ⇒ a monotone, calibrated
-    /// expected-return curve.
-    #[test]
-    fn calibration_curve_is_monotone() {
-        let samples: Vec<CalibrationSample> = (0..200)
-            .map(|i| {
-                let score = Decimal::from(i % 100) / dec!(100);
-                let realized = score * dec!(400) - dec!(100) + Decimal::from(i % 3) * dec!(5);
-                dq_sample(score, realized, DataQualityStatus::Fresh)
-            })
-            .collect();
-
-        let model = calibrate_return_model(&samples).expect("calibrated");
-        assert!(model.fit_sample_size >= 30);
-        assert!(model.expected_return_curve.len() >= 2);
-        for window in model.expected_return_curve.windows(2) {
-            assert!(window[0].score < window[1].score, "scores ascending");
-            assert!(window[0].bps <= window[1].bps, "expected return monotone");
-        }
-    }
-
-    #[test]
-    fn insufficient_samples_keep_heuristic() {
-        let samples: Vec<CalibrationSample> = (0..5)
-            .map(|i| {
-                dq_sample(
-                    Decimal::from(i) / dec!(10),
-                    dec!(10),
-                    DataQualityStatus::Fresh,
-                )
-            })
-            .collect();
-        assert!(calibrate_return_model(&samples).is_none());
     }
 
     /// A data-quality stratum that loses money collapses to a harsher multiplier;

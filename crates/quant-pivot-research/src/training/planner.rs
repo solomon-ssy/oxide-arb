@@ -116,9 +116,12 @@ pub fn plan_lot_timeline_samples(
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone, Utc};
-    use quant_pivot_models::types::{
-        MarketId, ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId,
-        SchemaVersion, Shares, TokenId, Usd, default_sample_sources,
+    use quant_pivot_models::{
+        enums::quant::DatasetPurpose,
+        types::{
+            MarketId, ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId,
+            SchemaVersion, Shares, TokenId, Usd, default_sample_sources,
+        },
     };
     use rust_decimal::Decimal;
 
@@ -135,6 +138,7 @@ mod tests {
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
+            purpose: DatasetPurpose::default(),
         }
     }
 

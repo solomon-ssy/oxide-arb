@@ -1,6 +1,7 @@
 pub mod account;
 pub mod backtest;
 pub mod basis_alert;
+pub mod calibration_shared;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;
 pub mod dataset_replay;
@@ -13,6 +14,7 @@ pub mod gamma;
 pub mod historical_replay;
 pub mod market_selection;
 pub mod model_backed_reinferer;
+pub mod model_calibration_fit;
 pub mod model_runner;
 pub mod model_training;
 pub mod opportunistic_sell;

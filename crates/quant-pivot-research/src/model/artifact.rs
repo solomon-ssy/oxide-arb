@@ -21,9 +21,11 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::{
         common::MarketCategory,
-        quant::{DataQualityStatus, ModelSerializationFormat},
+        quant::{DataQualityStatus, DownsideSource, ModelSerializationFormat},
     },
-    types::{ArtifactUri, ContentHash, ModelArtifactId, ModelVersionId},
+    types::{
+        ArtifactUri, CalibrationArtifactId, ContentHash, ModelArtifactId, ModelVersionId, Price,
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,10 @@ use crate::{
     factors::FactorName,
     features::{FeatureName, NullReason},
     hashing::ResearchHasher,
-    model::runtime::{ClassicalKind, ModelFamily},
+    model::{
+        calibrator::ResolvedCalibration,
+        runtime::{ClassicalKind, ModelFamily},
+    },
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
@@ -316,18 +321,11 @@ impl SubstitutionConfidenceRules {
     }
 }
 
-/// One point of a monotone, piecewise-linear return curve over `composite_score`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReturnCurvePoint {
-    /// `composite_score` knot in `[0, 1]` (ascending across the curve).
-    pub score: Decimal,
-    /// Return / downside value at the knot, in basis points.
-    pub bps: Decimal,
-}
-
-/// Uncalibrated, monotone heuristic return mapping shipped before 3.6 calibrates
-/// a real curve. Auditable and explicitly flagged as a heuristic so candidates
-/// never present a silently fabricated return.
+/// Uncalibrated, monotone heuristic return mapping — cold-start bootstrap only.
+///
+/// Auditable and explicitly flagged as a heuristic so candidates never present a
+/// silently fabricated return; fail-closed at publish / auto-execution / semi-auto
+/// (Phase 11.3 §6, `GateId::CalibrationRequired`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeuristicReturnModel {
     /// Expected return (bps) at `composite_score × confidence = 1`.
@@ -337,29 +335,33 @@ pub struct HeuristicReturnModel {
     pub max_downside_bps: Decimal,
 }
 
-/// A curve calibrated by the 3.6 `WeightedFactorTrainer` from realized backtest
-/// outcomes. 3.4 ships the *application* (interpolation) so a calibrated artifact
-/// is scoreable the moment 3.6 produces it.
+/// A return model derived from a fitted `ProbabilityCalibrator` (Phase 11.3 §3.3/§5).
+///
+/// Replaces the former hand-fit return-curve interpolation. `calibrator_ref` names
+/// the [`CalibrationArtifactId`] (`kind = ModelScore`) whose `P(win)` mapping +
+/// reliability report the estimate is derived from; the artifact is resolved once
+/// at runtime-load time (never re-fetched per candidate) into a
+/// [`ResolvedCalibration`] passed to
+/// [`ReturnModelSpec::estimate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalibratedReturnModel {
-    /// Monotone expected-return curve over `composite_score`.
-    pub expected_return_curve: Vec<ReturnCurvePoint>,
-    /// Monotone downside curve over `composite_score`.
-    pub downside_curve: Vec<ReturnCurvePoint>,
-    /// Backtest sample size the curve was fit on (provenance).
-    pub fit_sample_size: u64,
+    /// The bound `ProbabilityCalibrator` artifact.
+    pub calibrator_ref: CalibrationArtifactId,
+    /// Downside (bps) source read from the calibration artifact's reliability
+    /// bins (v1: `MfeMae` only — see [`DownsideSource`]).
+    pub downside_source: DownsideSource,
 }
 
 /// How a candidate's expected return / downside (bps) is produced from the ranking score.
 ///
 /// Provenance is explicit: a candidate records whether its return is `Heuristic`
-/// (uncalibrated) or `Calibrated` (3.6-fit).
+/// (uncalibrated, bootstrap-only) or `Calibrated` (independent held-out fit).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "calibration")]
 pub enum ReturnModelSpec {
-    /// Uncalibrated heuristic (pre-3.6 bootstrap).
+    /// Uncalibrated heuristic (cold-start bootstrap only).
     Heuristic(HeuristicReturnModel),
-    /// Curve calibrated by the 3.6 trainer.
+    /// Derived from an independently-fit `ProbabilityCalibrator`.
     Calibrated(CalibratedReturnModel),
 }
 
@@ -371,15 +373,28 @@ pub struct ReturnEstimate {
     pub expected_return_bps: Decimal,
     /// Estimated downside, in basis points.
     pub downside_bps: Decimal,
-    /// Whether the estimate came from a calibrated curve (else heuristic).
+    /// Whether the estimate came from a calibrated model (else heuristic).
     pub calibrated: bool,
 }
 
 impl ReturnModelSpec {
-    /// Estimate the expected return / downside (bps) for one candidate from its
-    /// `composite_score` and `confidence`, both in `[0, 1]`.
+    /// Estimate the expected return / downside (bps) for one candidate.
+    ///
+    /// `market_price` is the executable YES-leg reference price (required by
+    /// the `Calibrated` formula `E[r] = P(win)·(1-p)/p − (1−P(win))`; ignored
+    /// by `Heuristic`). `calibration` must be `Some` whenever `self` is
+    /// `Calibrated` — the runtime factory resolves it once at load time and
+    /// fails the load closed otherwise, so a `None` here is unreachable in
+    /// production; defensively it yields a zero (never-fabricated) estimate,
+    /// which downstream Kelly sizing already rejects via `InvalidEdgeInputs`.
     #[must_use]
-    pub fn estimate(&self, composite_score: Decimal, confidence: Decimal) -> ReturnEstimate {
+    pub fn estimate(
+        &self,
+        composite_score: Decimal,
+        confidence: Decimal,
+        market_price: Price,
+        calibration: Option<&ResolvedCalibration>,
+    ) -> ReturnEstimate {
         match self {
             Self::Heuristic(model) => {
                 let conviction = (composite_score * confidence).round_dp(RESEARCH_DECIMAL_SCALE);
@@ -394,15 +409,20 @@ impl ReturnModelSpec {
                     calibrated: false,
                 }
             }
-            Self::Calibrated(model) => ReturnEstimate {
-                expected_return_bps: interpolate(&model.expected_return_curve, composite_score),
-                downside_bps: interpolate(&model.downside_curve, composite_score),
-                calibrated: true,
-            },
+            Self::Calibrated(_) => {
+                let Some(resolved) = calibration else {
+                    return ReturnEstimate {
+                        expected_return_bps: Decimal::ZERO,
+                        downside_bps: Decimal::ZERO,
+                        calibrated: true,
+                    };
+                };
+                resolved.estimate_return(composite_score, market_price)
+            }
         }
     }
 
-    /// A conservative heuristic default (bootstrap before 3.6 calibration).
+    /// A conservative heuristic default (cold-start bootstrap only).
     #[must_use]
     pub fn heuristic_default() -> Self {
         Self::Heuristic(HeuristicReturnModel {
@@ -410,33 +430,6 @@ impl ReturnModelSpec {
             max_downside_bps: Decimal::from(500),
         })
     }
-}
-
-/// Linearly interpolate a monotone, score-ascending curve at `score`, clamping to
-/// the endpoints outside the knot range. An empty curve yields zero.
-fn interpolate(curve: &[ReturnCurvePoint], score: Decimal) -> Decimal {
-    let Some(first) = curve.first() else {
-        return Decimal::ZERO;
-    };
-    if score <= first.score {
-        return first.bps;
-    }
-    let last_point = &curve[curve.len() - 1];
-    if score >= last_point.score {
-        return last_point.bps;
-    }
-    for window in curve.windows(2) {
-        let [lo, hi] = window else { continue };
-        if score >= lo.score && score <= hi.score {
-            let span = hi.score - lo.score;
-            if span.is_zero() {
-                return lo.bps;
-            }
-            let frac = (score - lo.score) / span;
-            return (lo.bps + (hi.bps - lo.bps) * frac).round_dp(RESEARCH_DECIMAL_SCALE);
-        }
-    }
-    last_point.bps
 }
 
 /// Objective report produced by the 3.6 `WeightedFactorTrainer`. `None` for a
@@ -833,19 +826,32 @@ impl ModelArtifact {
     pub fn artifact_key(hash: &ContentHash) -> QuantResult<ArtifactKey> {
         ArtifactKey::new(ArtifactNamespace::Model, hash.hex(), "json")
     }
+
+    /// Whether the artifact's return model is calibrated.
+    ///
+    /// Only weighted-factor buy models carry a return model; classical and
+    /// sell-side artifacts are unconditionally uncalibrated for this gate.
+    #[must_use]
+    pub const fn return_model_is_calibrated(&self) -> bool {
+        match self {
+            Self::WeightedFactor(weighted) => {
+                matches!(weighted.return_model, ReturnModelSpec::Calibrated(_))
+            }
+            Self::Classical(_) | Self::SellScorer(_) => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         DataQualityMultipliers, HorizonMultipliers, LiquidityMultipliers, ModelArtifact,
-        ModelArtifactHeader, ReturnCurvePoint, ReturnModelSpec, ScoreMultiplierSpec,
-        SellScorerArtifact, SellScorerOutputSpec, SubstitutionConfidenceRules,
-        WeightedFactorModelArtifact,
+        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact,
+        SellScorerOutputSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
     };
     use quant_pivot_models::{
-        enums::quant::DataQualityStatus,
-        types::{ContentHash, ModelVersionId},
+        enums::quant::{DataQualityStatus, DownsideSource},
+        types::{CalibrationArtifactId, ContentHash, ModelVersionId, Price, Probability},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -853,6 +859,8 @@ mod tests {
     use crate::{
         factors::names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         model::artifact::{CalibratedReturnModel, FactorWeight, HeuristicReturnModel},
+        model::calibrator::{IsotonicKnot, MonotoneMapping, ResolvedCalibration},
+        model::reliability::{ReliabilityBin, ReliabilityReport},
         model::runtime::ModelFamily,
     };
 
@@ -1005,37 +1013,57 @@ mod tests {
             max_expected_return_bps: dec!(400),
             max_downside_bps: dec!(600),
         });
-        let est = heuristic.estimate(dec!(1), dec!(1));
+        let est = heuristic.estimate(dec!(1), dec!(1), Price::new(dec!(0.5)), None);
         assert_eq!(est.expected_return_bps, dec!(400));
         assert_eq!(est.downside_bps, dec!(0));
         assert!(!est.calibrated);
 
         let calibrated = ReturnModelSpec::Calibrated(CalibratedReturnModel {
-            expected_return_curve: vec![
-                ReturnCurvePoint {
-                    score: dec!(0),
-                    bps: dec!(0),
-                },
-                ReturnCurvePoint {
-                    score: dec!(1),
-                    bps: dec!(200),
-                },
-            ],
-            downside_curve: vec![
-                ReturnCurvePoint {
-                    score: dec!(0),
-                    bps: dec!(500),
-                },
-                ReturnCurvePoint {
-                    score: dec!(1),
-                    bps: dec!(100),
-                },
-            ],
-            fit_sample_size: 1_000,
+            calibrator_ref: CalibrationArtifactId::from_v7(),
+            downside_source: DownsideSource::MfeMae,
         });
-        let mid = calibrated.estimate(dec!(0.5), dec!(0.8));
-        assert_eq!(mid.expected_return_bps, dec!(100));
-        assert_eq!(mid.downside_bps, dec!(300));
+        let resolved = ResolvedCalibration {
+            artifact_id: CalibrationArtifactId::from_v7(),
+            mapping: MonotoneMapping::Isotonic {
+                knots: vec![
+                    IsotonicKnot {
+                        score: dec!(0),
+                        probability: dec!(0.2),
+                    },
+                    IsotonicKnot {
+                        score: dec!(1),
+                        probability: dec!(0.8),
+                    },
+                ],
+            },
+            reliability: ReliabilityReport {
+                bins: vec![ReliabilityBin {
+                    score_lo: dec!(0),
+                    score_hi: dec!(1),
+                    sample_count: 100,
+                    mean_predicted: Probability::new(dec!(0.5)),
+                    empirical_frequency: Probability::new(dec!(0.5)),
+                    wilson_ci: (Probability::new(dec!(0.4)), Probability::new(dec!(0.6))),
+                    mean_adverse_excursion_bps: Some(dec!(-300)),
+                }],
+                brier_score: dec!(0.1),
+                log_loss: dec!(0.3),
+                ece: dec!(0.05),
+                n_samples: 100,
+            },
+        };
+        // score=0.5 sits at/after the score=0 knot -> isotonic step yields
+        // p_win=0.2 (piecewise-constant at the last knot <= score).
+        // E[r] = 0.2*(1-0.4)/0.4 - 0.8 = -0.5 -> -5000 bps.
+        let mid = calibrated.estimate(dec!(0.5), dec!(0.8), Price::new(dec!(0.4)), Some(&resolved));
         assert!(mid.calibrated);
+        assert_eq!(mid.downside_bps, dec!(300));
+        assert_eq!(mid.expected_return_bps, dec!(-5000));
+
+        // Missing resolved calibration never fabricates a value.
+        let missing = calibrated.estimate(dec!(0.5), dec!(0.8), Price::new(dec!(0.4)), None);
+        assert_eq!(missing.expected_return_bps, Decimal::ZERO);
+        assert_eq!(missing.downside_bps, Decimal::ZERO);
+        assert!(missing.calibrated);
     }
 }

@@ -38,7 +38,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     backtest::PortfolioCaps,
-    model::signal::SignalCandidate,
+    model::{calibrator::ResolvedCalibration, signal::SignalCandidate},
     portfolio::{
         account::AccountSnapshot,
         allocator::{
@@ -46,7 +46,10 @@ use crate::{
         },
         correlation::CorrelationConstraint,
         optimizer::OptimizerOutcome,
-        sizing::{DrawdownState, SizingInput, SizingModel, SizingOutcome, SizingSuggestion},
+        sizing::{
+            CorrelationShrinkInput, DrawdownState, SizingInput, SizingModel, SizingOutcome,
+            SizingSuggestion,
+        },
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -102,6 +105,8 @@ pub struct PortfolioPlanInput<'a> {
     /// Correlated-cluster constraint that actually binds the optimizer, when
     /// correlation is enabled. `None` ⇒ the correlation cap does not bind.
     pub correlation: Option<&'a CorrelationConstraint>,
+    /// Resolved model-score calibration (edge-uncertainty + MAE lookup), when bound.
+    pub calibration: Option<&'a ResolvedCalibration>,
     /// The active sizing model.
     pub sizing: &'a dyn SizingModel,
     /// Entry-order slippage budget recorded on each risk envelope.
@@ -185,11 +190,14 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
         let mut rejected: Vec<RejectedCandidate> = Vec::new();
 
         // 1. Size every candidate; fundable ones proceed to allocation.
+        let correlation_shrink = correlation_shrink_map(&input.candidates, input.correlation);
         let (metas, mut sized) = size_candidates(
             &input.candidates,
             input.sizing,
             capital_base,
             input.drawdown_state,
+            input.calibration,
+            &correlation_shrink,
             &mut rejected,
         )?;
 
@@ -243,15 +251,31 @@ fn size_candidates<'a>(
     sizing: &dyn SizingModel,
     capital_base: Usd,
     drawdown_state: DrawdownState,
+    calibration: Option<&ResolvedCalibration>,
+    correlation_shrink: &BTreeMap<String, CorrelationShrinkInput>,
     rejected: &mut Vec<RejectedCandidate>,
 ) -> QuantResult<(Vec<CandidateMeta<'a>>, SizedLookup<'a>)> {
     let mut metas: Vec<CandidateMeta<'a>> = Vec::new();
     let mut sized: SizedLookup<'a> = BTreeMap::new();
     for plan_candidate in candidates {
+        let edge_half_width = calibration.and_then(|resolved| {
+            resolved
+                .reliability
+                .bin_for(plan_candidate.candidate.composite_score.inner())
+                .map(|bin| {
+                    let (lo, hi) = (bin.wilson_ci.0.inner(), bin.wilson_ci.1.inner());
+                    ((hi - lo) / Decimal::from(2)).max(Decimal::ZERO)
+                })
+        });
+        let correlation = correlation_shrink
+            .get(plan_candidate.candidate.market_id.as_str())
+            .copied();
         let outcome = sizing.suggest(&SizingInput {
             candidate: plan_candidate.candidate,
             capital_base_usd: capital_base,
             drawdown_state,
+            edge_uncertainty_half_width: edge_half_width,
+            correlation,
         })?;
         match outcome {
             SizingOutcome::Rejected(reason) => rejected.push(RejectedCandidate {
@@ -312,7 +336,7 @@ fn classify_allocations<'a>(
             });
             continue;
         }
-        let binding = resolve_binding(alloc.binding_constraint, suggestion.binding_kelly_cap);
+        let binding = resolve_binding(&suggestion, alloc.binding_constraint);
         let risk_adjusted = risk_adjusted_score(candidate, binding, alloc.liquidity_feasible);
         scored.push(Scored {
             candidate,
@@ -363,8 +387,50 @@ const fn rejection_for_binding(binding: BindingConstraint) -> RejectionReason {
         BindingConstraint::CategoryCap => RejectionReason::CategoryCapExhausted,
         BindingConstraint::LiquidityCap => RejectionReason::LiquidityInfeasible,
         BindingConstraint::CorrelationCap => RejectionReason::CorrelationCapExhausted,
+        BindingConstraint::AggregateExposureCap => RejectionReason::AggregateExposureCapExhausted,
         _ => RejectionReason::BelowMinSize,
     }
+}
+
+fn correlation_shrink_map(
+    candidates: &[PlanCandidate<'_>],
+    correlation: Option<&CorrelationConstraint>,
+) -> BTreeMap<String, CorrelationShrinkInput> {
+    let Some(correlation) = correlation else {
+        return BTreeMap::new();
+    };
+    let mut market_cluster: BTreeMap<String, (usize, u32)> = BTreeMap::new();
+    for (cluster_idx, members) in correlation.clusters.iter().enumerate() {
+        let batch_count = u32::try_from(
+            candidates
+                .iter()
+                .filter(|plan| members.iter().any(|m| m == &plan.candidate.market_id))
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
+        if batch_count <= 1 {
+            continue;
+        }
+        for market in members {
+            market_cluster.insert(market.as_str().to_owned(), (cluster_idx, batch_count));
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (market, (cluster_idx, batch_count)) in market_cluster {
+        let mean_rho = correlation
+            .cluster_mean_rho
+            .get(&cluster_idx)
+            .copied()
+            .unwrap_or(Decimal::ZERO);
+        out.insert(
+            market,
+            CorrelationShrinkInput {
+                cluster_size: batch_count,
+                mean_rho,
+            },
+        );
+    }
+    out
 }
 
 /// Project the allocator's solve provenance into the persisted plan metadata.
@@ -381,17 +447,23 @@ fn optimizer_meta(outcome: &OptimizerOutcome) -> PortfolioOptimizerMeta {
     }
 }
 
-/// Resolve the published binding: the allocator's binding, unless the size was
-/// the model's own (un-capped externally) choice that hit the Kelly cap.
+/// Resolve the published binding among allocator, `KellyCap`, and Kelly-stage soft caps.
+///
+/// Allocator hard constraints beat `KellyCap`, which beats Kelly-stage soft bindings
+/// (confidence / drawdown / correlation shrink).
 fn resolve_binding(
+    suggestion: &SizingSuggestion,
     allocator_binding: BindingConstraint,
-    binding_kelly_cap: bool,
 ) -> BindingConstraint {
-    if allocator_binding == BindingConstraint::None && binding_kelly_cap {
-        BindingConstraint::KellyCap
-    } else {
-        allocator_binding
+    if allocator_binding != BindingConstraint::None {
+        return allocator_binding;
     }
+    if suggestion.binding_kelly_cap {
+        return BindingConstraint::KellyCap;
+    }
+    suggestion
+        .kelly_stage_binding
+        .unwrap_or(BindingConstraint::None)
 }
 
 /// Whether a binding reflects scarce budget / exposure room (rank discount).
@@ -456,6 +528,8 @@ fn build_sizing_plan(
         sizing_model,
         edge_bps: item.suggestion.edge_bps,
         kelly_fraction_applied: item.suggestion.kelly_fraction_applied,
+        edge_uncertainty_shrink_applied: item.suggestion.edge_uncertainty_shrink_applied,
+        correlation_shrink_applied: item.suggestion.correlation_shrink_applied,
     }
 }
 

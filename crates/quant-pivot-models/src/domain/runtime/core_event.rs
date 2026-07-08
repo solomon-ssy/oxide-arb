@@ -388,6 +388,8 @@ pub enum MaterializationRunKind {
     Backtest,
     /// Favorite-longshot bias-table fit (Phase 11.2.1).
     BiasTableFit,
+    /// Model-score probability-calibrator fit (Phase 11.3).
+    ModelCalibrationFit,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -417,6 +419,7 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::ModelTrain => Self::Training,
             ResearchJobKind::Backtest => Self::Backtest,
             ResearchJobKind::BiasTableFit => Self::BiasTableFit,
+            ResearchJobKind::ModelCalibrationFit => Self::ModelCalibrationFit,
         }
     }
 }

@@ -10,8 +10,8 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        BuildTrainingDatasetRequest, FitBiasTableRequest, Paginated, ResearchJobListQuery,
-        ResearchJobView, RunBacktestRequest, TrainModelRequest,
+        BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest, Paginated,
+        ResearchJobListQuery, ResearchJobView, RunBacktestRequest, TrainModelRequest,
     },
     types::{ModelVersionId, ResearchJobId, RuntimeConfigVersionId},
 };
@@ -58,6 +58,18 @@ pub trait ResearchJobPort: Send + Sync {
     async fn enqueue_bias_table_fit(
         &self,
         request: FitBiasTableRequest,
+        runtime_config_version_id: RuntimeConfigVersionId,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView>;
+
+    /// Enqueue a model-score `ProbabilityCalibrator` fit (Phase 11.3 §4).
+    ///
+    /// The active runtime-config version is frozen at enqueue so the fit
+    /// replays through the exact `model.calibration` parameters (method
+    /// sample floors, embargo gap) that governed the request.
+    async fn enqueue_model_calibration_fit(
+        &self,
+        request: FitModelCalibratorRequest,
         runtime_config_version_id: RuntimeConfigVersionId,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;

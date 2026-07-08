@@ -56,6 +56,7 @@ fn bench_input(candidate_count: usize) -> AllocationInput<'static> {
         max_event_exposure_usd: dec!(10000),
         max_category_exposure_usd: dec!(25000),
         liquidity_usage_cap_pct: dec!(0.25),
+        max_aggregate_exposure_pct: dec!(0),
     }));
     let mut candidates = Vec::with_capacity(candidate_count);
     for index in 0..candidate_count {

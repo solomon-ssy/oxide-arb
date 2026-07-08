@@ -1,4 +1,4 @@
-//! Favorite-longshot bias-table admin route tests (Phase 11.2.1).
+//! Unified calibration-artifact admin route tests (Phase 11.3).
 //!
 //! Exercises route registration, RBAC wiring, request validation, and the
 //! paginated envelope — repository behavior is covered by pg tests.
@@ -7,7 +7,7 @@ use actix_web::{
     http::{StatusCode, header::AUTHORIZATION},
     test::TestRequest,
 };
-use quant_pivot_models::types::FavoriteLongshotBiasTableId;
+use quant_pivot_models::types::CalibrationArtifactId;
 use serde_json::json;
 
 use crate::harness::{self, API_VERSION, TestEnv};
@@ -30,11 +30,11 @@ async fn admin_token(env: &TestEnv) -> String {
 }
 
 #[tokio::test]
-async fn bias_tables_list_returns_paginated_envelope() {
+async fn calibration_artifacts_list_returns_paginated_envelope() {
     let env = TestEnv::start().await;
     let admin = admin_token(&env).await;
     let req = TestRequest::get()
-        .uri("/api/research/bias-tables?page=1&size=10")
+        .uri("/api/research/calibration-artifacts?page=1&size=10")
         .insert_header(API_VERSION)
         .insert_header(bearer(&admin));
     let res = harness::call(&env.state, req).await;
@@ -44,12 +44,12 @@ async fn bias_tables_list_returns_paginated_envelope() {
 }
 
 #[tokio::test]
-async fn bias_table_detail_not_found_returns_404() {
+async fn calibration_artifact_detail_not_found_returns_404() {
     let env = TestEnv::start().await;
     let admin = admin_token(&env).await;
-    let id = FavoriteLongshotBiasTableId::from_v7();
+    let id = CalibrationArtifactId::from_v7();
     let req = TestRequest::get()
-        .uri(&format!("/api/research/bias-tables/{id}"))
+        .uri(&format!("/api/research/calibration-artifacts/{id}"))
         .insert_header(API_VERSION)
         .insert_header(bearer(&admin));
     let res = harness::call(&env.state, req).await;
@@ -57,11 +57,11 @@ async fn bias_table_detail_not_found_returns_404() {
 }
 
 #[tokio::test]
-async fn bias_table_fit_rejects_inverted_window() {
+async fn calibration_artifact_fit_bias_table_rejects_inverted_window() {
     let env = TestEnv::start().await;
     let admin = admin_token(&env).await;
     let req = TestRequest::post()
-        .uri("/api/research/bias-tables/fit")
+        .uri("/api/research/calibration-artifacts/fit-bias-table")
         .insert_header(API_VERSION)
         .insert_header(bearer(&admin))
         .set_json(json!({

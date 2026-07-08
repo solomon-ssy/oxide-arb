@@ -46,11 +46,11 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgFactorRepository, PgFavoriteLongshotBiasTableRepository,
+        PgCalibrationArtifactRepository, PgEventRepository, PgFactorRepository,
         PgFeatureRepository, PgMarketRepository, PgModelRunRepository,
     },
     traits::{
-        EventRepository, FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+        CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
         MarketRepository, ModelRunRepository, QuantFactReadRepository,
     },
 };
@@ -381,9 +381,9 @@ async fn create_definition_and_values_then_list_for_run() {
     );
     let event_writer = Arc::new(FactorEventWriter::new(Arc::new(writer)));
     let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
-        PgFavoriteLongshotBiasTableRepository::new(db.clone()),
+        PgCalibrationArtifactRepository::new(db.clone()),
     )
-        as Arc<dyn FavoriteLongshotBiasTableRepository>));
+        as Arc<dyn CalibrationArtifactRepository>));
     let service = FactorPipelineService::new(Arc::clone(&factor_repo), event_writer, bias_table);
 
     let model_run_id = ModelRunId::from_v7();
@@ -480,9 +480,9 @@ async fn unpublished_factor_definitions_block_pipeline() {
         AsyncWriterObservability::default(),
     );
     let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
-        PgFavoriteLongshotBiasTableRepository::new(db.clone()),
+        PgCalibrationArtifactRepository::new(db.clone()),
     )
-        as Arc<dyn FavoriteLongshotBiasTableRepository>));
+        as Arc<dyn CalibrationArtifactRepository>));
     let service = FactorPipelineService::new(
         Arc::clone(&factor_repo),
         Arc::new(FactorEventWriter::new(Arc::new(writer))),

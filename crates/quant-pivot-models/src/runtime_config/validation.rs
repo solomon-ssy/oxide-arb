@@ -7,7 +7,8 @@
 use crate::runtime_config::FeatureFamily;
 
 use super::{
-    DecimalString, RuntimeConfig, SizingModelConfig, sections::FeaturesConfig,
+    DecimalString, RuntimeConfig, SizingModelConfig,
+    sections::{FeaturesConfig, KellySafetyConfig},
     validate_schedule_cadence,
 };
 use linkme::distributed_slice;
@@ -561,6 +562,17 @@ fn validate_model(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
         &config.model.shadow_diff_threshold,
         report,
     );
+    if config.model.calibration.min_samples_isotonic == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "model.calibration.min_samples_isotonic",
+            detail: "must be > 0".to_owned(),
+        });
+    }
+    unit_ratio(
+        "model.calibration.ci_confidence",
+        &config.model.calibration.ci_confidence,
+        report,
+    );
 }
 
 fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -747,7 +759,32 @@ fn validate_portfolio(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     );
 
     validate_sizing(&config.portfolio.sizing, report);
+    validate_kelly_safety(&config.portfolio.kelly_safety, report);
     validate_optimizer(config, report);
+}
+
+/// Validate Kelly safety-layer parameters (Phase 11.3).
+fn validate_kelly_safety(kelly: &KellySafetyConfig, report: &mut ConfigValidationReport) {
+    non_negative_decimal(
+        "portfolio.kelly_safety.edge_uncertainty_k",
+        &kelly.edge_uncertainty_k,
+        report,
+    );
+    unit_ratio(
+        "portfolio.kelly_safety.edge_uncertainty_floor",
+        &kelly.edge_uncertainty_floor,
+        report,
+    );
+    half_open_unit(
+        "portfolio.kelly_safety.max_aggregate_exposure_pct",
+        &kelly.max_aggregate_exposure_pct,
+        report,
+    );
+    half_open_unit(
+        "portfolio.kelly_safety.binding_materiality_threshold",
+        &kelly.binding_materiality_threshold,
+        report,
+    );
 }
 
 /// Validate the portfolio optimizer (`good_lp`) parameters.

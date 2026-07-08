@@ -33,14 +33,15 @@ use quant_pivot_models::{
     config::ResearchJobsConfig,
     domain::{
         BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        FavoriteLongshotFitPort, JobProgressSink, ModelTrainingPort, ResearchJobError,
-        ResearchJobInfo, ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
+        FavoriteLongshotFitPort, JobProgressSink, ModelCalibrationFitJobParams,
+        ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError, ResearchJobInfo,
+        ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobId},
 };
 use quant_pivot_repository::traits::{
-    FavoriteLongshotBiasTableRepository, RuntimeConfigVersionRepository,
+    CalibrationArtifactRepository, RuntimeConfigVersionRepository,
 };
 
 use super::{
@@ -53,12 +54,14 @@ use super::{
     task_id::TaskId,
     task_registry::AppRunner,
 };
+use crate::service::model_calibration_fit::ModelCalibrationFitService;
 
-const ALL_KINDS: [ResearchJobKind; 4] = [
+const ALL_KINDS: [ResearchJobKind; 5] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
     ResearchJobKind::BiasTableFit,
+    ResearchJobKind::ModelCalibrationFit,
 ];
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
@@ -78,6 +81,7 @@ struct ResearchJobExecutor {
     training: Arc<dyn ModelTrainingPort>,
     backtests: Arc<dyn BacktestPort>,
     bias_tables: Arc<dyn FavoriteLongshotFitPort>,
+    model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
 }
 
 /// Synchronous progress sink handed to the offline service: a lock-free channel
@@ -170,6 +174,17 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
+            ResearchJobKind::ModelCalibrationFit => {
+                let params: ModelCalibrationFitJobParams = from_params(&job.params_json)?;
+                let outcome = self
+                    .model_calibration_fit
+                    .fit(params, progress, cancel)
+                    .await?;
+                Ok(JobOutcome {
+                    result_ref: outcome.artifact_id.map(|id| id.as_uuid()),
+                    coverage: None,
+                })
+            }
         }
     }
 }
@@ -187,9 +202,22 @@ impl AppContext {
     pub fn register_research_job_worker(&self, runner: &mut AppRunner, engine: ResearchJobEngine) {
         let runtime_config =
             Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
-        let bias_table_repo = Arc::clone(&self.infra.repos.favorite_longshot_bias_table)
-            as Arc<dyn FavoriteLongshotBiasTableRepository>;
+        let bias_table_repo = Arc::clone(&self.infra.repos.calibration_artifact)
+            as Arc<dyn CalibrationArtifactRepository>;
         let config = self.config.quant.research_jobs;
+        let backtest_port = Arc::new(CoreBacktestPort::from_research(
+            &self.research,
+            Arc::clone(&runtime_config),
+            Arc::clone(&bias_table_repo),
+        ));
+        let model_calibration_fit: Arc<dyn ModelCalibrationFitPort> =
+            Arc::new(ModelCalibrationFitService::new(
+                Arc::clone(&backtest_port),
+                Arc::clone(&self.research.model_registry_repo),
+                Arc::clone(&self.research.training_dataset_repo),
+                Arc::clone(&bias_table_repo),
+                Arc::clone(&runtime_config),
+            ));
         let executor = ResearchJobExecutor {
             datasets: Arc::new(CoreTrainingDatasetPort::from_research(
                 &self.research,
@@ -204,12 +232,9 @@ impl AppContext {
                 Arc::clone(&runtime_config),
                 Arc::clone(&bias_table_repo),
             )),
-            backtests: Arc::new(CoreBacktestPort::from_research(
-                &self.research,
-                Arc::clone(&runtime_config),
-                Arc::clone(&bias_table_repo),
-            )),
+            backtests: backtest_port as Arc<dyn BacktestPort>,
             bias_tables: Arc::clone(&self.research.favorite_longshot_fit),
+            model_calibration_fit,
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
             run_worker(engine, executor, config, token).await;

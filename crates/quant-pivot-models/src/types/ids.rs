@@ -155,13 +155,19 @@ pub struct BacktestReportId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelComparisonReportId(Arc<Uuid>);
 
-/// Favorite-longshot bias-table artifact identifier (Phase 11.2.1).
+/// Unified, content-addressed calibration-artifact identifier (Phase 11.3).
 ///
-/// A content-addressed calibration artifact mapping market-implied price → the
-/// empirical settlement frequency, conditioned by `(category, price_bucket)`.
-/// Phase 11.3 folds this into the unified `CalibrationArtifactId` governance.
+/// Shared by every empirical calibration artifact in the system:
+/// `kind = ModelScore` (a [`crate::enums::quant::CalibrationKind`]) — a
+/// `ProbabilityCalibrator` mapping model score → `P(win)`, fit on an
+/// independent held-out calibration split — and `kind = MarketPriceBias`
+/// (formerly the standalone Phase 11.2.1 `FavoriteLongshotBiasTableId`,
+/// deleted, no alias) — market-implied price → empirical settlement
+/// frequency, conditioned by `(category, ttr_bucket, price_bucket)`. Both
+/// kinds share one table, one content-hash/split-hash contract, and one
+/// reliability-report shape.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FavoriteLongshotBiasTableId(Arc<Uuid>);
+pub struct CalibrationArtifactId(Arc<Uuid>);
 
 /// Shadow comparison record identifier (shadow vs active model run).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

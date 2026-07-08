@@ -353,6 +353,8 @@ crate::pg_enum! {
         Rollback => "rollback",
         /// A built training dataset was promoted to `Ready` (gated).
         DatasetReady => "dataset_ready",
+        /// A candidate model version bound a calibrated return model (Phase 11.3).
+        BindCalibration => "bind_calibration",
     }
 }
 
@@ -429,6 +431,8 @@ crate::pg_enum! {
         Backtest => "backtest",
         /// Fit a favorite-longshot bias-table artifact (Phase 11.2.1).
         BiasTableFit => "bias_table_fit",
+        /// Fit a model-score `ProbabilityCalibrator` artifact (Phase 11.3 §4).
+        ModelCalibrationFit => "model_calibration_fit",
     }
 }
 
@@ -656,14 +660,22 @@ crate::wire_enum! {
         CategoryCap => "category_cap",
         /// Visible-liquidity usage cap.
         LiquidityCap => "liquidity_cap",
-        /// Correlated-cluster exposure cap (`max_correlated_exposure_usd`).
+        /// Correlated-cluster exposure cap (`max_correlated_exposure_usd`);
+        /// also emitted when the Kelly-stage correlation shrink
+        /// (`f_i /= 1 + (n-1)·ρ̄`) is the dominant sizing shrink (Phase 11.3
+        /// §6.2 — same root cause, different pipeline stage).
         CorrelationCap => "correlation_cap",
-        /// Drawdown-scaling cap.
+        /// Drawdown-scaling cap: the Kelly-stage drawdown multiplier was the
+        /// dominant shrink on the final size (Phase 11.3 §6.4).
         DrawdownCap => "drawdown_cap",
-        /// Confidence-floor cap.
+        /// Confidence-floor cap: the Kelly-stage confidence multiplier was the
+        /// dominant shrink on the final size (Phase 11.3 §6.4).
         ConfidenceCap => "confidence_cap",
         /// Fractional-Kelly upper bound.
         KellyCap => "kelly_cap",
+        /// Total simultaneous portfolio exposure hard cap
+        /// (`portfolio.kelly_safety.max_aggregate_exposure_pct`; Phase 11.3 §6.3).
+        AggregateExposureCap => "aggregate_exposure_cap",
         /// No hard cap bound the size.
         #[default]
         None => "none",
@@ -716,6 +728,10 @@ crate::wire_enum! {
         ShadowNotPassed => "shadow_not_passed",
         /// The execution budget is exhausted.
         BudgetExhausted => "budget_exhausted",
+        /// The model's return model is `Heuristic` (uncalibrated) — fail-closed
+        /// per Phase 11.3 §8: `SemiAuto`/`AutoExecution` never build an intent
+        /// off an uncalibrated return estimate.
+        ReturnModelUncalibrated => "return_model_uncalibrated",
     }
 }
 
@@ -750,6 +766,78 @@ crate::wire_enum! {
         AvailableCashExhausted => "available_cash_exhausted",
         /// Fundable, but ranked beyond the report's `top_n` cut.
         BeyondTopN => "beyond_top_n",
+        /// The total simultaneous portfolio exposure hard cap was exhausted
+        /// (Phase 11.3 §6.3).
+        AggregateExposureCapExhausted => "aggregate_exposure_cap_exhausted",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_calibration_kind",
+    /// Which empirical calibration artifact family a
+    /// [`crate::types::CalibrationArtifactId`] belongs to (Phase 11.3 §3.4).
+    ///
+    /// Both kinds share one governance table, one content-hash/split-hash
+    /// contract, and one activation lifecycle; only the payload shape differs.
+    @derive(Default)
+    pub enum CalibrationKind {
+        /// A `ProbabilityCalibrator` mapping model score → `P(win)`, fit on an
+        /// independent held-out calibration split.
+        #[default]
+        ModelScore => "model_score",
+        /// A `FavoriteLongshotBiasTable` mapping market-implied price →
+        /// empirical settlement frequency (Phase 11.2.1, folded in here).
+        MarketPriceBias => "market_price_bias",
+    }
+}
+
+crate::wire_enum! {
+    /// The fitting method a `ModelScore` `ProbabilityCalibrator` used.
+    @derive(Default, schemars::JsonSchema)
+    pub enum CalibrationMethod {
+        /// Non-parametric monotone regression (pool-adjacent-violators).
+        /// Preferred with `>= min_samples_isotonic` samples.
+        #[default]
+        Isotonic => "isotonic",
+        /// Two-parameter sigmoid (Platt scaling); data-efficient for small
+        /// samples or near-sigmoid miscalibration.
+        Platt => "platt",
+    }
+}
+
+crate::wire_enum! {
+    /// The source a `Calibrated` return model's downside (bps) is read from.
+    ///
+    /// A single variant today (`MfeMae`): the system's Kelly/TP-SL structure
+    /// already treats "downside" as a stop distance, not a binary-settlement
+    /// full loss, so `MfeMae` (the empirical max-adverse-excursion label) is
+    /// the semantically correct v1 source. `EmpiricalCVaR` is added as a real
+    /// second variant once Phase 11.7 triple-barrier labeling lands (not
+    /// pre-declared now — zero dead semantics).
+    @derive(Default, schemars::JsonSchema)
+    pub enum DownsideSource {
+        /// Mean `max_adverse_excursion_bps` observed in the calibration split's
+        /// score bucket.
+        #[default]
+        MfeMae => "mfe_mae",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_dataset_purpose",
+    /// What a `TrainingDataset` row's materialized examples are used for
+    /// (Phase 11.3 §0/§4).
+    ///
+    /// `Calibration` datasets are built via the same pipeline as `Training`
+    /// datasets but must be time-disjoint **and** embargoed relative to the
+    /// training dataset of the model version they calibrate — the minimal,
+    /// literature-standard `WalkForwardSplit`-with-embargo purge primitive
+    /// (upgraded to full combinatorial CPCV by Phase 11.5).
+    @derive(Default)
+    pub enum DatasetPurpose {
+        #[default]
+        Training => "training",
+        Calibration => "calibration",
     }
 }
 

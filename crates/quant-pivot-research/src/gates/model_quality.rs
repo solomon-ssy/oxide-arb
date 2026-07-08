@@ -140,6 +140,9 @@ pub enum GateId {
     SellL2BookFidelity,
     /// `ExitDecision` microstructure fallback ratio (hard, sell family).
     SellFallbackRatio,
+    /// The return model must be `Calibrated` (hard, Buy family, publish/auto;
+    /// Phase 11.3 #5/#13 fail-closed).
+    CalibrationRequired,
 }
 
 impl GateId {
@@ -160,6 +163,7 @@ impl GateId {
             Self::CategoryConcentration => "category_concentration",
             Self::SellL2BookFidelity => "sell_l2_book_fidelity",
             Self::SellFallbackRatio => "sell_fallback_ratio",
+            Self::CalibrationRequired => "calibration_required",
         }
     }
 }
@@ -432,6 +436,11 @@ pub struct QualityGateInput {
     pub sell_thresholds: SellQualityGateThresholds,
     /// Model family under evaluation (`None` ⇒ buy-oriented defaults).
     pub model_family: Option<ModelFamily>,
+    /// Whether the evaluated artifact's `ReturnModelSpec` is `Calibrated`
+    /// (Phase 11.3 #5/#13). Buy-family `Publish`/`AutoExecution` intents hard-
+    /// gate on this; exit scorers and other intents ignore it (they have no
+    /// `ReturnModelSpec` concept).
+    pub return_model_calibrated: bool,
 }
 
 /// A content-addressed, persisted quality-gate evaluation.
@@ -495,6 +504,7 @@ impl ModelQualityGate for DefaultModelQualityGate {
                 evaluate_backtest_gates(report, &input.thresholds, &mut ledger);
             }
             evaluate_intent_gates(&input, &mut ledger);
+            evaluate_calibration_gate(&input, &mut ledger);
         }
 
         let gates = ledger.outcomes;
@@ -732,6 +742,38 @@ fn evaluate_intent_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
     evaluate_shadow_stability_gate(input, ledger);
 }
 
+/// Hard gate (Phase 11.3 #5/#13): `Publish` / `AutoExecution` intents on a Buy
+/// model require a `Calibrated` return model. `uncalibrated` (`Heuristic`)
+/// artifacts are bootstrap-only and must never reach publish or
+/// auto-execution — fail-closed, never a silent downgrade to the heuristic
+/// default.
+fn evaluate_calibration_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
+    let applies = matches!(
+        input.intent,
+        GateIntent::Publish | GateIntent::AutoExecution
+    );
+    if !applies {
+        ledger.not_applicable(
+            GateId::CalibrationRequired,
+            GateClass::Hard,
+            "calibrated",
+            "only evaluated for publish / auto-execution",
+        );
+        return;
+    }
+    ledger.hard(
+        GateId::CalibrationRequired,
+        input.return_model_calibrated,
+        if input.return_model_calibrated {
+            "calibrated"
+        } else {
+            "heuristic"
+        },
+        "calibrated",
+        "return model must be calibrated on an independent held-out split before publish / auto-execution",
+    );
+}
+
 /// Hard gate: publish / auto intents require an established shadow-overlap
 /// stability. Family-agnostic, so both Buy and Sell publishes are gated on it.
 fn evaluate_shadow_stability_gate(input: &QualityGateInput, ledger: &mut GateLedger) {
@@ -869,7 +911,40 @@ mod tests {
             thresholds: QualityGateThresholds::conservative(),
             sell_thresholds: SellQualityGateThresholds::default(),
             model_family: None,
+            return_model_calibrated: true,
         }
+    }
+
+    #[test]
+    fn publish_requires_calibrated_return_model() {
+        let mut input = passing_input(GateIntent::Publish);
+        input.return_model_calibrated = false;
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(
+            !decision.is_pass(),
+            "uncalibrated return model must block publish"
+        );
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::CalibrationRequired)
+        );
+        // Candidate intent does not require calibration yet.
+        let candidate = DefaultModelQualityGate::new()
+            .evaluate(QualityGateInput {
+                intent: GateIntent::Candidate,
+                return_model_calibrated: false,
+                ..passing_input(GateIntent::Candidate)
+            })
+            .expect("evaluate");
+        assert!(
+            candidate.is_pass(),
+            "candidate intent does not require calibration"
+        );
     }
 
     #[test]

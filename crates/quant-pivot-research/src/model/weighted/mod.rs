@@ -44,6 +44,7 @@ use crate::{
     features::FeatureName,
     model::{
         artifact::WeightedFactorModelArtifact,
+        calibrator::ResolvedCalibration,
         overlay::{WeightOverlay, WeightSource},
         runtime::{
             FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
@@ -65,12 +66,20 @@ pub struct WeightedFactorRuntime {
     weights: BTreeMap<FactorName, Decimal>,
     batch_layout: ScoringBatchLayout,
     weight_source: WeightSource,
+    /// Resolved `ProbabilityCalibrator` data when `artifact.return_model` is
+    /// `Calibrated` (Phase 11.3 §5) — bound once at load time by the factory,
+    /// never re-fetched per candidate. `None` for `Heuristic`.
+    calibration: Option<ResolvedCalibration>,
 }
 
 impl WeightedFactorRuntime {
     /// Build a runtime from a validated weighted artifact, optionally applying a
     /// non-persisted [`WeightOverlay`] over a non-published candidate / shadow
-    /// version.
+    /// version, and the resolved calibrator when the artifact's return model is
+    /// `Calibrated` (the loader — `quant-pivot-core`'s
+    /// `DefaultModelRuntimeFactory` — fails the load closed if it cannot
+    /// resolve a `Calibrated` artifact's `calibrator_ref`, so this is `None`
+    /// only for `Heuristic`).
     ///
     /// When `overlay` is `Some`, it **replaces** the artifact's weight table
     /// (fail-closed: it must cover exactly the artifact's factor set) and the
@@ -86,6 +95,7 @@ impl WeightedFactorRuntime {
     pub fn new(
         artifact: WeightedFactorModelArtifact,
         overlay: Option<WeightOverlay>,
+        calibration: Option<ResolvedCalibration>,
     ) -> QuantResult<Self> {
         artifact.validate()?;
         let artifact_weights = artifact.weight_index();
@@ -102,6 +112,7 @@ impl WeightedFactorRuntime {
             weights,
             batch_layout,
             weight_source,
+            calibration,
         })
     }
 
@@ -186,10 +197,12 @@ impl WeightedFactorRuntime {
         let composite_score = self.apply_multipliers(conviction, &row.context);
         let confidence = self.apply_confidence(confidence_mass, confidence_weighted, &row.context);
 
-        let estimate = self
-            .artifact
-            .return_model
-            .estimate(composite_score.inner(), confidence.inner());
+        let estimate = self.artifact.return_model.estimate(
+            composite_score.inner(),
+            confidence.inner(),
+            entry_price_ref,
+            self.calibration.as_ref(),
+        );
 
         let (top_positive, top_negative) = split_contributions(&contributions);
         let provenance = if estimate.calibrated {
@@ -546,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn weighted_runtime_scores_candidates_from_factor_table() {
-        let runtime = WeightedFactorRuntime::new(artifact(), None).expect("runtime");
+        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
             as_of: Utc::now(),
@@ -581,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn neutral_factors_emit_no_candidate() {
-        let runtime = WeightedFactorRuntime::new(artifact(), None).expect("runtime");
+        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
         let neutral_row = FactorInferenceRow {
             market_id: MarketId::new("0xflat"),
             token_id: TokenId::new("yes"),
@@ -620,7 +633,7 @@ mod tests {
         // still scores off the remaining scored factor; the indeterminate factor
         // is surfaced in the breakdown with a zero contribution and no fabricated
         // normalized score — never a silent neutral.
-        let runtime = WeightedFactorRuntime::new(artifact(), None).expect("runtime");
+        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
         let indeterminate = FactorValue {
             definition_id: FactorDefinitionId::from_v7(),
             name: MOMENTUM_ROC,

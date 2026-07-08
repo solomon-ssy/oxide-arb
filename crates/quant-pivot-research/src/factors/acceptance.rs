@@ -1121,7 +1121,7 @@ fn favorite_longshot_uses_bias_table_not_constant() {
 fn structural_factor_ic_gate_disables_insignificant_category() {
     use std::collections::BTreeMap;
 
-    use quant_pivot_models::types::{FavoriteLongshotBiasTableId, Price, Probability};
+    use quant_pivot_models::types::{CalibrationArtifactId, Price, Probability};
 
     // A retained price bin carrying a bias, but the curve's IC is NOT
     // significant — an insignificant category must be gated off when the IC
@@ -1152,7 +1152,7 @@ fn structural_factor_ic_gate_disables_insignificant_category() {
         },
     );
     let table = FavoriteLongshotBiasTable {
-        table_id: FavoriteLongshotBiasTableId::from_v7(),
+        table_id: CalibrationArtifactId::from_v7(),
         content_hash: ResearchHasher::canonical(&"ic-gate-test").unwrap(),
         fit_window: TimeWindow {
             from: Utc.timestamp_opt(0, 0).unwrap(),

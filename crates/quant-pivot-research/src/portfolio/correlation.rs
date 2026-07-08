@@ -60,6 +60,8 @@ pub struct CorrelationGroups {
     /// Multi-market clusters (singletons are omitted — they add no cap beyond the
     /// per-market cap). Each inner vec is sorted; the outer vec is sorted.
     pub clusters: Vec<Vec<MarketId>>,
+    /// Mean pairwise |ρ| per cluster index (Phase 11.3 §6.2 Kelly shrink).
+    pub cluster_mean_rho: BTreeMap<usize, Decimal>,
     /// How the clusters were derived.
     pub source: CorrelationSource,
 }
@@ -70,6 +72,7 @@ impl CorrelationGroups {
     pub const fn disabled() -> Self {
         Self {
             clusters: Vec::new(),
+            cluster_mean_rho: BTreeMap::new(),
             source: CorrelationSource::Disabled,
         }
     }
@@ -79,6 +82,7 @@ impl CorrelationGroups {
     pub fn into_constraint(self, cap_usd: Usd) -> CorrelationConstraint {
         CorrelationConstraint {
             clusters: self.clusters,
+            cluster_mean_rho: self.cluster_mean_rho,
             cap_usd,
             source: self.source,
         }
@@ -90,6 +94,8 @@ impl CorrelationGroups {
 pub struct CorrelationConstraint {
     /// Correlated market clusters (≥ 2 members each).
     pub clusters: Vec<Vec<MarketId>>,
+    /// Mean pairwise |ρ| per cluster index (Kelly correlation shrink).
+    pub cluster_mean_rho: BTreeMap<usize, Decimal>,
     /// Maximum projected exposure (`held + Σ allocated`) per cluster.
     pub cap_usd: Usd,
     /// Provenance of the clusters (carried into the plan's optimizer metadata).
@@ -143,8 +149,10 @@ impl ProxyCorrelationEstimator {
 
 impl CorrelationEstimator for ProxyCorrelationEstimator {
     fn estimate(&self, input: &CorrelationInput<'_>) -> QuantResult<CorrelationGroups> {
+        let clusters = Self::cluster(input.markets);
         Ok(CorrelationGroups {
-            clusters: Self::cluster(input.markets),
+            clusters: clusters.clone(),
+            cluster_mean_rho: proxy_cluster_rho(&clusters, input.cluster_threshold),
             source: CorrelationSource::Proxy,
         })
     }
@@ -185,6 +193,7 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
 
         let threshold = decimal_to_f64(input.cluster_threshold).abs();
         let mut uf = UnionFind::new(input.markets.len());
+        let mut pair_corrs: Vec<(usize, usize, f64)> = Vec::new();
         for i in 0..returns.len() {
             for j in (i + 1)..returns.len() {
                 let overlap = returns[i].len().min(returns[j].len());
@@ -195,11 +204,19 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
                     && corr.abs() >= threshold
                 {
                     uf.union(i, j);
+                    pair_corrs.push((i, j, corr.abs()));
                 }
             }
         }
+        let clusters = uf.into_clusters(input.markets);
         Ok(CorrelationGroups {
-            clusters: uf.into_clusters(input.markets),
+            clusters: clusters.clone(),
+            cluster_mean_rho: historical_cluster_rho(
+                input.markets,
+                &clusters,
+                &pair_corrs,
+                input.cluster_threshold,
+            ),
             source: CorrelationSource::Historical,
         })
     }
@@ -248,6 +265,52 @@ fn pearson(first: &[f64], second: &[f64]) -> Option<f64> {
 /// Convert a (small) observation count to `f64` without a lossy `as` cast.
 fn count_to_f64(count: usize) -> f64 {
     u32::try_from(count).map_or(f64::MAX, f64::from)
+}
+
+fn proxy_cluster_rho(clusters: &[Vec<MarketId>], threshold: Decimal) -> BTreeMap<usize, Decimal> {
+    let default_rho = threshold.abs().min(Decimal::ONE);
+    clusters
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| (idx, default_rho))
+        .collect()
+}
+
+fn historical_cluster_rho(
+    markets: &[CorrelationMarket],
+    clusters: &[Vec<MarketId>],
+    pair_corrs: &[(usize, usize, f64)],
+    fallback: Decimal,
+) -> BTreeMap<usize, Decimal> {
+    let market_index: BTreeMap<&str, usize> = markets
+        .iter()
+        .enumerate()
+        .map(|(idx, market)| (market.market_id.as_str(), idx))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (cluster_idx, members) in clusters.iter().enumerate() {
+        let member_indices: Vec<usize> = members
+            .iter()
+            .filter_map(|market| market_index.get(market.as_str()).copied())
+            .collect();
+        let mut rhos = Vec::new();
+        for &(left, right, corr) in pair_corrs {
+            if member_indices.contains(&left) && member_indices.contains(&right) {
+                rhos.push(corr);
+            }
+        }
+        let mean = if rhos.is_empty() {
+            fallback.abs().min(Decimal::ONE)
+        } else {
+            let sum: f64 = rhos.iter().sum();
+            Decimal::from_f64_retain(sum / count_to_f64(rhos.len()))
+                .unwrap_or(fallback)
+                .abs()
+                .min(Decimal::ONE)
+        };
+        out.insert(cluster_idx, mean);
+    }
+    out
 }
 
 /// Lossy `Decimal → f64` for statistical estimation only (never money).

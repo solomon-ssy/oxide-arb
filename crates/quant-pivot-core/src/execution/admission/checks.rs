@@ -149,7 +149,7 @@ impl AdmissionCheck for ModelPublicationCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        if input.model_published {
+        if input.model_state.published {
             AdmissionCheckTrace::pass(self.id(), "model version published")
         } else {
             AdmissionCheckTrace::deny(self.id(), "intent model version is no longer published")
@@ -602,7 +602,7 @@ impl AdmissionCheck for ManualBlockCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        if input.manual_block {
+        if input.exposure.manual_block {
             AdmissionCheckTrace::deny(self.id(), "market is on the operator block list")
         } else {
             AdmissionCheckTrace::pass(self.id(), "market not blocked")
@@ -629,7 +629,7 @@ impl AdmissionCheck for KillSwitchCheck {
                 ),
             );
         }
-        if input.mode == QuantRuntimeMode::AutoExecution && input.has_blocking_inflight {
+        if input.mode == QuantRuntimeMode::AutoExecution && input.exposure.has_blocking_inflight {
             return AdmissionCheckTrace::deny(
                 self.id(),
                 "blocking in-flight exposure (ambiguous/unresolvable) blocks auto execution",
@@ -694,6 +694,27 @@ impl AdmissionCheck for ExitMonitorReadinessCheck {
             AdmissionCheckTrace::pass(self.id(), "exit monitor ready")
         } else {
             AdmissionCheckTrace::deny(self.id(), "exit monitor not ready")
+        }
+    }
+}
+
+// 23 ─────────────────────────────────────────────────────────────────────────
+/// Frozen model artifact still carries a calibrated return model.
+pub(super) struct CalibratedReturnModelCheck;
+
+impl AdmissionCheck for CalibratedReturnModelCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::CalibratedReturnModel
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        if input.model_state.return_model_calibrated {
+            AdmissionCheckTrace::pass(self.id(), "return model is calibrated")
+        } else {
+            AdmissionCheckTrace::deny(
+                self.id(),
+                "return model is heuristic (uncalibrated) — fail-closed",
+            )
         }
     }
 }

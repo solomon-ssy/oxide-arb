@@ -5,6 +5,7 @@ use crate::{
         common::MarketCategory,
         domain::DomainFamily,
         factor::{FactorFamily, FactorNormalization},
+        quant::CalibrationMethod,
     },
     runtime_config::wire::{
         AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, EntryOrderPolicy,
@@ -390,15 +391,14 @@ impl Default for NegRiskStructuralConfig {
 
 /// Favorite-longshot bias factor parameters (Phase 11.2.1).
 ///
-/// `bias_table_ref` points at a fitted [`FavoriteLongshotBiasTableId`] artifact
+/// `bias_table_ref` points at a fitted [`CalibrationArtifactId`] artifact
 /// (as its UUID string); `None` disables the factor (it stays inert — never a
-/// fabricated constant). The sample-count gates fail closed on thin data.
-///
-/// [`FavoriteLongshotBiasTableId`]: crate::types::FavoriteLongshotBiasTableId
+/// silent heuristic fallback).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct FavoriteLongshotConfig {
-    /// Active fitted bias-table artifact id (UUID string), or `None` (inert).
+    /// Active fitted bias-table artifact id (`CalibrationArtifactId` UUID with
+    /// `kind = market_price_bias`), or `None` (inert).
     pub bias_table_ref: Option<String>,
     /// Number of equal-width price buckets over `(0, 1)` the fit uses.
     pub bins: u32,
@@ -663,6 +663,32 @@ impl Default for DomainConfig {
 /// Active and shadow model references.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+pub struct ModelCalibrationConfig {
+    /// Default calibrator fitting method (`isotonic` or `platt`).
+    pub method: CalibrationMethod,
+    /// Minimum samples required to select isotonic (below ⇒ fit must use Platt).
+    pub min_samples_isotonic: u64,
+    /// Minimum embargo gap (seconds) between a model's training-dataset window
+    /// and its calibration-dataset window.
+    pub embargo_secs: u64,
+    /// Two-sided confidence level for reliability-bin Wilson intervals.
+    pub ci_confidence: DecimalString,
+}
+
+impl Default for ModelCalibrationConfig {
+    fn default() -> Self {
+        Self {
+            method: CalibrationMethod::Isotonic,
+            min_samples_isotonic: 1_000,
+            embargo_secs: 86_400,
+            ci_confidence: DecimalString::new("0.95"),
+        }
+    }
+}
+
+/// Active and shadow model references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelConfig {
     /// Active published model version id.
     pub active_model_version_id: Option<ModelVersionRef>,
@@ -690,6 +716,8 @@ pub struct ModelConfig {
     pub candidate_score_floor: DecimalString,
     /// Shadow/live diff threshold.
     pub shadow_diff_threshold: DecimalString,
+    /// Model-score probability-calibrator fit policy (Phase 11.3).
+    pub calibration: ModelCalibrationConfig,
 }
 
 impl Default for ModelConfig {
@@ -703,6 +731,7 @@ impl Default for ModelConfig {
             min_quality_gate_age_secs: 86_400,
             candidate_score_floor: DecimalString::new("0.00"),
             shadow_diff_threshold: DecimalString::new("0.10"),
+            calibration: ModelCalibrationConfig::default(),
         }
     }
 }
@@ -914,6 +943,31 @@ impl Default for ReportScheduleConfig {
     }
 }
 
+/// Kelly safety-layer parameters (Phase 11.3 §6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct KellySafetyConfig {
+    /// Edge-uncertainty shrink coefficient `k` in `shrink = clamp(1 − k·edge_std, floor, 1)`.
+    pub edge_uncertainty_k: DecimalString,
+    /// Floor on the edge-uncertainty shrink multiplier.
+    pub edge_uncertainty_floor: DecimalString,
+    /// Hard cap on total simultaneous portfolio exposure as a fraction of bankroll.
+    pub max_aggregate_exposure_pct: DecimalString,
+    /// Kelly-stage binding is emitted when the dominant shrink falls below this threshold.
+    pub binding_materiality_threshold: DecimalString,
+}
+
+impl Default for KellySafetyConfig {
+    fn default() -> Self {
+        Self {
+            edge_uncertainty_k: DecimalString::new("1.0"),
+            edge_uncertainty_floor: DecimalString::new("0.5"),
+            max_aggregate_exposure_pct: DecimalString::new("0.25"),
+            binding_materiality_threshold: DecimalString::new("0.90"),
+        }
+    }
+}
+
 /// Portfolio policy: budget governance, exposure constraints, and sizing model.
 ///
 /// Policy (limits) only — never account state. Real equity / positions come
@@ -927,6 +981,8 @@ pub struct PortfolioConfig {
     pub constraints: PortfolioConstraints,
     /// Position-sizing model.
     pub sizing: SizingModelConfig,
+    /// Kelly safety-layer knobs (edge uncertainty, aggregate cap, binding threshold).
+    pub kelly_safety: KellySafetyConfig,
     /// Portfolio optimizer (`good_lp` LP/MILP) policy.
     pub optimizer: PortfolioOptimizerConfig,
 }

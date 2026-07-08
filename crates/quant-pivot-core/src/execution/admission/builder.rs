@@ -12,7 +12,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    domain::{DataQualityPort, OrderIntentInfo},
+    domain::{
+        CapitalAllocationInfo, DataQualityPort, ModelVersionInfo, OrderIntentInfo,
+        RecommendationInfo, RecommendationReportInfo, RuntimeConfigVersionInfo,
+    },
     enums::{market::MarketStatus, quant::PublicationStatus},
     types::Usd,
 };
@@ -21,9 +24,14 @@ use quant_pivot_repository::traits::{
     ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
     RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
 };
+use quant_pivot_research::{
+    artifact::ArtifactStore, model::load_hash_verified_artifact, portfolio::AccountSnapshot,
+};
 use rust_decimal::Decimal;
 
-use super::{AdmissionInput, AdmissionSeams, StateVersion};
+use super::{
+    AdmissionExposureState, AdmissionInput, AdmissionModelState, AdmissionSeams, StateVersion,
+};
 use crate::{
     execution::{breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle},
     governance::{KillSwitchHandle, RuntimeModeHandle},
@@ -37,6 +45,7 @@ pub struct AdmissionInputBuilderDeps {
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
@@ -94,6 +103,63 @@ impl AdmissionInputBuilder {
         let max_open_intents = config.execution.capital.max_open_intents;
         let max_reserved_usd = parse_capital_usd(&config.execution.capital.max_reserved_usd.value)?;
 
+        let fetched = self
+            .fetch_parallel_sources(&recommendation, intent, budget_total_usd, now)
+            .await?;
+        let model_state = self.resolve_model_state(fetched.model_version).await?;
+        let exposure = AdmissionExposureState {
+            has_blocking_inflight: fetched.has_blocking_inflight,
+            manual_block: fetched.manual_block,
+        };
+
+        let book = deps.book_store.load(&intent.entry_order_json.token_id);
+        let data_quality = deps.data_quality.snapshot();
+        let mode = deps.runtime_mode.current();
+        let kill_switch = deps.kill_switch.current();
+        let state_version = StateVersion {
+            config_version_id: fetched.active_version.runtime_config_version_id,
+            account_as_of: fetched.account.as_of,
+            book_version: book.as_ref().map(|snapshot| snapshot.version),
+            book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
+            kill_switch_state: kill_switch,
+        };
+
+        Ok(AdmissionInput {
+            intent: intent.clone(),
+            recommendation,
+            report: fetched.report,
+            mode,
+            kill_switch,
+            account: fetched.account,
+            allocation: fetched.allocation,
+            book,
+            budget_total_usd,
+            open_intent_count: fetched.open_intent_count,
+            max_open_intents,
+            max_reserved_usd,
+            model_state,
+            data_quality,
+            max_stale_book_ratio_bps,
+            exposure,
+            seams: AdmissionSeams {
+                venue_health: deps.venue_health.current(),
+                credentials_ready: deps.account_factory.credentials_ready(),
+                exit_monitor_ready: deps.exit_monitor_health.is_ready(now),
+            },
+            now,
+            now_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+            state_version,
+        })
+    }
+
+    async fn fetch_parallel_sources(
+        &self,
+        recommendation: &RecommendationInfo,
+        intent: &OrderIntentInfo,
+        budget_total_usd: Usd,
+        now: DateTime<Utc>,
+    ) -> QuantResult<ParallelAdmissionFetch> {
+        let deps = &self.deps;
         let report_id = recommendation.recommendation_report_id.clone();
         let market_id = recommendation.market_id.clone();
         let order_intent_id = intent.order_intent_id.clone();
@@ -130,67 +196,56 @@ impl AdmissionInputBuilder {
 
         let report = report_result?
             .ok_or_else(|| not_found("recommendation_report", report_id.to_string()))?;
-        let model_published = model_version_result?
-            .is_some_and(|version| version.publication_status == PublicationStatus::Published);
-        // Truth-unknown in-flight exposure blocks new auto entries (fail-closed):
-        // an `Ambiguous` order (capital held, venue truth unknown) or a recon
-        // worker's terminal `Unresolvable` verdict (05.5). Resting open orders and
-        // `Pending` (not-yet-reconciled) rows do not block.
-        let has_blocking_inflight = unresolvable_result? || ambiguous_inflight_result?;
-        let allocation = allocation_result?;
-        let account = account_result?;
         let manual_block = market_result?
             .ok_or_else(|| not_found("market", recommendation.market_id.to_string()))?
             .status
             == MarketStatus::ManuallyBlocked;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
-        let open_intent_count = open_intent_result?;
 
-        let book = deps.book_store.load(&intent.entry_order_json.token_id);
-        let data_quality = deps.data_quality.snapshot();
-        let mode = deps.runtime_mode.current();
-        let kill_switch = deps.kill_switch.current();
-
-        let state_version = StateVersion {
-            config_version_id: active_version.runtime_config_version_id,
-            account_as_of: account.as_of,
-            book_version: book.as_ref().map(|snapshot| snapshot.version),
-            book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
-            kill_switch_state: kill_switch,
-        };
-
-        Ok(AdmissionInput {
-            intent: intent.clone(),
-            recommendation,
+        Ok(ParallelAdmissionFetch {
             report,
-            mode,
-            kill_switch,
-            account,
-            allocation,
-            book,
-            budget_total_usd,
-            open_intent_count,
-            max_open_intents,
-            max_reserved_usd,
-            model_published,
-            data_quality,
-            max_stale_book_ratio_bps,
-            has_blocking_inflight,
+            model_version: model_version_result?,
+            has_blocking_inflight: unresolvable_result? || ambiguous_inflight_result?,
+            allocation: allocation_result?,
+            account: account_result?,
             manual_block,
-            // Real readiness seams: the 05.4 breaker supplies venue health, the
-            // 05.6 exit-monitor worker supplies its heartbeat, and credentials are
-            // real (the same keystore signs and reads).
-            seams: AdmissionSeams {
-                venue_health: deps.venue_health.current(),
-                credentials_ready: deps.account_factory.credentials_ready(),
-                exit_monitor_ready: deps.exit_monitor_health.is_ready(now),
-            },
-            now,
-            now_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
-            state_version,
+            active_version,
+            open_intent_count: open_intent_result?,
         })
     }
+
+    async fn resolve_model_state(
+        &self,
+        model_version: Option<ModelVersionInfo>,
+    ) -> QuantResult<AdmissionModelState> {
+        let published = model_version
+            .as_ref()
+            .is_some_and(|version| version.publication_status == PublicationStatus::Published);
+        let return_model_calibrated = match model_version.as_ref() {
+            Some(version) => {
+                let artifact =
+                    load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+                artifact.return_model_is_calibrated()
+            }
+            None => false,
+        };
+        Ok(AdmissionModelState {
+            published,
+            return_model_calibrated,
+        })
+    }
+}
+
+struct ParallelAdmissionFetch {
+    report: RecommendationReportInfo,
+    model_version: Option<ModelVersionInfo>,
+    has_blocking_inflight: bool,
+    allocation: Option<CapitalAllocationInfo>,
+    account: AccountSnapshot,
+    manual_block: bool,
+    active_version: RuntimeConfigVersionInfo,
+    open_intent_count: u64,
 }
 
 fn not_found(entity: &'static str, id: String) -> QuantError {

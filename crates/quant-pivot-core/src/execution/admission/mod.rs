@@ -88,6 +88,26 @@ pub struct StateVersion {
     pub kill_switch_state: KillSwitchState,
 }
 
+/// Model-governance flags distilled at build time (`#5`, `#23`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionModelState {
+    /// Whether the intent's model version is still `Published`.
+    pub published: bool,
+    /// Whether the frozen model artifact's return model is `Calibrated`.
+    pub return_model_calibrated: bool,
+}
+
+/// Market / exposure blocking flags (`#17`, manual-block check).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionExposureState {
+    /// Whether truth-unknown in-flight exposure exists — an `Ambiguous` order
+    /// (capital held, venue truth unknown) or a terminal `Unresolvable` recon
+    /// verdict (05.5). Blocks new auto entries (fail-closed, parent §11).
+    pub has_blocking_inflight: bool,
+    /// Whether the intent's market is on the operator block list.
+    pub manual_block: bool,
+}
+
 /// Immutable, decision-time-frozen aggregate consumed by every admission check.
 ///
 /// Built once by [`AdmissionInputBuilder`]; the checks read it as pure
@@ -123,19 +143,15 @@ pub struct AdmissionInput {
     /// Governed cap on total reserved capital
     /// (`execution.capital.max_reserved_usd`; `0` disables). Distilled at build.
     pub max_reserved_usd: Usd,
-    /// Whether the intent's model version is still `Published`.
-    pub model_published: bool,
+    /// Model publication + calibration flags distilled from the registry.
+    pub model_state: AdmissionModelState,
     /// Live data-quality classification of the book plane.
     pub data_quality: DataQualitySnapshot,
     /// Plane-wide stale-book ratio cap (`data_quality.max_stale_book_ratio_bps`),
     /// distilled from the active config at build time.
     pub max_stale_book_ratio_bps: u64,
-    /// Whether truth-unknown in-flight exposure exists — an `Ambiguous` order
-    /// (capital held, venue truth unknown) or a terminal `Unresolvable` recon
-    /// verdict (05.5). Blocks new auto entries (fail-closed, parent §11).
-    pub has_blocking_inflight: bool,
-    /// Whether the intent's market is on the operator block list.
-    pub manual_block: bool,
+    /// Market / in-flight exposure blocking distilled at build time.
+    pub exposure: AdmissionExposureState,
     /// Deferred readiness seams (`#18`/`#19`/`#20`).
     pub seams: AdmissionSeams,
     /// Decision time.

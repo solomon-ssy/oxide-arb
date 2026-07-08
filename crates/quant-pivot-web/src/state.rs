@@ -9,10 +9,10 @@ use quant_pivot_models::{
         DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort, ExecutionSubmitPort,
         FactorGovernancePort, FavoriteLongshotFitPort, KillSwitchPort, MarketDataPort,
         MarketLinkageGovernancePort, MaterializationRunEvent, MaterializationRunKind,
-        MaterializationRunStatus, MetricsScrapePort, ModelGovernancePort, ModelSpecPort,
-        ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort,
-        ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort, RuntimeControlPort,
-        StructuralMonitorPort, TrainingDatasetPort,
+        MaterializationRunStatus, MetricsScrapePort, ModelCalibrationFitPort, ModelGovernancePort,
+        ModelSpecPort, ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort,
+        ReconciliationPort, ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort,
+        RuntimeControlPort, StructuralMonitorPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -79,8 +79,11 @@ pub struct AppState {
     /// Durable async research-job engine (dataset build / model train / backtest
     /// / bias-table fit): enqueue + task-center list/get/cancel/retry.
     pub research_jobs: Arc<dyn ResearchJobPort>,
-    /// Favorite-longshot bias-table fit enqueue + artifact read (Phase 11.2.1).
+    /// Favorite-longshot bias-table fit enqueue + unified calibration-artifact
+    /// read (Phase 11.2.1, unified under Phase 11.3 §3.4).
     pub favorite_longshot: Arc<dyn FavoriteLongshotFitPort>,
+    /// Model-score `ProbabilityCalibrator` fit enqueue (Phase 11.3 §4).
+    pub model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
     /// Market → external-subject linkage ledger (Phase 11.2.2).
     pub market_linkages: Arc<dyn MarketLinkageRepository>,
     /// Domain-source ingest cursor health (Phase 11.2.2).

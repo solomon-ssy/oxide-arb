@@ -20,21 +20,21 @@ use arc_swap::ArcSwap;
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     runtime_config::FavoriteLongshotConfig,
-    types::{ContentHash, FavoriteLongshotBiasTableId},
+    types::{CalibrationArtifactId, ContentHash},
 };
-use quant_pivot_repository::traits::FavoriteLongshotBiasTableRepository;
+use quant_pivot_repository::traits::CalibrationArtifactRepository;
 use quant_pivot_research::model::FavoriteLongshotBiasTable;
 
 /// Lock-free, hot-reloadable holder for the active favorite-longshot bias table.
 pub struct BiasTableApplicator {
-    repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+    repo: Arc<dyn CalibrationArtifactRepository>,
     snapshot: ArcSwap<Option<Arc<FavoriteLongshotBiasTable>>>,
 }
 
 impl BiasTableApplicator {
     /// An applicator with no table bound (the inert default before activation).
     #[must_use]
-    pub fn new(repo: Arc<dyn FavoriteLongshotBiasTableRepository>) -> Self {
+    pub fn new(repo: Arc<dyn CalibrationArtifactRepository>) -> Self {
         Self {
             repo,
             snapshot: ArcSwap::from_pointee(None),
@@ -57,7 +57,7 @@ impl BiasTableApplicator {
             self.snapshot.store(Arc::new(None));
             return Ok(());
         };
-        let id: FavoriteLongshotBiasTableId = raw.trim().parse().map_err(|error| {
+        let id: CalibrationArtifactId = raw.trim().parse().map_err(|error| {
             ControlError::Precondition(format!(
                 "favorite_longshot.bias_table_ref `{raw}` is not a valid table id: {error}"
             ))

@@ -6,8 +6,9 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        GovernanceActor, PublishModelCommand, PublishModelRequest, RetireModelCommand,
-        RetireModelRequest, RollbackModelCommand, RollbackModelRequest, TrainedModelView,
+        BindCalibrationRequest, GovernanceActor, PublishModelCommand, PublishModelRequest,
+        RetireModelCommand, RetireModelRequest, RollbackModelCommand, RollbackModelRequest,
+        TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -48,6 +49,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models/{id}/retire",
             Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Retire),
             retire,
+        ),
+        spec(
+            Method::POST,
+            "/research/models/{id}/bind-calibration",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Create),
+            bind_calibration,
         ),
     ]
 }
@@ -180,6 +187,50 @@ pub async fn retire(
     op_ctx.set_detail(serde_json::json!({
         "model_version_id": view.model_version_id.to_string(),
         "publication_status": view.publication_status,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": request.reason,
+    }));
+    Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/models/{id}/bind-calibration` — bind a calibrator artifact.
+pub async fn bind_calibration(
+    state: web::Data<AppState>,
+    id: web::Path<ModelVersionId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<BindCalibrationRequest>,
+) -> Result<WebResponse<TrainedModelView>, WebError> {
+    let request = body.into_inner();
+    let model_version_id = id.into_inner();
+    let before = state
+        .model_training
+        .find_version(&model_version_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!("model_version not found: {model_version_id}"))
+        })?;
+    let created = state
+        .model_governance
+        .bind_calibration(
+            &model_version_id,
+            request.clone(),
+            governance_actor(&actor, &acting_role),
+        )
+        .await?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after_hash = canonical_state_hash(&created)?;
+    let view = TrainedModelView::from(created);
+    op_ctx.set_action(OperationCategory::Governance, "model.bind_calibration");
+    op_ctx.set_resource(ResourceType::Publication, view.model_version_id.to_string());
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "source_model_version_id": model_version_id.to_string(),
+        "calibrated_model_version_id": view.model_version_id.to_string(),
+        "calibrator_ref": request.calibrator_ref.to_string(),
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,

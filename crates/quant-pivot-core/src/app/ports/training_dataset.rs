@@ -16,7 +16,7 @@ use quant_pivot_models::{
     types::{RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, EventRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+    AttributionRepository, CalibrationArtifactRepository, EventRepository, FeatureRepository,
     MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PositionRepository,
     QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
     TrainingDatasetRepository,
@@ -52,7 +52,7 @@ pub struct CoreTrainingDatasetPort {
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+    bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
     max_spine_samples: u64,
     /// Deploy tunable: `as_of` slices sampled during `plan` to estimate keep-rate.
@@ -67,7 +67,7 @@ impl CoreTrainingDatasetPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+        bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
         max_spine_samples: u64,
         plan_sample_slices: u32,
         plan_sample_markets: u32,
@@ -149,6 +149,7 @@ impl CoreTrainingDatasetPort {
             feature_schema_version: body.feature_schema_version,
             sample_sources: body.sample_sources.clone(),
             training_dataset_id: None,
+            purpose: body.purpose,
         }
     }
 
@@ -164,6 +165,7 @@ impl CoreTrainingDatasetPort {
             feature_schema_version: body.feature_schema_version,
             sample_sources: body.sample_sources.clone(),
             training_dataset_id: body.training_dataset_id.clone(),
+            purpose: body.purpose,
         }
     }
 }

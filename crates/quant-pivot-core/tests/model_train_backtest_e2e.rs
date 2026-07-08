@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 
+use quant_pivot_core::governance::CoreCalibrationArtifactLoader;
 use quant_pivot_core::service::{
     backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
     historical_replay::ReplayConfig,
@@ -46,8 +47,8 @@ use quant_pivot_models::{
         factor::FactorFamily,
         model::ModelFamily,
         quant::{
-            DataQualityStatus, FactorDirection, ModelRunKind, ModelRunStatus, PublicationStatus,
-            TrainingDatasetStatus,
+            DataQualityStatus, DatasetPurpose, FactorDirection, ModelRunKind, ModelRunStatus,
+            PublicationStatus, TrainingDatasetStatus,
         },
         runtime_config::RuntimeConfigVersionSource,
     },
@@ -65,13 +66,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgBacktestReportRepository, PgEventRepository, PgMarketRepository,
-        PgModelComparisonReportRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgBacktestReportRepository, PgCalibrationArtifactRepository, PgEventRepository,
+        PgMarketRepository, PgModelComparisonReportRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        EventRepository, MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
-        RuntimeConfigVersionRepository, TrainingDatasetRepository,
+        CalibrationArtifactRepository, EventRepository, MarketRepository, ModelRegistryRepository,
+        QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -79,7 +80,8 @@ use quant_pivot_research::{
     factors::{FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
     features::{FeatureName, FeatureValue, FeatureVector, names},
     model::{
-        DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact, ModelRuntimeFactoryBuilder,
+        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact,
+        ModelRuntimeFactoryBuilder,
     },
     training::{DatasetParquetCodec, LabelName, TrainingExample, TrainingLabel},
 };
@@ -575,6 +577,7 @@ async fn seed_dataset(
         window_start,
         window_end: window_start + ChronoDuration::hours(4),
         status: TrainingDatasetStatus::Built,
+        purpose: DatasetPurpose::Training,
         feature_schema_hash: content_hash('a'),
         factor_schema_hash: content_hash('b'),
         label_schema_hash: content_hash('d'),
@@ -754,8 +757,14 @@ async fn train_then_backtest_then_calibrate_e2e() {
     assert_training_run_ledger(&db, &version, content_hash('e')).await;
 
     // ── Backtest (same PIT rematerialization path as training) ─────────────
-    let factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> =
-        Arc::new(DefaultModelRuntimeFactoryBuilder::new(Arc::clone(&store)));
+    let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
+        CoreCalibrationArtifactLoader::new(Arc::new(PgCalibrationArtifactRepository::new(
+            db.clone(),
+        )) as Arc<dyn CalibrationArtifactRepository>),
+    );
+    let factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> = Arc::new(
+        DefaultModelRuntimeFactoryBuilder::new(Arc::clone(&store), calibration_loader),
+    );
     let backtester = BacktestService::new(
         BacktestServiceDeps {
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),

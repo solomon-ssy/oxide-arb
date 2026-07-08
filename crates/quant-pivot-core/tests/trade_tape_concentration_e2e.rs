@@ -74,11 +74,11 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgFactorRepository, PgFavoriteLongshotBiasTableRepository,
+        PgCalibrationArtifactRepository, PgEventRepository, PgFactorRepository,
         PgFeatureRepository, PgMarketRepository, PgModelRunRepository,
     },
     traits::{
-        EventRepository, FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+        CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
         MarketRepository, ModelRunRepository, QuantFactReadRepository,
     },
 };
@@ -552,9 +552,8 @@ async fn run_factor_round_and_assert_concentration(
         Arc::clone(&factor_repo),
         noop_factor_writer(),
         Arc::new(BiasTableApplicator::new(
-            Arc::new(PgFavoriteLongshotBiasTableRepository::new(
-                harness.db.clone(),
-            )) as Arc<dyn FavoriteLongshotBiasTableRepository>,
+            Arc::new(PgCalibrationArtifactRepository::new(harness.db.clone()))
+                as Arc<dyn CalibrationArtifactRepository>,
         )),
     );
     let factor_result = factor_service

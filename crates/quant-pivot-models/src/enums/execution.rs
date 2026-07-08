@@ -209,6 +209,11 @@ crate::wire_enum! {
         VenueGuard => "venue_guard",
         CredentialReadiness => "credential_readiness",
         ExitMonitorReadiness => "exit_monitor_readiness",
+        /// Defense-in-depth re-check (Phase 11.3 §8): the frozen model artifact's
+        /// return model must still be `Calibrated` at submission time, even
+        /// though `report/composer.rs` already denied `SemiAuto`/`AutoExecution`
+        /// eligibility for uncalibrated candidates at report-build time.
+        CalibratedReturnModel => "calibrated_return_model",
     }
 }
 

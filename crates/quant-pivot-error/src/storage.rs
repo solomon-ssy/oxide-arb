@@ -38,6 +38,8 @@ pub mod entity {
     pub const QUANT_SETTLEMENT_REDEEM_LOT: &str = "quant_settlement_redeem_lot";
     /// `quant_training_dataset`.
     pub const QUANT_TRAINING_DATASET: &str = "quant_training_dataset";
+    /// `quant_calibration_artifact`.
+    pub const QUANT_CALIBRATION_ARTIFACT: &str = "quant_calibration_artifact";
     /// `quant_research_job`.
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
     /// `quant_model_registry`.

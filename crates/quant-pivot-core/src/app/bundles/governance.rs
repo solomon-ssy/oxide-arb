@@ -38,9 +38,9 @@ use quant_pivot_repository::{
         PgKillSwitchStateRepository, PgSystemRuntimeStateRepository, SYSTEM_KILL_SWITCH_ID,
     },
     traits::{
-        CapitalAllocationRepository, FavoriteLongshotBiasTableRepository,
-        KillSwitchStateRepository, ModelRegistryRepository, ReconciliationRepository,
-        RuntimeConfigVersionRepository, ShadowComparisonRepository, SystemRuntimeStateRepository,
+        CalibrationArtifactRepository, CapitalAllocationRepository, KillSwitchStateRepository,
+        ModelRegistryRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+        ShadowComparisonRepository, SystemRuntimeStateRepository,
     },
 };
 use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
@@ -139,9 +139,9 @@ impl GovernanceBundle {
         let status_publisher = SystemStatusPublisher::new(events);
         let weight_overlay = seed_weight_overlay(&runtime_config);
         let bias_table = Arc::new(BiasTableApplicator::new(Arc::clone(
-            &infra.repos.favorite_longshot_bias_table,
+            &infra.repos.calibration_artifact,
         )
-            as Arc<dyn FavoriteLongshotBiasTableRepository>));
+            as Arc<dyn CalibrationArtifactRepository>));
         let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
             deploy.research.artifact_root.clone(),
         ));

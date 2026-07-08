@@ -569,7 +569,7 @@ fn build_research(t: &mut MenuTree) {
         "Retire Factor",
         perm(ResourceType::FactorDefinition, Operation::Retire),
     );
-    build_research_bias_tables(t, &research);
+    build_research_calibration_artifacts(t, &research);
     build_research_domain_governance(t, &research);
     // Pairwise comparison report — deep-linkable from a backtest, hidden from
     // the sidebar (parented under the directory, not another page).
@@ -584,27 +584,28 @@ fn build_research(t: &mut MenuTree) {
     });
 }
 
-/// Favorite-longshot bias-table catalog (Phase 11.2.1): a content-addressed
-/// calibration artifact fit via a governed research job and pinned into the
-/// runtime config as the `favorite_longshot` factor's bias source.
-fn build_research_bias_tables(t: &mut MenuTree, research: &MenuId) {
-    let bias_tables = t.page(PageSpec {
+/// Unified calibration-artifact catalog (Phase 11.3 §3.4): content-addressed
+/// `market_price_bias` and `model_score` artifacts fit via governed research
+/// jobs; bias tables activate into runtime config, model calibrators bind to
+/// model versions.
+fn build_research_calibration_artifacts(t: &mut MenuTree, research: &MenuId) {
+    let calibration_artifacts = t.page(PageSpec {
         parent: research,
-        name: "research-bias-tables",
-        title: "page.menu.researchBiasTables",
-        path: "/research/bias-tables",
-        component: "research/bias-tables/index",
+        name: "research-calibration-artifacts",
+        title: "page.menu.researchCalibrationArtifacts",
+        path: "/research/calibration-artifacts",
+        component: "research/calibration-artifacts/index",
         permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
         icon: "lucide:scale",
     });
     t.button(
-        &bias_tables,
+        &calibration_artifacts,
         "materialization:create",
-        "Fit Bias Table",
+        "Fit Calibration Artifact",
         perm(ResourceType::Materialization, Operation::Create),
     );
     t.button(
-        &bias_tables,
+        &calibration_artifacts,
         "runtime_config:create",
         "Activate Bias Table",
         perm(ResourceType::RuntimeConfig, Operation::Create),

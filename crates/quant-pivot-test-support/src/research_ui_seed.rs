@@ -14,7 +14,9 @@ use quant_pivot_models::{
     enums::{
         factor::{FactorDefinitionScope, FactorFamily},
         model::ModelFamily,
-        quant::{ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus},
+        quant::{
+            DatasetPurpose, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
+        },
     },
     types::{
         ArtifactUri, BacktestReportId, ContentHash, DatasetCoverage, FactorDefinitionId,
@@ -330,6 +332,7 @@ async fn seed_training_datasets(
             window_start,
             window_end: window_start + ChronoDuration::days(7),
             status,
+            purpose: DatasetPurpose::Training,
             feature_schema_hash: hash.clone(),
             factor_schema_hash: hash.clone(),
             label_schema_hash: hash.clone(),

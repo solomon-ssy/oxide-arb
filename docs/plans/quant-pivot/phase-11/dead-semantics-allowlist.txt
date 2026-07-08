@@ -11,9 +11,6 @@
 # Format (whitespace-separated): <Type::Variant>  <owner-phase>  <reason...>
 # Lines starting with '#' and blank lines are ignored.
 
-BindingConstraint::DrawdownCap    phase-11.3  drawdown emitted as an independent binding constraint (not only Kelly shrink)
-BindingConstraint::ConfidenceCap  phase-11.3  confidence floor emitted as an independent binding constraint
-
 EntryTriggerKind::Pullback        phase-11.7  composer emits real conditional entry triggers
 EntryTriggerKind::Breakout        phase-11.7  composer emits real conditional entry triggers
 EntryTriggerKind::TimeWindow      phase-11.7  composer emits real conditional entry triggers

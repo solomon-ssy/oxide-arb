@@ -3,6 +3,7 @@ mod account_snapshot;
 mod attribution;
 mod backtest_report;
 mod basis_alert;
+mod calibration_artifact;
 mod capital_allocation;
 mod comparison_report;
 mod dataset;
@@ -11,7 +12,6 @@ mod equity_snapshot;
 mod execution_order;
 mod execution_submission;
 mod factor;
-mod favorite_longshot;
 mod feature;
 mod governance_audit;
 mod market_linkage;
@@ -33,17 +33,17 @@ mod trade_tape_block_cursor;
 pub use {
     account_snapshot::PgAccountSnapshotRepository, attribution::PgAttributionRepository,
     backtest_report::PgBacktestReportRepository, basis_alert::PgBasisAlertRepository,
+    calibration_artifact::PgCalibrationArtifactRepository,
     capital_allocation::PgCapitalAllocationRepository,
     comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
     domain_source_cursor::PgDomainSourceCursorRepository,
     equity_snapshot::PgEquitySnapshotRepository, execution_order::PgExecutionOrderRepository,
     execution_submission::PgExecutionSubmissionRepository, factor::PgFactorRepository,
-    favorite_longshot::PgFavoriteLongshotBiasTableRepository, feature::PgFeatureRepository,
-    governance_audit::PgModelGovernanceAuditRepository, market_linkage::PgMarketLinkageRepository,
-    market_selection::PgMarketSelectionRepository, model_registry::PgModelRegistryRepository,
-    model_run::PgModelRunRepository, order_intent::PgOrderIntentRepository,
-    portfolio_plan::PgPortfolioPlanRepository, position::PgPositionRepository,
-    recommendation::PgRecommendationRepository,
+    feature::PgFeatureRepository, governance_audit::PgModelGovernanceAuditRepository,
+    market_linkage::PgMarketLinkageRepository, market_selection::PgMarketSelectionRepository,
+    model_registry::PgModelRegistryRepository, model_run::PgModelRunRepository,
+    order_intent::PgOrderIntentRepository, portfolio_plan::PgPortfolioPlanRepository,
+    position::PgPositionRepository, recommendation::PgRecommendationRepository,
     recommendation_report::PgRecommendationReportRepository,
     reconciliation::PgReconciliationRepository, research_job::PgResearchJobRepository,
     reserved_capital::PgReservedCapitalRepository, settlement_redeem::PgSettlementRedeemRepository,

@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
-    governance::{BiasTableApplicator, RuntimeModeHandle, WeightOverlayApplicator},
+    governance::{
+        BiasTableApplicator, CoreCalibrationArtifactLoader, RuntimeModeHandle,
+        WeightOverlayApplicator,
+    },
     ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         alert_dispatcher::AlertDispatcher, fact_lag::IngestPipelineLagTracker,
@@ -76,16 +79,15 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEquitySnapshotRepository, PgEventRepository, PgFactorRepository,
-        PgFavoriteLongshotBiasTableRepository, PgFeatureRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
-        PgShadowComparisonRepository,
+        PgCalibrationArtifactRepository, PgEquitySnapshotRepository, PgEventRepository,
+        PgFactorRepository, PgFeatureRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgPositionRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository, PgReservedCapitalRepository,
+        PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
     },
     traits::{
-        BasisAlertRepository, EquitySnapshotRepository, EventRepository, FactorRepository,
-        FavoriteLongshotBiasTableRepository, MarketLinkageRepository, MarketRepository,
+        BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
+        EventRepository, FactorRepository, MarketLinkageRepository, MarketRepository,
         MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
         QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
         ReservedCapitalRepository, RuntimeConfigVersionRepository,
@@ -97,8 +99,8 @@ use quant_pivot_research::{
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
-        DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact, ModelArtifactHeader,
-        ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
+        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact,
+        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
         WeightedFactorModelArtifact,
     },
     portfolio::HistoricalCorrelationEstimator,
@@ -438,6 +440,7 @@ impl ReportPipelineHarness {
         let factors = factors_config();
         let features = FeaturesConfig::default();
         let store = artifact_store();
+        let calibration_loader = calibration_artifact_loader(db);
         let factor_repo =
             Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
         let domain = DomainConfig::default();
@@ -464,7 +467,8 @@ impl ReportPipelineHarness {
             .expect("active runtime config row");
 
         let account_factory = account_factory(db, Arc::clone(&registry), &options);
-        let model_runner = build_model_runner(db, store);
+        let model_runner =
+            build_model_runner(db, Arc::clone(&store), Arc::clone(&calibration_loader));
         let builder = build_report_builder(
             db,
             Arc::clone(&runtime_config_repo),
@@ -472,6 +476,8 @@ impl ReportPipelineHarness {
             &book_store,
             model_runner,
             account_factory,
+            store,
+            calibration_loader,
         );
         let lifecycle = build_lifecycle_service(db, runtime_config_repo, builder);
 
@@ -824,10 +830,21 @@ fn recording_alerts() -> Arc<AlertDispatcher> {
     ))))
 }
 
-fn build_model_runner(db: &DatabaseConnection, store: Arc<dyn ArtifactStore>) -> Arc<ModelRunner> {
+fn calibration_artifact_loader(db: &DatabaseConnection) -> Arc<dyn CalibrationArtifactLoader> {
+    Arc::new(CoreCalibrationArtifactLoader::new(
+        Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
+            as Arc<dyn CalibrationArtifactRepository>,
+    ))
+}
+
+fn build_model_runner(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+) -> Arc<ModelRunner> {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
-    let bias_table_repo = Arc::new(PgFavoriteLongshotBiasTableRepository::new(db.clone()))
-        as Arc<dyn FavoriteLongshotBiasTableRepository>;
+    let bias_table_repo = Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
+        as Arc<dyn CalibrationArtifactRepository>;
     let bias_table = Arc::new(BiasTableApplicator::new(bias_table_repo));
     let factor_pipeline = Arc::new(FactorPipelineService::new(
         Arc::clone(&factor_repo),
@@ -838,7 +855,10 @@ fn build_model_runner(db: &DatabaseConnection, store: Arc<dyn ArtifactStore>) ->
         model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
         model_registry_repo: Arc::new(PgModelRegistryRepository::new(db.clone())),
         shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
-        factory_builder: Arc::new(DefaultModelRuntimeFactoryBuilder::new(store)),
+        factory_builder: Arc::new(DefaultModelRuntimeFactoryBuilder::new(
+            store,
+            calibration_loader,
+        )),
         factor_pipeline,
         signal_writer: noop_signal_writer(),
         alerts: Arc::new(DispatcherAlertSink::new(recording_alerts())),
@@ -847,6 +867,7 @@ fn build_model_runner(db: &DatabaseConnection, store: Arc<dyn ArtifactStore>) ->
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_report_builder(
     db: &DatabaseConnection,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
@@ -854,6 +875,8 @@ fn build_report_builder(
     book_store: &Arc<BookStore>,
     model_runner: Arc<ModelRunner>,
     account_factory: Arc<AccountProviderFactory>,
+    artifact_store: Arc<dyn ArtifactStore>,
+    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
 ) -> Arc<DefaultReportBuilder> {
     let pit_source = Arc::new(LiveBookDataSource::new(
         Arc::clone(book_store),
@@ -861,6 +884,8 @@ fn build_report_builder(
     )) as Arc<dyn PointInTimeDataSource>;
     Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
         runtime_config_repo,
+        artifact_store,
+        calibration_loader,
         market_selector: Arc::new(ConfiguredMarketSelector::new()),
         market_selection_repo: Arc::new(PgMarketSelectionRepository::new(db.clone())),
         candidate_provider: Arc::new(MarketCandidateProvider::new(

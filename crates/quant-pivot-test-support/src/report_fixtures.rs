@@ -191,6 +191,8 @@ fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
         sizing_model: SizingModelKind::Kelly,
         edge_bps: Some(Bps::new(dec!(120))),
         kelly_fraction_applied: Some(dec!(0.5)),
+        edge_uncertainty_shrink_applied: None,
+        correlation_shrink_applied: None,
     }
 }
 

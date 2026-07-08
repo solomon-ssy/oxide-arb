@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{GatePreviewIntent, ModelVersionInfo, QualityGateReportView, TrainingDatasetInfo},
+    domain::{
+        BindCalibrationRequest, GatePreviewIntent, ModelVersionInfo, QualityGateReportView,
+        TrainingDatasetInfo,
+    },
     types::{BacktestReportId, ModelVersionId, TrainingDatasetId},
 };
 
@@ -117,4 +120,13 @@ pub trait ModelGovernancePort: Send + Sync {
         intent: GatePreviewIntent,
         backtest_report_id: Option<&BacktestReportId>,
     ) -> QuantResult<QualityGateReportView>;
+
+    /// Bind a `model_score` calibrator to a candidate version, minting a new
+    /// candidate whose `return_model` is `Calibrated { … }` (Phase 11.3 §5).
+    async fn bind_calibration(
+        &self,
+        model_version_id: &ModelVersionId,
+        request: BindCalibrationRequest,
+        actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo>;
 }

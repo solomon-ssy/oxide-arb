@@ -6,6 +6,8 @@ mod attribution;
 mod backtest;
 #[allow(clippy::needless_update)] // NewBasisAlert omits DB-managed created_at
 mod basis_alert;
+#[allow(clippy::needless_update)] // NewCalibrationArtifact omits DB-managed created_at
+mod calibration_artifact;
 mod candidate;
 mod capital;
 #[allow(clippy::needless_update)] // NewModelComparisonReport omits DB-managed created_at
@@ -15,8 +17,6 @@ mod dataset;
 mod execution;
 mod exit_training;
 mod factor;
-#[allow(clippy::needless_update)] // NewFavoriteLongshotBiasTable omits DB-managed created_at
-mod favorite_longshot;
 mod feature;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
@@ -45,6 +45,7 @@ pub use account::*;
 pub use attribution::*;
 pub use backtest::*;
 pub use basis_alert::*;
+pub use calibration_artifact::*;
 pub use candidate::*;
 pub use capital::*;
 pub use comparison::*;
@@ -52,7 +53,6 @@ pub use dataset::*;
 pub use execution::*;
 pub use exit_training::*;
 pub use factor::*;
-pub use favorite_longshot::*;
 pub use feature::*;
 pub use governance_audit::*;
 pub use linkage::*;

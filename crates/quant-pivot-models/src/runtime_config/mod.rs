@@ -33,10 +33,9 @@ use crate::types::SchemaVersion;
 ///
 /// This is a **monotonic** version: every schema-changing phase bumps it by one
 /// and the greenfield database is reset (zero compatibility — no shim, no
-/// migration; non-matching documents are rejected). Bumped to 5 by Phase
-/// 11.2.2 (domain section, category model pointers, feature schema v5); future
-/// phases (11.3+) bump it again.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
+/// migration; non-matching documents are rejected). Bumped to 6 by Phase
+/// 11.3 (`model.calibration`, `portfolio.kelly_safety`); future phases bump again.
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(6);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -312,7 +311,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(5));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(6));
     }
 
     #[test]

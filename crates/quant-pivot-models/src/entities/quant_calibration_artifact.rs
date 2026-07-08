@@ -1,22 +1,26 @@
-//! `quant_favorite_longshot_bias_table` table entity.
+//! `quant_calibration_artifact` table entity.
 
-use crate::types::{ContentHash, FavoriteLongshotBiasTableId};
+use crate::{
+    enums::quant::CalibrationKind,
+    types::{CalibrationArtifactId, ContentHash},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_favorite_longshot_bias_table")]
+#[sea_orm(table_name = "quant_calibration_artifact")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub bias_table_id: FavoriteLongshotBiasTableId,
+    pub artifact_id: CalibrationArtifactId,
+    pub kind: CalibrationKind,
     pub content_hash: ContentHash,
     pub fit_window_start: DateTime<Utc>,
     pub fit_window_end: DateTime<Utc>,
     pub calibration_split_hash: ContentHash,
-    pub category_count: i64,
-    pub total_sample_count: i64,
+    pub sample_count: i64,
     #[sea_orm(column_type = "JsonBinary")]
-    pub by_category: Json,
+    pub payload_json: Json,
+    pub active: bool,
     pub created_at: DateTime<Utc>,
 }
 

@@ -101,6 +101,12 @@ pub struct SizingPlan {
     pub edge_bps: Option<Bps>,
     /// The fractional-Kelly multiplier actually applied.
     pub kelly_fraction_applied: Option<Decimal>,
+    /// Edge-uncertainty shrink multiplier (Phase 11.3 §6.1).
+    #[serde(default)]
+    pub edge_uncertainty_shrink_applied: Option<Decimal>,
+    /// Correlation-cluster shrink multiplier (Phase 11.3 §6.2).
+    #[serde(default)]
+    pub correlation_shrink_applied: Option<Decimal>,
 }
 
 // ── Exit plan (parent §10 "when / how much to sell") ─────────────────────────

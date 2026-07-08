@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        PointInTimeDataSource, RuntimeConfigVersionInfo,
+        ModelVersionInfo, PointInTimeDataSource, RuntimeConfigVersionInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
     enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
@@ -20,9 +20,13 @@ use quant_pivot_repository::traits::{
     MarketSelectionRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::{
+    artifact::ArtifactStore,
     backtest::PortfolioCaps,
     features::{MarketDecisionCapture, PitView},
-    model::SignalCandidate,
+    model::{
+        CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration,
+        ReturnModelSpec, SignalCandidate, load_hash_verified_artifact,
+    },
     portfolio::{
         AccountSnapshot, CorrelationConstraint, CorrelationEstimator, CorrelationInput,
         CorrelationMarket, DefaultPortfolioPlanner, DrawdownState, PlanCandidate,
@@ -66,6 +70,8 @@ pub trait ReportBuilder: Send + Sync {
 /// Dependencies for [`DefaultReportBuilder`].
 pub struct ReportBuilderDeps {
     pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
+    pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     pub market_selector: Arc<dyn MarketSelector>,
     pub market_selection_repo: Arc<dyn MarketSelectionRepository>,
     pub candidate_provider: Arc<MarketCandidateProvider>,
@@ -93,6 +99,8 @@ struct BuildContext {
     as_of: chrono::DateTime<Utc>,
     top_n: u32,
     active: ActiveModelRequirements,
+    return_model_calibrated: bool,
+    resolved_calibration: Option<ResolvedCalibration>,
 }
 
 struct EmptyComposeInput<'a> {
@@ -442,6 +450,8 @@ impl DefaultReportBuilder {
                 as_of,
             })
             .await?;
+        let return_model_calibrated = self.return_model_calibrated(&active.version).await?;
+        let resolved_calibration = self.load_resolved_calibration(&active.version).await?;
 
         Ok(BuildContext {
             version,
@@ -450,6 +460,38 @@ impl DefaultReportBuilder {
             as_of,
             top_n,
             active,
+            return_model_calibrated,
+            resolved_calibration,
+        })
+    }
+
+    async fn load_resolved_calibration(
+        &self,
+        version: &ModelVersionInfo,
+    ) -> QuantResult<Option<ResolvedCalibration>> {
+        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        let ModelArtifact::WeightedFactor(weighted) = artifact else {
+            return Ok(None);
+        };
+        let ReturnModelSpec::Calibrated(CalibratedReturnModel { calibrator_ref, .. }) =
+            weighted.return_model
+        else {
+            return Ok(None);
+        };
+        self.deps
+            .calibration_loader
+            .load(&calibrator_ref)
+            .await
+            .map(Some)
+    }
+
+    async fn return_model_calibrated(&self, version: &ModelVersionInfo) -> QuantResult<bool> {
+        let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
+        Ok(match artifact {
+            ModelArtifact::WeightedFactor(weighted) => {
+                matches!(weighted.return_model, ReturnModelSpec::Calibrated(_))
+            }
+            ModelArtifact::SellScorer(_) | ModelArtifact::Classical(_) => false,
         })
     }
 
@@ -546,7 +588,10 @@ impl DefaultReportBuilder {
         correlation: Option<&CorrelationConstraint>,
     ) -> QuantResult<PortfolioPlanOutput> {
         let caps = portfolio_caps(&context.config)?;
-        let sizing = sizing_model_from_config(&context.config.portfolio.sizing)?;
+        let sizing = sizing_model_from_config(
+            &context.config.portfolio.sizing,
+            &context.config.portfolio.kelly_safety,
+        )?;
         // The optimizer is built per report from the active (hot-reloadable)
         // runtime config, so a config change takes effect on the next run.
         let allocator = optimizer_from_config(&context.config.portfolio.optimizer)?;
@@ -571,6 +616,7 @@ impl DefaultReportBuilder {
                     .value,
             )?),
             correlation,
+            calibration: context.resolved_calibration.as_ref(),
             sizing: sizing.as_ref(),
             entry_max_slippage_bps: Bps::new(Decimal::from(
                 context.config.execution.entry_order_policy.max_slippage_bps,
@@ -689,6 +735,7 @@ impl DefaultReportBuilder {
             market_selection_count: market_selection_count(&input.selection.included),
             empty: None,
             top_n: input.context.top_n,
+            return_model_calibrated: input.context.return_model_calibrated,
         })
     }
 
@@ -763,6 +810,7 @@ impl DefaultReportBuilder {
             market_selection_count: input.market_selection_count,
             empty: Some(input.empty),
             top_n: input.context.top_n,
+            return_model_calibrated: input.context.return_model_calibrated,
         })
     }
 }
@@ -952,6 +1000,14 @@ fn portfolio_caps(config: &RuntimeConfig) -> QuantResult<PortfolioCaps> {
         liquidity_usage_cap_pct: parse_decimal(
             "portfolio.constraints.liquidity_usage_cap_pct",
             &config.portfolio.constraints.liquidity_usage_cap_pct.value,
+        )?,
+        max_aggregate_exposure_pct: parse_decimal(
+            "portfolio.kelly_safety.max_aggregate_exposure_pct",
+            &config
+                .portfolio
+                .kelly_safety
+                .max_aggregate_exposure_pct
+                .value,
         )?,
     })
 }

@@ -41,20 +41,27 @@ use crate::{
 /// eligible market factor values (position-state pseudo-factors merged per-lot).
 type MarketFactorReplay = (FeatureVector, Vec<FactorValue>);
 
+/// Forward settlement truth for one `(as_of, market)` replay key.
+pub type ReplaySettlementCell = (bool, bool, Option<Decimal>);
+/// Settlement map keyed by `(as_of, market)`.
+pub type ReplaySettlementMap = HashMap<(DateTime<Utc>, MarketId), ReplaySettlementCell>;
+
 /// The replay schedule + forward label truth extracted from frozen Parquet rows.
 pub struct ReplaySchedule {
     /// Distinct `(market, token)` sample set to prefetch facts for.
     pub sample_set: Vec<ReplaySample>,
     /// Samples grouped by `as_of` (ascending) for cross-sectional materialization.
     pub by_as_of: BTreeMap<DateTime<Utc>, Vec<ReplaySample>>,
-    /// Forward settlement truth keyed by `(as_of, market)`: `(settled_yes, matured)`.
-    pub settlement: HashMap<(DateTime<Utc>, MarketId), (bool, bool)>,
+    /// Forward settlement truth keyed by `(as_of, market)`:
+    /// `(settled_yes, matured, max_adverse_excursion_bps)`.
+    pub settlement: ReplaySettlementMap,
 }
 
 impl ReplaySchedule {
     /// Extract the schedule + settlement truth from decoded examples.
     pub fn from_examples(examples: &[TrainingExample]) -> Self {
         let settlement_label = LabelName::new("settlement_outcome");
+        let mae_label = LabelName::new("max_adverse_excursion_bps");
         let mut sample_set = Vec::new();
         let mut seen: HashSet<(MarketId, TokenId)> = HashSet::new();
         let mut by_as_of: BTreeMap<DateTime<Utc>, Vec<ReplaySample>> = BTreeMap::new();
@@ -68,9 +75,14 @@ impl ReplaySchedule {
                 sample_set.push(sample.clone());
             }
             by_as_of.entry(example.as_of).or_default().push(sample);
+            let (settled_yes, matured) = settlement_outcome(example, &settlement_label);
             settlement.insert(
                 (example.as_of, example.market_id.clone()),
-                settlement_outcome(example, &settlement_label),
+                (
+                    settled_yes,
+                    matured,
+                    max_adverse_excursion(example, &mae_label),
+                ),
             );
         }
         Self {
@@ -454,6 +466,16 @@ pub fn settlement_outcome(example: &TrainingExample, label: &LabelName) -> (bool
         .iter()
         .find(|l| l.label_name == *label)
         .map_or((false, false), |l| (l.value >= Decimal::ONE, l.is_resolved))
+}
+
+/// `max_adverse_excursion_bps` label value, when the example carries a
+/// resolved `MAX_ADVERSE_EXCURSION_BPS` label (Phase 11.3 downside source).
+pub fn max_adverse_excursion(example: &TrainingExample, label: &LabelName) -> Option<Decimal> {
+    example
+        .labels
+        .iter()
+        .find(|l| l.label_name == *label && l.is_resolved)
+        .map(|l| l.value)
 }
 
 /// The maximum forward horizon (seconds) the dataset materialized.

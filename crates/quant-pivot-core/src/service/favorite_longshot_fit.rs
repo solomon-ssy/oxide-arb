@@ -25,11 +25,7 @@
 //! 6. Persist the content-addressed artifact — **only** when a curve qualifies;
 //!    otherwise succeed with no artifact (fail-closed greenfield).
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-    time::Duration as StdDuration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -38,32 +34,32 @@ use tokio_util::sync::CancellationToken;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        BiasTableFitJobParams, BiasTableFitOutcome, BiasTableListQuery,
-        FavoriteLongshotBiasTableInfo, FavoriteLongshotFitPort, JobProgressSink,
-        NewFavoriteLongshotBiasTable, Paginated, TrainingDatasetListQuery, WindowBoundsError,
-        query::TimeWindow,
+        BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactInfo,
+        CalibrationArtifactListQuery, FavoriteLongshotFitPort, JobProgressSink, Paginated,
+        WindowBoundsError, query::TimeWindow,
     },
     enums::common::MarketCategory,
-    enums::quant::TrainingDatasetStatus,
-    hashing::CanonicalDigest,
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig, RuntimeConfig,
     },
-    types::{ContentHash, FavoriteLongshotBiasTableId, MarketId, ResearchJobProgress, TokenId},
+    types::{CalibrationArtifactId, MarketId, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
-    EventRepository, FavoriteLongshotBiasTableRepository, MarketLinkageRepository,
-    MarketRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    CalibrationArtifactRepository, EventRepository, MarketLinkageRepository, MarketRepository,
+    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     features::PitView,
     model::favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
-use serde_json::json;
 
-use crate::prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec};
+use crate::{
+    prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
+    service::calibration_shared::{
+        assert_disjoint_from_all_training_datasets, calibration_split_hash,
+    },
+};
 
 /// Parse a runtime-config decimal string (must have passed validation on write).
 fn config_decimal(raw: &str, field: &'static str) -> QuantResult<Decimal> {
@@ -90,13 +86,13 @@ fn config_decimal(raw: &str, field: &'static str) -> QuantResult<Decimal> {
 /// content hash does not match — never a silent skip that would train the model
 /// on a different (or absent) bias than serving uses.
 pub async fn resolve_frozen_bias_table(
-    repo: &dyn FavoriteLongshotBiasTableRepository,
+    repo: &dyn CalibrationArtifactRepository,
     factors: &FactorsConfig,
 ) -> QuantResult<Option<Arc<FavoriteLongshotBiasTable>>> {
     let Some(raw) = factors.structural.favorite_longshot.bias_table_ref.as_ref() else {
         return Ok(None);
     };
-    let id: FavoriteLongshotBiasTableId = raw.trim().parse().map_err(|error| {
+    let id: CalibrationArtifactId = raw.trim().parse().map_err(|error| {
         QuantError::from(ResearchError::DatasetBuild {
             detail: format!("favorite_longshot.bias_table_ref `{raw}` is not a valid id: {error}"),
         })
@@ -135,7 +131,7 @@ pub struct FavoriteLongshotFitService {
     market_repo: Arc<dyn MarketRepository>,
     event_repo: Arc<dyn EventRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
-    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+    calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
 }
@@ -148,7 +144,7 @@ impl FavoriteLongshotFitService {
         market_repo: Arc<dyn MarketRepository>,
         event_repo: Arc<dyn EventRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
-        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+        calibration_repo: Arc<dyn CalibrationArtifactRepository>,
         runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
         training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
     ) -> Self {
@@ -157,7 +153,7 @@ impl FavoriteLongshotFitService {
             market_repo,
             event_repo,
             linkage_repo,
-            bias_table_repo,
+            calibration_repo,
             runtime_config_repo,
             training_dataset_repo,
         }
@@ -368,7 +364,12 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
                 })?;
         let frozen = self.frozen_fit(&params).await?;
         let config = &frozen.favorite_longshot;
-        self.assert_disjoint_from_training_datasets(&window).await?;
+        assert_disjoint_from_all_training_datasets(
+            self.training_dataset_repo.as_ref(),
+            &window,
+            "bias-table fit",
+        )
+        .await?;
 
         progress.report(ResearchJobProgress::with_total("resolutions", 0, 1));
         let samples = self
@@ -399,11 +400,16 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
         // The split hash anchors the artifact to the *exact* fit sample set
         // (sorted market keys + window), not just a coarse window/count — a real
         // provenance / leakage anchor (full purged/embargo CPCV is Phase 11.5).
-        let calibration_split_hash = split_hash(&window, &samples)?;
+        let split_hash = calibration_split_hash(
+            &window,
+            samples
+                .iter()
+                .map(|s| (s.market_id.to_string(), s.sampled_at)),
+        )?;
 
         progress.report(ResearchJobProgress::with_total("fit", 0, 1));
         let Some(table) =
-            FavoriteLongshotBiasTable::fit(&samples, window, calibration_split_hash, &fit_config)?
+            FavoriteLongshotBiasTable::fit(&samples, window, split_hash, &fit_config)?
         else {
             // Fail-closed: no category/ttr curve qualified, so no artifact is minted.
             return Ok(BiasTableFitOutcome {
@@ -414,19 +420,23 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
         };
 
         progress.report(ResearchJobProgress::with_total("persist", 0, 1));
-        let persisted = self.persist(&table, total_sample_count).await?;
+        let persisted = self.persist(table).await?;
+        let category_count = persisted
+            .payload_json
+            .as_object()
+            .map_or(0, |obj| obj.len() as u64);
         Ok(BiasTableFitOutcome {
-            bias_table_id: Some(persisted.bias_table_id),
-            category_count: persisted.category_count.cast_unsigned(),
+            bias_table_id: Some(persisted.artifact_id),
+            category_count,
             total_sample_count,
         })
     }
 
     async fn find(
         &self,
-        bias_table_id: &FavoriteLongshotBiasTableId,
-    ) -> QuantResult<Option<FavoriteLongshotBiasTableInfo>> {
-        self.bias_table_repo
+        bias_table_id: &CalibrationArtifactId,
+    ) -> QuantResult<Option<CalibrationArtifactInfo>> {
+        self.calibration_repo
             .find_by_id(bias_table_id)
             .await
             .map_err(QuantError::from)
@@ -434,9 +444,9 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
 
     async fn page(
         &self,
-        query: BiasTableListQuery,
-    ) -> QuantResult<Paginated<FavoriteLongshotBiasTableInfo>> {
-        self.bias_table_repo
+        query: CalibrationArtifactListQuery,
+    ) -> QuantResult<Paginated<CalibrationArtifactInfo>> {
+        self.calibration_repo
             .page(query)
             .await
             .map_err(QuantError::from)
@@ -444,30 +454,13 @@ impl FavoriteLongshotFitPort for FavoriteLongshotFitService {
 }
 
 impl FavoriteLongshotFitService {
-    /// Persist a fitted table as a content-addressed ledger row.
+    /// Persist a fitted table as a content-addressed, unified `CalibrationArtifact` row.
     async fn persist(
         &self,
-        table: &FavoriteLongshotBiasTable,
-        total_sample_count: u64,
-    ) -> QuantResult<FavoriteLongshotBiasTableInfo> {
-        let by_category = serde_json::to_value(&table.by_category).map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("bias-table payload serialization failed: {error}"),
-            })
-        })?;
-        let category_count = i64::try_from(table.by_category.len()).unwrap_or(i64::MAX);
-        let row = NewFavoriteLongshotBiasTable {
-            bias_table_id: table.table_id.clone(),
-            content_hash: table.content_hash.clone(),
-            fit_window_start: table.fit_window.from,
-            fit_window_end: table.fit_window.to,
-            calibration_split_hash: table.calibration_split_hash.clone(),
-            category_count,
-            total_sample_count: i64::try_from(total_sample_count).unwrap_or(i64::MAX),
-            by_category,
-        };
-        self.bias_table_repo
-            .create(row)
+        table: FavoriteLongshotBiasTable,
+    ) -> QuantResult<CalibrationArtifactInfo> {
+        self.calibration_repo
+            .create(table.into())
             .await
             .map_err(QuantError::from)
     }
@@ -476,100 +469,4 @@ impl FavoriteLongshotFitService {
 /// Max book staleness for the PIT engine, from the frozen data-quality config.
 const fn book_staleness(data_quality: &DataQualityConfig) -> StdDuration {
     StdDuration::from_millis(data_quality.max_book_age_ms)
-}
-
-/// Content hash anchoring the fit's calibration split to the exact sample set.
-///
-/// Covers the window and the sorted, distinct `(market_id, sampled_at)` keys
-/// that fed the fit — a deterministic provenance anchor for leakage audits.
-/// Full purged/embargoed CPCV splits are Phase 11.5.
-fn split_hash(window: &TimeWindow, samples: &[BiasSample]) -> QuantResult<ContentHash> {
-    let mut keys: Vec<(String, DateTime<Utc>)> = samples
-        .iter()
-        .map(|s| (s.market_id.to_string(), s.sampled_at))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    keys.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let sample_keys: Vec<_> = keys
-        .iter()
-        .map(|(market_id, sampled_at)| {
-            json!({
-                "market_id": market_id,
-                "sampled_at": sampled_at,
-            })
-        })
-        .collect();
-    CanonicalDigest::content_hash_json(&json!({
-        "window_start": window.from,
-        "window_end": window.to,
-        "sample_count": samples.len() as u64,
-        "sample_keys": sample_keys,
-    }))
-    .map_err(|error| {
-        QuantError::from(ResearchError::DatasetBuild {
-            detail: format!("calibration split hash failed: {error}"),
-        })
-    })
-}
-
-impl FavoriteLongshotFitService {
-    /// Fail closed when the fit window overlaps a `built` or `ready` training
-    /// dataset — the bias table must not be fit on the same spine the model
-    /// trains on.
-    async fn assert_disjoint_from_training_datasets(&self, window: &TimeWindow) -> QuantResult<()> {
-        let mut query = TrainingDatasetListQuery::default();
-        query.page.size = 100;
-        let mut page = 1_u64;
-        loop {
-            query.page.page = page;
-            let batch = self
-                .training_dataset_repo
-                .page(query.clone())
-                .await
-                .map_err(QuantError::from)?;
-            for dataset in &batch.items {
-                if !matches!(
-                    dataset.status,
-                    TrainingDatasetStatus::Built | TrainingDatasetStatus::Ready
-                ) {
-                    continue;
-                }
-                if half_open_windows_overlap(
-                    window.from,
-                    window.to,
-                    dataset.window_start,
-                    dataset.window_end,
-                ) {
-                    return Err(QuantError::from(ResearchError::DatasetBuild {
-                        detail: format!(
-                            "bias-table fit window [{}, {}) overlaps training dataset {} \
-                             [{}, {}) in status `{}` — fit and train windows must be disjoint",
-                            window.from,
-                            window.to,
-                            dataset.training_dataset_id,
-                            dataset.window_start,
-                            dataset.window_end,
-                            dataset.status,
-                        ),
-                    }));
-                }
-            }
-            if page.saturating_mul(query.page.size) >= batch.total {
-                break;
-            }
-            page += 1;
-        }
-        Ok(())
-    }
-}
-
-/// True when half-open intervals `[start, end)` intersect.
-fn half_open_windows_overlap(
-    a_start: DateTime<Utc>,
-    a_end: DateTime<Utc>,
-    b_start: DateTime<Utc>,
-    b_end: DateTime<Utc>,
-) -> bool {
-    a_start < b_end && b_start < a_end
 }

@@ -400,6 +400,7 @@ impl<'a> PreparedModel<'a> {
                 category_held: others(category_total),
                 cluster_held: cluster_total.map(others),
                 correlated_cap,
+                aggregate_held: others(ledger.total),
             });
 
             let binding = if allocated > Decimal::ZERO {
@@ -519,6 +520,24 @@ fn build_buckets(
                     rhs: (cap - held).max(Decimal::ZERO),
                 });
             }
+        }
+    }
+
+    if caps.max_aggregate_exposure_pct > Decimal::ZERO && caps.total_budget_usd > Decimal::ZERO {
+        let aggregate_cap =
+            (caps.max_aggregate_exposure_pct * caps.total_budget_usd).max(Decimal::ZERO);
+        let held: Decimal = input
+            .initial_exposures
+            .per_market
+            .values()
+            .map(|usd| usd.inner())
+            .sum();
+        let indices: Vec<usize> = (0..candidates.len()).collect();
+        if !indices.is_empty() {
+            buckets.push(BucketConstraint {
+                indices,
+                rhs: (aggregate_cap - held).max(Decimal::ZERO),
+            });
         }
     }
     buckets

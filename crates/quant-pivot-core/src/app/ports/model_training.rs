@@ -14,8 +14,8 @@ use quant_pivot_models::{
     types::{ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    EventRepository, FavoriteLongshotBiasTableRepository, MarketLinkageRepository,
-    MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+    CalibrationArtifactRepository, EventRepository, MarketLinkageRepository, MarketRepository,
+    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
     RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
@@ -46,7 +46,7 @@ pub struct CoreModelTrainingPort {
     event_repo: Arc<dyn EventRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-    bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+    bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
 impl CoreModelTrainingPort {
@@ -55,7 +55,7 @@ impl CoreModelTrainingPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-        bias_table_repo: Arc<dyn FavoriteLongshotBiasTableRepository>,
+        bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self {
             dataset_repo: Arc::clone(&research.training_dataset_repo),

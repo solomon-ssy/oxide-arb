@@ -3,8 +3,8 @@
 use super::{DataBundle, GovernanceBundle, InfraBundle};
 use crate::{
     governance::{
-        FactorGovernanceDeps, FactorGovernanceService, ModelGovernanceDeps, ModelGovernanceService,
-        ModelSpecDeps, ModelSpecService,
+        CoreCalibrationArtifactLoader, FactorGovernanceDeps, FactorGovernanceService,
+        ModelGovernanceDeps, ModelGovernanceService, ModelSpecDeps, ModelSpecService,
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::{
@@ -24,8 +24,8 @@ use quant_pivot_models::domain::{
 };
 use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
-    AttributionRepository, BacktestReportRepository, BasisAlertRepository, EventRepository,
-    FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+    AttributionRepository, BacktestReportRepository, BasisAlertRepository,
+    CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
     MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
     ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
     ModelRunRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
@@ -33,6 +33,7 @@ use quant_pivot_repository::traits::{
     TrainingDatasetRepository,
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
+use quant_pivot_research::model::CalibrationArtifactLoader;
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     model::{DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder},
@@ -98,6 +99,8 @@ pub struct ResearchBundle {
     pub model_spec: Arc<dyn ModelSpecPort>,
     /// Schema-bound runtime factory builder (loads model artifacts) (3.4/3.6).
     pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    /// Resolves `model_score` calibration artifacts for runtime + Kelly safety (11.3).
+    pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
@@ -201,9 +204,15 @@ impl ResearchBundle {
             Arc::clone(&repos.model_run) as Arc<dyn ModelRunRepository>;
         let model_registry_repo: Arc<dyn ModelRegistryRepository> =
             Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>;
-        let model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> = Arc::new(
-            DefaultModelRuntimeFactoryBuilder::new(Arc::clone(&artifact_store)),
-        );
+        let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
+            Arc::new(CoreCalibrationArtifactLoader::new(
+                Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>,
+            ));
+        let model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> =
+            Arc::new(DefaultModelRuntimeFactoryBuilder::new(
+                Arc::clone(&artifact_store),
+                Arc::clone(&calibration_loader),
+            ));
         let shadow_comparison_repo: Arc<dyn ShadowComparisonRepository> =
             Arc::clone(&repos.shadow_comparison) as Arc<dyn ShadowComparisonRepository>;
         let model_runner = Self::assemble_model_runner(
@@ -236,8 +245,7 @@ impl ResearchBundle {
                 Arc::clone(&deps.data.market_repo),
                 Arc::clone(&repos.event) as Arc<dyn EventRepository>,
                 Arc::clone(&market_linkage_repo),
-                Arc::clone(&repos.favorite_longshot_bias_table)
-                    as Arc<dyn FavoriteLongshotBiasTableRepository>,
+                Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>,
                 Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
                 Arc::clone(&offline.training_dataset) as Arc<dyn TrainingDatasetRepository>,
             ));
@@ -265,6 +273,7 @@ impl ResearchBundle {
             factor_governance,
             model_spec,
             model_runtime_factory_builder,
+            calibration_loader,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
             event_repo: Arc::clone(&repos.event) as Arc<dyn EventRepository>,
@@ -365,6 +374,8 @@ impl ResearchBundle {
             governance_audit_repo: Arc::clone(governance_audit_repo),
             dataset_repo: Arc::clone(training_dataset_repo),
             artifact_store: Arc::clone(artifact_store),
+            calibration_repo: Arc::clone(&deps.infra.repos.calibration_artifact)
+                as Arc<dyn CalibrationArtifactRepository>,
             gate,
             runtime_config: Arc::clone(&deps.governance.runtime_config),
             runtime_config_apply,

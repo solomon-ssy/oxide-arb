@@ -30,7 +30,7 @@
 pub mod account;
 pub mod auth;
 pub mod basis_alerts;
-pub mod bias_tables;
+pub mod calibration_artifacts;
 pub mod data_quality;
 pub mod domain_sources;
 pub mod execution_orders;
@@ -93,7 +93,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(training_datasets::route_specs());
     specs.extend(research_models::route_specs());
     specs.extend(research_jobs::route_specs());
-    specs.extend(bias_tables::route_specs());
+    specs.extend(calibration_artifacts::route_specs());
     specs.extend(market_linkages::route_specs());
     specs.extend(basis_alerts::route_specs());
     specs.extend(domain_sources::route_specs());

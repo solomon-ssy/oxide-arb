@@ -154,6 +154,8 @@ pub(crate) struct CeilingInputs<'a> {
     pub(crate) cluster_held: Option<Decimal>,
     /// Correlated-cluster cap (only meaningful when `cluster_held` is `Some`).
     pub(crate) correlated_cap: Decimal,
+    /// Total portfolio exposure held by other candidates (aggregate cap room).
+    pub(crate) aggregate_held: Decimal,
 }
 
 /// The chosen pre-min size, its binding cap, and liquidity feasibility.
@@ -220,6 +222,14 @@ pub(crate) fn decide_ceiling(input: &CeilingInputs<'_>) -> SizeDecision {
         ceilings.push(Ceiling {
             value: (bucket_cap(input.correlated_cap) - cluster_held).max(Decimal::ZERO),
             constraint: BindingConstraint::CorrelationCap,
+        });
+    }
+    if caps.max_aggregate_exposure_pct > Decimal::ZERO && caps.total_budget_usd > Decimal::ZERO {
+        let aggregate_cap =
+            (caps.max_aggregate_exposure_pct * caps.total_budget_usd).max(Decimal::ZERO);
+        ceilings.push(Ceiling {
+            value: (aggregate_cap - input.aggregate_held).max(Decimal::ZERO),
+            constraint: BindingConstraint::AggregateExposureCap,
         });
     }
 

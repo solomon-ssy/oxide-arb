@@ -1,0 +1,351 @@
+//! Model-score probability-calibrator fit orchestration (Phase 11.3 §4).
+//!
+//! Reuses the existing PIT backtest-replay engine
+//! ([`BacktestService::run_for_calibration`]) to harvest per-sample
+//! `(composite_score, settled_yes, max_adverse_excursion_bps)` triples over an
+//! **independent, disjoint + embargoed** `purpose = Calibration` dataset —
+//! never the model's own training spine — then fits a
+//! [`ProbabilityCalibrator`] and persists the unified `CalibrationArtifact`
+//! (`kind = ModelScore`).
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_models::{
+    domain::{
+        CalibrationArtifactInfo, FitModelCalibratorRequest, JobProgressSink,
+        ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
+        NewCalibrationArtifact, query::TimeWindow,
+    },
+    enums::quant::{CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide},
+    hashing::CanonicalDigest,
+    runtime_config::RuntimeConfig,
+    types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId},
+};
+use quant_pivot_repository::traits::{
+    CalibrationArtifactRepository, ModelRegistryRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
+};
+use quant_pivot_research::{
+    backtest::SampleOutcome,
+    model::{
+        IsotonicCalibrator, PlattCalibrator, ProbabilityCalibrator, ReliabilitySample,
+        compute_reliability,
+    },
+};
+use rust_decimal::Decimal;
+
+use crate::{
+    app::ports::backtest::CoreBacktestPort,
+    governance::ModelScoreCalibrationPayload,
+    service::{
+        backtest::BacktestInput,
+        calibration_shared::{
+            assert_disjoint_from_all_training_datasets, assert_embargoed_after,
+            calibration_split_hash,
+        },
+    },
+};
+
+/// Governed knobs the fit needs from the frozen `model.calibration` config
+/// section (Phase 11.3 §7), resolved from the pinned runtime-config version at
+/// fit time — deterministic on replay, mirrors the bias-table fit's
+/// `frozen_fit`.
+#[derive(Debug, Clone, Copy)]
+struct CalibrationFitPolicy {
+    min_samples_isotonic: usize,
+    embargo_secs: i64,
+    ci_confidence: Decimal,
+}
+
+/// Core model-score calibrator fitter.
+pub struct ModelCalibrationFitService {
+    /// Reused for its `backtest_service_for` assembly (frozen runtime-config
+    /// replay engine) — one construction path, never duplicated.
+    backtest_port: Arc<CoreBacktestPort>,
+    model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+}
+
+impl ModelCalibrationFitService {
+    #[must_use]
+    pub const fn new(
+        backtest_port: Arc<CoreBacktestPort>,
+        model_registry_repo: Arc<dyn ModelRegistryRepository>,
+        training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+        calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+        runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    ) -> Self {
+        Self {
+            backtest_port,
+            model_registry_repo,
+            training_dataset_repo,
+            calibration_repo,
+            runtime_config_repo,
+        }
+    }
+
+    /// Load the governed `model.calibration` policy from the pinned runtime-
+    /// config version (frozen at enqueue).
+    async fn frozen_policy(
+        &self,
+        runtime_config_version_id: &RuntimeConfigVersionId,
+    ) -> QuantResult<CalibrationFitPolicy> {
+        let version = self
+            .runtime_config_repo
+            .load_version(runtime_config_version_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: "runtime config version for model calibration fit not found".to_owned(),
+                })
+            })?;
+        let config = RuntimeConfig::from_json(&version.config_json).map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("frozen runtime config parse failed: {error}"),
+            })
+        })?;
+        let calibration = config.model.calibration;
+        let ci_confidence = calibration.ci_confidence.value.trim().parse().map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "model.calibration.ci_confidence `{}` invalid despite config validation: {error}",
+                    calibration.ci_confidence.value
+                ),
+            })
+        })?;
+        Ok(CalibrationFitPolicy {
+            min_samples_isotonic: usize::try_from(calibration.min_samples_isotonic)
+                .unwrap_or(usize::MAX),
+            embargo_secs: i64::try_from(calibration.embargo_secs).unwrap_or(i64::MAX),
+            ci_confidence,
+        })
+    }
+
+    /// Validate the calibration dataset's purpose/spec-match and its
+    /// disjoint + embargoed relationship to the target model's own training
+    /// dataset (Phase 11.3 §0/§4 — the `WalkForwardSplit`-with-embargo purge
+    /// primitive). Fail-closed on any mismatch.
+    async fn validate_split(
+        &self,
+        model_version_id: &ModelVersionId,
+        request: &FitModelCalibratorRequest,
+        policy: &CalibrationFitPolicy,
+    ) -> QuantResult<()> {
+        let version = self
+            .model_registry_repo
+            .find_model_version_by_id(model_version_id)
+            .await?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!("model version `{model_version_id}` not found"),
+                })
+            })?;
+        let calibration_dataset = self
+            .training_dataset_repo
+            .find_by_id(&request.calibration_dataset_id)
+            .await?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "calibration dataset `{}` not found",
+                        request.calibration_dataset_id
+                    ),
+                })
+            })?;
+        if calibration_dataset.purpose != DatasetPurpose::Calibration {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "dataset `{}` has purpose `{}`, expected `calibration` — a model \
+                     calibrator must never fit on a `training` dataset",
+                    calibration_dataset.training_dataset_id,
+                    calibration_dataset.purpose.as_str()
+                ),
+            }));
+        }
+        if calibration_dataset.model_spec_id != version.model_spec_id {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: "calibration dataset model_spec_id does not match the target model version"
+                    .to_owned(),
+            }));
+        }
+        let calibration_window = TimeWindow::new(
+            calibration_dataset.window_start,
+            calibration_dataset.window_end,
+        );
+        // Purge: disjoint from every Built/Ready training dataset in the system.
+        assert_disjoint_from_all_training_datasets(
+            self.training_dataset_repo.as_ref(),
+            &calibration_window,
+            "model calibration fit",
+        )
+        .await?;
+        // Embargo: additionally must start at/after the target model's own
+        // training-dataset window end + the governed embargo gap.
+        if let Some(training_dataset_id) = &version.training_dataset_id {
+            let training_dataset = self
+                .training_dataset_repo
+                .find_by_id(training_dataset_id)
+                .await?
+                .ok_or_else(|| {
+                    QuantError::from(ResearchError::DatasetBuild {
+                        detail: format!("training dataset `{training_dataset_id}` not found"),
+                    })
+                })?;
+            let training_window =
+                TimeWindow::new(training_dataset.window_start, training_dataset.window_end);
+            assert_embargoed_after(
+                &calibration_window,
+                &training_window,
+                policy.embargo_secs,
+                "model calibration fit",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ModelCalibrationFitPort for ModelCalibrationFitService {
+    #[allow(clippy::too_many_lines)]
+    async fn fit(
+        &self,
+        params: ModelCalibrationFitJobParams,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<ModelCalibrationFitOutcome> {
+        let ModelCalibrationFitJobParams {
+            request,
+            runtime_config_version_id,
+        } = params;
+        let policy = self.frozen_policy(&runtime_config_version_id).await?;
+        self.validate_split(&request.model_version_id, &request, &policy)
+            .await?;
+
+        // Reuse the PIT backtest replay engine to harvest (score, outcome, MAE)
+        // triples — the same computation graph the live plane scores, never a
+        // bespoke re-derivation.
+        let backtest = self
+            .backtest_port
+            .backtest_service_for(&runtime_config_version_id)
+            .await?;
+        let (_report, samples) = backtest
+            .run_for_calibration(
+                BacktestInput {
+                    model_version_id: request.model_version_id.clone(),
+                    training_dataset_id: request.calibration_dataset_id.clone(),
+                    runtime_config_version_id: runtime_config_version_id.clone(),
+                    calibrate: false,
+                    backtest_report_id: None,
+                },
+                Arc::clone(&progress),
+                cancel,
+            )
+            .await?;
+
+        let min_samples = match request.method {
+            CalibrationMethod::Isotonic => policy.min_samples_isotonic,
+            CalibrationMethod::Platt => 10,
+        };
+        if samples.len() < min_samples {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration split has {} samples, below the {} floor for method `{}`",
+                    samples.len(),
+                    min_samples,
+                    request.method.as_str()
+                ),
+            }));
+        }
+
+        let scores: Vec<Decimal> = samples.iter().map(|s| s.composite_score.inner()).collect();
+        let outcomes: Vec<bool> = samples.iter().map(sample_won).collect();
+
+        let mapping = match request.method {
+            CalibrationMethod::Isotonic => {
+                IsotonicCalibrator::new(policy.min_samples_isotonic).fit(&scores, &outcomes)?
+            }
+            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
+        };
+
+        let reliability_samples: Vec<ReliabilitySample> = samples
+            .iter()
+            .zip(&outcomes)
+            .map(|(sample, &won)| ReliabilitySample {
+                score: sample.composite_score.inner(),
+                won,
+                max_adverse_excursion_bps: sample.max_adverse_excursion_bps,
+            })
+            .collect();
+        let reliability =
+            compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
+
+        let (window_start, window_end) = (
+            samples.iter().map(|s| s.as_of).min().unwrap_or_default(),
+            samples.iter().map(|s| s.as_of).max().unwrap_or_default(),
+        );
+        let split_hash = calibration_split_hash(
+            &TimeWindow::new(window_start, window_end),
+            samples.iter().map(|s| (s.market_id.to_string(), s.as_of)),
+        )?;
+
+        let payload = ModelScoreCalibrationPayload {
+            mapping,
+            reliability,
+        };
+        let payload_json = serde_json::to_value(&payload).map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("calibration payload serialization failed: {error}"),
+            })
+        })?;
+        let content_hash = CanonicalDigest::content_hash_json(&serde_json::json!({
+            "model_version_id": request.model_version_id.to_string(),
+            "calibration_dataset_id": request.calibration_dataset_id.to_string(),
+            "split_hash": split_hash.as_str(),
+            "payload": payload_json,
+        }))
+        .map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("calibration content hash failed: {error}"),
+            })
+        })?;
+
+        let artifact_id = CalibrationArtifactId::from_v7();
+        let created = self
+            .calibration_repo
+            .create(NewCalibrationArtifact {
+                artifact_id: artifact_id.clone(),
+                kind: CalibrationKind::ModelScore,
+                content_hash,
+                calibration_split_hash: split_hash,
+                fit_window_start: window_start,
+                fit_window_end: window_end,
+                sample_count: i64::try_from(samples.len()).unwrap_or(i64::MAX),
+                payload_json,
+                active: false,
+            })
+            .await
+            .map_err(QuantError::from)?;
+
+        let _: CalibrationArtifactInfo = created;
+        Ok(ModelCalibrationFitOutcome {
+            artifact_id: Some(artifact_id),
+            sample_count: u64::try_from(samples.len()).unwrap_or(u64::MAX),
+        })
+    }
+}
+
+/// Whether the bought side won: `Yes` bets win iff `settled_yes`, `No` bets
+/// win iff `!settled_yes`.
+const fn sample_won(sample: &SampleOutcome) -> bool {
+    match sample.outcome_side {
+        OutcomeSide::Yes => sample.settled_yes,
+        OutcomeSide::No => !sample.settled_yes,
+    }
+}

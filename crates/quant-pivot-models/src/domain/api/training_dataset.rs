@@ -25,7 +25,7 @@ use validator::Validate;
 
 use crate::{
     domain::{TrainingDatasetInfo, pagination::PageRequest},
-    enums::quant::TrainingDatasetStatus,
+    enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
         ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId, SchemaVersion,
         TrainingDatasetId, TrainingSampleSource, default_sample_sources,
@@ -44,6 +44,12 @@ use crate::{
 pub struct BuildTrainingDatasetRequest {
     /// Target model specification (trainer binds artifacts to this spec).
     pub model_spec_id: ModelSpecId,
+    /// What the materialized examples are used for (Phase 11.3 §4). Defaults
+    /// to `Training`; set `Calibration` to build an independent held-out split
+    /// for `ProbabilityCalibrator` fitting (must be disjoint + embargoed from
+    /// the target model's own `Training` dataset — enforced at fit time).
+    #[serde(default)]
+    pub purpose: DatasetPurpose,
     /// Frozen runtime-config version governing feature/factor/label schemas.
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Inclusive first sample `as_of`.
@@ -120,6 +126,7 @@ pub struct TrainingDatasetView {
     pub window_end: DateTime<Utc>,
     /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
     pub status: TrainingDatasetStatus,
+    pub purpose: DatasetPurpose,
     pub feature_schema_hash: ContentHash,
     pub factor_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,
@@ -141,6 +148,7 @@ pub struct TrainingDatasetView {
 pub struct TrainingDatasetListQuery {
     pub model_spec_id: Option<ModelSpecId>,
     pub status: Option<TrainingDatasetStatus>,
+    pub purpose: Option<DatasetPurpose>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     #[normalize_page]
@@ -156,6 +164,7 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             window_start: info.window_start,
             window_end: info.window_end,
             status: info.status,
+            purpose: info.purpose,
             feature_schema_hash: info.feature_schema_hash,
             factor_schema_hash: info.factor_schema_hash,
             label_schema_hash: info.label_schema_hash,

@@ -43,6 +43,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{ExitTrainingLotRow, LotExitEventRow, market::book::BookLevel},
+    enums::quant::DatasetPurpose,
     types::{
         ArtifactUri, Bps, ContentHash, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
         RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
@@ -93,6 +94,9 @@ pub struct DatasetPlanRequest {
     /// Pre-assigned dataset id (build path); minted by the planner when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_dataset_id: Option<TrainingDatasetId>,
+    /// Whether samples are for model training or independent calibration (Phase 11.3).
+    #[serde(default)]
+    pub purpose: DatasetPurpose,
 }
 
 /// A market eligible for sampling, with its lifecycle bounds.

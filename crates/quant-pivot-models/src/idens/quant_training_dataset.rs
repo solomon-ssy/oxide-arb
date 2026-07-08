@@ -2,12 +2,13 @@ use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+        ColumnDef, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, Index, IndexOrder,
+        Table, TableCreateStatement,
     },
 };
 
 use crate::{
-    enums::quant::TrainingDatasetStatus,
+    enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     idens::{quant_model_spec::QuantModelSpec, runtime_config_version::RuntimeConfigVersion},
     schema::{
         column,
@@ -31,6 +32,7 @@ pub enum QuantTrainingDataset {
     WindowStart,
     WindowEnd,
     Status,
+    Purpose,
     FeatureSchemaHash,
     FactorSchemaHash,
     LabelSchemaHash,
@@ -46,6 +48,12 @@ pub enum QuantTrainingDataset {
 }
 
 pub fn table() -> TableCreateStatement {
+    let mut stmt = training_dataset_columns();
+    training_dataset_apply_foreign_keys(&mut stmt);
+    stmt
+}
+
+fn training_dataset_columns() -> TableCreateStatement {
     Table::create()
         .table(QuantTrainingDataset::Table)
         .if_not_exists()
@@ -63,6 +71,9 @@ pub fn table() -> TableCreateStatement {
         )
         .col(column::pg_enum::<TrainingDatasetStatus>(
             QuantTrainingDataset::Status,
+        ))
+        .col(column::pg_enum::<DatasetPurpose>(
+            QuantTrainingDataset::Purpose,
         ))
         .col(
             ColumnDef::new(QuantTrainingDataset::FeatureSchemaHash)
@@ -120,29 +131,40 @@ pub fn table() -> TableCreateStatement {
         .col(timestamp_with_write_default(
             QuantTrainingDataset::CreatedAt,
         ))
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_training_dataset_model_spec")
-                .from(
-                    QuantTrainingDataset::Table,
-                    QuantTrainingDataset::ModelSpecId,
-                )
-                .to(QuantModelSpec::Table, QuantModelSpec::ModelSpecId)
-                .on_delete(ForeignKeyAction::Restrict),
+        .to_owned()
+}
+
+fn training_dataset_apply_foreign_keys(stmt: &mut TableCreateStatement) {
+    let mut model_spec_fk = model_spec_fk();
+    stmt.foreign_key(&mut model_spec_fk);
+    let mut runtime_config_fk = runtime_config_fk();
+    stmt.foreign_key(&mut runtime_config_fk);
+}
+
+fn model_spec_fk() -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name("fk_quant_training_dataset_model_spec")
+        .from(
+            QuantTrainingDataset::Table,
+            QuantTrainingDataset::ModelSpecId,
         )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_training_dataset_runtime_config")
-                .from(
-                    QuantTrainingDataset::Table,
-                    QuantTrainingDataset::RuntimeConfigVersionId,
-                )
-                .to(
-                    RuntimeConfigVersion::Table,
-                    RuntimeConfigVersion::RuntimeConfigVersionId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
+        .to(QuantModelSpec::Table, QuantModelSpec::ModelSpecId)
+        .on_delete(ForeignKeyAction::Restrict)
+        .to_owned()
+}
+
+fn runtime_config_fk() -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name("fk_quant_training_dataset_runtime_config")
+        .from(
+            QuantTrainingDataset::Table,
+            QuantTrainingDataset::RuntimeConfigVersionId,
         )
+        .to(
+            RuntimeConfigVersion::Table,
+            RuntimeConfigVersion::RuntimeConfigVersionId,
+        )
+        .on_delete(ForeignKeyAction::Restrict)
         .to_owned()
 }
 

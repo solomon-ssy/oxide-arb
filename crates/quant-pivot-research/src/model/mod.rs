@@ -8,6 +8,7 @@
 
 pub mod artifact;
 pub mod calibration;
+pub mod calibrator;
 pub mod category_scope;
 #[cfg(feature = "ml-classical")]
 pub mod classical;
@@ -20,6 +21,7 @@ pub mod favorite_longshot;
 pub mod optimize;
 pub mod overlay;
 pub mod rank_scores;
+pub mod reliability;
 pub mod routing;
 pub mod runtime;
 pub mod score_percentile;
@@ -32,14 +34,17 @@ pub use artifact::{
     CalibratedReturnModel, ClassicalModelArtifact, ClassicalModelMetrics, DataQualityMultipliers,
     FactorWeight, FeatureImportance, HeuristicReturnModel, HorizonMultipliers,
     LiquidityMultipliers, LiquidityTier, ModelArtifact, ModelArtifactHeader, PreprocessingArtifact,
-    ReturnCurvePoint, ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact,
-    SellScorerOutputSpec, SubstitutionConfidenceRules, TrainingObjectiveReport,
-    WeightedFactorModelArtifact,
+    ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec,
+    SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
 };
 pub use calibration::{
     CalibrationReport, CalibrationResult, CalibrationSample, StratumFit,
-    calibrate_horizon_multipliers, calibrate_liquidity_multipliers, calibrate_return_model,
-    calibrate_score_multipliers, calibrate_substitution_rules, calibrate_weighted_artifact,
+    calibrate_horizon_multipliers, calibrate_liquidity_multipliers, calibrate_score_multipliers,
+    calibrate_substitution_rules, calibrate_weighted_artifact,
+};
+pub use calibrator::{
+    CalibrationArtifactLoader, IsotonicKnot, MonotoneMapping, ProbabilityCalibrator,
+    ResolvedCalibration, apply_mapping, isotonic::IsotonicCalibrator, platt::PlattCalibrator,
 };
 pub use category_scope::{infer_training_category_scope, validate_category_scope_weights};
 #[cfg(feature = "ml-classical")]
@@ -59,6 +64,7 @@ pub use favorite_longshot::{
 };
 pub use overlay::{WeightOverlay, WeightSource};
 pub use rank_scores::{RankScores, attach as attach_rank_scores};
+pub use reliability::{ReliabilityBin, ReliabilityReport, ReliabilitySample, compute_reliability};
 pub use routing::{
     ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
 };

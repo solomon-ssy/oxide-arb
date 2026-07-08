@@ -80,6 +80,10 @@ pub struct MarketOutcome {
     /// Whether the market had matured (resolved) by the resolution cutoff. An
     /// unmatured market contributes no realized sample (never zero-filled).
     pub matured: bool,
+    /// `max_adverse_excursion_bps` label value, when materialized (Phase 11.3
+    /// calibration downside source — the empirical worst intra-horizon
+    /// unfavorable move, distinct from the binary settlement outcome).
+    pub max_adverse_excursion_bps: Option<Decimal>,
 }
 
 /// One replay tick: the model input + realized outcomes + market metadata, all
@@ -122,6 +126,8 @@ pub struct PortfolioCaps {
     pub max_category_exposure_usd: Decimal,
     /// Fraction of visible liquidity an allocation may consume (`[0, 1]`).
     pub liquidity_usage_cap_pct: Decimal,
+    /// Total simultaneous exposure cap as a fraction of bankroll (`[0, 1]`).
+    pub max_aggregate_exposure_pct: Decimal,
 }
 
 impl From<&PortfolioConfig> for PortfolioCaps {
@@ -145,6 +151,9 @@ impl From<&PortfolioConfig> for PortfolioCaps {
             max_event_exposure_usd: decimal(&constraints.max_event_exposure_usd.value),
             max_category_exposure_usd: decimal(&constraints.max_category_exposure_usd.value),
             liquidity_usage_cap_pct: decimal(&constraints.liquidity_usage_cap_pct.value),
+            max_aggregate_exposure_pct: decimal(
+                &config.kelly_safety.max_aggregate_exposure_pct.value,
+            ),
         }
     }
 }
@@ -277,6 +286,12 @@ pub struct SampleOutcome {
     pub expected_return_bps: Decimal,
     /// Realized return (bps).
     pub realized_return_bps: Decimal,
+    /// Whether the YES token won (side-independent ground truth; Phase 11.3
+    /// `ProbabilityCalibrator` fits on this, not on realized-return sign).
+    pub settled_yes: bool,
+    /// `max_adverse_excursion_bps` label value, when materialized (Phase 11.3
+    /// `DownsideSource::MfeMae` input).
+    pub max_adverse_excursion_bps: Option<Decimal>,
     /// Capital allocated to this candidate (USD).
     pub allocated_usd: Usd,
     /// Whether the allocation respected the liquidity-usage cap.

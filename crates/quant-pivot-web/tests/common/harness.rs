@@ -35,16 +35,18 @@ use quant_pivot_models::{
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportListQuery, BacktestReportView,
         BasisAlertInfo, BasisAlertListQuery, BiasTableFitJobParams, BiasTableFitOutcome,
-        BiasTableListQuery, BookSnapshot, BuildTrainingDatasetRequest, CatalogState,
-        CatalogStatusPort, ComparisonReportListQuery, CoreEventPublisher, CreateModelSpecCommand,
-        DataQualityPort, DataQualitySnapshot, DomainSourceCursorInfo, ExecutionOrderInfo,
-        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
-        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, FactorGovernancePort, FavoriteLongshotBiasTableInfo,
-        FavoriteLongshotFitPort, FitBiasTableRequest, GatePreviewIntent, GovernanceActor,
-        HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
+        BindCalibrationRequest, BookSnapshot, BuildTrainingDatasetRequest, CalibrationArtifactInfo,
+        CalibrationArtifactListQuery, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
+        CoreEventPublisher, CreateModelSpecCommand, DataQualityPort, DataQualitySnapshot,
+        DomainSourceCursorInfo, ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort,
+        ExecutionRecoveryView, ExecutionSubmitPort, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        FactorGovernancePort, FavoriteLongshotFitPort, FitBiasTableRequest,
+        FitModelCalibratorRequest, GatePreviewIntent, GovernanceActor, HealthReport,
+        JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
         LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo,
         MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
+        ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         ModelComparisonReportInfo, ModelGovernancePort, ModelPublishedCatalogQuery, ModelSpecInfo,
         ModelSpecListQuery, ModelSpecPort, ModelTrainingPort, ModelVersionInfo,
         ModelVersionListQuery, NegRiskEventDriftView, NewBasisAlert, NewMarketLinkage,
@@ -64,9 +66,9 @@ use quant_pivot_models::{
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, BasisAlertId, DomainInstrumentKey, DomainSourceId, FactorDefinitionId,
-        FavoriteLongshotBiasTableId, MarketId, MarketLinkageId, ModelComparisonReportId,
-        ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId, RuntimeConfigVersionId, TokenId,
+        BacktestReportId, BasisAlertId, CalibrationArtifactId, DomainInstrumentKey, DomainSourceId,
+        FactorDefinitionId, MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId,
+        ModelVersionId, OrderIntentId, ResearchJobId, RuntimeConfigVersionId, TokenId,
         TrainingDatasetId,
     },
 };
@@ -175,6 +177,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         research_catalog: Arc::new(MockResearchCatalogPort),
         research_jobs: Arc::new(MockResearchJobPort),
         favorite_longshot: Arc::new(MockFavoriteLongshotFitPort),
+        model_calibration_fit: Arc::new(MockModelCalibrationFitPort),
         market_linkages: Arc::new(MockMarketLinkageRepository),
         domain_source_cursors: Arc::new(MockDomainSourceCursorRepository),
         basis_alerts: Arc::new(MockBasisAlertRepository),
@@ -905,6 +908,15 @@ impl ModelGovernancePort for MockModelGovernancePort {
             "model quality-gate preview".into(),
         ))
     }
+
+    async fn bind_calibration(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _request: BindCalibrationRequest,
+        _actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        Err(QuantError::NotImplemented("model bind calibration".into()))
+    }
 }
 
 /// No-op factor-governance port for web integration tests.
@@ -1038,6 +1050,17 @@ impl ResearchJobPort for MockResearchJobPort {
         Err(QuantError::NotImplemented("enqueue bias table fit".into()))
     }
 
+    async fn enqueue_model_calibration_fit(
+        &self,
+        _request: FitModelCalibratorRequest,
+        _runtime_config_version_id: RuntimeConfigVersionId,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented(
+            "enqueue model calibrator fit".into(),
+        ))
+    }
+
     async fn list(&self, _query: ResearchJobListQuery) -> QuantResult<Paginated<ResearchJobView>> {
         Err(QuantError::NotImplemented("research job list".into()))
     }
@@ -1080,16 +1103,30 @@ impl FavoriteLongshotFitPort for MockFavoriteLongshotFitPort {
 
     async fn find(
         &self,
-        _bias_table_id: &FavoriteLongshotBiasTableId,
-    ) -> QuantResult<Option<FavoriteLongshotBiasTableInfo>> {
+        _bias_table_id: &CalibrationArtifactId,
+    ) -> QuantResult<Option<CalibrationArtifactInfo>> {
         Ok(None)
     }
 
     async fn page(
         &self,
-        query: BiasTableListQuery,
-    ) -> QuantResult<Paginated<FavoriteLongshotBiasTableInfo>> {
+        query: CalibrationArtifactListQuery,
+    ) -> QuantResult<Paginated<CalibrationArtifactInfo>> {
         Ok(Paginated::empty_for(&query))
+    }
+}
+
+pub struct MockModelCalibrationFitPort;
+
+#[async_trait]
+impl ModelCalibrationFitPort for MockModelCalibrationFitPort {
+    async fn fit(
+        &self,
+        _params: ModelCalibrationFitJobParams,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> QuantResult<ModelCalibrationFitOutcome> {
+        Err(QuantError::NotImplemented("model calibrator fit".into()))
     }
 }
 

@@ -1,7 +1,7 @@
 //! `quant_training_dataset` table entity.
 
 use crate::{
-    enums::quant::TrainingDatasetStatus,
+    enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
         ArtifactUri, ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId,
         TrainingDatasetId, TrainingHorizonsSecs,
@@ -19,6 +19,7 @@ pub struct Model {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,
+    pub purpose: DatasetPurpose,
     pub feature_schema_hash: ContentHash,
     pub factor_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,

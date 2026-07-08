@@ -265,6 +265,8 @@ mod tests {
             confidence: Probability::new(dec!(1)),
             expected_return_bps: dec!(100),
             realized_return_bps: realized,
+            settled_yes: realized > Decimal::ZERO,
+            max_adverse_excursion_bps: None,
             allocated_usd: Usd::new(dec!(100)),
             liquidity_feasible: true,
             data_quality: DataQualityStatus::Fresh,

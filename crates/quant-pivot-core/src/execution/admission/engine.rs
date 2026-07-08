@@ -8,21 +8,21 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::enums::execution::AdmissionOutcome;
 
 use super::checks::{
-    BookFreshnessCheck, CapitalBudgetCheck, CategoryExposureCheck, CredentialReadinessCheck,
-    DataQualityCheck, EntryTriggerCheck, EventExposureCheck, ExitMonitorReadinessCheck,
-    IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck, ManualBlockCheck, MarketExposureCheck,
-    MaxOpenIntentsCheck, MaxReservedCapitalCheck, ModelPublicationCheck,
-    RecommendationFreshnessCheck, ReportStatusCheck, RiskEnvelopeHashCheck, RuntimeModeCheck,
-    SlippageCheck, VenueGuardCheck,
+    BookFreshnessCheck, CalibratedReturnModelCheck, CapitalBudgetCheck, CategoryExposureCheck,
+    CredentialReadinessCheck, DataQualityCheck, EntryTriggerCheck, EventExposureCheck,
+    ExitMonitorReadinessCheck, IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck,
+    ManualBlockCheck, MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck,
+    ModelPublicationCheck, RecommendationFreshnessCheck, ReportStatusCheck, RiskEnvelopeHashCheck,
+    RuntimeModeCheck, SlippageCheck, VenueGuardCheck,
 };
 use super::{AdmissionCheck, AdmissionDecision, AdmissionInput, ExecutionAdmissionEngine};
 use crate::observability::metrics_hub::MetricsHub;
 
-/// The 22-check admission set (parent §4.2). A fixed-size array makes the count
+/// The 23-check admission set (parent §4.2). A fixed-size array makes the count
 /// a compile-time invariant.
-const ADMISSION_CHECK_COUNT: usize = 22;
+const ADMISSION_CHECK_COUNT: usize = 23;
 
-/// Default admission engine: holds the 22 checks in canonical order and folds
+/// Default admission engine: holds the 23 checks in canonical order and folds
 /// their outcomes into a single decision.
 pub struct DefaultAdmissionEngine {
     checks: [Box<dyn AdmissionCheck>; ADMISSION_CHECK_COUNT],
@@ -56,6 +56,7 @@ impl DefaultAdmissionEngine {
             Box::new(VenueGuardCheck),
             Box::new(CredentialReadinessCheck),
             Box::new(ExitMonitorReadinessCheck),
+            Box::new(CalibratedReturnModelCheck),
         ];
         Self { checks, metrics }
     }

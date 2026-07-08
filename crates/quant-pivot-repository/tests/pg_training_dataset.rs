@@ -6,7 +6,7 @@ use quant_pivot_models::{
     domain::{NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset},
     enums::{
         model::ModelFamily,
-        quant::{PublicationStatus, TrainingDatasetStatus},
+        quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
@@ -83,6 +83,7 @@ fn new_dataset(
         window_start,
         window_end: window_start + ChronoDuration::hours(1),
         status,
+        purpose: DatasetPurpose::Training,
         feature_schema_hash: hash.clone(),
         factor_schema_hash: hash.clone(),
         label_schema_hash: hash.clone(),

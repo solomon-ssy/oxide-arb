@@ -34,7 +34,7 @@ use quant_pivot_models::{
         factor::FactorFamily,
         market::MarketStatus,
         model::ModelFamily,
-        quant::{PublicationStatus, TrainingDatasetStatus},
+        quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
     runtime_config::{
@@ -679,6 +679,7 @@ async fn plan_request(
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
+            purpose: DatasetPurpose::Training,
         })
         .await
         .expect("plan")
@@ -959,8 +960,7 @@ fn crypto_close_observation(event_time_ms: i64) -> DomainObservationRow {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_and_available() {
+async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArtifact {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
@@ -981,9 +981,6 @@ async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_an
     let as_of_ms = as_of.timestamp_millis();
     let domain_config = DomainConfig::default();
     let mut fact = pit_scenario(as_of_ms);
-    // Visible strictly before `as_of - domain.crypto.source_delay_secs` (5s
-    // default) and before the subject's `reference_at`, so both the
-    // `latest(Close)` and `latest_at(Close, reference_at)` reads resolve it.
     let observed_ms = as_of_ms - 15_000;
     fact.domain_observations.insert(
         crypto_instrument(),
@@ -1018,11 +1015,6 @@ async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_an
         DecimalString::new("0"),
     );
 
-    // `source_delay_secs` matches `DomainConfig::default().crypto.source_delay_secs`
-    // (5s): the domain feature evidence is anchored to the domain plane's own
-    // visibility cutoff (`as_of - domain.crypto.source_delay_secs`), so the
-    // dataset-wide leakage gate must be configured coherently with it — the
-    // same governance discipline a real deploy's runtime config must uphold.
     let plan = svc
         .plan(DatasetPlanRequest {
             model_spec_id,
@@ -1035,11 +1027,14 @@ async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_an
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
+            purpose: DatasetPurpose::Training,
         })
         .await
         .expect("plan");
-    let artifact = svc.build(plan).await.expect("build");
+    svc.build(plan).await.expect("build")
+}
 
+fn assert_crypto_pit_selection_includes_domain_feature(artifact: &TrainingDatasetArtifact) {
     assert!(
         artifact.coverage.pit_selection_candidates > 0,
         "the crypto market should enter the PIT funnel as a candidate",
@@ -1078,6 +1073,12 @@ async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_an
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pit_selection_includes_crypto_market_when_domain_feature_is_resolved_and_available() {
+    let artifact = build_crypto_pit_dataset_with_resolved_linkage().await;
+    assert_crypto_pit_selection_includes_domain_feature(&artifact);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn plan_estimates_pit_keep_rate() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -1106,6 +1107,7 @@ async fn plan_estimates_pit_keep_rate() {
         feature_schema_version: SchemaVersion::FIRST,
         sample_sources: vec![TrainingSampleSource::HistoricalPit],
         training_dataset_id: None,
+        purpose: DatasetPurpose::Training,
     };
     // 3 as_of slices × the single eligible fixture market.
     let counts = svc.count_plan(&request, 3, 50).await.expect("count plan");
@@ -1474,6 +1476,7 @@ async fn model_version_training_dataset_id_is_typed() {
             window_start,
             window_end,
             status: TrainingDatasetStatus::Built,
+            purpose: DatasetPurpose::Training,
             feature_schema_hash: hash.clone(),
             factor_schema_hash: hash.clone(),
             label_schema_hash: hash.clone(),
@@ -1552,6 +1555,7 @@ async fn plan_count_respects_sample_sources() {
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: vec![TrainingSampleSource::HistoricalPit],
             training_dataset_id: None,
+            purpose: DatasetPurpose::Training,
         })
         .await
         .expect("historical-only plan");

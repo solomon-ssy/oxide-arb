@@ -5,7 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
+use crate::{
+    enums::quant::{DownsideSource, PortfolioSolverKind},
+    types::ModelVersionId,
+};
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
@@ -168,6 +171,8 @@ pub struct SizingModelConfig {
     pub confidence_weighting: ConfidenceSizeCurve,
     /// Drawdown-driven scaling policy.
     pub drawdown_scaling: DrawdownMultiplierPolicy,
+    /// Downside (bps) source for calibrated return estimates (v1: `mfe_mae` only).
+    pub downside_source: DownsideSource,
 }
 
 impl Default for SizingModelConfig {
@@ -178,6 +183,7 @@ impl Default for SizingModelConfig {
             target_reward_multiple: DecimalString::new("2.0"),
             confidence_weighting: ConfidenceSizeCurve::Linear,
             drawdown_scaling: DrawdownMultiplierPolicy::Conservative,
+            downside_source: DownsideSource::MfeMae,
         }
     }
 }

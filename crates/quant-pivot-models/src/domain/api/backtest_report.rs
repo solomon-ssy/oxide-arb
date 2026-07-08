@@ -35,8 +35,12 @@ pub struct RunBacktestRequest {
     pub training_dataset_id: TrainingDatasetId,
     /// Frozen runtime-config version governing portfolio caps + provenance.
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    /// Whether to fit a calibrated return curve from realized outcomes and
-    /// register a calibrated child candidate version.
+    /// Whether to tighten the governed score multipliers (data-quality /
+    /// liquidity / horizon / substitution penalties) from this backtest's
+    /// realized stratified outcomes and register a tightened child candidate
+    /// version. Does **not** calibrate the return model — that requires an
+    /// independent held-out split via `ProbabilityCalibrator` (Phase 11.3
+    /// §4/§5, `POST /research/calibration-artifacts/fit-model-calibrator`).
     #[serde(default)]
     pub calibrate: bool,
     /// When set, run **pair mode**: replay this baseline over the same window

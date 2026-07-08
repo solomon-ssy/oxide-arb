@@ -32,15 +32,18 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{FavoriteLongshotBiasTableInfo, query::TimeWindow},
-    enums::common::MarketCategory,
-    types::{ContentHash, FavoriteLongshotBiasTableId, MarketId, Price, Probability},
+    domain::{CalibrationArtifactInfo, NewCalibrationArtifact, query::TimeWindow},
+    enums::{common::MarketCategory, quant::CalibrationKind},
+    types::{CalibrationArtifactId, ContentHash, MarketId, Price, Probability},
 };
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, Normal, StudentsT};
+use statrs::distribution::{ContinuousCDF, StudentsT};
 
-use crate::hashing::ResearchHasher;
+use crate::{
+    hashing::ResearchHasher,
+    stats::{count_f64, wilson_interval, wilson_z},
+};
 
 /// Decimal scale for every `f64`-derived statistic entering the artifact (Wilson
 /// CI, IC), matching the crate-wide `STAT_SCALE` so hashes are platform-stable.
@@ -137,11 +140,12 @@ impl CategoryBiasCurve {
     }
 }
 
-/// A content-addressed favorite-longshot bias table.
+/// A content-addressed favorite-longshot bias table — the `MarketPriceBias`
+/// payload of the unified `CalibrationArtifact` family (Phase 11.3 §3.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FavoriteLongshotBiasTable {
-    /// Surrogate artifact id.
-    pub table_id: FavoriteLongshotBiasTableId,
+    /// Surrogate artifact id (shared `CalibrationArtifactId` space).
+    pub table_id: CalibrationArtifactId,
     /// `blake3:` canonical content hash (excludes the surrogate id).
     pub content_hash: ContentHash,
     /// The sample window the table was fit over.
@@ -172,20 +176,31 @@ impl FavoriteLongshotBiasTable {
             .bias_for(ttr_secs, mid, ic_gate)
     }
 
-    /// Rehydrate a persisted artifact into the compute-domain table, verifying
-    /// the recomputed canonical content hash matches the stored hash.
+    /// Rehydrate a persisted `MarketPriceBias` artifact into the compute-domain
+    /// table, verifying the recomputed canonical content hash matches the
+    /// stored hash.
     ///
     /// # Errors
     ///
     /// Returns [`ResearchError::DatasetBuild`](quant_pivot_error::research::ResearchError::DatasetBuild)
-    /// when the payload cannot be deserialized or the recomputed hash does not
-    /// match the persisted `content_hash` (fail-closed: a tampered / corrupt
-    /// artifact never binds to the factor plane).
-    pub fn from_persisted(info: &FavoriteLongshotBiasTableInfo) -> QuantResult<Self> {
+    /// when `info.kind` is not [`CalibrationKind::MarketPriceBias`], the
+    /// payload cannot be deserialized, or the recomputed hash does not match
+    /// the persisted `content_hash` (fail-closed: a tampered / corrupt / wrong-
+    /// kind artifact never binds to the factor plane).
+    pub fn from_persisted(info: &CalibrationArtifactInfo) -> QuantResult<Self> {
         use quant_pivot_error::{QuantError, research::ResearchError};
 
+        if info.kind != CalibrationKind::MarketPriceBias {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration artifact `{}` is kind `{}`, expected `market_price_bias`",
+                    info.artifact_id,
+                    info.kind.as_str()
+                ),
+            }));
+        }
         let by_category: BTreeMap<MarketCategory, CategoryBiasCurve> =
-            serde_json::from_value(info.by_category.clone()).map_err(|error| {
+            serde_json::from_value(info.payload_json.clone()).map_err(|error| {
                 QuantError::from(ResearchError::DatasetBuild {
                     detail: format!("bias-table payload deserialization failed: {error}"),
                 })
@@ -205,12 +220,35 @@ impl FavoriteLongshotBiasTable {
             }));
         }
         Ok(Self {
-            table_id: info.bias_table_id.clone(),
+            table_id: info.artifact_id.clone(),
             content_hash: info.content_hash.clone(),
             fit_window,
             calibration_split_hash: info.calibration_split_hash.clone(),
             by_category,
         })
+    }
+}
+
+impl From<FavoriteLongshotBiasTable> for NewCalibrationArtifact {
+    fn from(table: FavoriteLongshotBiasTable) -> Self {
+        Self {
+            artifact_id: table.table_id,
+            kind: CalibrationKind::MarketPriceBias,
+            content_hash: table.content_hash,
+            calibration_split_hash: table.calibration_split_hash,
+            fit_window_start: table.fit_window.from,
+            fit_window_end: table.fit_window.to,
+            sample_count: i64::try_from(
+                table
+                    .by_category
+                    .values()
+                    .map(|c| c.sample_count)
+                    .sum::<u64>(),
+            )
+            .unwrap_or(i64::MAX),
+            payload_json: serde_json::to_value(&table.by_category).unwrap_or_default(),
+            active: false,
+        }
     }
 }
 
@@ -322,7 +360,7 @@ impl FavoriteLongshotBiasTable {
             by_category: &by_category,
         })?;
         Ok(Some(Self {
-            table_id: FavoriteLongshotBiasTableId::from_v7(),
+            table_id: CalibrationArtifactId::from_v7(),
             content_hash,
             fit_window,
             calibration_split_hash,
@@ -390,7 +428,7 @@ fn fit_bins(samples: &[&BiasSample], config: &BiasFitConfig, z: f64) -> Vec<Pric
         let realized = Decimal::from_f64(p_hat)
             .unwrap_or(Decimal::ZERO)
             .round_dp(STAT_SCALE);
-        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z);
+        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z, STAT_SCALE);
         // Wilson significance gate: retain the bias only when the implied mid
         // falls outside the empirical-frequency confidence interval.
         let implied = implied_mid.round_dp(STAT_SCALE);
@@ -467,11 +505,6 @@ fn ic_is_significant(ic: Decimal, n: u64, ci_confidence: Decimal, ic_floor: Deci
     t.abs() >= t_crit
 }
 
-/// A count converted to `f64` through `Decimal` (no lossy `as` cast).
-fn count_f64(n: u64) -> f64 {
-    Decimal::from(n).to_f64().unwrap_or(0.0)
-}
-
 /// Pearson correlation (0.0 for degenerate/empty inputs).
 fn pearson(xs: &[f64], ys: &[f64]) -> f64 {
     let n = xs.len();
@@ -496,32 +529,6 @@ fn pearson(xs: &[f64], ys: &[f64]) -> f64 {
     }
     let corr = cov / (var_x.sqrt() * var_y.sqrt());
     if corr.is_finite() { corr } else { 0.0 }
-}
-
-/// The two-sided normal quantile for a confidence level (e.g. `0.95 → 1.96`).
-fn wilson_z(confidence: Decimal) -> f64 {
-    let level = confidence.to_f64().unwrap_or(0.95).clamp(0.5, 0.999_999);
-    let upper = 1.0 - (1.0 - level) / 2.0;
-    Normal::new(0.0, 1.0).map_or(1.96, |dist| dist.inverse_cdf(upper))
-}
-
-/// Wilson score interval for a binomial proportion, quantized to `STAT_SCALE`.
-fn wilson_interval(p_hat: f64, n: u64, z: f64) -> (Decimal, Decimal) {
-    if n == 0 {
-        return (Decimal::ZERO, Decimal::ZERO);
-    }
-    let n = count_f64(n);
-    let z2 = z * z;
-    let denom = 1.0 + z2 / n;
-    let center = (p_hat + z2 / (2.0 * n)) / denom;
-    let margin = z * ((p_hat * (1.0 - p_hat) / n) + z2 / (4.0 * n * n)).sqrt() / denom;
-    let lo = Decimal::from_f64((center - margin).clamp(0.0, 1.0))
-        .unwrap_or(Decimal::ZERO)
-        .round_dp(STAT_SCALE);
-    let hi = Decimal::from_f64((center + margin).clamp(0.0, 1.0))
-        .unwrap_or(Decimal::ONE)
-        .round_dp(STAT_SCALE);
-    (lo, hi)
 }
 
 #[cfg(test)]

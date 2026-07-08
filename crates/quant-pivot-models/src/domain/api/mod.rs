@@ -2,10 +2,10 @@
 
 mod auth;
 mod backtest_report;
+mod calibration_artifact;
 mod comparison_report;
 mod execution_recovery;
 mod factor_governance;
-mod favorite_longshot;
 mod health;
 mod market;
 mod market_linkage;
@@ -34,10 +34,10 @@ mod window;
 
 pub use auth::*;
 pub use backtest_report::*;
+pub use calibration_artifact::*;
 pub use comparison_report::*;
 pub use execution_recovery::*;
 pub use factor_governance::*;
-pub use favorite_longshot::*;
 pub use health::*;
 pub use market::*;
 pub use market_linkage::*;

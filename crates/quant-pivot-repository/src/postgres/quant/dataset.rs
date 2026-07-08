@@ -116,6 +116,11 @@ fn page_condition(query: &TrainingDatasetListQuery) -> Condition {
         )
         .add_option(
             query
+                .purpose
+                .map(|purpose| quant_training_dataset::Column::Purpose.eq(purpose)),
+        )
+        .add_option(
+            query
                 .from
                 .map(|from| quant_training_dataset::Column::CreatedAt.gte(from)),
         )

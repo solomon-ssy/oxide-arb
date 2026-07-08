@@ -1356,6 +1356,7 @@ impl TrainingDatasetService {
                 window_start: plan.request.window_start,
                 window_end: plan.request.window_end,
                 status,
+                purpose: plan.request.purpose,
                 feature_schema_hash: feature_schema_hash.clone(),
                 factor_schema_hash: factor_schema_hash.clone(),
                 label_schema_hash: label_schema_hash.clone(),

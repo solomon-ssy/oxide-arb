@@ -24,6 +24,7 @@ use quant_pivot_models::{
 use quant_pivot_research::{
     backtest::PortfolioCaps,
     model::signal::{ModelExplanation, SignalCandidate},
+    portfolio::sizing::KellySafetyParams,
     portfolio::{
         AccountSnapshot, DefaultPortfolioPlanner, DrawdownState, KellySizingModel,
         LinearProgrammingPortfolioAllocator, OptimizerConfig, PlanCandidate, PortfolioPlanInput,
@@ -100,6 +101,7 @@ const fn caps() -> PortfolioCaps {
         max_event_exposure_usd: dec!(0),
         max_category_exposure_usd: dec!(5000),
         liquidity_usage_cap_pct: dec!(0.1),
+        max_aggregate_exposure_pct: dec!(0),
     }
 }
 
@@ -127,6 +129,7 @@ const fn kelly() -> KellySizingModel {
         dec!(2),
         ConfidenceSizeCurve::Linear,
         DrawdownMultiplierPolicy::Fixed,
+        KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9)),
     )
 }
 
@@ -165,6 +168,7 @@ fn input<'a>(
         sizing,
         entry_max_slippage_bps: Bps::new(dec!(50)),
         top_n,
+        calibration: None,
     }
 }
 
@@ -498,6 +502,7 @@ fn planner_consumes_real_drawdown_state() {
         dec!(2),
         ConfidenceSizeCurve::Linear,
         DrawdownMultiplierPolicy::Conservative,
+        KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9)),
     );
     let mut neutral = input(
         vec![plan_candidate(
@@ -553,6 +558,7 @@ fn planner_deterministic_with_frozen_drawdown() {
         dec!(2),
         ConfidenceSizeCurve::Linear,
         DrawdownMultiplierPolicy::Conservative,
+        KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9)),
     );
     let mut plan_input = input(
         vec![plan_candidate(

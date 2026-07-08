@@ -11,9 +11,9 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest, FitBiasTableRequest,
-        JobSubmitContext, NewResearchJob, Paginated, ResearchJobError, ResearchJobInfo,
-        ResearchJobListQuery, ResearchJobPort, ResearchJobView, RunBacktestRequest,
-        TrainModelRequest,
+        FitModelCalibratorRequest, JobSubmitContext, ModelCalibrationFitJobParams, NewResearchJob,
+        Paginated, ResearchJobError, ResearchJobInfo, ResearchJobListQuery, ResearchJobPort,
+        ResearchJobView, RunBacktestRequest, TrainModelRequest,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
@@ -169,6 +169,27 @@ impl ResearchJobPort for CoreResearchJobPort {
         })?;
         let job = self.new_job(
             ResearchJobKind::BiasTableFit,
+            params,
+            None,
+            Some(runtime_config_version_id),
+            None,
+            &ctx,
+        );
+        self.enqueue(job).await
+    }
+
+    async fn enqueue_model_calibration_fit(
+        &self,
+        request: FitModelCalibratorRequest,
+        runtime_config_version_id: RuntimeConfigVersionId,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        let params = to_params(&ModelCalibrationFitJobParams {
+            request,
+            runtime_config_version_id: runtime_config_version_id.clone(),
+        })?;
+        let job = self.new_job(
+            ResearchJobKind::ModelCalibrationFit,
             params,
             None,
             Some(runtime_config_version_id),

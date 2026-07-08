@@ -1,7 +1,7 @@
 //! Training-dataset ledger persistence DTOs.
 
 use crate::{
-    enums::quant::TrainingDatasetStatus,
+    enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
         ArtifactUri, ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId,
         TrainingDatasetId, TrainingHorizonsSecs,
@@ -20,6 +20,11 @@ pub struct TrainingDatasetInfo {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,
+    /// What the materialized examples are used for (Phase 11.3 §4): `Training`
+    /// (the default, model-training spine) or `Calibration` (an independent
+    /// held-out split a `ProbabilityCalibrator` fits on — must be disjoint +
+    /// embargoed from the model's own `Training` dataset).
+    pub purpose: DatasetPurpose,
     pub feature_schema_hash: ContentHash,
     pub factor_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,
@@ -47,6 +52,7 @@ info_from_model!(
         window_start,
         window_end,
         status,
+        purpose,
         feature_schema_hash,
         factor_schema_hash,
         label_schema_hash,
@@ -73,6 +79,7 @@ pub struct NewTrainingDataset {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: TrainingDatasetStatus,
+    pub purpose: DatasetPurpose,
     pub feature_schema_hash: ContentHash,
     pub factor_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,

@@ -13,7 +13,7 @@
 //! Per run it persists a `quant_backtest_report` + a `Backtest` `quant_model_run`
 //! and optionally fits a calibrated return curve into a fresh Candidate version.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use tokio::{runtime::Handle, task};
@@ -31,7 +31,7 @@ use quant_pivot_models::{
     },
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, MarketId, ModelComparisonReportId, ModelRunId, ModelVersionId,
+        BacktestReportId, ModelComparisonReportId, ModelRunId, ModelVersionId,
         RuntimeConfigVersionId, TrainingDatasetId, Usd,
     },
 };
@@ -62,7 +62,7 @@ use crate::{
         inference_batch::build_runtime_input, inference_context::build_market_inference_context,
     },
     service::{
-        dataset_replay::{ReplaySchedule, max_horizon},
+        dataset_replay::{ReplaySchedule, ReplaySettlementMap, max_horizon},
         historical_replay::{
             CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
         },
@@ -189,6 +189,29 @@ impl BacktestService {
             .persist_comparison(&candidate, &baseline, &comparison)
             .await?;
         Ok((candidate.info, info))
+    }
+
+    /// Run a backtest purely to harvest per-sample `(score, outcome)` pairs for
+    /// Phase 11.3 `ProbabilityCalibrator` fitting.
+    ///
+    /// Persists the same backtest-report / model-run ledger rows as [`Self::run`]
+    /// (a full audit trail of the exact PIT replay that produced the
+    /// calibration evidence — recomputed features/factors, never trusted from
+    /// Parquet, so the calibrator fits the identical computation graph the
+    /// live plane scores), and additionally returns the raw per-sample
+    /// outcomes `run()` discards.
+    pub async fn run_for_calibration(
+        &self,
+        input: BacktestInput,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<(BacktestReportInfo, Vec<SampleOutcome>)> {
+        let version = self.find_version(&input.model_version_id).await?;
+        let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        let recorded = self
+            .run_recorded(&version, &dataset, &input, &progress, &cancel)
+            .await?;
+        Ok((recorded.info, recorded.result.sample_outcomes))
     }
 
     /// Resolve a registered model version or fail with a not-found error.
@@ -445,11 +468,15 @@ impl BacktestService {
         Ok(info)
     }
 
-    /// Calibrate the full governed scoring surface (return curve + data-quality /
-    /// liquidity / horizon multipliers + substitution penalties) from realized
-    /// stratified outcomes and register a fresh calibrated Candidate version
-    /// (weighted models only). A `None` fit (too little evidence) leaves the
-    /// candidate uncalibrated — the conservative governed baseline stays in force.
+    /// Tighten the governed score multipliers (data-quality / liquidity /
+    /// horizon / substitution penalties) from realized stratified outcomes and
+    /// register a fresh Candidate version (weighted models only). A `None` fit
+    /// (too little evidence) leaves the candidate untightened — the
+    /// conservative governed baseline stays in force. Does **not** touch
+    /// `return_model`: the return model is calibrated separately, from an
+    /// independent held-out split, via `ProbabilityCalibrator` +
+    /// `ModelGovernanceService::bind_calibration` (Phase 11.3 §5) — never as a
+    /// same-backtest side effect (that would be a leaked "calibration").
     async fn maybe_calibrate(
         &self,
         version: &ModelVersionInfo,
@@ -467,15 +494,14 @@ impl BacktestService {
             return Ok(());
         };
 
-        // Fail-closed: only re-register a calibrated candidate when there is
-        // enough evidence to fit a real return curve.
+        // Fail-closed: only re-register a tightened candidate when there is
+        // enough evidence.
         let Some(result) = calibrate_weighted_artifact(&calibration, &weighted) else {
             return Ok(());
         };
 
         let new_version_id = ModelVersionId::from_v7();
         weighted.header.model_version_id = new_version_id.clone();
-        weighted.return_model = result.return_model;
         weighted.multipliers = result.multipliers;
         weighted.substitution_confidence_rules = result.substitution_rules;
         let calibrated = ModelArtifact::WeightedFactor(weighted);
@@ -703,7 +729,7 @@ fn build_tick(
     model_run_id: &ModelRunId,
     as_of: DateTime<Utc>,
     cross: &ReplayCrossSection,
-    settlement: &HashMap<(DateTime<Utc>, MarketId), (bool, bool)>,
+    settlement: &ReplaySettlementMap,
 ) -> Option<BacktestTick> {
     let model_input = build_runtime_input(
         model,
@@ -729,14 +755,15 @@ fn build_tick(
             event_id: Some(market.event_id.clone()),
             liquidity_usd: context.liquidity_usd,
         });
-        let (settled_yes, matured) = settlement
+        let (settled_yes, matured, max_adverse_excursion_bps) = settlement
             .get(&(as_of, market.market_id.clone()))
             .copied()
-            .unwrap_or((false, false));
+            .unwrap_or((false, false, None));
         outcomes.push(MarketOutcome {
             market_id: market.market_id.clone(),
             settled_yes,
             matured,
+            max_adverse_excursion_bps,
         });
     }
     Some(BacktestTick {

@@ -10,7 +10,7 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
-    governance::{BiasTableApplicator, WeightOverlayApplicator},
+    governance::{BiasTableApplicator, CoreCalibrationArtifactLoader, WeightOverlayApplicator},
     ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
@@ -56,12 +56,12 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgFactorRepository, PgFavoriteLongshotBiasTableRepository,
+        PgCalibrationArtifactRepository, PgEventRepository, PgFactorRepository,
         PgFeatureRepository, PgMarketRepository, PgModelRegistryRepository, PgModelRunRepository,
         PgShadowComparisonRepository,
     },
     traits::{
-        EventRepository, FactorRepository, FavoriteLongshotBiasTableRepository, FeatureRepository,
+        CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
         MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
         ShadowComparisonRepository,
     },
@@ -72,8 +72,8 @@ use quant_pivot_research::{
     features::{FeatureSchema, FeatureVector, PitView},
     hashing::ResearchHasher,
     model::{
-        DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact, ModelArtifactHeader,
-        ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
+        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact,
+        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
         WeightedFactorModelArtifact,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
@@ -813,10 +813,12 @@ fn build_runner(
     weight_overlay: Arc<WeightOverlayApplicator>,
 ) -> ModelRunner {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
-    let bias_table = Arc::new(BiasTableApplicator::new(Arc::new(
-        PgFavoriteLongshotBiasTableRepository::new(db.clone()),
-    )
-        as Arc<dyn FavoriteLongshotBiasTableRepository>));
+    let calibration_repo = Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
+        as Arc<dyn CalibrationArtifactRepository>;
+    let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
+        CoreCalibrationArtifactLoader::new(Arc::clone(&calibration_repo)),
+    );
+    let bias_table = Arc::new(BiasTableApplicator::new(calibration_repo));
     let factor_pipeline = Arc::new(FactorPipelineService::new(
         factor_repo,
         noop_factor_writer(),
@@ -832,7 +834,10 @@ fn build_runner(
         model_run_repo,
         model_registry_repo: registry,
         shadow_comparison_repo,
-        factory_builder: Arc::new(DefaultModelRuntimeFactoryBuilder::new(store)),
+        factory_builder: Arc::new(DefaultModelRuntimeFactoryBuilder::new(
+            store,
+            calibration_loader,
+        )),
         factor_pipeline,
         signal_writer: noop_signal_writer(),
         alerts: Arc::new(CountingAlertSink { critical }),

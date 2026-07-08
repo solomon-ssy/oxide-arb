@@ -62,7 +62,9 @@ expression: recommendation_not_auto_eligible()
     "sizing_reason": "half-kelly capped",
     "sizing_model": "kelly",
     "edge_bps": "120",
-    "kelly_fraction_applied": "0.5"
+    "kelly_fraction_applied": "0.5",
+    "edge_uncertainty_shrink_applied": null,
+    "correlation_shrink_applied": null
   },
   "exit_plan": {
     "take_profit_price": "0.7",
