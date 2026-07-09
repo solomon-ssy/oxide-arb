@@ -339,7 +339,7 @@ mod tests {
         },
         training::TrainingMatrix,
     };
-    use chrono::Utc;
+    use chrono::{DateTime, TimeZone, Utc};
     use ndarray::{Array1, Array2};
     use quant_pivot_models::{
         enums::quant::{DataQualityStatus, OutcomeSide},
@@ -360,6 +360,16 @@ mod tests {
         ContentHash::parse(format!("blake3:{}", &padded[..64])).expect("hash")
     }
 
+    fn fixture_row_secs(i: usize) -> i64 {
+        i64::try_from(i).expect("fixture row index fits i64")
+    }
+
+    fn fixture_ts(offset_secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000 + offset_secs, 0)
+            .single()
+            .expect("ts")
+    }
+
     /// A linearly separable matrix: label = 1 when feature-0 is high.
     fn training_matrix() -> TrainingMatrix {
         let rows = 40usize;
@@ -376,6 +386,10 @@ mod tests {
             labels,
             feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
             rejected_rows: 0,
+            row_as_of: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+            row_label_horizon_end: (0..rows)
+                .map(|i| fixture_ts(fixture_row_secs(i) + 60))
+                .collect(),
         }
     }
 

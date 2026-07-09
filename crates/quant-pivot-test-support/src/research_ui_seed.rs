@@ -435,6 +435,7 @@ async fn create_model_version(
             version,
             artifact_hash: content_hash(&format!("artifact-research-{artifact_seed}")),
             training_dataset_id,
+            publish_path_set_id: None,
             metrics_json,
             training_objective_json: serde_json::json!({
                 "rank_loss": "rank_ic_weighted_ranknet",

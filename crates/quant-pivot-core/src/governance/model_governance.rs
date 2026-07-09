@@ -30,8 +30,8 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetInfo, BacktestReportInfo, BindCalibrationRequest, GateOutcomeView,
-        GatePreviewIntent, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
+        BacktestPathSetInfo, BacktestReportInfo, BindCalibrationRequest, BindPublishPathSetRequest,
+        GateOutcomeView, GatePreviewIntent, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
         NewModelGovernanceAudit, NewModelVersion, PromoteDatasetRequest, PublishModelCommand,
         QualityGateReportView, RetireModelCommand, RollbackModelCommand, RuntimeConfigPort,
         ShadowStabilitySummary, TrainingDatasetInfo,
@@ -589,6 +589,77 @@ impl ModelGovernancePort for ModelGovernanceService {
         self.persist_calibrated_version(&version, &request, calibrated, actor)
             .await
     }
+
+    async fn bind_publish_path_set(
+        &self,
+        model_version_id: &ModelVersionId,
+        request: BindPublishPathSetRequest,
+        actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        let version = self.find_version(model_version_id).await?;
+        if !matches!(
+            version.publication_status,
+            PublicationStatus::Candidate | PublicationStatus::Shadow
+        ) {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "cannot bind publish path set on version {} in status {}",
+                    version.model_version_id,
+                    version.publication_status.as_str()
+                ),
+            }
+            .into());
+        }
+        let path_set = self
+            .deps
+            .backtest_path_set_repo
+            .find_by_id(&request.path_set_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| GovernanceError::NotFound {
+                entity: "backtest_path_set",
+                id: request.path_set_id.to_string(),
+            })?;
+        if path_set.model_version_id != version.model_version_id {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "path set {} belongs to model version {}, not {}",
+                    request.path_set_id, path_set.model_version_id, version.model_version_id
+                ),
+            }
+            .into());
+        }
+        let before = version.publish_path_set_id.clone();
+        let updated = self
+            .deps
+            .model_registry_repo
+            .set_publish_path_set_id(&version.model_version_id, Some(request.path_set_id.clone()))
+            .await
+            .map_err(QuantError::from)?;
+        self.write_audit(NewModelGovernanceAudit {
+            audit_id: ModelGovernanceAuditId::from_v7(),
+            model_version_id: Some(version.model_version_id.clone()),
+            training_dataset_id: version.training_dataset_id.clone(),
+            action: ModelGovernanceAction::BindPublishPathSet,
+            actor_username: actor.username,
+            actor_role: actor.role,
+            reason: request.reason,
+            before_status: version.publication_status,
+            after_status: updated.publication_status,
+            before_hash: before.map(|id| id.to_string()),
+            after_hash: Some(request.path_set_id.to_string()),
+            quality_gate_passed: false,
+            rollback_target_version_id: None,
+            shadow_window_secs: None,
+            detail_json: serde_json::json!({
+                "path_set_id": request.path_set_id.to_string(),
+                "path_set_hash": path_set.path_set_hash.as_str(),
+            }),
+            audit_event_id: Some(AuditEventId::from_v7()),
+        })
+        .await?;
+        Ok(updated)
+    }
 }
 
 impl ModelGovernanceService {
@@ -741,6 +812,7 @@ impl ModelGovernanceService {
                 version: next,
                 artifact_hash,
                 training_dataset_id: version.training_dataset_id.clone(),
+                publish_path_set_id: None,
                 metrics_json: serde_json::json!({
                     "calibrated_from": version.model_version_id.to_string(),
                     "calibrator_ref": request.calibrator_ref.to_string(),
@@ -825,25 +897,31 @@ impl ModelGovernanceService {
             None => self.latest_backtest(&version.model_version_id).await?,
         };
         let dataset = self.dataset_coverage(version).await?;
-        let leakage = if let Some(dataset_id) = &version.training_dataset_id {
-            let info = self
-                .deps
-                .dataset_repo
-                .find_by_id(dataset_id)
-                .await?
-                .ok_or_else(|| GovernanceError::NotFound {
-                    entity: "training_dataset",
-                    id: dataset_id.to_string(),
-                })?;
-            self.rescan_leakage(&info).await?
-        } else {
-            // No linked dataset ⇒ no feature provenance to scan; the coverage
-            // gates fail separately. Empty findings keep NoPitLeakage from
-            // inventing violations on a structurally incomplete version.
-            LeakageFindings::default()
-        };
+        // Publish/promote must rescan real Parquet provenance (#9). A version
+        // without `training_dataset_id` cannot be rescanned — fail closed
+        // rather than inventing empty `LeakageFindings` that would pass
+        // `NoPitLeakage`.
+        let dataset_id = version.training_dataset_id.as_ref().ok_or_else(|| {
+            GovernanceError::IllegalTransition {
+                detail: format!(
+                    "model version {} has no linked training_dataset_id; \
+                     publish/promote requires a frozen dataset for leakage rescan",
+                    version.model_version_id
+                ),
+            }
+        })?;
+        let dataset_info = self
+            .deps
+            .dataset_repo
+            .find_by_id(dataset_id)
+            .await?
+            .ok_or_else(|| GovernanceError::NotFound {
+                entity: "training_dataset",
+                id: dataset_id.to_string(),
+            })?;
+        let leakage = self.rescan_leakage(&dataset_info).await?;
         let path_set = if intent.requires_backtest() && !is_exit {
-            self.latest_path_set(&version.model_version_id).await?
+            self.bound_path_set(version).await?
         } else {
             None
         };
@@ -910,21 +988,41 @@ impl ModelGovernanceService {
         }
     }
 
-    /// Reconstruct the most recent CPCV path-set metrics for a version, if any.
-    async fn latest_path_set(
+    /// Resolve the CPCV path set bound for publish gates.
+    ///
+    /// Only an explicitly bound `publish_path_set_id` is accepted — never an
+    /// implicit "latest" row (a failed re-run must not silently replace a
+    /// passing candidate).
+    async fn bound_path_set(
         &self,
-        version_id: &ModelVersionId,
+        version: &ModelVersionInfo,
     ) -> QuantResult<Option<CpcvPathSetGateInput>> {
-        let rows = self
+        let Some(path_set_id) = &version.publish_path_set_id else {
+            return Ok(None);
+        };
+        let Some(info) = self
             .deps
             .backtest_path_set_repo
-            .list_by_model_version(version_id)
+            .find_by_id(path_set_id)
             .await
-            .map_err(QuantError::from)?;
-        Ok(rows
-            .into_iter()
-            .next()
-            .map(|info| path_set_gate_input_from_info(&info)))
+            .map_err(QuantError::from)?
+        else {
+            return Err(GovernanceError::NotFound {
+                entity: "backtest_path_set",
+                id: path_set_id.to_string(),
+            }
+            .into());
+        };
+        if info.model_version_id != version.model_version_id {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "bound publish_path_set_id {path_set_id} belongs to model version {}, not {}",
+                    info.model_version_id, version.model_version_id
+                ),
+            }
+            .into());
+        }
+        Ok(Some(path_set_gate_input_from_info(&info)))
     }
 
     /// Resolve the dataset coverage backing a model version (the gate's

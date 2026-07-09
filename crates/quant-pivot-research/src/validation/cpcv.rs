@@ -702,4 +702,27 @@ mod tests {
             replay: &DeterministicReplay,
         });
     }
+
+    /// Classical (and future Sell lot) families reuse the same φ-path CPCV
+    /// engine via `FoldModelSource` — path count is independent of trainer kind.
+    #[test]
+    fn cpcv_phi_paths_shared_by_classical_fold_source_contract() {
+        let groups = groups(8);
+        let path_set = DefaultCombinatorialPurgedBacktester::new()
+            .run(CpcvRequest {
+                path_set_id: BacktestPathSetId::from_v7(),
+                groups: &groups,
+                cpcv: CpcvConfig {
+                    n_groups: 4,
+                    k_test: 2,
+                },
+                purge: PurgeConfig::pct_only(dec!(0.02)),
+                fold_source: &StubFoldSource,
+                replay: &DeterministicReplay,
+            })
+            .expect("cpcv");
+        // N=4,k=2 → φ = C(3,1) = 3 (same for WeightedFactor and classical).
+        assert_eq!(path_set.paths.len(), 3);
+        assert_eq!(path_set.combination_count, 6);
+    }
 }

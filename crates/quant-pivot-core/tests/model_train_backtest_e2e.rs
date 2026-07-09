@@ -19,15 +19,15 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 
-use quant_pivot_core::governance::CoreCalibrationArtifactLoader;
-use quant_pivot_core::service::{
-    backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
-    cpcv_backtest::{
-        CpcvBacktestConfig, CpcvBacktestInput, CpcvBacktestService, CpcvBacktestServiceDeps,
-    },
-    historical_replay::ReplayConfig,
-    model_training::{
-        ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
+use quant_pivot_core::{
+    app::ports::cpcv_backtest::{CoreCpcvBacktestPort, CoreCpcvBacktestPortDeps},
+    governance::CoreCalibrationArtifactLoader,
+    service::{
+        backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
+        historical_replay::ReplayConfig,
+        model_training::{
+            ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
+        },
     },
 };
 use quant_pivot_error::storage::StorageError;
@@ -37,8 +37,8 @@ use quant_pivot_models::{
         DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
-        ModelVersionInfo, NewBacktestPathSet, NewModelRun, NewModelSpec, NewRuntimeConfigVersion,
-        NewTrainingDataset, NoopProgressSink,
+        CpcvBacktestPort, JobProgressSink, ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion,
+        NewTrainingDataset, NoopProgressSink, RunCpcvBacktestRequest,
     },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
@@ -62,9 +62,9 @@ use quant_pivot_models::{
     },
     types::{
         BacktestPathSetId, ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId,
-        MarketId, ModelRunId, ModelSpecId, ModelVersionId, Price, Probability,
-        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingHorizonsSecs, TrainingSampleSource, Usd,
+        MarketId, ModelSpecId, ModelVersionId, Price, Probability, RuntimeConfigVersionId,
+        SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
+        TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -76,7 +76,7 @@ use quant_pivot_repository::{
     },
     traits::{
         BacktestPathSetRepository, CalibrationArtifactRepository, EventRepository,
-        MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
         RuntimeConfigVersionRepository, TrainingDatasetRepository,
     },
 };
@@ -89,7 +89,7 @@ use quant_pivot_research::{
         ModelRuntimeFactoryBuilder, TrainingObjectiveSpec,
     },
     training::{DatasetParquetCodec, LabelName, TrainingExample, TrainingLabel},
-    validation::{CpcvConfig, PboInput, PurgeConfig, TrialGridSpec, WeightedFactorTrialGrid},
+    validation::PurgeConfig,
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
@@ -510,6 +510,16 @@ fn e2e_research_training() -> ResearchTrainingConfig {
 fn e2e_runtime_config() -> RuntimeConfig {
     let mut config = RuntimeConfig::default();
     config.research.training = e2e_research_training();
+    // Dataset has 4 as_of groups — size CPCV/PBO so the port path can run
+    // without failing the T < block_count preflight.
+    config.research.validation.cpcv.n_groups = 4;
+    config.research.validation.cpcv.k_test = 2;
+    config.research.validation.pbo.block_count = 4;
+    config.research.validation.trials.lambda_multipliers =
+        vec![DecimalString::new("1"), DecimalString::new("0.5")];
+    config.research.validation.trials.rank_loss_kinds = vec![RankLossKind::RankIcWeightedRanknet];
+    config.research.validation.trials.max_trials = 4;
+    config.research.validation.purge.embargo_pct = DecimalString::new("0.02");
     config
 }
 
@@ -980,135 +990,93 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         "trainer must persist coord_search_effective_n ≥ 1, got {coord_n}"
     );
 
-    // Dataset has 4 as_of groups → CPCV n_groups=4; PBO needs ≥4 periods.
-    let runtime = e2e_runtime_config();
-    let cpcv = CpcvBacktestService::new(
-        CpcvBacktestServiceDeps {
-            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            artifact_store: Arc::clone(&store),
-            fact_read: Arc::clone(&fact_read),
-            market_repo: Arc::clone(&market_repo),
-            event_repo: Arc::new(PgEventRepository::new(db.clone())),
-            linkage_repo: Arc::new(EmptyLinkageRepo),
-        },
-        CpcvBacktestConfig {
-            factors: trainer_config().factors,
-            objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)
-                .expect("objective"),
-            cpcv: CpcvConfig {
-                n_groups: 4,
-                k_test: 2,
-            },
-            purge: PurgeConfig {
-                embargo_pct: dec!(0.02),
-                min_embargo_secs: 0,
-            },
-            trials: TrialGridSpec::WeightedFactor(WeightedFactorTrialGrid {
-                lambda_multipliers: vec![Decimal::ONE, dec!(0.5)],
-                rank_loss_kinds: vec![RankLossKind::RankIcWeightedRanknet],
-                max_trials: 4,
-            }),
-            pbo: PboInput { block_count: 4 },
-            dsr_significance: dec!(0.05),
-        },
-        &portfolio(),
-        replay_config(),
-        Duration::from_mins(1),
-    );
-
+    // Production path: CoreCpcvBacktestPort creates ModelRunKind::Cpcv itself —
+    // tests must not pre-insert model_run (that masked the FK bug).
     let path_set_id = BacktestPathSetId::from_v7();
-    let cpcv_outcome = cpcv
+    let port = CoreCpcvBacktestPort::new(CoreCpcvBacktestPortDeps {
+        dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+        artifact_store: Arc::clone(&store),
+        path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
+        model_registry_repo: Arc::clone(&registry),
+        model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
+        fact_read: Arc::clone(&fact_read),
+        market_repo: Arc::clone(&market_repo),
+        event_repo: Arc::new(PgEventRepository::new(db.clone())),
+        linkage_repo: Arc::new(EmptyLinkageRepo),
+        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone())),
+        bias_table_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
+    });
+    let progress: Arc<dyn JobProgressSink> = Arc::new(NoopProgressSink);
+    let view = port
         .run(
-            CpcvBacktestInput {
+            version.model_version_id.clone(),
+            RunCpcvBacktestRequest {
                 training_dataset_id: dataset_id.clone(),
                 runtime_config_version_id: rc_id.clone(),
-                label: LabelSelector {
-                    name: settlement(),
-                    horizon_secs: 0,
-                },
-                model_family: ModelFamily::WeightedFactor,
+                model_family: "weighted_factor".to_owned(),
+                label_name: settlement().as_str().to_owned(),
+                label_horizon_secs: 0,
                 prediction_horizon_secs: 86_400,
-                category_scope: None,
+                reason: "train-then-cpcv e2e".to_owned(),
                 path_set_id: Some(path_set_id.clone()),
-                coord_search_effective_n: u32::try_from(coord_n).unwrap_or(0),
             },
-            &NoopProgressSink,
-            &CancellationToken::new(),
+            progress,
+            CancellationToken::new(),
         )
         .await
-        .expect("cpcv");
+        .expect("cpcv port");
 
+    assert_eq!(view.path_set_id, path_set_id);
     assert_eq!(
-        cpcv_outcome.trial_count,
-        cpcv_outcome
-            .trial_grid_count
-            .saturating_add(cpcv_outcome.coord_search_effective_n),
-        "DSR N must equal grid + coord-search effective N"
+        view.trial_count, view.trial_grid_count,
+        "DSR N must equal the governed trial-grid count (same population as V)"
     );
     assert_eq!(
-        cpcv_outcome.coord_search_effective_n,
-        u32::try_from(coord_n).unwrap_or(0)
+        view.coord_search_effective_n,
+        i64::try_from(coord_n).unwrap_or(0),
+        "coord_search_effective_n is audit-only and must still be persisted"
     );
-    assert!(!cpcv_outcome.path_set.paths.is_empty(), "φ paths present");
     // N=4,k=2 → φ = C(3,1) = 3 paths; C(4,2) = 6 combinations.
-    assert_eq!(cpcv_outcome.path_set.paths.len(), 3);
-    assert_eq!(cpcv_outcome.path_set.combination_count, 6);
+    assert_eq!(view.path_count, 3);
+    assert_eq!(view.combination_count, 6);
+    assert!(
+        !view.path_set_hash.as_str().is_empty(),
+        "port must persist a content hash"
+    );
 
-    // Persist ledger row the same way the admin port does.
-    let model_run_id = ModelRunId::from_v7();
-    PgModelRunRepository::new(db.clone())
-        .create(NewModelRun {
-            model_run_id: model_run_id.clone(),
-            run_kind: ModelRunKind::Backtest,
-            model_version_id: Some(version.model_version_id.clone()),
-            runtime_config_version_id: rc_id.clone(),
-            market_selection_id: None,
-            window_start: cpcv_outcome.window_start,
-            window_end: cpcv_outcome.window_end,
-            status: ModelRunStatus::Succeeded,
-            input_hash: content_hash('7'),
-            output_hash: Some(content_hash('8')),
-            metrics_json: serde_json::json!({}),
-            error_code: None,
-            error_message: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-        })
+    let cpcv_run = quant_model_run::Entity::find()
+        .filter(quant_model_run::Column::RunKind.eq(ModelRunKind::Cpcv))
+        .filter(quant_model_run::Column::Status.eq(ModelRunStatus::Succeeded))
+        .one(&db)
         .await
-        .expect("model run");
+        .expect("query cpcv run")
+        .expect("port must create ModelRunKind::Cpcv");
+    assert_eq!(cpcv_run.model_run_id, view.model_run_id);
 
-    let persisted = PgBacktestPathSetRepository::new(db.clone())
-        .create(NewBacktestPathSet {
-            path_set_id: path_set_id.clone(),
-            model_version_id: version.model_version_id.clone(),
-            model_run_id,
-            training_dataset_id: dataset_id,
-            runtime_config_version_id: rc_id,
-            window_start: cpcv_outcome.window_start,
-            window_end: cpcv_outcome.window_end,
-            path_count: i64::try_from(cpcv_outcome.path_set.paths.len()).unwrap_or(0),
-            combination_count: i64::try_from(cpcv_outcome.path_set.combination_count).unwrap_or(0),
-            median_rank_ic: cpcv_outcome.path_set.median_rank_ic,
-            sharpe_distribution: serde_json::to_value(cpcv_outcome.path_set.sharpe_distribution)
-                .expect("sharpe dist"),
-            paths: serde_json::to_value(cpcv_outcome.path_set.paths).expect("paths"),
-            deflated_sharpe: cpcv_outcome.dsr.deflated_sharpe,
-            dsr_benchmark_sharpe: cpcv_outcome.dsr.benchmark_sharpe,
-            pbo: cpcv_outcome.pbo,
-            min_track_record_length_secs: cpcv_outcome
-                .min_track_record_length
-                .map(|d| d.num_seconds()),
-            trial_count: i64::from(cpcv_outcome.trial_count),
-            trial_grid_count: i64::from(cpcv_outcome.trial_grid_count),
-            coord_search_effective_n: i64::from(cpcv_outcome.coord_search_effective_n),
-        })
+    let bound = registry
+        .find_model_version_by_id(&version.model_version_id)
         .await
-        .expect("persist path set");
+        .expect("reload version")
+        .expect("version");
+    assert!(
+        bound.publish_path_set_id.is_none(),
+        "CPCV must not auto-bind publish_path_set_id; explicit governance bind required"
+    );
 
-    assert_eq!(persisted.path_set_id, path_set_id);
+    registry
+        .set_publish_path_set_id(&version.model_version_id, Some(path_set_id.clone()))
+        .await
+        .expect("explicit bind for publish gate");
+
+    let bound = registry
+        .find_model_version_by_id(&version.model_version_id)
+        .await
+        .expect("reload after bind")
+        .expect("version");
     assert_eq!(
-        persisted.trial_count,
-        persisted.trial_grid_count + persisted.coord_search_effective_n
+        bound.publish_path_set_id.as_ref(),
+        Some(&path_set_id),
+        "explicit bind must pin publish_path_set_id"
     );
 
     let listed = PgBacktestPathSetRepository::new(db)

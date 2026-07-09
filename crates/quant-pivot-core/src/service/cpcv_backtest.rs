@@ -74,6 +74,26 @@ use crate::{
     },
 };
 
+/// Coarse CPCV job progress budget (units of work for `ResearchJobProgress`).
+///
+/// Phases are sequential; each reports `with_total(..., TOTAL)` so the UI can
+/// show a determinate percentage plus a named phase.
+struct CpcvProgress;
+
+impl CpcvProgress {
+    const TOTAL: u64 = 100;
+    const LOAD: ProgressPhase = ProgressPhase { start: 0 };
+    const MATERIALIZE_EXAMPLES: ProgressPhase = ProgressPhase { start: 10 };
+    const MATERIALIZE_TICKS: ProgressPhase = ProgressPhase { start: 25 };
+    const CPCV: ProgressPhase = ProgressPhase { start: 45 };
+    const TRIAL_GRID: ProgressPhase = ProgressPhase { start: 75 };
+    const FINALIZE: ProgressPhase = ProgressPhase { start: 95 };
+}
+
+struct ProgressPhase {
+    start: u64,
+}
+
 /// Repository + store dependencies.
 ///
 /// This service needs both the trainer's and the backtester's read paths:
@@ -123,9 +143,10 @@ pub struct CpcvBacktestInput {
     pub category_scope: Option<MarketCategory>,
     /// Pre-assigned path-set id (async job engine); minted when absent.
     pub path_set_id: Option<BacktestPathSetId>,
-    /// Effective independent trials from the production model's
-    /// `coordinate_search` (read from `metrics_json.validation.coord_search_effective_n`).
-    /// Classical / missing → 0 (trial grid alone supplies N).
+    /// Audit-only: production `coordinate_search` effective trials (persisted
+    /// for operator visibility). **Not** part of DSR N — Bailey's N/V must
+    /// describe the same trial population, and V comes only from the governed
+    /// trial-grid Sharpe series.
     pub coord_search_effective_n: u32,
 }
 
@@ -137,9 +158,10 @@ pub struct CpcvBacktestOutcome {
     pub dsr: DsrReport,
     pub pbo: Decimal,
     pub min_track_record_length: Option<ChronoDuration>,
-    /// Total DSR N = `trial_grid_count` + `coord_search_effective_n`.
+    /// DSR multiple-testing N (= `trial_grid_count`). Same population as V.
     pub trial_count: u32,
     pub trial_grid_count: u32,
+    /// Audit-only production coord-search effort (not included in DSR N).
     pub coord_search_effective_n: u32,
     /// The frozen training dataset's replay window (echoed for the caller's
     /// persistence row — the same `window_start`/`window_end` convention
@@ -195,28 +217,38 @@ impl CpcvBacktestService {
             .await?;
         let groups = Arc::clone(fold_template.groups());
 
-        progress.report(ResearchJobProgress::indeterminate("cpcv", 0));
+        progress.report(ResearchJobProgress::with_total(
+            "cpcv",
+            CpcvProgress::CPCV.start,
+            CpcvProgress::TOTAL,
+        ));
         let path_set_id = input.path_set_id.unwrap_or_else(BacktestPathSetId::from_v7);
         let path_set = self
             .run_cpcv(path_set_id, &fold_template, &replay_template, &groups)
             .await?;
 
-        progress.report(ResearchJobProgress::indeterminate("trial_grid", 0));
+        progress.report(ResearchJobProgress::with_total(
+            "trial_grid",
+            CpcvProgress::TRIAL_GRID.start,
+            CpcvProgress::TOTAL,
+        ));
         let (matrix, trial_grid_count) = self
             .run_trials(&fold_template, &replay_template, &groups)
             .await?;
 
-        let (dsr, pbo) = compute_dsr_and_pbo(
-            &dataset,
-            &path_set,
-            &matrix,
-            trial_grid_count,
-            input.coord_search_effective_n,
-            &self.config,
-        )?;
+        progress.report(ResearchJobProgress::with_total(
+            "finalize",
+            CpcvProgress::FINALIZE.start,
+            CpcvProgress::TOTAL,
+        ));
+        let (dsr, pbo) =
+            compute_dsr_and_pbo(&dataset, &path_set, &matrix, trial_grid_count, &self.config)?;
         let min_track_record_length = representative_path(&path_set)
             .and_then(|path| min_trl_for_path(&dataset, path, &self.config.dsr_significance));
-        let trial_count = trial_grid_count.saturating_add(input.coord_search_effective_n);
+        // Bailey DSR N/V must describe the same trial population: the governed
+        // trial grid that produced `matrix` (and thus V). Coord-search is
+        // audit-only and must not inflate N without a matching Sharpe column.
+        let trial_count = trial_grid_count;
 
         Ok(CpcvBacktestOutcome {
             path_set,
@@ -243,12 +275,17 @@ impl CpcvBacktestService {
         progress: &dyn JobProgressSink,
         cancel: &CancellationToken,
     ) -> QuantResult<(Arc<FoldTemplate>, Arc<ReplayTemplate>)> {
-        progress.report(ResearchJobProgress::indeterminate("load", 0));
+        progress.report(ResearchJobProgress::with_total(
+            "load",
+            CpcvProgress::LOAD.start,
+            CpcvProgress::TOTAL,
+        ));
         let parquet_examples = self.decode_examples(dataset).await?;
 
-        progress.report(ResearchJobProgress::indeterminate(
+        progress.report(ResearchJobProgress::with_total(
             "materialize_examples",
-            parquet_examples.len() as u64,
+            CpcvProgress::MATERIALIZE_EXAMPLES.start,
+            CpcvProgress::TOTAL,
         ));
         let examples = rematerialize_training_examples(&RematerializeInputs {
             dataset,
@@ -263,6 +300,19 @@ impl CpcvBacktestService {
         .await?;
 
         let groups: Arc<[TimelineGroup]> = build_timeline_groups(&examples, &input.label)?.into();
+        // Fail before the expensive CPCV fold loop when the timeline cannot
+        // support CSCV/PBO (T < block_count).
+        if groups.len() < self.config.pbo.block_count as usize {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV timeline has {} groups but research.validation.pbo.block_count={} \
+                     — need at least block_count periods for CSCV/PBO",
+                    groups.len(),
+                    self.config.pbo.block_count
+                ),
+            }
+            .into());
+        }
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
             model_family: input.model_family,
@@ -271,7 +321,11 @@ impl CpcvBacktestService {
         };
         let probe_required_features = self.probe_required_features(input.model_family);
 
-        progress.report(ResearchJobProgress::indeterminate("materialize_ticks", 0));
+        progress.report(ResearchJobProgress::with_total(
+            "materialize_ticks",
+            CpcvProgress::MATERIALIZE_TICKS.start,
+            CpcvProgress::TOTAL,
+        ));
         let ticks = self
             .materialize_full_window_ticks(
                 dataset,
@@ -297,42 +351,58 @@ impl CpcvBacktestService {
             caps: self.caps.clone(),
             handle: handle.clone(),
         });
-
-        let fold_template = match input.model_family.classical_kind() {
-            None => {
-                let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
-                Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
-                    examples: examples.into(),
-                    label: input.label.clone(),
-                    seed_weights,
-                    header_template,
-                    base_objective: self.config.objective.clone(),
-                    prediction_horizon_secs: input.prediction_horizon_secs,
-                    category_scope: input.category_scope,
-                    groups: Arc::clone(&groups),
-                    purge: self.config.purge,
-                    handle,
-                }))
+        #[cfg(not(feature = "ml-classical"))]
+        if input.model_family.is_classical() {
+            return Err(ResearchError::RuntimeUnavailable {
+                family: input.model_family.to_string(),
+                detail: "classical CPCV requires the `ml-classical` feature".to_owned(),
             }
-            #[cfg(feature = "ml-classical")]
-            Some(kind) => Arc::new(FoldTemplate::Classical(self.classical_fold_template(
+            .into());
+        }
+        let fold_template =
+            self.build_fold_template(dataset, input, examples, header_template, groups, handle);
+        Ok((fold_template, replay_template))
+    }
+
+    /// Build the family-specific [`FoldTemplate`] shared across CPCV folds and trials.
+    ///
+    /// Classical availability is gated in [`Self::prepare_templates`] so this
+    /// helper stays a pure constructor (no `Result`) under both feature sets.
+    fn build_fold_template(
+        &self,
+        dataset: &TrainingDatasetInfo,
+        input: &CpcvBacktestInput,
+        examples: Vec<TrainingExample>,
+        header_template: ModelArtifactHeader,
+        groups: Arc<[TimelineGroup]>,
+        handle: Handle,
+    ) -> Arc<FoldTemplate> {
+        #[cfg(feature = "ml-classical")]
+        if let Some(kind) = input.model_family.classical_kind() {
+            return Arc::new(FoldTemplate::Classical(self.classical_fold_template(
                 dataset,
                 &examples,
                 &input.label,
                 header_template,
                 kind,
                 groups,
-            ))),
-            #[cfg(not(feature = "ml-classical"))]
-            Some(_kind) => {
-                return Err(ResearchError::RuntimeUnavailable {
-                    family: input.model_family.to_string(),
-                    detail: "classical CPCV requires the `ml-classical` feature".to_owned(),
-                }
-                .into());
-            }
-        };
-        Ok((fold_template, replay_template))
+            )));
+        }
+        #[cfg(not(feature = "ml-classical"))]
+        let _ = dataset;
+        let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
+        Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
+            examples: examples.into(),
+            label: input.label.clone(),
+            seed_weights,
+            header_template,
+            base_objective: self.config.objective.clone(),
+            prediction_horizon_secs: input.prediction_horizon_secs,
+            category_scope: input.category_scope,
+            groups,
+            purge: self.config.purge,
+            handle,
+        }))
     }
 
     /// The feature list a classical-family probe/fold reads (the governed
@@ -993,9 +1063,21 @@ fn run_trial_grid(
             for evaluation in evaluations {
                 by_group.insert(evaluation.group_index, evaluation.return_value);
             }
-            Ok((0..groups.len())
-                .map(|idx| by_group.get(&idx).copied().unwrap_or(Decimal::ZERO))
-                .collect())
+            // Fail-closed: never invent zero returns for missing groups (same
+            // invariant as CPCV fold replay). Silent zeros would bias PBO/DSR V.
+            let mut column = Vec::with_capacity(groups.len());
+            for idx in 0..groups.len() {
+                let Some(return_value) = by_group.get(&idx).copied() else {
+                    return Err(ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "trial-grid replay missing group_index={idx} — refuse to invent a zero return"
+                        ),
+                    }
+                    .into());
+                };
+                column.push(return_value);
+            }
+            Ok(column)
         })
         .collect();
     let mut trial_returns = Vec::with_capacity(columns.len());
@@ -1027,7 +1109,6 @@ fn compute_dsr_and_pbo(
     path_set: &BacktestPathSet,
     matrix: &TrialPerformanceMatrix,
     trial_grid_count: u32,
-    coord_search_effective_n: u32,
     config: &CpcvBacktestConfig,
 ) -> QuantResult<(DsrReport, Decimal)> {
     let Some(path) = representative_path(path_set) else {
@@ -1043,10 +1124,9 @@ fn compute_dsr_and_pbo(
         period_length: ChronoDuration::seconds(dataset.sample_interval_secs.max(1)),
         skewness: stats::skewness(&path.group_returns),
         kurtosis: stats::kurtosis(&path.group_returns),
-        // Bailey multiple-testing N: governed trial grid + production
-        // coordinate_search effective trials (correlated local moves collapse
-        // to one effective trial per improving round).
-        trial_count: trial_grid_count.saturating_add(coord_search_effective_n),
+        // Bailey multiple-testing N/V: same population — the governed trial
+        // grid that produced `matrix`. Coord-search is audit-only.
+        trial_count: trial_grid_count,
         trial_sharpe_variance: stats::variance(&trial_sharpes),
     };
     let dsr = deflated_sharpe_ratio(&dsr_input);

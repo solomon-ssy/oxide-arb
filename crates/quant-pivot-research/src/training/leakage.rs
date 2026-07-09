@@ -93,6 +93,26 @@ pub fn scan_future_leakage(
                 });
             }
         }
+        // Label-horizon invariant (Phase 11.5 publish rescan): every label must
+        // mature at/after `as_of`. A matured_at in the past of the decision time
+        // means the labeler wrote a non-forward horizon — fail closed.
+        for label in &example.labels {
+            findings.scanned = findings.scanned.saturating_add(1);
+            if label.matured_at < example.as_of {
+                findings.violations.push(LeakageViolation {
+                    market_id: example.market_id.clone(),
+                    token_id: example.token_id.clone(),
+                    as_of: example.as_of,
+                    cutoff: example.as_of,
+                    reference: format!(
+                        "label:{}:horizon={}s:matured_at",
+                        label.label_name.as_str(),
+                        label.horizon_secs
+                    ),
+                    observed_at: label.matured_at,
+                });
+            }
+        }
     }
     findings
 }
@@ -139,6 +159,7 @@ mod tests {
         enums::quant::DataQualityStatus,
         types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
     };
+    use rust_decimal::Decimal;
     use std::collections::BTreeMap;
 
     fn example(source_offset_secs: i64) -> TrainingExample {
@@ -204,5 +225,27 @@ mod tests {
         let findings = scan_future_leakage(&[example(-5), example(-1)], 0);
         assert!(findings.is_clean());
         assert_eq!(findings.scanned, 2);
+    }
+
+    #[test]
+    fn scan_rejects_label_matured_before_as_of() {
+        use super::super::{LabelName, TrainingLabel};
+
+        let mut ex = example(-5);
+        ex.labels.push(TrainingLabel {
+            label_name: LabelName::from_static("settlement_outcome"),
+            horizon_secs: 0,
+            value: Decimal::ZERO,
+            is_resolved: true,
+            matured_at: ex.as_of - Duration::seconds(1),
+        });
+        let findings = scan_future_leakage(&[ex], 0);
+        assert!(!findings.is_clean());
+        assert!(
+            findings
+                .violations
+                .iter()
+                .any(|v| v.reference.contains("matured_at"))
+        );
     }
 }

@@ -355,6 +355,9 @@ crate::pg_enum! {
         DatasetReady => "dataset_ready",
         /// A candidate model version bound a calibrated return model (Phase 11.3).
         BindCalibration => "bind_calibration",
+        /// A candidate / shadow version bound the CPCV path set used by publish
+        /// quality gates (Phase 11.5 remediation — replaces implicit "latest").
+        BindPublishPathSet => "bind_publish_path_set",
     }
 }
 
@@ -496,6 +499,10 @@ crate::pg_enum! {
     pub enum ModelRunKind {
         Training => "training",
         Backtest => "backtest",
+        /// Combinatorial Purged Cross-Validation + governed trial-grid run
+        /// (Phase 11.5). Distinct from single-path [`Self::Backtest`] so the
+        /// ledger can audit which validation methodology produced a path set.
+        Cpcv => "cpcv",
         Shadow => "shadow",
         #[default]
         LiveInference => "live_inference",

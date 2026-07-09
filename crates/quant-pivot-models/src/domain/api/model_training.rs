@@ -21,8 +21,8 @@ use crate::{
     domain::{ModelVersionInfo, pagination::PageRequest},
     enums::quant::PublicationStatus,
     types::{
-        ContentHash, ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId,
-        TrainingDatasetId,
+        BacktestPathSetId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId,
+        RuntimeConfigVersionId, TrainingDatasetId,
     },
 };
 
@@ -87,6 +87,9 @@ pub struct TrainedModelView {
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
+    /// CPCV path set bound for publish quality gates (`None` until bound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_path_set_id: Option<BacktestPathSetId>,
     /// Lifecycle status — a freshly trained version is `candidate`.
     pub publication_status: String,
     /// Trainer metrics (in-sample + validation objective report).
@@ -123,6 +126,7 @@ impl From<ModelVersionInfo> for TrainedModelView {
             version: info.version,
             artifact_hash: info.artifact_hash,
             training_dataset_id: info.training_dataset_id,
+            publish_path_set_id: info.publish_path_set_id,
             publication_status: info.publication_status.as_str().to_owned(),
             metrics: info.metrics_json,
             training_objective: info.training_objective_json,

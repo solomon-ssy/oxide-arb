@@ -318,6 +318,7 @@ async fn seed_version(
             version,
             artifact_hash,
             training_dataset_id: dataset,
+            publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
             quality_gate_report: serde_json::json!({}),
@@ -793,7 +794,7 @@ async fn seed_path_set(
     PgModelRunRepository::new(db.clone())
         .create(NewModelRun {
             model_run_id: model_run_id.clone(),
-            run_kind: ModelRunKind::Backtest,
+            run_kind: ModelRunKind::Cpcv,
             model_version_id: Some(version.clone()),
             runtime_config_version_id: rc_id.clone(),
             market_selection_id: None,
@@ -821,9 +822,10 @@ async fn seed_path_set(
         .and_then(|v| v.training_dataset_id)
         .unwrap_or_else(TrainingDatasetId::from_v7);
 
+    let path_set_id = BacktestPathSetId::from_v7();
     PgBacktestPathSetRepository::new(db.clone())
         .create(NewBacktestPathSet {
-            path_set_id: BacktestPathSetId::from_v7(),
+            path_set_id: path_set_id.clone(),
             model_version_id: version.clone(),
             model_run_id,
             training_dataset_id,
@@ -845,12 +847,21 @@ async fn seed_path_set(
             dsr_benchmark_sharpe: dec!(0.5),
             pbo: dec!(0.20),
             min_track_record_length_secs: Some(86_400),
-            trial_count: 12,
+            trial_count: 10,
             trial_grid_count: 10,
             coord_search_effective_n: 2,
+            path_set_hash: ContentHash::parse(
+                "blake3:0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .expect("hash"),
         })
         .await
         .expect("path set");
+    // Publish gates require an explicit bind — never implicit "latest".
+    PgModelRegistryRepository::new(db.clone())
+        .set_publish_path_set_id(version, Some(path_set_id))
+        .await
+        .expect("bind publish path set");
 }
 
 /// Seeds for [`seed_and_publish_version`].

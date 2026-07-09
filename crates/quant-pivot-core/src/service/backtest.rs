@@ -529,6 +529,7 @@ impl BacktestService {
                 version: next,
                 artifact_hash,
                 training_dataset_id: Some(dataset.training_dataset_id.clone()),
+                publish_path_set_id: None,
                 metrics_json: serde_json::json!({
                     "calibrated_from": version.model_version_id.to_string(),
                     "calibration": serde_json::to_value(&result.report).unwrap_or_default(),

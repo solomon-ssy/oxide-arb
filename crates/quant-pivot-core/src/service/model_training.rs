@@ -394,6 +394,7 @@ impl ModelTrainerService {
                 version,
                 artifact_hash,
                 training_dataset_id: Some(input.training_dataset_id.clone()),
+                publish_path_set_id: None,
                 metrics_json,
                 training_objective_json,
                 quality_gate_report: serde_json::json!({}),
@@ -651,12 +652,17 @@ impl ModelTrainerService {
         let schema = FeatureSchema::build(&self.replay.features);
         let matrix = build_classical_matrix(examples, &input.label, &schema)?;
         let folds = input.validation_folds.max(2);
+        let validation = ValidationSpec {
+            folds,
+            embargo_pct: self.config.validation_purge.embargo_pct,
+            min_embargo_secs: self.config.validation_purge.min_embargo_secs,
+        };
         // Offload the CPU-bound classical fit + rolling validation to a blocking
         // thread (keeps the async runtime free for other jobs' heartbeats).
         let (output, validation) = task::spawn_blocking(move || {
             let adapter = ClassicalAdapterRegistry::adapter_for(kind);
             let output = adapter.train(&matrix)?;
-            let validation = adapter.validate(&matrix, folds)?;
+            let validation = adapter.validate(&matrix, validation)?;
             QuantResult::Ok((output, validation))
         })
         .await

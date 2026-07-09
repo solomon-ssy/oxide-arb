@@ -82,11 +82,13 @@ pub struct DsrReport {
 /// eq. 8): `SR* ≈ sqrt(V) · [(1-γ)·Φ⁻¹(1-1/N) + γ·Φ⁻¹(1-1/(N·e))]`. A single
 /// trial needs no multiple-testing correction (`SR* = 0`).
 fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> f64 {
-    if trial_count <= 1 || trial_sharpe_variance <= Decimal::ZERO {
+    if trial_count <= 1 {
         return 0.0;
     }
     let n = f64::from(trial_count);
-    let v = trial_sharpe_variance.to_f64().unwrap_or(0.0).max(0.0);
+    // When every trial Sharpe is identical, V=0 would erase the multiple-testing
+    // correction. Floor V at a tiny positive value so SR* still rises with N.
+    let v = trial_sharpe_variance.to_f64().unwrap_or(0.0).max(1e-12);
     let term_a = (1.0 - EULER_MASCHERONI) * stats::normal_inverse_cdf(1.0 - 1.0 / n);
     let term_b =
         EULER_MASCHERONI * stats::normal_inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
@@ -101,7 +103,12 @@ fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> f64 
 /// formula).
 fn psr_denominator(skewness: Decimal, kurtosis: Decimal, observed_sharpe: Decimal) -> Option<f64> {
     let gamma3 = skewness.to_f64().unwrap_or(0.0);
-    let gamma4 = kurtosis.to_f64().unwrap_or(3.0);
+    // Degenerate series report kurtosis=0 from `stats::kurtosis`; treat that as
+    // the normal-distribution default γ4=3 so DSR does not silently under-correct.
+    let gamma4 = match kurtosis.to_f64() {
+        Some(value) if value > 0.0 => value,
+        _ => 3.0,
+    };
     let sr = observed_sharpe.to_f64().unwrap_or(0.0);
     let radicand = ((gamma4 - 1.0) / 4.0 * sr).mul_add(sr, 1.0 - gamma3 * sr);
     if radicand <= 0.0 {

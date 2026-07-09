@@ -13,7 +13,7 @@ use quant_pivot_models::{
     },
     entities::{quant_model_spec, quant_model_version},
     enums::quant::PublicationStatus,
-    types::{ModelSpecId, ModelVersionId},
+    types::{BacktestPathSetId, ModelSpecId, ModelVersionId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
@@ -213,6 +213,30 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         };
         let mut active = row.into_active_model();
         active.quality_gate_report = ActiveValue::Set(quality_gate_report);
+        active
+            .update(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(Into::into)
+    }
+
+    async fn set_publish_path_set_id(
+        &self,
+        model_version_id: &ModelVersionId,
+        publish_path_set_id: Option<BacktestPathSetId>,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        let Some(row) = quant_model_version::Entity::find_by_id(model_version_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(error::not_found(
+                entity::QUANT_MODEL_REGISTRY,
+                model_version_id,
+            ));
+        };
+        let mut active = row.into_active_model();
+        active.publish_path_set_id = ActiveValue::Set(publish_path_set_id);
         active
             .update(&self.db)
             .await

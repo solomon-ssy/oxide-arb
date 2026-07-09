@@ -18,7 +18,8 @@ use validator::Validate;
 use crate::{
     domain::{BacktestPathSetInfo, pagination::PageRequest},
     types::{
-        BacktestPathSetId, ModelRunId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId,
+        BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+        TrainingDatasetId,
     },
 };
 
@@ -83,6 +84,7 @@ pub struct BacktestPathSetView {
     pub trial_count: i64,
     pub trial_grid_count: i64,
     pub coord_search_effective_n: i64,
+    pub path_set_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
 
@@ -119,6 +121,7 @@ impl From<BacktestPathSetInfo> for BacktestPathSetView {
             trial_count: info.trial_count,
             trial_grid_count: info.trial_grid_count,
             coord_search_effective_n: info.coord_search_effective_n,
+            path_set_hash: info.path_set_hash,
             created_at: info.created_at,
         }
     }

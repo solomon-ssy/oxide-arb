@@ -36,17 +36,17 @@ use quant_pivot_models::{
         BacktestPathSetInfo, BacktestPathSetListQuery, BacktestPathSetView, BacktestPort,
         BacktestReportInfo, BacktestReportListQuery, BacktestReportView, BasisAlertInfo,
         BasisAlertListQuery, BiasTableFitJobParams, BiasTableFitOutcome, BindCalibrationRequest,
-        BookSnapshot, BuildTrainingDatasetRequest, CalibrationArtifactFitPort,
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, CatalogState, CatalogStatusPort,
-        ComparisonReportListQuery, CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand,
-        DataQualityPort, DataQualitySnapshot, DomainSourceCursorInfo, ExecutionOrderInfo,
-        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
-        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, FactorGovernancePort, FitBiasTableRequest,
-        FitModelCalibratorRequest, GatePreviewIntent, GovernanceActor, HealthReport,
-        JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
-        LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo,
-        MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
+        BindPublishPathSetRequest, BookSnapshot, BuildTrainingDatasetRequest,
+        CalibrationArtifactFitPort, CalibrationArtifactInfo, CalibrationArtifactListQuery,
+        CatalogState, CatalogStatusPort, ComparisonReportListQuery, CoreEventPublisher,
+        CpcvBacktestPort, CreateModelSpecCommand, DataQualityPort, DataQualitySnapshot,
+        DomainSourceCursorInfo, ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort,
+        ExecutionRecoveryView, ExecutionSubmitPort, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        FactorGovernancePort, FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent,
+        GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort,
+        KillSwitchView, LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort,
+        MarketLinkageInfo, MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
         ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         ModelCalibrationFitPreflightView, ModelComparisonReportInfo, ModelGovernancePort,
         ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelSpecPort,
@@ -955,6 +955,17 @@ impl ModelGovernancePort for MockModelGovernancePort {
         _actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo> {
         Err(QuantError::NotImplemented("model bind calibration".into()))
+    }
+
+    async fn bind_publish_path_set(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _request: BindPublishPathSetRequest,
+        _actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        Err(QuantError::NotImplemented(
+            "model bind publish path set".into(),
+        ))
     }
 }
 

@@ -15,7 +15,7 @@
 //! transform the model was fit on, and a shared time-ordered holdout produces an
 //! out-of-sample validation objective.
 
-use ndarray::s;
+use ndarray::{Array1, Array2};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::enums::quant::ModelSerializationFormat;
 use rust_decimal::{
@@ -41,11 +41,12 @@ use crate::{
     model::{
         artifact::{ClassicalModelMetrics, FeatureImportance, PreprocessingArtifact},
         runtime::ClassicalKind,
-        trainer::ValidationReport,
+        trainer::{ValidationReport, ValidationSpec},
     },
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
     training::TrainingMatrix,
+    validation::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup},
 };
 
 /// The ML crate + version stamped onto every classical artifact (load-time
@@ -171,10 +172,14 @@ pub trait ClassicalModelAdapter: Send + Sync {
     /// Fit the estimator on a standardized training matrix.
     fn train(&self, matrix: &TrainingMatrix) -> QuantResult<ClassicalTrainOutput>;
 
-    /// Out-of-sample rolling-holdout validation objective over `folds`
-    /// time-ordered folds (the same `ValidationSpec` semantics the weighted
-    /// trainer uses).
-    fn validate(&self, matrix: &TrainingMatrix, folds: u32) -> QuantResult<ValidationReport>;
+    /// Out-of-sample walk-forward validation over `validation.folds` contiguous
+    /// time-ordered blocks (same `ValidationSpec` purge/embargo semantics as the
+    /// weighted trainer).
+    fn validate(
+        &self,
+        matrix: &TrainingMatrix,
+        validation: ValidationSpec,
+    ) -> QuantResult<ValidationReport>;
 }
 
 /// Constructs the [`ClassicalModelAdapter`] for a kind with production-tuned
@@ -249,8 +254,12 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
         })
     }
 
-    fn validate(&self, matrix: &TrainingMatrix, folds: u32) -> QuantResult<ValidationReport> {
-        rolling_validation(self.kind, &self.params, matrix, folds)
+    fn validate(
+        &self,
+        matrix: &TrainingMatrix,
+        validation: ValidationSpec,
+    ) -> QuantResult<ValidationReport> {
+        rolling_validation(self.kind, &self.params, matrix, validation)
     }
 }
 
@@ -369,27 +378,59 @@ fn fit_kind(
     Ok(model)
 }
 
-/// Time-ordered rolling-holdout validation: for each fold boundary, fit on the
-/// expanding prefix and score the next contiguous block out-of-sample, using the
-/// prefix's standardization (no validation-fold leakage).
+/// Walk-forward purged validation: for each interior fold boundary, fit only on
+/// rows strictly before the validation block (after label-horizon purge +
+/// embargo), then score the held-out block (Phase 11.5).
 fn rolling_validation(
     kind: ClassicalKind,
     params: &ClassicalParams,
     matrix: &TrainingMatrix,
-    folds: u32,
+    validation: ValidationSpec,
 ) -> QuantResult<ValidationReport> {
     let rows = matrix.features.nrows();
-    let folds = folds.max(2) as usize;
+    if matrix.row_as_of.len() != rows || matrix.row_label_horizon_end.len() != rows {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "classical TrainingMatrix timeline metadata length mismatch: \
+                 rows={rows} as_of={} horizon={}",
+                matrix.row_as_of.len(),
+                matrix.row_label_horizon_end.len()
+            ),
+        }
+        .into());
+    }
+    let folds = validation.folds.max(2) as usize;
     let boundaries: Vec<usize> = (0..=folds).map(|k| rows * k / folds).collect();
+    let timeline: Vec<TimelineGroup> = (0..rows)
+        .map(|idx| TimelineGroup {
+            as_of: matrix.row_as_of[idx],
+            label_horizon_end: matrix.row_label_horizon_end[idx],
+        })
+        .collect();
+    let purge = PurgeConfig {
+        embargo_pct: validation.embargo_pct,
+        min_embargo_secs: validation.min_embargo_secs,
+    };
+    let splitter = DefaultPurgedSplitter::new();
 
     let mut fold_objectives = Vec::new();
     for k in 1..folds {
-        let train_end = boundaries[k];
         let (val_start, val_end) = (boundaries[k], boundaries[k + 1]);
-        if train_end < 2 || val_end <= val_start {
+        if val_end <= val_start {
             continue;
         }
-        let train = slice_matrix(matrix, 0, train_end);
+        let test_indices: Vec<usize> = (val_start..val_end).collect();
+        let purged = splitter.split(&timeline, &test_indices, &purge);
+        // Walk-forward: never train on rows at or after the validation block.
+        let train_indices: Vec<usize> = purged
+            .train_indices
+            .into_iter()
+            .filter(|&idx| idx < val_start)
+            .collect();
+        if train_indices.len() < 2 {
+            continue;
+        }
+        let train = select_rows(matrix, &train_indices);
         let (std_train, preprocessing) = standardize(&train);
         let x_train = dense_matrix(&std_train)?;
         let model = fit_kind(kind, params, &x_train, &train.labels.to_vec())?;
@@ -421,13 +462,26 @@ fn rolling_validation(
     })
 }
 
-/// A contiguous row slice of a training matrix (`[start, end)`).
-fn slice_matrix(matrix: &TrainingMatrix, start: usize, end: usize) -> TrainingMatrix {
+/// Select an arbitrary set of row indices into a new training matrix.
+fn select_rows(matrix: &TrainingMatrix, indices: &[usize]) -> TrainingMatrix {
+    let cols = matrix.features.ncols();
+    let mut features = Array2::<f64>::zeros((indices.len(), cols));
+    let mut labels = Array1::<f64>::zeros(indices.len());
+    let mut row_as_of = Vec::with_capacity(indices.len());
+    let mut row_label_horizon_end = Vec::with_capacity(indices.len());
+    for (dst, &src) in indices.iter().enumerate() {
+        features.row_mut(dst).assign(&matrix.features.row(src));
+        labels[dst] = matrix.labels[src];
+        row_as_of.push(matrix.row_as_of[src]);
+        row_label_horizon_end.push(matrix.row_label_horizon_end[src]);
+    }
     TrainingMatrix {
-        features: matrix.features.slice(s![start..end, ..]).to_owned(),
-        labels: matrix.labels.slice(s![start..end]).to_owned(),
+        features,
+        labels,
         feature_names: matrix.feature_names.clone(),
         rejected_rows: 0,
+        row_as_of,
+        row_label_horizon_end,
     }
 }
 
@@ -648,13 +702,26 @@ fn count_f64(n: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{ClassicalAdapterRegistry, SmartcoreModel};
+    use chrono::TimeZone;
     use ndarray::{Array1, Array2};
 
     use crate::{
         features::FeatureName,
-        model::{classical::dense_matrix, runtime::ClassicalKind},
+        model::{classical::dense_matrix, runtime::ClassicalKind, trainer::ValidationSpec},
         training::TrainingMatrix,
     };
+
+    /// Fixture epoch offset for row `i` (test matrices are tiny; index always fits).
+    fn fixture_row_secs(i: usize) -> i64 {
+        i64::try_from(i).expect("fixture row index fits i64")
+    }
+
+    fn fixture_ts(offset_secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .timestamp_opt(1_700_000_000 + offset_secs, 0)
+            .single()
+            .expect("ts")
+    }
 
     /// A linearly separable matrix: label = 1 when feature-0 is high.
     fn training_matrix() -> TrainingMatrix {
@@ -672,7 +739,63 @@ mod tests {
             labels,
             feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
             rejected_rows: 0,
+            row_as_of: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+            row_label_horizon_end: (0..rows)
+                .map(|i| fixture_ts(fixture_row_secs(i) + 60))
+                .collect(),
         }
+    }
+
+    #[test]
+    fn walk_forward_train_indices_precede_validation_start() {
+        let purged_train = [1usize, 5, 10, 20, 25];
+        let val_start = 15usize;
+        let train: Vec<_> = purged_train
+            .into_iter()
+            .filter(|idx| *idx < val_start)
+            .collect();
+        assert_eq!(train, vec![1, 5, 10]);
+    }
+
+    #[test]
+    fn rolling_validation_purges_overlapping_label_horizons() {
+        use super::rolling_validation;
+        use crate::model::{classical::ClassicalParams, runtime::ClassicalKind};
+
+        // Long label horizons so expanding-prefix CV would leak; purged CV must
+        // still produce a finite held-out objective (or skip thin folds).
+        let rows = 40usize;
+        let mut features = Array2::<f64>::zeros((rows, 2));
+        let mut labels = Array1::<f64>::zeros(rows);
+        for i in 0..rows {
+            features[[i, 0]] = f64::from(u8::try_from(i % 7).unwrap_or(0));
+            features[[i, 1]] = f64::from(u8::try_from(i % 3).unwrap_or(0));
+            labels[i] = if i % 2 == 0 { 1.0 } else { 0.0 };
+        }
+        let matrix = TrainingMatrix {
+            features,
+            labels,
+            feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
+            rejected_rows: 0,
+            row_as_of: (0..rows)
+                .map(|i| fixture_ts(fixture_row_secs(i) * 60))
+                .collect(),
+            row_label_horizon_end: (0..rows)
+                .map(|i| fixture_ts(fixture_row_secs(i) * 60 + 600))
+                .collect(),
+        };
+        let report = rolling_validation(
+            ClassicalKind::Ridge,
+            &ClassicalParams::defaults_for(ClassicalKind::Ridge),
+            &matrix,
+            ValidationSpec {
+                folds: 4,
+                ..ValidationSpec::default()
+            },
+        )
+        .expect("purged rolling validation");
+        assert_eq!(report.sample_count, 40);
+        assert_eq!(report.coord_search_effective_n, 0);
     }
 
     /// Every supported kind trains, validates out-of-sample, serializes, and
@@ -700,7 +823,13 @@ mod tests {
             assert_eq!(output.metrics.feature_importances.len(), 2, "{kind}");
 
             let validation = adapter
-                .validate(&matrix, 3)
+                .validate(
+                    &matrix,
+                    ValidationSpec {
+                        folds: 3,
+                        ..ValidationSpec::default()
+                    },
+                )
                 .unwrap_or_else(|e| panic!("validate {kind}: {e}"));
             assert_eq!(validation.sample_count, 60, "{kind}");
 

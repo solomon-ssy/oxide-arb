@@ -1055,8 +1055,10 @@ fn validate_research_validation_trials(
         );
     }
     let weighted_expanded = trials.lambda_multipliers.len() * trials.rank_loss_kinds.len();
+    // Forest and linear multipliers apply to disjoint ClassicalKind families —
+    // sum, not Cartesian product (matches `validation::trials::generate_classical`).
     let classical_expanded =
-        trials.forest_n_trees_multipliers.len() * trials.linear_alpha_multipliers.len();
+        trials.forest_n_trees_multipliers.len() + trials.linear_alpha_multipliers.len();
     let expanded_trials = weighted_expanded.max(classical_expanded);
     if trials.max_trials == 0 || (expanded_trials as u64) > u64::from(trials.max_trials) {
         report.errors.push(ConfigValidationError::InvalidValue {

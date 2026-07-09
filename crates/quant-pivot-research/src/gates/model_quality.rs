@@ -1390,6 +1390,41 @@ mod tests {
     }
 
     #[test]
+    fn pbo_gate_blocks_overfit_synthetic_strategy() {
+        let mut input = passing_input(GateIntent::Publish);
+        input.path_set.as_mut().unwrap().pbo = dec!(0.95);
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::Pbo)
+        );
+    }
+
+    #[test]
+    fn deflated_sharpe_gate_blocks_insignificant_path_set() {
+        let mut input = passing_input(GateIntent::Publish);
+        // Floor is 1 - dsr_significance (default 0.05) ⇒ 0.95.
+        input.path_set.as_mut().unwrap().deflated_sharpe = dec!(0.50);
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::DeflatedSharpe)
+        );
+    }
+
+    #[test]
     fn dataset_ready_gate_needs_no_backtest() {
         let decision = DefaultModelQualityGate::new()
             .evaluate(QualityGateInput {

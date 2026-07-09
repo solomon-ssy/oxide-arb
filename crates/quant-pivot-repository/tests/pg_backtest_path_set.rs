@@ -107,6 +107,7 @@ async fn seed_model_and_dataset(
             version: 1,
             artifact_hash: content_hash('a'),
             training_dataset_id: Some(training_dataset_id.clone()),
+            publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
             quality_gate_report: serde_json::json!({}),
@@ -178,16 +179,20 @@ async fn quant_backtest_path_set_migration_and_crud() {
             dsr_benchmark_sharpe: dec!(0.4),
             pbo: dec!(0.25),
             min_track_record_length_secs: Some(86_400),
-            trial_count: 15,
+            trial_count: 12,
             trial_grid_count: 12,
-            coord_search_effective_n: 3,
+            coord_search_effective_n: 2,
+            path_set_hash: ContentHash::parse(
+                "blake3:0000000000000000000000000000000000000000000000000000000000000001",
+            )
+            .expect("hash"),
         })
         .await
         .expect("create");
     assert_eq!(created.path_set_id, path_set_id);
-    assert_eq!(created.trial_count, 15);
+    assert_eq!(created.trial_count, 12);
     assert_eq!(created.trial_grid_count, 12);
-    assert_eq!(created.coord_search_effective_n, 3);
+    assert_eq!(created.coord_search_effective_n, 2);
     assert_eq!(created.median_rank_ic, dec!(0.12));
 
     let found = repo

@@ -6,10 +6,10 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BindCalibrationRequest, GovernanceActor, ModelCalibrationFitPreflightQuery,
-        ModelCalibrationFitPreflightView, PublishModelCommand, PublishModelRequest,
-        RetireModelCommand, RetireModelRequest, RollbackModelCommand, RollbackModelRequest,
-        TrainedModelView,
+        BindCalibrationRequest, BindPublishPathSetRequest, GovernanceActor,
+        ModelCalibrationFitPreflightQuery, ModelCalibrationFitPreflightView, PublishModelCommand,
+        PublishModelRequest, RetireModelCommand, RetireModelRequest, RollbackModelCommand,
+        RollbackModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -56,6 +56,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/models/{id}/bind-calibration",
             Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Create),
             bind_calibration,
+        ),
+        spec(
+            Method::POST,
+            "/research/models/{id}/bind-publish-path-set",
+            Rule::ActingRoleGoverned(ResourceType::Publication, Operation::Create),
+            bind_publish_path_set,
         ),
         spec(
             Method::GET,
@@ -194,6 +200,49 @@ pub async fn retire(
     op_ctx.set_detail(serde_json::json!({
         "model_version_id": view.model_version_id.to_string(),
         "publication_status": view.publication_status,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": request.reason,
+    }));
+    Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/models/{id}/bind-publish-path-set` — pin CPCV path set for publish gates.
+pub async fn bind_publish_path_set(
+    state: web::Data<AppState>,
+    id: web::Path<ModelVersionId>,
+    actor: AuthedActor,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<BindPublishPathSetRequest>,
+) -> Result<WebResponse<TrainedModelView>, WebError> {
+    let request = body.into_inner();
+    let model_version_id = id.into_inner();
+    let before = state
+        .model_training
+        .find_version(&model_version_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!("model_version not found: {model_version_id}"))
+        })?;
+    let updated = state
+        .model_governance
+        .bind_publish_path_set(
+            &model_version_id,
+            request.clone(),
+            governance_actor(&actor, &acting_role),
+        )
+        .await?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after_hash = canonical_state_hash(&updated)?;
+    let view = TrainedModelView::from(updated);
+    op_ctx.set_action(OperationCategory::Governance, "model.bind_publish_path_set");
+    op_ctx.set_resource(ResourceType::Publication, model_version_id.to_string());
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
+    op_ctx.set_detail(serde_json::json!({
+        "model_version_id": view.model_version_id.to_string(),
+        "path_set_id": request.path_set_id.to_string(),
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,

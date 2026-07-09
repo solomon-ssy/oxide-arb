@@ -10,8 +10,8 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        BindCalibrationRequest, GatePreviewIntent, ModelVersionInfo, QualityGateReportView,
-        TrainingDatasetInfo,
+        BindCalibrationRequest, BindPublishPathSetRequest, GatePreviewIntent, ModelVersionInfo,
+        QualityGateReportView, TrainingDatasetInfo,
     },
     types::{BacktestReportId, ModelVersionId, TrainingDatasetId},
 };
@@ -127,6 +127,15 @@ pub trait ModelGovernancePort: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
         request: BindCalibrationRequest,
+        actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo>;
+
+    /// Bind the CPCV path set that publish/promote quality gates must evaluate.
+    /// The path set must belong to this model version. Candidate/Shadow only.
+    async fn bind_publish_path_set(
+        &self,
+        model_version_id: &ModelVersionId,
+        request: BindPublishPathSetRequest,
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo>;
 }

@@ -1,7 +1,8 @@
 //! `quant_backtest_path_set` table entity (Phase 11.5 CPCV result).
 
 use crate::types::{
-    BacktestPathSetId, ModelRunId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId,
+    BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+    TrainingDatasetId,
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -29,12 +30,14 @@ pub struct Model {
     pub dsr_benchmark_sharpe: Decimal,
     pub pbo: Decimal,
     pub min_track_record_length_secs: Option<i64>,
-    /// Total DSR multiple-testing N = `trial_grid_count` + `coord_search_effective_n`.
+    /// DSR multiple-testing N (= `trial_grid_count`). Same population as the
+    /// trial-grid Sharpe variance V used in the Deflated Sharpe Ratio.
     pub trial_count: i64,
-    /// Governed trial-grid configurations evaluated for CSCV/PBO + DSR V.
+    /// Governed trial-grid configurations evaluated for CSCV/PBO + DSR N/V.
     pub trial_grid_count: i64,
-    /// Effective independent trials from production `coordinate_search`.
+    /// Audit-only: production `coordinate_search` effective trials (not in DSR N).
     pub coord_search_effective_n: i64,
+    pub path_set_hash: ContentHash,
     pub created_at: DateTime<Utc>,
 }
 

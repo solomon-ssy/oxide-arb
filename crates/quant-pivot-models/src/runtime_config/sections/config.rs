@@ -1289,7 +1289,10 @@ pub struct ResearchValidationPboConfig {
 
 impl Default for ResearchValidationPboConfig {
     fn default() -> Self {
-        Self { block_count: 16 }
+        // Match default `cpcv.n_groups` so short research windows fail at
+        // config/orchestration time rather than after an expensive CPCV loop
+        // when T < S (Phase 11.5 audit P2).
+        Self { block_count: 8 }
     }
 }
 

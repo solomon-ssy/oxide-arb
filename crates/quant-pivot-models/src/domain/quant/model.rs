@@ -6,7 +6,7 @@ use crate::{
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     types::{
-        ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
+        BacktestPathSetId, ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
         RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
     },
 };
@@ -64,6 +64,7 @@ pub struct ModelVersionInfo {
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
+    pub publish_path_set_id: Option<BacktestPathSetId>,
     pub metrics_json: serde_json::Value,
     pub training_objective_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
@@ -82,6 +83,7 @@ info_from_model!(
         version,
         artifact_hash,
         training_dataset_id,
+        publish_path_set_id,
         metrics_json,
         training_objective_json,
         quality_gate_report,
@@ -101,6 +103,7 @@ pub struct NewModelVersion {
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
+    pub publish_path_set_id: Option<BacktestPathSetId>,
     pub metrics_json: serde_json::Value,
     pub training_objective_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,

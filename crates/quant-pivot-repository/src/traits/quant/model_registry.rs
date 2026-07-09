@@ -4,7 +4,7 @@ use quant_pivot_models::{
         ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewModelSpec,
         NewModelVersion, Paginated,
     },
-    types::{ModelSpecId, ModelVersionId},
+    types::{BacktestPathSetId, ModelSpecId, ModelVersionId},
 };
 
 #[async_trait::async_trait]
@@ -90,5 +90,14 @@ pub trait ModelRegistryRepository: Send + Sync {
         &self,
         model_version_id: &ModelVersionId,
         quality_gate_report: serde_json::Value,
+    ) -> Result<ModelVersionInfo, StorageError>;
+
+    /// Bind (or clear) the CPCV path set that publish/promote quality gates
+    /// must evaluate. Does not change publication status. Ownership of the
+    /// path set is enforced by the governance layer before calling this.
+    async fn set_publish_path_set_id(
+        &self,
+        model_version_id: &ModelVersionId,
+        publish_path_set_id: Option<BacktestPathSetId>,
     ) -> Result<ModelVersionInfo, StorageError>;
 }

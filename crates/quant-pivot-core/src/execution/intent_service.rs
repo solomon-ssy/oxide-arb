@@ -1179,6 +1179,7 @@ mod tests {
         use chrono::Utc;
         use quant_pivot_error::storage::StorageError;
         use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+        use quant_pivot_models::types::BacktestPathSetId;
         use quant_pivot_models::{
             domain::{
                 ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery,
@@ -1289,6 +1290,13 @@ mod tests {
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
+            async fn set_publish_path_set_id(
+                &self,
+                _model_version_id: &ModelVersionId,
+                _publish_path_set_id: Option<BacktestPathSetId>,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
         }
 
         /// Always resolves (or always fails), regardless of which artifact
@@ -1388,6 +1396,7 @@ mod tests {
                 version: 1,
                 artifact_hash: digest,
                 training_dataset_id: None,
+                publish_path_set_id: None,
                 metrics_json: serde_json::json!({}),
                 training_objective_json: serde_json::json!({"kind": "not_trained"}),
                 quality_gate_report: serde_json::json!({}),

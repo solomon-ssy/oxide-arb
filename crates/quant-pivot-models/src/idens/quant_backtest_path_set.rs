@@ -49,6 +49,9 @@ pub enum QuantBacktestPathSet {
     TrialCount,
     TrialGridCount,
     CoordSearchEffectiveN,
+    /// Content-addressed digest of the path-set payload (paths + distribution +
+    /// gate scalars). Enables audit/replay association beyond the random UUID.
+    PathSetHash,
     CreatedAt,
 }
 
@@ -116,6 +119,11 @@ pub fn table() -> TableCreateStatement {
         .col(
             ColumnDef::new(QuantBacktestPathSet::CoordSearchEffectiveN)
                 .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantBacktestPathSet::PathSetHash)
+                .text()
                 .not_null(),
         )
         .col(timestamp_with_write_default(

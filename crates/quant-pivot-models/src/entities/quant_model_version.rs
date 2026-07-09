@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::PublicationStatus,
-    types::{ContentHash, ModelSpecId, ModelVersionId, TrainingDatasetId},
+    types::{BacktestPathSetId, ContentHash, ModelSpecId, ModelVersionId, TrainingDatasetId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -16,6 +16,7 @@ pub struct Model {
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
+    pub publish_path_set_id: Option<BacktestPathSetId>,
     #[sea_orm(column_type = "JsonBinary")]
     pub metrics_json: Json,
     #[sea_orm(column_type = "JsonBinary")]

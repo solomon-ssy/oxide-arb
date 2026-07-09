@@ -21,11 +21,12 @@
 //! availability weights are trained on a real distinction and served a
 //! fabricated constant (11.2.2 remediation R2).
 
+use chrono::{DateTime, Utc};
 use ndarray::{Array1, Array2};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::Decimal;
 
-use super::{LabelName, TrainingExample};
+use super::{LabelName, TrainingExample, TrainingLabel};
 use crate::features::{
     CellAvailability, FeatureName, FeatureSchema, FeatureUnit, FeatureValueKind,
     availability_column_name, availability_of, feature_scalar, finite_f64,
@@ -86,6 +87,10 @@ pub struct TrainingMatrix {
     pub feature_names: Vec<FeatureName>,
     /// Number of sample rows rejected (NaN/inf, critical-missing, or no label).
     pub rejected_rows: usize,
+    /// Per kept row: decision time (`as_of`) for label-horizon purge (Phase 11.5).
+    pub row_as_of: Vec<DateTime<Utc>>,
+    /// Per kept row: label maturity time for purge overlap checks.
+    pub row_label_horizon_end: Vec<DateTime<Utc>>,
 }
 
 /// The three structurally distinct states a training-matrix cell can be in —
@@ -151,17 +156,16 @@ fn cell(example: &TrainingExample, column: &FeatureColumnSpec) -> Option<(f64, O
 }
 
 /// Resolve the target label cell for one example, or `None` to reject the row.
-fn label_cell(example: &TrainingExample, spec: &FeatureMatrixSpec) -> Option<f64> {
-    let value = example
-        .labels
-        .iter()
-        .find(|label| {
-            let name_matches = label.label_name == spec.label_name;
-            let horizon_matches = label.horizon_secs == spec.label_horizon_secs;
-            name_matches && horizon_matches
-        })?
-        .value;
-    finite_f64(value)
+/// Locate the supervised label row matching the matrix spec (name + horizon).
+fn matching_label<'a>(
+    example: &'a TrainingExample,
+    spec: &FeatureMatrixSpec,
+) -> Option<&'a TrainingLabel> {
+    example.labels.iter().find(|label| {
+        let name_matches = label.label_name == spec.label_name;
+        let horizon_matches = label.horizon_secs == spec.label_horizon_secs;
+        name_matches && horizon_matches
+    })
 }
 
 /// Build the dense `f64` training matrix from materialized examples.
@@ -187,10 +191,16 @@ pub fn build_training_matrix(
     let cols = feature_names.len();
     let mut data: Vec<f64> = Vec::with_capacity(examples.len() * cols);
     let mut labels: Vec<f64> = Vec::with_capacity(examples.len());
+    let mut row_as_of = Vec::with_capacity(examples.len());
+    let mut row_label_horizon_end = Vec::with_capacity(examples.len());
     let mut rejected = 0usize;
 
     'rows: for example in examples {
-        let Some(label) = label_cell(example, spec) else {
+        let Some(label_row) = matching_label(example, spec) else {
+            rejected += 1;
+            continue;
+        };
+        let Some(label) = finite_f64(label_row.value) else {
             rejected += 1;
             continue;
         };
@@ -208,6 +218,8 @@ pub fn build_training_matrix(
         }
         data.extend_from_slice(&row);
         labels.push(label);
+        row_as_of.push(example.as_of);
+        row_label_horizon_end.push(label_row.matured_at);
     }
 
     let rows = labels.len();
@@ -220,6 +232,8 @@ pub fn build_training_matrix(
         labels: Array1::from_vec(labels),
         feature_names,
         rejected_rows: rejected,
+        row_as_of,
+        row_label_horizon_end,
     })
 }
 

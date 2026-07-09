@@ -1479,8 +1479,8 @@ fn research_validation_purge_cpcv_fields() -> Vec<FieldUiEntry> {
             "research.validation.cpcv.n_groups",
             "CPCV partition count (N)",
             "CPCV 分区数 (N)",
-            "Number of contiguous timeline partitions for Combinatorial Purged Cross-Validation (4..=32). Together with k_test determines φ reconstructed paths.",
-            "组合 Purged 交叉验证的连续时间分区数（4..=32）。与 k_test 共同决定 φ 重构路径数。",
+            "Number of contiguous timeline partitions for Combinatorial Purged Cross-Validation (2..=32). Together with k_test determines φ reconstructed paths.",
+            "组合 Purged 交叉验证的连续时间分区数（2..=32）。与 k_test 共同决定 φ 重构路径数。",
         )
         .col_span(12),
         integer(
@@ -1549,8 +1549,8 @@ fn research_validation_pbo_gate_fields() -> Vec<FieldUiEntry> {
             "research.validation.pbo.block_count",
             "PBO CSCV block count",
             "PBO CSCV 块数",
-            "Number of equal-length time blocks for Combinatorially Symmetric Cross-Validation (must be even, default 16).",
-            "组合对称交叉验证的等长时间块数（必须为偶数，默认 16）。",
+            "Number of equal-length time blocks for Combinatorially Symmetric Cross-Validation (must be even, default 8 — match cpcv.n_groups).",
+            "组合对称交叉验证的等长时间块数（必须为偶数，默认 8）。",
         )
         .col_span(12),
         decimal(

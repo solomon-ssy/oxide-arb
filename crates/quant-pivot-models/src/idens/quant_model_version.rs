@@ -26,6 +26,10 @@ pub enum QuantModelVersion {
     Version,
     ArtifactHash,
     TrainingDatasetId,
+    /// Explicit CPCV path set the publish/promote quality gate must evaluate
+    /// (Phase 11.5 remediation). `NULL` means no publish candidate is bound —
+    /// the gate fails `CpcvRequired` rather than silently reading "latest".
+    PublishPathSetId,
     MetricsJson,
     TrainingObjectiveJson,
     QualityGateReport,
@@ -52,6 +56,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(column::uuid_null(QuantModelVersion::TrainingDatasetId))
+        .col(column::uuid_null(QuantModelVersion::PublishPathSetId))
         .col(
             ColumnDef::new(QuantModelVersion::MetricsJson)
                 .json_binary()
@@ -101,6 +106,11 @@ pub fn table() -> TableCreateStatement {
                 )
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        // `publish_path_set_id` is intentionally **not** a DB foreign key:
+        // `quant_backtest_path_set` already FKs to this table, and a reverse FK
+        // would create a create-order cycle. Ownership is enforced in
+        // `ModelGovernanceService::bind_publish_path_set` (path set must belong
+        // to the version) before the column is written.
         .to_owned()
 }
 

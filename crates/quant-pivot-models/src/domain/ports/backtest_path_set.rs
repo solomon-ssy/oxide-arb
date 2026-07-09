@@ -33,9 +33,9 @@ pub trait CpcvBacktestPort: Send + Sync {
         path_set_id: &BacktestPathSetId,
     ) -> QuantResult<Option<BacktestPathSetView>>;
 
-    /// Load the most recent path set for a model version, if any — the
-    /// Phase 11.5 quality gate's data source (never re-run CPCV inside the
-    /// gate itself; the gate consumes the latest already-persisted result).
+    /// Load the most recent path set for a model version (UI history /
+    /// catalog). Publish gates read `ModelVersion.publish_path_set_id`, not
+    /// this latest-by-`created_at` helper.
     async fn latest_path_set(
         &self,
         model_version_id: &ModelVersionId,

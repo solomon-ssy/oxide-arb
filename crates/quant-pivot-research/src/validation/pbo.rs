@@ -202,13 +202,23 @@ pub fn probability_of_backtest_overfitting(
                 .max_by(|(_, a), (_, b)| a.cmp(b))
                 .map_or(0, |(idx, _)| idx);
 
-            let rank = oos_sharpes
+            // Competition rank with average ties: count strictly worse + half of ties.
+            // Strict `<` alone inflated ω (and understated PBO) when Sharpes tied.
+            let champion_sharpe = oos_sharpes[champion];
+            let worse = oos_sharpes
                 .iter()
-                .filter(|&&sharpe| sharpe < oos_sharpes[champion])
-                .count()
-                + 1; // 1-indexed ascending rank
+                .filter(|&&sharpe| sharpe < champion_sharpe)
+                .count();
+            let ties = oos_sharpes
+                .iter()
+                .filter(|&&sharpe| sharpe == champion_sharpe)
+                .count();
+            let rank = 0.5f64.mul_add(
+                f64::from(u32::try_from(ties).unwrap_or(1).max(1)),
+                f64::from(u32::try_from(worse).unwrap_or(u32::MAX)),
+            );
             let n_trials_f64 = u32::try_from(n_trials).map_or(f64::MAX, f64::from);
-            let omega = f64::from(u32::try_from(rank).unwrap_or(u32::MAX)) / (n_trials_f64 + 1.0);
+            let omega = rank / (n_trials_f64 + 1.0);
             let logit = (omega / (1.0 - omega)).ln();
             logit < 0.0
         })

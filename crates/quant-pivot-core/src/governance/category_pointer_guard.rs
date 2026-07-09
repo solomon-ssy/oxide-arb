@@ -229,6 +229,13 @@ mod tests {
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
+        async fn set_publish_path_set_id(
+            &self,
+            _model_version_id: &ModelVersionId,
+            _publish_path_set_id: Option<quant_pivot_models::types::BacktestPathSetId>,
+        ) -> Result<ModelVersionInfo, StorageError> {
+            unimplemented!()
+        }
     }
 
     fn spec() -> ModelSpecInfo {
@@ -258,6 +265,7 @@ mod tests {
             version: 1,
             artifact_hash,
             training_dataset_id: None,
+            publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
             quality_gate_report: serde_json::json!({}),

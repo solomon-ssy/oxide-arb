@@ -123,7 +123,9 @@ fn generate_weighted_factor(
 fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
     use rust_decimal::prelude::ToPrimitive;
 
-    let expanded = grid.forest_n_trees_multipliers.len() * grid.linear_alpha_multipliers.len();
+    // Sum, not Cartesian product: forest and linear params apply to disjoint
+    // ClassicalKind families. Crossing them inflated DSR N with inert dimensions.
+    let expanded = grid.forest_n_trees_multipliers.len() + grid.linear_alpha_multipliers.len();
     validate_grid_size(expanded, grid.max_trials)?;
 
     let base = ClassicalParams {
@@ -133,31 +135,40 @@ fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
     let mut trials = Vec::with_capacity(expanded);
     let mut trial_id = 0_u32;
     for &forest_multiplier in &grid.forest_n_trees_multipliers {
-        for &linear_multiplier in &grid.linear_alpha_multipliers {
-            let base_n_trees = u32::try_from(base.forest.n_trees).unwrap_or(u32::MAX);
-            let scaled_n_trees = (Decimal::from(base_n_trees) * forest_multiplier)
-                .round()
-                .max(Decimal::ONE);
-            let n_trees = scaled_n_trees.to_usize().unwrap_or(1);
-            let linear_scale = linear_multiplier.to_f64().unwrap_or(1.0);
-            let params = ClassicalParams {
+        let base_n_trees = u32::try_from(base.forest.n_trees).unwrap_or(u32::MAX);
+        let scaled_n_trees = (Decimal::from(base_n_trees) * forest_multiplier)
+            .round()
+            .max(Decimal::ONE);
+        let n_trees = scaled_n_trees.to_usize().unwrap_or(1);
+        trials.push(Trial {
+            trial_id,
+            label: format!("forest_x{forest_multiplier}"),
+            weighted_factor_objective: None,
+            classical_params: Some(ClassicalParams {
                 forest: ForestParams {
                     n_trees,
                     ..base.forest
                 },
+                linear: base.linear,
+            }),
+        });
+        trial_id += 1;
+    }
+    for &linear_multiplier in &grid.linear_alpha_multipliers {
+        let linear_scale = linear_multiplier.to_f64().unwrap_or(1.0);
+        trials.push(Trial {
+            trial_id,
+            label: format!("linear_x{linear_multiplier}"),
+            weighted_factor_objective: None,
+            classical_params: Some(ClassicalParams {
+                forest: base.forest,
                 linear: LinearParams {
                     alpha: base.linear.alpha * linear_scale,
                     ..base.linear
                 },
-            };
-            trials.push(Trial {
-                trial_id,
-                label: format!("forest_x{forest_multiplier},linear_x{linear_multiplier}"),
-                weighted_factor_objective: None,
-                classical_params: Some(params),
-            });
-            trial_id += 1;
-        }
+            }),
+        });
+        trial_id += 1;
     }
     Ok(trials)
 }
@@ -255,5 +266,25 @@ mod tests {
             max_trials: 4, // grid expands to 6 > 4
         });
         assert!(grid.generate(&TrainingObjectiveSpec::default()).is_err());
+    }
+
+    #[cfg(feature = "ml-classical")]
+    #[test]
+    fn classical_grid_sums_forest_and_linear_not_cartesian() {
+        use super::ClassicalTrialGrid;
+
+        let grid = TrialGridSpec::Classical(ClassicalTrialGrid {
+            forest_n_trees_multipliers: vec![dec!(0.5), dec!(1), dec!(2)],
+            linear_alpha_multipliers: vec![dec!(0.5), dec!(1)],
+            max_trials: 32,
+        });
+        let trials = grid
+            .generate(&TrainingObjectiveSpec::default())
+            .expect("classical grid");
+        assert_eq!(
+            trials.len(),
+            5,
+            "3 forest + 2 linear multipliers (not 3×2=6)"
+        );
     }
 }

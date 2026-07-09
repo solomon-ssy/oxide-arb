@@ -1578,6 +1578,7 @@ async fn model_version_training_dataset_id_is_typed() {
             version: 2,
             artifact_hash: hash,
             training_dataset_id: Some(dataset_id.clone()),
+            publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
             quality_gate_report: serde_json::json!({}),
