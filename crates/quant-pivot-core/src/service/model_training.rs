@@ -48,10 +48,10 @@ use quant_pivot_research::{
     factors::{FactorName, names as factor_names},
     model::{
         ClassicalKind, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
-        ModelFamily, ModelTrainer, Regularization, ReturnModelSpec, ScoreMultiplierSpec,
-        SellScorerOutputSpec, SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest,
-        TrainSellScorerRequest, TrainedModelArtifact, TrainingObjective, ValidationSpec,
-        WeightedFactorTrainer, infer_training_category_scope,
+        ModelFamily, ModelTrainer, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
+        SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
+        TrainedModelArtifact, TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer,
+        infer_training_category_scope,
     },
     selection::ModelFeatureRequirements,
     training::{DatasetParquetCodec, TrainingExample},
@@ -112,6 +112,8 @@ pub struct ModelTrainerServiceDeps {
 pub struct ModelTrainerConfig {
     /// Factor config (the `factor_weights` training seed).
     pub factors: FactorsConfig,
+    /// Governed objective snapshot from `research.training`.
+    pub objective: TrainingObjectiveSpec,
 }
 
 /// A training request resolved by the admin port.
@@ -309,17 +311,19 @@ impl ModelTrainerService {
             factor_schema_hash: dataset.factor_schema_hash.clone(),
         };
 
-        let (artifact, metrics_json) = if input.model_family.is_exit_scorer() {
-            Self::train_sell_scorer(header, input, dataset, examples).await?
-        } else {
-            match input.model_family.classical_kind() {
-                None => self.train_weighted(header, input, examples).await?,
-                Some(kind) => {
-                    self.train_classical(header, input, dataset, examples, kind)
-                        .await?
+        let (artifact, metrics_json, training_objective_json) =
+            if input.model_family.is_exit_scorer() {
+                self.train_sell_scorer(header, input, dataset, examples)
+                    .await?
+            } else {
+                match input.model_family.classical_kind() {
+                    None => self.train_weighted(header, input, examples).await?,
+                    Some(kind) => {
+                        self.train_classical(header, input, dataset, examples, kind)
+                            .await?
+                    }
                 }
-            }
-        };
+            };
 
         let artifact_hash = artifact.content_hash()?;
         let key = ModelArtifact::artifact_key(&artifact_hash)?;
@@ -343,6 +347,7 @@ impl ModelTrainerService {
                 artifact_hash,
                 training_dataset_id: Some(input.training_dataset_id.clone()),
                 metrics_json,
+                training_objective_json,
                 quality_gate_report: serde_json::json!({}),
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,
@@ -358,7 +363,7 @@ impl ModelTrainerService {
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         examples: &[TrainingExample],
-    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
         let spec = self
             .deps
             .model_registry_repo
@@ -393,8 +398,7 @@ impl ModelTrainerService {
             examples: examples.to_vec(),
             label: input.label.clone(),
             seed_weights,
-            objective: TrainingObjective::RankIc,
-            regularization: Regularization::default(),
+            objective: self.config.objective.clone(),
             validation: ValidationSpec {
                 folds: input.validation_folds.max(2),
             },
@@ -417,29 +421,44 @@ impl ModelTrainerService {
                 detail: format!("weighted-factor trainer task join failed: {error}"),
             })
         })??;
+        let objective_json = serde_json::to_value(&self.config.objective).map_err(|error| {
+            QuantError::from(ResearchError::Serialization {
+                detail: format!("training objective serialization failed: {error}"),
+            })
+        })?;
         let metrics_json = serde_json::json!({
+            "objective": objective_json,
             "in_sample": {
                 "objective_value": trained.in_sample_metrics.objective_value,
+                "components": trained.in_sample_metrics.components,
+                "diagnostics": trained.in_sample_metrics.diagnostics,
                 "summary": trained.in_sample_metrics.summary,
             },
             "validation": {
-                "mean_objective": trained.validation_metrics.mean_objective,
+                "held_out_objective": trained.validation_metrics.held_out_objective,
+                "held_out_components": trained.validation_metrics.held_out_components,
+                "held_out_diagnostics": trained.validation_metrics.held_out_diagnostics,
                 "fold_objectives": trained.validation_metrics.fold_objectives,
+                "fold_components": trained.validation_metrics.fold_components,
                 "sample_count": trained.validation_metrics.sample_count,
+                "dropped_singleton_groups": trained.validation_metrics.dropped_singleton_groups,
+                "dropped_singleton_rows": trained.validation_metrics.dropped_singleton_rows,
+                "held_out_metric": "neg_total_ltr_loss",
             },
         });
-        Ok((trained.artifact, metrics_json))
+        Ok((trained.artifact, metrics_json, objective_json))
     }
 
     /// Sell-side hold-vs-exit training path (Phase 06.1). Seeds over the market
-    /// factors plus the position-state pseudo-factors and fits the shared rank-IC
+    /// factors plus the position-state pseudo-factors and fits the shared LTR
     /// simplex against the `hold_vs_exit_alpha_bps` label.
     async fn train_sell_scorer(
+        &self,
         header: ModelArtifactHeader,
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
-    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
         if !examples
             .iter()
             .all(|example| example.sample_source == TrainingSampleSource::ExitDecision)
@@ -454,7 +473,7 @@ impl ModelTrainerService {
             examples: examples.to_vec(),
             label: input.label.clone(),
             seed_weights,
-            regularization: Regularization::default(),
+            objective: self.config.objective.clone(),
             validation: ValidationSpec {
                 folds: input.validation_folds.max(2),
             },
@@ -473,18 +492,32 @@ impl ModelTrainerService {
                         detail: format!("sell-scorer trainer task join failed: {error}"),
                     })
                 })??;
+        let objective_json = serde_json::to_value(&self.config.objective).map_err(|error| {
+            QuantError::from(ResearchError::Serialization {
+                detail: format!("training objective serialization failed: {error}"),
+            })
+        })?;
         let metrics_json = serde_json::json!({
+            "objective": objective_json,
             "in_sample": {
                 "objective_value": trained.in_sample_metrics.objective_value,
+                "components": trained.in_sample_metrics.components,
+                "diagnostics": trained.in_sample_metrics.diagnostics,
                 "summary": trained.in_sample_metrics.summary,
             },
             "validation": {
-                "mean_objective": trained.validation_metrics.mean_objective,
+                "held_out_objective": trained.validation_metrics.held_out_objective,
+                "held_out_components": trained.validation_metrics.held_out_components,
+                "held_out_diagnostics": trained.validation_metrics.held_out_diagnostics,
                 "fold_objectives": trained.validation_metrics.fold_objectives,
+                "fold_components": trained.validation_metrics.fold_components,
                 "sample_count": trained.validation_metrics.sample_count,
+                "dropped_singleton_groups": trained.validation_metrics.dropped_singleton_groups,
+                "dropped_singleton_rows": trained.validation_metrics.dropped_singleton_rows,
+                "held_out_metric": "neg_total_ltr_loss",
             },
         });
-        Ok((trained.artifact, metrics_json))
+        Ok((trained.artifact, metrics_json, objective_json))
     }
 
     /// Seed the Sell scorer over the observed market factors plus the three
@@ -602,7 +635,7 @@ impl ModelTrainerService {
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
         kind: ClassicalKind,
-    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
         let schema = FeatureSchema::build(&self.replay.features);
         let matrix = build_classical_matrix(examples, &input.label, &schema)?;
         let folds = input.validation_folds.max(2);
@@ -632,7 +665,8 @@ impl ModelTrainerService {
             .put(model_key, &output.model_bytes)
             .await?;
 
-        let metrics_json = classical_metrics_json(kind, &output, &validation);
+        let objective_json = classical_objective_json(kind);
+        let metrics_json = classical_metrics_json(kind, &output, &validation, &objective_json);
         let artifact = ModelArtifact::Classical(Box::new(ClassicalModelArtifact {
             header,
             artifact_id: ModelArtifactId::from_v7(),
@@ -646,7 +680,7 @@ impl ModelTrainerService {
             preprocessing: output.preprocessing,
             metrics: output.metrics,
         }));
-        Ok((artifact, metrics_json))
+        Ok((artifact, metrics_json, objective_json))
     }
 }
 
@@ -687,18 +721,23 @@ fn classical_metrics_json(
     kind: ClassicalKind,
     output: &ClassicalTrainOutput,
     validation: &ValidationReport,
+    objective_json: &serde_json::Value,
 ) -> serde_json::Value {
     serde_json::json!({
         "kind": kind.as_str(),
+        "objective": objective_json,
         "in_sample": {
             "validation_objective": output.metrics.validation_objective,
             "train_samples": output.metrics.train_samples,
             "feature_count": output.metrics.feature_count,
         },
         "validation": {
-            "mean_objective": validation.mean_objective,
+            "held_out_objective": validation.held_out_objective,
             "fold_objectives": validation.fold_objectives,
             "sample_count": validation.sample_count,
+            "dropped_singleton_groups": validation.dropped_singleton_groups,
+            "dropped_singleton_rows": validation.dropped_singleton_rows,
+            "held_out_metric": "mean_rolling_fold_rank_ic",
         },
         "feature_importances": output.metrics.feature_importances
             .iter()
@@ -707,6 +746,17 @@ fn classical_metrics_json(
                 "importance": fi.importance,
             }))
             .collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(feature = "ml-classical")]
+fn classical_objective_json(kind: ClassicalKind) -> serde_json::Value {
+    serde_json::json!({
+        "family": "classical_pointwise_baseline",
+        "kind": kind.as_str(),
+        "rank_loss": serde_json::Value::Null,
+        "optimizer": serde_json::Value::Null,
+        "note": "classical smartcore adapters train pointwise supervised models and validate by rank_ic; they are not LTR rankers",
     })
 }
 
@@ -721,7 +771,7 @@ impl ModelTrainerService {
         _dataset: &TrainingDatasetInfo,
         _examples: &[TrainingExample],
         kind: ClassicalKind,
-    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+    ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
         Err(ResearchError::RuntimeUnavailable {
             family: kind.to_string(),
             detail: "classical training requires the `ml-classical` build".to_owned(),

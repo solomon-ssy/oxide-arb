@@ -1,4 +1,4 @@
-//! Model training contract and the [`WeightedFactorTrainer`] (Phase 3.6).
+//! Model training contract and the [`WeightedFactorTrainer`] (Phase 3.6 / 11.4).
 //!
 //! The weighted-factor trainer optimizes the **frozen factor weights** that the
 //! online [`WeightedFactorRuntime`](crate::model::weighted::WeightedFactorRuntime)
@@ -9,21 +9,20 @@
 //! net     = Σ weightᵢ · signedᵢ                 (the ranking score, ∈ [-1, 1])
 //! ```
 //!
-//! and searches the weight **simplex** (non-negative, sum to 1) to maximize the
-//! cross-sectional rank IC between `net` and the realized label, minus an L2
-//! complexity penalty. The deterministic coordinate search is the **base**
+//! and searches the weight **simplex** (non-negative, sum to 1) to minimize the
+//! governed LTR objective (`RankIC`-weighted `RankNet` or `RankNet` + `TopN`
+//! tail/turnover + L2). The deterministic coordinate search is the **base**
 //! optimizer (always linked); the `optimize` feature adds an `argmin` refinement
-//! seeded from the coordinate-search solution that is kept only when it strictly
-//! improves the training objective (see [`crate::model::optimize`]).
+//! that is kept only when it strictly improves the training objective. Configuring
+//! `argmin` without the feature **fails closed** (never silently degrades).
 //!
 //! Determinism is a hard, money-critical invariant: the same `(examples, label,
 //! seed, objective)` must yield a byte-identical artifact hash.
 
-use std::ops::Range;
-
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::enums::common::MarketCategory;
+use quant_pivot_models::runtime_config::TrainingOptimizerKind;
 use quant_pivot_models::types::ContentHash;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -37,6 +36,10 @@ use crate::{
             SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
         },
         category_scope::validate_category_scope_weights,
+        objective::{
+            CrossSectionGroup, ObjectiveComponentReport, ObjectiveEvaluator, RankingDiagnostics,
+            SampleRow, TrainingObjectiveSpec,
+        },
         runtime::ModelFamily,
         sell_scorer::position_state::{
             is_position_state_factor, position_state_signed_contribution,
@@ -44,7 +47,6 @@ use crate::{
     },
     parallel::par_map_with_index,
     precision::RESEARCH_DECIMAL_SCALE,
-    stats,
     training::{LabelName, TrainingExample},
 };
 
@@ -55,31 +57,6 @@ pub struct LabelSelector {
     pub name: LabelName,
     /// Label horizon in seconds (`0` for horizon-independent labels).
     pub horizon_secs: u64,
-}
-
-/// The validation objective the trainer maximizes on held-out folds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TrainingObjective {
-    /// Spearman rank IC between the predicted `net` and the realized label.
-    #[default]
-    RankIc,
-}
-
-/// Regularization applied to the weight vector during the search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Regularization {
-    /// Ridge (L2) penalty coefficient on `Σ weightᵢ²` (subtracted from the
-    /// objective). `0` disables regularization.
-    pub l2: Decimal,
-}
-
-impl Default for Regularization {
-    fn default() -> Self {
-        Self {
-            l2: Decimal::new(1, 2), // 0.01
-        }
-    }
 }
 
 /// Rolling time-ordered validation split.
@@ -100,12 +77,29 @@ impl Default for ValidationSpec {
 /// Per-fold and aggregate validation result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationReport {
-    /// Mean validation objective across rolling folds.
-    pub mean_objective: Decimal,
-    /// Per-fold validation objective values (time-ordered).
+    /// Held-out objective for the weighted trainer (last time block), or mean of
+    /// rolling OOS fold objectives for classical pointwise trainers.
+    pub held_out_objective: Decimal,
+    /// Held-out component breakdown (weighted LTR path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_out_components: Option<ObjectiveComponentReport>,
+    /// Ranking diagnostics on the held-out block (weighted LTR path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_out_diagnostics: Option<RankingDiagnostics>,
+    /// Per-block objective values (time-ordered; includes in-sample blocks for
+    /// weighted trainers — diagnostic only, not a pure OOS mean).
     pub fold_objectives: Vec<Decimal>,
-    /// Total resolved samples used.
+    /// Per-block component breakdowns (time-ordered).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fold_components: Vec<ObjectiveComponentReport>,
+    /// Total resolved samples kept in cross-section groups (`as_of` with ≥2 rows).
     pub sample_count: u64,
+    /// Number of `as_of` cross-sections dropped because they had fewer than 2 rows.
+    #[serde(default)]
+    pub dropped_singleton_groups: u64,
+    /// Number of sample rows discarded with those singleton cross-sections.
+    #[serde(default)]
+    pub dropped_singleton_rows: u64,
 }
 
 /// Request to train a weighted-factor model from frozen examples.
@@ -121,10 +115,8 @@ pub struct TrainModelRequest {
     pub label: LabelSelector,
     /// Initial weights / candidate factor set (from `FactorsConfig.factor_weights`).
     pub seed_weights: Vec<FactorWeight>,
-    /// Validation objective.
-    pub objective: TrainingObjective,
-    /// Weight regularization.
-    pub regularization: Regularization,
+    /// Governed training objective snapshot.
+    pub objective: TrainingObjectiveSpec,
     /// Rolling validation split.
     pub validation: ValidationSpec,
     /// Frozen artifact header (model version + schema hashes).
@@ -207,7 +199,7 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
         &request.examples,
         &request.label,
         &request.seed_weights,
-        request.regularization,
+        &request.objective,
         request.validation,
     )?;
 
@@ -239,7 +231,7 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
 /// weights plus the training / validation objective reports. Reused by every
 /// weighted family (Buy-side [`WeightedFactorModelArtifact`], Sell-side
 /// [`SellScorerArtifact`](crate::model::artifact::SellScorerArtifact)) so the
-/// deterministic rank-IC simplex search lives in exactly one place.
+/// deterministic LTR simplex search lives in exactly one place.
 #[derive(Debug, Clone)]
 pub(crate) struct FittedWeights {
     /// Frozen, normalized per-factor weights in seed order.
@@ -250,14 +242,14 @@ pub(crate) struct FittedWeights {
     pub validation: ValidationReport,
 }
 
-/// Fit the weight simplex against a supervised label via deterministic rank-IC
+/// Fit the weight simplex against a supervised label via deterministic LTR
 /// coordinate search (+ optional `argmin` refinement). Family-agnostic: the
 /// caller wraps the frozen weights into its concrete artifact body.
 pub(crate) fn fit_simplex_weights(
     examples: &[TrainingExample],
     label: &LabelSelector,
     seed_weights: &[FactorWeight],
-    regularization: Regularization,
+    objective: &TrainingObjectiveSpec,
     validation: ValidationSpec,
 ) -> QuantResult<FittedWeights> {
     if seed_weights.is_empty() {
@@ -266,15 +258,16 @@ pub(crate) fn fit_simplex_weights(
         }
         .into());
     }
+    ensure_optimizer_available(objective.optimizer)?;
 
     // Deterministic factor order: the seed-weight order defines the columns.
     let factors: Vec<FactorName> = seed_weights.iter().map(|w| w.factor.clone()).collect();
     let dataset = TrainingDataset::build(examples, label, &factors)?;
-    if dataset.rows.len() < validation.folds.max(2) as usize {
+    if dataset.groups.len() < validation.folds.max(2) as usize {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
-                "insufficient resolved samples ({}) for {} validation folds",
-                dataset.rows.len(),
+                "insufficient resolved cross-section groups ({}) for {} validation folds",
+                dataset.groups.len(),
                 validation.folds
             ),
         }
@@ -282,7 +275,7 @@ pub(crate) fn fit_simplex_weights(
     }
 
     let folds = validation.folds.max(2) as usize;
-    let split = TimeSplit::new(dataset.rows.len(), folds);
+    let split = TimeSplit::new(dataset.groups.len(), folds);
 
     // Seed simplex (normalized, non-negative).
     let seed = normalize_simplex(
@@ -292,31 +285,68 @@ pub(crate) fn fit_simplex_weights(
             .collect::<Vec<_>>(),
     );
 
-    let l2 = regularization.l2.max(Decimal::ZERO);
-    let train_rows = &dataset.rows[..split.train_end];
+    let evaluator = ObjectiveEvaluator::new(objective.clone());
+    let train_groups = &dataset.groups[..split.train_end];
 
     // Base optimizer: deterministic coordinate search on the simplex.
-    let grid_weights = coordinate_search(&seed, train_rows, l2);
-    let grid_objective = penalized_objective(&grid_weights, train_rows, l2);
+    let grid_weights = coordinate_search(&seed, train_groups, &evaluator)?;
+    let grid_report = evaluator.evaluate(&grid_weights, train_groups)?;
+    let grid_objective = grid_report.objective_value();
 
     // Optional refinement: argmin (kept only if it strictly improves).
-    let (weights, train_objective) = refine(&grid_weights, grid_objective, train_rows, l2);
+    let (weights, train_report) = refine(&grid_weights, grid_objective, train_groups, &evaluator)?;
+    assemble_fitted_weights(
+        &factors,
+        &weights,
+        train_report.rounded(),
+        &evaluator,
+        &dataset,
+        &split,
+        folds,
+    )
+}
 
-    // Per-fold diagnostics over every block; the held-out last block is the
-    // true validation objective (the final weights never saw it). The per-block
-    // rank-IC computations are independent, so they fold out across the `rayon`
-    // pool in source order (the result is identical regardless of thread count).
-    let blocks: Vec<Range<usize>> = split.blocks().collect();
-    let fold_objectives: Vec<Decimal> = par_map_with_index(&blocks, |_, block| {
-        rank_ic(&weights, &dataset.rows[block.clone()])
-    });
-    let mean_objective = rank_ic(&weights, &dataset.rows[split.held_out()]);
+/// Freeze weights, evaluate fold/held-out reports, and build the fit outcome.
+fn assemble_fitted_weights(
+    factors: &[FactorName],
+    weights: &[Decimal],
+    train_components: ObjectiveComponentReport,
+    evaluator: &ObjectiveEvaluator,
+    dataset: &TrainingDataset,
+    split: &TimeSplit,
+    folds: usize,
+) -> QuantResult<FittedWeights> {
+    let train_objective = train_components.objective_value();
+    let train_groups = &dataset.groups[..split.train_end];
+    let train_diagnostics = evaluator.diagnostics(weights, train_groups);
+
+    // Per-block diagnostics over every block; the held-out last block is the
+    // true validation objective (the final weights never saw it). Evaluated
+    // serially so a non-finite score fails closed without rayon Result plumbing.
+    let blocks = split.blocks();
+    let mut fold_components = Vec::with_capacity(blocks.len());
+    for block in &blocks {
+        fold_components.push(
+            evaluator
+                .evaluate(weights, &dataset.groups[block.start..block.end])?
+                .rounded(),
+        );
+    }
+    let fold_objectives: Vec<Decimal> = fold_components
+        .iter()
+        .map(ObjectiveComponentReport::objective_value)
+        .collect();
+    let held_out = split.held_out();
+    let held_out_groups = &dataset.groups[held_out.start..held_out.end];
+    let held_out_components = evaluator.evaluate(weights, held_out_groups)?.rounded();
+    let held_out_objective = held_out_components.objective_value();
+    let held_out_diagnostics = evaluator.diagnostics(weights, held_out_groups);
 
     let weights_dp = weights
         .iter()
         .map(|w| w.round_dp(RESEARCH_DECIMAL_SCALE))
         .collect::<Vec<_>>();
-    let frozen = normalize_simplex(&weights_dp); // re-normalize after rounding
+    let frozen = normalize_simplex(&weights_dp);
     let factor_weights: Vec<FactorWeight> = factors
         .iter()
         .zip(&frozen)
@@ -328,12 +358,23 @@ pub(crate) fn fit_simplex_weights(
 
     let objective_report = TrainingObjectiveReport {
         objective_value: train_objective.round_dp(RESEARCH_DECIMAL_SCALE),
+        spec: evaluator.spec().clone(),
+        components: train_components,
+        diagnostics: Some(train_diagnostics),
         summary: format!(
-            "rank_ic train={} validation_mean={} over {} folds, {} samples",
+            "ltr {:?} train={} held_out={} ndcg@{}={} rank_ic={} over {} folds, {} groups, {} samples, \
+             dropped_singleton_groups={}, dropped_singleton_rows={} (TopN pseudo=rank-equal)",
+            evaluator.spec().rank_loss,
             train_objective.round_dp(4),
-            mean_objective.round_dp(4),
+            held_out_objective.round_dp(4),
+            held_out_diagnostics.ndcg_k,
+            held_out_diagnostics.mean_ndcg_at_k.round_dp(4),
+            held_out_diagnostics.mean_rank_ic.round_dp(4),
             folds,
-            dataset.rows.len()
+            dataset.groups.len(),
+            dataset.sample_count,
+            dataset.dropped_singleton_groups,
+            dataset.dropped_singleton_rows
         ),
     };
 
@@ -341,14 +382,32 @@ pub(crate) fn fit_simplex_weights(
         factor_weights,
         objective_report,
         validation: ValidationReport {
-            mean_objective: mean_objective.round_dp(RESEARCH_DECIMAL_SCALE),
+            held_out_objective: held_out_objective.round_dp(RESEARCH_DECIMAL_SCALE),
+            held_out_components: Some(held_out_components),
+            held_out_diagnostics: Some(held_out_diagnostics),
             fold_objectives: fold_objectives
                 .iter()
                 .map(|v| v.round_dp(RESEARCH_DECIMAL_SCALE))
                 .collect(),
-            sample_count: dataset.rows.len() as u64,
+            fold_components,
+            sample_count: dataset.sample_count,
+            dropped_singleton_groups: dataset.dropped_singleton_groups,
+            dropped_singleton_rows: dataset.dropped_singleton_rows,
         },
     })
+}
+
+/// Reject `argmin` when the binary was built without the `optimize` feature.
+fn ensure_optimizer_available(optimizer: TrainingOptimizerKind) -> QuantResult<()> {
+    if optimizer == TrainingOptimizerKind::Argmin && !cfg!(feature = "optimize") {
+        return Err(ResearchError::DatasetBuild {
+            detail: "research.training.optimizer=argmin requires the `optimize` feature; \
+                     rebuild with --features optimize or set optimizer=coordinate_search"
+                .to_owned(),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Run the optional `argmin` refinement when the `optimize` feature is enabled.
@@ -356,20 +415,34 @@ pub(crate) fn fit_simplex_weights(
 fn refine(
     grid_weights: &[Decimal],
     grid_objective: Decimal,
-    train_rows: &[SampleRow],
-    l2: Decimal,
-) -> (Vec<Decimal>, Decimal) {
+    train_groups: &[CrossSectionGroup],
+    evaluator: &ObjectiveEvaluator,
+) -> QuantResult<(Vec<Decimal>, ObjectiveComponentReport)> {
     use crate::model::optimize;
 
-    match optimize::refine_weights(grid_weights, train_rows, l2) {
+    if evaluator.spec().optimizer != TrainingOptimizerKind::Argmin {
+        return Ok((
+            grid_weights.to_vec(),
+            evaluator.evaluate(grid_weights, train_groups)?,
+        ));
+    }
+
+    match optimize::refine_weights(grid_weights, train_groups, evaluator) {
         Some(refined) => {
-            let refined_objective = penalized_objective(&refined, train_rows, l2);
+            let refined_report = evaluator.evaluate(&refined, train_groups)?;
+            let refined_objective = refined_report.objective_value();
             if refined_objective > grid_objective {
-                return (refined, refined_objective);
+                return Ok((refined, refined_report));
             }
-            (grid_weights.to_vec(), grid_objective)
+            Ok((
+                grid_weights.to_vec(),
+                evaluator.evaluate(grid_weights, train_groups)?,
+            ))
         }
-        None => (grid_weights.to_vec(), grid_objective),
+        None => Ok((
+            grid_weights.to_vec(),
+            evaluator.evaluate(grid_weights, train_groups)?,
+        )),
     }
 }
 
@@ -377,11 +450,14 @@ fn refine(
 #[cfg(not(feature = "optimize"))]
 fn refine(
     grid_weights: &[Decimal],
-    grid_objective: Decimal,
-    _train_rows: &[SampleRow],
-    _l2: Decimal,
-) -> (Vec<Decimal>, Decimal) {
-    (grid_weights.to_vec(), grid_objective)
+    _grid_objective: Decimal,
+    train_groups: &[CrossSectionGroup],
+    evaluator: &ObjectiveEvaluator,
+) -> QuantResult<(Vec<Decimal>, ObjectiveComponentReport)> {
+    Ok((
+        grid_weights.to_vec(),
+        evaluator.evaluate(grid_weights, train_groups)?,
+    ))
 }
 
 /// Deterministic steepest-descent coordinate search over the weight simplex.
@@ -394,12 +470,16 @@ fn refine(
 /// the winner is chosen by a serial reduction over the source-ordered scores, the
 /// result is independent of `rayon`'s thread count — a hard, money-critical
 /// determinism invariant.
-fn coordinate_search(seed: &[Decimal], rows: &[SampleRow], l2: Decimal) -> Vec<Decimal> {
+fn coordinate_search(
+    seed: &[Decimal],
+    groups: &[CrossSectionGroup],
+    evaluator: &ObjectiveEvaluator,
+) -> QuantResult<Vec<Decimal>> {
     let n = seed.len();
     let mut best = seed.to_vec();
-    let mut best_obj = penalized_objective(&best, rows, l2);
+    let mut best_obj = evaluator.evaluate(&best, groups)?.objective_value();
     if n < 2 {
-        return best;
+        return Ok(best);
     }
 
     for _ in 0..MAX_SEARCH_ROUNDS {
@@ -407,17 +487,24 @@ fn coordinate_search(seed: &[Decimal], rows: &[SampleRow], l2: Decimal) -> Vec<D
         if moves.is_empty() {
             break;
         }
-        let scored = par_map_with_index(&moves, |_, &(from, to, step)| {
-            let mut trial = best.clone();
-            trial[from] -= step;
-            trial[to] += step;
-            penalized_objective(&trial, rows, l2)
-        });
+        let scored: Vec<QuantResult<Decimal>> =
+            par_map_with_index(&moves, |_, &(from, to, step)| {
+                let mut trial = best.clone();
+                trial[from] -= step;
+                trial[to] += step;
+                evaluator
+                    .evaluate(&trial, groups)
+                    .map(|report| report.objective_value())
+            });
+        let mut objectives = Vec::with_capacity(scored.len());
+        for result in scored {
+            objectives.push(result?);
+        }
 
         // Pick the single best strictly-improving move; ties resolve to the
         // earliest move in the fixed enumeration order (deterministic).
         let mut chosen: Option<(usize, Decimal)> = None;
-        for (idx, obj) in scored.iter().copied().enumerate() {
+        for (idx, obj) in objectives.iter().copied().enumerate() {
             if obj > best_obj && chosen.is_none_or(|(_, c)| obj > c) {
                 chosen = Some((idx, obj));
             }
@@ -430,7 +517,7 @@ fn coordinate_search(seed: &[Decimal], rows: &[SampleRow], l2: Decimal) -> Vec<D
         best[to] += step;
         best_obj = obj;
     }
-    best
+    Ok(best)
 }
 
 /// Enumerate every feasible weight-shifting move from `best` in the fixed order
@@ -454,23 +541,6 @@ fn enumerate_moves(n: usize, best: &[Decimal]) -> Vec<(usize, usize, Decimal)> {
     moves
 }
 
-/// The training objective: rank IC minus the L2 complexity penalty.
-pub(crate) fn penalized_objective(weights: &[Decimal], rows: &[SampleRow], l2: Decimal) -> Decimal {
-    let ic = rank_ic(weights, rows);
-    let l2_term: Decimal = weights.iter().map(|w| *w * *w).sum();
-    ic - l2 * l2_term
-}
-
-/// Spearman rank IC between predicted `net` and the realized label.
-pub(crate) fn rank_ic(weights: &[Decimal], rows: &[SampleRow]) -> Decimal {
-    if rows.len() < 2 {
-        return Decimal::ZERO;
-    }
-    let predicted: Vec<Decimal> = rows.iter().map(|row| row.net(weights)).collect();
-    let labels: Vec<Decimal> = rows.iter().map(|row| row.label).collect();
-    stats::spearman(&predicted, &labels)
-}
-
 /// Normalize a non-negative vector onto the unit simplex (sum to 1). A zero
 /// vector becomes uniform.
 fn normalize_simplex(weights: &[Decimal]) -> Vec<Decimal> {
@@ -489,32 +559,19 @@ fn normalize_simplex(weights: &[Decimal]) -> Vec<Decimal> {
         .collect()
 }
 
-/// One training sample reduced to its signed factor contributions + label.
-///
-/// `signed[i] = dir_signᵢ · normalizedᵢ · confidenceᵢ` mirrors the runtime, so
-/// `net = Σ weightᵢ · signedᵢ`.
-#[derive(Debug, Clone)]
-pub(crate) struct SampleRow {
-    signed: Vec<Decimal>,
-    label: Decimal,
-}
-
-impl SampleRow {
-    /// The predicted ranking score for a weight vector.
-    pub(crate) fn net(&self, weights: &[Decimal]) -> Decimal {
-        self.signed.iter().zip(weights).map(|(s, w)| *s * *w).sum()
-    }
-}
-
 /// The reduced, time-ordered training dataset for the weighted trainer.
 struct TrainingDataset {
-    rows: Vec<SampleRow>,
+    groups: Vec<CrossSectionGroup>,
+    sample_count: u64,
+    dropped_singleton_groups: u64,
+    dropped_singleton_rows: u64,
 }
 
 impl TrainingDataset {
     /// Extract signed factor contributions + label per resolved example, sorted
     /// by `(as_of, market_id, token_id)` for deterministic folding. Examples
     /// without the target label are skipped (never silently zero-filled).
+    /// Cross-sections with fewer than two rows are dropped and counted.
     fn build(
         examples: &[TrainingExample],
         label: &LabelSelector,
@@ -528,8 +585,21 @@ impl TrainingDataset {
                 .then_with(|| a.token_id.as_str().cmp(b.token_id.as_str()))
         });
 
-        let mut rows = Vec::new();
+        let mut groups = Vec::new();
+        let mut dropped_singleton_groups = 0_u64;
+        let mut dropped_singleton_rows = 0_u64;
+        let mut current_as_of = None;
+        let mut current_rows = Vec::new();
         for example in sorted {
+            if current_as_of.is_some_and(|as_of| as_of != example.as_of) {
+                push_group(
+                    &mut groups,
+                    std::mem::take(&mut current_rows),
+                    &mut dropped_singleton_groups,
+                    &mut dropped_singleton_rows,
+                );
+            }
+            current_as_of = Some(example.as_of);
             let Some(label_value) = example
                 .labels
                 .iter()
@@ -544,23 +614,64 @@ impl TrainingDataset {
                 .iter()
                 .map(|factor| signed_contribution(example, factor))
                 .collect();
-            rows.push(SampleRow {
+            current_rows.push(SampleRow {
+                allocation_key: format!(
+                    "{}:{}",
+                    example.market_id.as_str(),
+                    example.token_id.as_str()
+                ),
                 signed,
                 label: label_value,
             });
         }
-        if rows.is_empty() {
+        if current_as_of.is_some() {
+            push_group(
+                &mut groups,
+                current_rows,
+                &mut dropped_singleton_groups,
+                &mut dropped_singleton_rows,
+            );
+        }
+        let sample_count = groups
+            .iter()
+            .map(|group| group.rows.len() as u64)
+            .sum::<u64>();
+        if groups.is_empty() {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "no resolved samples for label `{}`@{}s",
+                    "no as_of cross-section group with ≥2 rows for label `{}`@{}s \
+                     (dropped_singleton_groups={dropped_singleton_groups}, \
+                     dropped_singleton_rows={dropped_singleton_rows})",
                     label.name.as_str(),
                     label.horizon_secs
                 ),
             }
             .into());
         }
-        Ok(Self { rows })
+        Ok(Self {
+            groups,
+            sample_count,
+            dropped_singleton_groups,
+            dropped_singleton_rows,
+        })
     }
+}
+
+fn push_group(
+    groups: &mut Vec<CrossSectionGroup>,
+    rows: Vec<SampleRow>,
+    dropped_singleton_groups: &mut u64,
+    dropped_singleton_rows: &mut u64,
+) {
+    if rows.len() >= 2 {
+        groups.push(CrossSectionGroup { rows });
+        return;
+    }
+    if rows.is_empty() {
+        return;
+    }
+    *dropped_singleton_groups = dropped_singleton_groups.saturating_add(1);
+    *dropped_singleton_rows = dropped_singleton_rows.saturating_add(rows.len() as u64);
 }
 
 /// `dir_sign · normalized · confidence` for one factor of one example, or `0`
@@ -608,24 +719,39 @@ impl TimeSplit {
     }
 
     /// Every fold block (diagnostic), skipping empties.
-    fn blocks(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+    fn blocks(&self) -> Vec<TimeBlock> {
         (1..self.boundaries.len())
             .map(move |k| self.boundaries[k - 1]..self.boundaries[k])
             .filter(|range| range.start < range.end)
+            .map(|range| TimeBlock {
+                start: range.start,
+                end: range.end,
+            })
+            .collect()
     }
 
     /// The held-out last block (true validation range).
-    fn held_out(&self) -> Range<usize> {
+    fn held_out(&self) -> TimeBlock {
         let last = self.boundaries.len() - 1;
-        self.boundaries[last - 1]..self.boundaries[last]
+        TimeBlock {
+            start: self.boundaries[last - 1],
+            end: self.boundaries[last],
+        }
     }
+}
+
+/// Contiguous group range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimeBlock {
+    start: usize,
+    end: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        LabelSelector, ModelTrainer, Regularization, TrainModelRequest, TrainingObjective,
-        ValidationSpec, WeightedFactorTrainer,
+        LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
+        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer,
     };
     use std::collections::BTreeMap;
 
@@ -679,7 +805,7 @@ mod tests {
         let fv = FeatureVector {
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: Some(TokenId::new("yes")),
-            as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
+            as_of: Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap(),
             generic_schema_version: SchemaVersion::FIRST,
             generic: BTreeMap::new(),
             domain: None,
@@ -706,7 +832,7 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
-            as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
+            as_of: Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap(),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: fv,
             factor_values: vec![mk(LIQUIDITY_DEPTH, liq), mk(MOMENTUM_ROC, mom)],
@@ -740,8 +866,12 @@ mod tests {
                     weight: dec!(0.5),
                 },
             ],
-            objective: TrainingObjective::RankIc,
-            regularization: Regularization { l2: dec!(0.0) },
+            objective: TrainingObjectiveSpec {
+                lambda_tail: Decimal::ZERO,
+                lambda_turnover: Decimal::ZERO,
+                lambda_l2: Decimal::ZERO,
+                ..TrainingObjectiveSpec::default()
+            },
             validation: ValidationSpec { folds: 3 },
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
@@ -765,9 +895,9 @@ mod tests {
             .map(|i| {
                 let strong = i % 2 == 0;
                 let (liq, mom, y) = if strong {
-                    (dec!(0.1), dec!(0.9), dec!(1))
+                    (dec!(0.2), dec!(0.9), dec!(1))
                 } else {
-                    (dec!(0.9), dec!(0.1), dec!(0))
+                    (dec!(0.8), dec!(0.1), dec!(0))
                 };
                 example(i, liq, mom, FactorDirection::Positive, y)
             })
@@ -842,7 +972,163 @@ mod tests {
             "momentum weight {} should exceed the 0.5 seed",
             momentum.weight
         );
-        assert!(outcome.in_sample_metrics.objective_value > dec!(0));
+        let report = art
+            .objective_report
+            .as_ref()
+            .expect("weighted artifact objective report");
+        assert_eq!(
+            report.objective_value,
+            outcome.in_sample_metrics.objective_value
+        );
+        assert_eq!(report.objective_value, -report.components.total_loss);
+        assert!(report.components.rank_loss > Decimal::ZERO);
+        assert!(report.components.pair_count > 0);
+        let diagnostics = report.diagnostics.as_ref().expect("diagnostics");
+        assert!(diagnostics.group_count > 0);
+        assert_eq!(diagnostics.ndcg_k, 20);
+        assert!(outcome.validation_metrics.held_out_diagnostics.is_some());
+    }
+
+    #[test]
+    fn time_split_operates_on_atomic_as_of_groups() {
+        // `TrainingDataset::build` collapses each as_of into one group; TimeSplit
+        // indexes groups (not rows), so a cross-section cannot be bisected.
+        let examples = momentum_dataset();
+        let factors = [LIQUIDITY_DEPTH, MOMENTUM_ROC];
+        let dataset = TrainingDataset::build(
+            &examples,
+            &LabelSelector {
+                name: label_name(),
+                horizon_secs: 0,
+            },
+            &factors,
+        )
+        .expect("dataset");
+        let distinct_as_ofs: std::collections::BTreeSet<_> =
+            examples.iter().map(|example| example.as_of).collect();
+        assert_eq!(
+            dataset.groups.len(),
+            distinct_as_ofs.len(),
+            "one group per as_of (momentum_dataset has >=2 rows each)"
+        );
+        for group in &dataset.groups {
+            assert!(group.rows.len() >= 2);
+        }
+        assert_eq!(dataset.dropped_singleton_groups, 0);
+        assert_eq!(dataset.dropped_singleton_rows, 0);
+        let split = TimeSplit::new(dataset.groups.len(), 3);
+        let covered: usize = split
+            .blocks()
+            .iter()
+            .map(|block| block.end - block.start)
+            .sum();
+        assert_eq!(covered, dataset.groups.len());
+        assert_eq!(
+            split.held_out().end - split.held_out().start,
+            dataset.groups.len() - split.train_end
+        );
+    }
+
+    #[test]
+    fn singleton_as_of_groups_are_dropped_and_counted() {
+        // Pair even/odd into shared as_of via `idx / 2`. Inject one lone as_of.
+        let mut examples = momentum_dataset();
+        examples.push(example(
+            100,
+            dec!(0.5),
+            dec!(0.5),
+            FactorDirection::Positive,
+            dec!(1),
+        ));
+        let factors = [LIQUIDITY_DEPTH, MOMENTUM_ROC];
+        let dataset = TrainingDataset::build(
+            &examples,
+            &LabelSelector {
+                name: label_name(),
+                horizon_secs: 0,
+            },
+            &factors,
+        )
+        .expect("dataset");
+        assert_eq!(dataset.dropped_singleton_groups, 1);
+        assert_eq!(dataset.dropped_singleton_rows, 1);
+        assert_eq!(dataset.groups.len(), 10); // momentum_dataset: 20 rows / 2
+    }
+
+    #[test]
+    fn lambda_tail_changes_total_loss_when_pseudo_topn_is_negative() {
+        use crate::model::objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow};
+
+        // Two-row group: selecting the high-score name yields a large loss.
+        let group = CrossSectionGroup {
+            rows: vec![
+                SampleRow {
+                    allocation_key: "m:a".to_owned(),
+                    signed: vec![dec!(1), dec!(0)],
+                    label: dec!(-500),
+                },
+                SampleRow {
+                    allocation_key: "m:b".to_owned(),
+                    signed: vec![dec!(0), dec!(1)],
+                    label: dec!(100),
+                },
+            ],
+        };
+        let weights = [dec!(1), dec!(0)]; // selects m:a into Top1
+        let zero_tail = ObjectiveEvaluator::new(TrainingObjectiveSpec {
+            lambda_tail: Decimal::ZERO,
+            lambda_turnover: Decimal::ZERO,
+            lambda_l2: Decimal::ZERO,
+            pseudo_top_n: 1,
+            ..TrainingObjectiveSpec::default()
+        })
+        .evaluate(&weights, std::slice::from_ref(&group))
+        .expect("zero");
+        let heavy_tail = ObjectiveEvaluator::new(TrainingObjectiveSpec {
+            lambda_tail: dec!(2),
+            lambda_turnover: Decimal::ZERO,
+            lambda_l2: Decimal::ZERO,
+            pseudo_top_n: 1,
+            ..TrainingObjectiveSpec::default()
+        })
+        .evaluate(&weights, &[group])
+        .expect("heavy");
+        assert!(heavy_tail.tail_penalty > Decimal::ZERO);
+        assert!(
+            heavy_tail.total_loss > zero_tail.total_loss,
+            "lambda_tail must increase total_loss when TopN return is negative \
+             (zero={}, heavy={})",
+            zero_tail.total_loss,
+            heavy_tail.total_loss
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_exposes_dropped_singleton_and_rank_loss_group_count() {
+        let outcome = train_weighted(&request(momentum_dataset())).expect("train");
+        assert_eq!(outcome.validation_metrics.dropped_singleton_groups, 0);
+        assert!(outcome.in_sample_metrics.components.rank_loss_group_count > 0);
+        assert!(
+            outcome
+                .in_sample_metrics
+                .summary
+                .contains("TopN pseudo=rank-equal")
+        );
+    }
+
+    #[cfg(not(feature = "optimize"))]
+    #[test]
+    fn argmin_without_optimize_feature_fails_closed() {
+        use quant_pivot_models::runtime_config::TrainingOptimizerKind;
+
+        let mut req = request(momentum_dataset());
+        req.objective.optimizer = TrainingOptimizerKind::Argmin;
+        let err = train_weighted(&req).expect_err("argmin must fail closed");
+        let detail = err.to_string();
+        assert!(
+            detail.contains("optimize"),
+            "error should mention optimize feature: {detail}"
+        );
     }
 }
 
@@ -852,7 +1138,10 @@ mod tests {
 /// is deterministic on a fixed platform.
 #[cfg(all(test, feature = "optimize"))]
 mod optimize_tests {
-    use super::{SampleRow, coordinate_search, penalized_objective, refine};
+    use super::{coordinate_search, refine};
+    use crate::model::objective::{
+        CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec,
+    };
     use crate::model::optimize::refine_weights;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -868,17 +1157,22 @@ mod optimize_tests {
     /// Synthesize `count` rows over `n` factors where factor 0 carries the signal
     /// (the label equals factor 0's signed contribution), so the rank-IC optimum
     /// lies near the `e0` simplex vertex.
-    fn synth_rows(seed: u64, n: usize, count: usize) -> Vec<SampleRow> {
+    fn synth_group(seed: u64, n: usize, count: usize) -> Vec<CrossSectionGroup> {
         let mut state = seed.wrapping_add(1);
-        (0..count)
+        let rows = (0..count)
             .map(|_| {
                 let signed: Vec<Decimal> = (0..n)
                     .map(|_| Decimal::from(next(&mut state) % 1000) / dec!(1000) - dec!(0.5))
                     .collect();
                 let label = signed[0];
-                SampleRow { signed, label }
+                SampleRow {
+                    allocation_key: format!("m{}:t0", next(&mut state)),
+                    signed,
+                    label,
+                }
             })
-            .collect()
+            .collect();
+        vec![CrossSectionGroup { rows }]
     }
 
     fn uniform(n: usize) -> Vec<Decimal> {
@@ -886,15 +1180,25 @@ mod optimize_tests {
         vec![w; n]
     }
 
+    fn evaluator(l2: Decimal) -> ObjectiveEvaluator {
+        ObjectiveEvaluator::new(TrainingObjectiveSpec {
+            lambda_tail: Decimal::ZERO,
+            lambda_turnover: Decimal::ZERO,
+            lambda_l2: l2,
+            ..TrainingObjectiveSpec::default()
+        })
+    }
+
     /// The same inputs must refine to byte-identical Decimal weights (the accepted
     /// result is deterministic on a fixed platform — the cross-platform `f64`
     /// optimizer is only a candidate generator; adoption is decided in Decimal).
     #[test]
     fn optimize_refine_is_deterministic_on_fixed_platform() {
-        let rows = synth_rows(7, 3, 60);
+        let groups = synth_group(7, 3, 60);
         let seed = vec![dec!(0.2), dec!(0.3), dec!(0.5)];
-        let a = refine_weights(&seed, &rows, dec!(0.01));
-        let b = refine_weights(&seed, &rows, dec!(0.01));
+        let evaluator = evaluator(dec!(0.01));
+        let a = refine_weights(&seed, &groups, &evaluator);
+        let b = refine_weights(&seed, &groups, &evaluator);
         assert_eq!(a, b, "refine_weights must be deterministic");
         assert!(a.is_some(), "refinement produced a candidate");
     }
@@ -906,13 +1210,19 @@ mod optimize_tests {
         let l2 = dec!(0.01);
         for trial in 0..100u64 {
             let n = 3;
-            let rows = synth_rows(trial, n, 50);
-            let grid = coordinate_search(&uniform(n), &rows, l2);
-            let grid_obj = penalized_objective(&grid, &rows, l2);
-            let (weights, objective) = refine(&grid, grid_obj, &rows, l2);
+            let groups = synth_group(trial, n, 50);
+            let evaluator = evaluator(l2);
+            let grid = coordinate_search(&uniform(n), &groups, &evaluator).expect("grid");
+            let grid_obj = evaluator
+                .evaluate(&grid, &groups)
+                .expect("eval")
+                .objective_value();
+            let (weights, objective) =
+                refine(&grid, grid_obj, &groups, &evaluator).expect("refine");
             assert!(
-                objective >= grid_obj,
-                "trial {trial}: refined objective {objective} < grid {grid_obj}"
+                objective.objective_value() >= grid_obj,
+                "trial {trial}: refined objective {} < grid {grid_obj}",
+                objective.objective_value()
             );
             for w in &weights {
                 assert!(*w >= dec!(0), "trial {trial}: negative weight {w}");
@@ -930,10 +1240,17 @@ mod optimize_tests {
     #[test]
     fn optimize_converges_and_falls_back_to_grid() {
         let l2 = Decimal::ZERO;
-        let rows = synth_rows(42, 3, 80);
-        let grid = coordinate_search(&uniform(3), &rows, l2);
-        let grid_obj = penalized_objective(&grid, &rows, l2);
-        let (_, objective) = refine(&grid, grid_obj, &rows, l2);
-        assert!(objective >= grid_obj, "refine never worsens the grid");
+        let groups = synth_group(42, 3, 80);
+        let evaluator = evaluator(l2);
+        let grid = coordinate_search(&uniform(3), &groups, &evaluator).expect("grid");
+        let grid_obj = evaluator
+            .evaluate(&grid, &groups)
+            .expect("eval")
+            .objective_value();
+        let (_, objective) = refine(&grid, grid_obj, &groups, &evaluator).expect("refine");
+        assert!(
+            objective.objective_value() >= grid_obj,
+            "refine never worsens the grid"
+        );
     }
 }

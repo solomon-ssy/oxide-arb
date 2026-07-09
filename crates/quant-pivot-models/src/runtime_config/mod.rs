@@ -1,5 +1,5 @@
 //! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `7`).
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `9`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -34,12 +34,10 @@ use crate::types::SchemaVersion;
 ///
 /// This is a **monotonic** version: every schema-changing phase bumps it by one
 /// and the greenfield database is reset (zero compatibility — no shim, no
-/// migration; non-matching documents are rejected). Bumped to 6 by Phase 11.3's
-/// first cut (`model.calibration`, `portfolio.kelly_safety`); bumped again to 7
-/// by the Phase 11.3 closed-loop hardening pass (Kelly bet-structure redesign
-/// removed the dead `portfolio.sizing.downside_source` field and added
-/// `model.calibration.require_for_publish`); future phases bump again.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(7);
+/// migration; non-matching documents are rejected). Phase 11.4 hardening bumps
+/// to 9 for honest RankIC-weighted `RankNet` naming, `TopN` pseudo-portfolio knobs,
+/// and diagnostic `ndcg_k` under `research.training`.
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(9);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -72,8 +70,7 @@ pub struct RuntimeConfig {
     pub execution: ExecutionConfig,
     /// Operator notification channels.
     pub notification: NotificationConfig,
-    /// Research plane: training objective + validation methodology (reserved
-    /// skeleton; 11.4/11.5 fill fields without a further schema bump).
+    /// Research plane: training objective + validation methodology.
     pub research: ResearchConfig,
     /// Research-feedback plane: attribution feedback + auto-retraining (reserved
     /// skeleton; 11.9 fills fields without a further schema bump).
@@ -315,7 +312,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(7));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(9));
     }
 
     #[test]

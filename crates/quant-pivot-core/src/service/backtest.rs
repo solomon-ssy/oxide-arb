@@ -532,6 +532,7 @@ impl BacktestService {
                     "calibrated_from": version.model_version_id.to_string(),
                     "calibration": serde_json::to_value(&result.report).unwrap_or_default(),
                 }),
+                training_objective_json: version.training_objective_json.clone(),
                 quality_gate_report: serde_json::json!({}),
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,

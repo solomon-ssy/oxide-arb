@@ -395,9 +395,14 @@ fn rolling_validation(
             .round_dp(RESEARCH_DECIMAL_SCALE)
     };
     Ok(ValidationReport {
-        mean_objective,
+        held_out_objective: mean_objective,
+        held_out_components: None,
+        held_out_diagnostics: None,
         fold_objectives,
+        fold_components: Vec::new(),
         sample_count: rows as u64,
+        dropped_singleton_groups: 0,
+        dropped_singleton_rows: 0,
     })
 }
 

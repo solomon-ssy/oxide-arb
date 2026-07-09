@@ -411,6 +411,13 @@ pub fn enum_label(value: &str) -> UiText {
         // PortfolioSolverKind
         "microlp" => UiText::localized("microlp (pure Rust)", "microlp（纯 Rust）"),
         "highs" => UiText::localized("HiGHS (native)", "HiGHS（原生）"),
+        // Learning-to-rank training objective (simplex surrogates, not GBDT LambdaMART)
+        "rank_ic_weighted_ranknet" => {
+            UiText::localized("RankIC-weighted RankNet", "RankIC 加权 RankNet")
+        }
+        "pairwise_ranknet" => UiText::localized("Pairwise RankNet", "Pairwise RankNet"),
+        "argmin" => UiText::localized("argmin refinement", "argmin 精修"),
+        "coordinate_search" => UiText::localized("Coordinate search", "坐标搜索"),
         // EmergencyExitKind
         "liquidate_all" => UiText::localized("Liquidate all", "全部平仓"),
         "manual_only" => UiText::localized("Manual only", "仅人工处理"),
@@ -481,6 +488,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         factor_fields(),
         model_fields(),
         quality_gate_fields(),
+        research_training_fields(),
         training_fields(),
         report_fields(),
         portfolio_fields(),
@@ -1384,6 +1392,79 @@ fn sell_quality_gate_fields() -> Vec<FieldUiEntry> {
 }
 
 // ---------------------------------------------------------------------------
+// Field dictionary — Research
+// ---------------------------------------------------------------------------
+
+fn research_training_fields() -> Vec<FieldUiEntry> {
+    vec![
+        enum_select(
+            "research.training.rank_loss",
+            "Rank loss",
+            "排序损失",
+            "Ranking loss optimized within each same-as_of cross-section. RankIC-weighted RankNet is a simplex surrogate (not GBDT LambdaRankIC): RankNet pairs weighted by RankIC swap impact. Pairwise RankNet uses unweighted label-order pairs.",
+            "同一 as_of 横截面内优化的排序损失。RankIC 加权 RankNet 是 simplex 代理（不是 GBDT LambdaRankIC）：按 RankIC 交换影响加权 RankNet pair。Pairwise RankNet 使用未加权的标签有序 pair。",
+        )
+        .col_span(12),
+        enum_select(
+            "research.training.optimizer",
+            "Optimizer",
+            "优化器",
+            "Simplex-weight optimizer for weighted factor models. coordinate_search is the deterministic default. argmin requires the optimize feature and fails closed when unavailable — it never silently falls back.",
+            "加权因子模型的 simplex 权重优化器。coordinate_search 是确定性默认。argmin 需要 optimize feature，不可用时 fail-closed，绝不静默回退。",
+        )
+        .col_span(12),
+        decimal(
+            "research.training.lambda_tail",
+            "Tail penalty weight (λ)",
+            "尾部惩罚权重 (λ)",
+            "Non-negative multiplier on lower-tail TopN pseudo-portfolio return loss (optimization proxy, not the authoritative backtest capital path).",
+            "下行尾部 TopN 伪组合收益损失的非负乘子（优化代理，不是权威回测资金路径）。",
+        )
+        .col_span(12),
+        ratio_half_open(
+            "research.training.tail_fraction",
+            "Tail fraction",
+            "尾部样本比例",
+            "Worst fraction of grouped TopN pseudo-portfolio returns used for the tail penalty, in (0, 1]. 0.10 means the worst decile.",
+            "尾部惩罚使用的最差 group TopN 伪组合收益比例，范围 (0,1]。0.10 表示最差十分位。",
+        )
+        .col_span(12),
+        decimal(
+            "research.training.lambda_turnover",
+            "Turnover penalty weight (λ)",
+            "换手惩罚权重 (λ)",
+            "Non-negative multiplier on mean per-tick TopN pseudo-allocation turnover between adjacent as_of groups. Uses the same L1/2 turnover formula as backtest metrics, but on score-derived TopN token weights (optimization proxy ≠ backtest USD allocations).",
+            "相邻 as_of group 间逐 tick TopN 伪配置换手均值的非负乘子。换手公式与回测相同（L1/2），但权重是 score 推导的 TopN token 配置（优化代理 ≠ 回测 USD 配置）。",
+        )
+        .col_span(12),
+        decimal(
+            "research.training.lambda_l2",
+            "L2 penalty weight (λ)",
+            "L2 惩罚权重 (λ)",
+            "Non-negative multiplier on Σ weightᵢ². Keeps the learned simplex weights from collapsing too aggressively onto one factor.",
+            "Σ weightᵢ² 的非负乘子。用于避免学习出的 simplex 权重过度集中到单一因子。",
+        )
+        .col_span(12),
+        integer(
+            "research.training.ndcg_k",
+            "NDCG@k (diagnostic)",
+            "NDCG@k（诊断）",
+            "Truncation k for diagnostic NDCG@k reported in training metrics. Not part of the training loss. Must be in 1..=reports.max_top_n; default 20 aligns with typical TopN reports.",
+            "训练指标中诊断用 NDCG@k 的截断 k。不进入训练损失。必须在 1..=reports.max_top_n；默认 20 与典型 TopN 报告对齐。",
+        )
+        .col_span(12),
+        integer(
+            "research.training.pseudo_top_n",
+            "Pseudo TopN size",
+            "伪组合 TopN",
+            "How many top-scored tokens enter the score-derived pseudo portfolio used by tail and turnover penalties. Optimization proxy only; authoritative capital/LP checks remain in backtest/report.",
+            "进入尾部/换手惩罚所用 score 伪组合的最高分 token 数量。仅优化代理；权威资金/LP 检查仍在回测/报告路径。",
+        )
+        .col_span(12),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Field dictionary — Training
 // ---------------------------------------------------------------------------
 
@@ -2235,6 +2316,7 @@ fn build_tree() -> Vec<SchemaNode> {
         factors_section(),
         model_section(),
         quality_gate_section(),
+        research_section(),
         training_section(),
         reports_section(),
         portfolio_section(),
@@ -2469,6 +2551,43 @@ fn training_section() -> SchemaNode {
             "training.min_exit_depth_usd",
             "training.min_selection_depth_usd",
         ]),
+    )
+}
+
+fn research_section() -> SchemaNode {
+    section_node(
+        section_spec(
+            "research",
+            54,
+            "lucide:flask-conical",
+            ls("Research", "研究"),
+            ls(
+                "Governed research-plane training objective and validation policy.",
+                "研究平面的受治理训练目标与验证策略。",
+            ),
+        ),
+        vec![subsection(
+            section_spec(
+                "research.training",
+                10,
+                "lucide:chart-no-axes-combined",
+                ls("Learning-to-rank objective", "Learning-to-rank 目标"),
+                ls(
+                    "Cross-sectional LTR loss, lower-tail penalty, turnover penalty, and L2 regularization frozen into trained weighted-model artifacts.",
+                    "冻结进加权模型训练产物的横截面 LTR 损失、尾部惩罚、换手惩罚与 L2 正则。",
+                ),
+            ),
+            fields_in_order(&[
+                "research.training.rank_loss",
+                "research.training.optimizer",
+                "research.training.lambda_tail",
+                "research.training.tail_fraction",
+                "research.training.lambda_turnover",
+                "research.training.lambda_l2",
+                "research.training.ndcg_k",
+                "research.training.pseudo_top_n",
+            ]),
+        )],
     )
 }
 

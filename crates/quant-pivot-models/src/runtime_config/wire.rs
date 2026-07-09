@@ -105,6 +105,32 @@ pub enum SmallCrossSectionPolicy {
     HistoricalQuantile,
 }
 
+/// Ranking loss optimized by the governed learning-to-rank trainer.
+///
+/// These are **simplex black-box surrogates**, not XGBoost/LightGBM `LambdaMART`
+/// λ-gradient rankers. `RankIcWeightedRanknet` weights `RankNet` pairs by the
+/// closed-form `RankIC` swap delta; it is not a GBDT `LambdaRankIC` implementation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RankLossKind {
+    /// RankIC-swap-weighted pairwise `RankNet` logistic loss (simplex surrogate).
+    #[default]
+    RankIcWeightedRanknet,
+    /// Plain pairwise `RankNet` logistic loss.
+    PairwiseRanknet,
+}
+
+/// Simplex optimizer used by the weighted-factor trainer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingOptimizerKind {
+    /// Deterministic coordinate search only (production default).
+    #[default]
+    CoordinateSearch,
+    /// Coordinate search base plus `argmin` refinement (requires `optimize` feature).
+    Argmin,
+}
+
 /// A dimension a factor can be neutralized (residualized) against before the
 /// cross-sectional normalization, to remove structural exposure (e.g. category).
 #[derive(

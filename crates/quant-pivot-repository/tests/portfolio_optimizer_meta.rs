@@ -87,6 +87,7 @@ async fn seed_model_run(
             artifact_hash: content_hash('a'),
             training_dataset_id: None,
             metrics_json: serde_json::json!({}),
+            training_objective_json: serde_json::json!({"kind": "not_trained"}),
             quality_gate_report: serde_json::json!({}),
             publication_status: PublicationStatus::Candidate,
             published_at: None,

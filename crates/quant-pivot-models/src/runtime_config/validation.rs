@@ -27,11 +27,13 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic runtime-config v7 invariants.
+/// Mode-agnostic runtime-config v9 invariants.
 ///
 /// Phase 11.3 added the `model.calibration` embargo/confidence bounds and the
-/// `portfolio.kelly_safety` edge-uncertainty bounds — see [`validate_model`]
-/// and [`validate_kelly_safety`].
+/// `portfolio.kelly_safety` edge-uncertainty bounds. Phase 11.4 adds the
+/// governed learning-to-rank objective under `research.training`, with
+/// hardening in v9 for honest RankIC-weighted naming, diagnostic `ndcg_k`, and
+/// `TopN` rank-equal pseudo-portfolio knobs.
 #[must_use]
 pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
@@ -45,6 +47,7 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_reports(config, &mut report);
     validate_portfolio(config, &mut report);
     validate_execution(config, &mut report);
+    validate_research(config, &mut report);
     report
 }
 
@@ -931,6 +934,44 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     validate_settlement_redeem(config, report);
 }
 
+fn validate_research(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    non_negative_decimal(
+        "research.training.lambda_tail",
+        &config.research.training.lambda_tail,
+        report,
+    );
+    half_open_unit(
+        "research.training.tail_fraction",
+        &config.research.training.tail_fraction,
+        report,
+    );
+    non_negative_decimal(
+        "research.training.lambda_turnover",
+        &config.research.training.lambda_turnover,
+        report,
+    );
+    non_negative_decimal(
+        "research.training.lambda_l2",
+        &config.research.training.lambda_l2,
+        report,
+    );
+    let max_top_n = config.reports.max_top_n;
+    for (field, value) in [
+        ("research.training.ndcg_k", config.research.training.ndcg_k),
+        (
+            "research.training.pseudo_top_n",
+            config.research.training.pseudo_top_n,
+        ),
+    ] {
+        if value == 0 || value > max_top_n {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: format!("must be in 1..=reports.max_top_n ({max_top_n})"),
+            });
+        }
+    }
+}
+
 fn validate_opportunistic_sell(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     let policy = &config.execution.exit_monitor.opportunistic_sell;
     unit_ratio(
@@ -1260,6 +1301,43 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn research_training_tail_fraction_must_be_positive_unit_fraction() {
+        let mut config = RuntimeConfig::default();
+        config.research.training.tail_fraction = DecimalString::new("0");
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        let mut config = RuntimeConfig::default();
+        config.research.training.tail_fraction = DecimalString::new("1.01");
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        let mut config = RuntimeConfig::default();
+        config.research.training.tail_fraction = DecimalString::new("0.10");
+        let report = validate_runtime_config(&config);
+        assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn research_training_ndcg_and_pseudo_top_n_must_fit_max_top_n() {
+        let mut config = RuntimeConfig::default();
+        config.research.training.ndcg_k = 0;
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        let mut config = RuntimeConfig::default();
+        config.research.training.pseudo_top_n = config.reports.max_top_n + 1;
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        let mut config = RuntimeConfig::default();
+        config.research.training.ndcg_k = 20;
+        config.research.training.pseudo_top_n = 20;
+        let report = validate_runtime_config(&config);
+        assert!(!report.has_errors());
     }
 
     #[test]

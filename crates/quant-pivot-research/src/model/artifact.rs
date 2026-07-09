@@ -38,6 +38,7 @@ use crate::{
     hashing::ResearchHasher,
     model::{
         calibrator::ResolvedCalibration,
+        objective::{ObjectiveComponentReport, RankingDiagnostics, TrainingObjectiveSpec},
         runtime::{ClassicalKind, ModelFamily},
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -442,12 +443,19 @@ impl ReturnModelSpec {
     }
 }
 
-/// Objective report produced by the 3.6 `WeightedFactorTrainer`. `None` for a
+/// Objective report produced by the weighted LTR trainer. `None` for a
 /// hand-authored bootstrap artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrainingObjectiveReport {
-    /// Validation objective value achieved (e.g. validation rank IC).
+    /// In-sample objective value (`-total_loss`).
     pub objective_value: Decimal,
+    /// Frozen governed objective snapshot.
+    pub spec: TrainingObjectiveSpec,
+    /// Component-level loss decomposition.
+    pub components: ObjectiveComponentReport,
+    /// Ranking diagnostics (`Rank IC` + `NDCG@k`); not part of the loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RankingDiagnostics>,
     /// Human-readable summary of the objective and result.
     pub summary: String,
 }

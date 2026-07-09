@@ -19,6 +19,8 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub metrics_json: Json,
     #[sea_orm(column_type = "JsonBinary")]
+    pub training_objective_json: Json,
+    #[sea_orm(column_type = "JsonBinary")]
     pub quality_gate_report: Json,
     pub publication_status: PublicationStatus,
     pub published_at: Option<DateTime<Utc>>,

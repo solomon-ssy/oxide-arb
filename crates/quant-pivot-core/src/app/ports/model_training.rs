@@ -20,7 +20,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    model::{LabelSelector, ModelFamilyParseError},
+    model::{LabelSelector, ModelFamilyParseError, TrainingObjectiveSpec},
     training::LabelName,
 };
 
@@ -92,6 +92,7 @@ impl CoreModelTrainingPort {
             },
             ModelTrainerConfig {
                 factors: runtime.factors.clone(),
+                objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)?,
             },
             ReplayConfig {
                 features: runtime.features,

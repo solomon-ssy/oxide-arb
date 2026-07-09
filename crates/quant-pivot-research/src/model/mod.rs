@@ -17,6 +17,7 @@ pub mod classical_runtime;
 pub mod degrade;
 pub mod factory;
 pub mod favorite_longshot;
+pub mod objective;
 #[cfg(feature = "optimize")]
 pub mod optimize;
 pub mod overlay;
@@ -62,6 +63,7 @@ pub use factory::{
 pub use favorite_longshot::{
     BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
 };
+pub use objective::{ObjectiveComponentReport, RankingDiagnostics, TrainingObjectiveSpec};
 pub use overlay::{WeightOverlay, WeightSource};
 pub use rank_scores::{RankScores, attach as attach_rank_scores};
 pub use reliability::{ReliabilityBin, ReliabilityReport, ReliabilitySample, compute_reliability};
@@ -85,7 +87,7 @@ pub use signal::{
     signal_candidate_events,
 };
 pub use trainer::{
-    LabelSelector, ModelTrainer, Regularization, TrainModelRequest, TrainedModelArtifact,
-    TrainingObjective, ValidationReport, ValidationSpec, WeightedFactorTrainer,
+    LabelSelector, ModelTrainer, TrainModelRequest, TrainedModelArtifact, ValidationReport,
+    ValidationSpec, WeightedFactorTrainer,
 };
 pub use weighted::WeightedFactorRuntime;

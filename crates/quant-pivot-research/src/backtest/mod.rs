@@ -12,7 +12,7 @@
 //! Money / price / probability stay in project newtypes; `f64` never appears.
 
 mod comparison;
-mod metrics;
+pub(crate) mod metrics;
 mod runner;
 mod simulator;
 

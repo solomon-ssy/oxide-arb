@@ -3,8 +3,12 @@
 > 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
 > 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
 > 离线 replay 在 HistoricalQuantile 下 fail-closed）；**11.2.2 已落地**（crypto 外部垂直：两层向量、
-> Tier 0/1 linkage、Binance 特征源、domain PIT、category 路由）；**11.2.3 Tier 2 LLM linkage**
-> 设计已冻结、待实现。11.0/11.2.1/11.3–11.11 仍在设计/规划或部分落地阶段。
+> Tier 0/1 linkage、Binance 特征源、domain PIT、category 路由）；**11.4 已落地并完成生产级语义加固**
+>（`as_of` 横截面 LTR、`rank_ic_weighted_ranknet` 诚实命名、TopN **rank-equal** token 伪组合、
+> singleton 可观测丢弃、`rank_loss_group_count`、NDCG@k/Rank IC 诊断、argmin/Decimal→f64
+> fail-closed、schema v9）；
+> **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。11.0/11.2.1/11.3/11.5–11.11
+> 仍在设计/规划或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -123,7 +127,8 @@ flowchart TD
 
 执行原则:
 
-- **11.0** 是设计冻结点:锁定新 config schema(v10)、新枚举、删除清单、feature-gate 策略。不写业务逻辑。
+- **11.0** 是设计冻结点:锁定新枚举、删除清单、feature-gate 策略;后续子phase 按实际落地逐步 bump runtime schema。
+  11.4 当前从代码实际 `v8` 升至 **`v9`**（诚实命名 + TopN 伪组合 + 诊断 knobs）。
 - **11.1 / 11.6** 是数据地基:先把因子/归一化/训练-服务一致性打好,再谈训练目标。
 - **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
 - **11.7 → 11.8** 是产物表达力:退出/入场结构 + 报告生命周期语义。

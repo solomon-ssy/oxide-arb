@@ -91,6 +91,8 @@ pub struct TrainedModelView {
     pub publication_status: String,
     /// Trainer metrics (in-sample + validation objective report).
     pub metrics: serde_json::Value,
+    /// Frozen training objective provenance used for this model version.
+    pub training_objective: serde_json::Value,
     pub created_at: DateTime<Utc>,
     /// Materialization run id — populated on `POST .../train` only (absent on poll).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,6 +125,7 @@ impl From<ModelVersionInfo> for TrainedModelView {
             training_dataset_id: info.training_dataset_id,
             publication_status: info.publication_status.as_str().to_owned(),
             metrics: info.metrics_json,
+            training_objective: info.training_objective_json,
             created_at: info.created_at,
             model_run_id: None,
         }

@@ -17,13 +17,14 @@ use argmin::{
     core::{CostFunction, Executor, State},
     solver::neldermead::NelderMead,
 };
+use argmin_math::Error;
 use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
 };
 
 use crate::{
-    model::trainer::{SampleRow, penalized_objective},
+    model::objective::{CrossSectionGroup, ObjectiveEvaluator},
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
@@ -42,24 +43,24 @@ const LN_FLOOR: f64 = 1e-6;
 #[must_use]
 pub(crate) fn refine_weights(
     grid_weights: &[Decimal],
-    rows: &[SampleRow],
-    l2: Decimal,
+    groups: &[CrossSectionGroup],
+    evaluator: &ObjectiveEvaluator,
 ) -> Option<Vec<Decimal>> {
     let n = grid_weights.len();
-    if n < 2 || rows.is_empty() {
+    if n < 2 || groups.is_empty() {
         return None;
     }
 
     let problem = WeightObjective {
-        rows: rows.to_vec(),
-        l2,
+        groups: groups.to_vec(),
+        evaluator: evaluator.clone(),
     };
 
     // Seed unconstrained params via inverse-softmax (log) of the grid weights.
-    let seed: Vec<f64> = grid_weights
-        .iter()
-        .map(|w| decimal_to_f64(*w).max(LN_FLOOR).ln())
-        .collect();
+    let mut seed = Vec::with_capacity(n);
+    for weight in grid_weights {
+        seed.push(decimal_to_f64(*weight).ok()?.max(LN_FLOOR).ln());
+    }
 
     // Deterministic initial simplex: the seed plus one perturbation per axis.
     let mut simplex = Vec::with_capacity(n + 1);
@@ -80,21 +81,25 @@ pub(crate) fn refine_weights(
     Some(softmax_to_simplex_decimal(&best))
 }
 
-/// The Nelder–Mead cost: negative penalized objective over the softmax-projected
+/// The Nelder–Mead cost: negative LTR objective over the softmax-projected
 /// weights (minimization).
 struct WeightObjective {
-    rows: Vec<SampleRow>,
-    l2: Decimal,
+    groups: Vec<CrossSectionGroup>,
+    evaluator: ObjectiveEvaluator,
 }
 
 impl CostFunction for WeightObjective {
     type Param = Vec<f64>;
     type Output = f64;
 
-    fn cost(&self, param: &Self::Param) -> Result<f64, argmin::core::Error> {
+    fn cost(&self, param: &Self::Param) -> Result<f64, Error> {
         let weights = softmax_to_simplex_decimal(param);
-        let objective = penalized_objective(&weights, &self.rows, self.l2);
-        Ok(-decimal_to_f64(objective))
+        let objective = self
+            .evaluator
+            .evaluate(&weights, &self.groups)
+            .map_err(|error| Error::msg(error.to_string()))?
+            .objective_value();
+        Ok(-decimal_to_f64(objective)?)
     }
 }
 
@@ -123,7 +128,12 @@ fn softmax_to_simplex_decimal(param: &[f64]) -> Vec<Decimal> {
         .collect()
 }
 
-/// Convert a `Decimal` to `f64` (optimizer boundary only).
-fn decimal_to_f64(value: Decimal) -> f64 {
-    value.to_f64().unwrap_or(0.0)
+/// Convert a `Decimal` to `f64` (optimizer boundary only). Fail-closed: never
+/// silently substitute `0.0` for a non-representable value.
+fn decimal_to_f64(value: Decimal) -> Result<f64, Error> {
+    value.to_f64().ok_or_else(|| {
+        Error::msg(format!(
+            "optimize boundary could not convert Decimal {value} to f64"
+        ))
+    })
 }

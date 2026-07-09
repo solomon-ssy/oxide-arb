@@ -373,6 +373,7 @@ mod tests {
             artifact_hash,
             training_dataset_id: None,
             metrics_json: serde_json::json!({}),
+            training_objective_json: serde_json::json!({"kind": "not_trained"}),
             quality_gate_report: serde_json::json!({}),
             publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),

@@ -27,6 +27,7 @@ pub enum QuantModelVersion {
     ArtifactHash,
     TrainingDatasetId,
     MetricsJson,
+    TrainingObjectiveJson,
     QualityGateReport,
     PublicationStatus,
     PublishedAt,
@@ -53,6 +54,11 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_null(QuantModelVersion::TrainingDatasetId))
         .col(
             ColumnDef::new(QuantModelVersion::MetricsJson)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantModelVersion::TrainingObjectiveJson)
                 .json_binary()
                 .not_null(),
         )

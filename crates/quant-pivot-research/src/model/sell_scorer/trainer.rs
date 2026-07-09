@@ -1,6 +1,6 @@
 //! [`SellScorerTrainer`]: fits a Sell-side hold-vs-exit scorer (Phase 06.1).
 //!
-//! Reuses the deterministic rank-IC simplex fit shared with the Buy-side
+//! Reuses the deterministic LTR simplex fit shared with the Buy-side
 //! weighted trainer.
 //!
 //! The ranking formula is identical (`net = Σ weightᵢ · signedᵢ`); only the
@@ -18,13 +18,14 @@ use rust_decimal::{
 use crate::{
     features::FeatureName,
     model::{
+        TrainingObjectiveSpec,
         artifact::{
             FactorWeight, ModelArtifact, ModelArtifactHeader, SellScorerArtifact,
             SellScorerOutputSpec,
         },
         trainer::{
-            LabelSelector, Regularization, TrainedModelArtifact, ValidationSpec,
-            fit_simplex_weights, signed_contribution,
+            LabelSelector, TrainedModelArtifact, ValidationSpec, fit_simplex_weights,
+            signed_contribution,
         },
     },
     training::TrainingExample,
@@ -50,8 +51,8 @@ pub struct TrainSellScorerRequest {
     pub label: LabelSelector,
     /// Initial weights / candidate factor set (market + position-state).
     pub seed_weights: Vec<FactorWeight>,
-    /// Weight regularization.
-    pub regularization: Regularization,
+    /// Governed training objective snapshot.
+    pub objective: TrainingObjectiveSpec,
     /// Rolling validation split.
     pub validation: ValidationSpec,
     /// Frozen artifact header (`model_family = HoldVsExitWeighted`).
@@ -91,7 +92,7 @@ impl SellScorerTrainer {
             &request.examples,
             &request.label,
             &request.seed_weights,
-            request.regularization,
+            &request.objective,
             request.validation,
         )?;
 

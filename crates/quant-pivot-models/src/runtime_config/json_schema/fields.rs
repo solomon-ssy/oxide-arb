@@ -490,6 +490,20 @@ mod tests {
     }
 
     #[test]
+    fn research_training_paths_are_schema_leaves_and_feedback_stays_reserved() {
+        let paths = schema_leaf_paths();
+        assert!(paths.contains("research.training.rank_loss"));
+        assert!(paths.contains("research.training.optimizer"));
+        assert!(paths.contains("research.training.lambda_tail"));
+        assert!(paths.contains("research.training.tail_fraction"));
+        assert!(paths.contains("research.training.lambda_turnover"));
+        assert!(paths.contains("research.training.lambda_l2"));
+        assert!(paths.contains("research.training.ndcg_k"));
+        assert!(paths.contains("research.training.pseudo_top_n"));
+        assert!(!paths.contains("feedback"));
+    }
+
+    #[test]
     fn patch_merge_invalid_schedule_top_n_fails_semantic_validation() {
         use crate::runtime_config::validate_runtime_config;
 

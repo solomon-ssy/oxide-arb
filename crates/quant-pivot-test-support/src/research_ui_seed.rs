@@ -436,6 +436,16 @@ async fn create_model_version(
             artifact_hash: content_hash(&format!("artifact-research-{artifact_seed}")),
             training_dataset_id,
             metrics_json,
+            training_objective_json: serde_json::json!({
+                "rank_loss": "rank_ic_weighted_ranknet",
+                "optimizer": "coordinate_search",
+                "lambda_tail": "0.5",
+                "tail_fraction": "0.10",
+                "lambda_turnover": "0.2",
+                "lambda_l2": "0.01",
+                "ndcg_k": 20,
+                "pseudo_top_n": 20,
+            }),
             quality_gate_report: serde_json::json!({
                 "passed": true,
                 "ui_demo": true,

@@ -54,8 +54,8 @@ use quant_pivot_models::{
     },
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorWeights, FactorsConfig, FeatureFamily,
-        FeaturesConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints,
-        wire::DecimalString,
+        FeaturesConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints, RankLossKind,
+        ResearchTrainingConfig, RuntimeConfig, TrainingOptimizerKind, wire::DecimalString,
     },
     types::{
         ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId, MarketId,
@@ -81,7 +81,7 @@ use quant_pivot_research::{
     features::{FeatureName, FeatureValue, FeatureVector, names},
     model::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact,
-        ModelRuntimeFactoryBuilder,
+        ModelRuntimeFactoryBuilder, TrainingObjectiveSpec,
     },
     training::{DatasetParquetCodec, LabelName, TrainingExample, TrainingLabel},
 };
@@ -482,14 +482,35 @@ fn fact_scenario() -> FactScenario {
 
 // ── Postgres catalog + ledger seeding ────────────────────────────────────────
 
+/// Governed training knobs exercised through `TrainingObjectiveSpec::from_runtime_config`.
+fn e2e_research_training() -> ResearchTrainingConfig {
+    ResearchTrainingConfig {
+        rank_loss: RankLossKind::RankIcWeightedRanknet,
+        optimizer: TrainingOptimizerKind::CoordinateSearch,
+        lambda_tail: DecimalString::new("0.5"),
+        tail_fraction: DecimalString::new("0.10"),
+        lambda_turnover: DecimalString::new("0.2"),
+        lambda_l2: DecimalString::new("0.01"),
+        ndcg_k: 5,
+        pseudo_top_n: 3,
+    }
+}
+
+fn e2e_runtime_config() -> RuntimeConfig {
+    let mut config = RuntimeConfig::default();
+    config.research.training = e2e_research_training();
+    config
+}
+
 async fn seed_runtime_config(db: &DatabaseConnection) -> RuntimeConfigVersionId {
+    let config = e2e_runtime_config();
     let id = RuntimeConfigVersionId::from_v7();
     PgRuntimeConfigVersionRepository::new(db.clone())
         .create_version(NewRuntimeConfigVersion {
             runtime_config_version_id: id.clone(),
             config_hash: content_hash('c'),
-            schema_version: SchemaVersion::FIRST,
-            config_json: serde_json::json!({}),
+            schema_version: config.schema_version,
+            config_json: config.to_json(),
             source: RuntimeConfigVersionSource::Bootstrap,
             created_by: "train-backtest-e2e".to_owned(),
             reason: "integration test".to_owned(),
@@ -600,11 +621,15 @@ async fn seed_dataset(
 fn trainer_config() -> ModelTrainerConfig {
     let mut weights = BTreeMap::new();
     weights.insert(LIQUIDITY_DEPTH.as_str().to_owned(), DecimalString::new("1"));
+    let runtime = e2e_runtime_config();
     ModelTrainerConfig {
         factors: FactorsConfig {
             factor_weights: FactorWeights { weights },
             ..FactorsConfig::default()
         },
+        // Same path as the production port: parse frozen `research.training`.
+        objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)
+            .expect("parse research.training"),
     }
 }
 
@@ -738,6 +763,55 @@ async fn train_then_backtest_then_calibrate_e2e() {
     let version = outcome.version;
     assert_eq!(version.publication_status, PublicationStatus::Candidate);
     assert_eq!(version.training_dataset_id.as_ref(), Some(&dataset_id));
+    assert_eq!(
+        version.training_objective_json["rank_loss"],
+        serde_json::json!("rank_ic_weighted_ranknet")
+    );
+    assert_eq!(
+        version.training_objective_json["optimizer"],
+        serde_json::json!("coordinate_search")
+    );
+    assert_eq!(
+        version.training_objective_json["ndcg_k"],
+        serde_json::json!(5)
+    );
+    assert_eq!(
+        version.training_objective_json["pseudo_top_n"],
+        serde_json::json!(3)
+    );
+    assert_eq!(
+        version.metrics_json["validation"]["held_out_metric"],
+        serde_json::json!("neg_total_ltr_loss")
+    );
+    assert!(
+        version.metrics_json["validation"]["dropped_singleton_groups"].is_number(),
+        "dropped_singleton_groups must be present: {}",
+        version.metrics_json
+    );
+    assert!(
+        version.metrics_json["in_sample"]["diagnostics"]["mean_rank_ic"].is_string()
+            || version.metrics_json["in_sample"]["diagnostics"]["mean_rank_ic"].is_number(),
+        "in-sample Rank IC diagnostic must be present: {}",
+        version.metrics_json
+    );
+    assert_eq!(
+        version.metrics_json["in_sample"]["diagnostics"]["ndcg_k"],
+        serde_json::json!(5),
+        "diagnostics must honor runtime-config ndcg_k"
+    );
+    assert!(
+        version.metrics_json["validation"]["held_out_diagnostics"]["mean_ndcg_at_k"].is_string()
+            || version.metrics_json["validation"]["held_out_diagnostics"]["mean_ndcg_at_k"]
+                .is_number(),
+        "held-out NDCG diagnostic must be present: {}",
+        version.metrics_json
+    );
+    assert!(
+        version.metrics_json["validation"]["held_out_objective"].is_string()
+            || version.metrics_json["validation"]["held_out_objective"].is_number(),
+        "held_out_objective must be present: {}",
+        version.metrics_json
+    );
 
     // Publish-boundary invariant: the artifact's weights are frozen + content
     // addressed — re-deriving the hash from the stored bytes matches the

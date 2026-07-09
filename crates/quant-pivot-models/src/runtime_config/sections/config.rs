@@ -11,9 +11,9 @@ use crate::{
         AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, EntryOrderPolicy,
         ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily, FeatureNameRef,
         FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
-        NeutralizeDimension, NotificationPolicies, PortfolioOptimizerConfig, ReconciliationPolicy,
-        ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy, SizingModelConfig,
-        SmallCrossSectionPolicy,
+        NeutralizeDimension, NotificationPolicies, PortfolioOptimizerConfig, RankLossKind,
+        ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy,
+        SizingModelConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
     },
     types::{SchemaVersion, Usd},
 };
@@ -1157,15 +1157,50 @@ pub struct WebhookNotificationConfig {
     pub url: String,
 }
 
+/// Learning-to-rank objective used by governed weighted-model training.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchTrainingConfig {
+    /// Ranking loss optimized inside each same-`as_of` cross-section.
+    pub rank_loss: RankLossKind,
+    /// Simplex optimizer policy.
+    pub optimizer: TrainingOptimizerKind,
+    /// Weight on lower-tail portfolio-return penalty.
+    pub lambda_tail: DecimalString,
+    /// Lower-tail fraction for tail penalty (e.g. `0.10` = worst decile).
+    pub tail_fraction: DecimalString,
+    /// Weight on mean per-tick allocation turnover.
+    pub lambda_turnover: DecimalString,
+    /// L2 coefficient on `Σ weightᵢ²`.
+    pub lambda_l2: DecimalString,
+    /// Truncation `k` for diagnostic NDCG@k (not part of the training loss).
+    pub ndcg_k: u32,
+    /// Truncation for score-derived `TopN` pseudo-portfolio used by tail/turnover.
+    pub pseudo_top_n: u32,
+}
+
+impl Default for ResearchTrainingConfig {
+    fn default() -> Self {
+        Self {
+            rank_loss: RankLossKind::default(),
+            optimizer: TrainingOptimizerKind::default(),
+            lambda_tail: DecimalString::new("0.5"),
+            tail_fraction: DecimalString::new("0.10"),
+            lambda_turnover: DecimalString::new("0.2"),
+            lambda_l2: DecimalString::new("0.01"),
+            ndcg_k: 20,
+            pseudo_top_n: 20,
+        }
+    }
+}
+
 /// Research plane configuration (training objective + validation methodology).
-///
-/// Reserved skeleton frozen at schema v11. Later Phase 11 sub-phases add fields
-/// here without a further schema bump:
-/// - 11.4 adds the training-objective (learning-to-rank + downside/turnover) knobs;
-/// - 11.5 adds the leakage-aware validation (purged/embargo/CPCV, DSR/PBO) knobs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct ResearchConfig {}
+pub struct ResearchConfig {
+    /// Governed training objective for weighted buy/sell scorers.
+    pub training: ResearchTrainingConfig,
+}
 
 /// Research-feedback plane configuration (attribution feedback + auto-retraining).
 ///

@@ -725,6 +725,7 @@ impl ModelGovernanceService {
                     "calibrator_ref": request.calibrator_ref.to_string(),
                     "downside_source": request.downside_source.as_str(),
                 }),
+                training_objective_json: version.training_objective_json.clone(),
                 quality_gate_report: serde_json::json!({}),
                 publication_status: PublicationStatus::Candidate,
                 published_at: None,
