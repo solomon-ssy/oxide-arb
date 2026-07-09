@@ -1,5 +1,6 @@
 //! `ClickHouse` point-in-time read integration tests (book tie-breaker + resolution).
 
+use chrono::Utc;
 use quant_pivot_models::{
     clickhouse::{BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd},
     config::ClickHouseConfig,
@@ -68,6 +69,43 @@ async fn insert_book_rows(client: &clickhouse::Client, rows: &[BookSnapshotRow])
     insert.end().await.expect("end insert");
 }
 
+/// Wait until inserted `book_snapshots` rows are query-visible.
+///
+/// Fresh MergeTree parts can lag briefly behind HTTP insert ack on a cold
+/// testcontainer; PIT reads that race this window return `None`.
+async fn wait_for_book_snapshot_rows(client: &clickhouse::Client, token: &TokenId, expected: u64) {
+    const ATTEMPTS: usize = 40;
+    const PAUSE: Duration = Duration::from_millis(50);
+    for attempt in 1..=ATTEMPTS {
+        let count: u64 = client
+            .query("SELECT count() FROM book_snapshots WHERE token_id = ?")
+            .bind(token.clone())
+            .fetch_one()
+            .await
+            .expect("count book_snapshots");
+        if count >= expected {
+            return;
+        }
+        if attempt == ATTEMPTS {
+            panic!(
+                "book_snapshots rows for {} not visible after insert \
+                 (count={count}, expected>={expected}, attempts={ATTEMPTS})",
+                token.as_str()
+            );
+        }
+        tokio::time::sleep(PAUSE).await;
+    }
+}
+
+/// Epoch millis inside the `book_snapshots` 180-day TTL window.
+///
+/// Fixed 2023 fixtures are deleted by `TTL snapshot_date + INTERVAL 180 DAY`
+/// once wall-clock time advances past that horizon (observed as intermittent
+/// `book_snapshot_at` → `None`).
+fn fresh_event_time_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
 fn book_row(
     token: &str,
     event_time_ms: i64,
@@ -102,7 +140,7 @@ async fn ch_read_orders_by_event_time_with_tiebreaker() {
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(pool);
     let token = TokenId::new("ch-pit-yes");
-    let event_time = 1_700_000_000_000_i64;
+    let event_time = fresh_event_time_ms();
 
     insert_book_rows(
         &client,
@@ -124,12 +162,19 @@ async fn ch_read_orders_by_event_time_with_tiebreaker() {
         ],
     )
     .await;
+    wait_for_book_snapshot_rows(&client, &token, 2).await;
 
     let row = read
         .book_snapshot_at(&token, event_time + 5)
         .await
         .expect("read")
-        .expect("snapshot");
+        .unwrap_or_else(|| {
+            panic!(
+                "PIT book_snapshot_at returned None for token={} as_of={}",
+                token.as_str(),
+                event_time + 5
+            )
+        });
     assert_eq!(
         row.mid_price.map(ChPrice::to_price),
         Some(Price::new(Decimal::new(50, 2))),
@@ -148,8 +193,8 @@ async fn resolution_at_is_pit_bounded() {
     let yes = TokenId::new("ch-pit-yes");
     let no = TokenId::new("ch-pit-no");
 
-    let early = 1_700_000_010_000_i64;
-    let late = 1_700_000_020_000_i64;
+    let early = fresh_event_time_ms();
+    let late = early + 10_000;
     let as_of = early + 5_000;
 
     let rows = vec![
@@ -206,7 +251,8 @@ async fn trade_tape_window_dedupes_replacing_merge_tree() {
     let read = ChQuantFactReadRepository::new(Arc::clone(&pool));
     let market_id = MarketId::new("0xtrade-tape-dedupe");
     let token_id = TokenId::new("tok-dedupe");
-    let event_time = 1_700_000_000_000_i64;
+    // Stay inside `quant_trade_tape` 365-day TTL.
+    let event_time = fresh_event_time_ms();
 
     let base = TradeTapeRow {
         market_id: market_id.clone(),

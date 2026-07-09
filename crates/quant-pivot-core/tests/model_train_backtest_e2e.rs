@@ -152,9 +152,13 @@ fn examples() -> Vec<TrainingExample> {
                 names::book::VISIBLE_LIQUIDITY_USD.clone(),
                 FeatureValue::Usd(Usd::new(liquidity_usd(i))),
             );
+            // Non-crypto category: this suite exercises liquidity rematerialization,
+            // not the Phase 11.2.2 crypto domain-weight publish invariant. Unanimous
+            // Crypto examples would infer `category_scope=Crypto` and reject a
+            // liquidity-only seed weight set.
             values.insert(
                 names::market::CATEGORY.clone(),
-                FeatureValue::Category(MarketCategory::Crypto),
+                FeatureValue::Category(MarketCategory::Politics),
             );
             let feature_vector = FeatureVector {
                 market_id: market.clone(),
@@ -547,7 +551,7 @@ async fn seed_catalog(db: &DatabaseConnection) {
             EVENT_ID,
             "Train/Backtest E2E",
             "train-backtest-e2e",
-            MarketCategory::Crypto,
+            MarketCategory::Politics,
         ))
         .await
         .expect("seed event");
@@ -563,7 +567,7 @@ async fn seed_catalog(db: &DatabaseConnection) {
                 EVENT_ID,
                 "Train/Backtest E2E?",
                 &format!("tb-{tick}-{i}"),
-                MarketCategory::Crypto,
+                MarketCategory::Politics,
                 Some(end_date),
             );
             market.yes_token_id = token_id(tick, i);
@@ -825,6 +829,11 @@ async fn train_then_backtest_then_calibrate_e2e() {
         artifact.content_hash().expect("hash"),
         version.artifact_hash,
         "artifact weights are frozen + content-addressed"
+    );
+    assert_eq!(
+        artifact.category_scope(),
+        Some(MarketCategory::Politics),
+        "unanimous Politics examples freeze Politics scope (not Crypto domain weights)"
     );
 
     // Training run ledger: version FK backfilled on succeed, output_hash links artifact.
