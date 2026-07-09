@@ -15,19 +15,20 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        BacktestReportInfo, BacktestReportListQuery, CollinearPairView, ComparisonReportListQuery,
-        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelPickerSide,
-        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
-        ModelVersionListQuery, Paginated, PublishedModelOptionView, ResearchCatalogPort,
-        TrainingDatasetInfo, TrainingDatasetListQuery, pagination::PageRequest,
+        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
+        CollinearPairView, ComparisonReportListQuery, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        ModelComparisonReportInfo, ModelPickerSide, ModelPublishedCatalogQuery, ModelSpecInfo,
+        ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        PublishedModelOptionView, ResearchCatalogPort, TrainingDatasetInfo,
+        TrainingDatasetListQuery, pagination::PageRequest,
     },
     enums::{common::MarketCategory, quant::PublicationStatus},
     types::{FactorDefinitionId, MarketId, Probability},
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, FactorRepository, MarketRepository, ModelComparisonReportRepository,
-    ModelRegistryRepository, TrainingDatasetRepository,
+    BacktestPathSetRepository, BacktestReportRepository, FactorRepository, MarketRepository,
+    ModelComparisonReportRepository, ModelRegistryRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::load_hash_verified_artifact};
 use rust_decimal::Decimal;
@@ -52,6 +53,7 @@ pub struct CoreResearchCatalogPort {
     datasets: Arc<dyn TrainingDatasetRepository>,
     models: Arc<dyn ModelRegistryRepository>,
     backtests: Arc<dyn BacktestReportRepository>,
+    path_sets: Arc<dyn BacktestPathSetRepository>,
     comparisons: Arc<dyn ModelComparisonReportRepository>,
     factors: Arc<dyn FactorRepository>,
     markets: Arc<dyn MarketRepository>,
@@ -66,6 +68,7 @@ impl CoreResearchCatalogPort {
             datasets: Arc::clone(&research.training_dataset_repo),
             models: Arc::clone(&research.model_registry_repo),
             backtests: Arc::clone(&research.backtest_report_repo),
+            path_sets: Arc::clone(&research.backtest_path_set_repo),
             comparisons: Arc::clone(&research.comparison_report_repo),
             factors: Arc::clone(&research.factor_repo),
             markets: Arc::clone(&research.market_repo),
@@ -218,6 +221,13 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         query: BacktestReportListQuery,
     ) -> QuantResult<Paginated<BacktestReportInfo>> {
         self.backtests.page(query).await.map_err(QuantError::from)
+    }
+
+    async fn list_backtest_path_sets(
+        &self,
+        query: BacktestPathSetListQuery,
+    ) -> QuantResult<Paginated<BacktestPathSetInfo>> {
+        self.path_sets.page(query).await.map_err(QuantError::from)
     }
 
     async fn list_comparison_reports(

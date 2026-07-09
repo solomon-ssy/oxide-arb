@@ -78,7 +78,8 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.2.3 | Tier 2 LLM Linkage Fallback | 离线 LLM 结构化抽取 + grounding gate + review queue | — (extends 11.2.2) | [11.2.3](11.2.3-tier2-llm-linkage.md) |
 | 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
-| 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论 | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
+| 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论(买方 WeightedFactor/classical) — **backend complete / UI operable** (trainer purged CV + DSR N 分解已闭合;Sell → 11.5.1) | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
+| 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 特征一致性 / 禁止静默零 | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Labeling, Entry & Exit Closed-Loop | 三重障碍标注 + 入场/退出闭环 | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
@@ -98,6 +99,7 @@ flowchart TD
     P113["11.3 Calibration & Kelly Safety"]
     P114["11.4 Training Objective & LTR"]
     P115["11.5 Leakage/CPCV/DSR"]
+    P1151["11.5.1 Sell Lot-Level Validation"]
     P116["11.6 Train-Serve Parity"]
     P117["11.7 Labeling/Entry/Exit"]
     P118["11.8 Report Lifecycle FSM"]
@@ -116,6 +118,7 @@ flowchart TD
     P111 --> P113
     P114 --> P113
     P115 --> P113
+    P115 --> P1151
     P113 --> P117
     P117 --> P118
     P115 --> P119
@@ -131,6 +134,11 @@ flowchart TD
   11.4 当前从代码实际 `v8` 升至 **`v9`**（诚实命名 + TopN 伪组合 + 诊断 knobs）。
 - **11.1 / 11.6** 是数据地基:先把因子/归一化/训练-服务一致性打好,再谈训练目标。
 - **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
+  **11.5 → 11.5.1**:11.5 只给买方(WeightedFactor/classical)接方法论,证明 purge/CPCV/trial-grid/
+  CSCV/DSR/PBO 算法正确;11.5.1 把同一套算法(设计上对"原子分裂单元"无感知)套用到 Sell/Hold-vs-Exit
+  家族,只新增一个 lot 级组合回放引擎(`LotReplayBacktester`)与一个 `FoldModelSource` 实现,不重新发明
+  算法层。11.5.1 不阻塞 11.7,也不被 11.7 阻塞(见 [11.5.1](11.5.1-sell-side-lot-level-validation.md)
+  文档头部)。
 - **11.7 → 11.8** 是产物表达力:退出/入场结构 + 报告生命周期语义。
 - **11.9 → 11.10** 是研究闭环:归因反馈 + 自动再训练 + 反事实归因,闭合"开环"。
 - **11.2 / 11.11** 相对独立,可并行。**11.2 已破坏式拆分为 [11.2.1](11.2.1-platform-structural-alpha.md)

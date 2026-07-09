@@ -39,6 +39,7 @@ pub enum QuantBacktestReport {
     SampleCount,
     MissingFeatureCount,
     RankIc,
+    Sharpe,
     HitRate,
     ExpectedVsRealized,
     MaxDrawdown,
@@ -82,6 +83,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(column::ratio(QuantBacktestReport::RankIc))
+        .col(column::ratio(QuantBacktestReport::Sharpe))
         .col(column::probability(QuantBacktestReport::HitRate))
         .col(
             ColumnDef::new(QuantBacktestReport::ExpectedVsRealized)

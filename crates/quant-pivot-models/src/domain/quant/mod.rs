@@ -4,6 +4,8 @@ mod account;
 mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
+#[allow(clippy::needless_update)] // NewBacktestPathSet omits DB-managed created_at
+mod backtest_path_set;
 #[allow(clippy::needless_update)] // NewBasisAlert omits DB-managed created_at
 mod basis_alert;
 #[allow(clippy::needless_update)] // NewCalibrationArtifact omits DB-managed created_at
@@ -44,6 +46,7 @@ mod shadow;
 pub use account::*;
 pub use attribution::*;
 pub use backtest::*;
+pub use backtest_path_set::*;
 pub use basis_alert::*;
 pub use calibration_artifact::*;
 pub use candidate::*;

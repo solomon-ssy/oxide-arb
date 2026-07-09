@@ -72,6 +72,10 @@ pub struct BacktestReportView {
     pub sample_count: i64,
     pub missing_feature_count: i64,
     pub rank_ic: Decimal,
+    /// Unannualized Sharpe ratio of the single-path per-tick return series
+    /// (Phase 11.5 §3.4) — the debug-view sibling of the CPCV path-set's
+    /// Sharpe distribution, never the alpha-significance gate's data source.
+    pub sharpe: Decimal,
     pub hit_rate: Probability,
     pub expected_vs_realized: serde_json::Value,
     pub max_drawdown: Decimal,
@@ -126,6 +130,7 @@ impl BacktestReportView {
             sample_count: info.sample_count,
             missing_feature_count: info.missing_feature_count,
             rank_ic: info.rank_ic,
+            sharpe: info.sharpe,
             hit_rate: info.hit_rate,
             expected_vs_realized: info.expected_vs_realized,
             max_drawdown: info.max_drawdown,

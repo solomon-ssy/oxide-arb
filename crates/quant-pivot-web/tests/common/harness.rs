@@ -33,15 +33,16 @@ use quant_pivot_models::{
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BacktestPort, BacktestReportInfo, BacktestReportListQuery, BacktestReportView,
-        BasisAlertInfo, BasisAlertListQuery, BiasTableFitJobParams, BiasTableFitOutcome,
-        BindCalibrationRequest, BookSnapshot, BuildTrainingDatasetRequest,
-        CalibrationArtifactFitPort, CalibrationArtifactInfo, CalibrationArtifactListQuery,
-        CatalogState, CatalogStatusPort, ComparisonReportListQuery, CoreEventPublisher,
-        CreateModelSpecCommand, DataQualityPort, DataQualitySnapshot, DomainSourceCursorInfo,
-        ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView,
-        ExecutionSubmitPort, FactorCollinearitySource, FactorCollinearityView,
-        FactorDefinitionInfo, FactorDefinitionListQuery, FactorGovernancePort, FitBiasTableRequest,
+        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestPathSetView, BacktestPort,
+        BacktestReportInfo, BacktestReportListQuery, BacktestReportView, BasisAlertInfo,
+        BasisAlertListQuery, BiasTableFitJobParams, BiasTableFitOutcome, BindCalibrationRequest,
+        BookSnapshot, BuildTrainingDatasetRequest, CalibrationArtifactFitPort,
+        CalibrationArtifactInfo, CalibrationArtifactListQuery, CatalogState, CatalogStatusPort,
+        ComparisonReportListQuery, CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand,
+        DataQualityPort, DataQualitySnapshot, DomainSourceCursorInfo, ExecutionOrderInfo,
+        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
+        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
+        FactorDefinitionListQuery, FactorGovernancePort, FitBiasTableRequest,
         FitModelCalibratorRequest, GatePreviewIntent, GovernanceActor, HealthReport,
         JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
         LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo,
@@ -57,19 +58,19 @@ use quant_pivot_models::{
         QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
         ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
         ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
-        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
-        RuntimeControlPort, SetKillSwitchCommand, StructuralMonitorPort, SystemStatus,
-        TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest, TrainedModelView,
-        TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
+        RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand, StructuralMonitorPort,
+        SystemStatus, TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest,
+        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
         TrainingDatasetPort, TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, BasisAlertId, CalibrationArtifactId, DomainInstrumentKey, DomainSourceId,
-        FactorDefinitionId, MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId,
-        ModelVersionId, OrderIntentId, ResearchJobId, RuntimeConfigVersionId, TokenId,
-        TrainingDatasetId,
+        BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId,
+        DomainInstrumentKey, DomainSourceId, FactorDefinitionId, MarketId, MarketLinkageId,
+        ModelComparisonReportId, ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId,
+        RuntimeConfigVersionId, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -171,6 +172,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         training_datasets: Arc::new(MockTrainingDatasetPort),
         model_training: Arc::new(MockModelTrainingPort),
         backtests: Arc::new(MockBacktestPort),
+        cpcv_backtests: Arc::new(MockCpcvBacktestPort),
         model_governance: Arc::new(MockModelGovernancePort),
         factor_governance: Arc::new(MockFactorGovernancePort),
         model_spec: Arc::new(MockModelSpecPort),
@@ -781,6 +783,36 @@ impl BacktestPort for MockBacktestPort {
     }
 }
 
+/// No-op CPCV backtest port for web integration tests.
+pub struct MockCpcvBacktestPort;
+
+#[async_trait]
+impl CpcvBacktestPort for MockCpcvBacktestPort {
+    async fn run(
+        &self,
+        _model_version_id: ModelVersionId,
+        _request: RunCpcvBacktestRequest,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: CancellationToken,
+    ) -> QuantResult<BacktestPathSetView> {
+        Err(QuantError::NotImplemented("cpcv backtest run".into()))
+    }
+
+    async fn find_path_set(
+        &self,
+        _path_set_id: &BacktestPathSetId,
+    ) -> QuantResult<Option<BacktestPathSetView>> {
+        Ok(None)
+    }
+
+    async fn latest_path_set(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> QuantResult<Option<BacktestPathSetView>> {
+        Ok(None)
+    }
+}
+
 /// No-op research catalog port for web integration tests (empty pages).
 pub struct MockResearchCatalogPort;
 
@@ -818,6 +850,13 @@ impl ResearchCatalogPort for MockResearchCatalogPort {
         &self,
         query: BacktestReportListQuery,
     ) -> QuantResult<Paginated<BacktestReportInfo>> {
+        Ok(empty_catalog_page(&query))
+    }
+
+    async fn list_backtest_path_sets(
+        &self,
+        query: BacktestPathSetListQuery,
+    ) -> QuantResult<Paginated<BacktestPathSetInfo>> {
         Ok(empty_catalog_page(&query))
     }
 
@@ -1039,6 +1078,15 @@ impl ResearchJobPort for MockResearchJobPort {
         _ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
         Err(QuantError::NotImplemented("enqueue backtest".into()))
+    }
+
+    async fn enqueue_cpcv_backtest(
+        &self,
+        _model_version_id: ModelVersionId,
+        _request: RunCpcvBacktestRequest,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("enqueue cpcv backtest".into()))
     }
 
     async fn enqueue_bias_table_fit(

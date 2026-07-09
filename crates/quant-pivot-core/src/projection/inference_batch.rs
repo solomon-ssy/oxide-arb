@@ -179,7 +179,7 @@ pub fn build_feature_matrix(
 #[cfg(test)]
 mod tests {
     use super::build_feature_matrix;
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::{common::MarketCategory, quant::DataQualityStatus},
         types::{
@@ -238,11 +238,12 @@ mod tests {
     }
 
     fn training_example(vector: FeatureVector) -> TrainingExample {
+        let as_of = vector.as_of;
         TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: vector.market_id.clone(),
             token_id: vector.token_id.clone().expect("token"),
-            as_of: vector.as_of,
+            as_of,
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: vector,
             factor_values: Vec::new(),
@@ -251,6 +252,7 @@ mod tests {
                 horizon_secs: 60,
                 value: dec!(1),
                 is_resolved: true,
+                matured_at: as_of + Duration::seconds(60),
             }],
             source_refs: Vec::new(),
             lot_context: None,

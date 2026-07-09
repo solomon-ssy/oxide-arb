@@ -15,9 +15,10 @@
 //!   a `DatasetReady` gate pass; `InsufficientLabels` can never be promoted (the
 //!   repository state machine returns a `Conflict`).
 //!
-//! Leakage is enforced at dataset **build** time (a leaking dataset can never
-//! reach `Built`), so the gate is fed a clean [`LeakageFindings`] here; its
-//! leakage arm is exercised directly by the gate's own unit tests.
+//! Leakage is enforced at dataset **build** time and **re-scanned** on
+//! promote/publish: [`Self::rescan_leakage`] decodes the frozen Parquet and
+//! runs [`scan_future_leakage`] so a tampered or stale artifact cannot skip
+//! the `NoPitLeakage` hard gate. A missing dataset row fails closed.
 //!
 //! Actor identity is recorded for audit provenance only; hard role enforcement
 //! is deferred to the Phase 07 web wiring.
@@ -29,40 +30,40 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
-        BacktestReportInfo, BindCalibrationRequest, GateOutcomeView, GatePreviewIntent,
-        GovernanceActor, ModelGovernancePort, ModelVersionInfo, NewModelGovernanceAudit,
-        NewModelVersion, PromoteDatasetRequest, PublishModelCommand, QualityGateReportView,
-        RetireModelCommand, RollbackModelCommand, RuntimeConfigPort, ShadowStabilitySummary,
-        TrainingDatasetInfo,
+        BacktestPathSetInfo, BacktestReportInfo, BindCalibrationRequest, GateOutcomeView,
+        GatePreviewIntent, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
+        NewModelGovernanceAudit, NewModelVersion, PromoteDatasetRequest, PublishModelCommand,
+        QualityGateReportView, RetireModelCommand, RollbackModelCommand, RuntimeConfigPort,
+        ShadowStabilitySummary, TrainingDatasetInfo,
     },
     enums::{
         model::ModelFamily,
         quant::{CalibrationKind, ModelGovernanceAction, PublicationStatus, TrainingDatasetStatus},
     },
-    runtime_config::QualityGateConfig,
+    runtime_config::{QualityGateConfig, sections::ResearchValidationGatesConfig},
     types::{
         AuditEventId, BacktestReportId, CalibrationArtifactId, ModelGovernanceAuditId, ModelSpecId,
         ModelVersionId, Probability,
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, CalibrationArtifactRepository, ModelGovernanceAuditRepository,
-    ModelRegistryRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
-    TrainingDatasetRepository,
+    BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
+    ModelGovernanceAuditRepository, ModelRegistryRepository, RuntimeConfigVersionRepository,
+    ShadowComparisonRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::BacktestReport,
     gates::{
-        GateId, GateIntent, GateOutcome, GateSubject, ModelQualityGate, QualityGateDecision,
-        QualityGateFailure, QualityGateInput, QualityGateReport, QualityGateThresholds,
-        SellQualityGateThresholds,
+        CpcvPathSetGateInput, GateId, GateIntent, GateOutcome, GateSubject, ModelQualityGate,
+        QualityGateDecision, QualityGateFailure, QualityGateInput, QualityGateReport,
+        QualityGateThresholds, SellQualityGateThresholds, ValidationGateThresholds,
     },
     model::{
         CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact, ReturnModelSpec,
         load_hash_verified_artifact, validate_category_scope_weights,
     },
-    training::{DatasetCoverage, LeakageFindings},
+    training::{DatasetCoverage, DatasetParquetCodec, LeakageFindings, scan_future_leakage},
 };
 use rust_decimal::Decimal;
 
@@ -82,6 +83,8 @@ pub struct ModelGovernanceDeps {
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Backtest-report ledger (gate metric source).
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
+    /// CPCV path-set ledger (Phase 11.5 alpha-significance gate source).
+    pub backtest_path_set_repo: Arc<dyn BacktestPathSetRepository>,
     /// Shadow-comparison ledger (publish stability source).
     pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
     /// Governance audit trail (WORM).
@@ -151,6 +154,21 @@ impl ModelGovernanceService {
     /// Build the gate thresholds from the active `quality_gate` config.
     fn thresholds(&self) -> QuantResult<QualityGateThresholds> {
         thresholds_from_config(&self.deps.runtime_config.current().quality_gate)
+    }
+
+    /// Build the Phase 11.5 CPCV alpha-significance thresholds.
+    fn validation_thresholds(&self) -> QuantResult<ValidationGateThresholds> {
+        validation_thresholds_from_config(
+            &self.deps.runtime_config.current().research.validation.gates,
+        )
+    }
+
+    /// Re-scan a frozen dataset Parquet for point-in-time leakage (Phase 11.5 #9).
+    async fn rescan_leakage(&self, dataset: &TrainingDatasetInfo) -> QuantResult<LeakageFindings> {
+        let bytes = self.deps.artifact_store.get(&dataset.parquet_uri).await?;
+        let examples = DatasetParquetCodec::decode(&bytes)?;
+        let delay = u64::try_from(dataset.source_delay_secs).unwrap_or(0);
+        Ok(scan_future_leakage(&examples, delay))
     }
 
     /// Aggregate the shadow stability for a publish candidate over the required
@@ -454,15 +472,18 @@ impl ModelGovernancePort for ModelGovernanceService {
         };
         let sell_thresholds =
             sell_thresholds_from_config(&self.deps.runtime_config.current().quality_gate)?;
+        let leakage = self.rescan_leakage(&dataset).await?;
 
         let decision = self.deps.gate.evaluate(QualityGateInput {
             subject: GateSubject::TrainingDataset(dataset.training_dataset_id.clone()),
             intent: GateIntent::DatasetReady,
             backtest: None,
             dataset: coverage,
-            leakage: LeakageFindings::default(),
+            leakage,
             shadow_stability: None,
             thresholds: self.thresholds()?,
+            validation_thresholds: self.validation_thresholds()?,
+            path_set: None,
             sell_thresholds,
             model_family,
             return_model_calibrated: false,
@@ -782,8 +803,11 @@ impl ModelGovernanceService {
         let config = self.deps.runtime_config.current();
         let required_window = config.quality_gate.required_shadow_window_secs;
         let thresholds = thresholds_from_config(&config.quality_gate)?;
+        let validation_thresholds =
+            validation_thresholds_from_config(&config.research.validation.gates)?;
         let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
         let model_family = self.model_family_for_version(version).await?;
+        let is_exit = model_family.is_exit_scorer();
 
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
         // Deep check (Phase 11.3 closed-loop hardening): the *same* function
@@ -801,6 +825,28 @@ impl ModelGovernanceService {
             None => self.latest_backtest(&version.model_version_id).await?,
         };
         let dataset = self.dataset_coverage(version).await?;
+        let leakage = if let Some(dataset_id) = &version.training_dataset_id {
+            let info = self
+                .deps
+                .dataset_repo
+                .find_by_id(dataset_id)
+                .await?
+                .ok_or_else(|| GovernanceError::NotFound {
+                    entity: "training_dataset",
+                    id: dataset_id.to_string(),
+                })?;
+            self.rescan_leakage(&info).await?
+        } else {
+            // No linked dataset ⇒ no feature provenance to scan; the coverage
+            // gates fail separately. Empty findings keep NoPitLeakage from
+            // inventing violations on a structurally incomplete version.
+            LeakageFindings::default()
+        };
+        let path_set = if intent.requires_backtest() && !is_exit {
+            self.latest_path_set(&version.model_version_id).await?
+        } else {
+            None
+        };
         let (shadow_stability, shadow_summary) = if intent.requires_shadow_stability() {
             let (stability, summary) = self
                 .shadow_stability(&version.model_version_id, required_window)
@@ -814,12 +860,12 @@ impl ModelGovernanceService {
             subject: GateSubject::ModelVersion(version.model_version_id.clone()),
             intent,
             backtest,
-            // Built ⇒ leakage-clean (enforced at dataset build); the gate's
-            // leakage arm is unit-tested directly.
-            leakage: LeakageFindings::default(),
             dataset,
+            leakage,
             shadow_stability,
             thresholds,
+            validation_thresholds,
+            path_set,
             sell_thresholds,
             model_family: Some(model_family),
             return_model_calibrated,
@@ -862,6 +908,23 @@ impl ModelGovernanceService {
             Some(info) => Ok(Some(backtest_report_from_info(info)?)),
             None => Ok(None),
         }
+    }
+
+    /// Reconstruct the most recent CPCV path-set metrics for a version, if any.
+    async fn latest_path_set(
+        &self,
+        version_id: &ModelVersionId,
+    ) -> QuantResult<Option<CpcvPathSetGateInput>> {
+        let rows = self
+            .deps
+            .backtest_path_set_repo
+            .list_by_model_version(version_id)
+            .await
+            .map_err(QuantError::from)?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|info| path_set_gate_input_from_info(&info)))
     }
 
     /// Resolve the dataset coverage backing a model version (the gate's
@@ -1049,12 +1112,45 @@ fn thresholds_from_config(config: &QualityGateConfig) -> QuantResult<QualityGate
             &config.min_shadow_overlap_stability.value,
             "min_shadow_overlap_stability",
         )?,
-        min_rank_ic: parse_threshold(&config.min_rank_ic.value, "min_rank_ic")?,
         max_category_concentration: parse_threshold(
             &config.max_category_concentration.value,
             "max_category_concentration",
         )?,
     })
+}
+
+/// Assemble Phase 11.5 [`ValidationGateThresholds`] from `research.validation.gates`.
+fn validation_thresholds_from_config(
+    config: &ResearchValidationGatesConfig,
+) -> QuantResult<ValidationGateThresholds> {
+    Ok(ValidationGateThresholds {
+        rank_ic_min: parse_threshold(
+            &config.rank_ic_min.value,
+            "research.validation.gates.rank_ic_min",
+        )?,
+        dsr_significance: parse_threshold(
+            &config.dsr_significance.value,
+            "research.validation.gates.dsr_significance",
+        )?,
+        max_pbo: parse_threshold(&config.max_pbo.value, "research.validation.gates.max_pbo")?,
+        max_turnover: parse_threshold(
+            &config.max_turnover.value,
+            "research.validation.gates.max_turnover",
+        )?,
+        min_tail_loss_bps: parse_threshold(
+            &config.min_tail_loss_bps.value,
+            "research.validation.gates.min_tail_loss_bps",
+        )?,
+    })
+}
+
+const fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> CpcvPathSetGateInput {
+    CpcvPathSetGateInput {
+        median_rank_ic: info.median_rank_ic,
+        deflated_sharpe: info.deflated_sharpe,
+        pbo: info.pbo,
+        min_track_record_length_secs: info.min_track_record_length_secs,
+    }
 }
 
 /// Assemble sell-side [`SellQualityGateThresholds`] from the governed config section.
@@ -1113,6 +1209,7 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
         sample_count: u64::try_from(info.sample_count).unwrap_or(0),
         missing_feature_count: u64::try_from(info.missing_feature_count).unwrap_or(0),
         rank_ic: info.rank_ic,
+        sharpe: info.sharpe,
         hit_rate: info.hit_rate,
         expected_vs_realized,
         max_drawdown: info.max_drawdown,

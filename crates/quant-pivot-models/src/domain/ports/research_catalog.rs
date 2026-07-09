@@ -12,11 +12,12 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{
-        BacktestReportInfo, BacktestReportListQuery, ComparisonReportListQuery,
-        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, ModelComparisonReportInfo, ModelPublishedCatalogQuery,
-        ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, Paginated,
-        PublishedModelOptionView, TrainingDatasetInfo, TrainingDatasetListQuery,
+        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
+        ComparisonReportListQuery, FactorCollinearitySource, FactorCollinearityView,
+        FactorDefinitionInfo, FactorDefinitionListQuery, ModelComparisonReportInfo,
+        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo,
+        ModelVersionListQuery, Paginated, PublishedModelOptionView, TrainingDatasetInfo,
+        TrainingDatasetListQuery,
     },
     types::FactorDefinitionId,
 };
@@ -62,6 +63,12 @@ pub trait ResearchCatalogPort: Send + Sync {
         &self,
         query: BacktestReportListQuery,
     ) -> QuantResult<Paginated<BacktestReportInfo>>;
+
+    /// Page the append-only CPCV path-set ledger, newest first.
+    async fn list_backtest_path_sets(
+        &self,
+        query: BacktestPathSetListQuery,
+    ) -> QuantResult<Paginated<BacktestPathSetInfo>>;
 
     /// Page the append-only pairwise comparison-report ledger, newest first.
     async fn list_comparison_reports(

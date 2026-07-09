@@ -17,6 +17,7 @@ mod runner;
 mod simulator;
 
 pub use comparison::{CategoryRankIcDelta, ModelComparisonReport, compare_reports};
+pub use metrics::sharpe_ratio;
 pub use runner::PortfolioReplayBacktester;
 
 use async_trait::async_trait;
@@ -242,6 +243,12 @@ pub struct BacktestReport {
     pub missing_feature_count: u64,
     /// Spearman rank IC between composite score and realized return.
     pub rank_ic: Decimal,
+    /// Unannualized Sharpe ratio of the per-tick portfolio return series
+    /// (Phase 11.5 §3.4; `0` for fewer than two ticks or a zero-variance
+    /// series). The single-path replay's own Sharpe — the debug-view sibling
+    /// of the CPCV path-set's [`crate::validation::SharpeDistribution`],
+    /// never itself the alpha-significance gate's data source.
+    pub sharpe: Decimal,
     /// Fraction of resolved samples with a positive realized return.
     pub hit_rate: Probability,
     /// Expected-vs-realized agreement.

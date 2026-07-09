@@ -132,6 +132,7 @@ fn new_report(
         sample_count: 10,
         missing_feature_count: 0,
         rank_ic: dec!(0.42),
+        sharpe: dec!(0.9),
         hit_rate: Probability::new(dec!(0.6)),
         expected_vs_realized: serde_json::json!({ "bias_bps": "5" }),
         max_drawdown: dec!(0.1),

@@ -483,6 +483,7 @@ async fn seed_backtest_reports(
         BacktestSeedConfig {
             seed: "baseline",
             rank_ic: dec!(0.24),
+            sharpe: dec!(0.85),
             hit_rate: dec!(0.54),
             sample_count: 8_400,
         },
@@ -497,6 +498,7 @@ async fn seed_backtest_reports(
         BacktestSeedConfig {
             seed: "candidate",
             rank_ic: dec!(0.33),
+            sharpe: dec!(1.12),
             hit_rate: dec!(0.61),
             sample_count: 11_200,
         },
@@ -515,6 +517,7 @@ async fn seed_backtest_reports(
         BacktestSeedConfig {
             seed: "shadow",
             rank_ic: dec!(0.29),
+            sharpe: dec!(0.97),
             hit_rate: dec!(0.57),
             sample_count: 10_100,
         },
@@ -527,6 +530,7 @@ async fn seed_backtest_reports(
 struct BacktestSeedConfig {
     seed: &'static str,
     rank_ic: rust_decimal::Decimal,
+    sharpe: rust_decimal::Decimal,
     hit_rate: rust_decimal::Decimal,
     sample_count: i64,
 }
@@ -554,6 +558,7 @@ async fn seed_one_backtest(
             sample_count: config.sample_count,
             missing_feature_count: 42,
             rank_ic: config.rank_ic,
+            sharpe: config.sharpe,
             hit_rate: Probability::new(config.hit_rate),
             expected_vs_realized: expected_vs_realized_json(config.seed),
             max_drawdown: dec!(0.11),

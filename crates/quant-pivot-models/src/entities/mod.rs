@@ -6,6 +6,7 @@ pub mod market;
 pub mod menu;
 pub mod operation_log;
 pub mod quant_account_snapshot;
+pub mod quant_backtest_path_set;
 pub mod quant_backtest_report;
 pub mod quant_basis_alert;
 pub mod quant_calibration_artifact;

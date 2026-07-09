@@ -151,6 +151,12 @@ pub struct ModelArtifactId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BacktestReportId(Arc<Uuid>);
 
+/// Combinatorial Purged Cross-Validation (CPCV) backtest path-set identifier
+/// (Phase 11.5): one row per `phi`-path-reconstruction run over a frozen
+/// `(model_spec, training_dataset, runtime_config)` triple.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BacktestPathSetId(Arc<Uuid>);
+
 /// Pairwise model-comparison report identifier (baseline vs candidate replay).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelComparisonReportId(Arc<Uuid>);

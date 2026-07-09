@@ -71,7 +71,7 @@ async fn insert_book_rows(client: &clickhouse::Client, rows: &[BookSnapshotRow])
 
 /// Wait until inserted `book_snapshots` rows are query-visible.
 ///
-/// Fresh MergeTree parts can lag briefly behind HTTP insert ack on a cold
+/// Fresh `MergeTree` parts can lag briefly behind HTTP insert ack on a cold
 /// testcontainer; PIT reads that race this window return `None`.
 async fn wait_for_book_snapshot_rows(client: &clickhouse::Client, token: &TokenId, expected: u64) {
     const ATTEMPTS: usize = 40;
@@ -86,13 +86,12 @@ async fn wait_for_book_snapshot_rows(client: &clickhouse::Client, token: &TokenI
         if count >= expected {
             return;
         }
-        if attempt == ATTEMPTS {
-            panic!(
-                "book_snapshots rows for {} not visible after insert \
-                 (count={count}, expected>={expected}, attempts={ATTEMPTS})",
-                token.as_str()
-            );
-        }
+        assert!(
+            attempt < ATTEMPTS,
+            "book_snapshots rows for {} not visible after insert \
+             (count={count}, expected>={expected}, attempts={ATTEMPTS})",
+            token.as_str()
+        );
         tokio::time::sleep(PAUSE).await;
     }
 }

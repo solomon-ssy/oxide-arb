@@ -5,6 +5,7 @@ pub mod bias_table_fit;
 pub mod calibration_shared;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;
+pub mod cpcv_backtest;
 pub mod dataset_replay;
 pub mod domain_ingest;
 pub mod equity;

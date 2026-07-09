@@ -28,7 +28,7 @@ use crate::{
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
         ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId, SchemaVersion,
-        TrainingDatasetId, TrainingSampleSource, default_sample_sources,
+        TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource, default_sample_sources,
     },
 };
 
@@ -133,6 +133,12 @@ pub struct TrainingDatasetView {
     pub dataset_hash: ContentHash,
     pub parquet_uri: String,
     pub sample_count: i64,
+    /// Feature source visibility delay in seconds (PIT cutoff).
+    pub source_delay_secs: i64,
+    /// Deterministic sample grid step in seconds.
+    pub sample_interval_secs: i64,
+    /// Forward label horizons frozen into this dataset (seconds).
+    pub horizons_secs: TrainingHorizonsSecs,
     /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
     pub coverage_json: DatasetCoverage,
     pub runtime_config_version_id: RuntimeConfigVersionId,
@@ -171,6 +177,9 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             dataset_hash: info.dataset_hash,
             parquet_uri: info.parquet_uri.to_string(),
             sample_count: info.sample_count,
+            source_delay_secs: info.source_delay_secs,
+            sample_interval_secs: info.sample_interval_secs,
+            horizons_secs: info.horizons_secs,
             coverage_json: info.coverage_json,
             runtime_config_version_id: info.runtime_config_version_id,
             created_at: info.created_at,

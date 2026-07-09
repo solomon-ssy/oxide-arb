@@ -308,7 +308,7 @@ mod tests {
         },
         training::{LabelName, TrainingExample, TrainingLabel},
     };
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
         types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
@@ -344,6 +344,7 @@ mod tests {
                     horizon_secs: 60,
                     value,
                     is_resolved: true,
+                    matured_at: as_of + Duration::seconds(60),
                 }]
             })
             .unwrap_or_default();

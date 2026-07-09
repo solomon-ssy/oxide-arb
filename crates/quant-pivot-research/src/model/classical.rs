@@ -191,6 +191,19 @@ impl ClassicalAdapterRegistry {
             params: ClassicalParams::defaults_for(kind),
         })
     }
+
+    /// Construct the adapter for `kind` with an explicit hyperparameter
+    /// override (Phase 11.5 §3.5's governed classical trial grid) instead of
+    /// [`ClassicalParams::defaults_for`]. Production training always uses
+    /// [`Self::adapter_for`]; only CPCV/trial-grid validation folds need to
+    /// vary hyperparameters away from the governed production defaults.
+    #[must_use]
+    pub fn adapter_with_params(
+        kind: ClassicalKind,
+        params: ClassicalParams,
+    ) -> Box<dyn ClassicalModelAdapter> {
+        Box::new(SmartcoreAdapter { kind, params })
+    }
 }
 
 /// The single `smartcore`-backed adapter; the kind selects the estimator.
@@ -403,6 +416,8 @@ fn rolling_validation(
         sample_count: rows as u64,
         dropped_singleton_groups: 0,
         dropped_singleton_rows: 0,
+        // Classical adapters do not run coordinate_search; DSR N is trial-grid only.
+        coord_search_effective_n: 0,
     })
 }
 

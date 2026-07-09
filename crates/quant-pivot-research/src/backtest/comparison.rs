@@ -293,6 +293,7 @@ mod tests {
             sample_count: samples.len() as u64,
             missing_feature_count: 0,
             rank_ic,
+            sharpe: dec!(0),
             hit_rate: Probability::new(dec!(0.5)),
             expected_vs_realized: ExpectedVsRealized {
                 mean_expected_bps: dec!(0),

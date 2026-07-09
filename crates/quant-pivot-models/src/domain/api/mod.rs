@@ -1,6 +1,7 @@
 //! HTTP API contract types — Phase 0 control plane subset.
 
 mod auth;
+mod backtest_path_set;
 mod backtest_report;
 mod calibration_artifact;
 mod comparison_report;
@@ -33,6 +34,7 @@ mod validation;
 mod window;
 
 pub use auth::*;
+pub use backtest_path_set::*;
 pub use backtest_report::*;
 pub use calibration_artifact::*;
 pub use comparison_report::*;

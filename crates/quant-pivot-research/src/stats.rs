@@ -90,6 +90,72 @@ pub fn mean(values: &[Decimal]) -> Decimal {
     values.iter().sum::<Decimal>() / Decimal::from(values.len() as u64)
 }
 
+/// Population variance (`0` for fewer than two values or zero-variance input).
+#[must_use]
+pub fn variance(values: &[Decimal]) -> Decimal {
+    let n = values.len();
+    if n < 2 {
+        return Decimal::ZERO;
+    }
+    let m = mean(values);
+    let sum_sq: Decimal = values.iter().map(|v| (*v - m) * (*v - m)).sum();
+    sum_sq / Decimal::from(n as u64)
+}
+
+/// Sample standard deviation (population variance's square root; `0` for
+/// fewer than two values).
+#[must_use]
+pub fn stddev(values: &[Decimal]) -> Decimal {
+    sqrt(variance(values))
+}
+
+/// Pearson (population) skewness `γ3 = E[(X-μ)³] / σ³`.
+///
+/// `0` when σ is zero or fewer than two values. Used by the
+/// Probabilistic/Deflated Sharpe Ratio formulas (Bailey & López de Prado
+/// 2012/2014), which correct for non-normal return distributions.
+#[must_use]
+pub fn skewness(values: &[Decimal]) -> Decimal {
+    let n = values.len();
+    if n < 2 {
+        return Decimal::ZERO;
+    }
+    let m = mean(values);
+    let sigma = stddev(values);
+    if sigma.is_zero() {
+        return Decimal::ZERO;
+    }
+    let sum_cubed: Decimal = values.iter().map(|v| (*v - m) * (*v - m) * (*v - m)).sum();
+    (sum_cubed / Decimal::from(n as u64)) / (sigma * sigma * sigma)
+}
+
+/// Pearson (population, non-excess) kurtosis `γ4 = E[(X-μ)⁴] / σ⁴`.
+///
+/// A normal distribution has `γ4 = 3`; `0` when σ is zero or fewer than two
+/// values — callers must not confuse a genuinely degenerate series with a
+/// normal one.
+#[must_use]
+pub fn kurtosis(values: &[Decimal]) -> Decimal {
+    let n = values.len();
+    if n < 2 {
+        return Decimal::ZERO;
+    }
+    let m = mean(values);
+    let sigma = stddev(values);
+    if sigma.is_zero() {
+        return Decimal::ZERO;
+    }
+    let variance_sq = sigma * sigma * sigma * sigma;
+    let sum_fourth: Decimal = values
+        .iter()
+        .map(|v| {
+            let d = *v - m;
+            d * d * d * d
+        })
+        .sum();
+    (sum_fourth / Decimal::from(n as u64)) / variance_sq
+}
+
 /// Deterministic decimal square root (Newton's method, fixed iterations).
 #[must_use]
 pub fn sqrt(value: Decimal) -> Decimal {
@@ -120,6 +186,24 @@ pub fn wilson_z(confidence: Decimal) -> f64 {
     let level = confidence.to_f64().unwrap_or(0.95).clamp(0.5, 0.999_999);
     let upper = 1.0 - (1.0 - level) / 2.0;
     Normal::new(0.0, 1.0).map_or(1.96, |dist| dist.inverse_cdf(upper))
+}
+
+/// Standard normal CDF `Φ(z)`. Used by the Probabilistic/Deflated Sharpe
+/// Ratio (Bailey & López de Prado 2012/2014) to convert a standardized
+/// Sharpe-significance statistic into a probability.
+#[must_use]
+pub fn normal_cdf(z: f64) -> f64 {
+    Normal::new(0.0, 1.0).map_or(0.5, |dist| dist.cdf(z))
+}
+
+/// Standard normal inverse CDF (quantile function) `Φ⁻¹(p)`, `p` clamped to `(0, 1)`.
+///
+/// Used by the Deflated Sharpe Ratio's expected-maximum-Sharpe benchmark
+/// (`SR*`) and by the CSCV/PBO logit transform's rank quantiles.
+#[must_use]
+pub fn normal_inverse_cdf(p: f64) -> f64 {
+    let p = p.clamp(1e-12, 1.0 - 1e-12);
+    Normal::new(0.0, 1.0).map_or(0.0, |dist| dist.inverse_cdf(p))
 }
 
 /// Wilson score interval for a binomial proportion, quantized to `scale`.
@@ -223,8 +307,8 @@ pub fn pava_non_decreasing_grouped(group_means: &[Decimal], group_weights: &[u64
 #[cfg(test)]
 mod calibration_stat_tests {
     use super::{
-        pava_non_decreasing, pava_non_decreasing_grouped, pava_non_increasing, wilson_interval,
-        wilson_z,
+        kurtosis, normal_cdf, normal_inverse_cdf, pava_non_decreasing, pava_non_decreasing_grouped,
+        pava_non_increasing, skewness, stddev, variance, wilson_interval, wilson_z,
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -319,5 +403,54 @@ mod calibration_stat_tests {
             pava_non_decreasing_grouped(&values, &weights),
             pava_non_decreasing(&values)
         );
+    }
+
+    #[test]
+    fn variance_and_stddev_of_known_series() {
+        // [2, 4, 4, 4, 5, 5, 7, 9]: population variance = 4, stddev = 2 (textbook example).
+        let values = vec![
+            dec!(2),
+            dec!(4),
+            dec!(4),
+            dec!(4),
+            dec!(5),
+            dec!(5),
+            dec!(7),
+            dec!(9),
+        ];
+        assert_eq!(variance(&values), dec!(4));
+        assert_eq!(stddev(&values), dec!(2));
+    }
+
+    #[test]
+    fn skewness_is_zero_for_symmetric_series() {
+        let symmetric = vec![dec!(-2), dec!(-1), dec!(0), dec!(1), dec!(2)];
+        assert_eq!(skewness(&symmetric), Decimal::ZERO);
+    }
+
+    #[test]
+    fn skewness_is_positive_for_right_tailed_series() {
+        let right_tailed = vec![dec!(1), dec!(1), dec!(1), dec!(1), dec!(10)];
+        assert!(skewness(&right_tailed) > Decimal::ZERO);
+    }
+
+    #[test]
+    fn kurtosis_of_degenerate_series_is_zero_not_normal() {
+        // Fewer than two distinct values ⇒ zero variance ⇒ must report 0, never
+        // silently claim the normal distribution's kurtosis of 3.
+        let degenerate = vec![dec!(5), dec!(5), dec!(5)];
+        assert_eq!(kurtosis(&degenerate), Decimal::ZERO);
+    }
+
+    #[test]
+    fn normal_cdf_matches_known_quantiles() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-9);
+        assert!((normal_cdf(1.959_963_984_540_054_5) - 0.975).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normal_inverse_cdf_is_the_inverse_of_normal_cdf() {
+        let p = 0.841_344_746_068_542_9; // Phi(1.0)
+        assert!((normal_inverse_cdf(p) - 1.0).abs() < 1e-6);
     }
 }

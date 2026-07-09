@@ -24,9 +24,9 @@ use quant_pivot_models::domain::{
 };
 use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
 use quant_pivot_repository::traits::{
-    AttributionRepository, BacktestReportRepository, BasisAlertRepository,
-    CalibrationArtifactRepository, EventRepository, FactorRepository, FeatureRepository,
-    MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+    AttributionRepository, BacktestPathSetRepository, BacktestReportRepository,
+    BasisAlertRepository, CalibrationArtifactRepository, EventRepository, FactorRepository,
+    FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
     ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
     ModelRunRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
     RuntimeConfigVersionRepository, ShadowComparisonRepository, TradeTapeBlockCursorRepository,
@@ -85,6 +85,8 @@ pub struct ResearchBundle {
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
     /// Append-only backtest-report ledger persistence (3.6).
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
+    /// Append-only CPCV + trial-grid path-set ledger persistence (11.5).
+    pub backtest_path_set_repo: Arc<dyn BacktestPathSetRepository>,
     /// Append-only pairwise comparison-report ledger persistence (3.6 §5.6).
     pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
     /// Append-only shadow-comparison ledger persistence (3.7).
@@ -123,6 +125,7 @@ struct OfflineResearchRepos {
     attribution: Arc<dyn AttributionRepository>,
     recommendation: Arc<dyn RecommendationRepository>,
     backtest_report: Arc<dyn BacktestReportRepository>,
+    backtest_path_set: Arc<dyn BacktestPathSetRepository>,
     comparison_report: Arc<dyn ModelComparisonReportRepository>,
     governance_audit: Arc<dyn ModelGovernanceAuditRepository>,
 }
@@ -266,6 +269,7 @@ impl ResearchBundle {
             attribution_repo: offline.attribution,
             recommendation_repo: offline.recommendation,
             backtest_report_repo: offline.backtest_report,
+            backtest_path_set_repo: Arc::clone(&offline.backtest_path_set),
             comparison_report_repo: offline.comparison_report,
             shadow_comparison_repo,
             governance_audit_repo: offline.governance_audit,
@@ -345,6 +349,8 @@ impl ResearchBundle {
             recommendation: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             backtest_report: Arc::clone(&repos.backtest_report)
                 as Arc<dyn BacktestReportRepository>,
+            backtest_path_set: Arc::clone(&repos.backtest_path_set)
+                as Arc<dyn BacktestPathSetRepository>,
             comparison_report: Arc::clone(&repos.comparison_report)
                 as Arc<dyn ModelComparisonReportRepository>,
             governance_audit: Arc::clone(&repos.governance_audit)
@@ -369,6 +375,7 @@ impl ResearchBundle {
         Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {
             model_registry_repo: Arc::clone(model_registry_repo),
             backtest_report_repo: Arc::clone(&offline.backtest_report),
+            backtest_path_set_repo: Arc::clone(&offline.backtest_path_set),
             shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
             governance_audit_repo: Arc::clone(&offline.governance_audit),
             dataset_repo: Arc::clone(&offline.training_dataset),

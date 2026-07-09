@@ -181,9 +181,14 @@ impl SampleRow {
 /// Same-`as_of` query group for cross-sectional LTR.
 ///
 /// Grouping by `as_of` happens when the trainer builds the dataset; once formed,
-/// the evaluator only needs the rows (pair loss / pseudo portfolio).
+/// the evaluator only needs the rows (pair loss / pseudo portfolio). The
+/// `[as_of, label_horizon_end]` interval is retained so trainer CV can apply
+/// the same label-horizon purge/embargo as CPCV (Phase 11.5).
 #[derive(Debug, Clone)]
 pub(crate) struct CrossSectionGroup {
+    pub(crate) as_of: chrono::DateTime<chrono::Utc>,
+    /// Conservative upper bound of member rows' `TrainingLabel::matured_at`.
+    pub(crate) label_horizon_end: chrono::DateTime<chrono::Utc>,
     pub(crate) rows: Vec<SampleRow>,
 }
 
@@ -553,6 +558,7 @@ fn parse_tail_fraction(value: &str) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use quant_pivot_models::runtime_config::RankLossKind;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -573,6 +579,8 @@ mod tests {
     #[test]
     fn correct_pairwise_order_has_lower_loss_than_reversed_order() {
         let group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(1), dec!(10)),
                 row("m:b", dec!(0), dec!(-10)),
@@ -586,6 +594,8 @@ mod tests {
             .evaluate(&[dec!(1)], std::slice::from_ref(&group))
             .expect("eval");
         let reversed_group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(0), dec!(10)),
                 row("m:b", dec!(1), dec!(-10)),
@@ -609,6 +619,8 @@ mod tests {
     #[test]
     fn objective_breakdown_total_matches_weighted_components() {
         let group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(1), dec!(-100)),
                 row("m:b", dec!(0), dec!(50)),
@@ -642,6 +654,8 @@ mod tests {
     #[test]
     fn topn_pseudo_allocations_only_select_top_n_and_keep_token_keys_separate() {
         let group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m1:yes", dec!(3), dec!(10)),
                 row("m1:no", dec!(2), dec!(5)),
@@ -658,6 +672,8 @@ mod tests {
     #[test]
     fn topn_pseudo_allocations_all_negative_scores_still_equal_weight() {
         let group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(-3), dec!(10)),
                 row("m:b", dec!(-1), dec!(5)),
@@ -676,12 +692,16 @@ mod tests {
     fn rank_loss_group_count_excludes_all_tied_label_groups() {
         let groups = vec![
             CrossSectionGroup {
+                as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 rows: vec![
                     row("m:a", dec!(1), dec!(10)),
                     row("m:b", dec!(0), dec!(-10)),
                 ],
             },
             CrossSectionGroup {
+                as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 rows: vec![row("m:c", dec!(1), dec!(5)), row("m:d", dec!(0), dec!(5))],
             },
         ];
@@ -698,6 +718,8 @@ mod tests {
     #[test]
     fn rank_ic_weighted_ranknet_differs_from_plain_pairwise() {
         let group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(3), dec!(30)),
                 row("m:b", dec!(2), dec!(10)),

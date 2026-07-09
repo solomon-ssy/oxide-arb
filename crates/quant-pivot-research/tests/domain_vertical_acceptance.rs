@@ -333,6 +333,7 @@ fn dataset_hash_changes_when_domain_slice_added() {
             horizon_secs: 60,
             value: Decimal::ONE,
             is_resolved: true,
+            matured_at: as_of + Duration::seconds(60),
         }],
         source_refs: Vec::new(),
         lot_context: None,

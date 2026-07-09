@@ -55,6 +55,7 @@ use quant_pivot_research::{
     },
     selection::ModelFeatureRequirements,
     training::{DatasetParquetCodec, TrainingExample},
+    validation::PurgeConfig,
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
@@ -74,6 +75,51 @@ use crate::service::{
     },
     historical_replay::ReplayConfig,
 };
+
+/// Derive the candidate factor seed: configured `factor_weights` if present,
+/// else a uniform seed over the (sorted, de-duplicated) factors observed in
+/// `examples`. Shared by [`ModelTrainerService`] and Phase 11.5's CPCV/trial-grid
+/// orchestration (`quant-pivot-core::service::cpcv_backtest`) so every
+/// `WeightedFactor` fold — production or validation — starts from the same
+/// governed seed.
+pub(crate) fn weighted_seed_weights(
+    factors: &FactorsConfig,
+    examples: &[TrainingExample],
+) -> Vec<FactorWeight> {
+    let configured: Vec<FactorWeight> = factors
+        .factor_weights
+        .weights
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .value
+                .parse::<Decimal>()
+                .ok()
+                .map(|weight| FactorWeight {
+                    factor: FactorName::new(name.clone()),
+                    weight,
+                })
+        })
+        .collect();
+    if !configured.is_empty() {
+        return configured;
+    }
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for example in examples {
+        for factor in &example.factor_values {
+            names.insert(factor.name.as_str().to_owned());
+        }
+    }
+    let count = names.len().max(1);
+    let weight = Decimal::ONE / Decimal::from(count as u64);
+    names
+        .into_iter()
+        .map(|name| FactorWeight {
+            factor: FactorName::new(name),
+            weight,
+        })
+        .collect()
+}
 
 /// Fail closed with a terminal [`ResearchError::Cancelled`] when the job was
 /// cooperatively cancelled (operator cancel, lease loss, or graceful shutdown),
@@ -114,6 +160,8 @@ pub struct ModelTrainerConfig {
     pub factors: FactorsConfig,
     /// Governed objective snapshot from `research.training`.
     pub objective: TrainingObjectiveSpec,
+    /// Label-horizon purge/embargo for trainer CV (same knobs as CPCV).
+    pub validation_purge: PurgeConfig,
 }
 
 /// A training request resolved by the admin port.
@@ -393,7 +441,7 @@ impl ModelTrainerService {
             Some(category) => requirements.for_category(category),
             None => requirements.generic.clone(),
         };
-        let seed_weights = self.seed_weights(examples);
+        let seed_weights = weighted_seed_weights(&self.config.factors, examples);
         let request = TrainModelRequest {
             examples: examples.to_vec(),
             label: input.label.clone(),
@@ -401,6 +449,8 @@ impl ModelTrainerService {
             objective: self.config.objective.clone(),
             validation: ValidationSpec {
                 folds: input.validation_folds.max(2),
+                embargo_pct: self.config.validation_purge.embargo_pct,
+                min_embargo_secs: self.config.validation_purge.min_embargo_secs,
             },
             header,
             prediction_horizon_secs: input.prediction_horizon_secs,
@@ -443,6 +493,7 @@ impl ModelTrainerService {
                 "sample_count": trained.validation_metrics.sample_count,
                 "dropped_singleton_groups": trained.validation_metrics.dropped_singleton_groups,
                 "dropped_singleton_rows": trained.validation_metrics.dropped_singleton_rows,
+                "coord_search_effective_n": trained.validation_metrics.coord_search_effective_n,
                 "held_out_metric": "neg_total_ltr_loss",
             },
         });
@@ -468,7 +519,7 @@ impl ModelTrainerService {
             }
             .into());
         }
-        let seed_weights = Self::sell_seed_weights(examples);
+        let seed_weights = Self::seed_weights(examples);
         let request = TrainSellScorerRequest {
             examples: examples.to_vec(),
             label: input.label.clone(),
@@ -476,6 +527,8 @@ impl ModelTrainerService {
             objective: self.config.objective.clone(),
             validation: ValidationSpec {
                 folds: input.validation_folds.max(2),
+                embargo_pct: self.config.validation_purge.embargo_pct,
+                min_embargo_secs: self.config.validation_purge.min_embargo_secs,
             },
             header,
             prediction_horizon_secs: input.prediction_horizon_secs,
@@ -523,7 +576,7 @@ impl ModelTrainerService {
     /// Seed the Sell scorer over the observed market factors plus the three
     /// position-state pseudo-factors (uniform), so the trainer can weigh the
     /// lot's own state alongside market factors.
-    fn sell_seed_weights(examples: &[TrainingExample]) -> Vec<FactorWeight> {
+    fn seed_weights(examples: &[TrainingExample]) -> Vec<FactorWeight> {
         let mut names: BTreeSet<String> = BTreeSet::new();
         for example in examples {
             for factor in &example.factor_values {
@@ -536,47 +589,6 @@ impl ModelTrainerService {
             factor_names::POSITION_PEAK_DRAWDOWN,
         ] {
             names.insert(pseudo.as_str().to_owned());
-        }
-        let count = names.len().max(1);
-        let weight = Decimal::ONE / Decimal::from(count as u64);
-        names
-            .into_iter()
-            .map(|name| FactorWeight {
-                factor: FactorName::new(name),
-                weight,
-            })
-            .collect()
-    }
-
-    /// Derive the candidate factor seed: configured `factor_weights` if present,
-    /// else a uniform seed over the factors observed in the examples.
-    fn seed_weights(&self, examples: &[TrainingExample]) -> Vec<FactorWeight> {
-        let configured: Vec<FactorWeight> = self
-            .config
-            .factors
-            .factor_weights
-            .weights
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .value
-                    .parse::<Decimal>()
-                    .ok()
-                    .map(|weight| FactorWeight {
-                        factor: FactorName::new(name.clone()),
-                        weight,
-                    })
-            })
-            .collect();
-        if !configured.is_empty() {
-            return configured;
-        }
-        // Uniform seed over the (sorted, de-duplicated) factors in the dataset.
-        let mut names: BTreeSet<String> = BTreeSet::new();
-        for example in examples {
-            for factor in &example.factor_values {
-                names.insert(factor.name.as_str().to_owned());
-            }
         }
         let count = names.len().max(1);
         let weight = Decimal::ONE / Decimal::from(count as u64);
@@ -696,8 +708,12 @@ impl ModelTrainerService {
 /// admission instead of silently being treated as fillable). This also makes
 /// the column set reproducible across runs and comparable to the schema
 /// hash, rather than an artifact of which markets happened to be sampled.
+/// Shared by [`ModelTrainerService::train_classical`] and Phase 11.5's
+/// CPCV/trial-grid orchestration (`quant-pivot-core::service::cpcv_backtest`),
+/// so every classical fold — production or validation — builds its matrix
+/// through the identical governed [`FeatureSchema`] column contract.
 #[cfg(feature = "ml-classical")]
-fn build_classical_matrix(
+pub(crate) fn build_classical_matrix(
     examples: &[TrainingExample],
     label: &LabelSelector,
     schema: &FeatureSchema,

@@ -18,8 +18,8 @@ use quant_pivot_core::runtime_config::RuntimeConfigStore;
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     domain::{
-        BindCalibrationRequest, GovernanceActor, ModelGovernancePort, NewBacktestReport,
-        NewCalibrationArtifact, NewModelRun, NewModelSpec, NewModelVersion,
+        BindCalibrationRequest, GovernanceActor, ModelGovernancePort, NewBacktestPathSet,
+        NewBacktestReport, NewCalibrationArtifact, NewModelRun, NewModelSpec, NewModelVersion,
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
         NewTrainingDataset, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
         RollbackModelCommand, RuntimeConfigPort,
@@ -36,7 +36,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::{ModelVersionRef, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
     types::{
-        ArtifactUri, BacktestReportId, CalibrationArtifactId, ContentHash, DatasetCoverage,
+        BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash, DatasetCoverage,
         ModelRunId, ModelSpecId, ModelVersionId, Probability, RuntimeConfigActivationId,
         RuntimeConfigVersionId, SchemaVersion, ShadowComparisonId, TrainingDatasetId,
         TrainingHorizonsSecs,
@@ -44,19 +44,20 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgBacktestReportRepository, PgCalibrationArtifactRepository,
+        PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
         PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
         PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
-        BacktestReportRepository, CalibrationArtifactRepository, ModelGovernanceAuditRepository,
-        ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
-        ShadowComparisonRepository, TrainingDatasetRepository,
+        BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
+        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
+        RuntimeConfigVersionRepository, ShadowComparisonRepository, TrainingDatasetRepository,
     },
 };
+use quant_pivot_research::training::TrainingExample;
 use quant_pivot_research::{
-    artifact::{ArtifactStore, LocalArtifactStore},
+    artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     backtest::{ExpectedVsRealized, PnlSimulation},
     factors::names::LIQUIDITY_DEPTH,
     gates::{DefaultModelQualityGate, ModelQualityGate},
@@ -66,6 +67,7 @@ use quant_pivot_research::{
         WeightedFactorModelArtifact,
     },
     model::{MonotoneMapping, ReliabilityReport},
+    training::DatasetParquetCodec,
 };
 use quant_pivot_test_support::pg::setup_pg;
 use rust_decimal_macros::dec;
@@ -131,6 +133,7 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
     let service = ModelGovernanceService::new(ModelGovernanceDeps {
         model_registry_repo: Arc::new(PgModelRegistryRepository::new(db.clone())),
         backtest_report_repo: Arc::new(PgBacktestReportRepository::new(db.clone())),
+        backtest_path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
         shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
         governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
         dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
@@ -246,6 +249,7 @@ fn healthy_coverage() -> DatasetCoverage {
 
 async fn seed_dataset(
     db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
     spec: &ModelSpecId,
     rc_id: &RuntimeConfigVersionId,
     status: TrainingDatasetStatus,
@@ -254,6 +258,14 @@ async fn seed_dataset(
 ) -> TrainingDatasetId {
     let id = TrainingDatasetId::from_v7();
     let window_start = Utc::now() - ChronoDuration::hours(2);
+    // Real Parquet so publish-time leakage rescan (#9) can decode bytes.
+    let bytes = DatasetParquetCodec::encode(&[]).expect("encode empty parquet");
+    let hex = id.as_uuid().simple().to_string();
+    let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
+    let parquet_uri = artifact_store
+        .put(key, &bytes)
+        .await
+        .expect("store parquet");
     PgTrainingDatasetRepository::new(db.clone())
         .create(NewTrainingDataset {
             training_dataset_id: id.clone(),
@@ -266,7 +278,7 @@ async fn seed_dataset(
             factor_schema_hash: content_hash(u32::from('g')),
             label_schema_hash: content_hash(u32::from('l')),
             dataset_hash: content_hash(u32::from(dataset_hash_seed)),
-            parquet_uri: ArtifactUri::parse("file:///tmp/governance-it.parquet").expect("uri"),
+            parquet_uri,
             sample_count: 990,
             source_delay_secs: 10,
             sample_interval_secs: 3_600,
@@ -452,6 +464,7 @@ async fn seed_backtest(
             sample_count: 1_000,
             missing_feature_count: 0,
             rank_ic: dec!(0.15),
+            sharpe: dec!(1.1),
             hit_rate: Probability::new(dec!(0.62)),
             expected_vs_realized: evr,
             max_drawdown: dec!(0.10),
@@ -494,7 +507,7 @@ async fn seed_shadow_window(
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn publish_requires_quality_gate_pass() {
     let (pool, _container) = setup_pg().await;
@@ -532,15 +545,17 @@ async fn publish_requires_quality_gate_pass() {
     assert!(row.quality_gate_report.get("passed").is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn publish_requires_backtest_report() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::Ready,
@@ -548,7 +563,6 @@ async fn publish_requires_backtest_report() {
         '1',
     )
     .await;
-    let harness = harness(&db).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -583,15 +597,17 @@ async fn publish_requires_backtest_report() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn publish_requires_shadow_stability() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::Ready,
@@ -599,7 +615,6 @@ async fn publish_requires_shadow_stability() {
         '1',
     )
     .await;
-    let harness = harness(&db).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -629,15 +644,17 @@ async fn publish_requires_shadow_stability() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn publish_succeeds_then_published_version_is_immutable() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::Ready,
@@ -645,7 +662,6 @@ async fn publish_succeeds_then_published_version_is_immutable() {
         '1',
     )
     .await;
-    let harness = harness(&db).await;
     let calibrator = seed_model_score_calibrator(&db).await;
     let candidate = seed_version(
         &db,
@@ -658,6 +674,7 @@ async fn publish_succeeds_then_published_version_is_immutable() {
     )
     .await;
     seed_backtest(&db, &candidate, &rc_id, '1').await;
+    seed_path_set(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
     let published = harness
@@ -728,9 +745,16 @@ struct PublishReadyParams<'a> {
     reason: &'a str,
 }
 
-/// Publish a fully gated candidate (backtest + shadow window + publish).
+/// Publish a fully gated candidate (backtest + CPCV path set + shadow + publish).
 async fn publish_ready_version(params: PublishReadyParams<'_>) {
     seed_backtest(
+        params.db,
+        params.version,
+        params.rc_id,
+        params.backtest_seed,
+    )
+    .await;
+    seed_path_set(
         params.db,
         params.version,
         params.rc_id,
@@ -757,6 +781,78 @@ async fn publish_ready_version(params: PublishReadyParams<'_>) {
         .expect("publish ready version");
 }
 
+/// Seed a CPCV path set that clears the Phase 11.5 alpha hard gates.
+async fn seed_path_set(
+    db: &DatabaseConnection,
+    version: &ModelVersionId,
+    rc_id: &RuntimeConfigVersionId,
+    hash_seed: char,
+) {
+    let model_run_id = ModelRunId::from_v7();
+    let window_start = Utc::now() - ChronoDuration::hours(2);
+    PgModelRunRepository::new(db.clone())
+        .create(NewModelRun {
+            model_run_id: model_run_id.clone(),
+            run_kind: ModelRunKind::Backtest,
+            model_version_id: Some(version.clone()),
+            runtime_config_version_id: rc_id.clone(),
+            market_selection_id: None,
+            window_start,
+            window_end: window_start + ChronoDuration::hours(1),
+            status: ModelRunStatus::Succeeded,
+            input_hash: content_hash(u32::from(hash_seed) + 10),
+            output_hash: Some(content_hash(u32::from(hash_seed) + 11)),
+            metrics_json: serde_json::json!({}),
+            error_code: None,
+            error_message: None,
+            started_at: window_start,
+            finished_at: Some(Utc::now()),
+        })
+        .await
+        .expect("cpcv model run");
+
+    // Dataset id is required by the ledger FK; reuse any Ready dataset linked
+    // to this version when present, otherwise mint a synthetic id that the
+    // path-set row alone references (no FK to training_dataset in schema).
+    let training_dataset_id = PgModelRegistryRepository::new(db.clone())
+        .find_model_version_by_id(version)
+        .await
+        .expect("version")
+        .and_then(|v| v.training_dataset_id)
+        .unwrap_or_else(TrainingDatasetId::from_v7);
+
+    PgBacktestPathSetRepository::new(db.clone())
+        .create(NewBacktestPathSet {
+            path_set_id: BacktestPathSetId::from_v7(),
+            model_version_id: version.clone(),
+            model_run_id,
+            training_dataset_id,
+            runtime_config_version_id: rc_id.clone(),
+            window_start,
+            window_end: window_start + ChronoDuration::hours(1),
+            path_count: 7,
+            combination_count: 28,
+            median_rank_ic: dec!(0.15),
+            sharpe_distribution: serde_json::json!({
+                "min": "0.5",
+                "p25": "0.8",
+                "median": "1.0",
+                "p75": "1.2",
+                "max": "1.5"
+            }),
+            paths: serde_json::json!([]),
+            deflated_sharpe: dec!(0.97),
+            dsr_benchmark_sharpe: dec!(0.5),
+            pbo: dec!(0.20),
+            min_track_record_length_secs: Some(86_400),
+            trial_count: 12,
+            trial_grid_count: 10,
+            coord_search_effective_n: 2,
+        })
+        .await
+        .expect("path set");
+}
+
 /// Seeds for [`seed_and_publish_version`].
 struct PublishableVersionSeeds {
     dataset_seed: char,
@@ -777,6 +873,7 @@ async fn seed_and_publish_version(
 ) -> ModelVersionId {
     let dataset = seed_dataset(
         db,
+        &harness.artifact_store,
         spec,
         rc_id,
         TrainingDatasetStatus::Ready,
@@ -894,7 +991,7 @@ async fn assert_single_active_published(
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn rollback_retains_previous_and_writes_reason() {
     let (pool, _container) = setup_pg().await;
@@ -955,7 +1052,7 @@ async fn rollback_retains_previous_and_writes_reason() {
     assert_rollback_restored_predecessor(&db, &harness.store, &v2, &v1, "v2 regressed").await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn retire_published_version_clears_runtime_pointer_and_audits() {
     let (pool, _container) = setup_pg().await;
@@ -966,6 +1063,7 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
 
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::Ready,
@@ -1028,7 +1126,7 @@ async fn retire_published_version_clears_runtime_pointer_and_audits() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn retire_published_version_clears_dangling_category_pointer() {
     // 11.2.2 remediation R7: a category-specific pointer left dangling after
@@ -1043,6 +1141,7 @@ async fn retire_published_version_clears_dangling_category_pointer() {
 
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::Ready,
@@ -1125,15 +1224,17 @@ async fn retire_published_version_clears_dangling_category_pointer() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn uncalibrated_return_model_cannot_publish() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::Ready,
@@ -1141,7 +1242,6 @@ async fn uncalibrated_return_model_cannot_publish() {
         '1',
     )
     .await;
-    let harness = harness(&db).await;
     let candidate = seed_version(
         &db,
         &harness.artifact_store,
@@ -1153,6 +1253,7 @@ async fn uncalibrated_return_model_cannot_publish() {
     )
     .await;
     seed_backtest(&db, &candidate, &rc_id, '1').await;
+    seed_path_set(&db, &candidate, &rc_id, '1').await;
     seed_shadow_window(&db, &candidate, &candidate, 'p').await;
 
     let result = harness
@@ -1186,7 +1287,7 @@ async fn uncalibrated_return_model_cannot_publish() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn bind_calibration_creates_candidate_version_with_calibrated_return_model() {
     let (pool, _container) = setup_pg().await;
@@ -1227,16 +1328,18 @@ async fn bind_calibration_creates_candidate_version_with_calibrated_return_model
     assert_eq!(calibrated.calibrator_ref, calibrator);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn dataset_insufficient_labels_cannot_promote_ready() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
     // Terminal InsufficientLabels dataset (even with healthy coverage on paper).
     let dataset = seed_dataset(
         &db,
+        &harness.artifact_store,
         &spec,
         &rc_id,
         TrainingDatasetStatus::InsufficientLabels,
@@ -1245,8 +1348,7 @@ async fn dataset_insufficient_labels_cannot_promote_ready() {
     )
     .await;
 
-    let result = harness(&db)
-        .await
+    let result = harness
         .service
         .promote_dataset_ready(
             PromoteDatasetRequest {
@@ -1260,4 +1362,150 @@ async fn dataset_insufficient_labels_cannot_promote_ready() {
         result.is_err(),
         "an InsufficientLabels dataset can never be promoted to Ready"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn publish_rescans_leakage_not_default_findings() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let dataset_id = seed_leaking_dataset(&db, &harness.artifact_store, &spec, &rc_id).await;
+    let calibrator = seed_model_score_calibrator(&db).await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'L',
+        1,
+        Some(dataset_id),
+        Some(calibrator),
+    )
+    .await;
+    seed_backtest(&db, &candidate, &rc_id, '1').await;
+    seed_path_set(&db, &candidate, &rc_id, '1').await;
+    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+
+    let result = harness
+        .service
+        .publish(
+            PublishModelCommand {
+                model_version_id: candidate.clone(),
+                reason: "leakage rescan".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "publish must fail when rescan finds PIT leakage"
+    );
+
+    let row = PgModelRegistryRepository::new(db.clone())
+        .find_model_version_by_id(&candidate)
+        .await
+        .expect("find")
+        .expect("row");
+    let gate = &row.quality_gate_report;
+    let hard = gate
+        .get("hard_failures")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        hard.iter().any(|failure| {
+            failure.get("gate").and_then(|g| g.as_str()) == Some("no_pit_leakage")
+        }),
+        "gate report must record NoPitLeakage from rescan, got: {gate}"
+    );
+}
+
+/// One training example whose feature evidence is observed after `as_of`.
+fn leaking_training_example() -> TrainingExample {
+    use chrono::TimeZone;
+    use quant_pivot_models::{
+        enums::quant::DataQualityStatus,
+        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
+    };
+    use quant_pivot_research::features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector};
+    use quant_pivot_research::training::{LabelName, TrainingExample, TrainingLabel};
+    use std::collections::BTreeMap;
+
+    let as_of = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    TrainingExample {
+        example_id: TrainingExampleId::from_v7(),
+        market_id: MarketId::new("0xleak"),
+        token_id: TokenId::new("yes"),
+        as_of,
+        sample_source: TrainingSampleSource::HistoricalPit,
+        feature_vector: FeatureVector {
+            market_id: MarketId::new("0xleak"),
+            token_id: Some(TokenId::new("yes")),
+            as_of,
+            generic_schema_version: SchemaVersion::FIRST,
+            generic: BTreeMap::new(),
+            domain: None,
+            substitutions: Vec::new(),
+            data_quality: DataQualityStatus::Fresh,
+            staleness_ms: 0,
+            source_refs: Vec::new(),
+        },
+        factor_values: Vec::new(),
+        labels: vec![TrainingLabel {
+            label_name: LabelName::new("settlement_outcome"),
+            horizon_secs: 0,
+            value: dec!(1),
+            is_resolved: true,
+            matured_at: as_of,
+        }],
+        source_refs: vec![EvidenceSourceRef {
+            source_kind: EvidenceSourceKind::Derived,
+            reference: "future-leak".to_owned(),
+            observed_at: as_of + ChronoDuration::seconds(60),
+        }],
+        lot_context: None,
+        position_state: None,
+        book_fidelity: None,
+    }
+}
+
+/// Persist a Ready dataset whose Parquet fails publish-time PIT leakage rescan.
+async fn seed_leaking_dataset(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    spec: &ModelSpecId,
+    rc_id: &RuntimeConfigVersionId,
+) -> TrainingDatasetId {
+    let bytes = DatasetParquetCodec::encode(&[leaking_training_example()]).expect("encode");
+    let dataset_id = TrainingDatasetId::from_v7();
+    let hex = dataset_id.as_uuid().simple().to_string();
+    let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
+    let parquet_uri = artifact_store.put(key, &bytes).await.expect("store");
+    let window_start = Utc::now() - ChronoDuration::hours(2);
+    PgTrainingDatasetRepository::new(db.clone())
+        .create(NewTrainingDataset {
+            training_dataset_id: dataset_id.clone(),
+            model_spec_id: spec.clone(),
+            window_start,
+            window_end: window_start + ChronoDuration::hours(1),
+            status: TrainingDatasetStatus::Ready,
+            purpose: quant_pivot_models::enums::quant::DatasetPurpose::Training,
+            feature_schema_hash: content_hash(u32::from('f')),
+            factor_schema_hash: content_hash(u32::from('g')),
+            label_schema_hash: content_hash(u32::from('l')),
+            dataset_hash: content_hash(u32::from('z')),
+            parquet_uri,
+            sample_count: 1,
+            source_delay_secs: 0,
+            sample_interval_secs: 3_600,
+            horizons_secs: TrainingHorizonsSecs(vec![0]),
+            coverage_json: healthy_coverage(),
+            runtime_config_version_id: rc_id.clone(),
+        })
+        .await
+        .expect("dataset");
+    dataset_id
 }

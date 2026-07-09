@@ -5,11 +5,12 @@ use crate::{
     app::{
         ports::{
             account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
-            execution_read::CoreExecutionReadPort, execution_recovery::CoreExecutionRecoveryPort,
-            market_data::CoreMarketData, metrics_scrape::CoreMetricsScrape,
-            model_training::CoreModelTrainingPort, quant_report::CoreQuantReportPort,
-            reconciliation::CoreReconciliationPort, research_catalog::CoreResearchCatalogPort,
-            structural_monitor::CoreStructuralMonitor, training_dataset::CoreTrainingDatasetPort,
+            cpcv_backtest::CoreCpcvBacktestPort, execution_read::CoreExecutionReadPort,
+            execution_recovery::CoreExecutionRecoveryPort, market_data::CoreMarketData,
+            metrics_scrape::CoreMetricsScrape, model_training::CoreModelTrainingPort,
+            quant_report::CoreQuantReportPort, reconciliation::CoreReconciliationPort,
+            research_catalog::CoreResearchCatalogPort, structural_monitor::CoreStructuralMonitor,
+            training_dataset::CoreTrainingDatasetPort,
         },
         task_id::TaskId,
         task_registry::AppRunner,
@@ -141,6 +142,7 @@ async fn build_app_state(
         training_datasets: research_ports.training_datasets,
         model_training: research_ports.model_training,
         backtests: research_ports.backtests,
+        cpcv_backtests: research_ports.cpcv_backtests,
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
         model_spec: Arc::clone(&ctx.research.model_spec),
@@ -279,6 +281,7 @@ struct ResearchWebPorts {
     training_datasets: Arc<CoreTrainingDatasetPort>,
     model_training: Arc<CoreModelTrainingPort>,
     backtests: Arc<CoreBacktestPort>,
+    cpcv_backtests: Arc<CoreCpcvBacktestPort>,
     model_calibration_fit: Arc<ModelCalibrationFitService>,
 }
 
@@ -289,6 +292,11 @@ fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
     let bias_table =
         Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>;
     let backtests = Arc::new(CoreBacktestPort::from_research(
+        &ctx.research,
+        Arc::clone(&runtime_config),
+        Arc::clone(&bias_table),
+    ));
+    let cpcv_backtests = Arc::new(CoreCpcvBacktestPort::from_research(
         &ctx.research,
         Arc::clone(&runtime_config),
         Arc::clone(&bias_table),
@@ -315,6 +323,7 @@ fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
             Arc::clone(&bias_table),
         )),
         backtests,
+        cpcv_backtests,
         model_calibration_fit,
     }
 }

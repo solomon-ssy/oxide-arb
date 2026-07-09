@@ -6,13 +6,14 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort, CoreEvent,
-        CoreEventPublisher, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-        ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort, MarketDataPort,
-        MarketLinkageGovernancePort, MaterializationRunEvent, MaterializationRunKind,
-        MaterializationRunStatus, MetricsScrapePort, ModelCalibrationFitPort, ModelGovernancePort,
-        ModelSpecPort, ModelTrainingPort, OrderIntentPort, QuantReportPort, ReadinessPort,
-        ReconciliationPort, ResearchCatalogPort, ResearchJobPort, RuntimeConfigPort,
-        RuntimeControlPort, StructuralMonitorPort, TrainingDatasetPort,
+        CoreEventPublisher, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
+        ExecutionRecoveryPort, ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort,
+        MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
+        MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
+        ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
+        OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
+        ResearchJobPort, RuntimeConfigPort, RuntimeControlPort, StructuralMonitorPort,
+        TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -67,6 +68,8 @@ pub struct AppState {
     pub model_training: Arc<dyn ModelTrainingPort>,
     /// Offline PIT backtests (Phase 3.6 Admin API).
     pub backtests: Arc<dyn BacktestPort>,
+    /// CPCV + governed trial-grid validation (Phase 11.5 Admin API).
+    pub cpcv_backtests: Arc<dyn CpcvBacktestPort>,
     /// Model publish / rollback governance (Phase 3.7 Admin API).
     pub model_governance: Arc<dyn ModelGovernancePort>,
     /// Factor-definition publish / retire governance (Phase 05.7 Admin API).

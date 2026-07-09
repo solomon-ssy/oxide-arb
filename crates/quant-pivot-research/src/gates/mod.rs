@@ -9,9 +9,9 @@
 pub mod model_quality;
 
 pub use model_quality::{
-    DefaultModelQualityGate, GateClass, GateId, GateIntent, GateOutcome, GateStatus, GateSubject,
-    QualityGateFailure, QualityGateInput, QualityGateReport, QualityGateThresholds,
-    SellQualityGateThresholds,
+    CpcvPathSetGateInput, DefaultModelQualityGate, GateClass, GateId, GateIntent, GateOutcome,
+    GateStatus, GateSubject, QualityGateFailure, QualityGateInput, QualityGateReport,
+    QualityGateThresholds, SellQualityGateThresholds, ValidationGateThresholds,
 };
 
 use quant_pivot_error::QuantResult;

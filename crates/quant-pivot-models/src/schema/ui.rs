@@ -489,6 +489,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         model_fields(),
         quality_gate_fields(),
         research_training_fields(),
+        research_validation_fields(),
         training_fields(),
         report_fields(),
         portfolio_fields(),
@@ -1325,13 +1326,6 @@ fn quality_gate_fields() -> Vec<FieldUiEntry> {
             "Minimum stability of the shadow-vs-active pick overlap ([0, 1]) required before publish. Guards against promoting a model whose selections are erratic relative to the incumbent.",
             "发布前所需的『影子与活动模型选择重叠』最低稳定性（[0,1]）。防止晋升选择相对现役模型不稳定的模型。",
         ),
-        decimal(
-            "quality_gate.min_rank_ic",
-            "Minimum rank IC (soft)",
-            "最低排序 IC（软）",
-            "Soft floor on rank information coefficient (a correlation in [-1, 1]); at or below it raises a soft warning rather than a hard block. Higher demands stronger predictive ranking.",
-            "排序信息系数的软下限（相关系数，[-1,1]）；达到或低于时给出软告警而非硬阻断。调高要求更强的预测排序能力。",
-        ),
         ratio(
             "quality_gate.max_category_concentration",
             "Maximum category concentration (soft)",
@@ -1459,6 +1453,144 @@ fn research_training_fields() -> Vec<FieldUiEntry> {
             "伪组合 TopN",
             "How many top-scored tokens enter the score-derived pseudo portfolio used by tail and turnover penalties. Optimization proxy only; authoritative capital/LP checks remain in backtest/report.",
             "进入尾部/换手惩罚所用 score 伪组合的最高分 token 数量。仅优化代理；权威资金/LP 检查仍在回测/报告路径。",
+        )
+        .col_span(12),
+    ]
+}
+
+fn research_validation_fields() -> Vec<FieldUiEntry> {
+    let mut fields = research_validation_purge_cpcv_fields();
+    fields.extend(research_validation_trials_fields());
+    fields.extend(research_validation_pbo_gate_fields());
+    fields
+}
+
+fn research_validation_purge_cpcv_fields() -> Vec<FieldUiEntry> {
+    vec![
+        ratio(
+            "research.validation.purge.embargo_pct",
+            "CPCV embargo fraction",
+            "CPCV 禁运比例",
+            "Post-test embargo window as a fraction of the full timeline span ([0, 1]). Groups in this window are excluded from training after each test fold. Label-horizon purge is always on (not configurable).",
+            "禁运窗口占完整时间线跨度的比例（[0,1]）。每个测试折之后该窗口内的分组从训练中剔除。标签 horizon purge 恒开启（不可配置）。",
+        )
+        .col_span(12),
+        integer(
+            "research.validation.cpcv.n_groups",
+            "CPCV partition count (N)",
+            "CPCV 分区数 (N)",
+            "Number of contiguous timeline partitions for Combinatorial Purged Cross-Validation (4..=32). Together with k_test determines φ reconstructed paths.",
+            "组合 Purged 交叉验证的连续时间分区数（4..=32）。与 k_test 共同决定 φ 重构路径数。",
+        )
+        .col_span(12),
+        integer(
+            "research.validation.cpcv.k_test",
+            "CPCV test folds (k)",
+            "CPCV 测试折数 (k)",
+            "Number of partitions held out as the test set per combination (1..=n_groups).",
+            "每个组合的测试集分区数（1..=n_groups）。",
+        )
+        .col_span(12),
+    ]
+}
+
+fn research_validation_trials_fields() -> Vec<FieldUiEntry> {
+    vec![
+        f(
+            "research.validation.trials.lambda_multipliers",
+            "Trial lambda multipliers",
+            "Trial λ 乘子",
+            "Multipliers applied to the base training lambdas when expanding the governed trial grid for DSR/PBO.",
+            "展开受治理 trial 网格时应用于基础训练 λ 的乘子（DSR/PBO 多重检验校正）。",
+        )
+        .widget(FieldWidget::StringList)
+        .col_span(12),
+        f(
+            "research.validation.trials.rank_loss_kinds",
+            "Trial rank-loss variants",
+            "Trial 排序损失变体",
+            "Rank-loss kinds crossed with each lambda multiplier in the trial grid.",
+            "trial 网格中与每个 λ 乘子交叉的排序损失变体。",
+        )
+        .widget(FieldWidget::EnumSet)
+        .col_span(12),
+        f(
+            "research.validation.trials.forest_n_trees_multipliers",
+            "Classical forest n_trees multipliers",
+            "Classical 森林树数乘子",
+            "Multipliers applied to ForestParams.n_trees when expanding the classical trial grid.",
+            "展开 classical trial 网格时应用于 ForestParams.n_trees 的乘子。",
+        )
+        .widget(FieldWidget::StringList)
+        .col_span(12),
+        f(
+            "research.validation.trials.linear_alpha_multipliers",
+            "Classical linear alpha multipliers",
+            "Classical 线性 α 乘子",
+            "Multipliers applied to LinearParams.alpha when expanding the classical trial grid.",
+            "展开 classical trial 网格时应用于 LinearParams.alpha 的乘子。",
+        )
+        .widget(FieldWidget::StringList)
+        .col_span(12),
+        integer(
+            "research.validation.trials.max_trials",
+            "Trial grid cap",
+            "Trial 网格上限",
+            "Hard cap on governed hyperparameter trials expanded for DSR/PBO multiple-testing correction.",
+            "DSR/PBO 多重检验校正所展开的超参 trial 硬上限。",
+        )
+        .col_span(12),
+    ]
+}
+
+fn research_validation_pbo_gate_fields() -> Vec<FieldUiEntry> {
+    vec![
+        integer(
+            "research.validation.pbo.block_count",
+            "PBO CSCV block count",
+            "PBO CSCV 块数",
+            "Number of equal-length time blocks for Combinatorially Symmetric Cross-Validation (must be even, default 16).",
+            "组合对称交叉验证的等长时间块数（必须为偶数，默认 16）。",
+        )
+        .col_span(12),
+        decimal(
+            "research.validation.gates.rank_ic_min",
+            "Minimum CPCV median rank IC",
+            "CPCV 中位 rank IC 下限",
+            "Hard floor on the CPCV path-set median rank IC (replaces the deleted single-path soft threshold).",
+            "CPCV 路径集中位 rank IC 的硬下限（取代已删除的单路径软阈值）。",
+        )
+        .col_span(12),
+        ratio(
+            "research.validation.gates.dsr_significance",
+            "DSR significance (α)",
+            "DSR 显著性 (α)",
+            "Target significance level: deflated_sharpe must clear 1 − α (hard gate).",
+            "目标显著性水平：deflated Sharpe 必须超过 1 − α（硬门禁）。",
+        )
+        .col_span(12),
+        ratio(
+            "research.validation.gates.max_pbo",
+            "Maximum PBO",
+            "PBO 上限",
+            "Maximum tolerated Probability of Backtest Overfitting ([0, 1], hard gate).",
+            "可容忍的回测过拟合概率上限（[0,1]，硬门禁）。",
+        )
+        .col_span(12),
+        ratio(
+            "research.validation.gates.max_turnover",
+            "Maximum turnover",
+            "换手上限",
+            "Maximum tolerated single-path turnover (hard gate; risk/execution realism).",
+            "可容忍的单路径换手上限（硬门禁；风险/执行现实性）。",
+        )
+        .col_span(12),
+        decimal(
+            "research.validation.gates.min_tail_loss_bps",
+            "Minimum tail loss (bps)",
+            "尾部损失下限 (bps)",
+            "Minimum tolerated single-path tail loss in bps (hard gate; tail_loss is typically negative, so this is a floor).",
+            "可容忍的单路径尾部损失下限（bps，硬门禁；tail_loss 通常为负，因此这是下限）。",
         )
         .col_span(12),
     ]
@@ -2566,28 +2698,58 @@ fn research_section() -> SchemaNode {
                 "研究平面的受治理训练目标与验证策略。",
             ),
         ),
-        vec![subsection(
-            section_spec(
-                "research.training",
-                10,
-                "lucide:chart-no-axes-combined",
-                ls("Learning-to-rank objective", "Learning-to-rank 目标"),
-                ls(
-                    "Cross-sectional LTR loss, lower-tail penalty, turnover penalty, and L2 regularization frozen into trained weighted-model artifacts.",
-                    "冻结进加权模型训练产物的横截面 LTR 损失、尾部惩罚、换手惩罚与 L2 正则。",
+        vec![
+            subsection(
+                section_spec(
+                    "research.training",
+                    10,
+                    "lucide:chart-no-axes-combined",
+                    ls("Learning-to-rank objective", "Learning-to-rank 目标"),
+                    ls(
+                        "Cross-sectional LTR loss, lower-tail penalty, turnover penalty, and L2 regularization frozen into trained weighted-model artifacts.",
+                        "冻结进加权模型训练产物的横截面 LTR 损失、尾部惩罚、换手惩罚与 L2 正则。",
+                    ),
                 ),
+                fields_in_order(&[
+                    "research.training.rank_loss",
+                    "research.training.optimizer",
+                    "research.training.lambda_tail",
+                    "research.training.tail_fraction",
+                    "research.training.lambda_turnover",
+                    "research.training.lambda_l2",
+                    "research.training.ndcg_k",
+                    "research.training.pseudo_top_n",
+                ]),
             ),
-            fields_in_order(&[
-                "research.training.rank_loss",
-                "research.training.optimizer",
-                "research.training.lambda_tail",
-                "research.training.tail_fraction",
-                "research.training.lambda_turnover",
-                "research.training.lambda_l2",
-                "research.training.ndcg_k",
-                "research.training.pseudo_top_n",
-            ]),
-        )],
+            subsection(
+                section_spec(
+                    "research.validation",
+                    20,
+                    "lucide:shield-check",
+                    ls("Leakage-aware validation", "泄漏感知验证"),
+                    ls(
+                        "CPCV purge/embargo, trial grid, DSR/PBO overfitting control, and alpha-significance publish gates.",
+                        "CPCV purge/embargo、trial 网格、DSR/PBO 过拟合控制与 alpha 显著性发布门禁。",
+                    ),
+                ),
+                fields_in_order(&[
+                    "research.validation.purge.embargo_pct",
+                    "research.validation.cpcv.n_groups",
+                    "research.validation.cpcv.k_test",
+                    "research.validation.trials.lambda_multipliers",
+                    "research.validation.trials.rank_loss_kinds",
+                    "research.validation.trials.forest_n_trees_multipliers",
+                    "research.validation.trials.linear_alpha_multipliers",
+                    "research.validation.trials.max_trials",
+                    "research.validation.pbo.block_count",
+                    "research.validation.gates.rank_ic_min",
+                    "research.validation.gates.dsr_significance",
+                    "research.validation.gates.max_pbo",
+                    "research.validation.gates.max_turnover",
+                    "research.validation.gates.min_tail_loss_bps",
+                ]),
+            ),
+        ],
     )
 }
 
@@ -2644,7 +2806,6 @@ fn quality_gate_section() -> SchemaNode {
         "quality_gate.max_drawdown",
         "quality_gate.min_liquidity_exit_feasibility",
         "quality_gate.min_shadow_overlap_stability",
-        "quality_gate.min_rank_ic",
         "quality_gate.max_category_concentration",
         "quality_gate.required_shadow_window_secs",
     ]);

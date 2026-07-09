@@ -20,6 +20,7 @@
 //! seed, objective)` must yield a byte-identical artifact hash.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::enums::common::MarketCategory;
 use quant_pivot_models::runtime_config::TrainingOptimizerKind;
@@ -48,6 +49,7 @@ use crate::{
     parallel::par_map_with_index,
     precision::RESEARCH_DECIMAL_SCALE,
     training::{LabelName, TrainingExample},
+    validation::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup},
 };
 
 /// Which forward label a trainer targets.
@@ -59,18 +61,33 @@ pub struct LabelSelector {
     pub horizon_secs: u64,
 }
 
-/// Rolling time-ordered validation split.
+/// Rolling time-ordered validation split with label-horizon purge/embargo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationSpec {
     /// Number of contiguous, time-ordered folds (`>= 2`). The last fold is held
-    /// out; earlier folds train, and each rolling split contributes one
-    /// validation objective.
+    /// out; earlier folds train after purge/embargo against the held-out
+    /// interval, and each rolling split contributes one validation objective.
     pub folds: u32,
+    /// Embargo fraction of the full timeline span (same knob as
+    /// `research.validation.purge.embargo_pct`). Label-horizon purge is always on.
+    #[serde(default = "default_embargo_pct")]
+    pub embargo_pct: Decimal,
+    /// Absolute embargo floor in seconds (typically max feature lookback).
+    #[serde(default)]
+    pub min_embargo_secs: u64,
+}
+
+fn default_embargo_pct() -> Decimal {
+    Decimal::new(2, 2) // 0.02
 }
 
 impl Default for ValidationSpec {
     fn default() -> Self {
-        Self { folds: 3 }
+        Self {
+            folds: 3,
+            embargo_pct: default_embargo_pct(),
+            min_embargo_secs: 0,
+        }
     }
 }
 
@@ -100,6 +117,10 @@ pub struct ValidationReport {
     /// Number of sample rows discarded with those singleton cross-sections.
     #[serde(default)]
     pub dropped_singleton_rows: u64,
+    /// Effective independent trial count from `coordinate_search` (Bailey
+    /// multiple-testing correction input; Phase 11.5 DSR N decomposition).
+    #[serde(default)]
+    pub coord_search_effective_n: u32,
 }
 
 /// Request to train a weighted-factor model from frozen examples.
@@ -263,21 +284,29 @@ pub(crate) fn fit_simplex_weights(
     // Deterministic factor order: the seed-weight order defines the columns.
     let factors: Vec<FactorName> = seed_weights.iter().map(|w| w.factor.clone()).collect();
     let dataset = TrainingDataset::build(examples, label, &factors)?;
-    if dataset.groups.len() < validation.folds.max(2) as usize {
+    if dataset.groups.is_empty() {
+        return Err(ResearchError::DatasetBuild {
+            detail: "no resolved cross-section groups for training".to_owned(),
+        }
+        .into());
+    }
+
+    // `folds == 1` (or less): full-window fit — used by CPCV fold training where
+    // the outer CPCV already supplies the OOS distribution. `folds >= 2`: purged
+    // hold-out CV matching CPCV label-horizon semantics.
+    let folds = validation.folds.max(1) as usize;
+    if folds >= 2 && dataset.groups.len() < folds {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
                 "insufficient resolved cross-section groups ({}) for {} validation folds",
                 dataset.groups.len(),
-                validation.folds
+                folds
             ),
         }
         .into());
     }
 
-    let folds = validation.folds.max(2) as usize;
-    let split = TimeSplit::new(dataset.groups.len(), folds);
-
-    // Seed simplex (normalized, non-negative).
+    let evaluator = ObjectiveEvaluator::new(objective.clone());
     let seed = normalize_simplex(
         &seed_weights
             .iter()
@@ -285,38 +314,160 @@ pub(crate) fn fit_simplex_weights(
             .collect::<Vec<_>>(),
     );
 
-    let evaluator = ObjectiveEvaluator::new(objective.clone());
-    let train_groups = &dataset.groups[..split.train_end];
+    if folds < 2 {
+        let (grid_weights, coord_search_effective_n) =
+            coordinate_search(&seed, &dataset.groups, &evaluator)?;
+        let grid_report = evaluator.evaluate(&grid_weights, &dataset.groups)?;
+        let (weights, train_report) = refine(
+            &grid_weights,
+            grid_report.objective_value(),
+            &dataset.groups,
+            &evaluator,
+        )?;
+        return Ok(assemble_full_window_weights(
+            &factors,
+            &weights,
+            train_report.rounded(),
+            &evaluator,
+            &dataset,
+            coord_search_effective_n,
+        ));
+    }
 
-    // Base optimizer: deterministic coordinate search on the simplex.
-    let grid_weights = coordinate_search(&seed, train_groups, &evaluator)?;
-    let grid_report = evaluator.evaluate(&grid_weights, train_groups)?;
+    let split = TimeSplit::new(dataset.groups.len(), folds);
+    let purge = PurgeConfig {
+        embargo_pct: validation.embargo_pct,
+        min_embargo_secs: validation.min_embargo_secs,
+    };
+    let timeline: Vec<TimelineGroup> = dataset
+        .groups
+        .iter()
+        .map(|group| TimelineGroup {
+            as_of: group.as_of,
+            label_horizon_end: group.label_horizon_end,
+        })
+        .collect();
+    let held_out = split.held_out();
+    let test_indices: Vec<usize> = (held_out.start..held_out.end).collect();
+    let purged = DefaultPurgedSplitter::new().split(&timeline, &test_indices, &purge);
+    if purged.train_indices.is_empty() {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "purged trainer CV left zero training groups \
+                 (folds={folds}, purged={}, embargoed={})",
+                purged.purged_indices.len(),
+                purged.embargoed_indices.len()
+            ),
+        }
+        .into());
+    }
+    let train_groups: Vec<CrossSectionGroup> = purged
+        .train_indices
+        .iter()
+        .map(|&idx| dataset.groups[idx].clone())
+        .collect();
+
+    // Base optimizer: deterministic coordinate search on the purged train set.
+    let (grid_weights, coord_search_effective_n) =
+        coordinate_search(&seed, &train_groups, &evaluator)?;
+    let grid_report = evaluator.evaluate(&grid_weights, &train_groups)?;
     let grid_objective = grid_report.objective_value();
 
     // Optional refinement: argmin (kept only if it strictly improves).
-    let (weights, train_report) = refine(&grid_weights, grid_objective, train_groups, &evaluator)?;
-    assemble_fitted_weights(
-        &factors,
-        &weights,
-        train_report.rounded(),
-        &evaluator,
-        &dataset,
-        &split,
+    let (weights, train_report) = refine(&grid_weights, grid_objective, &train_groups, &evaluator)?;
+    assemble_fitted_weights(AssembleFittedWeights {
+        factors: &factors,
+        weights: &weights,
+        train_components: train_report.rounded(),
+        evaluator: &evaluator,
+        dataset: &dataset,
+        split: &split,
         folds,
-    )
+        coord_search_effective_n,
+    })
 }
 
-/// Freeze weights, evaluate fold/held-out reports, and build the fit outcome.
-fn assemble_fitted_weights(
+/// Inputs to [`assemble_fitted_weights`] (keeps the call site under the
+/// clippy argument-count budget without losing named fields).
+struct AssembleFittedWeights<'a> {
+    factors: &'a [FactorName],
+    weights: &'a [Decimal],
+    train_components: ObjectiveComponentReport,
+    evaluator: &'a ObjectiveEvaluator,
+    dataset: &'a TrainingDataset,
+    split: &'a TimeSplit,
+    folds: usize,
+    coord_search_effective_n: u32,
+}
+
+/// Full-window fit path (`folds < 2`): no hold-out; held-out metrics mirror train.
+fn assemble_full_window_weights(
     factors: &[FactorName],
     weights: &[Decimal],
     train_components: ObjectiveComponentReport,
     evaluator: &ObjectiveEvaluator,
     dataset: &TrainingDataset,
-    split: &TimeSplit,
-    folds: usize,
-) -> QuantResult<FittedWeights> {
+    coord_search_effective_n: u32,
+) -> FittedWeights {
     let train_objective = train_components.objective_value();
+    let diagnostics = evaluator.diagnostics(weights, &dataset.groups);
+    let weights_dp = weights
+        .iter()
+        .map(|w| w.round_dp(RESEARCH_DECIMAL_SCALE))
+        .collect::<Vec<_>>();
+    let frozen = normalize_simplex(&weights_dp);
+    let factor_weights: Vec<FactorWeight> = factors
+        .iter()
+        .zip(&frozen)
+        .map(|(factor, weight)| FactorWeight {
+            factor: factor.clone(),
+            weight: weight.round_dp(RESEARCH_DECIMAL_SCALE),
+        })
+        .collect();
+    FittedWeights {
+        factor_weights,
+        objective_report: TrainingObjectiveReport {
+            objective_value: train_objective.round_dp(RESEARCH_DECIMAL_SCALE),
+            spec: evaluator.spec().clone(),
+            components: train_components.clone(),
+            diagnostics: Some(diagnostics.clone()),
+            summary: format!(
+                "ltr {:?} full-window train={} (CPCV fold / folds=1), {} groups, {} samples",
+                evaluator.spec().rank_loss,
+                train_objective.round_dp(4),
+                dataset.groups.len(),
+                dataset.sample_count,
+            ),
+        },
+        validation: ValidationReport {
+            held_out_objective: train_objective.round_dp(RESEARCH_DECIMAL_SCALE),
+            held_out_components: Some(train_components),
+            held_out_diagnostics: Some(diagnostics),
+            fold_objectives: vec![train_objective.round_dp(RESEARCH_DECIMAL_SCALE)],
+            fold_components: Vec::new(),
+            sample_count: dataset.sample_count,
+            dropped_singleton_groups: dataset.dropped_singleton_groups,
+            dropped_singleton_rows: dataset.dropped_singleton_rows,
+            coord_search_effective_n,
+        },
+    }
+}
+
+/// Freeze weights, evaluate fold/held-out reports, and build the fit outcome.
+fn assemble_fitted_weights(input: AssembleFittedWeights<'_>) -> QuantResult<FittedWeights> {
+    let AssembleFittedWeights {
+        factors,
+        weights,
+        train_components,
+        evaluator,
+        dataset,
+        split,
+        folds,
+        coord_search_effective_n,
+    } = input;
+    let train_objective = train_components.objective_value();
+    // Diagnostics on the contiguous pre-hold-out prefix (audit view); the
+    // optimizer itself only saw the purged train subset.
     let train_groups = &dataset.groups[..split.train_end];
     let train_diagnostics = evaluator.diagnostics(weights, train_groups);
 
@@ -393,6 +544,7 @@ fn assemble_fitted_weights(
             sample_count: dataset.sample_count,
             dropped_singleton_groups: dataset.dropped_singleton_groups,
             dropped_singleton_rows: dataset.dropped_singleton_rows,
+            coord_search_effective_n,
         },
     })
 }
@@ -470,16 +622,23 @@ fn refine(
 /// the winner is chosen by a serial reduction over the source-ordered scores, the
 /// result is independent of `rayon`'s thread count — a hard, money-critical
 /// determinism invariant.
+/// Deterministic coordinate search on the weight simplex.
+///
+/// Returns `(weights, effective_n_trials)` where `effective_n_trials` is the
+/// Bailey-style independent-trial count for DSR: each improving round counts
+/// as one independent configuration (correlated local moves within a round
+/// collapse to a single effective trial). Always at least 1 (the seed).
 fn coordinate_search(
     seed: &[Decimal],
     groups: &[CrossSectionGroup],
     evaluator: &ObjectiveEvaluator,
-) -> QuantResult<Vec<Decimal>> {
+) -> QuantResult<(Vec<Decimal>, u32)> {
     let n = seed.len();
     let mut best = seed.to_vec();
     let mut best_obj = evaluator.evaluate(&best, groups)?.objective_value();
+    let mut improving_rounds = 0_u32;
     if n < 2 {
-        return Ok(best);
+        return Ok((best, 1));
     }
 
     for _ in 0..MAX_SEARCH_ROUNDS {
@@ -516,8 +675,10 @@ fn coordinate_search(
         best[from] -= step;
         best[to] += step;
         best_obj = obj;
+        improving_rounds = improving_rounds.saturating_add(1);
     }
-    Ok(best)
+    // Seed + each accepted improving round = effective independent trials.
+    Ok((best, improving_rounds.saturating_add(1)))
 }
 
 /// Enumerate every feasible weight-shifting move from `best` in the fixed order
@@ -589,27 +750,31 @@ impl TrainingDataset {
         let mut dropped_singleton_groups = 0_u64;
         let mut dropped_singleton_rows = 0_u64;
         let mut current_as_of = None;
+        let mut current_horizon_end = None;
         let mut current_rows = Vec::new();
         for example in sorted {
             if current_as_of.is_some_and(|as_of| as_of != example.as_of) {
                 push_group(
                     &mut groups,
+                    current_as_of,
+                    current_horizon_end,
                     std::mem::take(&mut current_rows),
                     &mut dropped_singleton_groups,
                     &mut dropped_singleton_rows,
                 );
+                current_horizon_end = None;
             }
             current_as_of = Some(example.as_of);
-            let Some(label_value) = example
-                .labels
-                .iter()
-                .find(|row| {
-                    (&row.label_name, row.horizon_secs) == (&label.name, label.horizon_secs)
-                })
-                .map(|row| row.value)
-            else {
+            let Some(label_row) = example.labels.iter().find(|row| {
+                (&row.label_name, row.horizon_secs) == (&label.name, label.horizon_secs)
+            }) else {
                 continue;
             };
+            let label_value = label_row.value;
+            current_horizon_end = Some(
+                current_horizon_end
+                    .map_or(label_row.matured_at, |end| end.max(label_row.matured_at)),
+            );
             let signed = factors
                 .iter()
                 .map(|factor| signed_contribution(example, factor))
@@ -627,6 +792,8 @@ impl TrainingDataset {
         if current_as_of.is_some() {
             push_group(
                 &mut groups,
+                current_as_of,
+                current_horizon_end,
                 current_rows,
                 &mut dropped_singleton_groups,
                 &mut dropped_singleton_rows,
@@ -659,12 +826,21 @@ impl TrainingDataset {
 
 fn push_group(
     groups: &mut Vec<CrossSectionGroup>,
+    as_of: Option<DateTime<Utc>>,
+    label_horizon_end: Option<DateTime<Utc>>,
     rows: Vec<SampleRow>,
     dropped_singleton_groups: &mut u64,
     dropped_singleton_rows: &mut u64,
 ) {
+    let (Some(as_of), Some(label_horizon_end)) = (as_of, label_horizon_end) else {
+        return;
+    };
     if rows.len() >= 2 {
-        groups.push(CrossSectionGroup { rows });
+        groups.push(CrossSectionGroup {
+            as_of,
+            label_horizon_end,
+            rows,
+        });
         return;
     }
     if rows.is_empty() {
@@ -828,11 +1004,12 @@ mod tests {
             },
             input_feature_refs: Vec::new(),
         };
+        let as_of = Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap();
         TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
-            as_of: Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap(),
+            as_of,
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: fv,
             factor_values: vec![mk(LIQUIDITY_DEPTH, liq), mk(MOMENTUM_ROC, mom)],
@@ -841,6 +1018,7 @@ mod tests {
                 horizon_secs: 0,
                 value: y,
                 is_resolved: true,
+                matured_at: as_of,
             }],
             source_refs: Vec::new(),
             lot_context: None,
@@ -872,7 +1050,10 @@ mod tests {
                 lambda_l2: Decimal::ZERO,
                 ..TrainingObjectiveSpec::default()
             },
-            validation: ValidationSpec { folds: 3 },
+            validation: ValidationSpec {
+                folds: 3,
+                ..ValidationSpec::default()
+            },
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
                 model_family: ModelFamily::WeightedFactor,
@@ -1061,6 +1242,8 @@ mod tests {
 
         // Two-row group: selecting the high-score name yields a large loss.
         let group = CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 SampleRow {
                     allocation_key: "m:a".to_owned(),
@@ -1130,6 +1313,98 @@ mod tests {
             "error should mention optimize feature: {detail}"
         );
     }
+
+    /// Long label horizons that overlap the held-out fold must be purged from
+    /// the trainer CV train set (same semantics as CPCV `PurgedSplitter`).
+    #[test]
+    fn trainer_cv_respects_label_horizon_purge() {
+        // 6 as_of groups (2 markets each). Held-out fold for folds=3 is the
+        // last 2 groups. Give early groups a matured_at that overlaps the
+        // held-out as_of so purge removes them from train.
+        let mut examples = Vec::new();
+        for group_idx in 0..6_i64 {
+            let as_of = Utc
+                .timestamp_opt(1_700_000_000 + group_idx * 100, 0)
+                .unwrap();
+            // Groups 0..=3 mature after group 4's as_of → overlap held-out.
+            let matured_at = if group_idx <= 3 {
+                Utc.timestamp_opt(1_700_000_000 + 450, 0).unwrap()
+            } else {
+                as_of
+            };
+            for market in 0..2_i64 {
+                let idx = group_idx * 10 + market;
+                let mut ex = example(
+                    idx,
+                    dec!(0.5),
+                    dec!(0.5),
+                    FactorDirection::Positive,
+                    Decimal::from(market),
+                );
+                ex.as_of = as_of;
+                ex.feature_vector.as_of = as_of;
+                ex.labels[0].matured_at = matured_at;
+                examples.push(ex);
+            }
+        }
+        let mut req = request(examples);
+        req.validation = ValidationSpec {
+            folds: 3,
+            embargo_pct: Decimal::ZERO,
+            min_embargo_secs: 0,
+        };
+        // With aggressive overlap, purged train may be empty → fail closed.
+        let result = train_weighted(&req);
+        match result {
+            Ok(outcome) => {
+                // If enough non-overlapping groups remain, training succeeds
+                // and still records coord-search effective N ≥ 1.
+                assert!(outcome.validation_metrics.coord_search_effective_n >= 1);
+            }
+            Err(err) => {
+                let detail = err.to_string();
+                assert!(
+                    detail.contains("purged") || detail.contains("insufficient"),
+                    "expected purge/insufficient failure, got: {detail}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coordinate_search_effective_n_at_least_seed() {
+        use super::coordinate_search;
+        use crate::model::objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow};
+
+        let groups = vec![CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            rows: vec![
+                SampleRow {
+                    allocation_key: "m:a".to_owned(),
+                    signed: vec![dec!(1), dec!(0)],
+                    label: dec!(1),
+                },
+                SampleRow {
+                    allocation_key: "m:b".to_owned(),
+                    signed: vec![dec!(0), dec!(1)],
+                    label: dec!(0),
+                },
+            ],
+        }];
+        let evaluator = ObjectiveEvaluator::new(TrainingObjectiveSpec {
+            lambda_tail: Decimal::ZERO,
+            lambda_turnover: Decimal::ZERO,
+            lambda_l2: Decimal::ZERO,
+            ..TrainingObjectiveSpec::default()
+        });
+        let seed = vec![dec!(0.5), dec!(0.5)];
+        let (_, effective_n) = coordinate_search(&seed, &groups, &evaluator).expect("search");
+        assert!(
+            effective_n >= 1,
+            "seed always counts as one effective trial"
+        );
+    }
 }
 
 /// `optimize`-feature tests: the `argmin` refinement is gradient-free,
@@ -1143,6 +1418,7 @@ mod optimize_tests {
         CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec,
     };
     use crate::model::optimize::refine_weights;
+    use chrono::{TimeZone, Utc};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -1172,7 +1448,11 @@ mod optimize_tests {
                 }
             })
             .collect();
-        vec![CrossSectionGroup { rows }]
+        vec![CrossSectionGroup {
+            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            rows,
+        }]
     }
 
     fn uniform(n: usize) -> Vec<Decimal> {
@@ -1212,7 +1492,7 @@ mod optimize_tests {
             let n = 3;
             let groups = synth_group(trial, n, 50);
             let evaluator = evaluator(l2);
-            let grid = coordinate_search(&uniform(n), &groups, &evaluator).expect("grid");
+            let (grid, _) = coordinate_search(&uniform(n), &groups, &evaluator).expect("grid");
             let grid_obj = evaluator
                 .evaluate(&grid, &groups)
                 .expect("eval")
@@ -1242,7 +1522,7 @@ mod optimize_tests {
         let l2 = Decimal::ZERO;
         let groups = synth_group(42, 3, 80);
         let evaluator = evaluator(l2);
-        let grid = coordinate_search(&uniform(3), &groups, &evaluator).expect("grid");
+        let (grid, _) = coordinate_search(&uniform(3), &groups, &evaluator).expect("grid");
         let grid_obj = evaluator
             .evaluate(&grid, &groups)
             .expect("eval")

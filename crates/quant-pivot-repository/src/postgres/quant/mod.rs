@@ -1,6 +1,7 @@
 //! Quant-pivot Postgres repository implementations.
 mod account_snapshot;
 mod attribution;
+mod backtest_path_set;
 mod backtest_report;
 mod basis_alert;
 mod calibration_artifact;
@@ -32,8 +33,8 @@ mod trade_tape_block_cursor;
 
 pub use {
     account_snapshot::PgAccountSnapshotRepository, attribution::PgAttributionRepository,
-    backtest_report::PgBacktestReportRepository, basis_alert::PgBasisAlertRepository,
-    calibration_artifact::PgCalibrationArtifactRepository,
+    backtest_path_set::PgBacktestPathSetRepository, backtest_report::PgBacktestReportRepository,
+    basis_alert::PgBasisAlertRepository, calibration_artifact::PgCalibrationArtifactRepository,
     capital_allocation::PgCapitalAllocationRepository,
     comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
     domain_source_cursor::PgDomainSourceCursorRepository,

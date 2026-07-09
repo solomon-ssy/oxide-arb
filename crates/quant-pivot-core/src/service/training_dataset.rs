@@ -1842,15 +1842,30 @@ fn attribution_labels(
     attribution: &RecommendationAttributionInfo,
     recommendation: &RecommendationInfo,
 ) -> Vec<TrainingLabel> {
+    // `label_available_at` is the authoritative Phase 11.5 `matured_at` for
+    // live-attribution labels; a live attribution row is only ever built once
+    // its outcome is known, so `created_at` (the row's own persistence time,
+    // necessarily at/after every value it carries became known) is the safe
+    // upper-bound fallback when the dedicated timestamp is absent — never an
+    // arbitrary/earlier default that would under-purge.
+    let matured_at = attribution
+        .label_available_at
+        .unwrap_or(attribution.created_at);
     let mut labels = Vec::new();
     if let Some(realized_pnl) = attribution.realized_pnl_usd {
-        push_label(&mut labels, "realized_pnl_usd", realized_pnl.inner());
+        push_label(
+            &mut labels,
+            "realized_pnl_usd",
+            realized_pnl.inner(),
+            matured_at,
+        );
         if !recommendation.sizing_plan.suggested_usd.is_zero() {
             push_label(
                 &mut labels,
                 "realized_return_bps",
                 realized_pnl.inner() / recommendation.sizing_plan.suggested_usd.inner()
                     * Decimal::from(10_000),
+                matured_at,
             );
         }
     }
@@ -1862,15 +1877,21 @@ fn attribution_labels(
         } else {
             Decimal::ZERO
         },
+        matured_at,
     );
     if let Some(slippage) = attribution.entry_outcome_json.entry_slippage_bps {
-        push_label(&mut labels, "entry_slippage_bps", slippage.inner());
+        push_label(
+            &mut labels,
+            "entry_slippage_bps",
+            slippage.inner(),
+            matured_at,
+        );
     }
     if let Some(mfe) = attribution.max_favorable_excursion_bps {
-        push_label(&mut labels, "max_favorable_excursion_bps", mfe);
+        push_label(&mut labels, "max_favorable_excursion_bps", mfe, matured_at);
     }
     if let Some(mae) = attribution.max_adverse_excursion_bps {
-        push_label(&mut labels, "max_adverse_excursion_bps", mae);
+        push_label(&mut labels, "max_adverse_excursion_bps", mae, matured_at);
     }
     push_label(
         &mut labels,
@@ -1880,21 +1901,29 @@ fn attribution_labels(
         } else {
             recommendation.expected_return_bps.inner()
         },
+        matured_at,
     );
     push_label(
         &mut labels,
         "recommendation_outcome",
         recommendation_outcome_code(attribution.outcome),
+        matured_at,
     );
     labels
 }
 
-fn push_label(labels: &mut Vec<TrainingLabel>, name: &'static str, value: Decimal) {
+fn push_label(
+    labels: &mut Vec<TrainingLabel>,
+    name: &'static str,
+    value: Decimal,
+    matured_at: DateTime<Utc>,
+) {
     labels.push(TrainingLabel {
         label_name: LabelName::from_static(name),
         horizon_secs: 0,
         value,
         is_resolved: true,
+        matured_at,
     });
 }
 

@@ -11,7 +11,8 @@ use quant_pivot_error::QuantResult;
 use crate::{
     domain::{
         BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest, Paginated,
-        ResearchJobListQuery, ResearchJobView, RunBacktestRequest, TrainModelRequest,
+        ResearchJobListQuery, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
+        TrainModelRequest,
     },
     types::{ModelVersionId, ResearchJobId, RuntimeConfigVersionId},
 };
@@ -47,6 +48,15 @@ pub trait ResearchJobPort: Send + Sync {
         &self,
         model_version_id: ModelVersionId,
         request: RunBacktestRequest,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView>;
+
+    /// Enqueue Combinatorial Purged Cross-Validation + governed trial-grid
+    /// validation (Phase 11.5).
+    async fn enqueue_cpcv_backtest(
+        &self,
+        model_version_id: ModelVersionId,
+        request: RunCpcvBacktestRequest,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 

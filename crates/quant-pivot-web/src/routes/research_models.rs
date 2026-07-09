@@ -23,18 +23,20 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        BacktestReportListQuery, BacktestReportView, ComparisonReportListQuery,
-        CreateModelSpecCommand, CreateModelSpecRequest, GovernanceActor, JobSubmitContext,
-        ModelComparisonReportView, ModelPublishedCatalogQuery, ModelSpecListQuery,
-        ModelVersionListQuery, Paginated, PublishedModelOptionView, QualityGatePreviewQuery,
-        QualityGateReportView, QuantModelSpecView, ResearchJobView, RunBacktestRequest,
-        TrainModelRequest, TrainedModelView,
+        BacktestPathSetListQuery, BacktestPathSetView, BacktestReportListQuery, BacktestReportView,
+        ComparisonReportListQuery, CreateModelSpecCommand, CreateModelSpecRequest, GovernanceActor,
+        JobSubmitContext, ModelComparisonReportView, ModelPublishedCatalogQuery,
+        ModelSpecListQuery, ModelVersionListQuery, Paginated, PublishedModelOptionView,
+        QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
+        RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
-    types::{BacktestReportId, ModelComparisonReportId, ModelSpecId, ModelVersionId},
+    types::{
+        BacktestPathSetId, BacktestReportId, ModelComparisonReportId, ModelSpecId, ModelVersionId,
+    },
 };
 
 use crate::{
@@ -127,6 +129,24 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/comparison-reports/{id}",
             Rule::ResourceOp(ResourceType::Replay, Operation::Read),
             get_comparison_report,
+        ),
+        spec(
+            Method::GET,
+            "/research/backtest-path-sets",
+            Rule::ResourceOp(ResourceType::Replay, Operation::Read),
+            list_backtest_path_sets,
+        ),
+        spec(
+            Method::GET,
+            "/research/backtest-path-sets/{id}",
+            Rule::ResourceOp(ResourceType::Replay, Operation::Read),
+            get_backtest_path_set,
+        ),
+        spec(
+            Method::POST,
+            "/research/models/{id}/cpcv-backtest",
+            Rule::ActingRoleGoverned(ResourceType::Replay, Operation::Create),
+            cpcv_backtest,
         ),
     ]
 }
@@ -409,4 +429,65 @@ pub async fn get_comparison_report(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("comparison report not found: {id}")))?;
     Ok(WebResponse::ok(ModelComparisonReportView::from(info)))
+}
+
+/// `GET /api/research/backtest-path-sets` — paginated CPCV path-set catalog.
+pub async fn list_backtest_path_sets(
+    state: web::Data<AppState>,
+    query: web::Query<BacktestPathSetListQuery>,
+) -> Result<WebResponse<Paginated<BacktestPathSetView>>, WebError> {
+    let page = state
+        .research_catalog
+        .list_backtest_path_sets(query.into_inner())
+        .await?
+        .map(BacktestPathSetView::from);
+    Ok(WebResponse::ok(page))
+}
+
+/// `GET /api/research/backtest-path-sets/{id}` — stored CPCV path set.
+pub async fn get_backtest_path_set(
+    state: web::Data<AppState>,
+    id: web::Path<BacktestPathSetId>,
+) -> Result<WebResponse<BacktestPathSetView>, WebError> {
+    let view = state
+        .cpcv_backtests
+        .find_path_set(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("backtest path set not found: {id}")))?;
+    Ok(WebResponse::ok(view))
+}
+
+/// `POST /api/research/models/{id}/cpcv-backtest` — enqueue async CPCV validation.
+pub async fn cpcv_backtest(
+    state: web::Data<AppState>,
+    id: web::Path<ModelVersionId>,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<RunCpcvBacktestRequest>,
+) -> Result<WebResponse<ResearchJobView>, WebError> {
+    let request = body.into_inner();
+    let reason = request.reason.clone();
+    let model_version_id = id.into_inner();
+    let job = state
+        .research_jobs
+        .enqueue_cpcv_backtest(
+            model_version_id,
+            request,
+            JobSubmitContext {
+                acting_role: acting_role.0.clone(),
+                requested_by: None,
+            },
+        )
+        .await?;
+    op_ctx.set_action(OperationCategory::Other, "model.cpcv_backtest");
+    op_ctx.set_resource(ResourceType::Replay, job.job_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "job_id": job.job_id.to_string(),
+        "kind": "cpcv_backtest",
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": reason,
+    }));
+    Ok(WebResponse::accepted(job))
 }

@@ -21,6 +21,7 @@ pub struct Model {
     pub sample_count: i64,
     pub missing_feature_count: i64,
     pub rank_ic: Decimal,
+    pub sharpe: Decimal,
     pub hit_rate: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub expected_vs_realized: Json,

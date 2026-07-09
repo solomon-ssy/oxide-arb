@@ -49,6 +49,7 @@ dashmap     = { workspace = true }
 parking_lot = { workspace = true }
 arc-swap    = { workspace = true }
 flume       = { workspace = true }
+rayon       = { workspace = true }
 
 # ── Resilience ─────────────────────────────────────────────────────
 backoff  = { workspace = true, features = ["tokio"] }

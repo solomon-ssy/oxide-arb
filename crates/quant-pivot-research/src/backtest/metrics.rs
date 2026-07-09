@@ -144,6 +144,26 @@ pub fn turnover(tick_weights: &[BTreeMap<String, Decimal>]) -> Decimal {
     (total / Decimal::from((tick_weights.len() - 1) as u64)).round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
+/// Sharpe ratio of a per-period return series: `mean/stddev · sqrt(periods_per_year)`.
+///
+/// `0` for fewer than two periods or a zero-variance series (never a
+/// divide-by-zero panic or an unbounded value). Pass `periods_per_year = 1`
+/// for an unannualized (raw per-period) Sharpe — callers comparing across
+/// different sampling cadences must annualize.
+#[must_use]
+pub fn sharpe_ratio(returns: &[Decimal], periods_per_year: Decimal) -> Decimal {
+    if returns.len() < 2 {
+        return Decimal::ZERO;
+    }
+    let mean = stats::mean(returns);
+    let sigma = stats::stddev(returns);
+    if sigma.is_zero() {
+        return Decimal::ZERO;
+    }
+    (mean / sigma * stats::sqrt(periods_per_year.max(Decimal::ZERO)))
+        .round_dp(RESEARCH_DECIMAL_SCALE)
+}
+
 /// Fraction of samples whose allocation respected the liquidity-usage cap.
 #[must_use]
 pub fn liquidity_feasibility(samples: &[SampleOutcome]) -> Probability {

@@ -2,6 +2,7 @@
 
 pub mod account_read;
 pub mod backtest;
+pub mod backtest_path_set;
 pub mod calibration_artifact;
 pub mod execution_read;
 pub mod execution_recovery;
@@ -21,6 +22,7 @@ pub mod training_dataset;
 
 pub use account_read::*;
 pub use backtest::*;
+pub use backtest_path_set::*;
 pub use calibration_artifact::*;
 pub use execution_read::*;
 pub use execution_recovery::*;

@@ -163,6 +163,16 @@ pub enum ResearchError {
         detail: String,
     },
 
+    /// A Phase 11.5 validation-methodology invariant was violated: an invalid
+    /// CPCV/trial-grid/CSCV configuration (e.g. an odd `block_count`, a
+    /// `k_test >= n_groups`), or a computation that cannot proceed without
+    /// silently degrading (e.g. fewer trials than the CSCV comparison needs).
+    #[error("leakage-aware validation methodology failed: {detail}")]
+    ValidationMethodology {
+        /// Context describing the violated invariant.
+        detail: String,
+    },
+
     /// Parquet (de)serialization of a dataset failed.
     #[error("parquet codec failed: {detail}")]
     ParquetCodec {

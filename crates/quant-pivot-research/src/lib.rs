@@ -52,6 +52,7 @@ pub mod portfolio;
 pub mod selection;
 pub mod trade_tape;
 pub mod training;
+pub mod validation;
 
 #[cfg(test)]
 mod acceptance_tests {

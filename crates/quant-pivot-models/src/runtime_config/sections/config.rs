@@ -795,8 +795,6 @@ pub struct QualityGateConfig {
     pub min_liquidity_exit_feasibility: DecimalString,
     /// Minimum shadow overlap stability in `[0, 1]` (publish gate).
     pub min_shadow_overlap_stability: DecimalString,
-    /// Minimum (soft) rank IC; `<=` raises a soft warning.
-    pub min_rank_ic: DecimalString,
     /// Maximum (soft) per-category sample concentration in `[0, 1]`.
     pub max_category_concentration: DecimalString,
     /// Minimum shadow comparison window (seconds) required before publish.
@@ -814,7 +812,6 @@ impl Default for QualityGateConfig {
             max_drawdown: DecimalString::new("0.30"),
             min_liquidity_exit_feasibility: DecimalString::new("0.90"),
             min_shadow_overlap_stability: DecimalString::new("0.60"),
-            min_rank_ic: DecimalString::new("0.00"),
             max_category_concentration: DecimalString::new("0.60"),
             required_shadow_window_secs: 86_400,
             sell: SellQualityGateConfig::default(),
@@ -1194,12 +1191,164 @@ impl Default for ResearchTrainingConfig {
     }
 }
 
+/// Label-horizon-aware purge + embargo (Phase 11.5 §3.1/§3.2).
+///
+/// `embargo_pct` is the **only** knob — whether to purge by label horizon is
+/// deliberately not configurable (see `quant_pivot_research::validation::purge`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchValidationPurgeConfig {
+    /// Embargo window as a fraction of the full timeline span.
+    pub embargo_pct: DecimalString,
+}
+
+impl Default for ResearchValidationPurgeConfig {
+    fn default() -> Self {
+        Self {
+            embargo_pct: DecimalString::new("0.02"),
+        }
+    }
+}
+
+/// Combinatorial Purged Cross-Validation partition config (Phase 11.5 §3.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchValidationCpcvConfig {
+    /// Number of contiguous timeline partitions (`N`).
+    pub n_groups: u32,
+    /// Number of partitions held out as the test set per combination (`k`).
+    pub k_test: u32,
+}
+
+impl Default for ResearchValidationCpcvConfig {
+    fn default() -> Self {
+        Self {
+            n_groups: 8,
+            k_test: 2,
+        }
+    }
+}
+
+/// Governed hyperparameter trial grid for the multi-testing-corrected
+/// Deflated Sharpe Ratio + CSCV/PBO (Phase 11.5 §3.5).
+///
+/// Weighted-factor and classical families share `max_trials` but expand
+/// different Cartesian dimensions — the CPCV port selects the matching
+/// grid from `model_family` at run time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchValidationTrialsConfig {
+    /// Multipliers applied to the base `lambda_tail`/`lambda_turnover`/`lambda_l2`
+    /// (`WeightedFactor` trial grid).
+    pub lambda_multipliers: Vec<DecimalString>,
+    /// Rank-loss variants to cross with each lambda multiplier (`WeightedFactor`).
+    pub rank_loss_kinds: Vec<RankLossKind>,
+    /// Multipliers applied to base `ForestParams.n_trees` (classical trial grid).
+    pub forest_n_trees_multipliers: Vec<DecimalString>,
+    /// Multipliers applied to base `LinearParams.alpha` (classical trial grid).
+    pub linear_alpha_multipliers: Vec<DecimalString>,
+    /// Hard cap on the number of trials the selected family grid may expand to.
+    pub max_trials: u32,
+}
+
+impl Default for ResearchValidationTrialsConfig {
+    fn default() -> Self {
+        Self {
+            lambda_multipliers: vec![
+                DecimalString::new("0.5"),
+                DecimalString::new("1"),
+                DecimalString::new("2"),
+            ],
+            rank_loss_kinds: vec![
+                RankLossKind::RankIcWeightedRanknet,
+                RankLossKind::PairwiseRanknet,
+            ],
+            forest_n_trees_multipliers: vec![
+                DecimalString::new("0.5"),
+                DecimalString::new("1"),
+                DecimalString::new("2"),
+            ],
+            linear_alpha_multipliers: vec![
+                DecimalString::new("0.5"),
+                DecimalString::new("1"),
+                DecimalString::new("2"),
+            ],
+            max_trials: 32,
+        }
+    }
+}
+
+/// Combinatorially Symmetric Cross-Validation block config (Phase 11.5 §3.5,
+/// Bailey/Borwein/López de Prado/Zhu 2014/2017 Algorithm 2.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchValidationPboConfig {
+    /// Number of equal-length time blocks (`S`, must be even, `>= 4`).
+    pub block_count: u32,
+}
+
+impl Default for ResearchValidationPboConfig {
+    fn default() -> Self {
+        Self { block_count: 16 }
+    }
+}
+
+/// Phase 11.5 hard/soft alpha-significance gate thresholds
+/// (`research.validation.gates.*`) — distinct from the single-path risk
+/// thresholds in `quality_gate.*` (`max_drawdown`/etc, unchanged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchValidationGatesConfig {
+    /// Minimum CPCV path-set median rank IC (hard gate; replaces the deleted
+    /// single-path `quality_gate.min_rank_ic` soft threshold).
+    pub rank_ic_min: DecimalString,
+    /// Target significance (`α`) the Deflated Sharpe Ratio must clear:
+    /// `deflated_sharpe >= 1 - dsr_significance` (hard gate).
+    pub dsr_significance: DecimalString,
+    /// Maximum tolerated Probability of Backtest Overfitting (hard gate).
+    pub max_pbo: DecimalString,
+    /// Maximum tolerated single-path turnover (hard gate; risk/execution
+    /// realism, reads the debug-view single-path `BacktestReport`, not the
+    /// CPCV path set).
+    pub max_turnover: DecimalString,
+    /// Minimum tolerated single-path tail loss, in bps (hard gate; `tail_loss`
+    /// is typically negative, so this is a **floor**, not a ceiling — named
+    /// accordingly, correcting the original design draft's ambiguous
+    /// `max_tail_loss`).
+    pub min_tail_loss_bps: DecimalString,
+}
+
+impl Default for ResearchValidationGatesConfig {
+    fn default() -> Self {
+        Self {
+            rank_ic_min: DecimalString::new("0.02"),
+            dsr_significance: DecimalString::new("0.05"),
+            max_pbo: DecimalString::new("0.5"),
+            max_turnover: DecimalString::new("0.5"),
+            min_tail_loss_bps: DecimalString::new("-500"),
+        }
+    }
+}
+
+/// Leakage-aware validation & overfitting-control methodology (Phase 11.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResearchValidationConfig {
+    pub purge: ResearchValidationPurgeConfig,
+    pub cpcv: ResearchValidationCpcvConfig,
+    pub trials: ResearchValidationTrialsConfig,
+    pub pbo: ResearchValidationPboConfig,
+    pub gates: ResearchValidationGatesConfig,
+}
+
 /// Research plane configuration (training objective + validation methodology).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResearchConfig {
     /// Governed training objective for weighted buy/sell scorers.
     pub training: ResearchTrainingConfig,
+    /// Governed leakage-aware validation & overfitting-control methodology.
+    pub validation: ResearchValidationConfig,
 }
 
 /// Research-feedback plane configuration (attribution feedback + auto-retraining).

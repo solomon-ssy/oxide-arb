@@ -2,6 +2,7 @@
 
 pub mod account_read;
 pub mod backtest;
+pub mod cpcv_backtest;
 pub mod execution_read;
 pub mod execution_recovery;
 pub mod market_data;

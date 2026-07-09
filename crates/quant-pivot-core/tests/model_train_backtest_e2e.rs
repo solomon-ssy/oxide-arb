@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 use quant_pivot_core::governance::CoreCalibrationArtifactLoader;
 use quant_pivot_core::service::{
     backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
+    cpcv_backtest::{
+        CpcvBacktestConfig, CpcvBacktestInput, CpcvBacktestService, CpcvBacktestServiceDeps,
+    },
     historical_replay::ReplayConfig,
     model_training::{
         ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
@@ -34,8 +37,8 @@ use quant_pivot_models::{
         DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
-        ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion, NewTrainingDataset,
-        NoopProgressSink,
+        ModelVersionInfo, NewBacktestPathSet, NewModelRun, NewModelSpec, NewRuntimeConfigVersion,
+        NewTrainingDataset, NoopProgressSink,
     },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
@@ -58,21 +61,23 @@ use quant_pivot_models::{
         ResearchTrainingConfig, RuntimeConfig, TrainingOptimizerKind, wire::DecimalString,
     },
     types::{
-        ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId, MarketId,
-        ModelSpecId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, SchemaVersion,
-        TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
-        Usd,
+        BacktestPathSetId, ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId,
+        MarketId, ModelRunId, ModelSpecId, ModelVersionId, Price, Probability,
+        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
+        TrainingHorizonsSecs, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgBacktestReportRepository, PgCalibrationArtifactRepository, PgEventRepository,
-        PgMarketRepository, PgModelComparisonReportRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
+        PgEventRepository, PgMarketRepository, PgModelComparisonReportRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgRuntimeConfigVersionRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
-        CalibrationArtifactRepository, EventRepository, MarketRepository, ModelRegistryRepository,
-        QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+        BacktestPathSetRepository, CalibrationArtifactRepository, EventRepository,
+        MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        RuntimeConfigVersionRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -84,6 +89,7 @@ use quant_pivot_research::{
         ModelRuntimeFactoryBuilder, TrainingObjectiveSpec,
     },
     training::{DatasetParquetCodec, LabelName, TrainingExample, TrainingLabel},
+    validation::{CpcvConfig, PboInput, PurgeConfig, TrialGridSpec, WeightedFactorTrialGrid},
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
@@ -100,7 +106,7 @@ use uuid::Uuid;
 type FeatureName2 = FeatureName;
 
 const EVENT_ID: &str = "evt-train-backtest-e2e";
-const TICKS: i64 = 3;
+const TICKS: i64 = 4;
 const MARKETS_PER_TICK: usize = 20;
 const BASE_TS: i64 = 1_700_000_000;
 const TICK_INTERVAL_SECS: i64 = 3600;
@@ -203,6 +209,7 @@ fn examples() -> Vec<TrainingExample> {
                         Decimal::ZERO
                     },
                     is_resolved: true,
+                    matured_at: as_of + ChronoDuration::seconds(1),
                 }],
                 source_refs: Vec::new(),
                 lot_context: None,
@@ -634,6 +641,10 @@ fn trainer_config() -> ModelTrainerConfig {
         // Same path as the production port: parse frozen `research.training`.
         objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)
             .expect("parse research.training"),
+        validation_purge: PurgeConfig {
+            embargo_pct: dec!(0.02),
+            min_embargo_secs: runtime.features.max_lookback_secs(),
+        },
     }
 }
 
@@ -897,4 +908,212 @@ async fn train_then_backtest_then_calibrate_e2e() {
         next >= 3,
         "calibration should have registered a calibrated child version (next={next})"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
+        std::env::temp_dir().join(format!("qp_cpcv_e2e_{}", Uuid::new_v4().simple())),
+    ));
+
+    let rc_id = seed_runtime_config(&db).await;
+    let model_spec_id = seed_model_spec(&db).await;
+    seed_catalog(&db).await;
+    let dataset_id = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
+
+    let registry: Arc<dyn ModelRegistryRepository> =
+        Arc::new(PgModelRegistryRepository::new(db.clone()));
+    let fact_read: Arc<dyn QuantFactReadRepository> = Arc::new(ControllableFactRead {
+        scenario: Arc::new(Mutex::new(fact_scenario())),
+    });
+    let market_repo: Arc<dyn MarketRepository> = Arc::new(PgMarketRepository::new(db.clone()));
+    let trainer = ModelTrainerService::new(
+        ModelTrainerServiceDeps {
+            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+            artifact_store: Arc::clone(&store),
+            model_registry_repo: Arc::clone(&registry),
+            model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
+            fact_read: Arc::clone(&fact_read),
+            market_repo: Arc::clone(&market_repo),
+            event_repo: Arc::new(PgEventRepository::new(db.clone())),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
+        },
+        trainer_config(),
+        replay_config(),
+        Duration::from_mins(1),
+    );
+
+    let outcome = trainer
+        .train(
+            TrainModelInput {
+                model_version_id: ModelVersionId::from_v7(),
+                model_spec_id: model_spec_id.clone(),
+                training_dataset_id: dataset_id.clone(),
+                runtime_config_version_id: rc_id.clone(),
+                model_family: ModelFamily::WeightedFactor,
+                label: LabelSelector {
+                    name: settlement(),
+                    horizon_secs: 0,
+                },
+                prediction_horizon_secs: 86_400,
+                validation_folds: 3,
+                selection_enabled_categories: vec![],
+                category_scope: None,
+            },
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("train");
+    let version = outcome.version;
+    let coord_n = version
+        .metrics_json
+        .pointer("/validation/coord_search_effective_n")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    assert!(
+        coord_n >= 1,
+        "trainer must persist coord_search_effective_n ≥ 1, got {coord_n}"
+    );
+
+    // Dataset has 4 as_of groups → CPCV n_groups=4; PBO needs ≥4 periods.
+    let runtime = e2e_runtime_config();
+    let cpcv = CpcvBacktestService::new(
+        CpcvBacktestServiceDeps {
+            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+            artifact_store: Arc::clone(&store),
+            fact_read: Arc::clone(&fact_read),
+            market_repo: Arc::clone(&market_repo),
+            event_repo: Arc::new(PgEventRepository::new(db.clone())),
+            linkage_repo: Arc::new(EmptyLinkageRepo),
+        },
+        CpcvBacktestConfig {
+            factors: trainer_config().factors,
+            objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)
+                .expect("objective"),
+            cpcv: CpcvConfig {
+                n_groups: 4,
+                k_test: 2,
+            },
+            purge: PurgeConfig {
+                embargo_pct: dec!(0.02),
+                min_embargo_secs: 0,
+            },
+            trials: TrialGridSpec::WeightedFactor(WeightedFactorTrialGrid {
+                lambda_multipliers: vec![Decimal::ONE, dec!(0.5)],
+                rank_loss_kinds: vec![RankLossKind::RankIcWeightedRanknet],
+                max_trials: 4,
+            }),
+            pbo: PboInput { block_count: 4 },
+            dsr_significance: dec!(0.05),
+        },
+        &portfolio(),
+        replay_config(),
+        Duration::from_mins(1),
+    );
+
+    let path_set_id = BacktestPathSetId::from_v7();
+    let cpcv_outcome = cpcv
+        .run(
+            CpcvBacktestInput {
+                training_dataset_id: dataset_id.clone(),
+                runtime_config_version_id: rc_id.clone(),
+                label: LabelSelector {
+                    name: settlement(),
+                    horizon_secs: 0,
+                },
+                model_family: ModelFamily::WeightedFactor,
+                prediction_horizon_secs: 86_400,
+                category_scope: None,
+                path_set_id: Some(path_set_id.clone()),
+                coord_search_effective_n: u32::try_from(coord_n).unwrap_or(0),
+            },
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("cpcv");
+
+    assert_eq!(
+        cpcv_outcome.trial_count,
+        cpcv_outcome
+            .trial_grid_count
+            .saturating_add(cpcv_outcome.coord_search_effective_n),
+        "DSR N must equal grid + coord-search effective N"
+    );
+    assert_eq!(
+        cpcv_outcome.coord_search_effective_n,
+        u32::try_from(coord_n).unwrap_or(0)
+    );
+    assert!(!cpcv_outcome.path_set.paths.is_empty(), "φ paths present");
+    // N=4,k=2 → φ = C(3,1) = 3 paths; C(4,2) = 6 combinations.
+    assert_eq!(cpcv_outcome.path_set.paths.len(), 3);
+    assert_eq!(cpcv_outcome.path_set.combination_count, 6);
+
+    // Persist ledger row the same way the admin port does.
+    let model_run_id = ModelRunId::from_v7();
+    PgModelRunRepository::new(db.clone())
+        .create(NewModelRun {
+            model_run_id: model_run_id.clone(),
+            run_kind: ModelRunKind::Backtest,
+            model_version_id: Some(version.model_version_id.clone()),
+            runtime_config_version_id: rc_id.clone(),
+            market_selection_id: None,
+            window_start: cpcv_outcome.window_start,
+            window_end: cpcv_outcome.window_end,
+            status: ModelRunStatus::Succeeded,
+            input_hash: content_hash('7'),
+            output_hash: Some(content_hash('8')),
+            metrics_json: serde_json::json!({}),
+            error_code: None,
+            error_message: None,
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+        })
+        .await
+        .expect("model run");
+
+    let persisted = PgBacktestPathSetRepository::new(db.clone())
+        .create(NewBacktestPathSet {
+            path_set_id: path_set_id.clone(),
+            model_version_id: version.model_version_id.clone(),
+            model_run_id,
+            training_dataset_id: dataset_id,
+            runtime_config_version_id: rc_id,
+            window_start: cpcv_outcome.window_start,
+            window_end: cpcv_outcome.window_end,
+            path_count: i64::try_from(cpcv_outcome.path_set.paths.len()).unwrap_or(0),
+            combination_count: i64::try_from(cpcv_outcome.path_set.combination_count).unwrap_or(0),
+            median_rank_ic: cpcv_outcome.path_set.median_rank_ic,
+            sharpe_distribution: serde_json::to_value(cpcv_outcome.path_set.sharpe_distribution)
+                .expect("sharpe dist"),
+            paths: serde_json::to_value(cpcv_outcome.path_set.paths).expect("paths"),
+            deflated_sharpe: cpcv_outcome.dsr.deflated_sharpe,
+            dsr_benchmark_sharpe: cpcv_outcome.dsr.benchmark_sharpe,
+            pbo: cpcv_outcome.pbo,
+            min_track_record_length_secs: cpcv_outcome
+                .min_track_record_length
+                .map(|d| d.num_seconds()),
+            trial_count: i64::from(cpcv_outcome.trial_count),
+            trial_grid_count: i64::from(cpcv_outcome.trial_grid_count),
+            coord_search_effective_n: i64::from(cpcv_outcome.coord_search_effective_n),
+        })
+        .await
+        .expect("persist path set");
+
+    assert_eq!(persisted.path_set_id, path_set_id);
+    assert_eq!(
+        persisted.trial_count,
+        persisted.trial_grid_count + persisted.coord_search_effective_n
+    );
+
+    let listed = PgBacktestPathSetRepository::new(db)
+        .list_by_model_version(&version.model_version_id)
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), 1);
 }

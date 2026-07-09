@@ -433,6 +433,9 @@ crate::pg_enum! {
         BiasTableFit => "bias_table_fit",
         /// Fit a model-score `ProbabilityCalibrator` artifact (Phase 11.3 §4).
         ModelCalibrationFit => "model_calibration_fit",
+        /// Run Combinatorial Purged Cross-Validation + the governed trial
+        /// grid over a model version (Phase 11.5 §3.3/§3.5).
+        CpcvBacktest => "cpcv_backtest",
     }
 }
 

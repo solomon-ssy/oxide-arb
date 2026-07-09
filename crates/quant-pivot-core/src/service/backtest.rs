@@ -450,6 +450,7 @@ impl BacktestService {
                 missing_feature_count: i64::try_from(report.missing_feature_count)
                     .unwrap_or(i64::MAX),
                 rank_ic: report.rank_ic,
+                sharpe: report.sharpe,
                 hit_rate: report.hit_rate,
                 expected_vs_realized: serde_json::to_value(&report.expected_vs_realized)
                     .unwrap_or_default(),
@@ -652,57 +653,21 @@ fn run_backtest_replay_blocking(
 async fn run_backtest_replay(
     inputs: BacktestReplayInputs,
 ) -> QuantResult<Option<BacktestRunResult>> {
-    let builder = ConfiguredFeatureBuilder::new(&inputs.replay.features, &inputs.replay.domain);
-    let engine = FactorEngine::new(
-        &inputs.replay.factors,
-        &inputs.replay.features,
-        &inputs.replay.domain,
-        inputs.replay.bias_table.clone(),
-    );
-
-    let total_sections = inputs.schedule.by_as_of.len() as u64;
-    let mut processed_sections: u64 = 0;
-    let mut ticks = Vec::with_capacity(inputs.schedule.by_as_of.len());
-    for (as_of, group) in &inputs.schedule.by_as_of {
-        if inputs.cancel.is_cancelled() {
-            return Ok(None);
-        }
-        processed_sections += 1;
-        inputs.sink.report(ResearchJobProgress::with_total(
-            "materialize",
-            processed_sections,
-            total_sections,
-        ));
-        let Some(cross) = materialize_cross_section(
-            &builder,
-            &engine,
-            &inputs.replay,
-            &CrossSectionRequest {
-                pit: &inputs.window.pit,
-                prefetched: &inputs.window.prefetched,
-                as_of: *as_of,
-                group,
-                source_delay: inputs.source_delay,
-                lookback: inputs.lookback,
-            },
-        )
-        .await?
-        else {
-            continue;
-        };
-        if let Some(tick) = build_tick(
-            inputs.model.as_ref(),
-            &inputs.model_run_id,
-            *as_of,
-            &cross,
-            &inputs.schedule.settlement,
-        ) {
-            ticks.push(tick);
-        }
-    }
-    if inputs.cancel.is_cancelled() {
+    let Some(ticks) = materialize_ticks(
+        &inputs.window,
+        &inputs.schedule,
+        &inputs.replay,
+        inputs.model.as_ref(),
+        &inputs.model_run_id,
+        inputs.source_delay,
+        inputs.lookback,
+        &inputs.cancel,
+        inputs.sink.as_ref(),
+    )
+    .await?
+    else {
         return Ok(None);
-    }
+    };
 
     inputs.sink.report(ResearchJobProgress::indeterminate(
         "replay",
@@ -717,6 +682,78 @@ async fn run_backtest_replay(
         })
         .await?;
     Ok(Some(result))
+}
+
+/// Recompute every `as_of` cross-section point-in-time and assemble the
+/// replay ticks (factor table + forward settlement truth + market metadata),
+/// **without** running the portfolio replay itself. Shared by the single-path
+/// [`run_backtest_replay`] and Phase 11.5's CPCV/trial-grid orchestration
+/// (`quant-pivot-core::service::cpcv_backtest`), which both need the exact
+/// same PIT-recomputed tick set but replay it differently (one full window
+/// vs. many purged/embargoed fold subsets). Returns `None` when cancelled at
+/// a cross-section boundary.
+///
+/// # Errors
+///
+/// Propagates [`materialize_cross_section`] failures.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn materialize_ticks(
+    window: &HistoricalWindow,
+    schedule: &ReplaySchedule,
+    replay: &ReplayConfig,
+    model: &dyn QuantModelRuntime,
+    model_run_id: &ModelRunId,
+    source_delay: Duration,
+    lookback: Duration,
+    cancel: &CancellationToken,
+    sink: &dyn JobProgressSink,
+) -> QuantResult<Option<Vec<BacktestTick>>> {
+    let builder = ConfiguredFeatureBuilder::new(&replay.features, &replay.domain);
+    let engine = FactorEngine::new(
+        &replay.factors,
+        &replay.features,
+        &replay.domain,
+        replay.bias_table.clone(),
+    );
+
+    let total_sections = schedule.by_as_of.len() as u64;
+    let mut processed_sections: u64 = 0;
+    let mut ticks = Vec::with_capacity(schedule.by_as_of.len());
+    for (as_of, group) in &schedule.by_as_of {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        processed_sections += 1;
+        sink.report(ResearchJobProgress::with_total(
+            "materialize",
+            processed_sections,
+            total_sections,
+        ));
+        let Some(cross) = materialize_cross_section(
+            &builder,
+            &engine,
+            replay,
+            &CrossSectionRequest {
+                pit: &window.pit,
+                prefetched: &window.prefetched,
+                as_of: *as_of,
+                group,
+                source_delay,
+                lookback,
+            },
+        )
+        .await?
+        else {
+            continue;
+        };
+        if let Some(tick) = build_tick(model, model_run_id, *as_of, &cross, &schedule.settlement) {
+            ticks.push(tick);
+        }
+    }
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    Ok(Some(ticks))
 }
 
 /// Assemble one replay tick from a recomputed cross-section + forward settlement.

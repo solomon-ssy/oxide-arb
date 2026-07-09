@@ -18,7 +18,9 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    domain::{ResearchJobInfo, RunBacktestRequest, pagination::PageRequest},
+    domain::{
+        ResearchJobInfo, RunBacktestRequest, RunCpcvBacktestRequest, pagination::PageRequest,
+    },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
         DatasetCoverage, ModelSpecId, ModelVersionId, ResearchJobError, ResearchJobId,
@@ -35,6 +37,15 @@ pub struct BacktestJobParams {
     pub model_version_id: ModelVersionId,
     #[serde(flatten)]
     pub request: RunBacktestRequest,
+}
+
+/// Frozen params for a `cpcv_backtest` job (Phase 11.5): the path model
+/// version + the CPCV/trial-grid request body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpcvBacktestJobParams {
+    pub model_version_id: ModelVersionId,
+    #[serde(flatten)]
+    pub request: RunCpcvBacktestRequest,
 }
 
 /// Outbound projection of one durable research job.

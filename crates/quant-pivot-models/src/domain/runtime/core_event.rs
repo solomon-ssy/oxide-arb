@@ -390,6 +390,8 @@ pub enum MaterializationRunKind {
     BiasTableFit,
     /// Model-score probability-calibrator fit (Phase 11.3).
     ModelCalibrationFit,
+    /// Combinatorial Purged Cross-Validation + governed trial-grid run (Phase 11.5).
+    CpcvBacktest,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -420,6 +422,7 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::Backtest => Self::Backtest,
             ResearchJobKind::BiasTableFit => Self::BiasTableFit,
             ResearchJobKind::ModelCalibrationFit => Self::ModelCalibrationFit,
+            ResearchJobKind::CpcvBacktest => Self::CpcvBacktest,
         }
     }
 }

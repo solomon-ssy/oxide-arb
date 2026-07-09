@@ -205,6 +205,16 @@ pub struct TrainingLabel {
     pub value: Decimal,
     /// Whether the outcome was fully realized (vs. censored / settlement-final).
     pub is_resolved: bool,
+    /// The instant this label's forward-looking window closes and its value
+    /// becomes knowable (Phase 11.5 `label_horizon_end`): `as_of + horizon_secs`
+    /// for horizon-dependent labels, the settlement `resolved_at` for
+    /// `settlement_outcome`, or the owning lot's `closed_at` for
+    /// `hold_vs_exit_alpha_bps`. This is the conservative upper bound
+    /// `PurgedSplitter` purges against — a training row whose `matured_at`
+    /// overlaps a test window's span leaks the test outcome into training.
+    /// Refined (not reinterpreted) by 11.7's triple-barrier first-touch time
+    /// when it lands; the field and its consumers are unaffected.
+    pub matured_at: DateTime<Utc>,
 }
 
 /// Why a mature label is not yet available.
@@ -543,7 +553,7 @@ impl From<&ExitTrainingLotRow> for LotTerminalSnapshot {
 pub(crate) mod fixtures {
     use super::{LabelName, TrainingExample, TrainingLabel};
     use crate::features::FeatureVector;
-    use chrono::{DateTime, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
         types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
@@ -578,6 +588,7 @@ pub(crate) mod fixtures {
                 horizon_secs: 60,
                 value: Decimal::from(label_value),
                 is_resolved: true,
+                matured_at: as_of + Duration::seconds(60),
             }],
             source_refs: Vec::new(),
             lot_context: None,

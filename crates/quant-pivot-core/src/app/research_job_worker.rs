@@ -34,9 +34,9 @@ use quant_pivot_models::{
     config::ResearchJobsConfig,
     domain::{
         BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        CalibrationArtifactFitPort, JobProgressSink, ModelCalibrationFitJobParams,
-        ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError, ResearchJobInfo,
-        ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
+        CalibrationArtifactFitPort, CpcvBacktestJobParams, CpcvBacktestPort, JobProgressSink,
+        ModelCalibrationFitJobParams, ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError,
+        ResearchJobInfo, ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobId},
@@ -48,8 +48,8 @@ use quant_pivot_repository::traits::{
 use super::{
     AppContext,
     ports::{
-        backtest::CoreBacktestPort, model_training::CoreModelTrainingPort,
-        training_dataset::CoreTrainingDatasetPort,
+        backtest::CoreBacktestPort, cpcv_backtest::CoreCpcvBacktestPort,
+        model_training::CoreModelTrainingPort, training_dataset::CoreTrainingDatasetPort,
     },
     research_job::ResearchJobEngine,
     task_id::TaskId,
@@ -57,10 +57,11 @@ use super::{
 };
 use crate::service::model_calibration_fit::ModelCalibrationFitService;
 
-const ALL_KINDS: [ResearchJobKind; 5] = [
+const ALL_KINDS: [ResearchJobKind; 6] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
+    ResearchJobKind::CpcvBacktest,
     ResearchJobKind::BiasTableFit,
     ResearchJobKind::ModelCalibrationFit,
 ];
@@ -81,6 +82,7 @@ struct ResearchJobExecutor {
     datasets: Arc<dyn TrainingDatasetPort>,
     training: Arc<dyn ModelTrainingPort>,
     backtests: Arc<dyn BacktestPort>,
+    cpcv_backtests: Arc<dyn CpcvBacktestPort>,
     bias_tables: Arc<dyn CalibrationArtifactFitPort>,
     model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
 }
@@ -166,6 +168,17 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
+            ResearchJobKind::CpcvBacktest => {
+                let params: CpcvBacktestJobParams = from_params(&job.params_json)?;
+                let view = self
+                    .cpcv_backtests
+                    .run(params.model_version_id, params.request, progress, cancel)
+                    .await?;
+                Ok(JobOutcome {
+                    result_ref: Some(view.path_set_id.as_uuid()),
+                    coverage: None,
+                })
+            }
             ResearchJobKind::BiasTableFit => {
                 let params: BiasTableFitJobParams = from_params(&job.params_json)?;
                 let outcome = self.bias_tables.fit(params, progress, cancel).await?;
@@ -211,6 +224,11 @@ impl AppContext {
             Arc::clone(&runtime_config),
             Arc::clone(&bias_table_repo),
         ));
+        let cpcv_backtest_port = Arc::new(CoreCpcvBacktestPort::from_research(
+            &self.research,
+            Arc::clone(&runtime_config),
+            Arc::clone(&bias_table_repo),
+        ));
         let model_calibration_fit: Arc<dyn ModelCalibrationFitPort> =
             Arc::new(ModelCalibrationFitService::new(
                 Arc::clone(&backtest_port),
@@ -234,6 +252,7 @@ impl AppContext {
                 Arc::clone(&bias_table_repo),
             )),
             backtests: backtest_port as Arc<dyn BacktestPort>,
+            cpcv_backtests: cpcv_backtest_port as Arc<dyn CpcvBacktestPort>,
             bias_tables: Arc::clone(&self.research.calibration_artifact_fit),
             model_calibration_fit,
         };

@@ -10,15 +10,16 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest, FitBiasTableRequest,
-        FitModelCalibratorRequest, JobSubmitContext, ModelCalibrationFitJobParams, NewResearchJob,
-        Paginated, ResearchJobError, ResearchJobInfo, ResearchJobListQuery, ResearchJobPort,
-        ResearchJobView, RunBacktestRequest, TrainModelRequest,
+        BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest,
+        CpcvBacktestJobParams, FitBiasTableRequest, FitModelCalibratorRequest, JobSubmitContext,
+        ModelCalibrationFitJobParams, NewResearchJob, Paginated, ResearchJobError, ResearchJobInfo,
+        ResearchJobListQuery, ResearchJobPort, ResearchJobView, RunBacktestRequest,
+        RunCpcvBacktestRequest, TrainModelRequest,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
-        BacktestReportId, ModelSpecId, ModelVersionId, ResearchJobId, RuntimeConfigVersionId,
-        TrainingDatasetId,
+        BacktestPathSetId, BacktestReportId, ModelSpecId, ModelVersionId, ResearchJobId,
+        RuntimeConfigVersionId, TrainingDatasetId,
     },
 };
 
@@ -148,6 +149,31 @@ impl ResearchJobPort for CoreResearchJobPort {
         })?;
         let job = self.new_job(
             ResearchJobKind::Backtest,
+            params,
+            None,
+            runtime_config_version_id,
+            None,
+            &ctx,
+        );
+        self.enqueue(job).await
+    }
+
+    async fn enqueue_cpcv_backtest(
+        &self,
+        model_version_id: ModelVersionId,
+        mut request: RunCpcvBacktestRequest,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        if request.path_set_id.is_none() {
+            request.path_set_id = Some(BacktestPathSetId::from_v7());
+        }
+        let runtime_config_version_id = Some(request.runtime_config_version_id.clone());
+        let params = to_params(&CpcvBacktestJobParams {
+            model_version_id,
+            request,
+        })?;
+        let job = self.new_job(
+            ResearchJobKind::CpcvBacktest,
             params,
             None,
             runtime_config_version_id,

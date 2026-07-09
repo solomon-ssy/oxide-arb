@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         JobProgressSink, ModelTrainingPort, ModelVersionInfo, TrainModelRequest, TrainedModelView,
@@ -22,6 +22,7 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{LabelSelector, ModelFamilyParseError, TrainingObjectiveSpec},
     training::LabelName,
+    validation::PurgeConfig,
 };
 
 use crate::{
@@ -93,6 +94,25 @@ impl CoreModelTrainingPort {
             ModelTrainerConfig {
                 factors: runtime.factors.clone(),
                 objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)?,
+                validation_purge: PurgeConfig {
+                    embargo_pct: runtime
+                        .research
+                        .validation
+                        .purge
+                        .embargo_pct
+                        .value
+                        .parse()
+                        .map_err(|error| {
+                            QuantError::from(
+                                ResearchError::ValidationMethodology {
+                                    detail: format!(
+                                        "`research.validation.purge.embargo_pct` is not a valid decimal: {error}"
+                                    ),
+                                },
+                            )
+                        })?,
+                    min_embargo_secs: runtime.features.max_lookback_secs(),
+                },
             },
             ReplayConfig {
                 features: runtime.features,

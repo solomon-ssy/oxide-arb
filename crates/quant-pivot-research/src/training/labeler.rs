@@ -147,6 +147,7 @@ impl Labeler for ReturnToHorizonLabeler {
                     horizon_secs: input.horizon_secs,
                     value,
                     is_resolved: true,
+                    matured_at: cutoff,
                 })
             },
         )
@@ -231,6 +232,7 @@ fn excursion(input: &LabelBuildInput<'_>, name: LabelName, extreme: Extreme) -> 
                 horizon_secs: input.horizon_secs,
                 value,
                 is_resolved: true,
+                matured_at: cutoff,
             })
         },
     )
@@ -277,6 +279,7 @@ impl Labeler for LiquidityExitLabeler {
                 Decimal::ZERO
             },
             is_resolved: true,
+            matured_at: cutoff,
         })
     }
 }
@@ -345,6 +348,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
             horizon_secs: 0,
             value: alpha,
             is_resolved: true,
+            matured_at: ctx.terminal.closed_at,
         })
     }
 }
@@ -384,6 +388,7 @@ impl Labeler for SettlementOutcomeLabeler {
                 Decimal::ZERO
             },
             is_resolved: true,
+            matured_at: resolution.resolved_at,
         })
     }
 }

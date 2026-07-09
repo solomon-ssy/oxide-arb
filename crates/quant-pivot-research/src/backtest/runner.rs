@@ -72,6 +72,9 @@ struct RunAccumulator {
     samples: Vec<SampleOutcome>,
     pnl_curve: Vec<PnlCurvePoint>,
     tick_weights: Vec<BTreeMap<String, Decimal>>,
+    /// Per-tick return (`tick_pnl / tick_allocated`), `0` for a tick with no
+    /// allocation — the Sharpe-ratio input series (Phase 11.5 §3.4).
+    tick_returns: Vec<Decimal>,
     missing_feature_count: u64,
     total_emitted: u64,
     total_allocated: Decimal,
@@ -100,6 +103,7 @@ impl Backtester for PortfolioReplayBacktester {
             samples: &acc.samples,
             pnl_curve: &acc.pnl_curve,
             tick_weights: &acc.tick_weights,
+            tick_returns: &acc.tick_returns,
             missing_feature_count: acc.missing_feature_count,
             total_emitted: acc.total_emitted,
             total_allocated: acc.total_allocated,
@@ -177,6 +181,7 @@ fn process_tick(
         .push(weights_for_tick(&allocation.allocations));
 
     let mut tick_pnl = Decimal::ZERO;
+    let mut tick_allocated = Decimal::ZERO;
     for candidate in &output.candidates {
         let (Some(market), Some(outcome)) = (
             meta.get(candidate.market_id.as_str()),
@@ -202,6 +207,7 @@ fn process_tick(
             outcome.settled_yes,
         );
         acc.total_allocated += allocated_usd.inner();
+        tick_allocated += allocated_usd.inner();
         let market_context = context.get(candidate.market_id.as_str());
         acc.samples.push(SampleOutcome {
             as_of: tick.as_of,
@@ -230,6 +236,12 @@ fn process_tick(
         as_of: tick.as_of,
         cumulative_realized_pnl_usd: acc.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
     });
+    // A tick with no allocation contributes no return observation (never a
+    // silent zero-return sample, which would bias the Sharpe ratio's
+    // variance downward).
+    if tick_allocated > Decimal::ZERO {
+        acc.tick_returns.push(tick_pnl / tick_allocated);
+    }
     Ok(())
 }
 
@@ -279,6 +291,7 @@ struct BuildMetrics<'a> {
     samples: &'a [SampleOutcome],
     pnl_curve: &'a [PnlCurvePoint],
     tick_weights: &'a [BTreeMap<String, Decimal>],
+    tick_returns: &'a [Decimal],
     missing_feature_count: u64,
     total_emitted: u64,
     total_allocated: Decimal,
@@ -296,6 +309,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         Decimal::ZERO
     };
     let rank_ic = metrics::rank_ic(m.samples);
+    let sharpe = metrics::sharpe_ratio(m.tick_returns, Decimal::ONE);
     let hit_rate = metrics::hit_rate(m.samples);
     let expected_vs_realized = metrics::expected_vs_realized(m.samples);
     let max_drawdown = metrics::max_drawdown(m.pnl_curve, m.budget);
@@ -326,6 +340,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         sample_count,
         missing_feature_count: m.missing_feature_count,
         rank_ic,
+        sharpe,
         hit_rate,
         expected_vs_realized: &expected_vs_realized,
         max_drawdown,
@@ -346,6 +361,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         sample_count,
         missing_feature_count: m.missing_feature_count,
         rank_ic,
+        sharpe,
         hit_rate,
         expected_vs_realized,
         max_drawdown,
@@ -370,6 +386,7 @@ struct ReportHashInput<'a> {
     sample_count: u64,
     missing_feature_count: u64,
     rank_ic: Decimal,
+    sharpe: Decimal,
     hit_rate: Probability,
     expected_vs_realized: &'a ExpectedVsRealized,
     max_drawdown: Decimal,

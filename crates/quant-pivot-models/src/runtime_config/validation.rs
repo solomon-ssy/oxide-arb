@@ -7,7 +7,8 @@
 use crate::{runtime_config::FeatureFamily, types::CalibrationArtifactId};
 
 use super::{
-    DecimalString, RuntimeConfig, SizingModelConfig,
+    DecimalString, ResearchValidationConfig, ResearchValidationTrialsConfig, RuntimeConfig,
+    SizingModelConfig,
     sections::{FeaturesConfig, KellySafetyConfig},
     validate_schedule_cadence,
 };
@@ -654,8 +655,6 @@ fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationRe
         &gate.max_category_concentration,
         report,
     );
-    // rank IC is a correlation in [-1, 1]; only validate it parses.
-    decimal("quality_gate.min_rank_ic", &gate.min_rank_ic, report);
     if gate.required_shadow_window_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "quality_gate.required_shadow_window_secs",
@@ -969,6 +968,143 @@ fn validate_research(config: &RuntimeConfig, report: &mut ConfigValidationReport
                 detail: format!("must be in 1..=reports.max_top_n ({max_top_n})"),
             });
         }
+    }
+    validate_research_validation(config, report);
+}
+
+/// Phase 11.5 `research.validation.*` methodology config validation.
+fn validate_research_validation(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let validation = &config.research.validation;
+    validate_research_validation_purge_cpcv(validation, report);
+    validate_research_validation_trials(&validation.trials, report);
+    validate_research_validation_pbo_gates(validation, report);
+}
+
+fn validate_research_validation_purge_cpcv(
+    validation: &ResearchValidationConfig,
+    report: &mut ConfigValidationReport,
+) {
+    half_open_unit(
+        "research.validation.purge.embargo_pct",
+        &validation.purge.embargo_pct,
+        report,
+    );
+
+    let cpcv = &validation.cpcv;
+    if cpcv.n_groups < 2 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.cpcv.n_groups",
+            detail: "must be >= 2".to_owned(),
+        });
+    }
+    if cpcv.k_test < 1 || cpcv.k_test >= cpcv.n_groups {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.cpcv.k_test",
+            detail: "must be in 1..n_groups".to_owned(),
+        });
+    }
+}
+
+fn validate_research_validation_trials(
+    trials: &ResearchValidationTrialsConfig,
+    report: &mut ConfigValidationReport,
+) {
+    if trials.lambda_multipliers.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.trials.lambda_multipliers",
+            detail: "must not be empty".to_owned(),
+        });
+    }
+    for multiplier in &trials.lambda_multipliers {
+        non_negative_decimal(
+            "research.validation.trials.lambda_multipliers",
+            multiplier,
+            report,
+        );
+    }
+    if trials.rank_loss_kinds.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.trials.rank_loss_kinds",
+            detail: "must not be empty".to_owned(),
+        });
+    }
+    if trials.forest_n_trees_multipliers.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.trials.forest_n_trees_multipliers",
+            detail: "must not be empty".to_owned(),
+        });
+    }
+    for multiplier in &trials.forest_n_trees_multipliers {
+        non_negative_decimal(
+            "research.validation.trials.forest_n_trees_multipliers",
+            multiplier,
+            report,
+        );
+    }
+    if trials.linear_alpha_multipliers.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.trials.linear_alpha_multipliers",
+            detail: "must not be empty".to_owned(),
+        });
+    }
+    for multiplier in &trials.linear_alpha_multipliers {
+        non_negative_decimal(
+            "research.validation.trials.linear_alpha_multipliers",
+            multiplier,
+            report,
+        );
+    }
+    let weighted_expanded = trials.lambda_multipliers.len() * trials.rank_loss_kinds.len();
+    let classical_expanded =
+        trials.forest_n_trees_multipliers.len() * trials.linear_alpha_multipliers.len();
+    let expanded_trials = weighted_expanded.max(classical_expanded);
+    if trials.max_trials == 0 || (expanded_trials as u64) > u64::from(trials.max_trials) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.trials.max_trials",
+            detail: format!(
+                "must be >= the larger family grid size (weighted={weighted_expanded}, \
+                 classical={classical_expanded})"
+            ),
+        });
+    }
+}
+
+fn validate_research_validation_pbo_gates(
+    validation: &ResearchValidationConfig,
+    report: &mut ConfigValidationReport,
+) {
+    if validation.pbo.block_count < 4 || !validation.pbo.block_count.is_multiple_of(2) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.pbo.block_count",
+            detail: "must be even and >= 4".to_owned(),
+        });
+    }
+
+    let gates = &validation.gates;
+    non_negative_decimal(
+        "research.validation.gates.rank_ic_min",
+        &gates.rank_ic_min,
+        report,
+    );
+    half_open_unit(
+        "research.validation.gates.dsr_significance",
+        &gates.dsr_significance,
+        report,
+    );
+    unit_ratio("research.validation.gates.max_pbo", &gates.max_pbo, report);
+    non_negative_decimal(
+        "research.validation.gates.max_turnover",
+        &gates.max_turnover,
+        report,
+    );
+    if gates.min_tail_loss_bps.value.parse::<Decimal>().is_err() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.validation.gates.min_tail_loss_bps",
+            detail: format!(
+                "`{}` is not a valid decimal string",
+                gates.min_tail_loss_bps.value
+            ),
+        });
     }
 }
 

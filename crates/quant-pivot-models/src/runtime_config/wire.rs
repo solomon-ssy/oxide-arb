@@ -120,6 +120,17 @@ pub enum RankLossKind {
     PairwiseRanknet,
 }
 
+impl RankLossKind {
+    /// The stable `snake_case` wire name (matches the serde representation).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RankIcWeightedRanknet => "rank_ic_weighted_ranknet",
+            Self::PairwiseRanknet => "pairwise_ranknet",
+        }
+    }
+}
+
 /// Simplex optimizer used by the weighted-factor trainer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
