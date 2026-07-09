@@ -740,7 +740,7 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     // Phase 11.3 P1-8: a `purpose = Calibration` dataset whose window
     // overlaps a `Built` training dataset must fail closed at *build* time
     // (not only later, at calibrator-fit time) — the purge primitive shared
-    // with `ModelCalibrationFitService`/`FavoriteLongshotFitService`. The
+    // with `ModelCalibrationFitService`/`BiasTableFitService`. The
     // existing training dataset is seeded directly (its own materialization
     // pipeline is irrelevant here — only its ledger row's window/status
     // matter to the purge check).

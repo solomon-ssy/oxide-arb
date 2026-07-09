@@ -340,24 +340,29 @@ sequenceDiagram
 
 ### 9.1 Sizing
 
-当前 sizing model 是 Kelly-based：
+生产 sizing 使用 **校准 P(win) 直接 Kelly**（Phase 11.3 方向 A）：
 
 ```mermaid
 flowchart TD
-    A["model expected return"] --> B["derive win probability"]
-    C["downside bps"] --> B
-    D["target_reward_multiple"] --> B
-    B --> E["full Kelly"]
+    A["calibrated P(win) q"] --> B["f* = (q − p) / (1 − p)"]
+    C["entry_price_ref p"] --> B
+    B --> E["full Kelly f*"]
     F["kelly_fraction"] --> G["fractional Kelly"]
     E --> G
     H["confidence"] --> I["confidence weighting"]
     G --> I
     J["drawdown"] --> K["drawdown scaling"]
     I --> K
-    L["max_position_pct"] --> M["position cap"]
-    K --> M
-    M --> N["raw suggested USD/shares"]
+    K --> L["edge-uncertainty + correlation shrink"]
+    M["max_position_pct"] --> N["position cap"]
+    L --> N
+    N --> O["raw suggested USD/shares"]
+    P["LP aggregate exposure cap"] --> Q["planner convergence"]
+    O --> Q
 ```
+
+`HeuristicReturnModel {300,500}` 仅冷启动 `ReportOnly` 可达；`target_reward_multiple` 用于止盈定价，
+不再反解 Kelly 胜率。四处 `resolve_return_model_calibration` 深校验关闭 publish/report/admission/intent TOCTOU。
 
 ### 9.2 Optimizer constraints
 

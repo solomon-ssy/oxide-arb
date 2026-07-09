@@ -21,9 +21,44 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::CalibrationArtifactRepository;
 use quant_pivot_research::model::{
-    CalibrationArtifactLoader, MonotoneMapping, ResolvedCalibration,
+    CalibrationArtifactLoader, ModelArtifact, MonotoneMapping, ResolvedCalibration,
 };
 use serde::Serialize;
+
+/// Resolve a model artifact's return-model calibration state through the
+/// **single** deep check every production consumer shares (Phase 11.3
+/// closed-loop hardening).
+///
+/// Publish gate, report builder, admission, and intent creation all call this —
+/// never their own independent re-implementation. Before this consolidation,
+/// `publish` only inspected the `ReturnModelSpec` enum tag
+/// (`ModelArtifact::return_model_is_calibrated`) while `report`/`admission`
+/// re-verified calibrator liveness + content hash, so a calibrator deactivated
+/// between `bind_calibration` and `publish` could pass the gate yet fail every
+/// downstream consumer — the exact "judged once, drifts later" gap this function
+/// closes.
+///
+/// - `Heuristic` (or a family with no return-model concept) ⇒ `Ok(None)` —
+///   never an error; a cold-start bootstrap candidate is a valid, if
+///   unpublishable / unexecutable, state.
+/// - `Calibrated` whose bound calibrator loads clean (active, hash-verified)
+///   ⇒ `Ok(Some(resolved))`.
+/// - `Calibrated` whose calibrator is missing / inactive / hash-mismatched ⇒
+///   `Err` — fail-closed, never silently downgraded to "uncalibrated".
+///
+/// # Errors
+///
+/// Propagates [`CalibrationArtifactLoader::load`]'s fail-closed errors.
+pub async fn resolve_return_model_calibration(
+    loader: &dyn CalibrationArtifactLoader,
+    artifact: &ModelArtifact,
+) -> QuantResult<Option<ResolvedCalibration>> {
+    let Some(calibrator_ref) = artifact.calibrator_ref() else {
+        return Ok(None);
+    };
+    let resolved = loader.load(calibrator_ref).await?;
+    Ok(Some(resolved))
+}
 
 /// Payload shape stored in `quant_calibration_artifact.payload_json` for
 /// `kind = model_score` rows.

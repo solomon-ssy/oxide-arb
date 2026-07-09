@@ -22,6 +22,7 @@ pub mod weight_overlay;
 pub use bias_table::BiasTableApplicator;
 pub use calibration_loader::{
     CoreCalibrationArtifactLoader, ModelScoreCalibrationPayload, model_score_content_hash,
+    resolve_return_model_calibration,
 };
 pub use category_pointer_guard::CategoryPointerGuard;
 pub use factor_governance::{FactorGovernanceDeps, FactorGovernanceService};

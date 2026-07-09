@@ -20,7 +20,7 @@ use quant_pivot_models::{
             AccountSource, BindingConstraint, EntryTriggerKind, ExitSettlementMode,
             FactorDirection, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
             RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
-            ReportTriggerKind, SizingModelKind,
+            ReportTriggerKind, SizingBetStructure, SizingModelKind,
         },
     },
     types::{
@@ -200,6 +200,7 @@ fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
         drawdown_shrink_applied: Some(dec!(1.0)),
         raw_fraction_applied: Some(dec!(0.5)),
         position_cap_fraction_applied: Some(dec!(0.05)),
+        bet_structure_applied: Some(SizingBetStructure::Resolution),
     }
 }
 
@@ -306,5 +307,6 @@ fn execution_eligibility() -> ExecutionEligibility {
         ineligibility_reasons: vec![IneligibilityReason::ReportOnlyMode],
         approval_required: true,
         auto_policy_id: None,
+        uncalibrated_watermark: false,
     }
 }

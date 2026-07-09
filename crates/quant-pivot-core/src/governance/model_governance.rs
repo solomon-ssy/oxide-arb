@@ -59,16 +59,19 @@ use quant_pivot_research::{
         SellQualityGateThresholds,
     },
     model::{
-        CalibratedReturnModel, ModelArtifact, ReturnModelSpec, load_hash_verified_artifact,
-        validate_category_scope_weights,
+        CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact, ReturnModelSpec,
+        load_hash_verified_artifact, validate_category_scope_weights,
     },
     training::{DatasetCoverage, LeakageFindings},
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::runtime_model_pointers::{
-        RuntimeModelPointerSync, sync_after_model_retire, sync_production_active,
+    governance::{
+        resolve_return_model_calibration,
+        runtime_model_pointers::{
+            RuntimeModelPointerSync, sync_after_model_retire, sync_production_active,
+        },
     },
     runtime_config::RuntimeConfigStore,
 };
@@ -89,6 +92,10 @@ pub struct ModelGovernanceDeps {
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Unified calibration-artifact ledger (`bind_calibration` guard).
     pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
+    /// Deep calibrator resolution (active + content-hash verified) — shared
+    /// with the report builder / admission / intent creation via
+    /// [`resolve_return_model_calibration`] (Phase 11.3 closed-loop hardening).
+    pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// The model quality gate.
     pub gate: Arc<dyn ModelQualityGate>,
     /// Active runtime config (gate thresholds + shadow window).
@@ -459,6 +466,13 @@ impl ModelGovernancePort for ModelGovernanceService {
             sell_thresholds,
             model_family,
             return_model_calibrated: false,
+            calibration_gate_enabled: self
+                .deps
+                .runtime_config
+                .current()
+                .model
+                .calibration
+                .require_for_publish,
         })?;
         let report = decision.report().clone();
 
@@ -771,7 +785,15 @@ impl ModelGovernanceService {
         let model_family = self.model_family_for_version(version).await?;
 
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
-        let return_model_calibrated = artifact.return_model_is_calibrated();
+        // Deep check (Phase 11.3 closed-loop hardening): the *same* function
+        // report/admission/intent-creation share, not the shallow enum-tag
+        // read `ModelArtifact::return_model_is_calibrated` used to be — a
+        // calibrator deactivated after `bind_calibration` must fail the
+        // publish gate too, not just downstream consumers.
+        let return_model_calibrated =
+            resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
+                .await?
+                .is_some();
 
         let backtest = match backtest_report_id {
             Some(id) => self.backtest_by_id(id).await?,
@@ -800,6 +822,7 @@ impl ModelGovernanceService {
             sell_thresholds,
             model_family: Some(model_family),
             return_model_calibrated,
+            calibration_gate_enabled: config.model.calibration.require_for_publish,
         })?;
         Ok(GateEvaluation {
             report: decision.report().clone(),

@@ -43,6 +43,9 @@ impl AppContext {
             metrics: Arc::clone(&self.infra.metrics),
             intent_lifecycle: Arc::clone(&self.intent_lifecycle),
             dispatch_wake: self.execution_wake(),
+            model_registry: Arc::clone(&self.research.model_registry_repo),
+            artifact_store: Arc::clone(&self.research.artifact_store),
+            calibration_loader: Arc::clone(&self.research.calibration_loader),
         }))
     }
 

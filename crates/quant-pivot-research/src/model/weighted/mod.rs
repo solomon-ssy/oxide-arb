@@ -224,6 +224,7 @@ impl WeightedFactorRuntime {
             confidence,
             expected_return_bps: estimate.expected_return_bps,
             downside_bps: estimate.downside_bps,
+            win_probability: estimate.win_probability,
             entry_price_ref,
             suggested_horizon_secs: self.artifact.prediction_horizon_secs,
             factor_breakdown: contributions,

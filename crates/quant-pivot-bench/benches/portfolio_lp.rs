@@ -30,6 +30,7 @@ fn candidate(index: usize, composite: Decimal) -> SignalCandidate {
         confidence: Probability::new(dec!(0.9)),
         expected_return_bps: dec!(100),
         downside_bps: dec!(100),
+        win_probability: None,
         entry_price_ref: Price::new(dec!(0.5)),
         suggested_horizon_secs: 3_600,
         factor_breakdown: Vec::new(),

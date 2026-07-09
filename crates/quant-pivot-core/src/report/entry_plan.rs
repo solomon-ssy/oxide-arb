@@ -79,6 +79,7 @@ mod tests {
             confidence: Probability::new(dec!(0.80)),
             expected_return_bps: dec!(5000),
             downside_bps: dec!(1000),
+            win_probability: None,
             entry_price_ref: entry_price,
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),

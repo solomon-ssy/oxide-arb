@@ -6,37 +6,52 @@
 //! planner). Sizing is a pure function: no I/O, no clock, no mutable state, so a
 //! plan is deterministically replayable.
 //!
-//! # Kelly with confidence shrinkage (production default)
+//! # Kelly from the calibrated win probability (production default)
 //!
-//! Polymarket outcome tokens are binary. We model "hold to the horizon, exit at
-//! target or stop" as a two-outcome bet `{win +g, lose −l}`:
+//! Polymarket outcome tokens are binary: hold a `Calibrated` position to
+//! resolution and it either pays `(1-p)/p` per unit stake (win) or loses the
+//! whole stake (lose), where `p` is the executable market price. This is
+//! *exactly* the payoff [`ReturnEstimate::win_probability`](crate::model::artifact::ReturnEstimate)'s
+//! `E[r] = q·(1-p)/p − (1-q)` already assumes (Phase 11.3 §3.3), so Kelly uses
+//! the *same* `q` directly — never re-derives a different "implied" win
+//! probability from a second, inconsistent bet structure:
 //!
 //! ```text
-//! l = downside_bps / 10_000                      // stop-loss fraction of stake
-//! E[r] = expected_return_bps / 10_000            // model's expected mean return
-//! g = R · l                                       // target gain (R = target_reward_multiple)
-//! q = clamp((E[r] + l) / (g + l), 0, 1)           // recovered win probability
-//! f* = (q·g − (1−q)·l) / (g·l)                     // two-outcome Kelly fraction
+//! q = win_probability                             // calibrated P(win), same q as E[r]
+//! p = entry_price_ref                             // executable market price
+//! f* = (q − p) / (1 − p)                           // binary Kelly, b = (1-p)/p odds
 //! ```
+//!
+//! This is the standard closed-form simplification of `f* = p·b − (1-p)` (Kelly
+//! criterion, <https://en.wikipedia.org/wiki/Kelly_criterion>) when the net odds
+//! `b = (1-p)/p` come from a market price rather than a bookmaker's line.
+//! `f* ≤ 0` (i.e. `q ≤ p`, no edge over the market) ⇒ **rejected**, never funded.
+//!
+//! `win_probability` is `None` only for the `HeuristicReturnModel` cold-start
+//! bootstrap (fail-closed gates already block it from every production
+//! execution path — see [`GateId::CalibrationRequired`](../../quant_pivot_research/gates/model_quality/index.html));
+//! that path keeps the legacy TP/SL bet-structure recovery (`g = R·l`, `q`
+//! solved from `E[r]`/`downside`) purely so a cold-start `ReportOnly` report can
+//! still show an experimental, clearly-labeled size ([`SizingBetStructure::HeuristicTpSl`]).
 //!
 //! `confidence` is the model's **evidence quality**, *not* a calibrated
-//! probability, so it never stands in for `q`. Instead it shrinks the bet — the
-//! production-standard mitigation for Kelly's sensitivity to edge
-//! mis-estimation (fractional Kelly + uncertainty shrinkage):
+//! probability, so it never stands in for `q` in either branch. Instead it
+//! shrinks the bet — the production-standard mitigation for Kelly's sensitivity
+//! to edge mis-estimation (fractional Kelly + uncertainty shrinkage):
 //!
 //! ```text
-//! f = clamp(kelly_fraction · confidence_shrink(confidence) · drawdown_scale,
+//! f = clamp(kelly_fraction · confidence_shrink(confidence) · drawdown_scale
+//!           · edge_uncertainty_shrink · correlation_shrink,
 //!           0, max_position_pct)
-//! desired_usd = round(f · equity)
+//! desired_usd = round(f · f* · equity)
 //! ```
 //!
-//! `f* ≤ 0` (no positive edge) ⇒ the candidate is **rejected**, never funded.
 //! Every intermediate stays in [`Decimal`]; `f64` never appears, so no precision
 //! drift can leak into a money value.
 
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    enums::quant::{BindingConstraint, RejectionReason, SizingModelKind},
+    enums::quant::{BindingConstraint, RejectionReason, SizingBetStructure, SizingModelKind},
     runtime_config::{
         ConfidenceSizeCurve, DrawdownMultiplierPolicy, KellySafetyConfig, SizingModelConfig,
     },
@@ -146,8 +161,10 @@ pub struct SizingSuggestion {
 /// `raw_fraction` is capped at `position_cap_fraction`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizingProvenance {
-    /// The raw, uncapped full-Kelly fraction (`edge / (gain · loss)`), before
-    /// any fractional-Kelly or safety-layer shrink.
+    /// The raw, uncapped full-Kelly fraction, before any fractional-Kelly or
+    /// safety-layer shrink. Derived per `bet_structure` — `(q - p) / (1 - p)`
+    /// for `Resolution`, or the legacy `edge / (gain · loss)` recovery for
+    /// `HeuristicTpSl`.
     pub f_star: Decimal,
     /// The governed static fractional-Kelly constant (e.g. `0.5` for half-Kelly).
     pub kelly_fraction_config: Decimal,
@@ -167,6 +184,8 @@ pub struct SizingProvenance {
     /// The per-position equity cap (`max_position_pct`) `raw_fraction` was
     /// clamped against.
     pub position_cap_fraction: Decimal,
+    /// Which bet structure produced `f_star` (Phase 11.3 §4 redesign).
+    pub bet_structure: SizingBetStructure,
 }
 
 /// A position-sizing model (pure: no I/O, no clock, no mutable state).
@@ -249,26 +268,49 @@ impl SizingModel for KellySizingModel {
         let bps = Decimal::from(BPS_PER_UNIT);
         let candidate = input.candidate;
 
-        let loss = candidate.downside_bps / bps;
-        // A non-positive downside means the model gave no valid stop; never
-        // fabricate a bet structure.
-        if loss <= Decimal::ZERO {
-            return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
-        }
-        let expected = candidate.expected_return_bps / bps;
-        let gain = self.target_reward_multiple * loss;
-        if gain <= Decimal::ZERO {
-            return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
-        }
-
-        // Recover the win probability from the bet structure, then re-derive the
-        // edge from the clamped `q` so a degenerate input cannot inflate it.
-        let q = ((expected + loss) / (gain + loss)).clamp(Decimal::ZERO, Decimal::ONE);
-        let edge = q * gain - (Decimal::ONE - q) * loss;
-        if edge <= Decimal::ZERO {
-            return Ok(SizingOutcome::Rejected(RejectionReason::NoPositiveSignal));
-        }
-        let f_star = edge / (gain * loss);
+        let (f_star, edge, bet_structure) = if let Some(win_probability) = candidate.win_probability
+        {
+            // Resolution bet structure (Phase 11.3 §4 redesign): `q` is the
+            // *same* calibrated `P(win)` that produced `expected_return_bps`
+            // (`E[r] = q·(1-p)/p − (1-q)`), so `f*` and `E[r]` always share
+            // one probability — never two independently-derived numbers.
+            let market_price = candidate.entry_price_ref.inner();
+            if market_price <= Decimal::ZERO || market_price >= Decimal::ONE {
+                return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
+            }
+            let q = win_probability.inner();
+            if q <= market_price {
+                return Ok(SizingOutcome::Rejected(RejectionReason::NoPositiveSignal));
+            }
+            let f_star = (q - market_price) / (Decimal::ONE - market_price);
+            let edge = candidate.expected_return_bps / bps;
+            (f_star, edge, SizingBetStructure::Resolution)
+        } else {
+            // Legacy TP/SL bet-structure recovery — only reachable from
+            // `HeuristicReturnModel`, which fail-closed gates already block
+            // from every production execution path (publish / semi-auto /
+            // auto-execution). Retained purely so a cold-start `ReportOnly`
+            // report can still show an experimental, clearly-labeled size.
+            let loss = candidate.downside_bps / bps;
+            if loss <= Decimal::ZERO {
+                return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
+            }
+            let expected = candidate.expected_return_bps / bps;
+            let gain = self.target_reward_multiple * loss;
+            if gain <= Decimal::ZERO {
+                return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
+            }
+            // Recover the win probability from the bet structure, then
+            // re-derive the edge from the clamped `q` so a degenerate input
+            // cannot inflate it.
+            let q = ((expected + loss) / (gain + loss)).clamp(Decimal::ZERO, Decimal::ONE);
+            let edge = q * gain - (Decimal::ONE - q) * loss;
+            if edge <= Decimal::ZERO {
+                return Ok(SizingOutcome::Rejected(RejectionReason::NoPositiveSignal));
+            }
+            let f_star = edge / (gain * loss);
+            (f_star, edge, SizingBetStructure::HeuristicTpSl)
+        };
 
         let shrink = confidence_shrink(candidate.confidence.inner(), self.confidence_weighting);
         let drawdown = drawdown_scale(input.drawdown_state, self.drawdown_scaling);
@@ -316,6 +358,7 @@ impl SizingModel for KellySizingModel {
                 correlation_shrink: round(correlation_shrink),
                 raw_fraction: round(raw_fraction),
                 position_cap_fraction: round(self.max_position_pct),
+                bet_structure,
             }),
         })))
     }
@@ -456,7 +499,9 @@ mod tests {
     };
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{BindingConstraint, OutcomeSide, RejectionReason, SizingModelKind},
+        enums::quant::{
+            BindingConstraint, OutcomeSide, RejectionReason, SizingBetStructure, SizingModelKind,
+        },
         types::{MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId, Usd},
     };
     use rust_decimal::Decimal;
@@ -464,7 +509,53 @@ mod tests {
 
     use crate::model::signal::{ModelExplanation, SignalCandidate};
 
+    /// A `Calibrated`-path candidate: `win_probability` is `Some`, so
+    /// `KellySizingModel` uses the `Resolution` bet structure directly
+    /// (`f* = (q - p) / (1 - p)`). Defaults to `q=0.6, p=0.5` (`f*=0.2`,
+    /// deliberately modest so shrink-mechanism tests aren't pre-capped by
+    /// `max_position_pct`); tests that need a specific `f*` use
+    /// [`resolution_candidate`] directly.
     fn candidate(
+        expected_bps: Decimal,
+        downside_bps: Decimal,
+        confidence: Decimal,
+    ) -> SignalCandidate {
+        resolution_candidate(expected_bps, downside_bps, confidence, dec!(0.6), dec!(0.5))
+    }
+
+    /// A `Calibrated`-path candidate with an explicit `(win_probability,
+    /// market_price)` pair, for tests that need to control `f*` precisely.
+    fn resolution_candidate(
+        expected_bps: Decimal,
+        downside_bps: Decimal,
+        confidence: Decimal,
+        win_probability: Decimal,
+        market_price: Decimal,
+    ) -> SignalCandidate {
+        SignalCandidate {
+            win_probability: Some(Probability::new(win_probability)),
+            entry_price_ref: Price::new(market_price),
+            ..base_candidate(expected_bps, downside_bps, confidence)
+        }
+    }
+
+    /// A `Heuristic`-path candidate: `win_probability` is `None`, so
+    /// `KellySizingModel` falls back to the legacy TP/SL bet-structure
+    /// recovery. Only reachable in production behind fail-closed publish /
+    /// admission gates — exercised here purely to pin the cold-start
+    /// `ReportOnly` experimental behavior.
+    fn heuristic_candidate(
+        expected_bps: Decimal,
+        downside_bps: Decimal,
+        confidence: Decimal,
+    ) -> SignalCandidate {
+        SignalCandidate {
+            win_probability: None,
+            ..base_candidate(expected_bps, downside_bps, confidence)
+        }
+    }
+
+    fn base_candidate(
         expected_bps: Decimal,
         downside_bps: Decimal,
         confidence: Decimal,
@@ -479,6 +570,7 @@ mod tests {
             confidence: Probability::new(confidence),
             expected_return_bps: expected_bps,
             downside_bps,
+            win_probability: None,
             entry_price_ref: Price::new(dec!(0.5)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -530,29 +622,102 @@ mod tests {
     }
 
     #[test]
-    fn kelly_positive_edge_sizes_fraction_of_equity() {
-        // E[r]=0.02, l=0.01, R=2 → g=0.02; q=(0.02+0.01)/(0.02+0.01)=1.0.
-        // edge = 1·0.02 − 0 = 0.02; f* = 0.02/(0.02·0.01)=100 (huge → capped).
+    fn kelly_uses_calibrated_win_probability_directly() {
+        // Resolution structure: f* = (q - p) / (1 - p), q=0.99, p=0.01 -> f*≈0.9899.
         let model = kelly();
         let s = sized(
             model
                 .suggest(&sizing_input(
-                    &candidate(dec!(200), dec!(100), dec!(1)),
+                    &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.99), dec!(0.01)),
                     Usd::new(dec!(10000)),
                 ))
                 .expect("suggest"),
         );
-        // Capped at 10% of equity = 1000.
+        // multiplier = 0.5 (kelly_fraction) * f* ≈ 0.495 > max_position_pct (0.1) -> capped.
         assert_eq!(s.desired_usd, Usd::new(dec!(1000)));
         assert!(s.binding_kelly_cap, "max_position_pct must bind");
+        // edge_bps == expected_return_bps: Kelly's audit edge is the *same*
+        // E[r] the calibrator produced, never a re-derived number.
         assert_eq!(s.edge_bps.expect("edge").inner(), dec!(200));
+        assert_eq!(
+            s.provenance.expect("provenance").bet_structure,
+            SizingBetStructure::Resolution
+        );
     }
 
     #[test]
-    fn kelly_q_derived_from_expected_return_and_downside() {
-        // E[r]=0.005, l=0.01, R=3 → g=0.03; q=(0.005+0.01)/(0.03+0.01)=0.375.
-        // edge = 0.375·0.03 − 0.625·0.01 = 0.01125 − 0.00625 = 0.005 (= E[r]).
-        // f* = 0.005/(0.03·0.01) = 16.6667 → ·0.5 = capped to 0.1.
+    fn kelly_fraction_matches_p_minus_market_price_over_one_minus_market_price() {
+        // q=0.7, p=0.4 -> f* = (0.7-0.4)/(1-0.4) = 0.5.
+        let model = KellySizingModel::new(
+            dec!(1),
+            dec!(1),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+            KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
+        );
+        let s = sized(
+            model
+                .suggest(&sizing_input(
+                    &resolution_candidate(dec!(300), dec!(100), dec!(1), dec!(0.7), dec!(0.4)),
+                    Usd::new(dec!(10000)),
+                ))
+                .expect("suggest"),
+        );
+        assert_eq!(s.provenance.expect("provenance").f_star, dec!(0.5));
+    }
+
+    #[test]
+    fn kelly_win_probability_at_or_below_market_price_rejects() {
+        // q == p: no edge over the market -> reject, never funded.
+        let model = kelly();
+        let outcome = model
+            .suggest(&sizing_input(
+                &resolution_candidate(dec!(0), dec!(100), dec!(1), dec!(0.5), dec!(0.5)),
+                Usd::new(dec!(10000)),
+            ))
+            .expect("suggest");
+        assert_eq!(
+            outcome,
+            SizingOutcome::Rejected(RejectionReason::NoPositiveSignal)
+        );
+
+        // q < p: negative edge -> reject.
+        let below = model
+            .suggest(&sizing_input(
+                &resolution_candidate(dec!(-50), dec!(100), dec!(1), dec!(0.4), dec!(0.5)),
+                Usd::new(dec!(10000)),
+            ))
+            .expect("suggest");
+        assert_eq!(
+            below,
+            SizingOutcome::Rejected(RejectionReason::NoPositiveSignal)
+        );
+    }
+
+    #[test]
+    fn kelly_invalid_market_price_rejects() {
+        let model = kelly();
+        for invalid_price in [dec!(0), dec!(1)] {
+            let outcome = model
+                .suggest(&sizing_input(
+                    &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.9), invalid_price),
+                    Usd::new(dec!(10000)),
+                ))
+                .expect("suggest");
+            assert_eq!(
+                outcome,
+                SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs),
+                "market_price={invalid_price} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn heuristic_kelly_q_derived_from_expected_return_and_downside() {
+        // Legacy TP/SL recovery (win_probability=None): E[r]=0.005, l=0.01,
+        // R=3 -> g=0.03; q=(0.005+0.01)/(0.03+0.01)=0.375.
+        // edge = 0.375*0.03 - 0.625*0.01 = 0.005 (= E[r]).
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.1),
@@ -564,7 +729,7 @@ mod tests {
         let s = sized(
             model
                 .suggest(&SizingInput {
-                    candidate: &candidate(dec!(50), dec!(100), dec!(1)),
+                    candidate: &heuristic_candidate(dec!(50), dec!(100), dec!(1)),
                     capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
@@ -574,15 +739,20 @@ mod tests {
         );
         // edge_bps == expected_return_bps (self-consistency of the derivation).
         assert_eq!(s.edge_bps.expect("edge").inner(), dec!(50));
+        assert_eq!(
+            s.provenance.expect("provenance").bet_structure,
+            SizingBetStructure::HeuristicTpSl
+        );
     }
 
     #[test]
-    fn kelly_non_positive_edge_rejects() {
-        // E[r] = −0.01 → edge negative → reject, never funded.
+    fn heuristic_kelly_non_positive_edge_rejects() {
+        // E[r] = −0.01 → edge negative → reject, never funded. Only reachable
+        // via the Heuristic (win_probability=None) cold-start path.
         let model = kelly();
         let outcome = model
             .suggest(&SizingInput {
-                candidate: &candidate(dec!(-100), dec!(100), dec!(1)),
+                candidate: &heuristic_candidate(dec!(-100), dec!(100), dec!(1)),
                 capital_base_usd: Usd::new(dec!(10000)),
                 drawdown_state: DrawdownState::neutral(),
                 edge_uncertainty_half_width: None,
@@ -596,11 +766,11 @@ mod tests {
     }
 
     #[test]
-    fn kelly_invalid_downside_rejects() {
+    fn heuristic_kelly_invalid_downside_rejects() {
         let model = kelly();
         let outcome = model
             .suggest(&SizingInput {
-                candidate: &candidate(dec!(200), dec!(0), dec!(1)),
+                candidate: &heuristic_candidate(dec!(200), dec!(0), dec!(1)),
                 capital_base_usd: Usd::new(dec!(10000)),
                 drawdown_state: DrawdownState::neutral(),
                 edge_uncertainty_half_width: None,
@@ -782,82 +952,199 @@ mod tests {
                 .expect("drawdown suggest"),
         );
         assert_eq!(in_drawdown.desired_usd, neutral.desired_usd);
+        assert_eq!(
+            in_drawdown.kelly_stage_binding, None,
+            "a Fixed drawdown policy must never emit DrawdownCap, since it never shrinks"
+        );
     }
 
     #[test]
-    fn kelly_edge_uncertainty_shrink_reduces_size_monotonically() {
-        let model = kelly();
-        let candidate = candidate(dec!(10), dec!(200), dec!(1));
-        let capital = Usd::new(dec!(10000));
-        let base = sized(
+    fn kelly_stage_binding_is_none_when_every_shrink_is_immaterial() {
+        // confidence=1 (shrink=1), Fixed drawdown (shrink=1), no correlation
+        // input (shrink=1): every multiplier is exactly 1, which is not
+        // "materially low" under any threshold < 1, so no soft binding fires.
+        let model = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+            KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
+        );
+        let suggestion = sized(
             model
                 .suggest(&SizingInput {
-                    candidate: &candidate,
-                    capital_base_usd: capital,
+                    candidate: &candidate(dec!(10), dec!(200), dec!(1)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
                 })
-                .expect("base"),
+                .expect("suggest"),
         );
-        let shrunk = sized(
+        assert_eq!(suggestion.kelly_stage_binding, None);
+    }
+
+    #[test]
+    fn confidence_cap_binding_not_emitted_when_drawdown_is_the_tighter_shrink() {
+        // Confidence is only mildly low (0.7 -> shrink=0.7, above the 0.6
+        // floor materiality would need); drawdown is severe (0.5 current
+        // drawdown -> shrink=0.5, the strictly smaller multiplier) so
+        // DrawdownCap — not ConfidenceCap — must be the emitted binding.
+        let model = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Conservative,
+            KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
+        );
+        let suggestion = sized(
             model
                 .suggest(&SizingInput {
-                    candidate: &candidate,
-                    capital_base_usd: capital,
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: Some(dec!(0.15)),
+                    candidate: &candidate(dec!(10), dec!(200), dec!(0.7)),
+                    capital_base_usd: Usd::new(dec!(10000)),
+                    drawdown_state: DrawdownState {
+                        current_drawdown: dec!(0.5),
+                    },
+                    edge_uncertainty_half_width: None,
                     correlation: None,
                 })
-                .expect("shrunk"),
+                .expect("suggest"),
+        );
+        assert_eq!(
+            suggestion.kelly_stage_binding,
+            Some(BindingConstraint::DrawdownCap),
+            "the strictly smaller shrink (drawdown=0.5 < confidence=0.7) must win the binding \
+             attribution, not confidence"
+        );
+    }
+
+    #[test]
+    fn kelly_edge_uncertainty_shrink_reduces_size_monotonically() {
+        // Half-Kelly, uncapped (max_position_pct=0.9) so the sweep is
+        // observable across every half-width rather than clipped flat by the
+        // per-position cap.
+        let model = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+            kelly_safety(),
+        );
+        let candidate = candidate(dec!(10), dec!(200), dec!(1));
+        let capital = Usd::new(dec!(10000));
+        let half_widths = [
+            None,
+            Some(dec!(0.05)),
+            Some(dec!(0.15)),
+            Some(dec!(0.3)),
+            Some(dec!(0.5)),
+        ];
+        let mut sizes = Vec::with_capacity(half_widths.len());
+        for half_width in half_widths {
+            let suggestion = sized(
+                model
+                    .suggest(&SizingInput {
+                        candidate: &candidate,
+                        capital_base_usd: capital,
+                        drawdown_state: DrawdownState::neutral(),
+                        edge_uncertainty_half_width: half_width,
+                        correlation: None,
+                    })
+                    .expect("sized"),
+            );
+            sizes.push((half_width, suggestion));
+        }
+        for window in sizes.windows(2) {
+            let (prev_width, prev) = &window[0];
+            let (next_width, next) = &window[1];
+            assert!(
+                next.desired_usd <= prev.desired_usd,
+                "widening half-width from {prev_width:?} to {next_width:?} must never \
+                 increase size: prev={:?} next={:?}",
+                prev.desired_usd,
+                next.desired_usd
+            );
+        }
+        assert_eq!(
+            sizes[0].1.edge_uncertainty_shrink_applied,
+            Some(Decimal::ONE),
+            "no half-width supplied must apply no shrink"
         );
         assert!(
-            shrunk.desired_usd <= base.desired_usd,
-            "edge uncertainty must never increase size: base={:?} shrunk={:?}",
-            base.desired_usd,
-            shrunk.desired_usd
-        );
-        assert!(
-            shrunk.edge_uncertainty_shrink_applied.expect("audit") < Decimal::ONE,
-            "non-zero half-width must apply shrink"
+            sizes
+                .last()
+                .expect("non-empty")
+                .1
+                .edge_uncertainty_shrink_applied
+                .expect("audit")
+                < Decimal::ONE,
+            "a wide half-width must apply a strictly-below-1 shrink"
         );
     }
 
     #[test]
     fn correlation_shrink_reduces_size_for_correlated_cluster() {
-        let model = kelly();
+        // Half-Kelly, uncapped (max_position_pct=0.9) so the sweep is
+        // observable across every cluster size rather than clipped flat by
+        // the per-position cap.
+        let model = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+            kelly_safety(),
+        );
         let candidate = candidate(dec!(10), dec!(200), dec!(1));
         let capital = Usd::new(dec!(10000));
-        let solo = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate,
-                    capital_base_usd: capital,
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                })
-                .expect("solo"),
-        );
-        let clustered = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate,
-                    capital_base_usd: capital,
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: Some(CorrelationShrinkInput {
-                        cluster_size: 3,
-                        mean_rho: dec!(0.5),
-                    }),
-                })
-                .expect("clustered"),
+        let cluster_sizes = [1_u32, 2, 3, 5, 10];
+        let mut sizes = Vec::with_capacity(cluster_sizes.len());
+        for cluster_size in cluster_sizes {
+            let suggestion = sized(
+                model
+                    .suggest(&SizingInput {
+                        candidate: &candidate,
+                        capital_base_usd: capital,
+                        drawdown_state: DrawdownState::neutral(),
+                        edge_uncertainty_half_width: None,
+                        correlation: Some(CorrelationShrinkInput {
+                            cluster_size,
+                            mean_rho: dec!(0.5),
+                        }),
+                    })
+                    .expect("sized"),
+            );
+            sizes.push((cluster_size, suggestion));
+        }
+        for window in sizes.windows(2) {
+            let (prev_n, prev) = &window[0];
+            let (next_n, next) = &window[1];
+            assert!(
+                next.desired_usd <= prev.desired_usd,
+                "growing the cluster from {prev_n} to {next_n} must never increase size: \
+                 prev={:?} next={:?}",
+                prev.desired_usd,
+                next.desired_usd
+            );
+        }
+        assert_eq!(
+            sizes[0].1.correlation_shrink_applied,
+            Some(Decimal::ONE),
+            "a solo candidate (cluster_size=1) must apply no correlation shrink"
         );
         assert!(
-            clustered.desired_usd <= solo.desired_usd,
-            "correlation shrink must not increase size"
+            sizes
+                .last()
+                .expect("non-empty")
+                .1
+                .correlation_shrink_applied
+                .expect("audit")
+                < Decimal::ONE,
+            "a large correlated cluster must apply a strictly-below-1 shrink"
         );
-        assert!(clustered.correlation_shrink_applied.expect("audit") < Decimal::ONE);
     }
 
     #[test]
@@ -937,29 +1224,45 @@ mod tests {
     }
 
     #[test]
-    fn confidence_cap_binding_emitted_when_below_floor() {
-        let model = KellySizingModel::new(
-            dec!(0.5),
-            dec!(0.9),
-            dec!(2),
-            ConfidenceSizeCurve::Linear,
-            DrawdownMultiplierPolicy::Fixed,
-            KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
+    fn return_model_has_no_300_500_constant_in_production_path() {
+        // Resolution path (`win_probability = Some`): `f*` depends only on
+        // calibrated `q` and market `p` — never on `target_reward_multiple`
+        // or the heuristic 300/500 bps constants that only feed the cold-start
+        // `HeuristicTpSl` branch (fail-closed from every production gate).
+        let candidate = resolution_candidate(dec!(200), dec!(500), dec!(1), dec!(0.7), dec!(0.4));
+        let capital = Usd::new(dec!(10000));
+        let with_r2 = sized(
+            KellySizingModel::new(
+                dec!(1),
+                dec!(1),
+                dec!(2),
+                ConfidenceSizeCurve::Linear,
+                DrawdownMultiplierPolicy::Fixed,
+                KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
+            )
+            .suggest(&sizing_input(&candidate, capital))
+            .expect("suggest"),
         );
-        let suggestion = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &candidate(dec!(10), dec!(200), dec!(0.2)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                })
-                .expect("suggest"),
+        let with_r99 = sized(
+            KellySizingModel::new(
+                dec!(1),
+                dec!(1),
+                dec!(99),
+                ConfidenceSizeCurve::Linear,
+                DrawdownMultiplierPolicy::Fixed,
+                KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
+            )
+            .suggest(&sizing_input(&candidate, capital))
+            .expect("suggest"),
         );
         assert_eq!(
-            suggestion.kelly_stage_binding,
-            Some(BindingConstraint::ConfidenceCap)
+            with_r2.provenance.expect("provenance").f_star,
+            with_r99.provenance.expect("provenance").f_star,
+            "changing target_reward_multiple must not affect Resolution-path f*"
+        );
+        assert_eq!(
+            with_r2.provenance.expect("provenance").bet_structure,
+            SizingBetStructure::Resolution
         );
     }
 }

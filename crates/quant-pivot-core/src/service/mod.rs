@@ -1,6 +1,7 @@
 pub mod account;
 pub mod backtest;
 pub mod basis_alert;
+pub mod bias_table_fit;
 pub mod calibration_shared;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;
@@ -8,7 +9,6 @@ pub mod dataset_replay;
 pub mod domain_ingest;
 pub mod equity;
 pub mod factor_pipeline;
-pub mod favorite_longshot_fit;
 pub mod feature_pipeline;
 pub mod gamma;
 pub mod historical_replay;

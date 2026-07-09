@@ -11,8 +11,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::governance::{
-    ModelGovernanceDeps, ModelGovernanceService, ModelScoreCalibrationPayload,
-    model_score_content_hash,
+    CoreCalibrationArtifactLoader, ModelGovernanceDeps, ModelGovernanceService,
+    ModelScoreCalibrationPayload, model_score_content_hash,
 };
 use quant_pivot_core::runtime_config::RuntimeConfigStore;
 use quant_pivot_error::control::ControlError;
@@ -61,8 +61,9 @@ use quant_pivot_research::{
     factors::names::LIQUIDITY_DEPTH,
     gates::{DefaultModelQualityGate, ModelQualityGate},
     model::{
-        CalibratedReturnModel, FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
-        ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+        CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
+        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
+        WeightedFactorModelArtifact,
     },
     model::{MonotoneMapping, ReliabilityReport},
 };
@@ -122,6 +123,11 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
     let apply: Arc<dyn RuntimeConfigPort> = Arc::new(TestRuntimeConfigApply {
         store: Arc::clone(&store),
     });
+    let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
+        Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
+    let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
+        CoreCalibrationArtifactLoader::new(Arc::clone(&calibration_repo)),
+    );
     let service = ModelGovernanceService::new(ModelGovernanceDeps {
         model_registry_repo: Arc::new(PgModelRegistryRepository::new(db.clone())),
         backtest_report_repo: Arc::new(PgBacktestReportRepository::new(db.clone())),
@@ -129,8 +135,8 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
         dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
         artifact_store: Arc::clone(&artifact_store),
-        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone()))
-            as Arc<dyn CalibrationArtifactRepository>,
+        calibration_repo,
+        calibration_loader,
         gate,
         runtime_config: Arc::clone(&store),
         runtime_config_apply: apply,

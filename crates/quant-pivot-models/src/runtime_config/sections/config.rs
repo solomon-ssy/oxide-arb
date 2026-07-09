@@ -673,6 +673,14 @@ pub struct ModelCalibrationConfig {
     pub embargo_secs: u64,
     /// Two-sided confidence level for reliability-bin Wilson intervals.
     pub ci_confidence: DecimalString,
+    /// Hard gate switch for `GateId::CalibrationRequired` (Phase 11.3 §6):
+    /// when `true` (the production default), `Publish`/`AutoExecution` on a
+    /// Buy model requires a `Calibrated` return model — an uncalibrated
+    /// (`Heuristic`) artifact fails closed. Never disable outside a
+    /// deliberately-labeled cold-start bootstrap window; it exists as a
+    /// governed field (not a hard-coded `true`) purely so that window is an
+    /// auditable operator decision, not a code change.
+    pub require_for_publish: bool,
 }
 
 impl Default for ModelCalibrationConfig {
@@ -682,6 +690,7 @@ impl Default for ModelCalibrationConfig {
             min_samples_isotonic: 1_000,
             embargo_secs: 86_400,
             ci_confidence: DecimalString::new("0.95"),
+            require_for_publish: true,
         }
     }
 }

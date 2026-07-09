@@ -105,11 +105,21 @@ pub struct SignalCandidate {
     /// Model confidence in `[0, 1]`.
     pub confidence: Probability,
     /// Expected (probability-weighted **mean**) return in basis points — `E[r]`,
-    /// not a conditional take-profit target. Kelly sizing recovers the win
-    /// probability from `E[r]`, the downside, and a configured reward multiple.
+    /// not a conditional take-profit target. Audit-only once `win_probability`
+    /// is `Some`: Kelly sizing (Phase 11.3 §4 redesign) uses `win_probability`
+    /// directly, never re-derives it from `E[r]`.
     pub expected_return_bps: Decimal,
-    /// Estimated downside (stop-loss magnitude) in basis points — `l`.
+    /// Estimated downside (stop-loss magnitude) in basis points — `l`. Feeds
+    /// the exit plan's stop-loss price (Phase 11.7 territory); no longer part
+    /// of the Kelly win-probability derivation (Phase 11.3 §4 redesign).
     pub downside_bps: Decimal,
+    /// The calibrated `P(win)` Kelly sizing consumes directly as `q`
+    /// (`f* = (q - p) / (1 - p)`, `p` = `entry_price_ref`). `Some` only when
+    /// the emitting model's return model is `Calibrated`; `None` for the
+    /// `Heuristic` bootstrap path, whose sizing is fenced off from production
+    /// by fail-closed publish/admission gates (Phase 11.3 §4 redesign — see
+    /// `crate::portfolio::sizing`).
+    pub win_probability: Option<Probability>,
     /// Reference entry price.
     pub entry_price_ref: Price,
     /// Suggested holding horizon, in seconds.
@@ -225,6 +235,7 @@ mod tests {
             confidence: Probability::new(Decimal::new(60, 2)),
             expected_return_bps: Decimal::new(150, 0),
             downside_bps: Decimal::new(40, 0),
+            win_probability: Some(Probability::new(Decimal::new(55, 2))),
             entry_price_ref: Price::new(Decimal::new(65, 2)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -261,6 +272,7 @@ mod tests {
             // +200 bps target, -500 bps stop on a 0.40 entry.
             expected_return_bps: Decimal::from(200),
             downside_bps: Decimal::from(500),
+            win_probability: Some(Probability::new(Decimal::new(52, 2))),
             entry_price_ref: Price::new(Decimal::new(40, 2)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),

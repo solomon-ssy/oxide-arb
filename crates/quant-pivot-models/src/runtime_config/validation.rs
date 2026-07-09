@@ -4,7 +4,7 @@
 //! and superseded pre-quant configuration paths are not accepted (clean-break
 //! runtime configuration).
 
-use crate::runtime_config::FeatureFamily;
+use crate::{runtime_config::FeatureFamily, types::CalibrationArtifactId};
 
 use super::{
     DecimalString, RuntimeConfig, SizingModelConfig,
@@ -27,7 +27,7 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic runtime-config v6 invariants.
+/// Mode-agnostic runtime-config v7 invariants.
 ///
 /// Phase 11.3 added the `model.calibration` embargo/confidence bounds and the
 /// `portfolio.kelly_safety` edge-uncertainty bounds — see [`validate_model`]
@@ -406,6 +406,18 @@ fn validate_factor_structural(config: &RuntimeConfig, report: &mut ConfigValidat
         &fl.ic_significance_min,
         report,
     );
+    // Pure format check (no IO): a malformed ref must be caught here, not
+    // deferred until config activation (`BiasTableApplicator::reload`), which
+    // additionally verifies existence + content hash — that IO-bound check
+    // stays there; this one only guards the string shape.
+    if let Some(raw) = fl.bias_table_ref.as_ref()
+        && raw.trim().parse::<CalibrationArtifactId>().is_err()
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.structural.favorite_longshot.bias_table_ref",
+            detail: format!("`{raw}` is not a valid CalibrationArtifactId (UUID)"),
+        });
+    }
     validate_participant_concentration_weights(config, report);
 }
 
@@ -1124,6 +1136,7 @@ mod tests {
             DecimalString, FeatureNameRef, RUNTIME_CONFIG_SCHEMA_VERSION, ReportScheduleConfig,
             ScheduleCadence,
         },
+        types::CalibrationArtifactId,
     };
 
     #[test]
@@ -1184,6 +1197,34 @@ mod tests {
             !report.has_errors(),
             "0.90 is within the valid (0.5, 1) range"
         );
+    }
+
+    #[test]
+    fn runtime_config_rejects_malformed_bias_table_ref_before_activation() {
+        // A malformed ref must be caught at the pure semantic-validation pass
+        // (this function, no IO), not deferred to `BiasTableApplicator::reload`
+        // at config activation time.
+        let mut config = RuntimeConfig::default();
+        config.factors.structural.favorite_longshot.bias_table_ref = Some("not-a-uuid".to_owned());
+        let report = validate_runtime_config(&config);
+        assert!(
+            report.has_errors(),
+            "a non-UUID bias_table_ref must fail validation before activation"
+        );
+
+        let mut config = RuntimeConfig::default();
+        config.factors.structural.favorite_longshot.bias_table_ref =
+            Some(CalibrationArtifactId::from_v7().to_string());
+        let report = validate_runtime_config(&config);
+        assert!(
+            !report.has_errors(),
+            "a well-formed CalibrationArtifactId UUID must pass the format check"
+        );
+
+        let mut config = RuntimeConfig::default();
+        config.factors.structural.favorite_longshot.bias_table_ref = None;
+        let report = validate_runtime_config(&config);
+        assert!(!report.has_errors(), "None must never be rejected");
     }
 
     #[test]

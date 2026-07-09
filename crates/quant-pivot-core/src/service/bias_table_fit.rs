@@ -1,4 +1,4 @@
-//! Favorite-longshot bias-table fit orchestration (Phase 11.2.1).
+//! Bias-table fit orchestration (`kind = market_price_bias`, Phase 11.2.1).
 //!
 //! The fit reuses the **offline point-in-time spine**
 //!   (`HistoricalWindowLoader` + the in-memory `MaterializedPitEngine`) that the
@@ -38,7 +38,7 @@ use quant_pivot_models::{
         CalibrationArtifactInfo, CalibrationArtifactListQuery, JobProgressSink, Paginated,
         WindowBoundsError, query::TimeWindow,
     },
-    enums::common::MarketCategory,
+    enums::{common::MarketCategory, quant::CalibrationKind},
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorsConfig, FavoriteLongshotConfig, RuntimeConfig,
     },
@@ -50,16 +50,66 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     features::PitView,
-    model::favorite_longshot::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable},
+    model::favorite_longshot::{
+        BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable,
+    },
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
+    governance::ModelScoreCalibrationPayload,
     prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
     service::calibration_shared::{
         assert_disjoint_from_all_training_datasets, calibration_split_hash,
     },
 };
+
+/// Validate that `info.payload_json` actually deserializes into the shape its
+/// declared `kind` promises, **before** serving it to a read-only detail view
+/// (Phase 11.3 closed-loop hardening — closes the "kind says X, payload is
+/// shaped like Y" drift that a raw `payload_json` pass-through could
+/// otherwise surface as a broken frontend render rather than a clear server
+/// error). Deliberately **does not** re-verify content hash or `active`: an
+/// operator must still be able to inspect a superseded / historical artifact's
+/// full detail — those two invariants are enforced at the *consumption* points
+/// (`CoreCalibrationArtifactLoader::load`, `BiasTableApplicator::reload`), not
+/// at read-only display.
+///
+/// # Errors
+///
+/// Returns an error when the payload cannot deserialize into the shape its
+/// `kind` promises.
+fn validate_payload_shape(info: &CalibrationArtifactInfo) -> QuantResult<()> {
+    match info.kind {
+        CalibrationKind::ModelScore => {
+            serde_json::from_value::<ModelScoreCalibrationPayload>(info.payload_json.clone())
+                .map_err(|error| {
+                    QuantError::from(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "calibration artifact `{}` declares kind `model_score` but its \
+                             payload does not deserialize as one: {error}",
+                            info.artifact_id
+                        ),
+                    })
+                })?;
+        }
+        CalibrationKind::MarketPriceBias => {
+            serde_json::from_value::<BTreeMap<MarketCategory, CategoryBiasCurve>>(
+                info.payload_json.clone(),
+            )
+            .map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "calibration artifact `{}` declares kind `market_price_bias` but its \
+                         payload does not deserialize as one: {error}",
+                        info.artifact_id
+                    ),
+                })
+            })?;
+        }
+    }
+    Ok(())
+}
 
 /// Parse a runtime-config decimal string (must have passed validation on write).
 fn config_decimal(raw: &str, field: &'static str) -> QuantResult<Decimal> {
@@ -125,8 +175,8 @@ struct SettledMarket {
     settled_yes: bool,
 }
 
-/// Core favorite-longshot bias-table fitter + read port.
-pub struct FavoriteLongshotFitService {
+/// Core bias-table fitter + calibration-artifact read port.
+pub struct BiasTableFitService {
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_repo: Arc<dyn MarketRepository>,
     event_repo: Arc<dyn EventRepository>,
@@ -136,7 +186,7 @@ pub struct FavoriteLongshotFitService {
     training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
 }
 
-impl FavoriteLongshotFitService {
+impl BiasTableFitService {
     /// Wire the fitter from its persistence ports.
     #[must_use]
     pub const fn new(
@@ -344,7 +394,7 @@ impl FavoriteLongshotFitService {
 }
 
 #[async_trait]
-impl CalibrationArtifactFitPort for FavoriteLongshotFitService {
+impl CalibrationArtifactFitPort for BiasTableFitService {
     async fn fit(
         &self,
         params: BiasTableFitJobParams,
@@ -436,10 +486,15 @@ impl CalibrationArtifactFitPort for FavoriteLongshotFitService {
         &self,
         artifact_id: &CalibrationArtifactId,
     ) -> QuantResult<Option<CalibrationArtifactInfo>> {
-        self.calibration_repo
+        let found = self
+            .calibration_repo
             .find_by_id(artifact_id)
             .await
-            .map_err(QuantError::from)
+            .map_err(QuantError::from)?;
+        if let Some(info) = &found {
+            validate_payload_shape(info)?;
+        }
+        Ok(found)
     }
 
     async fn page(
@@ -463,7 +518,7 @@ impl CalibrationArtifactFitPort for FavoriteLongshotFitService {
     }
 }
 
-impl FavoriteLongshotFitService {
+impl BiasTableFitService {
     /// Persist a fitted table as a content-addressed, unified `CalibrationArtifact` row.
     async fn persist(
         &self,
@@ -479,4 +534,64 @@ impl FavoriteLongshotFitService {
 /// Max book staleness for the PIT engine, from the frozen data-quality config.
 const fn book_staleness(data_quality: &DataQualityConfig) -> StdDuration {
     StdDuration::from_millis(data_quality.max_book_age_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_payload_shape;
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::CalibrationArtifactInfo,
+        enums::quant::CalibrationKind,
+        types::{CalibrationArtifactId, ContentHash},
+    };
+
+    fn base_info(
+        kind: CalibrationKind,
+        payload_json: serde_json::Value,
+    ) -> CalibrationArtifactInfo {
+        let hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+        CalibrationArtifactInfo {
+            artifact_id: CalibrationArtifactId::from_v7(),
+            kind,
+            content_hash: hash.clone(),
+            fit_window_start: Utc::now(),
+            fit_window_end: Utc::now(),
+            calibration_split_hash: hash,
+            sample_count: 100,
+            payload_json,
+            active: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn rejects_model_score_kind_with_market_price_bias_shaped_payload() {
+        // The exact "kind says X, payload is shaped like Y" drift this guard
+        // exists to catch before serving a broken payload to the detail view.
+        let info = base_info(CalibrationKind::ModelScore, serde_json::json!({}));
+        assert!(
+            validate_payload_shape(&info).is_err(),
+            "an empty object is not a valid ModelScoreCalibrationPayload"
+        );
+    }
+
+    #[test]
+    fn rejects_market_price_bias_kind_with_non_map_payload() {
+        let info = base_info(
+            CalibrationKind::MarketPriceBias,
+            serde_json::json!("not-a-map"),
+        );
+        assert!(
+            validate_payload_shape(&info).is_err(),
+            "a bare string is not a valid by-category bias curve map"
+        );
+    }
+
+    #[test]
+    fn accepts_well_formed_market_price_bias_payload() {
+        // An empty map is a structurally valid (if practically inert) payload.
+        let info = base_info(CalibrationKind::MarketPriceBias, serde_json::json!({}));
+        assert!(validate_payload_shape(&info).is_ok());
+    }
 }

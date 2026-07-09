@@ -62,7 +62,7 @@
 
 ## 2. Runtime Config v7
 
-根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 9`（以代码为准；本节结构文字仍以 v7 基线书写，后续 bump 只增段不改既有语义）。
+根类型 [`RuntimeConfig`](../../../crates/quant-pivot-models/src/runtime_config/mod.rs)，`RUNTIME_CONFIG_SCHEMA_VERSION = 7`（以代码为准）。
 
 > **schema 版本历史**：v7 基线 → … → v9（Phase 06.1）→ **v10**（Phase 10.7：移除线上死配置 `model.prediction_horizon_secs`→训练 API；`data_quality.min_book_depth_usd` 迁移正名为 `execution.entry_order_policy.min_entry_book_depth_usd`）。
 

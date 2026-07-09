@@ -29,7 +29,7 @@ use quant_pivot_research::{
 use crate::{
     app::bundles::ResearchBundle,
     service::{
-        favorite_longshot_fit::resolve_frozen_bias_table,
+        bias_table_fit::resolve_frozen_bias_table,
         training_dataset::{
             TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
             default_labelers,

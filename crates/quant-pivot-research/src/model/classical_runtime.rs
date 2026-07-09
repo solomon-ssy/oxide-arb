@@ -166,6 +166,12 @@ impl ClassicalRuntime {
             confidence,
             expected_return_bps,
             downside_bps,
+            // Classical ML has no bound `ProbabilityCalibrator` (Phase 11.3
+            // scope is the weighted-factor family only); `ModelArtifact::Classical`
+            // is unconditionally `return_model_is_calibrated() == false`, so
+            // this path is already fenced off from every production execution
+            // gate the same way `HeuristicReturnModel` is.
+            win_probability: None,
             entry_price_ref,
             suggested_horizon_secs: 0,
             factor_breakdown: Vec::new(),

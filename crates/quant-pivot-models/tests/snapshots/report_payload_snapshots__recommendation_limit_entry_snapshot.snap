@@ -70,7 +70,8 @@ expression: recommendation_limit_entry()
     "confidence_shrink_applied": "1.0",
     "drawdown_shrink_applied": "1.0",
     "raw_fraction_applied": "0.5",
-    "position_cap_fraction_applied": "0.05"
+    "position_cap_fraction_applied": "0.05",
+    "bet_structure_applied": "resolution"
   },
   "exit_plan": {
     "take_profit_price": "0.7",
@@ -128,7 +129,8 @@ expression: recommendation_limit_entry()
       "report_only_mode"
     ],
     "approval_required": true,
-    "auto_policy_id": null
+    "auto_policy_id": null,
+    "uncalibrated_watermark": false
   },
   "valid_from": "2023-11-14T22:13:20Z",
   "valid_until": "2023-11-15T22:13:20Z",

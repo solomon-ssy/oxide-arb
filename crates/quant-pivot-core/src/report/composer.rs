@@ -651,6 +651,7 @@ fn execution_eligibility(
     }
     ExecutionEligibility {
         eligible_modes,
+        uncalibrated_watermark: reasons.contains(&IneligibilityReason::ReturnModelUncalibrated),
         ineligibility_reasons: reasons,
         approval_required: !gate.allowed || !return_model_calibrated,
         auto_policy_id: (gate.allowed && return_model_calibrated)
@@ -1163,6 +1164,7 @@ mod tests {
             confidence: Probability::new(dec!(0.80)),
             expected_return_bps: dec!(5000),
             downside_bps: dec!(1000),
+            win_probability: None,
             entry_price_ref: Price::new(dec!(0.50)),
             suggested_horizon_secs: 3_600,
             factor_breakdown: Vec::new(),
@@ -1275,6 +1277,7 @@ mod tests {
             drawdown_shrink_applied: None,
             raw_fraction_applied: None,
             position_cap_fraction_applied: None,
+            bet_structure_applied: None,
         }
     }
 
@@ -1349,6 +1352,7 @@ mod tests {
                 drawdown_shrink_applied: None,
                 raw_fraction_applied: None,
                 position_cap_fraction_applied: None,
+                bet_structure_applied: None,
             },
             risk_envelope: RiskEnvelope {
                 max_loss_usd: Usd::new(dec!(120)),

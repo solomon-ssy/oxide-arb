@@ -31,6 +31,39 @@ fn sample_count_as_f64(len: usize) -> f64 {
     f64::from(u32::try_from(len).unwrap_or(u32::MAX))
 }
 
+/// Convert every calibration-split score to `f64`, failing closed (never a
+/// fabricated `0.0`) the moment any single score cannot round-trip.
+fn decimals_to_f64_or_fail(scores: &[Decimal]) -> QuantResult<Vec<f64>> {
+    scores
+        .iter()
+        .map(|score| {
+            score.to_f64().ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "platt calibration score `{score}` cannot be represented as f64 — \
+                         rejecting the fit rather than silently substituting 0.0"
+                    ),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Convert a fitted Platt parameter back to `Decimal`, failing closed (never
+/// a fabricated `0.0`) on a non-finite or out-of-range result — a `NaN`/`inf`
+/// parameter here would mean the Newton loop diverged, and persisting `0.0`
+/// instead would silently store a degenerate, uninformative calibrator.
+fn decimal_from_f64_or_fail(value: f64, name: &'static str) -> QuantResult<Decimal> {
+    Decimal::from_f64(value).ok_or_else(|| {
+        QuantError::from(ResearchError::DatasetBuild {
+            detail: format!(
+                "platt fit produced a non-finite or out-of-range {name}={value} — \
+                 rejecting the fit rather than silently substituting 0.0"
+            ),
+        })
+    })
+}
+
 /// Platt's label-smoothing prior for the positive class count.
 fn prior_positive_target(won_count: f64) -> f64 {
     (won_count + 1.0) / (won_count + 2.0)
@@ -58,11 +91,15 @@ impl ProbabilityCalibrator for PlattCalibrator {
                 ),
             }));
         }
-        let scores_f64: Vec<f64> = scores.iter().map(|s| s.to_f64().unwrap_or(0.0)).collect();
+        // Fail-closed (README §5: "NaN/inf rejects the sample, never a
+        // silent 0"): a score that cannot round-trip through `f64` must
+        // reject the whole fit, not silently corrupt the Newton loop with a
+        // fabricated `0.0`.
+        let scores_f64 = decimals_to_f64_or_fail(scores)?;
         let (param_a, param_b) = fit_platt(&scores_f64, outcomes)?;
         Ok(MonotoneMapping::Platt {
-            a: Decimal::from_f64(param_a).unwrap_or(Decimal::ZERO),
-            b: Decimal::from_f64(param_b).unwrap_or(Decimal::ZERO),
+            a: decimal_from_f64_or_fail(param_a, "param_a")?,
+            b: decimal_from_f64_or_fail(param_b, "param_b")?,
         })
     }
 

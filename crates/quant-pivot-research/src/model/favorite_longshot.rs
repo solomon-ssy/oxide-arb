@@ -199,6 +199,21 @@ impl FavoriteLongshotBiasTable {
                 ),
             }));
         }
+        // Fail-closed governance, unified with the `ModelScore` calibrator
+        // loader (Phase 11.3 closed-loop hardening — both `kind`s of the same
+        // `CalibrationArtifact` family share one `active` lifecycle
+        // semantics): a superseded or never-activated bias table must never
+        // resolve, even if a stale `factors.structural.favorite_longshot.bias_table_ref`
+        // still names it.
+        if !info.active {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "bias-table `{}` is not active — a superseded or never-activated bias \
+                     table must never resolve",
+                    info.artifact_id
+                ),
+            }));
+        }
         let by_category: BTreeMap<MarketCategory, CategoryBiasCurve> =
             serde_json::from_value(info.payload_json.clone()).map_err(|error| {
                 QuantError::from(ResearchError::DatasetBuild {
@@ -505,14 +520,15 @@ fn ic_is_significant(ic: Decimal, n: u64, ci_confidence: Decimal, ic_floor: Deci
 
 #[cfg(test)]
 mod tests {
-    use super::{BiasFitConfig, BiasSample, FavoriteLongshotBiasTable};
+    use super::{BiasFitConfig, BiasSample, BiasTableCanonical, FavoriteLongshotBiasTable};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::query::TimeWindow,
-        enums::common::MarketCategory,
-        types::{ContentHash, MarketId, Price},
+        domain::{CalibrationArtifactInfo, query::TimeWindow},
+        enums::{common::MarketCategory, quant::CalibrationKind},
+        types::{CalibrationArtifactId, ContentHash, MarketId, Price},
     };
     use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
 
     fn window() -> TimeWindow {
         TimeWindow::new(
@@ -659,5 +675,62 @@ mod tests {
                 "unfit category has no bias"
             );
         }
+    }
+
+    fn persisted_info(active: bool) -> CalibrationArtifactInfo {
+        let by_category: BTreeMap<MarketCategory, super::CategoryBiasCurve> = BTreeMap::new();
+        let fit_window = window();
+        let calibration_split_hash = split_hash();
+        let content_hash = crate::hashing::ResearchHasher::canonical(&BiasTableCanonical {
+            fit_window: &fit_window,
+            calibration_split_hash: &calibration_split_hash,
+            by_category: &by_category,
+        })
+        .expect("hash");
+        CalibrationArtifactInfo {
+            artifact_id: CalibrationArtifactId::from_v7(),
+            kind: CalibrationKind::MarketPriceBias,
+            content_hash,
+            fit_window_start: fit_window.from,
+            fit_window_end: fit_window.to,
+            calibration_split_hash,
+            sample_count: 1_000,
+            payload_json: serde_json::to_value(&by_category).expect("payload json"),
+            active,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn favorite_longshot_governance_unified_under_calibration_artifact() {
+        // Phase 11.3 closed-loop: `MarketPriceBias` shares the same `active`
+        // lifecycle gate as `model_score` calibrators — a superseded bias table
+        // must fail closed at resolve time, not only at activate time.
+        let info = persisted_info(false);
+        assert!(
+            FavoriteLongshotBiasTable::from_persisted(&info).is_err(),
+            "inactive bias table must be rejected under unified calibration-artifact governance"
+        );
+    }
+
+    #[test]
+    fn from_persisted_rejects_inactive_bias_table() {
+        // Unified with `CoreCalibrationArtifactLoader` (Phase 11.3 closed-loop
+        // hardening): a superseded or never-activated bias table must never
+        // resolve, even though `MarketPriceBias` previously had no such gate.
+        let info = persisted_info(false);
+        assert!(
+            FavoriteLongshotBiasTable::from_persisted(&info).is_err(),
+            "an inactive bias table must never resolve"
+        );
+    }
+
+    #[test]
+    fn from_persisted_accepts_active_bias_table() {
+        let info = persisted_info(true);
+        assert!(
+            FavoriteLongshotBiasTable::from_persisted(&info).is_ok(),
+            "an active, hash-verified bias table must resolve"
+        );
     }
 }

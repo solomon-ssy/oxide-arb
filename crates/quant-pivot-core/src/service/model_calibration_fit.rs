@@ -155,12 +155,20 @@ impl ModelCalibrationFitService {
     /// disjoint + embargoed relationship to the target model's own training
     /// dataset (Phase 11.3 §0/§4 — the `WalkForwardSplit`-with-embargo purge
     /// primitive). Fail-closed on any mismatch.
+    ///
+    /// Returns the **catalog** calibration window (`calibration_dataset.window_start/end`) —
+    /// the exact window this function verified disjoint + embargoed. `fit()`
+    /// persists this same window as `fit_window`, never a window re-derived
+    /// from which samples happened to materialize (that could be a strict
+    /// subset of the verified window, e.g. under sparse market activity,
+    /// silently decoupling the persisted provenance from what was actually
+    /// checked).
     async fn validate_split(
         &self,
         model_version_id: &ModelVersionId,
         request: &FitModelCalibratorRequest,
         policy: &CalibrationFitPolicy,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<TimeWindow> {
         let version = self
             .model_registry_repo
             .find_model_version_by_id(model_version_id)
@@ -230,7 +238,7 @@ impl ModelCalibrationFitService {
                 "model calibration fit",
             )?;
         }
-        Ok(())
+        Ok(calibration_window)
     }
 }
 
@@ -248,7 +256,8 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             runtime_config_version_id,
         } = params;
         let policy = self.frozen_policy(&runtime_config_version_id).await?;
-        self.validate_split(&request.model_version_id, &request, &policy)
+        let fit_window = self
+            .validate_split(&request.model_version_id, &request, &policy)
             .await?;
 
         // Reuse the PIT backtest replay engine to harvest (score, outcome, MAE)
@@ -309,11 +318,6 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
         let reliability =
             compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
 
-        let (window_start, window_end) = (
-            samples.iter().map(|s| s.as_of).min().unwrap_or_default(),
-            samples.iter().map(|s| s.as_of).max().unwrap_or_default(),
-        );
-        let fit_window = TimeWindow::new(window_start, window_end);
         let split_hash = calibration_split_hash(
             &fit_window,
             samples.iter().map(|s| (s.market_id.to_string(), s.as_of)),
@@ -343,8 +347,8 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
                 kind: CalibrationKind::ModelScore,
                 content_hash,
                 calibration_split_hash: split_hash,
-                fit_window_start: window_start,
-                fit_window_end: window_end,
+                fit_window_start: fit_window.from,
+                fit_window_end: fit_window.to,
                 sample_count: i64::try_from(samples.len()).unwrap_or(i64::MAX),
                 payload_json,
                 active: false,

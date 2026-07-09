@@ -43,6 +43,7 @@ actix-rt = { workspace = true }
 actix-test = { workspace = true }
 prometheus = { workspace = true }
 quant-pivot-core = { workspace = true }
+quant-pivot-research = { workspace = true }
 quant-pivot-storage = { workspace = true, features = ["test-util"] }
 quant-pivot-test-support = { workspace = true }
 rust_decimal = { workspace = true }

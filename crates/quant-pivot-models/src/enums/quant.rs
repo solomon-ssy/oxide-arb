@@ -640,6 +640,27 @@ crate::wire_enum! {
 }
 
 crate::wire_enum! {
+    /// Which bet-structure `KellySizingModel::suggest` used to derive `f*`
+    /// (Phase 11.3 §4 redesign — audit provenance on `SizingPlan`).
+    @derive(Default)
+    pub enum SizingBetStructure {
+        /// `f* = (q - p) / (1 - p)`, `q` = calibrated `P(win)`, `p` =
+        /// executable market price — the payoff structure `E[r]` already
+        /// assumes (hold to resolution: win `(1-p)/p`, lose the stake). The
+        /// only bet structure reachable from a `Calibrated` return model.
+        #[default]
+        Resolution => "resolution",
+        /// Legacy TP/SL bet-structure recovery (`g = target_reward_multiple ×
+        /// downside`, `q` solved from `E[r]`/`downside`). Only reachable from
+        /// `HeuristicReturnModel`, which fail-closed gates block from every
+        /// production execution path (publish / semi-auto / auto-execution);
+        /// retained solely so a `ReportOnly` cold-start report can still show
+        /// an experimental size.
+        HeuristicTpSl => "heuristic_tp_sl",
+    }
+}
+
+crate::wire_enum! {
     /// The cap that bound a recommendation's final size.
     ///
     /// `None` means no hard cap bound the size (it was limited only by the

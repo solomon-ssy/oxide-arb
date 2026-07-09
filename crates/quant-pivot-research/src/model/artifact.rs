@@ -25,6 +25,7 @@ use quant_pivot_models::{
     },
     types::{
         ArtifactUri, CalibrationArtifactId, ContentHash, ModelArtifactId, ModelVersionId, Price,
+        Probability,
     },
 };
 use rust_decimal::Decimal;
@@ -375,6 +376,13 @@ pub struct ReturnEstimate {
     pub downside_bps: Decimal,
     /// Whether the estimate came from a calibrated model (else heuristic).
     pub calibrated: bool,
+    /// The calibrated `P(win)` (`Some` only for `Calibrated`; Kelly sizing
+    /// (Phase 11.3 §4 redesign) consumes this directly as its win probability
+    /// — never re-derived from `expected_return_bps`/`downside_bps`, which
+    /// would reintroduce the resolution-vs-TP/SL bet-structure mismatch this
+    /// field exists to remove). `None` for `Heuristic`, whose sizing path is
+    /// fenced off from production by fail-closed publish/admission gates.
+    pub win_probability: Option<Probability>,
 }
 
 impl ReturnModelSpec {
@@ -407,6 +415,7 @@ impl ReturnModelSpec {
                     expected_return_bps,
                     downside_bps,
                     calibrated: false,
+                    win_probability: None,
                 }
             }
             Self::Calibrated(_) => {
@@ -415,6 +424,7 @@ impl ReturnModelSpec {
                         expected_return_bps: Decimal::ZERO,
                         downside_bps: Decimal::ZERO,
                         calibrated: true,
+                        win_probability: None,
                     };
                 };
                 resolved.estimate_return(composite_score, market_price)
@@ -1051,6 +1061,10 @@ mod tests {
         assert_eq!(est.expected_return_bps, dec!(400));
         assert_eq!(est.downside_bps, dec!(0));
         assert!(!est.calibrated);
+        assert!(
+            est.win_probability.is_none(),
+            "heuristic path never carries a calibrated win probability"
+        );
 
         let calibrated = ReturnModelSpec::Calibrated(CalibratedReturnModel {
             calibrator_ref: CalibrationArtifactId::from_v7(),
@@ -1093,11 +1107,17 @@ mod tests {
         assert!(mid.calibrated);
         assert_eq!(mid.downside_bps, dec!(300));
         assert_eq!(mid.expected_return_bps, dec!(2500));
+        assert_eq!(
+            mid.win_probability,
+            Some(Probability::new(dec!(0.5))),
+            "Kelly must receive the calibrated P(win) directly, not a value re-derived from E[r]"
+        );
 
         // Missing resolved calibration never fabricates a value.
         let missing = calibrated.estimate(dec!(0.5), dec!(0.8), Price::new(dec!(0.4)), None);
         assert_eq!(missing.expected_return_bps, Decimal::ZERO);
         assert_eq!(missing.downside_bps, Decimal::ZERO);
         assert!(missing.calibrated);
+        assert!(missing.win_probability.is_none());
     }
 }

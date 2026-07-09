@@ -36,7 +36,7 @@ use super::{
 };
 use crate::{
     execution::{breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle},
-    governance::{KillSwitchHandle, RuntimeModeHandle},
+    governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     ingest::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
     service::account::AccountProviderFactory,
@@ -234,19 +234,15 @@ impl AdmissionInputBuilder {
                 let artifact =
                     load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
                 // The enum tag alone only proves a calibrator was bound at
-                // publish time; re-resolve it now so a calibrator that has
-                // since been deactivated/superseded denies at submit time
-                // (TOCTOU close — admission check #23 deep verification)
-                // rather than silently continuing to trust a stale reference.
-                match artifact.calibrator_ref() {
-                    Some(calibrator_ref) => self
-                        .deps
-                        .calibration_loader
-                        .load(calibrator_ref)
-                        .await
-                        .is_ok(),
-                    None => false,
-                }
+                // publish time; `resolve_return_model_calibration` re-resolves
+                // it now (the same shared deep check publish / report /
+                // intent-creation use) so a calibrator that has since been
+                // deactivated/superseded denies at submit time (TOCTOU close
+                // — admission check #23 deep verification) rather than
+                // silently continuing to trust a stale reference.
+                resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
+                    .await
+                    .is_ok_and(|resolved| resolved.is_some())
             }
             None => false,
         };

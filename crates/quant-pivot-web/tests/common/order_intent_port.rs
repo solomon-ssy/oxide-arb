@@ -7,7 +7,7 @@ use quant_pivot_core::{
         CoreOrderIntentService, DefaultRuntimeModeGate, DispatchWake, IntentLifecyclePublisher,
         OrderIntentServiceDeps, RuntimeModeGate,
     },
-    governance::{KillSwitchHandle, RuntimeModeHandle},
+    governance::{CoreCalibrationArtifactLoader, KillSwitchHandle, RuntimeModeHandle},
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
@@ -17,10 +17,15 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgCalibrationArtifactRepository, PgModelRegistryRepository, PgOrderIntentRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository,
     },
-    traits::{OrderIntentRepository, RecommendationReportRepository, RecommendationRepository},
+    traits::{
+        CalibrationArtifactRepository, ModelRegistryRepository, OrderIntentRepository,
+        RecommendationReportRepository, RecommendationRepository,
+    },
 };
+use quant_pivot_research::{artifact::LocalArtifactStore, model::CalibrationArtifactLoader};
 use sea_orm::DatabaseConnection;
 
 /// Assemble a real [`CoreOrderIntentService`] over the test Postgres connection.
@@ -51,5 +56,17 @@ pub fn build_order_intent_service(
         intent_lifecycle,
         dispatch_wake: DispatchWake::new(),
         metrics: Arc::new(MetricsHub::new()),
+        model_registry: Arc::new(PgModelRegistryRepository::new(db.clone()))
+            as Arc<dyn ModelRegistryRepository>,
+        artifact_store: Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(
+            "qp_web_test_order_intent_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        )))),
+        calibration_loader: Arc::new(CoreCalibrationArtifactLoader::new(Arc::new(
+            PgCalibrationArtifactRepository::new(db.clone()),
+        )
+            as Arc<dyn CalibrationArtifactRepository>))
+            as Arc<dyn CalibrationArtifactLoader>,
     }))
 }

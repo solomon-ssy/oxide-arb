@@ -1058,13 +1058,17 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 ### 9.3 买多少
 
-以 `sizing_plan.suggested_usd` 和 `sizing_plan.shares` 为上限。计算链路：
+以 `sizing_plan.suggested_usd` 和 `sizing_plan.shares` 为上限。生产 Kelly 使用校准 `P(win)` 与市场价
+`p` 直接计算 `f* = (q − p) / (1 − p)`（Phase 11.3）；`sizing_plan` 瀑布图审计各收缩阶段。
+未校准 return model 仅 `ReportOnly` 实验展示，禁止 publish / semi-auto / auto intent 创建。
+
+计算链路：
 
 ```mermaid
 flowchart LR
     A["venue collateral + positions"] --> B["capital_base = min(venue NLV, runtime budget)"]
     B --> C["available cash after reservations"]
-    C --> D["Kelly sizing with confidence and drawdown scaling"]
+    C --> D["Kelly f* from calibrated P(win) + shrink layers"]
     D --> E["per-rec max, market/event/category exposure caps"]
     E --> F["liquidity usage and slippage caps"]
     F --> G["correlation cap and optimizer"]

@@ -256,6 +256,35 @@ mod calibration_stat_tests {
     }
 
     #[test]
+    fn wilson_z_matches_known_95_percent_quantile() {
+        // The standard two-sided 95% normal quantile, to float precision.
+        let z = wilson_z(Decimal::new(95, 2));
+        assert!(
+            (z - 1.959_963_984_540_054_5).abs() < 1e-9,
+            "z={z}, expected ~1.959963984540054"
+        );
+    }
+
+    #[test]
+    fn wilson_interval_matches_known_closed_form() {
+        // p_hat=0.2, n=50, z=1.9599639845400545 (95%) — golden (lo, hi)
+        // independently computed in Python from the standard Wilson score
+        // interval closed form (Wilson, 1927), rounded to the same 6-dp scale
+        // `wilson_interval` quantizes to.
+        let z = wilson_z(Decimal::new(95, 2));
+        let (lo, hi) = wilson_interval(0.2, 50, z, 6);
+        assert_eq!(lo, Decimal::new(112_438, 6), "lo={lo}");
+        assert_eq!(hi, Decimal::new(330_371, 6), "hi={hi}");
+    }
+
+    #[test]
+    fn wilson_interval_zero_samples_yields_zero_width() {
+        let (lo, hi) = wilson_interval(0.5, 0, 1.96, 6);
+        assert_eq!(lo, Decimal::ZERO);
+        assert_eq!(hi, Decimal::ZERO);
+    }
+
+    #[test]
     fn pava_non_decreasing_grouped_pools_ties_before_pava() {
         // scores [1, 2, 2, 3], outcomes [0, 1, 0, 1] grouped as
         // (x=1, mean=0, w=1), (x=2, mean=0.5, w=2), (x=3, mean=1, w=1).

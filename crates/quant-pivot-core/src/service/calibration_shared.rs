@@ -1,7 +1,7 @@
 //! Shared calibration-split primitives (Phase 11.3 §2/§4).
 //!
 //! Purge (disjoint-window) and embargo checks every empirical calibration fit
-//! (`FavoriteLongshotFitService`'s `market_price_bias` fit and
+//! (`BiasTableFitService`'s `market_price_bias` fit and
 //! `ModelCalibrationFitService`'s `model_score` fit) must pass before its
 //! fitted artifact is trusted as an **independent held-out** calibration.
 //!

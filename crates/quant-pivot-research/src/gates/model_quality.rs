@@ -437,10 +437,18 @@ pub struct QualityGateInput {
     /// Model family under evaluation (`None` ⇒ buy-oriented defaults).
     pub model_family: Option<ModelFamily>,
     /// Whether the evaluated artifact's `ReturnModelSpec` is `Calibrated`
-    /// (Phase 11.3 #5/#13). Buy-family `Publish`/`AutoExecution` intents hard-
-    /// gate on this; exit scorers and other intents ignore it (they have no
-    /// `ReturnModelSpec` concept).
+    /// (Phase 11.3 #5/#13), resolved through the **same deep check**
+    /// (`resolve_return_model_calibration`) the report builder, admission,
+    /// and intent creation share — never a shallow enum-tag read. Buy-family
+    /// `Publish`/`AutoExecution` intents hard-gate on this; exit scorers and
+    /// other intents ignore it (they have no `ReturnModelSpec` concept).
     pub return_model_calibrated: bool,
+    /// `model.calibration.require_for_publish` (Phase 11.3 closed-loop
+    /// hardening): when `false`, `GateId::CalibrationRequired` records an
+    /// explicit `NotApplicable` (never a silent pass) instead of hard-gating —
+    /// an auditable, operator-governed cold-start bootstrap window. `true`
+    /// (the production default) preserves the original hard-gate behavior.
+    pub calibration_gate_enabled: bool,
 }
 
 /// A content-addressed, persisted quality-gate evaluation.
@@ -757,6 +765,16 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
             input.intent,
             GateIntent::Publish | GateIntent::AutoExecution
         );
+    if applies && !input.calibration_gate_enabled {
+        ledger.not_applicable(
+            GateId::CalibrationRequired,
+            GateClass::Hard,
+            "calibrated",
+            "disabled by model.calibration.require_for_publish=false — an operator-governed \
+             cold-start bootstrap window, not a silent pass",
+        );
+        return;
+    }
     if !applies {
         let detail = if is_exit {
             "sell / hold-vs-exit scorers never carry a return model"
@@ -925,6 +943,7 @@ mod tests {
             sell_thresholds: SellQualityGateThresholds::default(),
             model_family: None,
             return_model_calibrated: true,
+            calibration_gate_enabled: true,
         }
     }
 
@@ -958,6 +977,33 @@ mod tests {
             candidate.is_pass(),
             "candidate intent does not require calibration"
         );
+    }
+
+    #[test]
+    fn calibration_gate_disabled_records_not_applicable_not_a_silent_pass() {
+        // `model.calibration.require_for_publish = false` must still record an
+        // explicit, auditable `NotApplicable` row (never simply omit the gate
+        // or silently flip it to `Pass`), and the overall decision must still
+        // pass since no hard failure was recorded.
+        let input = QualityGateInput {
+            return_model_calibrated: false,
+            calibration_gate_enabled: false,
+            ..passing_input(GateIntent::Publish)
+        };
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+        assert!(
+            decision.is_pass(),
+            "a disabled calibration gate must not itself block publish"
+        );
+        let calibration_row = decision
+            .report()
+            .gates
+            .iter()
+            .find(|outcome| outcome.gate == GateId::CalibrationRequired)
+            .expect("CalibrationRequired row must still be recorded when disabled");
+        assert_eq!(calibration_row.status, GateStatus::NotApplicable);
     }
 
     #[test]

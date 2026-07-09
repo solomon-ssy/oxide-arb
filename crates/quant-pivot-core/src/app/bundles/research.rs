@@ -8,8 +8,8 @@ use crate::{
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::{
+        bias_table_fit::BiasTableFitService,
         factor_pipeline::FactorPipelineService,
-        favorite_longshot_fit::FavoriteLongshotFitService,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         training_dataset::{
@@ -231,17 +231,16 @@ impl ResearchBundle {
             deps,
             &artifact_store,
             &model_registry_repo,
-            &offline.backtest_report,
             &shadow_comparison_repo,
-            &offline.governance_audit,
-            &offline.training_dataset,
+            &offline,
+            &calibration_loader,
         );
         let factor_governance = Self::assemble_factor_governance(&factor_repo);
         let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
             model_registry: Arc::clone(&model_registry_repo),
         }));
         let calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort> =
-            Arc::new(FavoriteLongshotFitService::new(
+            Arc::new(BiasTableFitService::new(
                 Arc::clone(&deps.infra.quant_fact_read),
                 Arc::clone(&deps.data.market_repo),
                 Arc::clone(&repos.event) as Arc<dyn EventRepository>,
@@ -358,10 +357,9 @@ impl ResearchBundle {
         deps: &ResearchBundleDeps<'_>,
         artifact_store: &Arc<dyn ArtifactStore>,
         model_registry_repo: &Arc<dyn ModelRegistryRepository>,
-        backtest_report_repo: &Arc<dyn BacktestReportRepository>,
         shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
-        governance_audit_repo: &Arc<dyn ModelGovernanceAuditRepository>,
-        training_dataset_repo: &Arc<dyn TrainingDatasetRepository>,
+        offline: &OfflineResearchRepos,
+        calibration_loader: &Arc<dyn CalibrationArtifactLoader>,
     ) -> Arc<dyn ModelGovernancePort> {
         let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
         let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
@@ -370,13 +368,14 @@ impl ResearchBundle {
             Arc::clone(&deps.governance.applicator) as Arc<dyn RuntimeConfigPort>;
         Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {
             model_registry_repo: Arc::clone(model_registry_repo),
-            backtest_report_repo: Arc::clone(backtest_report_repo),
+            backtest_report_repo: Arc::clone(&offline.backtest_report),
             shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
-            governance_audit_repo: Arc::clone(governance_audit_repo),
-            dataset_repo: Arc::clone(training_dataset_repo),
+            governance_audit_repo: Arc::clone(&offline.governance_audit),
+            dataset_repo: Arc::clone(&offline.training_dataset),
             artifact_store: Arc::clone(artifact_store),
             calibration_repo: Arc::clone(&deps.infra.repos.calibration_artifact)
                 as Arc<dyn CalibrationArtifactRepository>,
+            calibration_loader: Arc::clone(calibration_loader),
             gate,
             runtime_config: Arc::clone(&deps.governance.runtime_config),
             runtime_config_apply,

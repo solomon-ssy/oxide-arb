@@ -31,7 +31,7 @@ use crate::{
         quant::{
             BindingConstraint, EmptyReportReason, EntryTriggerKind, ExitSettlementMode,
             ExitTriggerKind, FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
-            SizingModelKind,
+            SizingBetStructure, SizingModelKind,
         },
     },
     hashing::CanonicalDigest,
@@ -134,6 +134,12 @@ pub struct SizingPlan {
     /// `raw_fraction_applied` was clamped against.
     #[serde(default)]
     pub position_cap_fraction_applied: Option<Decimal>,
+    /// Which bet-structure produced `f_star_applied` (Phase 11.3 §4 redesign):
+    /// `Resolution` (calibrated `P(win)` + market price — the only structure
+    /// reachable in production) or `HeuristicTpSl` (cold-start bootstrap,
+    /// fenced off from execution by fail-closed gates).
+    #[serde(default)]
+    pub bet_structure_applied: Option<SizingBetStructure>,
 }
 
 // ── Exit plan (parent §10 "when / how much to sell") ─────────────────────────
@@ -376,6 +382,13 @@ pub struct ExecutionEligibility {
     pub approval_required: bool,
     /// Auto-execution policy id, when applicable.
     pub auto_policy_id: Option<String>,
+    /// Explicit "uncalibrated · experimental" watermark (Phase 11.3 closed-loop
+    /// hardening): `true` exactly when [`Self::ineligibility_reasons`] contains
+    /// [`IneligibilityReason::ReturnModelUncalibrated`]. A first-class DTO field
+    /// — not something the UI must infer by scanning the reasons array — so a
+    /// `ReportOnly`-only sizing is never mistaken for a normal, executable one.
+    #[serde(default)]
+    pub uncalibrated_watermark: bool,
 }
 
 impl ExecutionEligibility {

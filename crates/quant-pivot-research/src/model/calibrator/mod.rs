@@ -105,6 +105,12 @@ impl ResolvedCalibration {
     /// invalid market price (outside `(0, 1)`) or a probability bucket with
     /// no MAE evidence yields a zero estimate — never fabricated — which
     /// downstream Kelly sizing rejects via `InvalidEdgeInputs`.
+    ///
+    /// `win_probability` on the returned [`ReturnEstimate`] is the *same*
+    /// `P(win)` used to derive `expected_return_bps` — Kelly sizing (Phase
+    /// 11.3 §4 redesign) consumes it directly as `q`, so the sizing decision
+    /// and the return estimate always share one probability, never two
+    /// independently-derived numbers.
     #[must_use]
     pub fn estimate_return(&self, composite_score: Decimal, market_price: Price) -> ReturnEstimate {
         let p = market_price.inner();
@@ -113,15 +119,18 @@ impl ResolvedCalibration {
                 expected_return_bps: Decimal::ZERO,
                 downside_bps: Decimal::ZERO,
                 calibrated: true,
+                win_probability: None,
             };
         }
-        let p_win = self.calibrate(composite_score).inner();
+        let p_win = self.calibrate(composite_score);
+        let p_win_inner = p_win.inner();
         let bps = Decimal::from(10_000);
-        let expected_return_bps = ((p_win * (Decimal::ONE - p) / p - (Decimal::ONE - p_win)) * bps)
-            .round_dp(RESEARCH_DECIMAL_SCALE);
+        let expected_return_bps =
+            ((p_win_inner * (Decimal::ONE - p) / p - (Decimal::ONE - p_win_inner)) * bps)
+                .round_dp(RESEARCH_DECIMAL_SCALE);
         let downside_bps = self
             .reliability
-            .bin_for(p_win)
+            .bin_for(p_win_inner)
             .and_then(|bin| bin.mean_adverse_excursion_bps)
             .map_or(Decimal::ZERO, |mae| {
                 mae.abs().round_dp(RESEARCH_DECIMAL_SCALE)
@@ -130,6 +139,7 @@ impl ResolvedCalibration {
             expected_return_bps,
             downside_bps,
             calibrated: true,
+            win_probability: Some(p_win),
         }
     }
 }
@@ -150,4 +160,66 @@ pub trait CalibrationArtifactLoader: Send + Sync {
     /// payload cannot be deserialized — a `Calibrated` return model must never
     /// silently fall back to an unresolved / stale calibrator.
     async fn load(&self, artifact_id: &CalibrationArtifactId) -> QuantResult<ResolvedCalibration>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IsotonicKnot, MonotoneMapping, ResolvedCalibration};
+    use crate::model::reliability::ReliabilityReport;
+    use quant_pivot_models::types::{CalibrationArtifactId, Price};
+    use rust_decimal_macros::dec;
+
+    fn resolved() -> ResolvedCalibration {
+        ResolvedCalibration {
+            artifact_id: CalibrationArtifactId::from_v7(),
+            mapping: MonotoneMapping::Isotonic {
+                knots: vec![
+                    IsotonicKnot {
+                        score: dec!(0),
+                        probability: dec!(0.5),
+                    },
+                    IsotonicKnot {
+                        score: dec!(1),
+                        probability: dec!(0.5),
+                    },
+                ],
+            },
+            reliability: ReliabilityReport {
+                bins: Vec::new(),
+                brier_score: dec!(0.1),
+                log_loss: dec!(0.3),
+                ece: dec!(0.05),
+                n_samples: 100,
+            },
+        }
+    }
+
+    #[test]
+    fn estimate_return_rejects_boundary_market_prices() {
+        // `market_price` outside the *open* interval `(0, 1)` — a price of
+        // exactly 0 or 1 is not an executable YES-leg price on a real
+        // Polymarket order book, and `p=0` would divide by zero in
+        // `(1-p)/p` if not rejected first — must yield a zero, never-
+        // fabricated estimate, not a panic or a garbage value.
+        let resolved = resolved();
+        for boundary in [dec!(0), dec!(1)] {
+            let estimate = resolved.estimate_return(dec!(0.5), Price::new(boundary));
+            assert_eq!(estimate.expected_return_bps, rust_decimal::Decimal::ZERO);
+            assert_eq!(estimate.downside_bps, rust_decimal::Decimal::ZERO);
+            assert!(estimate.calibrated);
+            assert!(
+                estimate.win_probability.is_none(),
+                "a rejected boundary price must never carry a fabricated win probability"
+            );
+        }
+    }
+
+    #[test]
+    fn estimate_return_accepts_interior_market_prices() {
+        let resolved = resolved();
+        let estimate = resolved.estimate_return(dec!(0.5), Price::new(dec!(0.01)));
+        assert!(estimate.win_probability.is_some());
+        let estimate = resolved.estimate_return(dec!(0.5), Price::new(dec!(0.99)));
+        assert!(estimate.win_probability.is_some());
+    }
 }

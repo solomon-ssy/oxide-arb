@@ -24,8 +24,8 @@ use quant_pivot_research::{
     backtest::PortfolioCaps,
     features::{MarketDecisionCapture, PitView},
     model::{
-        CalibratedReturnModel, CalibrationArtifactLoader, ModelArtifact, ResolvedCalibration,
-        ReturnModelSpec, SignalCandidate, load_hash_verified_artifact,
+        CalibrationArtifactLoader, ResolvedCalibration, SignalCandidate,
+        load_hash_verified_artifact,
     },
     portfolio::{
         AccountSnapshot, CorrelationConstraint, CorrelationEstimator, CorrelationInput,
@@ -40,7 +40,7 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::RuntimeModeHandle,
+    governance::{RuntimeModeHandle, resolve_return_model_calibration},
     prefetch::market_candidates::MarketCandidateProvider,
     service::{
         account::AccountProviderFactory,
@@ -467,22 +467,20 @@ impl DefaultReportBuilder {
 
     /// Single hash-verified artifact load resolving both `return_model_calibrated`
     /// and the (optional) [`ResolvedCalibration`] — never two independent loads
-    /// of the same artifact (Phase 11.3 §8: "one load, two checks").
+    /// of the same artifact (Phase 11.3 §8: "one load, two checks"). Delegates
+    /// the calibration-state decision to
+    /// [`resolve_return_model_calibration`](crate::governance::resolve_return_model_calibration) —
+    /// the same shared deep check `publish` / admission / intent creation use
+    /// (Phase 11.3 closed-loop hardening).
     async fn resolve_calibration_state(
         &self,
         version: &ModelVersionInfo,
     ) -> QuantResult<(bool, Option<ResolvedCalibration>)> {
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
-        let ModelArtifact::WeightedFactor(weighted) = artifact else {
-            return Ok((false, None));
-        };
-        let ReturnModelSpec::Calibrated(CalibratedReturnModel { calibrator_ref, .. }) =
-            weighted.return_model
-        else {
-            return Ok((false, None));
-        };
-        let resolved = self.deps.calibration_loader.load(&calibrator_ref).await?;
-        Ok((true, Some(resolved)))
+        let resolved =
+            resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
+                .await?;
+        Ok((resolved.is_some(), resolved))
     }
 
     async fn build_selection(

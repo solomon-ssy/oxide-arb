@@ -1313,7 +1313,7 @@ impl TrainingDatasetService {
         // is fail-closed here, *before* paying for schema hashing / Parquet
         // encoding / artifact-store writes that would only be discovered
         // wasted at fit time (`ModelCalibrationFitService`/
-        // `FavoriteLongshotFitService` already re-check this at fit time —
+        // `BiasTableFitService` already re-check this at fit time —
         // this is strictly earlier, not a replacement). The model-specific
         // embargo gap is not checked here: it depends on a target model
         // version's own training window, which is not yet known for a

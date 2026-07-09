@@ -205,6 +205,7 @@ fn not_auto_eligible() -> ExecutionEligibility {
         ineligibility_reasons: vec![IneligibilityReason::LowConfidence],
         approval_required: true,
         auto_policy_id: None,
+        uncalibrated_watermark: false,
     }
 }
 

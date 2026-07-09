@@ -1166,6 +1166,14 @@ fn model_calibration_fields() -> Vec<FieldUiEntry> {
             "Minimum seconds between a model's training-dataset window end and its calibration-dataset window start (purge + embargo).",
             "模型训练集窗口结束与校准集窗口开始之间的最小间隔秒数（purge + embargo）。",
         ),
+        boolean(
+            "model.calibration.require_for_publish",
+            "Require calibration for publish",
+            "发布强制要求已校准",
+            "Hard-gate GateId::CalibrationRequired: when on (the production default), Publish/AutoExecution on a Buy model requires a Calibrated return model. Disabling is an auditable, operator-governed cold-start bootstrap window — never disable outside one.",
+            "硬门禁 GateId::CalibrationRequired：开启时（生产默认），Buy 模型的发布/自动执行需要已校准的收益模型。关闭是可审计、由运营方治理的冷启动窗口——除该窗口外禁止关闭。",
+        )
+        .critical(),
         ratio_confidence(
             "model.calibration.ci_confidence",
             "Reliability CI confidence",
@@ -1609,8 +1617,8 @@ fn portfolio_sizing_fields() -> Vec<FieldUiEntry> {
             "portfolio.sizing.target_reward_multiple",
             "Target reward multiple",
             "目标盈亏倍数",
-            "Target reward-to-risk multiple R (> 0): target gain = R × downside. Fixes the binary bet structure so the implied win probability is recoverable from expected return and downside.",
-            "目标盈亏比 R（>0）：目标收益 = R × 下行。固定二元下注结构，使隐含胜率可由预期收益与下行反推。",
+            "Target reward-to-risk multiple R (> 0): target gain = R × downside for the exit plan's take-profit price, and for the legacy TP/SL Kelly fallback a cold-start Heuristic candidate uses (a Calibrated candidate's Kelly fraction never reads this — it uses the calibrated win probability directly).",
+            "目标盈亏比 R（>0）：用于止盈价 = R × 下行，以及冷启动 Heuristic 候选的遗留 TP/SL Kelly 兜底公式（Calibrated 候选的 Kelly 分数直接使用校准胜率，不读取该字段）。",
         ),
         enum_select(
             "portfolio.sizing.confidence_weighting",
@@ -1625,13 +1633,6 @@ fn portfolio_sizing_fields() -> Vec<FieldUiEntry> {
             "回撤缩放策略",
             "How sizing responds to drawdown: 'Fixed' keeps sizing flat; 'Conservative' de-risks as drawdown grows.",
             "定量对回撤的响应：『固定』保持不变；『保守』随回撤加深自动降险。",
-        ),
-        enum_select(
-            "portfolio.sizing.downside_source",
-            "Downside source",
-            "下行来源",
-            "How calibrated return models map score buckets to downside (bps) for Kelly: MfeMae uses mean adverse excursion from the calibration split.",
-            "校准收益模型如何将分数分箱映射为 Kelly 下行（bps）：MfeMae 使用校准集的平均不利偏移。",
         ),
     ]
 }
@@ -1666,12 +1667,12 @@ fn portfolio_kelly_safety_fields() -> Vec<FieldUiEntry> {
             "同时组合总敞口占治理后资金基准（capital base）的硬上限（LP bucket 约束）。必须大于 0。",
         )
         .critical(),
-        ratio(
+        ratio_half_open(
             "portfolio.kelly_safety.binding_materiality_threshold",
             "Kelly binding materiality",
             "Kelly 绑定显著性阈值",
-            "Emit ConfidenceCap / DrawdownCap / CorrelationCap when the dominant Kelly-stage shrink falls below this threshold.",
-            "当主导 Kelly 阶段收缩低于此阈值时发出 ConfidenceCap / DrawdownCap / CorrelationCap 绑定。",
+            "Emit ConfidenceCap / DrawdownCap / CorrelationCap when the dominant Kelly-stage shrink falls below this threshold. Must be > 0 (a zero threshold can never bind).",
+            "当主导 Kelly 阶段收缩低于此阈值时发出 ConfidenceCap / DrawdownCap / CorrelationCap 绑定。必须大于 0（阈值为 0 永远不会触发绑定）。",
         ),
     ]
 }
@@ -2432,6 +2433,7 @@ fn model_section() -> SchemaNode {
             "model.calibration.method",
             "model.calibration.min_samples_isotonic",
             "model.calibration.embargo_secs",
+            "model.calibration.require_for_publish",
             "model.calibration.ci_confidence",
         ]),
     ));
@@ -2630,7 +2632,6 @@ fn portfolio_section_children() -> Vec<SchemaNode> {
                 "portfolio.sizing.target_reward_multiple",
                 "portfolio.sizing.confidence_weighting",
                 "portfolio.sizing.drawdown_scaling",
-                "portfolio.sizing.downside_source",
             ]),
         ),
         subsection(

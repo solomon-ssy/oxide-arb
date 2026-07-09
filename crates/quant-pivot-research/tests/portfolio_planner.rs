@@ -75,6 +75,7 @@ fn candidate(
         confidence: Probability::new(confidence),
         expected_return_bps: expected_bps,
         downside_bps,
+        win_probability: None,
         entry_price_ref: Price::new(dec!(0.5)),
         suggested_horizon_secs: 3_600,
         factor_breakdown: Vec::new(),

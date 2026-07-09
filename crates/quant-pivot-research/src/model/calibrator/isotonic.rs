@@ -49,6 +49,18 @@ impl ProbabilityCalibrator for IsotonicCalibrator {
                 ),
             }));
         }
+        // Fail-closed (matches `PlattCalibrator`): a calibration split with a
+        // single outcome class carries no discriminative signal — PAVA would
+        // still "fit" a degenerate constant-probability mapping without
+        // error, silently producing an uninformative calibrator rather than
+        // rejecting the split.
+        let won_count = outcomes.iter().filter(|&&won| won).count();
+        if won_count == 0 || won_count == outcomes.len() {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: "isotonic calibration requires both won and lost outcomes in the split"
+                    .to_owned(),
+            }));
+        }
         let mut order: Vec<usize> = (0..scores.len()).collect();
         order.sort_by(|&a, &b| scores[a].cmp(&scores[b]));
 
@@ -144,6 +156,26 @@ mod tests {
         let scores = vec![dec!(0.1), dec!(0.9)];
         let outcomes = vec![false, true];
         assert!(calibrator.fit(&scores, &outcomes).is_err());
+    }
+
+    #[test]
+    fn fit_fails_closed_without_both_classes() {
+        // All-win split: no discriminative signal, PAVA would otherwise
+        // silently fit a degenerate constant-1.0 mapping (matches Platt's
+        // equivalent guard).
+        let calibrator = IsotonicCalibrator::new(10);
+        let scores: Vec<Decimal> = (0..20).map(|i| Decimal::from(i) / dec!(20)).collect();
+        let outcomes = vec![true; 20];
+        assert!(
+            calibrator.fit(&scores, &outcomes).is_err(),
+            "an all-win calibration split must be rejected, not silently fit"
+        );
+
+        let outcomes = vec![false; 20];
+        assert!(
+            calibrator.fit(&scores, &outcomes).is_err(),
+            "an all-loss calibration split must be rejected, not silently fit"
+        );
     }
 
     #[test]

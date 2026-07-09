@@ -26,7 +26,7 @@ use crate::{
     app::bundles::ResearchBundle,
     service::{
         backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
-        favorite_longshot_fit::resolve_frozen_bias_table,
+        bias_table_fit::resolve_frozen_bias_table,
         historical_replay::ReplayConfig,
     },
 };

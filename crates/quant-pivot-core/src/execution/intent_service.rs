@@ -32,12 +32,17 @@ use quant_pivot_models::{
     },
     runtime_config::EntryOrderPolicy,
     types::{
-        CapitalAllocationId, ContentHash, EntryOrderSpec, ExitPolicySpec, OperationLogId,
-        OrderIntentId, Price, RecommendationId, RecommendationReportId, Usd,
+        CapitalAllocationId, ContentHash, EntryOrderSpec, ExitPolicySpec, ModelVersionId,
+        OperationLogId, OrderIntentId, Price, RecommendationId, RecommendationReportId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+    ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
+    RecommendationRepository,
+};
+use quant_pivot_research::{
+    artifact::ArtifactStore,
+    model::{CalibrationArtifactLoader, load_hash_verified_artifact},
 };
 use rust_decimal::Decimal;
 
@@ -47,7 +52,7 @@ use crate::{
         intent_lifecycle::IntentLifecyclePublisher,
         mode_gate::{IntentPolicyDecision, RuntimeModeGate},
     },
-    governance::{KillSwitchHandle, RuntimeModeHandle},
+    governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
@@ -95,6 +100,14 @@ pub struct OrderIntentServiceDeps {
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
     /// Wake the dispatcher when an `ApprovedByPolicy` intent is created (auto).
     pub dispatch_wake: DispatchWake,
+    /// Model registry (calibration-state recheck at `SemiAuto`/`AutoExecution`
+    /// intent-creation time — Phase 11.3 closed-loop hardening).
+    pub model_registry: Arc<dyn ModelRegistryRepository>,
+    /// Content-addressed model artifact store (calibration recheck).
+    pub artifact_store: Arc<dyn ArtifactStore>,
+    /// Deep calibrator resolution (calibration recheck), the same shared
+    /// check publish / report / admission use.
+    pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
 }
 
 /// Governed order-intent service (implements the web [`OrderIntentPort`], the
@@ -110,6 +123,9 @@ pub struct CoreOrderIntentService {
     metrics: Arc<MetricsHub>,
     lifecycle: Arc<IntentLifecyclePublisher>,
     dispatch_wake: DispatchWake,
+    model_registry: Arc<dyn ModelRegistryRepository>,
+    artifact_store: Arc<dyn ArtifactStore>,
+    calibration_loader: Arc<dyn CalibrationArtifactLoader>,
 }
 
 impl CoreOrderIntentService {
@@ -127,7 +143,32 @@ impl CoreOrderIntentService {
             metrics: deps.metrics,
             lifecycle: deps.intent_lifecycle,
             dispatch_wake: deps.dispatch_wake,
+            model_registry: deps.model_registry,
+            artifact_store: deps.artifact_store,
+            calibration_loader: deps.calibration_loader,
         }
+    }
+
+    /// Re-verify the bound model version's return-model calibration state at
+    /// intent-creation time — not just at report-build time — closing the
+    /// TOCTOU window between report generation and intent creation: a
+    /// calibrator deactivated after a report was built must not let a stale,
+    /// frozen `execution_eligibility` still create a capital-reserving
+    /// `SemiAuto`/`AutoExecution` intent (Phase 11.3 closed-loop hardening;
+    /// the same [`resolve_return_model_calibration`] deep check publish /
+    /// report / admission share). A free function (not `&self`) so it is
+    /// directly unit-testable against fakes for just its three dependencies.
+    async fn ensure_return_model_still_calibrated(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> QuantResult<()> {
+        recheck_return_model_calibrated(
+            &self.model_registry,
+            &self.artifact_store,
+            &self.calibration_loader,
+            model_version_id,
+        )
+        .await
     }
 
     /// Create an intent from a recommendation at `now` (mode-gated, atomic with
@@ -142,6 +183,13 @@ impl CoreOrderIntentService {
         self.ensure_create_allowed(&rec, &report, now).await?;
 
         let mode = self.runtime_mode.current();
+        if matches!(
+            mode,
+            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution
+        ) {
+            self.ensure_return_model_still_calibrated(&rec.evidence_refs.model_version_id)
+                .await?;
+        }
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let config = self.config.current();
         let entry = project_entry_order_spec(&rec, &config.execution.entry_order_policy)?;
@@ -466,6 +514,43 @@ impl IntentInvalidationHook for CoreOrderIntentService {
         }
         Ok(count)
     }
+}
+
+/// The Phase 11.3 closed-loop calibration recheck (see
+/// [`CoreOrderIntentService::ensure_return_model_still_calibrated`]), extracted
+/// as a free function over its three dependencies so it is unit-testable
+/// without constructing a full [`CoreOrderIntentService`].
+///
+/// # Errors
+///
+/// Returns [`ExecutionError::IntentDenied`] when the model version is missing
+/// or its return model is `Heuristic` (uncalibrated); propagates
+/// [`resolve_return_model_calibration`]'s fail-closed error when a
+/// `Calibrated` return model's bound calibrator is missing / inactive /
+/// hash-mismatched.
+async fn recheck_return_model_calibrated(
+    model_registry: &Arc<dyn ModelRegistryRepository>,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    calibration_loader: &Arc<dyn CalibrationArtifactLoader>,
+    model_version_id: &ModelVersionId,
+) -> QuantResult<()> {
+    let version = model_registry
+        .find_model_version_by_id(model_version_id)
+        .await?
+        .ok_or_else(|| ExecutionError::IntentDenied {
+            reason: format!("model version {model_version_id} not found for calibration recheck"),
+        })?;
+    let artifact = load_hash_verified_artifact(artifact_store, &version).await?;
+    let resolved = resolve_return_model_calibration(calibration_loader.as_ref(), &artifact).await?;
+    if resolved.is_none() {
+        return Err(ExecutionError::IntentDenied {
+            reason: "return model is uncalibrated (heuristic) — SemiAuto/AutoExecution intent \
+                     creation is fail-closed"
+                .to_owned(),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Resolved per-mode intent fields produced by the mode gate decision.
@@ -1080,5 +1165,360 @@ mod tests {
             ),
             Some(ApprovalInvalidation::RiskEnvelopeMismatch)
         );
+    }
+
+    // ── Phase 11.3 closed-loop hardening: intent-creation-time calibration
+    // recheck (closes the TOCTOU window between report generation and intent
+    // creation — a calibrator deactivated after a report was built must not
+    // let a stale `execution_eligibility` still create a capital-reserving
+    // `SemiAuto`/`AutoExecution` intent) ────────────────────────────────────
+
+    mod calibration_recheck {
+        use crate::execution::intent_service::recheck_return_model_calibrated;
+        use async_trait::async_trait;
+        use chrono::Utc;
+        use quant_pivot_error::storage::StorageError;
+        use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+        use quant_pivot_models::{
+            domain::{
+                ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery,
+                NewModelSpec, NewModelVersion, Paginated,
+            },
+            enums::quant::{DownsideSource, PublicationStatus},
+            types::{CalibrationArtifactId, ContentHash, ModelSpecId, ModelVersionId},
+        };
+        use quant_pivot_repository::traits::ModelRegistryRepository;
+        use quant_pivot_research::{
+            artifact::{ArtifactStore, LocalArtifactStore},
+            factors::names::LIQUIDITY_DEPTH,
+            model::{
+                CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
+                ModelArtifactHeader, ModelFamily, MonotoneMapping, ReliabilityReport,
+                ResolvedCalibration, ReturnModelSpec, ScoreMultiplierSpec,
+                SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+            },
+        };
+        use std::sync::Arc;
+
+        struct FakeRegistry {
+            version: Option<ModelVersionInfo>,
+        }
+
+        #[async_trait]
+        impl ModelRegistryRepository for FakeRegistry {
+            async fn create_model_spec(
+                &self,
+                _spec: NewModelSpec,
+            ) -> Result<ModelSpecInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn find_model_spec_by_id(
+                &self,
+                _model_spec_id: &ModelSpecId,
+            ) -> Result<Option<ModelSpecInfo>, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn create_model_version(
+                &self,
+                _version: NewModelVersion,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn next_version_for_spec(
+                &self,
+                _model_spec_id: &ModelSpecId,
+            ) -> Result<i32, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn find_model_version_by_id(
+                &self,
+                model_version_id: &ModelVersionId,
+            ) -> Result<Option<ModelVersionInfo>, StorageError> {
+                Ok(self
+                    .version
+                    .as_ref()
+                    .filter(|version| version.model_version_id == *model_version_id)
+                    .cloned())
+            }
+            async fn page_specs(
+                &self,
+                _query: ModelSpecListQuery,
+            ) -> Result<Paginated<ModelSpecInfo>, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn page_versions(
+                &self,
+                _query: ModelVersionListQuery,
+            ) -> Result<Paginated<ModelVersionInfo>, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn list_published_for_spec(
+                &self,
+                _model_spec_id: &ModelSpecId,
+            ) -> Result<Vec<ModelVersionInfo>, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn publish_model_version(
+                &self,
+                _model_version_id: &ModelVersionId,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn retire_model_version(
+                &self,
+                _model_version_id: &ModelVersionId,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn promote_model_to_shadow(
+                &self,
+                _model_version_id: &ModelVersionId,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn restore_model_version(
+                &self,
+                _model_version_id: &ModelVersionId,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn set_quality_gate_report(
+                &self,
+                _model_version_id: &ModelVersionId,
+                _quality_gate_report: serde_json::Value,
+            ) -> Result<ModelVersionInfo, StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+        }
+
+        /// Always resolves (or always fails), regardless of which artifact
+        /// id is requested — sufficient for these tests, which only vary the
+        /// artifact's `ReturnModelSpec` variant, not the calibrator lookup.
+        struct FakeCalibrationLoader {
+            succeeds: bool,
+        }
+
+        #[async_trait]
+        impl CalibrationArtifactLoader for FakeCalibrationLoader {
+            async fn load(
+                &self,
+                artifact_id: &CalibrationArtifactId,
+            ) -> QuantResult<ResolvedCalibration> {
+                if self.succeeds {
+                    Ok(ResolvedCalibration {
+                        artifact_id: artifact_id.clone(),
+                        mapping: MonotoneMapping::Isotonic { knots: Vec::new() },
+                        reliability: ReliabilityReport {
+                            bins: Vec::new(),
+                            brier_score: rust_decimal::Decimal::ZERO,
+                            log_loss: rust_decimal::Decimal::ZERO,
+                            ece: rust_decimal::Decimal::ZERO,
+                            n_samples: 0,
+                        },
+                    })
+                } else {
+                    Err(QuantError::from(ResearchError::DatasetBuild {
+                        detail: "calibrator deactivated after report build (test)".to_owned(),
+                    }))
+                }
+            }
+        }
+
+        fn temp_store() -> Arc<dyn ArtifactStore> {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "qp_intent_calibration_recheck_test_{}_{}_{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            Arc::new(LocalArtifactStore::new(root))
+        }
+
+        fn header(model_version_id: ModelVersionId) -> ModelArtifactHeader {
+            ModelArtifactHeader {
+                model_version_id,
+                model_family: ModelFamily::WeightedFactor,
+                feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                    .expect("hash"),
+                factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
+                    .expect("hash"),
+            }
+        }
+
+        fn weighted_artifact(
+            model_version_id: ModelVersionId,
+            return_model: ReturnModelSpec,
+        ) -> ModelArtifact {
+            ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
+                header: header(model_version_id),
+                weights: vec![FactorWeight {
+                    factor: LIQUIDITY_DEPTH,
+                    weight: rust_decimal::Decimal::ONE,
+                }],
+                prediction_horizon_secs: 86_400,
+                multipliers: ScoreMultiplierSpec::conservative(),
+                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                return_model,
+                required_features: Vec::new(),
+                objective_report: None,
+                category_scope: None,
+            }))
+        }
+
+        /// Seeds a real `ModelVersionInfo` + a hash-verified artifact into a
+        /// real (file-backed, no Docker) `LocalArtifactStore` — no fake
+        /// needed for `ArtifactStore`/`load_hash_verified_artifact` itself.
+        async fn seeded(
+            return_model: ReturnModelSpec,
+        ) -> (Arc<dyn ArtifactStore>, ModelVersionInfo) {
+            let store = temp_store();
+            let model_version_id = ModelVersionId::from_v7();
+            let artifact = weighted_artifact(model_version_id.clone(), return_model);
+            let digest = artifact.content_hash().expect("hash");
+            let key = ModelArtifact::artifact_key(&digest).expect("key");
+            store
+                .put(key, &artifact.to_bytes().expect("bytes"))
+                .await
+                .expect("put");
+            let version = ModelVersionInfo {
+                model_version_id,
+                model_spec_id: ModelSpecId::from_v7(),
+                version: 1,
+                artifact_hash: digest,
+                training_dataset_id: None,
+                metrics_json: serde_json::json!({}),
+                quality_gate_report: serde_json::json!({}),
+                publication_status: PublicationStatus::Published,
+                published_at: Some(Utc::now()),
+                retired_at: None,
+                created_at: Utc::now(),
+            };
+            (store, version)
+        }
+
+        #[tokio::test]
+        async fn uncalibrated_model_blocks_semi_auto_intent_creation() {
+            // Alias for the acceptance name in Phase 11.3 §8 — same TOCTOU
+            // close as `heuristic_return_model_denies_semi_auto_intent_creation`.
+            let (store, version) = seeded(ReturnModelSpec::heuristic_default()).await;
+            let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
+                version: Some(version.clone()),
+            });
+            let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
+                Arc::new(FakeCalibrationLoader { succeeds: true });
+            let result = recheck_return_model_calibrated(
+                &model_registry,
+                &store,
+                &calibration_loader,
+                &version.model_version_id,
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "uncalibrated heuristic return model must block SemiAuto intent creation"
+            );
+        }
+
+        #[tokio::test]
+        async fn heuristic_return_model_denies_semi_auto_intent_creation() {
+            let (store, version) = seeded(ReturnModelSpec::heuristic_default()).await;
+            let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
+                version: Some(version.clone()),
+            });
+            let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
+                Arc::new(FakeCalibrationLoader { succeeds: true });
+            let result = recheck_return_model_calibrated(
+                &model_registry,
+                &store,
+                &calibration_loader,
+                &version.model_version_id,
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "an uncalibrated (heuristic) return model must deny SemiAuto/AutoExecution \
+                 intent creation, not silently allow it: {result:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn calibrated_and_still_active_allows_intent_creation() {
+            let calibrator_ref = CalibrationArtifactId::from_v7();
+            let (store, version) = seeded(ReturnModelSpec::Calibrated(CalibratedReturnModel {
+                calibrator_ref,
+                downside_source: DownsideSource::MfeMae,
+            }))
+            .await;
+            let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
+                version: Some(version.clone()),
+            });
+            let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
+                Arc::new(FakeCalibrationLoader { succeeds: true });
+            let result = recheck_return_model_calibrated(
+                &model_registry,
+                &store,
+                &calibration_loader,
+                &version.model_version_id,
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "a Calibrated return model whose calibrator still resolves must allow intent \
+                 creation: {result:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn calibrated_but_deactivated_after_report_build_denies_intent_creation() {
+            // This is the TOCTOU scenario itself: the return model is still
+            // tagged `Calibrated` (as it was when the report was built), but
+            // the bound calibrator has since been deactivated/superseded —
+            // `resolve_return_model_calibration` must fail closed.
+            let calibrator_ref = CalibrationArtifactId::from_v7();
+            let (store, version) = seeded(ReturnModelSpec::Calibrated(CalibratedReturnModel {
+                calibrator_ref,
+                downside_source: DownsideSource::MfeMae,
+            }))
+            .await;
+            let model_registry: Arc<dyn ModelRegistryRepository> = Arc::new(FakeRegistry {
+                version: Some(version.clone()),
+            });
+            let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
+                Arc::new(FakeCalibrationLoader { succeeds: false });
+            let result = recheck_return_model_calibrated(
+                &model_registry,
+                &store,
+                &calibration_loader,
+                &version.model_version_id,
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "a calibrator deactivated after report build must deny intent creation \
+                 (TOCTOU close), not silently continue trusting the stale reference"
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_model_version_denies_intent_creation() {
+            let model_registry: Arc<dyn ModelRegistryRepository> =
+                Arc::new(FakeRegistry { version: None });
+            let calibration_loader: Arc<dyn CalibrationArtifactLoader> =
+                Arc::new(FakeCalibrationLoader { succeeds: true });
+            let store = temp_store();
+            let result = recheck_return_model_calibrated(
+                &model_registry,
+                &store,
+                &calibration_loader,
+                &ModelVersionId::from_v7(),
+            )
+            .await;
+            assert!(
+                result.is_err(),
+                "a missing model version must deny, not panic or pass"
+            );
+        }
     }
 }

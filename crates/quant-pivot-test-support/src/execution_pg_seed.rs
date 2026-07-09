@@ -979,6 +979,7 @@ fn sizing_plan() -> SizingPlan {
         drawdown_shrink_applied: None,
         raw_fraction_applied: None,
         position_cap_fraction_applied: None,
+        bet_structure_applied: None,
     }
 }
 
@@ -1086,6 +1087,7 @@ fn execution_eligibility() -> ExecutionEligibility {
         ineligibility_reasons: Vec::new(),
         approval_required: false,
         auto_policy_id: None,
+        uncalibrated_watermark: false,
     }
 }
 

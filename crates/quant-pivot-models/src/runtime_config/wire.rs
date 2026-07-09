@@ -5,10 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::{
-    enums::quant::{DownsideSource, PortfolioSolverKind},
-    types::ModelVersionId,
-};
+use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
@@ -149,11 +146,12 @@ pub enum DrawdownMultiplierPolicy {
 /// sizer, and an edge-free confidence-to-size curve has no place in a capital
 /// system (it would deploy capital regardless of expected value). `confidence`
 /// is an evidence-quality measure, **not** a calibrated win probability, so it
-/// never stands in for `q`; `q` is derived from the candidate's expected return,
-/// downside, and target reward multiple, while `confidence` enters only as an
-/// estimation-uncertainty shrinkage on the Kelly fraction (`confidence_weighting`)
-/// — the production-standard mitigation for Kelly's sensitivity to edge
-/// mis-estimation.
+/// never stands in for `q` (Phase 11.3 §4 redesign): for a `Calibrated` return
+/// model, `q` is the calibrator's `P(win)` directly (`f* = (q - p) / (1 - p)`,
+/// `p` = market price) — never re-derived from a second, TP/SL-shaped bet
+/// structure. `confidence` enters only as an estimation-uncertainty shrinkage
+/// on the Kelly fraction (`confidence_weighting`) — the production-standard
+/// mitigation for Kelly's sensitivity to edge mis-estimation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SizingModelConfig {
@@ -161,18 +159,18 @@ pub struct SizingModelConfig {
     pub kelly_fraction: DecimalString,
     /// Maximum single-position size as a fraction of equity (`(0, 1]`).
     pub max_position_pct: DecimalString,
-    /// Target reward-to-risk multiple `R` (`> 0`): the target gain is
-    /// `R × downside`, fixing the binary bet structure so the win probability
-    /// `q = (E[r] + l) / (g + l)` is recoverable from the candidate's expected
-    /// return `E[r]` and downside `l`.
+    /// Target reward-to-risk multiple `R` (`> 0`): target gain = `R × downside`
+    /// for the exit plan's take-profit price (Phase 11.7 territory) **and**
+    /// for the legacy TP/SL bet-structure recovery a `HeuristicReturnModel`
+    /// candidate's Kelly sizing falls back to (cold-start bootstrap only — a
+    /// `Calibrated` candidate's Kelly fraction never reads this field; Phase
+    /// 11.3 §4 redesign).
     pub target_reward_multiple: DecimalString,
     /// Confidence-driven shrinkage of the Kelly fraction (estimation
     /// uncertainty): `confidence` high → near fractional Kelly, low → compressed.
     pub confidence_weighting: ConfidenceSizeCurve,
     /// Drawdown-driven scaling policy.
     pub drawdown_scaling: DrawdownMultiplierPolicy,
-    /// Downside (bps) source for calibrated return estimates (v1: `mfe_mae` only).
-    pub downside_source: DownsideSource,
 }
 
 impl Default for SizingModelConfig {
@@ -183,7 +181,6 @@ impl Default for SizingModelConfig {
             target_reward_multiple: DecimalString::new("2.0"),
             confidence_weighting: ConfidenceSizeCurve::Linear,
             drawdown_scaling: DrawdownMultiplierPolicy::Conservative,
-            downside_source: DownsideSource::MfeMae,
         }
     }
 }

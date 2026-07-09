@@ -380,6 +380,47 @@ mod tests {
     }
 
     #[test]
+    fn brier_and_log_loss_match_known_closed_form() {
+        // An identity mapping (knots at (0,0)/(1,1), exact linear
+        // interpolation) makes `calibrated == score`, so Brier/log-loss can
+        // be hand-verified against a fixed, independently-computed golden
+        // value (Python: `sum((p-y)**2)/n` / clamped cross-entropy) rather
+        // than only a relative "not worse than raw" comparison.
+        let identity = MonotoneMapping::Isotonic {
+            knots: vec![
+                IsotonicKnot {
+                    score: dec!(0),
+                    probability: dec!(0),
+                },
+                IsotonicKnot {
+                    score: dec!(1),
+                    probability: dec!(1),
+                },
+            ],
+        };
+        let scores = [dec!(0.1), dec!(0.4), dec!(0.6), dec!(0.9)];
+        let outcomes = [false, false, true, true];
+        let samples: Vec<ReliabilitySample> = scores
+            .iter()
+            .zip(outcomes)
+            .map(|(&score, won)| ReliabilitySample {
+                score,
+                won,
+                max_adverse_excursion_bps: None,
+            })
+            .collect();
+        let report = compute_reliability(&identity, &samples, dec!(0.95)).expect("reliability");
+        // Golden: brier = ((0.1-0)^2+(0.4-0)^2+(0.6-1)^2+(0.9-1)^2)/4 = 0.085 exactly.
+        assert_eq!(report.brier_score, dec!(0.085));
+        // Golden (Python, natural log, no clamping triggered): 0.30809306971190853.
+        let log_loss_f64 = report.log_loss.to_f64().expect("f64");
+        assert!(
+            (log_loss_f64 - 0.308_093_069_711_908_53).abs() < 1e-6,
+            "log_loss={log_loss_f64}"
+        );
+    }
+
+    #[test]
     fn empty_split_yields_zeroed_report() {
         let mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
         let report = compute_reliability(&mapping, &[], dec!(0.95)).expect("reliability");
