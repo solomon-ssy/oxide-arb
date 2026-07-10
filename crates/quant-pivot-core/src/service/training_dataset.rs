@@ -46,8 +46,8 @@ use quant_pivot_models::{
         SelectionConfig, TrainingConfig,
     },
     types::{
-        Bps, MarketId, ModelSpecId, Price, Shares, TokenId, TrainingDatasetId, TrainingExampleId,
-        TrainingHorizonsSecs, TrainingSampleSource, Usd,
+        Bps, FeatureVectorId, MarketId, ModelSpecId, Price, RecommendationId, Shares, TokenId,
+        TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -1018,11 +1018,39 @@ impl TrainingDatasetService {
         coverage.live_attribution_candidates += attributions.len() as u64;
         coverage.planned_samples += attributions.len() as u64;
 
+        if attributions.is_empty() {
+            return Ok(());
+        }
+
+        let recommendation_ids: Vec<_> = attributions
+            .iter()
+            .map(|a| a.recommendation_id.clone())
+            .collect();
+        let recommendations = self
+            .recommendation_repo
+            .find_by_ids(&recommendation_ids)
+            .await?;
+        let recommendation_by_id: HashMap<_, _> = recommendations
+            .into_iter()
+            .map(|r| (r.recommendation_id.clone(), r))
+            .collect();
+
+        let feature_vector_ids: Vec<_> = recommendation_by_id
+            .values()
+            .map(|r| r.evidence_refs.feature_vector_id.clone())
+            .collect();
+        let feature_infos = self.feature_repo.find_by_ids(&feature_vector_ids).await?;
+        let feature_by_id: HashMap<_, _> = feature_infos
+            .into_iter()
+            .map(|f| (f.feature_vector_id.clone(), f))
+            .collect();
+
         for attribution in attributions {
-            match self
-                .materialize_live_attribution_example(&attribution)
-                .await?
-            {
+            match materialize_live_attribution_example(
+                &attribution,
+                &recommendation_by_id,
+                &feature_by_id,
+            ) {
                 Some(example) => {
                     market_set.insert(example.market_id.clone());
                     coverage.labels_available += example.labels.len() as u64;
@@ -1032,73 +1060,6 @@ impl TrainingDatasetService {
             }
         }
         Ok(())
-    }
-
-    async fn materialize_live_attribution_example(
-        &self,
-        attribution: &RecommendationAttributionInfo,
-    ) -> QuantResult<Option<TrainingExample>> {
-        let Some(recommendation) = self
-            .recommendation_repo
-            .find_by_id(&attribution.recommendation_id)
-            .await?
-        else {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                "live attribution sample dropped: recommendation not found",
-            );
-            return Ok(None);
-        };
-        if recommendation.status.excluded_from_attribution() {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                "live attribution sample dropped: recommendation revoked",
-            );
-            return Ok(None);
-        }
-        let Some(feature_info) = self
-            .feature_repo
-            .find_by_id(&recommendation.evidence_refs.feature_vector_id)
-            .await?
-        else {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-                "live attribution sample dropped: frozen feature vector not found",
-            );
-            return Ok(None);
-        };
-        let Some(feature_vector) = frozen_feature_vector(&feature_info) else {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-                "live attribution sample dropped: frozen feature vector payload is invalid",
-            );
-            return Ok(None);
-        };
-        let Some(factor_values) = frozen_factor_values(&recommendation) else {
-            tracing::warn!(
-                recommendation_id = %attribution.recommendation_id,
-                "live attribution sample dropped: frozen factor definitions are incomplete",
-            );
-            return Ok(None);
-        };
-
-        let labels = attribution_labels(attribution, &recommendation);
-        Ok(Some(TrainingExample {
-            example_id: TrainingExampleId::from_v7(),
-            market_id: recommendation.market_id.clone(),
-            token_id: recommendation.token_id.clone(),
-            as_of: feature_vector.as_of,
-            sample_source: TrainingSampleSource::LiveAttribution,
-            source_refs: feature_vector.source_refs.clone(),
-            feature_vector,
-            factor_values,
-            labels,
-            lot_context: None,
-            position_state: None,
-            book_fidelity: None,
-        }))
     }
 
     async fn append_exit_decision_examples(
@@ -1770,6 +1731,66 @@ fn append_historical_examples(
             book_fidelity: None,
         });
     }
+}
+
+fn materialize_live_attribution_example(
+    attribution: &RecommendationAttributionInfo,
+    recommendations: &HashMap<RecommendationId, RecommendationInfo>,
+    features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
+) -> Option<TrainingExample> {
+    let Some(recommendation) = recommendations.get(&attribution.recommendation_id) else {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            "live attribution sample dropped: recommendation not found",
+        );
+        return None;
+    };
+    if recommendation.status.excluded_from_attribution() {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            "live attribution sample dropped: recommendation revoked",
+        );
+        return None;
+    }
+    let Some(feature_info) = features.get(&recommendation.evidence_refs.feature_vector_id) else {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+            "live attribution sample dropped: frozen feature vector not found",
+        );
+        return None;
+    };
+    let Some(feature_vector) = frozen_feature_vector(feature_info) else {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+            "live attribution sample dropped: frozen feature vector payload is invalid",
+        );
+        return None;
+    };
+    let Some(factor_values) = frozen_factor_values(recommendation) else {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            "live attribution sample dropped: frozen factor definitions are incomplete",
+        );
+        return None;
+    };
+
+    let labels = attribution_labels(attribution, recommendation);
+    Some(TrainingExample {
+        example_id: TrainingExampleId::from_v7(),
+        market_id: recommendation.market_id.clone(),
+        token_id: recommendation.token_id.clone(),
+        as_of: feature_vector.as_of,
+        sample_source: TrainingSampleSource::LiveAttribution,
+        source_refs: feature_vector.source_refs.clone(),
+        feature_vector,
+        factor_values,
+        labels,
+        lot_context: None,
+        position_state: None,
+        book_fidelity: None,
+    })
 }
 
 fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {

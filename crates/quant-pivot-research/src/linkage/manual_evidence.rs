@@ -105,7 +105,7 @@ mod tests {
             CryptoSubject, GroundingField, GroundingKind, LinkageSourceMetadata,
             ManualEvidenceInput, PriceComparator, ResolutionOracle,
         },
-        types::{ChainlinkFeedKey, CryptoAsset, CryptoQuote, MarketId},
+        types::{ChainlinkFeedKey, CryptoAsset, CryptoQuote, DomainInstrumentKey, MarketId, Usd},
     };
 
     fn metadata() -> LinkageSourceMetadata {
@@ -136,7 +136,7 @@ mod tests {
         }
     }
 
-    fn instrument_key() -> quant_pivot_models::types::DomainInstrumentKey {
+    fn instrument_key() -> DomainInstrumentKey {
         crate::linkage::rule_for_alias("btc")
             .expect("btc rule")
             .instrument_key()
@@ -206,9 +206,7 @@ mod tests {
     fn strike_is_required_only_when_present() {
         let mut with_strike = subject();
         with_strike.comparator = PriceComparator::Above;
-        with_strike.strike = Some(quant_pivot_models::types::Usd::new(
-            rust_decimal::Decimal::from(100_000),
-        ));
+        with_strike.strike = Some(Usd::new(rust_decimal::Decimal::from(100_000)));
         let evidence = vec![
             ManualEvidenceInput {
                 subject_field: "asset".to_owned(),

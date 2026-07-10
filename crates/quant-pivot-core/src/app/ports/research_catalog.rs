@@ -160,27 +160,38 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             .map_err(QuantError::from)?
             .items;
 
-        let mut options = Vec::with_capacity(versions.len());
-        for version in versions {
-            let Some(spec) = self
+        let mut unique_spec_ids = HashSet::new();
+        for version in &versions {
+            unique_spec_ids.insert(version.model_spec_id.clone());
+        }
+        let mut specs_by_id = HashMap::with_capacity(unique_spec_ids.len());
+        for model_spec_id in unique_spec_ids {
+            if let Some(spec) = self
                 .models
-                .find_model_spec_by_id(&version.model_spec_id)
+                .find_model_spec_by_id(&model_spec_id)
                 .await
                 .map_err(QuantError::from)?
-            else {
+            {
+                specs_by_id.insert(model_spec_id, spec);
+            }
+        }
+
+        let mut options = Vec::with_capacity(versions.len());
+        for version in versions {
+            let matches_side = match query.side {
+                ModelPickerSide::Buy => !version.model_family.is_exit_scorer(),
+                ModelPickerSide::Sell => version.model_family.is_exit_scorer(),
+            };
+            if !matches_side {
+                continue;
+            }
+            let Some(spec) = specs_by_id.get(&version.model_spec_id) else {
                 tracing::warn!(
                     model_version_id = %version.model_version_id,
                     "published version's spec not found; excluded from the picker catalog"
                 );
                 continue;
             };
-            let matches_side = match query.side {
-                ModelPickerSide::Buy => !spec.model_family.is_exit_scorer(),
-                ModelPickerSide::Sell => spec.model_family.is_exit_scorer(),
-            };
-            if !matches_side {
-                continue;
-            }
             let category_scope = match load_hash_verified_artifact(&self.artifact_store, &version)
                 .await
             {
@@ -201,9 +212,9 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             options.push(PublishedModelOptionView {
                 model_version_id: version.model_version_id,
                 model_spec_id: version.model_spec_id,
-                spec_name: spec.name,
+                spec_name: spec.name.clone(),
                 version: version.version,
-                model_family: spec.model_family.as_str().to_owned(),
+                model_family: version.model_family.as_str().to_owned(),
                 category_scope,
                 published_at: version.published_at,
             });

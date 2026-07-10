@@ -55,12 +55,18 @@ pub struct NewModelSpec {
     pub status: PublicationStatus,
 }
 
-/// Published or candidate model version row.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::quant_model_version::Entity")]
+/// Published or candidate model version row, enriched with the owning spec's
+/// immutable N:1 identity field [`model_family`](Self::model_family).
+///
+/// `model_family` is **not** a `quant_model_version` column — repository reads
+/// always `INNER JOIN quant_model_spec` (or reload via that join after writes).
+/// It is not present on [`NewModelVersion`] / patches.
+#[derive(Debug, Clone, Serialize, Deserialize, FromQueryResult)]
 pub struct ModelVersionInfo {
     pub model_version_id: ModelVersionId,
     pub model_spec_id: ModelSpecId,
+    /// Immutable family from the owning `quant_model_spec` (JOIN projection).
+    pub model_family: ModelFamily,
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
@@ -73,26 +79,6 @@ pub struct ModelVersionInfo {
     pub retired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
-
-info_from_model!(
-    ModelVersionInfo,
-    crate::entities::quant_model_version::Model,
-    {
-        model_version_id,
-        model_spec_id,
-        version,
-        artifact_hash,
-        training_dataset_id,
-        publish_path_set_id,
-        metrics_json,
-        training_objective_json,
-        quality_gate_report,
-        publication_status,
-        published_at,
-        retired_at,
-        created_at,
-    }
-);
 
 /// Insert payload for `quant_model_version`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]

@@ -72,10 +72,13 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CryptoSubject, GroundingProof, MarketSubject, PriceComparator, ResolutionOracle,
-            ResolvedBinding,
+            CryptoSubject, GroundingProof, MarketSubject, NewBasisAlert, PriceComparator,
+            ResolutionOracle, ResolvedBinding,
         },
-        enums::{domain::DomainFamily, quant::DataQualityStatus},
+        enums::{
+            domain::{DomainFamily, KlineInterval},
+            quant::DataQualityStatus,
+        },
         runtime_config::DomainConfig,
         types::{
             BinanceSymbol, ChainlinkFeedKey, CryptoAsset, CryptoQuote, DomainInstrumentKey,
@@ -92,7 +95,7 @@ mod tests {
     fn instrument() -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-            quant_pivot_models::enums::domain::KlineInterval::OneMinute,
+            KlineInterval::OneMinute,
         )
     }
 
@@ -231,10 +234,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BasisAlertRepository for InMemoryBasisAlertRepo {
-        async fn record(
-            &self,
-            alert: quant_pivot_models::domain::NewBasisAlert,
-        ) -> Result<BasisAlertInfo, StorageError> {
+        async fn record(&self, alert: NewBasisAlert) -> Result<BasisAlertInfo, StorageError> {
             let row = BasisAlertInfo {
                 alert_id: alert.alert_id,
                 market_id: alert.market_id,

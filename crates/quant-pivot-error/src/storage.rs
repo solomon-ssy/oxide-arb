@@ -42,8 +42,6 @@ pub mod entity {
     pub const QUANT_CALIBRATION_ARTIFACT: &str = "quant_calibration_artifact";
     /// `quant_research_job`.
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
-    /// `quant_model_registry`.
-    pub const QUANT_MODEL_REGISTRY: &str = "quant_model_registry";
     /// `quant_model_spec`.
     pub const QUANT_MODEL_SPEC: &str = "quant_model_spec";
     /// `quant_model_version`.

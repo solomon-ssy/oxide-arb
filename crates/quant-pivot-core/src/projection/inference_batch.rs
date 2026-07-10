@@ -181,9 +181,10 @@ mod tests {
     use super::build_feature_matrix;
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        enums::{common::MarketCategory, quant::DataQualityStatus},
+        enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
         types::{
-            EventId, MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
+            EventId, MarketId, Probability, SchemaVersion, TokenId, TrainingExampleId,
+            TrainingSampleSource,
         },
     };
     use quant_pivot_research::{
@@ -203,10 +204,10 @@ mod tests {
         let mut generic = BTreeMap::new();
         generic.insert(
             book::MID,
-            FeatureValue::Probability(quant_pivot_models::types::Probability::new(dec!(0.5))),
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
         );
         let domain = domain_value.map(|value| quant_pivot_research::features::DomainFeatureSlice {
-            family: quant_pivot_models::enums::domain::DomainFamily::Crypto,
+            family: DomainFamily::Crypto,
             schema_version: SchemaVersion::FIRST,
             values: BTreeMap::from([(FeatureName::from_static(FEATURE), value)]),
         });

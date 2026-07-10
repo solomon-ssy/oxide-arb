@@ -79,6 +79,12 @@ pub trait OrderIntentRepository: Send + Sync {
         intent_id: &OrderIntentId,
     ) -> Result<Option<OrderIntentInfo>, StorageError>;
 
+    /// Batch-load intents by id (chunked `IN` lists). Missing ids are omitted.
+    async fn find_by_ids(
+        &self,
+        intent_ids: &[OrderIntentId],
+    ) -> Result<Vec<OrderIntentInfo>, StorageError>;
+
     /// Page intents filtered by status / mode / recommendation / `created_at`.
     async fn page(
         &self,

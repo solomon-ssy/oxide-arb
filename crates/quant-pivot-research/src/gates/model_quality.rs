@@ -144,6 +144,8 @@ pub enum GateId {
     TurnoverBudget,
     /// Single-path tail-loss floor in bps (hard, risk/execution realism).
     TailLossBudget,
+    /// Sell CPCV model median calendar return must beat exit-at-first baseline.
+    SellBaselineUplift,
     /// Directional hit rate (soft).
     HitRate,
     /// Per-category concentration within budget (soft).
@@ -177,6 +179,7 @@ impl GateId {
             Self::MinTrackRecordLength => "min_track_record_length",
             Self::TurnoverBudget => "turnover_budget",
             Self::TailLossBudget => "tail_loss_budget",
+            Self::SellBaselineUplift => "sell_baseline_uplift",
             Self::HitRate => "hit_rate",
             Self::CategoryConcentration => "category_concentration",
             Self::SellL2BookFidelity => "sell_l2_book_fidelity",
@@ -429,14 +432,33 @@ pub struct CpcvPathSetGateInput {
     pub deflated_sharpe: Decimal,
     pub pbo: Decimal,
     pub min_track_record_length_secs: Option<i64>,
+    pub median_max_drawdown: Option<Decimal>,
+    pub median_tail_loss: Option<Decimal>,
+    pub baseline_uplift: Option<Decimal>,
+    pub window_start: Option<DateTime<Utc>>,
+    pub window_end: Option<DateTime<Utc>>,
 }
 
-/// Sell-side hold-vs-exit gate thresholds (Phase 06.1).
+/// Sell-side hold-vs-exit gate thresholds (Phase 06.1; alpha-significance
+/// fields added Phase 11.5.1).
+///
+/// DSR significance (`α`) is **not** duplicated here — Sell publish reads the
+/// single authority [`ValidationGateThresholds::dsr_significance`]
+/// (`research.validation.gates.dsr_significance`), the same knob CPCV uses to
+/// compute Deflated Sharpe / `MinTRL`. Rank IC / PBO remain Sell-scoped so
+/// operators can set exit-scorer bars independently of Buy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SellQualityGateThresholds {
     pub min_sample_count: u64,
     pub min_label_coverage: Decimal,
-    pub min_exit_alpha_rank_ic: Decimal,
+    /// Minimum CPCV path-set median rank IC (hard gate; Phase 11.5.1 —
+    /// replaces the deleted single-path soft `min_exit_alpha_rank_ic`,
+    /// mirroring the Buy-side `ValidationGateThresholds::rank_ic_min`
+    /// upgrade Phase 11.5 already made).
+    pub rank_ic_min: Decimal,
+    /// Maximum tolerated Probability of Backtest Overfitting (hard gate;
+    /// Phase 11.5.1).
+    pub max_pbo: Decimal,
     pub min_l2_book_fidelity_ratio: Decimal,
     pub max_fallback_ratio: Decimal,
 }
@@ -446,7 +468,8 @@ impl Default for SellQualityGateThresholds {
         Self {
             min_sample_count: 200,
             min_label_coverage: Decimal::new(60, 2),
-            min_exit_alpha_rank_ic: Decimal::new(5, 2),
+            rank_ic_min: Decimal::new(2, 2),
+            max_pbo: Decimal::new(50, 2),
             min_l2_book_fidelity_ratio: Decimal::new(50, 2),
             max_fallback_ratio: Decimal::new(50, 2),
         }
@@ -723,14 +746,113 @@ fn evaluate_sell_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
         t.max_fallback_ratio.to_string(),
         "ExitDecision microstructure fallback ratio above maximum",
     );
-    if let Some(report) = &input.backtest {
-        ledger.soft(
-            GateId::RankIc,
-            report.rank_ic >= t.min_exit_alpha_rank_ic,
-            report.rank_ic.to_string(),
-            t.min_exit_alpha_rank_ic.to_string(),
-            "exit-alpha rank IC below soft minimum",
+    let backtest_window = input
+        .path_set
+        .as_ref()
+        .and_then(|path_set| path_set.window_start.zip(path_set.window_end));
+    // DSR α is the single authority under `research.validation.gates` —
+    // never a parallel `quality_gate.sell.dsr_significance` that could drift
+    // from the value CPCV used when computing `deflated_sharpe`.
+    evaluate_alpha_significance_gates(
+        input.intent,
+        input.path_set.as_ref(),
+        backtest_window,
+        t.rank_ic_min,
+        input.validation_thresholds.dsr_significance,
+        t.max_pbo,
+        ledger,
+    );
+    if input.intent.requires_backtest() {
+        evaluate_sell_path_set_risk_gates(
+            input.path_set.as_ref(),
+            &input.thresholds,
+            &input.validation_thresholds,
+            ledger,
         );
+    }
+}
+
+/// Sell path-set risk/baseline gates over calendarized lot returns.
+fn evaluate_sell_path_set_risk_gates(
+    path_set: Option<&CpcvPathSetGateInput>,
+    thresholds: &QualityGateThresholds,
+    validation: &ValidationGateThresholds,
+    ledger: &mut GateLedger,
+) {
+    let Some(path_set) = path_set else {
+        ledger.not_applicable(
+            GateId::MaxDrawdown,
+            GateClass::Hard,
+            thresholds.max_drawdown.to_string(),
+            "requires a CPCV path set",
+        );
+        ledger.not_applicable(
+            GateId::TailLossBudget,
+            GateClass::Hard,
+            validation.min_tail_loss_bps.to_string(),
+            "requires a CPCV path set",
+        );
+        ledger.not_applicable(
+            GateId::SellBaselineUplift,
+            GateClass::Hard,
+            "> 0",
+            "requires a CPCV path set",
+        );
+        return;
+    };
+
+    match path_set.median_max_drawdown {
+        Some(max_drawdown) => ledger.hard(
+            GateId::MaxDrawdown,
+            max_drawdown <= thresholds.max_drawdown,
+            max_drawdown.to_string(),
+            thresholds.max_drawdown.to_string(),
+            "Sell CPCV median calendarized max drawdown exceeds budget",
+        ),
+        None => ledger.hard(
+            GateId::MaxDrawdown,
+            false,
+            "none",
+            thresholds.max_drawdown.to_string(),
+            "Sell CPCV path set is missing median max drawdown",
+        ),
+    }
+
+    match path_set.median_tail_loss {
+        Some(tail_loss) => {
+            let tail_loss_bps = tail_loss * Decimal::from(10_000);
+            ledger.hard(
+                GateId::TailLossBudget,
+                tail_loss_bps >= validation.min_tail_loss_bps,
+                tail_loss_bps.to_string(),
+                validation.min_tail_loss_bps.to_string(),
+                "Sell CPCV median calendarized tail loss exceeds budget",
+            );
+        }
+        None => ledger.hard(
+            GateId::TailLossBudget,
+            false,
+            "none",
+            validation.min_tail_loss_bps.to_string(),
+            "Sell CPCV path set is missing median tail loss",
+        ),
+    }
+
+    match path_set.baseline_uplift {
+        Some(uplift) => ledger.hard(
+            GateId::SellBaselineUplift,
+            uplift > Decimal::ZERO,
+            uplift.to_string(),
+            "> 0",
+            "Sell CPCV median calendar return does not beat exit-at-first baseline",
+        ),
+        None => ledger.hard(
+            GateId::SellBaselineUplift,
+            false,
+            "none",
+            "> 0",
+            "Sell CPCV path set is missing baseline uplift",
+        ),
     }
 }
 
@@ -795,14 +917,52 @@ fn evaluate_backtest_risk_gates(
     );
 }
 
-/// CPCV alpha-significance gates (hard) plus `MinTRL` advisory (soft).
+/// CPCV alpha-significance gates (hard) plus `MinTRL` advisory (soft) — the
+/// Buy-side entry point into the family-shared
+/// [`evaluate_alpha_significance_gates`] helper.
 fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) {
-    if !input.intent.requires_backtest() {
+    let validation = &input.validation_thresholds;
+    let backtest_window = input
+        .backtest
+        .as_ref()
+        .map(|report| (report.window_start, report.window_end));
+    evaluate_alpha_significance_gates(
+        input.intent,
+        input.path_set.as_ref(),
+        backtest_window,
+        validation.rank_ic_min,
+        validation.dsr_significance,
+        validation.max_pbo,
+        ledger,
+    );
+}
+
+/// CPCV/lot-replay alpha-significance gates (hard) plus `MinTRL` advisory
+/// (soft) — shared by the Buy (`evaluate_cpcv_alpha_gates`) and Sell
+/// (`evaluate_sell_gates`, Phase 11.5.1) branches.
+///
+/// Both families' publish readiness is judged by the identical persisted
+/// [`BacktestPathSet`](crate::validation::BacktestPathSet) methodology
+/// (`CpcvRequired`/`RankIc`/`DeflatedSharpe`/`Pbo`/`MinTrackRecordLength`
+/// reuse the exact same [`GateId`] variants for both families — mirroring how
+/// `SampleCount`/`LabelCoverage` are already shared in
+/// [`evaluate_coverage_gates`] and [`evaluate_sell_gates`] — only the
+/// threshold source and the availability of a single-path debug
+/// `backtest_window` (Buy only; Sell has none) differ.
+fn evaluate_alpha_significance_gates(
+    intent: GateIntent,
+    path_set: Option<&CpcvPathSetGateInput>,
+    backtest_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    rank_ic_min: Decimal,
+    dsr_significance: Decimal,
+    max_pbo: Decimal,
+    ledger: &mut GateLedger,
+) {
+    if !intent.requires_backtest() {
         return;
     }
-    let validation = &input.validation_thresholds;
-    let dsr_floor = Decimal::ONE - validation.dsr_significance;
-    if let Some(path_set) = &input.path_set {
+    let dsr_floor = Decimal::ONE - dsr_significance;
+    if let Some(path_set) = path_set {
         ledger.hard(
             GateId::CpcvRequired,
             true,
@@ -812,9 +972,9 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
         );
         ledger.hard(
             GateId::RankIc,
-            path_set.median_rank_ic >= validation.rank_ic_min,
+            path_set.median_rank_ic >= rank_ic_min,
             path_set.median_rank_ic.to_string(),
-            validation.rank_ic_min.to_string(),
+            rank_ic_min.to_string(),
             "CPCV median rank IC below minimum",
         );
         ledger.hard(
@@ -826,17 +986,16 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
         );
         ledger.hard(
             GateId::Pbo,
-            path_set.pbo <= validation.max_pbo,
+            path_set.pbo <= max_pbo,
             path_set.pbo.to_string(),
-            validation.max_pbo.to_string(),
+            max_pbo.to_string(),
             "probability of backtest overfitting above maximum",
         );
-        if let (Some(mintrl_secs), Some(backtest)) =
-            (path_set.min_track_record_length_secs, &input.backtest)
+        if let (Some(mintrl_secs), Some((window_start, window_end))) =
+            (path_set.min_track_record_length_secs, backtest_window)
         {
-            let observed_secs = backtest
-                .window_end
-                .signed_duration_since(backtest.window_start)
+            let observed_secs = window_end
+                .signed_duration_since(window_start)
                 .num_seconds()
                 .max(0);
             ledger.soft(
@@ -851,7 +1010,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
                 GateId::MinTrackRecordLength,
                 GateClass::Soft,
                 "n/a",
-                "MinTRL unavailable when representative Sharpe is non-positive",
+                "MinTRL unavailable when representative Sharpe is non-positive, or no single-path debug window to compare against",
             );
         }
         return;
@@ -866,7 +1025,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
     ledger.not_applicable(
         GateId::RankIc,
         GateClass::Hard,
-        validation.rank_ic_min.to_string(),
+        rank_ic_min.to_string(),
         "requires a CPCV path set",
     );
     ledger.not_applicable(
@@ -878,7 +1037,7 @@ fn evaluate_cpcv_alpha_gates(input: &QualityGateInput, ledger: &mut GateLedger) 
     ledger.not_applicable(
         GateId::Pbo,
         GateClass::Hard,
-        validation.max_pbo.to_string(),
+        max_pbo.to_string(),
         "requires a CPCV path set",
     );
     ledger.not_applicable(
@@ -1032,7 +1191,7 @@ mod tests {
         QualityGateInput, QualityGateThresholds, SellQualityGateThresholds,
         ValidationGateThresholds,
     };
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use quant_pivot_models::{
         enums::model::ModelFamily,
         types::{
@@ -1111,6 +1270,11 @@ mod tests {
             deflated_sharpe: dec!(0.97),
             pbo: dec!(0.20),
             min_track_record_length_secs: Some(86_400),
+            median_max_drawdown: Some(dec!(0.10)),
+            median_tail_loss: Some(dec!(-0.005)),
+            baseline_uplift: Some(dec!(0.001)),
+            window_start: Some(Utc::now()),
+            window_end: Some(Utc::now() + Duration::hours(48)),
         }
     }
 
@@ -1211,6 +1375,73 @@ mod tests {
             .find(|outcome| outcome.gate == GateId::CalibrationRequired)
             .expect("CalibrationRequired row must be present for the sell family");
         assert_eq!(calibration_row.status, GateStatus::NotApplicable);
+    }
+
+    #[test]
+    fn sell_publish_requires_baseline_uplift() {
+        let mut input = QualityGateInput {
+            model_family: Some(ModelFamily::HoldVsExitWeighted),
+            ..passing_input(GateIntent::Publish)
+        };
+        input.path_set.as_mut().unwrap().baseline_uplift = None;
+
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::SellBaselineUplift)
+        );
+    }
+
+    #[test]
+    fn sell_publish_blocks_high_path_set_drawdown() {
+        let mut input = QualityGateInput {
+            model_family: Some(ModelFamily::HoldVsExitWeighted),
+            ..passing_input(GateIntent::Publish)
+        };
+        input.path_set.as_mut().unwrap().median_max_drawdown = Some(dec!(0.90));
+
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::MaxDrawdown)
+        );
+    }
+
+    #[test]
+    fn sell_publish_blocks_bad_path_set_tail_loss() {
+        let mut input = QualityGateInput {
+            model_family: Some(ModelFamily::HoldVsExitWeighted),
+            ..passing_input(GateIntent::Publish)
+        };
+        // Calendarized fractional tail loss → bps far below default min_tail_loss_bps (-500).
+        input.path_set.as_mut().unwrap().median_tail_loss = Some(dec!(-0.20));
+
+        let decision = DefaultModelQualityGate::new()
+            .evaluate(input)
+            .expect("evaluate");
+
+        assert!(!decision.is_pass());
+        assert!(
+            decision
+                .report()
+                .hard_failures
+                .iter()
+                .any(|failure| failure.gate == GateId::TailLossBudget)
+        );
     }
 
     #[test]

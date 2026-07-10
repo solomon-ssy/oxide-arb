@@ -1,7 +1,7 @@
 //! Postgres-backed recommendation repository (read + per-recommendation expiry).
 
 use crate::{
-    postgres::{error, quant::attribution, state_hash},
+    postgres::{error, quant::attribution, query::find_models_by_id_chunks, state_hash},
     traits::RecommendationRepository,
 };
 use chrono::{DateTime, Utc};
@@ -52,6 +52,19 @@ impl RecommendationRepository for PgRecommendationRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn find_by_ids(
+        &self,
+        recommendation_ids: &[RecommendationId],
+    ) -> Result<Vec<RecommendationInfo>, StorageError> {
+        find_models_by_id_chunks::<quant_recommendation::Entity, _, _>(
+            &self.db,
+            recommendation_ids,
+            quant_recommendation::Column::RecommendationId,
+        )
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
     async fn find_expirable(

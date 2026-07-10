@@ -1362,11 +1362,18 @@ fn sell_quality_gate_fields() -> Vec<FieldUiEntry> {
             "带可用『持有 vs 退出』标签的卖出侧样本最低占比（[0,1]）。",
         ),
         decimal(
-            "quality_gate.sell.min_exit_alpha_rank_ic",
-            "Sell minimum exit-alpha rank IC",
-            "卖出侧最低 exit-alpha rank IC",
-            "Soft floor on the Sell scorer's exit-alpha rank IC (correlation in [-1, 1]). Measures how well the scorer ranks exit timing.",
-            "卖出评分模型 exit-alpha rank IC 的软下限（相关系数，[-1,1]）。衡量其对退出时机的排序能力。",
+            "quality_gate.sell.rank_ic_min",
+            "Sell minimum CPCV median rank IC",
+            "卖出侧 CPCV 中位 rank IC 下限",
+            "Hard floor on the Sell scorer's lot-level CPCV path-set median rank IC (correlation in [-1, 1]; replaces the deleted single-path soft `min_exit_alpha_rank_ic`).",
+            "卖出评分模型 lot 级 CPCV 路径集中位 rank IC 的硬下限（相关系数，[-1,1]；取代已删除的单路径软阈值）。",
+        ),
+        ratio(
+            "quality_gate.sell.max_pbo",
+            "Sell maximum PBO",
+            "卖出侧 PBO 上限",
+            "Maximum tolerated Probability of Backtest Overfitting for the Sell lot-level CPCV path set ([0, 1], hard gate).",
+            "卖出侧 lot 级 CPCV 路径集可容忍的回测过拟合概率上限（[0,1]，硬门禁）。",
         ),
         ratio(
             "quality_gate.sell.min_l2_book_fidelity_ratio",
@@ -2823,7 +2830,8 @@ fn quality_gate_section() -> SchemaNode {
         fields_in_order(&[
             "quality_gate.sell.min_sample_count",
             "quality_gate.sell.min_label_coverage",
-            "quality_gate.sell.min_exit_alpha_rank_ic",
+            "quality_gate.sell.rank_ic_min",
+            "quality_gate.sell.max_pbo",
             "quality_gate.sell.min_l2_book_fidelity_ratio",
             "quality_gate.sell.max_fallback_ratio",
         ]),

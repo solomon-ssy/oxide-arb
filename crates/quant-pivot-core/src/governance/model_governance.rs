@@ -42,7 +42,7 @@ use quant_pivot_models::{
     },
     runtime_config::{QualityGateConfig, sections::ResearchValidationGatesConfig},
     types::{
-        AuditEventId, BacktestReportId, CalibrationArtifactId, ModelGovernanceAuditId, ModelSpecId,
+        AuditEventId, BacktestReportId, CalibrationArtifactId, ModelGovernanceAuditId,
         ModelVersionId, Probability,
     },
 };
@@ -64,6 +64,7 @@ use quant_pivot_research::{
         load_hash_verified_artifact, validate_category_scope_weights,
     },
     training::{DatasetCoverage, DatasetParquetCodec, LeakageFindings, scan_future_leakage},
+    validation::SharpeDistribution,
 };
 use rust_decimal::Decimal;
 
@@ -222,31 +223,6 @@ impl ModelGovernanceService {
             validate_category_scope_weights(weighted.category_scope, &weighted.weights)?;
         }
         Ok(())
-    }
-
-    /// Retire every currently published version for a spec (single-active invariant).
-    async fn retire_published_predecessors(
-        &self,
-        model_spec_id: &ModelSpecId,
-        except: &ModelVersionId,
-    ) -> QuantResult<Vec<ModelVersionId>> {
-        let predecessors = self
-            .deps
-            .model_registry_repo
-            .list_published_for_spec(model_spec_id)
-            .await?;
-        let mut retired = Vec::new();
-        for predecessor in predecessors {
-            if predecessor.model_version_id == *except {
-                continue;
-            }
-            self.deps
-                .model_registry_repo
-                .retire_model_version(&predecessor.model_version_id)
-                .await?;
-            retired.push(predecessor.model_version_id);
-        }
-        Ok(retired)
     }
 }
 
@@ -672,21 +648,11 @@ impl ModelGovernanceService {
         command: PublishModelCommand,
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo> {
-        let rollback_target = self
-            .deps
-            .model_registry_repo
-            .list_published_for_spec(&version.model_spec_id)
-            .await?
-            .into_iter()
-            .next();
-        let retired_predecessors = self
-            .retire_published_predecessors(&version.model_spec_id, &version.model_version_id)
-            .await?;
         let before_status = version.publication_status;
-        let published = self
+        let (published, retired_predecessors, rollback_target) = self
             .deps
             .model_registry_repo
-            .publish_model_version(&version.model_version_id)
+            .publish_replacing_predecessors(&version.model_spec_id, &version.model_version_id)
             .await?;
 
         sync_production_active(
@@ -878,8 +844,7 @@ impl ModelGovernanceService {
         let validation_thresholds =
             validation_thresholds_from_config(&config.research.validation.gates)?;
         let sell_thresholds = sell_thresholds_from_config(&config.quality_gate)?;
-        let model_family = self.model_family_for_version(version).await?;
-        let is_exit = model_family.is_exit_scorer();
+        let model_family = Self::model_family_for_version(version);
 
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
         // Deep check (Phase 11.3 closed-loop hardening): the *same* function
@@ -920,7 +885,11 @@ impl ModelGovernanceService {
                 id: dataset_id.to_string(),
             })?;
         let leakage = self.rescan_leakage(&dataset_info).await?;
-        let path_set = if intent.requires_backtest() && !is_exit {
+        // Phase 11.5.1: Sell (`HoldVsExitWeighted`) publish/promote requires
+        // the same bound CPCV path set as Buy — `bound_path_set` is already
+        // family-agnostic (it only reads `version.publish_path_set_id`), so
+        // no `is_exit` branch is needed here at all.
+        let path_set = if intent.requires_backtest() {
             self.bound_path_set(version).await?
         } else {
             None
@@ -1022,7 +991,7 @@ impl ModelGovernanceService {
             }
             .into());
         }
-        Ok(Some(path_set_gate_input_from_info(&info)))
+        Ok(Some(path_set_gate_input_from_info(&info)?))
     }
 
     /// Resolve the dataset coverage backing a model version (the gate's
@@ -1038,21 +1007,9 @@ impl ModelGovernanceService {
         Ok(dataset.coverage_json)
     }
 
-    /// Resolve the governed model family for a version (via its spec).
-    async fn model_family_for_version(
-        &self,
-        version: &ModelVersionInfo,
-    ) -> QuantResult<ModelFamily> {
-        let spec = self
-            .deps
-            .model_registry_repo
-            .find_model_spec_by_id(&version.model_spec_id)
-            .await?
-            .ok_or_else(|| GovernanceError::NotFound {
-                entity: "model_spec",
-                id: version.model_spec_id.to_string(),
-            })?;
-        Ok(spec.model_family)
+    /// Resolve the governed model family for a version (JOIN-projected on the row).
+    const fn model_family_for_version(version: &ModelVersionInfo) -> ModelFamily {
+        version.model_family
     }
 
     /// Resolve the version to restore on rollback: the predecessor recorded at
@@ -1242,13 +1199,31 @@ fn validation_thresholds_from_config(
     })
 }
 
-const fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> CpcvPathSetGateInput {
-    CpcvPathSetGateInput {
+fn path_set_gate_input_from_info(info: &BacktestPathSetInfo) -> QuantResult<CpcvPathSetGateInput> {
+    // Fail closed on corrupt JSON — never silently drop Sell diagnostics
+    // (`median_max_drawdown` / `median_tail_loss` / `baseline_uplift`) into
+    // `None`, which would surface as opaque hard-gate failures without a
+    // readable persistence error.
+    let distribution = serde_json::from_value::<SharpeDistribution>(
+        info.sharpe_distribution.clone(),
+    )
+    .map_err(|error| GovernanceError::IllegalTransition {
+        detail: format!(
+            "backtest path set {} `sharpe_distribution` is not decodable: {error}",
+            info.path_set_id
+        ),
+    })?;
+    Ok(CpcvPathSetGateInput {
         median_rank_ic: info.median_rank_ic,
         deflated_sharpe: info.deflated_sharpe,
         pbo: info.pbo,
         min_track_record_length_secs: info.min_track_record_length_secs,
-    }
+        median_max_drawdown: distribution.median_max_drawdown,
+        median_tail_loss: distribution.median_tail_loss,
+        baseline_uplift: distribution.baseline_uplift,
+        window_start: Some(info.window_start),
+        window_end: Some(info.window_end),
+    })
 }
 
 /// Assemble sell-side [`SellQualityGateThresholds`] from the governed config section.
@@ -1261,10 +1236,8 @@ fn sell_thresholds_from_config(
             &config.sell.min_label_coverage.value,
             "sell.min_label_coverage",
         )?,
-        min_exit_alpha_rank_ic: parse_threshold(
-            &config.sell.min_exit_alpha_rank_ic.value,
-            "sell.min_exit_alpha_rank_ic",
-        )?,
+        rank_ic_min: parse_threshold(&config.sell.rank_ic_min.value, "sell.rank_ic_min")?,
+        max_pbo: parse_threshold(&config.sell.max_pbo.value, "sell.max_pbo")?,
         min_l2_book_fidelity_ratio: parse_threshold(
             &config.sell.min_l2_book_fidelity_ratio.value,
             "sell.min_l2_book_fidelity_ratio",
@@ -1318,4 +1291,77 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
         report_pnl_simulation,
         report_hash: info.report_hash,
     })
+}
+
+#[cfg(test)]
+mod path_set_gate_input_tests {
+    use super::path_set_gate_input_from_info;
+    use chrono::Utc;
+    use quant_pivot_models::{
+        domain::BacktestPathSetInfo,
+        types::{
+            BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+            TrainingDatasetId,
+        },
+    };
+    use rust_decimal_macros::dec;
+
+    fn hash() -> ContentHash {
+        ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash")
+    }
+
+    fn info_with_distribution(sharpe_distribution: serde_json::Value) -> BacktestPathSetInfo {
+        BacktestPathSetInfo {
+            path_set_id: BacktestPathSetId::from_v7(),
+            model_version_id: ModelVersionId::from_v7(),
+            model_run_id: ModelRunId::from_v7(),
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            window_start: Utc::now(),
+            window_end: Utc::now(),
+            path_count: 3,
+            combination_count: 6,
+            paths: serde_json::json!([]),
+            sharpe_distribution,
+            median_rank_ic: dec!(0.1),
+            deflated_sharpe: dec!(0.95),
+            dsr_benchmark_sharpe: dec!(0.1),
+            pbo: dec!(0.2),
+            min_track_record_length_secs: Some(86_400),
+            trial_count: 4,
+            trial_grid_count: 4,
+            coord_search_effective_n: 0,
+            path_set_hash: hash(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn path_set_gate_input_decodes_sell_diagnostics() {
+        let info = info_with_distribution(serde_json::json!({
+            "min": "0",
+            "p25": "0",
+            "median": "0.5",
+            "p75": "1",
+            "max": "1",
+            "median_max_drawdown": "0.1",
+            "median_tail_loss": "-0.005",
+            "baseline_uplift": "0.001"
+        }));
+        let gate = path_set_gate_input_from_info(&info).expect("decode");
+        assert_eq!(gate.median_max_drawdown, Some(dec!(0.1)));
+        assert_eq!(gate.median_tail_loss, Some(dec!(-0.005)));
+        assert_eq!(gate.baseline_uplift, Some(dec!(0.001)));
+    }
+
+    #[test]
+    fn path_set_gate_input_rejects_corrupt_sharpe_distribution() {
+        let info = info_with_distribution(serde_json::json!("not-an-object"));
+        let err = path_set_gate_input_from_info(&info).expect_err("corrupt JSON");
+        let detail = err.to_string();
+        assert!(
+            detail.contains("sharpe_distribution") || detail.contains("not decodable"),
+            "expected explicit decode error, got: {detail}"
+        );
+    }
 }

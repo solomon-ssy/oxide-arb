@@ -12,15 +12,18 @@
 //! skipped — only `NotStarted` / `Monitoring` / `Triggered` / `PartiallyExited`
 //! lots are (re)evaluated, so a single in-flight exit is never double-submitted.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::{OrderIntentInfo, PositionInfo, market::book::BookSnapshot},
+    domain::{OrderIntentInfo, PositionInfo, RecommendationInfo, market::book::BookSnapshot},
     enums::execution::ExitState,
     runtime_config::EmergencyExitPolicy,
-    types::{OrderIntentId, Price},
+    types::{OrderIntentId, Price, RecommendationId},
 };
 use quant_pivot_repository::traits::{
     ExecutionSubmissionRepository, OrderIntentRepository, PositionRepository,
@@ -83,9 +86,25 @@ impl ExitMonitorService {
         let recheck =
             Duration::seconds(i64::try_from(policy.signal_recheck_secs).unwrap_or(i64::MAX));
 
-        let lots = self.deps.positions.find_open_lots().await?;
-        for lot in lots.into_iter().take(SCAN_BATCH_GUARD) {
-            if let Err(error) = self.evaluate_lot(&lot, monitor_secs, recheck, now).await {
+        let lots: Vec<PositionInfo> = self
+            .deps
+            .positions
+            .find_open_lots()
+            .await?
+            .into_iter()
+            .take(SCAN_BATCH_GUARD)
+            .collect();
+        let (intents, recommendations) = self.preload_lot_context(&lots).await?;
+
+        for lot in &lots {
+            let Some(intent) = intents.get(&lot.order_intent_id) else {
+                continue;
+            };
+            let recommendation = recommendations.get(&intent.recommendation_id);
+            if let Err(error) = self
+                .evaluate_lot(lot, intent, recommendation, monitor_secs, recheck, now)
+                .await
+            {
                 tracing::warn!(
                     %error,
                     token_id = %lot.token_id,
@@ -101,16 +120,49 @@ impl ExitMonitorService {
         Ok(())
     }
 
+    /// Batch-load intents + recommendations for the sweep's open lots.
+    async fn preload_lot_context(
+        &self,
+        lots: &[PositionInfo],
+    ) -> QuantResult<(
+        HashMap<OrderIntentId, OrderIntentInfo>,
+        HashMap<RecommendationId, RecommendationInfo>,
+    )> {
+        let intent_ids: Vec<OrderIntentId> =
+            lots.iter().map(|lot| lot.order_intent_id.clone()).collect();
+        let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
+        let intent_map: HashMap<OrderIntentId, OrderIntentInfo> = intents
+            .into_iter()
+            .map(|intent| (intent.order_intent_id.clone(), intent))
+            .collect();
+
+        let recommendation_ids: Vec<RecommendationId> = intent_map
+            .values()
+            .map(|intent| intent.recommendation_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let recommendations = self
+            .deps
+            .recommendations
+            .find_by_ids(&recommendation_ids)
+            .await?;
+        let recommendation_map = recommendations
+            .into_iter()
+            .map(|rec| (rec.recommendation_id.clone(), rec))
+            .collect();
+        Ok((intent_map, recommendation_map))
+    }
+
     async fn evaluate_lot(
         &self,
         lot: &PositionInfo,
+        intent: &OrderIntentInfo,
+        recommendation: Option<&RecommendationInfo>,
         monitor_secs: u64,
         recheck: Duration,
         now: DateTime<Utc>,
     ) -> QuantResult<()> {
-        let Some(intent) = self.deps.intents.find_by_id(&lot.order_intent_id).await? else {
-            return Ok(());
-        };
         // Skip in-flight / manual / terminal exit states — only re-evaluate lots
         // that are still being actively monitored.
         if matches!(
@@ -128,23 +180,16 @@ impl ExitMonitorService {
 
         // The recommendation supplies the venue neg-risk signing context (and the
         // re-inference thesis context); a missing one is non-fatal.
-        let recommendation = self
-            .deps
-            .recommendations
-            .find_by_id(&intent.recommendation_id)
-            .await?;
         // Same per-book staleness ceiling as admission `#7` (`BookFreshnessCheck`):
         // frozen `entry_plan.max_book_age_ms` when available, else live config.
-        let max_book_age_ms = recommendation.as_ref().map_or_else(
+        let max_book_age_ms = recommendation.map_or_else(
             || self.deps.config.current().data_quality.max_book_age_ms,
             |rec| rec.entry_plan.max_book_age_ms,
         );
         let (mark_price, book_fresh, market_abnormal) =
             classify_book(snapshot.as_deref(), now_ms, max_book_age_ms);
 
-        let neg_risk = recommendation
-            .as_ref()
-            .is_some_and(|rec| rec.market_context.neg_risk);
+        let neg_risk = recommendation.is_some_and(|rec| rec.market_context.neg_risk);
 
         // Fold the current mark into the trailing peak.
         let peak_mark_price = max_price(intent.peak_mark_price, mark_price);
@@ -152,7 +197,7 @@ impl ExitMonitorService {
         let (signal, did_recheck) = resolve_exit_signal(
             self.deps.signal.as_ref(),
             ExitSignalResolve {
-                intent: &intent,
+                intent,
                 lot,
                 mark_price,
                 book_fresh,

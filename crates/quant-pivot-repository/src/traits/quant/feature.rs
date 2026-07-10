@@ -19,4 +19,10 @@ pub trait FeatureRepository: Send + Sync {
         &self,
         id: &FeatureVectorId,
     ) -> Result<Option<FeatureVectorInfo>, StorageError>;
+
+    /// Batch-load feature vectors by id (chunked `IN` lists). Missing ids are omitted.
+    async fn find_by_ids(
+        &self,
+        ids: &[FeatureVectorId],
+    ) -> Result<Vec<FeatureVectorInfo>, StorageError>;
 }

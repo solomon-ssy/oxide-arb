@@ -1271,6 +1271,20 @@ mod tests {
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
+            async fn publish_replacing_predecessors(
+                &self,
+                _model_spec_id: &ModelSpecId,
+                _model_version_id: &ModelVersionId,
+            ) -> Result<
+                (
+                    ModelVersionInfo,
+                    Vec<ModelVersionId>,
+                    Option<ModelVersionInfo>,
+                ),
+                StorageError,
+            > {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
             async fn promote_model_to_shadow(
                 &self,
                 _model_version_id: &ModelVersionId,
@@ -1393,6 +1407,7 @@ mod tests {
             let version = ModelVersionInfo {
                 model_version_id,
                 model_spec_id: ModelSpecId::from_v7(),
+                model_family: ModelFamily::WeightedFactor,
                 version: 1,
                 artifact_hash: digest,
                 training_dataset_id: None,

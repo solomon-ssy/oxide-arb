@@ -676,11 +676,12 @@ fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationRe
         &gate.sell.max_fallback_ratio,
         report,
     );
-    decimal(
-        "quality_gate.sell.min_exit_alpha_rank_ic",
-        &gate.sell.min_exit_alpha_rank_ic,
+    non_negative_decimal(
+        "quality_gate.sell.rank_ic_min",
+        &gate.sell.rank_ic_min,
         report,
     );
+    unit_ratio("quality_gate.sell.max_pbo", &gate.sell.max_pbo, report);
 }
 
 fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport) {

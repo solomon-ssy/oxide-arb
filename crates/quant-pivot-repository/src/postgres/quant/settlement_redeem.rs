@@ -19,7 +19,7 @@ use quant_pivot_models::{
     },
     entities::{quant_order_intent, quant_settlement_redeem, quant_settlement_redeem_lot},
     enums::execution::{ExitReason, ExitState, SettlementRedeemState},
-    types::{MarketId, SettlementRedeemId},
+    types::{MarketId, OrderIntentId, SettlementRedeemId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
@@ -311,7 +311,7 @@ async fn load_redeem(
 
 async fn mark_intent_redeemed(
     db: &impl sea_orm::ConnectionTrait,
-    intent_id: &quant_pivot_models::types::OrderIntentId,
+    intent_id: &OrderIntentId,
 ) -> Result<(), StorageError> {
     let intent = quant_order_intent::Entity::find_by_id(intent_id.clone())
         .lock_exclusive()

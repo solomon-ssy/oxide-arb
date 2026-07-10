@@ -52,6 +52,9 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `quant-pivot-mo
 - DB 行投影，由 Repository `find_*` / `page` 返回。
 - 字段与表列对齐时优先 `#[derive(DerivePartialModel, FromQueryResult)]` + `#[sea_orm(entity = "...")]`；insert-return 路径另需 `From<Model>`，用 `info_from_model!` 宏生成。
 - 可以携带敏感列（如 `password_hash`），因为 repository 内部路径需要；出网前必须经 `*View` 投影剥离。
+- **允许不可变 N:1 身份字段**（例如 `ModelVersionInfo.model_family` 来自 owning `quant_model_spec` 的 JOIN 投影）。这类字段：
+  - **可以**出现在读模型 `*Info` 上（repository 必须 JOIN-fill，不得依赖 handler 二次查询）；
+  - **不得**出现在 `New*` / `*Patch` 上（写入仍只对主表列；身份列以父行 / FK 为唯一事实源）。
 
 ### 写 DTO `New*` / `*Patch`
 
@@ -82,6 +85,22 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `quant-pivot-mo
 - 跨资源复用的读过滤领域类型（`TimeWindow` / `MarketFilter`）住在 `domain/query.rs`，被 `domain/api` 的 `*Query::resolve()` 与 repository 读方法共用。
 
 **Forbidden（分页）**：repository 内 `query.normalized()`；`paginate_mapped(..., &PageRequest)`；`Paginated::from_request`；业务代码 `query.page.normalized()` 绕过 trait；handler 内裸 mutate enrich（用 `prepare` / `resolve`）。
+
+#### 跨表分页
+
+列表需要 N:1 附属列（如 version → spec.`model_family`）时，在 repository SQL 边界完成 JOIN，再分页：
+
+| 助手 | 用途 |
+|---|---|
+| `paginate_mapped` | 单实体行 → 映射为 `*Info` |
+| `paginate_into_model` | 自定义 `FromQueryResult` 投影（含 N:1 `JOIN` + `column_as`） |
+
+硬性规则：
+
+- **仅允许 N:1** `INNER JOIN` 过滤 / 投影（一主行对应一 join 行，`COUNT` / page 不膨胀）。
+- **禁止 1:N join 分页** — `total` 与页内容会重复膨胀。
+- **禁止** handler 对分页结果做 per-row `find_*` 富化（N+1）；身份 / 展示列必须由 repository JOIN-fill 进 `*Info`，再 `From` 到 `*View`。
+- `total` 始终来自主 paginator，不得用第二次 enrich 查询回填。
 
 ### 入站 `*Request`
 
@@ -151,3 +170,4 @@ ValidatedJson<CreateUserRequest>       // 提取 + 校验
 - ❌ 在 `*Patch` 中放入凭证或 `status` 等需专用方法的敏感转换字段。
 - ❌ 在 handler 之外（如 DTO 的 `Default` / 构造器）写死业务默认值。
 - ❌ 在没有第二个消费者之前把 `domain::api` 移出 `quant-pivot-models`。
+- ❌ handler 对列表 / 详情做 N+1 enrich 循环（per-row `find_*` 补 N:1 身份列）；应在 repository JOIN-fill `*Info`。

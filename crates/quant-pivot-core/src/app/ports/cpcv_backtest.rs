@@ -31,7 +31,8 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{
-        LabelSelector, ModelArtifact, ModelFamily, ModelFamilyParseError, TrainingObjectiveSpec,
+        LabelSelector, ModelArtifact, ModelFamily, ModelFamilyParseError, SellSignalPolicy,
+        TrainingObjectiveSpec,
     },
     training::LabelName,
     validation::{
@@ -586,6 +587,12 @@ fn cpcv_config_from_runtime(
         dsr_significance: decimal(
             "research.validation.gates.dsr_significance",
             &validation.gates.dsr_significance.value,
+        )?,
+        // Sell-side lot replay (Phase 11.5.1) fires on the exact same
+        // opportunistic-exit thresholds production uses — never a parallel
+        // CPCV-only policy that could drift from the live decision rule.
+        sell_policy: SellSignalPolicy::try_from_runtime(
+            &runtime.execution.exit_monitor.opportunistic_sell,
         )?,
     })
 }

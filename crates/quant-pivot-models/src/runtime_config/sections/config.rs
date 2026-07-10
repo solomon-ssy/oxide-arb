@@ -745,7 +745,11 @@ impl Default for ModelConfig {
     }
 }
 
-/// Sell-side hold-vs-exit quality-gate thresholds (Phase 06.1).
+/// Sell-side hold-vs-exit quality-gate thresholds (Phase 06.1;
+/// alpha-significance fields upgraded to hard CPCV gates Phase 11.5.1).
+///
+/// DSR significance lives only under `research.validation.gates.dsr_significance`
+/// (shared with Buy CPCV compute + gate) — never duplicated here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SellQualityGateConfig {
@@ -753,8 +757,15 @@ pub struct SellQualityGateConfig {
     pub min_sample_count: u64,
     /// Minimum sell-side label coverage in `[0, 1]`.
     pub min_label_coverage: DecimalString,
-    /// Minimum (soft) exit-alpha rank IC in `[-1, 1]`.
-    pub min_exit_alpha_rank_ic: DecimalString,
+    /// Minimum CPCV path-set median rank IC in `[-1, 1]` (hard gate; Phase
+    /// 11.5.1 — renamed and upgraded from the deleted single-path soft
+    /// `min_exit_alpha_rank_ic`, mirroring the Buy-side
+    /// `research.validation.gates.rank_ic_min` upgrade Phase 11.5 already
+    /// made).
+    pub rank_ic_min: DecimalString,
+    /// Maximum tolerated Probability of Backtest Overfitting (hard gate;
+    /// Phase 11.5.1).
+    pub max_pbo: DecimalString,
     /// Minimum fraction of `ExitDecision` rows simulated from full L2 books.
     pub min_l2_book_fidelity_ratio: DecimalString,
     /// Maximum fraction of `ExitDecision` rows using microstructure fallback.
@@ -766,7 +777,8 @@ impl Default for SellQualityGateConfig {
         Self {
             min_sample_count: 200,
             min_label_coverage: DecimalString::new("0.60"),
-            min_exit_alpha_rank_ic: DecimalString::new("0.05"),
+            rank_ic_min: DecimalString::new("0.02"),
+            max_pbo: DecimalString::new("0.5"),
             min_l2_book_fidelity_ratio: DecimalString::new("0.50"),
             max_fallback_ratio: DecimalString::new("0.50"),
         }

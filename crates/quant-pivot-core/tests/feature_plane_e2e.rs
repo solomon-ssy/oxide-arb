@@ -302,6 +302,13 @@ impl FeatureRepository for RecordingFeatureRepo {
     ) -> Result<Option<FeatureVectorInfo>, StorageError> {
         Ok(None)
     }
+
+    async fn find_by_ids(
+        &self,
+        _ids: &[FeatureVectorId],
+    ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 #[tokio::test]

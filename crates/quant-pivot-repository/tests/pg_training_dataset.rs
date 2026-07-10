@@ -10,8 +10,8 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        ContentHash, DatasetCoverage, ModelSpecId, ModelVersionId, RuntimeConfigVersionId,
-        SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
+        ArtifactUri, ContentHash, DatasetCoverage, ModelSpecId, ModelVersionId,
+        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
     },
 };
 use quant_pivot_repository::{
@@ -88,10 +88,7 @@ fn new_dataset(
         factor_schema_hash: hash.clone(),
         label_schema_hash: hash.clone(),
         dataset_hash: hash,
-        parquet_uri: quant_pivot_models::types::ArtifactUri::parse(
-            "file:///tmp/pg-training-dataset.parquet",
-        )
-        .expect("uri"),
+        parquet_uri: ArtifactUri::parse("file:///tmp/pg-training-dataset.parquet").expect("uri"),
         sample_count: 42,
         source_delay_secs: 10,
         sample_interval_secs: 3600,

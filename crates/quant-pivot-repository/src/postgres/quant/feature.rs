@@ -1,6 +1,6 @@
 //! Postgres-backed feature-vector repository.
 
-use crate::traits::FeatureRepository;
+use crate::{postgres::query::find_models_by_id_chunks, traits::FeatureRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{FeatureVectorInfo, NewFeatureVector},
@@ -60,5 +60,18 @@ impl FeatureRepository for PgFeatureRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn find_by_ids(
+        &self,
+        ids: &[FeatureVectorId],
+    ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
+        find_models_by_id_chunks::<quant_feature_vector::Entity, _, _>(
+            &self.db,
+            ids,
+            quant_feature_vector::Column::FeatureVectorId,
+        )
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 }

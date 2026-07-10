@@ -10,7 +10,7 @@
 //! so train and backtest share the same PIT-resolved `liquidity_depth` cross-section.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -57,8 +57,9 @@ use quant_pivot_models::{
     },
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorWeights, FactorsConfig, FeatureFamily,
-        FeaturesConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints, RankLossKind,
-        ResearchTrainingConfig, RuntimeConfig, TrainingOptimizerKind, wire::DecimalString,
+        FeaturesConfig, MomentumFeaturesConfig, PortfolioBudget, PortfolioConfig,
+        PortfolioConstraints, RankLossKind, ResearchTrainingConfig, RuntimeConfig,
+        StructuralFeaturesConfig, TrainingOptimizerKind, wire::DecimalString,
     },
     types::{
         BacktestPathSetId, ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId,
@@ -99,7 +100,6 @@ use quant_pivot_test_support::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
-use std::collections::BTreeMap;
 use uuid::Uuid;
 
 // Type alias to keep the BTreeMap key readable.
@@ -507,8 +507,70 @@ fn e2e_research_training() -> ResearchTrainingConfig {
     }
 }
 
+/// Shared PIT replay slice: trainer hand-wiring and the frozen runtime-config
+/// JSON the CPCV production port loads must see the **same** features / factors
+/// / data-quality / book-staleness, or rematerialization drifts (train ok,
+/// CPCV → zero examples).
+struct E2eReplaySlice {
+    features: FeaturesConfig,
+    factors: FactorsConfig,
+    domain: DomainConfig,
+    data_quality: DataQualityConfig,
+    max_book_staleness_ms: u64,
+}
+
+fn e2e_replay_slice() -> E2eReplaySlice {
+    let mut weights = BTreeMap::new();
+    weights.insert(LIQUIDITY_DEPTH.as_str().to_owned(), DecimalString::new("1"));
+    // PriceBook + MarketMetadata only. Cap every lookback-driving window so
+    // `features.max_lookback_secs()` (→ CPCV `min_embargo_secs`) stays well
+    // below the 1h tick spacing — default 3600s micro / 86400s tape windows
+    // embargo entire train partitions on this 4-tick timeline.
+    E2eReplaySlice {
+        features: FeaturesConfig {
+            enabled_feature_families: vec![FeatureFamily::PriceBook, FeatureFamily::MarketMetadata],
+            bar_windows_secs: vec![60],
+            momentum: MomentumFeaturesConfig {
+                roc_windows_secs: vec![120],
+                roc_lag_secs: 60,
+                ema_fast_secs: 30,
+                ema_slow_secs: 60,
+                slope_windows_secs: vec![60],
+            },
+            volatility_windows_secs: vec![60],
+            structural: StructuralFeaturesConfig {
+                shock_window_secs: 60,
+                book_churn_window_secs: 60,
+                trade_tape_window_secs: 60,
+                ..StructuralFeaturesConfig::default()
+            },
+            ..FeaturesConfig::default()
+        },
+        factors: FactorsConfig {
+            enabled_factor_families: vec![FactorFamily::Liquidity],
+            factor_weights: FactorWeights { weights },
+            ..FactorsConfig::default()
+        },
+        domain: DomainConfig::default(),
+        // Relaxed book-age bound that fits the `10s` source delay + `15s`
+        // evidence lag seeded in [`fact_scenario`].
+        data_quality: DataQualityConfig {
+            max_book_age_ms: 60_000,
+            max_feature_bucket_age_secs: 120,
+            ..DataQualityConfig::default()
+        },
+        max_book_staleness_ms: 60_000,
+    }
+}
+
 fn e2e_runtime_config() -> RuntimeConfig {
     let mut config = RuntimeConfig::default();
+    let replay = e2e_replay_slice();
+    config.features = replay.features;
+    config.factors = replay.factors;
+    config.domain = replay.domain;
+    config.data_quality = replay.data_quality;
+    config.training.max_book_staleness_ms = replay.max_book_staleness_ms;
     config.research.training = e2e_research_training();
     // Dataset has 4 as_of groups — size CPCV/PBO so the port path can run
     // without failing the T < block_count preflight.
@@ -640,14 +702,10 @@ async fn seed_dataset(
 }
 
 fn trainer_config() -> ModelTrainerConfig {
-    let mut weights = BTreeMap::new();
-    weights.insert(LIQUIDITY_DEPTH.as_str().to_owned(), DecimalString::new("1"));
     let runtime = e2e_runtime_config();
+    let replay = e2e_replay_slice();
     ModelTrainerConfig {
-        factors: FactorsConfig {
-            factor_weights: FactorWeights { weights },
-            ..FactorsConfig::default()
-        },
+        factors: replay.factors,
         // Same path as the production port: parse frozen `research.training`.
         objective: TrainingObjectiveSpec::from_runtime_config(&runtime.research.training)
             .expect("parse research.training"),
@@ -673,30 +731,21 @@ fn portfolio() -> PortfolioConfig {
     }
 }
 
-/// Replay config governing the PIT recompute: top-of-book + metadata features and
-/// the liquidity factor family (the trained model's factor), with a relaxed
-/// book-age bound that fits the `10s` source delay.
+/// Replay config governing the PIT recompute — identical slice to the frozen
+/// runtime JSON [`e2e_runtime_config`] embeds for the CPCV port.
 fn replay_config() -> ReplayConfig {
-    let mut weights = BTreeMap::new();
-    weights.insert(LIQUIDITY_DEPTH.as_str().to_owned(), DecimalString::new("1"));
+    let replay = e2e_replay_slice();
     ReplayConfig {
-        features: FeaturesConfig {
-            enabled_feature_families: vec![FeatureFamily::PriceBook, FeatureFamily::MarketMetadata],
-            ..FeaturesConfig::default()
-        },
-        factors: FactorsConfig {
-            enabled_factor_families: vec![FactorFamily::Liquidity],
-            factor_weights: FactorWeights { weights },
-            ..FactorsConfig::default()
-        },
-        domain: DomainConfig::default(),
-        data_quality: DataQualityConfig {
-            max_book_age_ms: 60_000,
-            max_feature_bucket_age_secs: 120,
-            ..DataQualityConfig::default()
-        },
+        features: replay.features,
+        factors: replay.factors,
+        domain: replay.domain,
+        data_quality: replay.data_quality,
         bias_table: None,
     }
+}
+
+fn e2e_max_book_staleness() -> Duration {
+    Duration::from_millis(e2e_replay_slice().max_book_staleness_ms)
 }
 
 /// Assert the training `quant_model_run` row was finalized with version FK + artifact hash.
@@ -759,7 +808,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         },
         trainer_config(),
         replay_config(),
-        Duration::from_mins(1),
+        e2e_max_book_staleness(),
     );
 
     // ── Train ────────────────────────────────────────────────────────────
@@ -885,7 +934,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         },
         &portfolio(),
         replay_config(),
-        Duration::from_mins(1),
+        e2e_max_book_staleness(),
     );
 
     let report = backtester
@@ -954,7 +1003,7 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         },
         trainer_config(),
         replay_config(),
-        Duration::from_mins(1),
+        e2e_max_book_staleness(),
     );
 
     let outcome = trainer

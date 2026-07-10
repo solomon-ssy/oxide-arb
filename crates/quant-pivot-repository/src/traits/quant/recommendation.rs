@@ -22,6 +22,12 @@ pub trait RecommendationRepository: Send + Sync {
         recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationInfo>, StorageError>;
 
+    /// Batch-load recommendations by id (chunked `IN` lists). Missing ids are omitted.
+    async fn find_by_ids(
+        &self,
+        recommendation_ids: &[RecommendationId],
+    ) -> Result<Vec<RecommendationInfo>, StorageError>;
+
     /// Ids of recommendations eligible for TTL expiry: still actionable
     /// (`Published` / `IntentCreated`) and past their data-driven `valid_until`,
     /// earliest deadline first, capped at `limit` (per-recommendation sweep input).

@@ -253,6 +253,7 @@ mod tests {
     };
     use quant_pivot_models::{
         enums::{
+            common::MarketCategory,
             factor::{FactorFamily, FactorNormalization},
             quant::FactorDirection,
         },
@@ -308,7 +309,7 @@ mod tests {
             ModelFeatureRequirements::generic_only(vec![FeatureName::from_static("book.mid")]);
         let mut with_category = generic_only.clone();
         with_category.by_category.insert(
-            quant_pivot_models::enums::common::MarketCategory::Crypto,
+            MarketCategory::Crypto,
             vec![FeatureName::from_static("domain.crypto.distance_to_strike")],
         );
         assert_ne!(

@@ -79,8 +79,8 @@ pub use runtime::{
 pub use score_percentile::annotate;
 pub use sell_scorer::{
     LotStateInput, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
-    SellScorerTrainer, TrainSellScorerRequest, WeightedSellScorerRuntime,
-    position_state_factor_values, position_state_features,
+    SellScorerTrainer, SellSignalPolicy, TrainSellScorerRequest, WeightedSellScorerRuntime,
+    position_state_factor_values, position_state_features, sell_signal_fires, sell_signal_target,
 };
 pub use signal::{
     FactorContribution, ModelExplanation, SignalCandidate, SignalWarning, signal_candidate_event,

@@ -7,7 +7,11 @@
 //! (`find_lots_by_token`), not a single row.
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
+    batch::chunk_for_in_clause,
+    postgres::{
+        error,
+        query::{group_by_key, map_by_key, paginate_mapped},
+    },
     traits::PositionRepository,
 };
 use quant_pivot_error::storage::{StorageError, entity};
@@ -27,7 +31,7 @@ use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
     EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
-    sea_query::Expr,
+    TransactionTrait, sea_query::Expr,
 };
 use std::collections::HashMap;
 
@@ -59,7 +63,10 @@ struct RealizedPnlSum {
 #[async_trait::async_trait]
 impl PositionRepository for PgPositionRepository {
     async fn apply_fill(&self, fill: PositionFill) -> Result<PositionInfo, StorageError> {
-        apply_fill(&self.db, fill).await
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let info = apply_fill(&txn, fill).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(info)
     }
 
     async fn apply_exit(
@@ -67,7 +74,10 @@ impl PositionRepository for PgPositionRepository {
         order_intent_id: &OrderIntentId,
         exit: PositionExit,
     ) -> Result<PositionInfo, StorageError> {
-        apply_exit(&self.db, order_intent_id, exit).await
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let info = apply_exit(&txn, order_intent_id, exit).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(info)
     }
 
     async fn find_by_intent(
@@ -86,25 +96,22 @@ impl PositionRepository for PgPositionRepository {
         &self,
         position_id: &PositionId,
     ) -> Result<Option<PositionSummary>, StorageError> {
-        let Some(position): Option<PositionInfo> =
-            quant_position::Entity::find_by_id(position_id.clone())
-                .one(&self.db)
-                .await
-                .map_err(StorageError::from)?
-                .map(Into::into)
-        else {
-            return Ok(None);
-        };
-        let intent = quant_order_intent::Entity::find_by_id(position.order_intent_id.clone())
+        // N:1 join projects `recommendation_id` in one round-trip (same shape
+        // as the page path's batch enrich, without a second query).
+        let Some((position, intent)) = quant_position::Entity::find_by_id(position_id.clone())
+            .find_also_related(quant_order_intent::Entity)
             .one(&self.db)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                error::not_found(entity::QUANT_ORDER_INTENT, &position.order_intent_id)
-            })?;
+        else {
+            return Ok(None);
+        };
+        let intent = intent.ok_or_else(|| {
+            error::not_found(entity::QUANT_ORDER_INTENT, &position.order_intent_id)
+        })?;
         Ok(Some(PositionSummary {
             recommendation_id: intent.recommendation_id,
-            position,
+            position: position.into(),
         }))
     }
 
@@ -207,36 +214,32 @@ impl PositionRepository for PgPositionRepository {
             .await
             .map_err(StorageError::from)?;
 
+        let intent_ids: Vec<OrderIntentId> =
+            rows.iter().map(|row| row.order_intent_id.clone()).collect();
+        let intents = intents_by_id(&self.db, &intent_ids).await?;
+        let orders_by_intent = orders_by_intent_id(&self.db, &intent_ids).await?;
+
         let mut lots = Vec::with_capacity(rows.len());
         for row in rows {
             let position = PositionInfo::from(row);
             let Some(closed_at) = position.closed_at else {
                 continue;
             };
-            let Some(intent) =
-                quant_order_intent::Entity::find_by_id(position.order_intent_id.clone())
-                    .one(&self.db)
-                    .await
-                    .map_err(StorageError::from)?
-            else {
+            let Some(intent) = intents.get(&position.order_intent_id) else {
                 continue;
             };
-            let orders = quant_execution_order::Entity::find()
-                .filter(
-                    quant_execution_order::Column::OrderIntentId
-                        .eq(position.order_intent_id.clone()),
-                )
-                .all(&self.db)
-                .await
-                .map_err(StorageError::from)?;
-            let Some(entry_shares) = resolve_entry_shares(&intent, &orders) else {
+            let empty = [];
+            let orders = orders_by_intent
+                .get(&position.order_intent_id)
+                .map_or(empty.as_slice(), Vec::as_slice);
+            let Some(entry_shares) = resolve_entry_shares(intent, orders) else {
                 continue;
             };
-            let avg_price = resolve_entry_avg_price(&position, &orders);
+            let avg_price = resolve_entry_avg_price(&position, orders);
             if avg_price.is_zero() {
                 continue;
             }
-            let exit_events = exit_events_from_orders(&orders);
+            let exit_events = exit_events_from_orders(orders);
             let entry_cost = avg_price.inner() * entry_shares.inner();
             let total_net_proceeds =
                 Usd::new((entry_cost + position.realized_pnl_usd.inner()).max(Decimal::ZERO));
@@ -279,6 +282,7 @@ pub async fn apply_fill(
 
     let existing = quant_position::Entity::find()
         .filter(quant_position::Column::OrderIntentId.eq(fill.order_intent_id.clone()))
+        .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?;
@@ -354,6 +358,7 @@ pub async fn apply_exit(
 
     let Some(row) = quant_position::Entity::find()
         .filter(quant_position::Column::OrderIntentId.eq(order_intent_id.clone()))
+        .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?
@@ -542,19 +547,61 @@ async fn recommendation_ids_for(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = quant_order_intent::Entity::find()
-        .select_only()
-        .column(quant_order_intent::Column::OrderIntentId)
-        .column(quant_order_intent::Column::RecommendationId)
-        .filter(quant_order_intent::Column::OrderIntentId.is_in(ids))
-        .into_model::<IntentRecommendationRow>()
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
+    let mut rows = Vec::with_capacity(ids.len());
+    for chunk in chunk_for_in_clause(&ids) {
+        let batch = quant_order_intent::Entity::find()
+            .select_only()
+            .column(quant_order_intent::Column::OrderIntentId)
+            .column(quant_order_intent::Column::RecommendationId)
+            .filter(quant_order_intent::Column::OrderIntentId.is_in(chunk.to_vec()))
+            .into_model::<IntentRecommendationRow>()
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        rows.extend(batch);
+    }
     Ok(rows
         .into_iter()
         .map(|row| (row.order_intent_id, row.recommendation_id))
         .collect())
+}
+
+async fn intents_by_id(
+    db: &impl ConnectionTrait,
+    ids: &[OrderIntentId],
+) -> Result<HashMap<OrderIntentId, quant_order_intent::Model>, StorageError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut rows = Vec::with_capacity(ids.len());
+    for chunk in chunk_for_in_clause(ids) {
+        let batch = quant_order_intent::Entity::find()
+            .filter(quant_order_intent::Column::OrderIntentId.is_in(chunk.to_vec()))
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        rows.extend(batch);
+    }
+    Ok(map_by_key(rows, |row| row.order_intent_id.clone()))
+}
+
+async fn orders_by_intent_id(
+    db: &impl ConnectionTrait,
+    ids: &[OrderIntentId],
+) -> Result<HashMap<OrderIntentId, Vec<quant_execution_order::Model>>, StorageError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut rows = Vec::new();
+    for chunk in chunk_for_in_clause(ids) {
+        let batch = quant_execution_order::Entity::find()
+            .filter(quant_execution_order::Column::OrderIntentId.is_in(chunk.to_vec()))
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        rows.extend(batch);
+    }
+    Ok(group_by_key(rows, |row| row.order_intent_id.clone()))
 }
 
 fn page_condition(query: &PositionListQuery) -> Condition {

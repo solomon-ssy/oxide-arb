@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     backtest::metrics::sharpe_ratio,
-    model::runtime::QuantModelRuntime,
+    model::{runtime::QuantModelRuntime, sell_scorer::SellScorerRuntime},
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
     validation::{
@@ -100,6 +100,55 @@ pub struct GroupRowFilter {
     pub group_indices: Vec<usize>,
 }
 
+/// A fold-trained model, family-polymorphic over the two runtime traits the
+/// CPCV pipeline can train and replay.
+///
+/// This is the **only** family-specific seam in the entire CPCV pipeline
+/// (alongside [`FoldModelSource`] / [`ReplayEngine`] themselves) — every
+/// other algorithm in this module (purge/embargo, φ-path reconstruction,
+/// trial-grid, DSR/PBO) is written purely against these three abstractions
+/// and never inspects which variant it holds.
+pub enum FoldRuntime {
+    /// A Buy-side (`WeightedFactor` / classical ML) fold runtime.
+    Buy(Box<dyn QuantModelRuntime>),
+    /// A Sell-side (`HoldVsExitWeighted`, Phase 11.5.1) fold runtime.
+    Sell(Box<dyn SellScorerRuntime>),
+}
+
+impl FoldRuntime {
+    /// Project to the Buy-side runtime.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed (never panics) when a [`ReplayEngine`] impl is wired to
+    /// the wrong family's [`FoldModelSource`] — a configuration bug, not a
+    /// data problem, but still must not crash the CPCV run.
+    pub fn as_buy(&self) -> QuantResult<&dyn QuantModelRuntime> {
+        match self {
+            Self::Buy(runtime) => Ok(runtime.as_ref()),
+            Self::Sell(_) => Err(ResearchError::ValidationMethodology {
+                detail: "expected a Buy-side FoldRuntime, got Sell".to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    /// Project to the Sell-side runtime.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::as_buy`].
+    pub fn as_sell(&self) -> QuantResult<&dyn SellScorerRuntime> {
+        match self {
+            Self::Sell(runtime) => Ok(runtime.as_ref()),
+            Self::Buy(_) => Err(ResearchError::ValidationMethodology {
+                detail: "expected a Sell-side FoldRuntime, got Buy".to_owned(),
+            }
+            .into()),
+        }
+    }
+}
+
 /// Trains one fold's model, restricted to the groups `filter` selects.
 ///
 /// Implementations close over the full underlying example set (or lot set,
@@ -109,11 +158,27 @@ pub trait FoldModelSource: Send + Sync {
     /// Train a fold-scoped model. Errors propagate (a fold that cannot train
     /// — e.g. too few resolved labels after purge — fails the whole CPCV run
     /// rather than silently skipping a path).
-    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<Box<dyn QuantModelRuntime>>;
+    fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime>;
+}
+
+/// One (predicted score, realized outcome) pair contributed by one evaluated
+/// candidate within a [`GroupEvaluation`].
+///
+/// Pooled across every group in a reconstructed path to compute that path's
+/// rank IC ([`build_path`]) — a single population-level Spearman
+/// correlation, not an average of small-sample per-group correlations
+/// (statistically more robust, and the only definition that survives atomic
+/// units with a single candidate, e.g. one Sell lot per group).
+#[derive(Debug, Clone, Copy)]
+pub struct RankObservation {
+    /// The model's predicted score for this candidate.
+    pub score: Decimal,
+    /// The realized outcome actually observed for this candidate.
+    pub realized: Decimal,
 }
 
 /// One test group's fold-level evaluation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GroupEvaluation {
     /// Index into the original `groups` slice this evaluation covers.
     pub group_index: usize,
@@ -122,11 +187,12 @@ pub struct GroupEvaluation {
     /// realized tick `PnL` / allocated capital for Buy-side, realized lot
     /// proceeds / cost basis for Phase 11.5.1's Sell-side).
     pub return_value: Decimal,
-    /// This group's own cross-sectional rank IC (Spearman of score vs.
-    /// realized outcome across the group's candidates), when the group has
-    /// more than one ranked candidate. `None` for groups where "rank" is not
-    /// a meaningful concept (e.g. a single hold-vs-exit decision).
-    pub rank_ic: Option<Decimal>,
+    /// Every (score, realized) pair this group's replay produced — zero for
+    /// a group with nothing scored, one for a single-candidate atomic unit
+    /// (e.g. one Sell lot's decision walk), many for a multi-candidate
+    /// cross-section (e.g. one Buy `as_of` tick's ranked tokens). Pooled
+    /// across the whole path by [`build_path`] to compute rank IC.
+    pub rank_observations: Vec<RankObservation>,
 }
 
 /// Evaluates a trained model against the groups `filter` selects, returning
@@ -135,7 +201,7 @@ pub trait ReplayEngine: Send + Sync {
     /// Errors propagate for the same reason as [`FoldModelSource::train_fold`].
     fn evaluate(
         &self,
-        model: &dyn QuantModelRuntime,
+        model: &FoldRuntime,
         filter: &GroupRowFilter,
     ) -> QuantResult<Vec<GroupEvaluation>>;
 }
@@ -148,6 +214,12 @@ pub struct SharpeDistribution {
     pub median: Decimal,
     pub p75: Decimal,
     pub max: Decimal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_max_drawdown: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median_tail_loss: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_uplift: Option<Decimal>,
 }
 
 /// One complete, full-timeline reconstructed backtest path.
@@ -162,8 +234,8 @@ pub struct BacktestPath {
     /// Sharpe ratio of [`Self::group_returns`] (unannualized; callers
     /// annualize using their own period cadence when displaying).
     pub sharpe: Decimal,
-    /// Mean of the path's groups' own `rank_ic` (only over groups where it
-    /// was `Some`; `0` if none reported a rank IC).
+    /// Spearman correlation over every `(score, realized)` pair pooled across
+    /// the whole path (`0` if no rank observations were reported).
     pub rank_ic: Decimal,
     /// Maximum peak-to-trough drawdown of the cumulative return curve.
     pub max_drawdown: Decimal,
@@ -279,7 +351,7 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
                     group_indices: split.train_indices,
                 })?;
                 let evaluations = replay.evaluate(
-                    model.as_ref(),
+                    &model,
                     &GroupRowFilter {
                         group_indices: split.test_indices,
                     },
@@ -384,7 +456,7 @@ fn reconstruct_paths(
                     .evaluations
                     .iter()
                     .find(|e| e.group_index == group_index)
-                    .copied();
+                    .cloned();
                 per_group[group_index] = evaluation;
             }
         }
@@ -396,7 +468,8 @@ fn reconstruct_paths(
 
 fn build_path(path_index: u32, per_group: &[Option<GroupEvaluation>]) -> QuantResult<BacktestPath> {
     let mut group_returns = Vec::with_capacity(per_group.len());
-    let mut rank_ics = Vec::new();
+    let mut pooled_scores = Vec::new();
+    let mut pooled_realized = Vec::new();
     for (group_index, evaluation) in per_group.iter().enumerate() {
         let Some(evaluation) = evaluation else {
             return Err(ResearchError::ValidationMethodology {
@@ -405,13 +478,22 @@ fn build_path(path_index: u32, per_group: &[Option<GroupEvaluation>]) -> QuantRe
             .into());
         };
         group_returns.push(evaluation.return_value);
-        if let Some(rank_ic) = evaluation.rank_ic {
-            rank_ics.push(rank_ic);
+        for observation in &evaluation.rank_observations {
+            pooled_scores.push(observation.score);
+            pooled_realized.push(observation.realized);
         }
     }
 
     let sharpe = sharpe_ratio(&group_returns, Decimal::ONE).round_dp(RESEARCH_DECIMAL_SCALE);
-    let rank_ic = stats::mean(&rank_ics).round_dp(RESEARCH_DECIMAL_SCALE);
+    // A single population-level Spearman correlation over every (score,
+    // realized) pair pooled across the whole path — not an average of
+    // small-sample per-group correlations. This is the only definition that
+    // is both statistically sound for a multi-candidate cross-section
+    // (Buy-side) *and* well-defined for a single-candidate atomic unit (one
+    // Sell lot per group, where a per-group correlation is structurally
+    // undefined).
+    let rank_ic =
+        stats::spearman(&pooled_scores, &pooled_realized).round_dp(RESEARCH_DECIMAL_SCALE);
     let max_drawdown = max_drawdown_from_returns(&group_returns);
     let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2));
 
@@ -470,6 +552,9 @@ fn sharpe_distribution(paths: &[BacktestPath]) -> SharpeDistribution {
         median: percentile(&sharpes, Decimal::new(5, 1)),
         p75: percentile(&sharpes, Decimal::new(75, 2)),
         max: percentile(&sharpes, Decimal::ONE),
+        median_max_drawdown: None,
+        median_tail_loss: None,
+        baseline_uplift: None,
     }
 }
 
@@ -501,8 +586,8 @@ fn median(values: &[Decimal]) -> Decimal {
 mod tests {
     use super::{
         CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-        DefaultCombinatorialPurgedBacktester, FoldModelSource, GroupEvaluation, GroupRowFilter,
-        ReplayEngine,
+        DefaultCombinatorialPurgedBacktester, FoldModelSource, FoldRuntime, GroupEvaluation,
+        GroupRowFilter, RankObservation, ReplayEngine,
     };
     use crate::{
         features::FeatureName,
@@ -547,8 +632,8 @@ mod tests {
 
     struct StubFoldSource;
     impl FoldModelSource for StubFoldSource {
-        fn train_fold(&self, _filter: &GroupRowFilter) -> QuantResult<Box<dyn QuantModelRuntime>> {
-            Ok(Box::new(StubRuntime))
+        fn train_fold(&self, _filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
+            Ok(FoldRuntime::Buy(Box::new(StubRuntime)))
         }
     }
 
@@ -558,7 +643,7 @@ mod tests {
     impl ReplayEngine for DeterministicReplay {
         fn evaluate(
             &self,
-            _model: &dyn QuantModelRuntime,
+            _model: &FoldRuntime,
             filter: &GroupRowFilter,
         ) -> QuantResult<Vec<GroupEvaluation>> {
             Ok(filter
@@ -568,7 +653,10 @@ mod tests {
                     group_index,
                     return_value: Decimal::from(u64::try_from(group_index).unwrap_or(0))
                         / Decimal::from(10_000),
-                    rank_ic: Some(dec!(0.1)),
+                    rank_observations: vec![RankObservation {
+                        score: dec!(1),
+                        realized: dec!(1),
+                    }],
                 })
                 .collect())
         }
@@ -701,6 +789,76 @@ mod tests {
             fold_source: &StubFoldSource,
             replay: &DeterministicReplay,
         });
+    }
+
+    /// `build_path`'s rank IC is one population-level Spearman correlation
+    /// over every group's pooled observations, not an average of per-group
+    /// correlations — required for a single-candidate atomic unit (Phase
+    /// 11.5.1's one-lot-per-group) to ever report a non-zero rank IC at all,
+    /// and a strictly more robust estimator for a multi-candidate one too.
+    #[test]
+    fn build_path_pools_rank_observations_across_groups_not_per_group_mean() {
+        struct SingleObservationReplay;
+        impl ReplayEngine for SingleObservationReplay {
+            fn evaluate(
+                &self,
+                _model: &FoldRuntime,
+                filter: &GroupRowFilter,
+            ) -> QuantResult<Vec<GroupEvaluation>> {
+                // Each group contributes exactly one (score, realized) pair —
+                // the Sell lot-per-group shape, where a per-group Spearman
+                // correlation is structurally undefined (needs >= 2 points).
+                Ok(filter
+                    .group_indices
+                    .iter()
+                    .map(|&group_index| GroupEvaluation {
+                        group_index,
+                        return_value: Decimal::ZERO,
+                        rank_observations: vec![RankObservation {
+                            score: Decimal::from(group_index as u64),
+                            realized: Decimal::from(group_index as u64),
+                        }],
+                    })
+                    .collect())
+            }
+        }
+
+        let groups = groups(80);
+        let result = DefaultCombinatorialPurgedBacktester::new()
+            .run(CpcvRequest {
+                path_set_id: BacktestPathSetId::from_v7(),
+                groups: &groups,
+                cpcv: CpcvConfig {
+                    n_groups: 8,
+                    k_test: 2,
+                },
+                purge: PurgeConfig::pct_only(dec!(0)),
+                fold_source: &StubFoldSource,
+                replay: &SingleObservationReplay,
+            })
+            .expect("cpcv run");
+        // A perfectly monotone (score, realized) pooled series ⇒ rank IC = 1,
+        // which no single-observation-per-group per-group-Spearman scheme
+        // could ever produce (every per-group Spearman would be 0/undefined).
+        for path in &result.paths {
+            assert_eq!(
+                path.rank_ic,
+                Decimal::ONE,
+                "path {} rank_ic",
+                path.path_index
+            );
+        }
+        assert_eq!(result.median_rank_ic, Decimal::ONE);
+    }
+
+    /// [`FoldRuntime::as_sell`] must fail closed (never panic) when the
+    /// concrete runtime is actually a Buy one — a configuration bug, not a
+    /// data problem.
+    #[test]
+    fn fold_runtime_as_sell_rejects_buy_runtime() {
+        let runtime = FoldRuntime::Buy(Box::new(StubRuntime));
+        assert!(runtime.as_sell().is_err());
+        assert!(runtime.as_buy().is_ok());
     }
 
     /// Classical (and future Sell lot) families reuse the same φ-path CPCV

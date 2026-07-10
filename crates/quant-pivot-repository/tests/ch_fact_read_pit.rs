@@ -5,7 +5,7 @@ use quant_pivot_models::{
     clickhouse::{BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd},
     config::ClickHouseConfig,
     enums::clickhouse::{ChFactSource, ChSnapshotReason},
-    types::{MarketId, Price, TokenId},
+    types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::{
     clickhouse::ChQuantFactReadRepository, traits::QuantFactReadRepository,
@@ -262,8 +262,8 @@ async fn trade_tape_window_dedupes_replacing_merge_tree() {
         participant_role: ChTradeParticipantRole::Maker,
         side: ChTradeSide::Buy,
         price: ChPrice::from(Price::new(Decimal::new(55, 2))),
-        size_shares: ChShares::from(quant_pivot_models::types::Shares::new(Decimal::from(10))),
-        notional_usd: ChUsd::from(quant_pivot_models::types::Usd::new(Decimal::from(5))),
+        size_shares: ChShares::from(Shares::new(Decimal::from(10))),
+        notional_usd: ChUsd::from(Usd::new(Decimal::from(5))),
         tx_hash: Some("0xtx".to_owned()),
         trade_id: "trade-dedupe-1".to_owned(),
         source: ChTradeTapeSource::OnChain,

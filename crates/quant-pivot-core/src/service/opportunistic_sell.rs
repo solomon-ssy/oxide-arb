@@ -30,8 +30,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{ModelRegistryRepository, RecommendationRepository};
 use quant_pivot_research::{
     model::{
-        LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput,
-        position_state_features,
+        LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput, SellSignalPolicy,
+        position_state_features, sell_signal_fires, sell_signal_target,
     },
     selection::ModelFeatureRequirements,
 };
@@ -303,20 +303,21 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             return ExitSignalVerdict::Holds;
         };
 
-        let min_confidence = parse_decimal(&policy.min_confidence.value);
-        let min_p_exit_better =
-            parse_decimal_or(&policy.min_p_exit_better.value, Decimal::new(5, 1));
-        let max_sell_pct = parse_decimal_or(&policy.max_sell_pct.value, Decimal::ONE);
-        let min_alpha = Decimal::from(policy.min_expected_alpha_bps);
-
-        let target = score
-            .recommended_cumulative_exit_pct
-            .min(max_sell_pct)
-            .clamp(Decimal::ZERO, Decimal::ONE);
-
-        let fires = score.confidence.inner() >= min_confidence
-            && score.p_exit_better.inner() >= min_p_exit_better
-            && score.exit_alpha_bps.inner() >= min_alpha;
+        let signal_policy = SellSignalPolicy::try_from_runtime(&policy).unwrap_or_else(|error| {
+            tracing::error!(
+                error = %error,
+                "opportunistic_sell policy decimals are malformed — fail-safe hold thresholds"
+            );
+            // Unreachable confidence so a corrupt snapshot never opens the gate.
+            SellSignalPolicy {
+                min_confidence: Decimal::ONE,
+                min_p_exit_better: Decimal::ONE,
+                min_expected_alpha_bps: Decimal::from(i64::MAX / 2),
+                max_sell_pct: Decimal::ZERO,
+            }
+        });
+        let target = sell_signal_target(&score, &signal_policy);
+        let fires = sell_signal_fires(&score, &signal_policy);
 
         if !fires {
             self.audit.write(audit_row(
@@ -401,16 +402,4 @@ fn audit_row(
         detail: verdict.as_str().to_owned(),
         ingestion_time: now_ms,
     }
-}
-
-/// Parse a config decimal, defaulting to the most conservative bar (`1.0`, i.e.
-/// unreachable confidence) on a malformed value so a corrupted snapshot never
-/// silently opens the opportunistic gate.
-fn parse_decimal(value: &str) -> Decimal {
-    value.trim().parse::<Decimal>().unwrap_or(Decimal::ONE)
-}
-
-/// Parse a config decimal with an explicit fallback.
-fn parse_decimal_or(value: &str, fallback: Decimal) -> Decimal {
-    value.trim().parse::<Decimal>().unwrap_or(fallback)
 }

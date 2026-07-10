@@ -369,6 +369,7 @@ mod tests {
         ModelVersionInfo {
             model_version_id: id.clone(),
             model_spec_id: ModelSpecId::from_v7(),
+            model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash,
             training_dataset_id: None,

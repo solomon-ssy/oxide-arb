@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    domain::market::book::BookLevel,
+    domain::{MarketInfo, market::book::BookLevel},
     enums::market::MarketStatus,
     types::{MarketId, TokenId},
 };
@@ -94,4 +94,16 @@ pub trait PitQueryEngine: Send + Sync {
         market_id: &MarketId,
         as_of: DateTime<Utc>,
     ) -> QuantResult<Option<MarketContextAt>>;
+
+    /// Same as [`Self::market_at`], but reuses an already-loaded [`MarketInfo`]
+    /// so callers that hold a page of markets (offline selection / keep-rate
+    /// estimate) do not re-hit Postgres per market. Default falls back to
+    /// [`Self::market_at`].
+    async fn market_at_from_info(
+        &self,
+        info: &MarketInfo,
+        as_of: DateTime<Utc>,
+    ) -> QuantResult<Option<MarketContextAt>> {
+        self.market_at(&info.market_id, as_of).await
+    }
 }

@@ -5,7 +5,10 @@
 //! and unresolvable reconciliation are skipped so a later sweep can write the
 //! single final row once truth is available.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
@@ -99,6 +102,9 @@ impl AttributionService {
                 batch_size,
             )
             .await?;
+        let recommendations_by_id = self
+            .preload_recommendations_for_intents(&intent_candidates)
+            .await?;
 
         for intent in intent_candidates {
             if summary.considered >= batch_size {
@@ -108,7 +114,8 @@ impl AttributionService {
                 continue;
             }
             summary.considered += 1;
-            match self.build_from_intent(now, &intent).await? {
+            let recommendation = recommendations_by_id.get(&intent.recommendation_id);
+            match self.build_from_intent(now, &intent, recommendation).await? {
                 Some(row) => {
                     self.insert_final(row, &mut summary).await?;
                 }
@@ -190,19 +197,35 @@ impl AttributionService {
         self.attribution_events.write(row);
     }
 
+    async fn preload_recommendations_for_intents(
+        &self,
+        intents: &[OrderIntentInfo],
+    ) -> QuantResult<HashMap<RecommendationId, RecommendationInfo>> {
+        let recommendation_ids: Vec<RecommendationId> = intents
+            .iter()
+            .map(|intent| intent.recommendation_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let rows = self
+            .recommendations
+            .find_by_ids(&recommendation_ids)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|rec| (rec.recommendation_id.clone(), rec))
+            .collect())
+    }
+
     async fn build_from_intent(
         &self,
         now: DateTime<Utc>,
         intent: &OrderIntentInfo,
+        recommendation: Option<&RecommendationInfo>,
     ) -> QuantResult<Option<NewRecommendationAttribution>> {
-        let Some(intent) = self.intents.find_by_id(&intent.order_intent_id).await? else {
-            return Ok(None);
-        };
-        let Some(recommendation) = self
-            .recommendations
-            .find_by_id(&intent.recommendation_id)
-            .await?
-        else {
+        // Candidate rows are already terminal-status filtered; skip when the
+        // preloaded recommendation map missed the id (race / orphan).
+        let Some(recommendation) = recommendation.cloned() else {
             tracing::warn!(
                 recommendation_id = %intent.recommendation_id,
                 intent_id = %intent.order_intent_id,
@@ -227,7 +250,7 @@ impl AttributionService {
 
         if let Some(position) = position.as_ref() {
             return self
-                .build_filled_terminal(now, &intent, &recommendation, &orders, position)
+                .build_filled_terminal(now, intent, &recommendation, &orders, position)
                 .await;
         }
 

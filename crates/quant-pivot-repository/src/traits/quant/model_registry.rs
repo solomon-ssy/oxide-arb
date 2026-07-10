@@ -66,6 +66,26 @@ pub trait ModelRegistryRepository: Send + Sync {
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError>;
 
+    /// Retire every currently `Published` version of `model_spec_id` except
+    /// `model_version_id`, then publish `model_version_id` — all in one
+    /// transaction (spec row locked first).
+    ///
+    /// Returns `(published, retired_predecessor_ids, rollback_target)` where
+    /// `rollback_target` is the most recently published predecessor before
+    /// retirement (if any).
+    async fn publish_replacing_predecessors(
+        &self,
+        model_spec_id: &ModelSpecId,
+        model_version_id: &ModelVersionId,
+    ) -> Result<
+        (
+            ModelVersionInfo,
+            Vec<ModelVersionId>,
+            Option<ModelVersionInfo>,
+        ),
+        StorageError,
+    >;
+
     /// Promote a backtested candidate into shadow evaluation (`Candidate → Shadow`).
     ///
     /// Idempotent when the version is already `Shadow` or `Published`.

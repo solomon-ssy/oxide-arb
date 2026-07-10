@@ -1,7 +1,7 @@
 //! Settlement redemption service for resolved standard binary CTF markets.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     str::FromStr,
     sync::{Arc, OnceLock},
     time::Duration as StdDuration,
@@ -502,12 +502,23 @@ impl SettlementRedeemService {
 
     async fn candidate_groups(&self) -> QuantResult<BTreeMap<MarketId, Vec<CandidateLot>>> {
         let lots = self.deps.positions.find_open_lots().await?;
+        let open_lots: Vec<PositionInfo> = lots
+            .into_iter()
+            .filter(|lot| lot.state == PositionLedgerState::Open)
+            .collect();
+        let intent_ids: Vec<_> = open_lots
+            .iter()
+            .map(|lot| lot.order_intent_id.clone())
+            .collect();
+        let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
+        let intent_map: HashMap<_, _> = intents
+            .into_iter()
+            .map(|intent| (intent.order_intent_id.clone(), intent))
+            .collect();
+
         let mut groups: BTreeMap<MarketId, Vec<CandidateLot>> = BTreeMap::new();
-        for lot in lots {
-            if lot.state != PositionLedgerState::Open {
-                continue;
-            }
-            let Some(intent) = self.deps.intents.find_by_id(&lot.order_intent_id).await? else {
+        for lot in open_lots {
+            let Some(intent) = intent_map.get(&lot.order_intent_id) else {
                 tracing::warn!(
                     order_intent_id = %lot.order_intent_id,
                     position_id = %lot.position_id,
@@ -515,7 +526,7 @@ impl SettlementRedeemService {
                 );
                 continue;
             };
-            if !is_auto_redeem_candidate(&intent) {
+            if !is_auto_redeem_candidate(intent) {
                 continue;
             }
             groups

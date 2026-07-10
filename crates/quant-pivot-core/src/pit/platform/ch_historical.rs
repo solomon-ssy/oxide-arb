@@ -119,17 +119,25 @@ impl PitQueryEngine for ChHistoricalPitSource {
         else {
             return Ok(None);
         };
+        self.market_at_from_info(&info, as_of).await
+    }
+
+    async fn market_at_from_info(
+        &self,
+        info: &MarketInfo,
+        as_of: DateTime<Utc>,
+    ) -> QuantResult<Option<MarketContextAt>> {
         if info.created_at > as_of {
             // The market did not exist at the decision time.
             return Ok(None);
         }
         let resolved = self
             .fact_read
-            .resolution_at(market_id, as_of.timestamp_millis())
+            .resolution_at(&info.market_id, as_of.timestamp_millis())
             .await
             .map_err(PitResolutionStorageError::from)?
             .is_some();
-        Ok(Some(market_context(&info, as_of, resolved)))
+        Ok(Some(market_context(info, as_of, resolved)))
     }
 }
 

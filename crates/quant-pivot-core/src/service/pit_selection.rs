@@ -140,7 +140,7 @@ impl OfflinePitSelector {
         let availability = domain_availability.resolve(as_of, markets).await?;
         let mut candidates = Vec::with_capacity(markets.len());
         for market in markets {
-            let context = pit.market_at(&market.market_id, as_of).await?;
+            let context = pit.market_at_from_info(market, as_of).await?;
             let book = pit
                 .book_at(&market.yes_token_id, as_of)
                 .await?

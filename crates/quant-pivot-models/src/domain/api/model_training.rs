@@ -100,6 +100,10 @@ pub struct TrainedModelView {
     /// Materialization run id — populated on `POST .../train` only (absent on poll).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_run_id: Option<ModelRunId>,
+    /// Model family wire label from the owning spec (`weighted_factor`,
+    /// `hold_vs_exit_weighted`, …). Required — repository JOIN fills
+    /// [`ModelVersionInfo::model_family`] before projection.
+    pub model_family: String,
 }
 
 /// Paginated filter for the trained-model registry catalog.
@@ -132,6 +136,7 @@ impl From<ModelVersionInfo> for TrainedModelView {
             training_objective: info.training_objective_json,
             created_at: info.created_at,
             model_run_id: None,
+            model_family: info.model_family.as_str().to_owned(),
         }
     }
 }

@@ -1446,7 +1446,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use quant_pivot_models::{
         domain::ModelVersionInfo,
-        enums::quant::PublicationStatus,
+        enums::{model::ModelFamily, quant::PublicationStatus},
         types::{ContentHash, ModelSpecId, ModelVersionId},
     };
 
@@ -1454,6 +1454,7 @@ mod tests {
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id: ModelSpecId::from_v7(),
+            model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
             training_dataset_id: None,

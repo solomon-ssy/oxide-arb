@@ -13,7 +13,7 @@ use crate::{
         quant::capital_allocation::{
             capital_invariant_ok, load_capital, release_capital, validate_non_negative,
         },
-        query::paginate_mapped,
+        query::{find_models_by_id_chunks, paginate_mapped},
         state_hash,
     },
     traits::OrderIntentRepository,
@@ -188,8 +188,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             ));
         }
 
-        let rec = load_recommendation(&txn, &row.recommendation_id).await?;
-        let report = load_report(&txn, &rec.recommendation_report_id).await?;
+        let (rec, report) = load_recommendation_with_report(&txn, &row.recommendation_id).await?;
         let active_config_version_id = load_current_config_version_id(&txn).await?;
         let kill_switch_allows_entry = load_kill_switch_allows_entry(&txn).await?;
 
@@ -320,6 +319,19 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn find_by_ids(
+        &self,
+        intent_ids: &[OrderIntentId],
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        find_models_by_id_chunks::<quant_order_intent::Entity, _, _>(
+            &self.db,
+            intent_ids,
+            quant_order_intent::Column::OrderIntentId,
+        )
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
     async fn page(
         &self,
         query: OrderIntentListQuery,
@@ -433,14 +445,13 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         let eligible_state = Condition::any()
             .add(quant_order_intent::Column::Status.is_in(OrderIntentStatus::UNFILLED_TERMINAL))
             .add(quant_order_intent::Column::Status.is_in(OrderIntentStatus::FILLED_TERMINAL));
+        // Inner-join recommendation so orphaned intents never enter the sweep.
+        // Position is intentionally not joined: eligibility is status-driven and
+        // the builder re-loads the lot (if any) before writing WORM attribution.
         quant_order_intent::Entity::find()
             .join(
                 JoinType::InnerJoin,
                 quant_order_intent::Relation::Recommendation.def(),
-            )
-            .join(
-                JoinType::LeftJoin,
-                quant_order_intent::Relation::Position.def(),
             )
             .filter(quant_order_intent::Column::Status.is_in(statuses))
             .filter(eligible_state)
@@ -508,34 +519,26 @@ pub async fn load_intent_for_update(
         })
 }
 
-async fn load_recommendation(
+/// Load recommendation + owning report in one round-trip (`find_also_related`).
+/// Fail-closed when either side is missing.
+async fn load_recommendation_with_report(
     db: &impl ConnectionTrait,
     recommendation_id: &RecommendationId,
-) -> Result<RecommendationInfo, StorageError> {
-    quant_recommendation::Entity::find_by_id(recommendation_id.clone())
+) -> Result<(RecommendationInfo, RecommendationReportInfo), StorageError> {
+    let (rec, report) = quant_recommendation::Entity::find_by_id(recommendation_id.clone())
+        .find_also_related(quant_recommendation_report::Entity)
         .one(db)
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| StorageError::NotFound {
             entity: "recommendation",
             id: recommendation_id.to_string(),
-        })
-        .map(Into::into)
-}
-
-async fn load_report(
-    db: &impl ConnectionTrait,
-    report_id: &RecommendationReportId,
-) -> Result<RecommendationReportInfo, StorageError> {
-    quant_recommendation_report::Entity::find_by_id(report_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "recommendation_report",
-            id: report_id.to_string(),
-        })
-        .map(Into::into)
+        })?;
+    let report = report.ok_or_else(|| StorageError::NotFound {
+        entity: "recommendation_report",
+        id: rec.recommendation_report_id.to_string(),
+    })?;
+    Ok((rec.into(), report.into()))
 }
 
 async fn load_current_config_version_id(

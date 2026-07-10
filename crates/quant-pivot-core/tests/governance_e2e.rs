@@ -16,6 +16,8 @@ use quant_pivot_core::governance::{
 };
 use quant_pivot_core::runtime_config::RuntimeConfigStore;
 use quant_pivot_error::control::ControlError;
+use quant_pivot_models::domain::TimeWindow;
+use quant_pivot_models::enums::quant::DatasetPurpose;
 use quant_pivot_models::{
     domain::{
         BindCalibrationRequest, GovernanceActor, ModelGovernancePort, NewBacktestPathSet,
@@ -63,8 +65,8 @@ use quant_pivot_research::{
     gates::{DefaultModelQualityGate, ModelQualityGate},
     model::{
         CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
-        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
-        WeightedFactorModelArtifact,
+        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact,
+        SellScorerOutputSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
     },
     model::{MonotoneMapping, ReliabilityReport},
     training::DatasetParquetCodec,
@@ -247,6 +249,18 @@ fn healthy_coverage() -> DatasetCoverage {
     }
 }
 
+/// A dataset coverage that clears the Sell-side gates (Phase 11.5.1):
+/// `exit_decision_built` covers `min_sample_count`, and the L2/fallback row
+/// split clears `SellL2BookFidelity`/`SellFallbackRatio`.
+fn healthy_sell_coverage() -> DatasetCoverage {
+    DatasetCoverage {
+        exit_decision_built: 990,
+        exit_fill_l2_rows: 900,
+        exit_fill_fallback_rows: 90,
+        ..healthy_coverage()
+    }
+}
+
 async fn seed_dataset(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
@@ -273,7 +287,7 @@ async fn seed_dataset(
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             status,
-            purpose: quant_pivot_models::enums::quant::DatasetPurpose::Training,
+            purpose: DatasetPurpose::Training,
             feature_schema_hash: content_hash(u32::from('f')),
             factor_schema_hash: content_hash(u32::from('g')),
             label_schema_hash: content_hash(u32::from('l')),
@@ -367,11 +381,86 @@ async fn store_weighted_artifact(
     artifact_hash
 }
 
+/// A `HoldVsExitWeighted` model spec (Phase 11.5.1 sell-side governance tests).
+async fn seed_sell_spec(db: &DatabaseConnection) -> ModelSpecId {
+    let id = ModelSpecId::from_v7();
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_spec(NewModelSpec {
+            model_spec_id: id.clone(),
+            name: "governance-it-sell".to_owned(),
+            model_family: ModelFamily::HoldVsExitWeighted,
+            prediction_horizon_secs: 86_400,
+            feature_schema_version: SchemaVersion::FIRST,
+            label_schema_version: SchemaVersion::FIRST,
+            spec_json: serde_json::json!({}),
+            feature_requirements: serde_json::json!({}),
+            status: PublicationStatus::Published,
+        })
+        .await
+        .expect("sell model spec");
+    id
+}
+
+/// A `HoldVsExitWeighted` candidate version with a validated
+/// [`SellScorerArtifact`] (Phase 11.5.1). Sell scorers never carry a return
+/// model, so unlike [`seed_version`] there is no calibrator parameter.
+async fn seed_sell_version(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+    spec: &ModelSpecId,
+    version: i32,
+    dataset: Option<TrainingDatasetId>,
+) -> ModelVersionId {
+    let id = ModelVersionId::from_v7();
+    let artifact = ModelArtifact::SellScorer(Box::new(SellScorerArtifact {
+        header: ModelArtifactHeader {
+            model_version_id: id.clone(),
+            model_family: ModelFamily::HoldVsExitWeighted,
+            feature_schema_hash: content_hash(u32::from('f')),
+            factor_schema_hash: content_hash(u32::from('g')),
+        },
+        weights: vec![FactorWeight {
+            factor: LIQUIDITY_DEPTH,
+            weight: dec!(1),
+        }],
+        prediction_horizon_secs: 86_400,
+        output_spec: SellScorerOutputSpec::conservative(),
+        label_schema_hash: content_hash(u32::from('l')),
+        required_features: Vec::new(),
+        objective_report: None,
+    }));
+    artifact.validate().expect("sell artifact valid");
+    let artifact_hash = artifact.content_hash().expect("hash");
+    let key = ModelArtifact::artifact_key(&artifact_hash).expect("key");
+    artifact_store
+        .put(key, &artifact.to_bytes().expect("bytes"))
+        .await
+        .expect("store sell artifact");
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_version(NewModelVersion {
+            model_version_id: id.clone(),
+            model_spec_id: spec.clone(),
+            version,
+            artifact_hash,
+            training_dataset_id: dataset,
+            publish_path_set_id: None,
+            metrics_json: serde_json::json!({}),
+            training_objective_json: serde_json::json!({"kind": "not_trained"}),
+            quality_gate_report: serde_json::json!({}),
+            publication_status: PublicationStatus::Candidate,
+            published_at: None,
+            retired_at: None,
+        })
+        .await
+        .expect("sell model version");
+    id
+}
+
 async fn seed_model_score_calibrator(db: &DatabaseConnection) -> CalibrationArtifactId {
     let artifact_id = CalibrationArtifactId::from_v7();
     let window_start = Utc::now() - ChronoDuration::days(90);
     let window_end = Utc::now() - ChronoDuration::days(1);
-    let fit_window = quant_pivot_models::domain::query::TimeWindow::new(window_start, window_end);
+    let fit_window = TimeWindow::new(window_start, window_end);
     let split_hash = content_hash(u32::from('s'));
     let payload = ModelScoreCalibrationPayload {
         model_version_id: ModelVersionId::from_v7(),
@@ -513,11 +602,31 @@ async fn seed_shadow_window(
 async fn publish_requires_quality_gate_pass() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let _rc_id = seed_runtime_config(&db).await;
+    let rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
     let harness = harness(&db).await;
-    // No dataset, no backtest → coverage + sample gates fail.
-    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None, None).await;
+    // Frozen dataset present so leakage rescan can run; no backtest → gate
+    // evaluates and fails (BacktestRequired / risk gates), then persists evidence.
+    let dataset = seed_dataset(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        &rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_coverage(),
+        '1',
+    )
+    .await;
+    let candidate = seed_version(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        'a',
+        1,
+        Some(dataset),
+        None,
+    )
+    .await;
 
     let result = harness
         .service
@@ -543,7 +652,54 @@ async fn publish_requires_quality_gate_pass() {
         "a blocked publish leaves the version a candidate"
     );
     // The gate evaluation is persisted as durable evidence even on failure.
-    assert!(row.quality_gate_report.get("passed").is_some());
+    assert_eq!(
+        row.quality_gate_report.get("passed"),
+        Some(&serde_json::json!(false)),
+        "failed publish must persist quality_gate_report.passed=false"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn publish_without_training_dataset_is_illegal_transition() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let _rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+    // Missing training_dataset_id fails closed before gate evaluation — no
+    // durable gate report is written (distinct from QualityGateFailed).
+    let candidate = seed_version(&db, &harness.artifact_store, &spec, 'a', 1, None, None).await;
+
+    let result = harness
+        .service
+        .publish(
+            PublishModelCommand {
+                model_version_id: candidate.clone(),
+                reason: "attempt".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await;
+    let err = result.expect_err("publish must refuse versions without a training dataset");
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("illegal governance transition")
+            && err_text.contains("training_dataset_id"),
+        "expected IllegalTransition naming the missing training_dataset_id, got: {err_text}"
+    );
+
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let row = registry
+        .find_model_version_by_id(&candidate)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(row.publication_status, PublicationStatus::Candidate);
+    assert!(
+        row.quality_gate_report.get("passed").is_none(),
+        "pre-gate IllegalTransition must not invent a quality_gate_report"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -840,7 +996,10 @@ async fn seed_path_set(
                 "p25": "0.8",
                 "median": "1.0",
                 "p75": "1.2",
-                "max": "1.5"
+                "max": "1.5",
+                "median_max_drawdown": "0.10",
+                "median_tail_loss": "-0.005",
+                "baseline_uplift": "0.001"
             }),
             paths: serde_json::json!([]),
             deflated_sharpe: dec!(0.97),
@@ -1503,7 +1662,7 @@ async fn seed_leaking_dataset(
             window_start,
             window_end: window_start + ChronoDuration::hours(1),
             status: TrainingDatasetStatus::Ready,
-            purpose: quant_pivot_models::enums::quant::DatasetPurpose::Training,
+            purpose: DatasetPurpose::Training,
             feature_schema_hash: content_hash(u32::from('f')),
             factor_schema_hash: content_hash(u32::from('g')),
             label_schema_hash: content_hash(u32::from('l')),
@@ -1519,4 +1678,116 @@ async fn seed_leaking_dataset(
         .await
         .expect("dataset");
     dataset_id
+}
+
+/// Phase 11.5.1: Sell (`HoldVsExitWeighted`) publish requires a bound CPCV
+/// path set exactly like Buy — `bound_path_set` is family-agnostic, and
+/// `evaluate_gate` no longer excludes exit scorers from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn sell_publish_requires_bound_cpcv_path_set() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_sell_spec(&db).await;
+    let harness = harness(&db).await;
+    let dataset = seed_dataset(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        &rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_sell_coverage(),
+        '1',
+    )
+    .await;
+    let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, Some(dataset)).await;
+    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+    // Deliberately no bound CPCV path set.
+
+    let result = harness
+        .service
+        .publish(
+            PublishModelCommand {
+                model_version_id: candidate.clone(),
+                reason: "attempt".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "sell publish must fail without a bound CPCV path set"
+    );
+    let err = result.expect_err("publish error");
+    assert!(
+        err.to_string().contains("CpcvRequired") || err.to_string().contains("cpcv"),
+        "expected CpcvRequired failure, got: {err}"
+    );
+
+    let row = PgModelRegistryRepository::new(db.clone())
+        .find_model_version_by_id(&candidate)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(
+        row.publication_status,
+        PublicationStatus::Candidate,
+        "a blocked sell publish leaves the version a candidate"
+    );
+}
+
+/// Phase 11.5.1: once a lot-level CPCV path set clearing the alpha-
+/// significance hard gates is explicitly bound, Sell publish succeeds
+/// through the same governance closure Buy uses (no calibrator needed —
+/// `CalibrationRequired` is `NotApplicable` for exit scorers).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn sell_publish_succeeds_with_bound_cpcv_path_set() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_sell_spec(&db).await;
+    let harness = harness(&db).await;
+    let dataset = seed_dataset(
+        &db,
+        &harness.artifact_store,
+        &spec,
+        &rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_sell_coverage(),
+        '1',
+    )
+    .await;
+    let candidate = seed_sell_version(&db, &harness.artifact_store, &spec, 1, Some(dataset)).await;
+    // `seed_path_set` clears the alpha-significance hard gates
+    // (median_rank_ic=0.15 >= 0.02, deflated_sharpe=0.97 >= 1-0.05, pbo=0.20
+    // <= 0.5) with the exact same defaults for Buy and Sell (Phase 11.5.1
+    // §4 mirrors `research.validation.gates.*` under `quality_gate.sell.*`).
+    seed_path_set(&db, &candidate, &rc_id, '1').await;
+    seed_shadow_window(&db, &candidate, &candidate, 'p').await;
+
+    harness
+        .service
+        .publish(
+            PublishModelCommand {
+                model_version_id: candidate.clone(),
+                reason: "sell publish".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect("sell publish with bound path set should succeed");
+
+    let row = PgModelRegistryRepository::new(db.clone())
+        .find_model_version_by_id(&candidate)
+        .await
+        .expect("find")
+        .expect("row");
+    assert_eq!(row.publication_status, PublicationStatus::Published);
+    assert!(row.published_at.is_some());
+    assert!(
+        row.publish_path_set_id.is_some(),
+        "the bound path set stays recorded on the published version"
+    );
 }

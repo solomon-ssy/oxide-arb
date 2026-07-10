@@ -18,7 +18,7 @@ use quant_pivot_models::{
     types::{
         BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
         DomainInstrumentKey, DomainSourceId, EventId, MarketId, MarketLinkageId, Probability,
-        ResolverVersion, SchemaVersion, TokenId,
+        ResolverVersion, SchemaVersion, TokenId, Usd,
     },
 };
 use quant_pivot_research::{
@@ -54,7 +54,7 @@ use rust_decimal_macros::dec;
 
 fn metadata(slug: &str) -> LinkageSourceMetadata {
     LinkageSourceMetadata {
-        market_id: quant_pivot_models::types::MarketId::new("0xmarket"),
+        market_id: MarketId::new("0xmarket"),
         slug: slug.to_owned(),
         question: "Bitcoin Up or Down".to_owned(),
         // Every observed short-cycle up/down market carries this literal
@@ -98,7 +98,7 @@ fn vector(category: MarketCategory, domain: Option<DomainFeatureSlice>) -> Featu
     let mut generic = BTreeMap::new();
     generic.insert(market_names::CATEGORY, FeatureValue::Category(category));
     FeatureVector {
-        market_id: quant_pivot_models::types::MarketId::new("m"),
+        market_id: MarketId::new("m"),
         token_id: Some(TokenId::new("t")),
         as_of: Utc::now(),
         generic_schema_version: SchemaVersion::FIRST,
@@ -124,7 +124,7 @@ fn feature_vector_domain_slice_only_for_mapped_category() {
 
     let build = |category: MarketCategory, domain: Option<DomainSliceInputs>| {
         let market = SelectedMarket {
-            market_id: quant_pivot_models::types::MarketId::new("m"),
+            market_id: MarketId::new("m"),
             event_id: EventId::new("e"),
             category,
             primary_token_id: TokenId::new("yes"),
@@ -141,7 +141,7 @@ fn feature_vector_domain_slice_only_for_mapped_category() {
             book.clone(),
             market_ctx.clone(),
             None,
-            quant_pivot_models::types::Usd::ZERO,
+            Usd::ZERO,
         )
         .expect("capture");
         let window =
@@ -184,7 +184,7 @@ fn feature_vector_domain_slice_only_for_mapped_category() {
             asset: CryptoAsset::parse("BTC").expect("asset"),
             quote: CryptoQuote::parse("USD").expect("quote"),
             comparator: PriceComparator::Above,
-            strike: Some(quant_pivot_models::types::Usd::new(dec!(99000))),
+            strike: Some(Usd::new(dec!(99000))),
             reference_at: None,
             observation_at: as_of,
             resolution_oracle: ResolutionOracle::BinanceKline {
@@ -322,7 +322,7 @@ fn dataset_hash_changes_when_domain_slice_added() {
 
     let make = |domain: Option<DomainFeatureSlice>| TrainingExample {
         example_id: TrainingExampleId::from_v7(),
-        market_id: quant_pivot_models::types::MarketId::new("m"),
+        market_id: MarketId::new("m"),
         token_id: TokenId::new("m-yes"),
         as_of,
         sample_source: TrainingSampleSource::HistoricalPit,
@@ -381,7 +381,7 @@ fn dataset_builder_domain_slice_no_future_leakage() {
     fv.as_of = as_of;
     let clean = TrainingExample {
         example_id: TrainingExampleId::from_v7(),
-        market_id: quant_pivot_models::types::MarketId::new("m"),
+        market_id: MarketId::new("m"),
         token_id: TokenId::new("m-yes"),
         as_of,
         sample_source: TrainingSampleSource::HistoricalPit,
@@ -414,7 +414,7 @@ fn dataset_builder_domain_slice_no_future_leakage() {
 fn crypto_subject_parser_tier1_deterministic_fail_closed() {
     let parser = CryptoSubjectParser;
     let meta = LinkageSourceMetadata {
-        market_id: quant_pivot_models::types::MarketId::new("0xmarket"),
+        market_id: MarketId::new("0xmarket"),
         slug: "bitcoin-up-or-down-july-7-12pm-et".to_owned(),
         question: "Bitcoin Up or Down - July 7, 12PM ET".to_owned(),
         description: Some(
@@ -543,7 +543,6 @@ fn linkage_grounding_rejects_field_absent_from_source() {
 #[test]
 fn crypto_domain_feature_present_with_domain_external_evidence() {
     use quant_pivot_models::runtime_config::CryptoDomainConfig;
-    use quant_pivot_models::types::Usd;
     use quant_pivot_research::domain::DomainObservationWindow;
 
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
@@ -648,7 +647,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
     let content_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
     let linkage = MarketLinkage {
         linkage_id: MarketLinkageId::from_v7(),
-        market_id: quant_pivot_models::types::MarketId::new("m"),
+        market_id: MarketId::new("m"),
         domain_family: DomainFamily::Crypto,
         outcome: LinkageOutcome::Resolved(binding),
         confidence: Probability::ONE,

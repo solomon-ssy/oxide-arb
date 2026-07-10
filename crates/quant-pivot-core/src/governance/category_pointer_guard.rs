@@ -210,6 +210,20 @@ mod tests {
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
+        async fn publish_replacing_predecessors(
+            &self,
+            _model_spec_id: &ModelSpecId,
+            _model_version_id: &ModelVersionId,
+        ) -> Result<
+            (
+                ModelVersionInfo,
+                Vec<ModelVersionId>,
+                Option<ModelVersionInfo>,
+            ),
+            StorageError,
+        > {
+            unimplemented!()
+        }
         async fn promote_model_to_shadow(
             &self,
             _model_version_id: &ModelVersionId,
@@ -262,6 +276,7 @@ mod tests {
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id,
+            model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash,
             training_dataset_id: None,

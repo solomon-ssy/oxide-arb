@@ -8,7 +8,10 @@
 //! operator resolves it. Reconciliation runs in **all** modes: in-flight money
 //! must be reconciled regardless of the current runtime mode.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
@@ -60,6 +63,33 @@ use crate::{
 const RECONCILE_BATCH: u64 = 256;
 /// Audit actor recorded for machine reconciliation corrections.
 const WORKER_ACTOR: &str = "system:reconciliation_worker";
+
+/// Preloaded intent / recommendation maps for one reconcile sweep.
+struct ReconcileContextMaps {
+    intents_by_id: HashMap<OrderIntentId, OrderIntentInfo>,
+    recommendations_by_id: HashMap<RecommendationId, RecommendationInfo>,
+}
+
+fn load_reconcile_context(
+    order: &ExecutionOrderInfo,
+    context: &ReconcileContextMaps,
+) -> QuantResult<(OrderIntentInfo, RecommendationInfo)> {
+    let intent = context
+        .intents_by_id
+        .get(&order.order_intent_id)
+        .cloned()
+        .ok_or_else(|| {
+            StorageError::not_found(entity::QUANT_ORDER_INTENT, &order.order_intent_id)
+        })?;
+    let recommendation = context
+        .recommendations_by_id
+        .get(&intent.recommendation_id)
+        .cloned()
+        .ok_or_else(|| {
+            StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
+        })?;
+    Ok((intent, recommendation))
+}
 
 /// Collaborators for [`ReconciliationService`].
 pub struct ReconciliationServiceDeps {
@@ -125,8 +155,9 @@ impl ReconciliationService {
             .execution_orders
             .find_reconcilable(RECONCILE_BATCH)
             .await?;
+        let context = self.preload_reconcile_context(&orders).await?;
         for order in orders {
-            if let Err(error) = self.reconcile_one(&order, now, stale_after).await {
+            if let Err(error) = self.reconcile_one(&order, now, stale_after, &context).await {
                 tracing::warn!(
                     %error,
                     execution_order_id = %order.execution_order_id,
@@ -137,18 +168,56 @@ impl ReconciliationService {
         Ok(())
     }
 
+    /// Batch-load intents + recommendations for one reconcile sweep.
+    async fn preload_reconcile_context(
+        &self,
+        orders: &[ExecutionOrderInfo],
+    ) -> QuantResult<ReconcileContextMaps> {
+        let intent_ids: Vec<OrderIntentId> = orders
+            .iter()
+            .map(|order| order.order_intent_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let intents = self.deps.intents.find_by_ids(&intent_ids).await?;
+        let intents_by_id: HashMap<OrderIntentId, OrderIntentInfo> = intents
+            .into_iter()
+            .map(|intent| (intent.order_intent_id.clone(), intent))
+            .collect();
+        let recommendation_ids: Vec<RecommendationId> = intents_by_id
+            .values()
+            .map(|intent| intent.recommendation_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let recommendations = self
+            .deps
+            .recommendations
+            .find_by_ids(&recommendation_ids)
+            .await?;
+        let recommendations_by_id = recommendations
+            .into_iter()
+            .map(|rec| (rec.recommendation_id.clone(), rec))
+            .collect();
+        Ok(ReconcileContextMaps {
+            intents_by_id,
+            recommendations_by_id,
+        })
+    }
+
     /// Reconcile a single order to a terminal verdict (or leave it pending).
     async fn reconcile_one(
         &self,
         order: &ExecutionOrderInfo,
         now: DateTime<Utc>,
         stale_after: Duration,
+        context: &ReconcileContextMaps,
     ) -> QuantResult<()> {
         if self.skip_unresolvable_awaiting_operator(order).await? {
             return Ok(());
         }
 
-        let (intent, recommendation) = self.load_reconcile_context(order).await?;
+        let (intent, recommendation) = load_reconcile_context(order, context)?;
 
         // Collect venue evidence. A venue read failure is fail-closed: freeze
         // only once the order is past the staleness deadline, else retry later.
@@ -163,7 +232,7 @@ impl ReconciliationService {
                         now,
                     )];
                     return self
-                        .apply_unresolvable(order, intent.status, evidence)
+                        .apply_unresolvable(order, intent.status, evidence, &recommendation)
                         .await;
                 }
                 return Ok(());
@@ -191,7 +260,7 @@ impl ReconciliationService {
         let evidence = collected.evidence;
         if decision.result == ReconciliationResult::Unresolvable {
             return self
-                .apply_unresolvable(order, intent.status, evidence)
+                .apply_unresolvable(order, intent.status, evidence, &recommendation)
                 .await;
         }
 
@@ -348,29 +417,6 @@ impl ReconciliationService {
         Ok(existing.result == ReconciliationResult::Unresolvable && existing.resolved_at.is_none())
     }
 
-    async fn load_reconcile_context(
-        &self,
-        order: &ExecutionOrderInfo,
-    ) -> QuantResult<(OrderIntentInfo, RecommendationInfo)> {
-        let intent = self
-            .deps
-            .intents
-            .find_by_id(&order.order_intent_id)
-            .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_ORDER_INTENT, &order.order_intent_id)
-            })?;
-        let recommendation = self
-            .deps
-            .recommendations
-            .find_by_id(&intent.recommendation_id)
-            .await?
-            .ok_or_else(|| {
-                StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
-            })?;
-        Ok((intent, recommendation))
-    }
-
     /// Fan out the settled `quant.intent` status after a reconciliation write.
     /// A no-op for exit-order reconciliations (the entry intent stays terminal)
     /// and unresolvable verdicts (status unchanged), gated by `prior_status`.
@@ -432,8 +478,8 @@ impl ReconciliationService {
         order: &ExecutionOrderInfo,
         intent_status: OrderIntentStatus,
         evidence: Vec<ReconciliationEvidence>,
+        recommendation: &RecommendationInfo,
     ) -> QuantResult<()> {
-        let (_, recommendation) = self.load_reconcile_context(order).await?;
         let detail = format!(
             "unresolvable reconciliation for execution order {}",
             order.execution_order_id

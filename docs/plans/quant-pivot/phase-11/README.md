@@ -7,7 +7,11 @@
 >（`as_of` 横截面 LTR、`rank_ic_weighted_ranknet` 诚实命名、TopN **rank-equal** token 伪组合、
 > singleton 可观测丢弃、`rank_loss_group_count`、NDCG@k/Rank IC 诊断、argmin/Decimal→f64
 > fail-closed、schema v9）；
-> **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。11.0/11.2.1/11.3/11.5–11.11
+> **11.5 已落地**（Buy 侧 CPCV/DSR/PBO/purge/trial-grid，见其文档头部"闭环加固"）；
+> **11.5.1 已落地**（Sell/Hold-vs-Exit lot 级 CPCV：`FoldRuntime`/`RankObservation` 泛化、
+> residual-shares 状态机 + 路径分叉停止、activity-only lot-native Sharpe/DSR/PBO、null baseline uplift、
+> Sell path-set DD/tail 硬门禁、UI 隐藏单路径 Backtest / 锁定 family+label）；
+> **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。11.0/11.2.1/11.3/11.6–11.11
 > 仍在设计/规划或部分落地阶段。
 >
 > 父文档（概念真理）：
@@ -78,8 +82,8 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.2.3 | Tier 2 LLM Linkage Fallback | 离线 LLM 结构化抽取 + grounding gate + review queue | — (extends 11.2.2) | [11.2.3](11.2.3-tier2-llm-linkage.md) |
 | 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
-| 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论(买方 WeightedFactor/classical) — **production closed loop** (model_run FK + publish_path_set_id bind + trial fail-closed + classical purged CV + publish label-horizon rescan;Sell → 11.5.1) | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
-| 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
+| 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论(买方 WeightedFactor/classical) — **已落地** (model_run FK + publish_path_set_id bind + trial fail-closed + classical purged CV + publish label-horizon rescan;Sell → 11.5.1) | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
+| 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 — **已落地 + remediation**（residual-shares 状态机 + 路径分叉停止、activity-only DSR/PBO、null baseline uplift、Sell DD/tail 硬门禁、UI 锁死 family/label） | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 特征一致性 / 禁止静默零 | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Labeling, Entry & Exit Closed-Loop | 三重障碍标注 + 入场/退出闭环 | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |

@@ -11,12 +11,21 @@
 //!
 //! Money / price / probability stay in project newtypes; `f64` never appears.
 
+mod calendarize;
 mod comparison;
+mod lot_replay;
 pub(crate) mod metrics;
 mod runner;
 mod simulator;
 
+pub use calendarize::{
+    CalendarReturn, active_observation_count, calendarize_lot_returns, mean_calendar_return,
+};
 pub use comparison::{CategoryRankIcDelta, ModelComparisonReport, compare_reports};
+pub use lot_replay::{
+    LotBacktestInputs, LotBacktestRunResult, LotBacktester, LotDecisionSequence, LotOutcome,
+    LotReplayBacktester, SellNullBaseline, replay_lot_null_baseline,
+};
 pub use metrics::sharpe_ratio;
 pub use runner::PortfolioReplayBacktester;
 
