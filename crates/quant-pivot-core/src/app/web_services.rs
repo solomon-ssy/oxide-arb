@@ -1,7 +1,6 @@
 //! Web admin surface assembly for Phase 0.
 
 use super::AppContext;
-use crate::service::feature_integrity::CatalogFeatureIntegrityCoverage;
 use crate::{
     app::{
         ports::{
@@ -24,8 +23,9 @@ use crate::{
     },
     prefetch::feature_window::FeatureWindowProvider,
     service::{
-        feature_integrity::FeatureIntegrityService,
-        model_calibration_fit::ModelCalibrationFitService, trade_policy::TradePolicyService,
+        feature_integrity::{CatalogFeatureIntegrityCoverage, FeatureIntegrityService},
+        model_calibration_fit::ModelCalibrationFitService,
+        trade_policy::TradePolicyService,
     },
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
@@ -48,11 +48,10 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
-use quant_pivot_web::auth::casbin::PermChecker;
 use quant_pivot_web::{
     AppState,
     audit::OperationLogBuffer,
-    auth::casbin::CasbinService,
+    auth::casbin::{CasbinService, PermChecker},
     jwt::{JwtService, TokenBlacklist},
     readiness::PgRedisReadiness,
     routes, spawn_web_server,

@@ -13,9 +13,9 @@ use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
-use crate::entities::quant_domain_source_cursor;
 use crate::{
     clickhouse::{ChDecimal64, ChSchemaVersion, DomainObservationRow},
+    entities::quant_domain_source_cursor,
     enums::domain::{DomainFamily, DomainMetric},
     types::{DomainInstrumentKey, DomainSourceId},
 };

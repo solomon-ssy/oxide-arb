@@ -9,8 +9,10 @@ use std::collections::BTreeMap;
 
 use ndarray::{Array1, Array2};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 
 use crate::{
     factors::FactorName, model::runtime::FactorInferenceRow, precision::RESEARCH_DECIMAL_SCALE,

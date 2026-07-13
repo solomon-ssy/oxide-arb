@@ -44,8 +44,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
 pub struct RuntimeSnapshot {

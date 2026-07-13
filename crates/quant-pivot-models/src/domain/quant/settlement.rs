@@ -1,9 +1,8 @@
 //! Settlement redemption persistence DTOs.
 
-use crate::entities::quant_settlement_redeem;
-use crate::entities::quant_settlement_redeem_lot;
 use crate::{
     domain::PositionExit,
+    entities::{quant_settlement_redeem, quant_settlement_redeem_lot},
     enums::{
         execution::SettlementRedeemState,
         quant::{ExecutionWalletKind, OutcomeSide},

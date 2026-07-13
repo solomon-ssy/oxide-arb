@@ -32,7 +32,6 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::naming::stable_name;
 use crate::{
     artifact::{ArtifactKey, ArtifactNamespace},
     factors::{FactorName, FrozenReferenceQuantiles},
@@ -43,6 +42,7 @@ use crate::{
         objective::{ObjectiveComponentReport, RankingDiagnostics, TrainingObjectiveSpec},
         runtime::{ClassicalKind, ModelFamily},
     },
+    naming::stable_name,
     precision::RESEARCH_DECIMAL_SCALE,
 };
 

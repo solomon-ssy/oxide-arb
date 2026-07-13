@@ -1,10 +1,12 @@
 //! Combinatorial Purged Cross-Validation (CPCV) path-set ledger persistence
 //! DTOs (Phase 11.5 §3.3/§6).
 
-use crate::entities::quant_backtest_path_set;
-use crate::types::{
-    BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
-    TrainingDatasetId,
+use crate::{
+    entities::quant_backtest_path_set,
+    types::{
+        BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
+        TrainingDatasetId,
+    },
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;

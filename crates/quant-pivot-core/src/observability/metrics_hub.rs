@@ -4,8 +4,7 @@
 //! shutdown. Legacy Endgame detection / execution / risk / settlement /
 //! control-factor series do not exist here.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,

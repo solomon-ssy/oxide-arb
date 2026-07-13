@@ -8,8 +8,7 @@ use chrono::Utc;
 use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
 use quant_pivot_models::domain::{CatalogStatusPort, HealthReport, SubsystemHealth};
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 /// Construction dependencies for [`HealthChecker`].
 pub struct HealthCheckerDeps {

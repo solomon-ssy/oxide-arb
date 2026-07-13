@@ -22,7 +22,10 @@
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
     domain::{CryptoSubject, DomainObservation, MarketSubject, PriceComparator, ResolutionOracle},
-    enums::{domain::DomainFamily, feature::EvidenceSourceKind},
+    enums::{
+        domain::{DomainFamily, DomainMetric},
+        feature::EvidenceSourceKind,
+    },
 };
 use rust_decimal::Decimal;
 
@@ -36,7 +39,6 @@ use crate::{
         value::{EvidenceSourceRef, FeatureValue, NullReason},
     },
 };
-use quant_pivot_models::enums::domain::DomainMetric;
 
 /// Basis points per unit ratio.
 const BPS_PER_UNIT: Decimal = Decimal::from_parts(10_000, 0, 0, false, 0);

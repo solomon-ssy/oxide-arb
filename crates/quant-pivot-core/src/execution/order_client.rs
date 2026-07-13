@@ -303,12 +303,13 @@ impl PolymarketOrderClient for ClobOrderClient {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::enums::common::OrderType;
+    use quant_pivot_models::{
+        enums::common::OrderType,
+        types::{Shares, Usd},
+    };
 
-    use super::VenueOutcome;
-    use super::VenueSubmitResult;
+    use super::{VenueOutcome, VenueSubmitResult};
     use chrono::Utc;
-    use quant_pivot_models::types::{Shares, Usd};
 
     #[test]
     fn fok_partial_normalizes_to_ambiguous() {

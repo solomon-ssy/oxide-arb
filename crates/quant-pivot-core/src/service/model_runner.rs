@@ -19,6 +19,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
+    mem,
     str::FromStr,
     sync::{
         Arc,
@@ -74,7 +75,6 @@ use crate::{
     projection::inference_batch::build_runtime_input,
     service::factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
 };
-use std::mem;
 
 /// Decimal places shadow-diff aggregates are rounded to.
 const DIFF_SCALE: u32 = 12;

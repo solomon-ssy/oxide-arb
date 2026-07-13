@@ -17,8 +17,7 @@ use quant_pivot_models::{
         quant::QuantRuntimeMode,
     },
 };
-use std::collections::HashMap;
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 
 /// Prior probe outcome per subsystem name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,8 +184,7 @@ mod tests {
         },
         enums::quant::QuantRuntimeMode,
     };
-    use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn ws_skipped_during_warming_phases() {

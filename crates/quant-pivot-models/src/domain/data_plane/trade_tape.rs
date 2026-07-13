@@ -8,9 +8,9 @@ use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
-use crate::entities::quant_trade_tape_block_cursor;
 use crate::{
     clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow},
+    entities::quant_trade_tape_block_cursor,
     enums::{
         clickhouse::{ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource},
         common::Side,

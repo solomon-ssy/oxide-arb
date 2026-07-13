@@ -4,7 +4,10 @@ use crate::{
     postgres::{error, query::paginate_mapped},
     traits::FactorRepository,
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    slice,
+};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
@@ -23,7 +26,6 @@ use sea_orm::{
     DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
     QuerySelect, SqlErr, Statement, TransactionTrait,
 };
-use std::slice;
 
 /// Postgres-backed factor repository: immutable, content-addressed definition
 /// revisions plus the insert-only factor-value ledger.

@@ -454,9 +454,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
-    use std::vec::IntoIter;
+    use std::{collections::BTreeMap, sync::Mutex, vec::IntoIter};
 
     fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()

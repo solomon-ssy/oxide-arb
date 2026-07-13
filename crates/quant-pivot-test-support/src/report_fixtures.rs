@@ -5,13 +5,11 @@
 //! are built one way. Defaults are sensible; knobs cover the dimensions tests
 //! actually vary (id, status, kind, market, side, rank, suggested USD).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 use chrono::{Duration, TimeZone, Utc};
 use rust_decimal_macros::dec;
 
-use quant_pivot_models::enums::common::TickSize::Hundredth;
-use quant_pivot_models::enums::market::MarketStatus;
 use quant_pivot_models::{
     domain::{
         FeatureParityJobParams, NewFeatureParityRun, NewRecommendationReport,
@@ -19,8 +17,9 @@ use quant_pivot_models::{
         RunFullFeatureParityRequest,
     },
     enums::{
-        common::MarketCategory,
+        common::{MarketCategory, TickSize::Hundredth},
         factor::{FactorFamily, FactorValueState, NormalizationSource},
+        market::MarketStatus,
         quant::{
             AccountSource, BindingConstraint, ExitSettlementMode, FactorDirection,
             FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason, OutcomeSide,
@@ -41,7 +40,6 @@ use quant_pivot_models::{
         TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
     },
 };
-use std::str::FromStr;
 
 fn content_hash() -> ContentHash {
     ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")

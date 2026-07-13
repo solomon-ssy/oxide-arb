@@ -5,7 +5,7 @@
 //! factor, or feature rows. Loads the **intent-frozen** model version and
 //! runtime-config snapshot so exit evaluation matches the entry thesis.
 
-use std::{sync::Arc, time::Duration};
+use std::{slice, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -48,7 +48,6 @@ use crate::{
     projection::inference_batch::build_runtime_input,
     service::signal_reinference::{ExitSignalReinferer, FreshSignal},
 };
-use std::slice;
 
 /// Dependencies for [`ModelBackedExitSignalReinferer`].
 pub struct ModelBackedExitSignalReinfererDeps {
@@ -615,7 +614,6 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::{Duration as ChronoDuration, Utc};
-    use quant_pivot_models::runtime_config::RuntimeConfig;
     use quant_pivot_models::{
         domain::{
             DecisionClock, DecisionSource, PositionInfo,
@@ -627,14 +625,17 @@ mod tests {
             market::{EventStatus, MarketStatus},
             quant::{AccountSource, OutcomeSide},
         },
+        runtime_config::RuntimeConfig,
         types::{
             CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId,
             MarketCatalogVersionId, MarketId, ModelRunId, OrderIntentId, PositionId, Price,
             Probability, Shares, SignalCandidateId, TokenId, Usd,
         },
     };
-    use quant_pivot_research::model::{ModelExplanation, SignalCandidate};
-    use quant_pivot_research::pit::{MarketContextAt, ResolvedMarketSnapshot};
+    use quant_pivot_research::{
+        model::{ModelExplanation, SignalCandidate},
+        pit::{MarketContextAt, ResolvedMarketSnapshot},
+    };
     use rust_decimal_macros::dec;
 
     use super::{

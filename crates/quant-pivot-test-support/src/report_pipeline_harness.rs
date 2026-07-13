@@ -1,9 +1,18 @@
 //! Shared harness for Phase 04 report pipeline integration tests.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    env, process,
+    sync::{Arc, Mutex},
+};
 
-use crate::fact_sink::DiscardFactWriter;
-use crate::pit::InMemoryDecisionSnapshotSource;
+use crate::{
+    catalog_fixtures::{make_event, make_market},
+    fact_sink::DiscardFactWriter,
+    factor_governance::publish_all_factor_definitions,
+    pit::InMemoryDecisionSnapshotSource,
+    report_fixtures,
+    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
+};
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_api::data_api::VenuePosition;
@@ -56,6 +65,7 @@ use quant_pivot_models::{
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
+    entities::quant_feature_parity_state,
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
@@ -120,16 +130,6 @@ use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObse
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
-
-use crate::factor_governance::publish_all_factor_definitions;
-use crate::{
-    catalog_fixtures::{make_event, make_market},
-    report_fixtures,
-    trade_tape_fixtures::live_trade_tape_block_cursor_repo,
-};
-use quant_pivot_models::entities::quant_feature_parity_state;
-use std::env;
-use std::process;
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
 pub const EVENT_ID: &str = "evt-report-pipeline-e2e";

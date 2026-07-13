@@ -3,8 +3,7 @@
 use sea_orm::DbErr;
 
 use crate::seed::{SeedConflictPolicy, SeedContext};
-use std::future::Future;
-use std::pin::Pin;
+use std::{future::Future, pin::Pin};
 
 /// Typed key for passing seed artifacts between graph-ordered seeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

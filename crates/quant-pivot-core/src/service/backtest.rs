@@ -8,7 +8,10 @@
 //! Per run it persists a `quant_backtest_report` + a `Backtest` `quant_model_run`
 //! and optionally fits a calibrated return curve into a fresh Candidate version.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Utc};
 use tokio::{runtime::Handle, task};
@@ -52,7 +55,6 @@ use crate::{
     projection::inference_batch::build_frozen_runtime_input,
     service::training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
-use std::collections::HashMap;
 
 /// Repository + store + factory dependencies for the backtest service.
 pub struct BacktestServiceDeps {

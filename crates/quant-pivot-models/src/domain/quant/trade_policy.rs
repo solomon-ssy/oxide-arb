@@ -5,9 +5,8 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entities::quant_trade_policy_artifact;
-use crate::entities::quant_trade_policy_governance_audit;
 use crate::{
+    entities::{quant_trade_policy_artifact, quant_trade_policy_governance_audit},
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
     types::{
         ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload,

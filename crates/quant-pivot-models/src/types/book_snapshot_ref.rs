@@ -3,8 +3,10 @@
 //! Reports and replay both resolve the durable `ClickHouse` fact ledger and
 //! therefore share the same exact tie-breaker coordinates.
 
-use std::fmt::{self, Display, Formatter};
-use std::str::FromStr;
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 

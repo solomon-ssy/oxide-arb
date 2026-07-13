@@ -1,21 +1,23 @@
 //! [`DefaultAdmissionEngine`]: the fixed-order, short-circuiting evaluator.
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::enums::execution::AdmissionOutcome;
 
-use super::checks::{
-    BookFreshnessCheck, CalibratedReturnModelCheck, CapitalBudgetCheck, CategoryExposureCheck,
-    CredentialReadinessCheck, DataQualityCheck, EntryTriggerCheck, EventExposureCheck,
-    ExitMonitorReadinessCheck, IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck,
-    ManualBlockCheck, MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck,
-    ModelPublicationCheck, RecommendationFreshnessCheck, ReportStatusCheck, RiskEnvelopeHashCheck,
-    RuntimeModeCheck, SlippageCheck, VenueGuardCheck, VenueMetadataCheck,
+use super::{
+    AdmissionCheck, AdmissionDecision, AdmissionInput, ExecutionAdmissionEngine,
+    checks::{
+        BookFreshnessCheck, CalibratedReturnModelCheck, CapitalBudgetCheck, CategoryExposureCheck,
+        CredentialReadinessCheck, DataQualityCheck, EntryTriggerCheck, EventExposureCheck,
+        ExitMonitorReadinessCheck, IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck,
+        ManualBlockCheck, MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck,
+        ModelPublicationCheck, RecommendationFreshnessCheck, ReportStatusCheck,
+        RiskEnvelopeHashCheck, RuntimeModeCheck, SlippageCheck, VenueGuardCheck,
+        VenueMetadataCheck,
+    },
 };
-use super::{AdmissionCheck, AdmissionDecision, AdmissionInput, ExecutionAdmissionEngine};
 use crate::observability::metrics_hub::MetricsHub;
 
 /// The 24-check admission set. A fixed-size array makes the count

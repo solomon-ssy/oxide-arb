@@ -9,7 +9,7 @@ use quant_pivot_models::{
     domain::{
         NewAccountSnapshot, NewEquitySnapshot, NewOperationLog, NewPortfolioPlan,
         NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
-        NewReportTransaction, TradePolicyArtifactInfo,
+        NewReportTransaction, TradePolicyArtifactInfo, market::book::BookLevel,
     },
     enums::{
         common::{MarketCategory, TickSize},
@@ -46,7 +46,6 @@ use super::types::{
     ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
     ReportTrigger,
 };
-use quant_pivot_models::domain::market::book::BookLevel;
 
 /// Inputs required to compose one report artifact.
 pub struct ComposeReportInput<'a> {

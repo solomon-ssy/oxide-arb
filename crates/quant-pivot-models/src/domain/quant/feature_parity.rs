@@ -1,8 +1,7 @@
 //! Feature-parity run and governed latch persistence contracts.
 
-use crate::entities::quant_feature_parity_run;
-use crate::entities::quant_feature_parity_state;
 use crate::{
+    entities::{quant_feature_parity_run, quant_feature_parity_state},
     enums::quant::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus,
         FeatureParityStateTransition,

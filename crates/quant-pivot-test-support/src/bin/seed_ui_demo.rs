@@ -10,8 +10,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
-use quant_pivot_test_support::research_ui_seed::ResearchUiSeedSummary;
-use quant_pivot_test_support::ui_demo_seed::{UiDemoSeedSummary, seed_ui_demo_ck, seed_ui_demo_pg};
+use quant_pivot_test_support::{
+    research_ui_seed::ResearchUiSeedSummary,
+    ui_demo_seed::{UiDemoSeedSummary, seed_ui_demo_ck, seed_ui_demo_pg},
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]

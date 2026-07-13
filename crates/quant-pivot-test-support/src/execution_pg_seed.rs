@@ -16,8 +16,11 @@ use quant_pivot_models::{
         NewRuntimeConfigVersion, NewTradePolicyArtifact, NewTradePolicyGovernanceAudit,
         PositionExit, PositionFill, SubmissionLedgerWrite,
     },
+    entities::{
+        quant_feature_parity_state, quant_model_run, quant_model_spec, quant_model_version,
+    },
     enums::{
-        common::{MarketCategory, OrderType, Side},
+        common::{MarketCategory, OrderType, Side, TickSize::Hundredth},
         execution::{
             CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
             OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult, VenueOrderStatus,
@@ -85,12 +88,6 @@ use uuid::Uuid;
 use crate::{
     catalog_fixtures::{make_event, make_market},
     report_fixtures, seeded_uuid,
-};
-use quant_pivot_models::{
-    entities::{
-        quant_feature_parity_state, quant_model_run, quant_model_spec, quant_model_version,
-    },
-    enums::common::TickSize::Hundredth,
 };
 
 /// shares (100) * `limit_price` (0.6).

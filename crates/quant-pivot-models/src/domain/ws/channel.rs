@@ -15,8 +15,8 @@
 
 use crate::{enums::rbac::ResourceType, types::MarketId};
 use serde_with::DeserializeFromStr;
-use std::error::Error;
 use std::{
+    error::Error,
     fmt::{self, Display, Formatter},
     str::FromStr,
 };

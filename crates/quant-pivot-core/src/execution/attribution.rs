@@ -6,6 +6,7 @@
 //! single final row once truth is available.
 
 use std::{
+    cmp::Ordering::{Equal, Greater, Less},
     collections::{HashMap, HashSet},
     sync::Arc,
 };
@@ -34,9 +35,6 @@ use quant_pivot_repository::traits::{
 
 use crate::observability::attribution_fact_writer::AttributionEventWriter;
 use rust_decimal::Decimal;
-use std::cmp::Ordering::Equal;
-use std::cmp::Ordering::Greater;
-use std::cmp::Ordering::Less;
 
 /// Dependencies for [`AttributionService`].
 pub struct AttributionServiceDeps {

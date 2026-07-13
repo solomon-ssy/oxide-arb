@@ -12,6 +12,10 @@ use quant_pivot_models::{
         NewModelComparisonReport, NewModelRun, NewModelSpec, NewModelVersion,
         NewTrainingDatasetPlan,
     },
+    entities::{
+        quant_backtest_report, quant_factor_definition, quant_model_comparison_report,
+        quant_model_spec, quant_model_version, quant_training_dataset,
+    },
     enums::{
         factor::{FactorDefinitionScope, FactorFamily},
         model::ModelFamily,
@@ -44,10 +48,6 @@ use sea_orm::{
 };
 
 use crate::execution_pg_seed::SharedDemoInfra;
-use quant_pivot_models::entities::{
-    quant_backtest_report, quant_factor_definition, quant_model_comparison_report,
-    quant_model_spec, quant_model_version, quant_training_dataset,
-};
 
 const RESEARCH_MARKER_SPEC: &str = "ui-demo-research-spec-secondary";
 const PRIMARY_SPEC_NAME: &str = "ui-demo-seed-model";

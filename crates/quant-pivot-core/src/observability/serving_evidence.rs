@@ -451,9 +451,11 @@ mod tests {
         types::{FeatureVectorId, MarketId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
     };
     use quant_pivot_repository::traits::FactWriter;
-    use std::slice;
-    use std::sync::Mutex;
-    use std::{marker::PhantomData, sync::Arc};
+    use std::{
+        marker::PhantomData,
+        slice,
+        sync::{Arc, Mutex},
+    };
     use uuid::Uuid;
 
     struct OrderedSink<T> {

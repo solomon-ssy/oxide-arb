@@ -337,8 +337,7 @@ impl WsShardHealthPort for ClobWsManager {
 mod tests {
     use super::{SubscriptionSource, SubscriptionState};
     use quant_pivot_models::types::TokenId;
-    use std::collections::HashSet;
-    use std::iter;
+    use std::{collections::HashSet, iter};
 
     fn tok(s: &str) -> TokenId {
         TokenId::new(s)

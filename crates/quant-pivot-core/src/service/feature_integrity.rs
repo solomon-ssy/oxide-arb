@@ -880,8 +880,7 @@ fn resolve_full_window(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-    use std::sync::MutexGuard;
+    use std::sync::{Mutex, MutexGuard};
 
     use quant_pivot_models::{
         domain::{

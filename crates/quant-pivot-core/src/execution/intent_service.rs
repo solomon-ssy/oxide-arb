@@ -1399,18 +1399,19 @@ mod tests {
     // `SemiAuto`/`AutoExecution` intent) ────────────────────────────────────
 
     mod calibration_recheck {
-        use std::env;
-        use std::process;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::{
+            env, process,
+            sync::{
+                Arc,
+                atomic::{AtomicU64, Ordering},
+            },
+        };
 
         use crate::execution::intent_service::recheck_return_model_calibrated;
         use async_trait::async_trait;
         use chrono::Utc;
-        use quant_pivot_error::storage::StorageError;
-        use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-        use quant_pivot_models::runtime_config::FactorCrossSectionConfig;
-        use quant_pivot_models::types::{
-            BacktestPathSetId, FeatureParityRunId, FeatureParityStateId,
+        use quant_pivot_error::{
+            QuantError, QuantResult, research::ResearchError, storage::StorageError,
         };
         use quant_pivot_models::{
             domain::{
@@ -1418,18 +1419,19 @@ mod tests {
                 NewModelSpec, NewModelVersion, Paginated,
             },
             enums::quant::{DownsideSource, PublicationStatus},
+            runtime_config::FactorCrossSectionConfig,
             types::{
-                CalibrationArtifactId, ContentHash, ModelInputContract, ModelSpecId, ModelVersionId,
+                BacktestPathSetId, CalibrationArtifactId, ContentHash, FeatureParityRunId,
+                FeatureParityStateId, ModelInputContract, ModelSpecId, ModelVersionId,
             },
         };
         use quant_pivot_repository::traits::{
             CompensateRollbackModelVersionCommit, ModelRegistryRepository,
             RollbackModelVersionCommit,
         };
-        use quant_pivot_research::factors::FrozenReferenceQuantiles;
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
-            factors::names::LIQUIDITY_DEPTH,
+            factors::{FrozenReferenceQuantiles, names::LIQUIDITY_DEPTH},
             model::{
                 CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
                 ModelArtifactHeader, ModelFamily, MonotoneMapping, ReliabilityReport,
@@ -1438,7 +1440,6 @@ mod tests {
                 model_input_contract_hash,
             },
         };
-        use std::sync::Arc;
 
         struct FakeRegistry {
             version: Option<ModelVersionInfo>,

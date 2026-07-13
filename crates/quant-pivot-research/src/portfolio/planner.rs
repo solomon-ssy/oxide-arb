@@ -14,9 +14,7 @@
 //! yields the same plan (stable sort, no wall-clock, no randomness). `f64` never
 //! appears; every money value stays in a project newtype.
 
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;

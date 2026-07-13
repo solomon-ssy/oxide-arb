@@ -4,9 +4,7 @@
 //! return clone; collinearity is detectable), #3 (config-driven normalization,
 //! no silent neutral — small / degenerate cross-sections are indeterminate).
 
-use std::collections::BTreeMap;
-use std::slice;
-use std::sync::Arc;
+use std::{collections::BTreeMap, slice, sync::Arc};
 
 use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_models::{
@@ -24,14 +22,6 @@ use quant_pivot_models::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use crate::features::{
-    FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
-    generic::stats,
-};
-use crate::model::favorite_longshot::{
-    BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
-    TtrBucketCurve,
-};
 use crate::{
     factors::{
         CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorName,
@@ -41,7 +31,15 @@ use crate::{
         names::{MEAN_REVERSION, STRUCT_FAVORITE_LONGSHOT, STRUCT_REVERSAL_AFTER_SHOCK},
         structural::structural_factors,
     },
+    features::{
+        FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
+        generic::stats,
+    },
     hashing::ResearchHasher,
+    model::favorite_longshot::{
+        BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
+        TtrBucketCurve,
+    },
 };
 // ── Fixtures ────────────────────────────────────────────────────────────────
 

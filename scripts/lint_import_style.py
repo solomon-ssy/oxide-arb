@@ -1,0 +1,1091 @@
+#!/usr/bin/env python3
+"""Import-style lint for quant-pivot Rust sources.
+
+Enforces `.cursor/rules/quant-pivot-rust-style.mdc`:
+
+  1. No `use` outside module preambles (file header / nested `mod`).
+  2. No deep paths in item bodies (≤1 `::` after imports).
+  3. One non-`pub` `use` tree per (root, leading-attrs) in each module scope
+     — merge siblings into a single brace tree (e.g. `use std::{a, b::{self, C}}`).
+
+`pub use` re-exports are intentionally left alone (barrel modules).
+
+Usage:
+  python3 scripts/lint_import_style.py           # check
+  python3 scripts/lint_import_style.py --fix    # merge duplicate-root uses
+  python3 scripts/lint_import_style.py --self-test
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+ROOT = Path(os.environ.get("LINT_IMPORT_STYLE_ROOT", Path(__file__).resolve().parent.parent))
+SRC_ROOTS = sorted(ROOT.glob("crates/*/src"))
+EXCLUDE_CRATES = {"quant-pivot-macros"}
+
+DEEP_PATH = re.compile(
+    r"""
+    (?<![\w/$])
+    (?P<path>
+        (?:crate|super|self|std|core|alloc|quant_pivot_[a-z0-9_]+)
+        (?: :: [A-Za-z_][A-Za-z0-9_]*){2,}
+    )
+    """,
+    re.VERBOSE,
+)
+FUTURE_BOUND = re.compile(r"\bimpl\s+std::future::Future\b")
+MACRO_RULES = re.compile(r"\bmacro_rules\s*!")
+USE_ITEM = re.compile(r"^\s*(?:pub\s+)?use\b")
+USE_HEADER = re.compile(
+    r"^(?P<indent>\s*)(?P<pub>pub\s+)?use\s+(?P<body>.*)$"
+)
+MOD_ITEM = re.compile(
+    r"^(?P<indent>\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)\b"
+)
+FN_ITEM = re.compile(
+    r"\b(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(?P<name>\w+)\b"
+)
+IMPL_OR_TRAIT = re.compile(r"\b(?:pub\s+)?(?:unsafe\s+)?(?:impl|trait)\b")
+CONST_STATIC = re.compile(r"\b(?:pub\s+)?(?:const|static)\b")
+TYPE_ALIAS = re.compile(r"\b(?:pub\s+)?(?:type)\b")
+ATTR_LINE = re.compile(r"^\s*#!?\[")
+DOC_LINE = re.compile(r"^\s*//!|^\s*///")
+LINE_COMMENT = re.compile(r"^\s*//")
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+# ---------------------------------------------------------------------------
+# Lexical helpers
+# ---------------------------------------------------------------------------
+
+
+def strip_strings_and_comments(line: str, in_block_comment: bool) -> tuple[str, bool]:
+    """Return code-only text for brace/`use` detection; track /* */ state."""
+    if in_block_comment:
+        end = line.find("*/")
+        if end < 0:
+            return "", True
+        line = line[end + 2 :]
+        in_block_comment = False
+
+    out: list[str] = []
+    i = 0
+    n = len(line)
+    in_string = False
+    in_char = False
+    while i < n:
+        ch = line[i]
+        nxt = line[i + 1] if i + 1 < n else ""
+
+        if not in_string and not in_char:
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                end = line.find("*/", i + 2)
+                if end < 0:
+                    return "".join(out), True
+                i = end + 2
+                continue
+            if ch == '"':
+                in_string = True
+                out.append(" ")
+                i += 1
+                continue
+            if ch == "'":
+                if nxt.isalpha() or nxt == "_":
+                    out.append(ch)
+                    i += 1
+                    continue
+                in_char = True
+                out.append(" ")
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        if in_string:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'":
+            in_char = False
+        i += 1
+
+    return "".join(out), in_block_comment
+
+
+def strip_for_path_scan(line: str) -> str:
+    """Remove strings, line comments, and rustdoc link targets for path matching."""
+    s = re.sub(r"\[[^\]]*\]\([^)]*\)", " ", line)
+    s = re.sub(
+        r"\[(?:crate|super|self|std|core|alloc|quant_pivot_[a-z0-9_]+)(?:::[^\]]+)?\]",
+        " ",
+        s,
+    )
+    code, _ = strip_strings_and_comments(s, False)
+    return code
+
+
+def iter_rs_files() -> list[Path]:
+    files: list[Path] = []
+    for src in SRC_ROOTS:
+        crate = src.parent.name
+        if crate in EXCLUDE_CRATES:
+            continue
+        files.extend(sorted(src.rglob("*.rs")))
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Use-tree IR
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class UseTree:
+    """Nested import tree under one root (`std`, `crate`, …)."""
+
+    children: dict[str, UseTree] = field(default_factory=dict)
+    # (name, rename) where rename is None (no `as`), "_" (`as _`), or an ident.
+    # Same source name may appear twice with different renames
+    # (`AtomicU64` + `AtomicU64 as StdSyncAtomicU64`).
+    bindings: list[tuple[str, str | None]] = field(default_factory=list)
+    include_self: bool = False
+    glob: bool = False
+
+    def _add_binding(self, name: str, rename: str | None) -> None:
+        key = (name, rename)
+        if key not in self.bindings:
+            self.bindings.append(key)
+
+    def merge(self, other: UseTree) -> None:
+        self.include_self = self.include_self or other.include_self
+        self.glob = self.glob or other.glob
+        for name, rename in other.bindings:
+            self._add_binding(name, rename)
+        for seg, child in other.children.items():
+            if seg in self.children:
+                self.children[seg].merge(child)
+            else:
+                self.children[seg] = child
+        self._promote_leaf_modules()
+
+    def _promote_leaf_modules(self) -> None:
+        """`use a::b` + `use a::b::C` → `use a::b::{self, C}`."""
+        kept: list[tuple[str, str | None]] = []
+        for name, rename in self.bindings:
+            if name in self.children:
+                if rename is not None:
+                    raise ValueError(
+                        f"cannot merge renamed `{name} as {rename}` with nested path"
+                    )
+                self.children[name].include_self = True
+            else:
+                kept.append((name, rename))
+        self.bindings = kept
+        for child in self.children.values():
+            child._promote_leaf_modules()
+
+    def is_empty(self) -> bool:
+        return (
+            not self.children
+            and not self.bindings
+            and not self.include_self
+            and not self.glob
+        )
+
+
+class UseParseError(ValueError):
+    pass
+
+
+class _Parser:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.i = 0
+
+    def peek(self) -> str:
+        self._skip_ws()
+        return self.text[self.i] if self.i < len(self.text) else ""
+
+    def _skip_ws(self) -> None:
+        while self.i < len(self.text) and self.text[self.i].isspace():
+            self.i += 1
+
+    def expect(self, ch: str) -> None:
+        self._skip_ws()
+        if self.i >= len(self.text) or self.text[self.i] != ch:
+            raise UseParseError(f"expected {ch!r} at {self.i} in {self.text!r}")
+        self.i += 1
+
+    def try_consume(self, ch: str) -> bool:
+        self._skip_ws()
+        if self.i < len(self.text) and self.text[self.i] == ch:
+            self.i += 1
+            return True
+        return False
+
+    def ident(self) -> str:
+        self._skip_ws()
+        m = IDENT.match(self.text, self.i)
+        if not m:
+            raise UseParseError(f"expected ident at {self.i} in {self.text!r}")
+        self.i = m.end()
+        return m.group(0)
+
+    def try_ident(self) -> str | None:
+        self._skip_ws()
+        m = IDENT.match(self.text, self.i)
+        if not m:
+            return None
+        self.i = m.end()
+        return m.group(0)
+
+    def parse_tree(self) -> UseTree:
+        """Parse a UseTree (possibly with leading path segments)."""
+        self._skip_ws()
+        if self.try_consume("{"):
+            tree = self._parse_brace_list()
+            self.expect("}")
+            return tree
+        if self.try_consume("*"):
+            return UseTree(glob=True)
+
+        # Path: ident (:: ident)* (:: suffix)?
+        segments: list[str] = []
+        first = self.try_ident()
+        if first is None:
+            raise UseParseError(f"empty use tree in {self.text!r}")
+        segments.append(first)
+        while self.try_consume(":"):
+            self.expect(":")
+            if self.peek() == "{":
+                self.expect("{")
+                nested = self._parse_brace_list()
+                self.expect("}")
+                return self._nest(segments, nested)
+            if self.peek() == "*":
+                self.expect("*")
+                return self._nest(segments, UseTree(glob=True))
+            nxt = self.ident()
+            segments.append(nxt)
+
+        return self._finish_path(segments)
+
+    def _parse_rename(self) -> str | None:
+        """Parse optional `as Rename` / `as _`. Returns None when absent."""
+        self._skip_ws()
+        save = self.i
+        kw = self.try_ident()
+        if kw != "as":
+            self.i = save
+            return None
+        self._skip_ws()
+        if self.try_consume("_"):
+            return "_"
+        return self.ident()
+
+    def _finish_path(self, segments: list[str]) -> UseTree:
+        rename = self._parse_rename()
+        if not segments:
+            raise UseParseError("empty path")
+        leaf = segments[-1]
+        parents = segments[:-1]
+        if leaf == "self":
+            if rename is not None:
+                raise UseParseError("`self as …` is not supported in import merge")
+            tree = UseTree(include_self=True)
+            return self._nest(parents, tree) if parents else tree
+        tree = UseTree(bindings=[(leaf, rename)])
+        return self._nest(parents, tree) if parents else tree
+
+    def _parse_brace_list(self) -> UseTree:
+        tree = UseTree()
+        self._skip_ws()
+        if self.peek() == "}":
+            return tree
+        while True:
+            item = self._parse_brace_item()
+            tree.merge(item)
+            self._skip_ws()
+            if self.try_consume(","):
+                self._skip_ws()
+                if self.peek() == "}":
+                    break
+                continue
+            break
+        return tree
+
+    def _parse_brace_item(self) -> UseTree:
+        self._skip_ws()
+        if self.try_consume("*"):
+            return UseTree(glob=True)
+        if self.peek() == "{":
+            # Unusual but legal: `{{}}` — recurse
+            return self.parse_tree()
+
+        # `self` or path
+        if self.text.startswith("self", self.i) and (
+            self.i + 4 >= len(self.text)
+            or not (self.text[self.i + 4].isalnum() or self.text[self.i + 4] == "_")
+        ):
+            # peek ident
+            pass
+        name = self.ident()
+        if name == "self":
+            rename = self._parse_rename()
+            if rename is not None:
+                raise UseParseError("`self as …` is not supported in import merge")
+            return UseTree(include_self=True)
+
+        segments = [name]
+        while self.try_consume(":"):
+            self.expect(":")
+            if self.peek() == "{":
+                self.expect("{")
+                nested = self._parse_brace_list()
+                self.expect("}")
+                return self._nest(segments, nested)
+            if self.peek() == "*":
+                self.expect("*")
+                return self._nest(segments, UseTree(glob=True))
+            segments.append(self.ident())
+
+        return self._finish_path(segments)
+
+    @staticmethod
+    def _nest(segments: list[str], leaf: UseTree) -> UseTree:
+        cur = leaf
+        for seg in reversed(segments):
+            cur = UseTree(children={seg: cur})
+        return cur
+
+
+def parse_use_body(body: str) -> tuple[str, UseTree]:
+    """Parse `Root::rest`, `Root`, or brace-root `{…}` after the `use` keyword."""
+    body = body.strip()
+    if body.endswith(";"):
+        body = body[:-1].strip()
+    p = _Parser(body)
+    p._skip_ws()
+    # `pub use { a::B, c::D };` — brace-rooted re-export (no path prefix).
+    if p.peek() == "{":
+        p.expect("{")
+        rest = p._parse_brace_list()
+        p.expect("}")
+        p._skip_ws()
+        if p.i < len(p.text):
+            raise UseParseError(f"trailing junk in use body: {p.text[p.i:]!r}")
+        return "", rest
+    root = p.ident()
+    if p.try_consume(":"):
+        p.expect(":")
+        rest = p.parse_tree()
+    else:
+        # `use super;` — import the parent module binding.
+        rest = UseTree(include_self=True)
+    p._skip_ws()
+    if p.i < len(p.text):
+        raise UseParseError(f"trailing junk in use body: {p.text[p.i:]!r}")
+    return root, rest
+
+
+def render_use(indent: str, root: str, tree: UseTree) -> str:
+    """Pretty-print a single `use` item (with trailing `;`)."""
+    if root == "":
+        items = _brace_items(tree)
+        inner = ",\n".join(f"    {it}" for it in items)
+        return f"{indent}use {{\n{inner},\n}};"
+    body = _render_tree(tree, is_root_rest=True)
+    if body == "self" and not tree.children and not tree.bindings and not tree.glob:
+        return f"{indent}use {root};"
+    if not body:
+        return f"{indent}use {root};"
+    if _is_simple_path(tree):
+        return f"{indent}use {root}::{_render_simple_path(tree)};"
+    return f"{indent}use {root}::{body};"
+
+
+def _is_simple_path(tree: UseTree) -> bool:
+    """True when the tree is a single path without braces."""
+    if tree.glob or tree.include_self:
+        return False
+    if tree.bindings and tree.children:
+        return False
+    if len(tree.bindings) > 1:
+        return False
+    if len(tree.bindings) == 1:
+        name, rename = tree.bindings[0]
+        return rename is None and not tree.children
+    if len(tree.children) == 1:
+        return _is_simple_path(next(iter(tree.children.values())))
+    return False
+
+
+def _render_simple_path(tree: UseTree) -> str:
+    parts: list[str] = []
+    cur = tree
+    while True:
+        if len(cur.bindings) == 1 and not cur.children:
+            name, rename = cur.bindings[0]
+            if rename is None:
+                parts.append(name)
+            elif rename == "_":
+                parts.append(f"{name} as _")
+            else:
+                parts.append(f"{name} as {rename}")
+            return "::".join(parts)
+        if len(cur.children) == 1 and not cur.bindings:
+            seg, child = next(iter(cur.children.items()))
+            parts.append(seg)
+            cur = child
+            continue
+        raise AssertionError("not a simple path")
+
+
+def _render_binding(name: str, rename: str | None) -> str:
+    if rename is None:
+        return name
+    if rename == "_":
+        return f"{name} as _"
+    return f"{name} as {rename}"
+
+
+def _render_tree(tree: UseTree, *, is_root_rest: bool) -> str:
+    items = _brace_items(tree)
+    if not items:
+        if tree.include_self:
+            return "self"
+        return ""
+    if len(items) == 1 and not tree.include_self and not tree.glob and is_root_rest:
+        return items[0]
+    if len(items) > 2 or len(", ".join(items)) > 80 or any("{" in it for it in items):
+        rendered = ",\n".join(f"    {it}" for it in items)
+        return "{\n" + rendered + ",\n}"
+    return "{" + ", ".join(items) + "}"
+
+
+def _brace_items(tree: UseTree) -> list[str]:
+    items: list[str] = []
+    if tree.include_self:
+        items.append("self")
+    if tree.glob:
+        items.append("*")
+
+    named: list[tuple[str, str]] = []
+    for name, rename in tree.bindings:
+        named.append((name, _render_binding(name, rename)))
+    for seg in tree.children:
+        named.append((seg, _render_child(seg, tree.children[seg])))
+    # rustfmt-like: self, *, then alphabetical by source name
+    named.sort(key=lambda pair: pair[0])
+    items.extend(text for _, text in named)
+    return items
+
+
+def _render_child(seg: str, child: UseTree) -> str:
+    if (
+        child.include_self
+        and not child.glob
+        and not child.bindings
+        and not child.children
+    ):
+        return seg
+    if (
+        not child.include_self
+        and not child.glob
+        and not child.children
+        and len(child.bindings) == 1
+    ):
+        name, rename = child.bindings[0]
+        return f"{seg}::{_render_binding(name, rename)}"
+    if (
+        not child.include_self
+        and not child.glob
+        and not child.bindings
+        and len(child.children) == 1
+    ):
+        nxt, nested = next(iter(child.children.items()))
+        return f"{seg}::{_render_child(nxt, nested)}"
+
+    inner_items = _brace_items(child)
+    if (
+        not child.include_self
+        and not child.glob
+        and len(inner_items) == 1
+        and "{" not in inner_items[0]
+    ):
+        return f"{seg}::{inner_items[0]}"
+    inner = ", ".join(inner_items)
+    if len(inner_items) > 2 or len(inner) > 60 or any("{" in it for it in inner_items):
+        rendered = ",\n".join(f"    {it}" for it in inner_items)
+        return f"{seg}::{{\n{rendered},\n}}"
+    return f"{seg}::{{{inner}}}"
+
+
+# ---------------------------------------------------------------------------
+# File analysis
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Scope:
+    kind: str  # mod | fn | other | macro
+    brace_depth: int
+    name: str = ""
+    scope_id: int = 0
+
+
+@dataclass
+class UseRecord:
+    start: int  # 1-based inclusive
+    end: int  # 1-based inclusive
+    indent: str
+    is_pub: bool
+    root: str
+    attrs: tuple[str, ...]  # raw attr lines immediately above
+    body: str  # text after `use `, including nested lines, no leading indent on first
+    scope_id: int
+    has_comment: bool
+
+
+def _leading_attrs(lines: list[str], use_lineno0: int) -> tuple[str, ...]:
+    """Collect contiguous `#[…]` lines directly above a use (no blank gaps)."""
+    attrs: list[str] = []
+    i = use_lineno0 - 1
+    while i >= 0:
+        raw = lines[i]
+        if ATTR_LINE.match(raw) and not raw.strip().startswith("#!"):
+            attrs.append(raw.rstrip())
+            i -= 1
+            continue
+        break
+    attrs.reverse()
+    return tuple(attrs)
+
+
+def _use_has_comment(block_lines: list[str]) -> bool:
+    for line in block_lines:
+        code, _ = strip_strings_and_comments(line, False)
+        if "//" in line and code.strip() != line.split("//")[0].strip():
+            # comment outside strings
+            if LINE_COMMENT.match(line) or (not ATTR_LINE.match(line) and "//" in line):
+                # inline comment on a use line
+                stripped_code = code.rstrip()
+                if len(stripped_code) < len(line.rstrip().split("//")[0].rstrip()) or (
+                    "//" in line and not line.strip().startswith("//")
+                ):
+                    # crude: any // in the physical line of a use block
+                    if re.search(r"//", line):
+                        # ignore // inside strings already stripped — if raw has // and
+                        # code lost content after //, it's a comment
+                        if line.find("//") >= 0:
+                            before = line[: line.find("//")]
+                            if strip_strings_and_comments(before, False)[0] == before or True:
+                                # treat any // in use block as comment (safe skip for fix)
+                                return True
+    return any("//" in ln for ln in block_lines)
+
+
+def collect_uses(path: Path) -> tuple[list[str], list[UseRecord], list[str]]:
+    """Return (lines, use_records, structural_errors)."""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    rel = path.relative_to(ROOT)
+    errors: list[str] = []
+    uses: list[UseRecord] = []
+
+    brace = 0
+    next_scope_id = 1
+    stack: list[Scope] = [Scope("mod", 0, "<file>", 0)]
+    pending: str | None = None
+    pending_name = ""
+    in_block_comment = False
+    in_use = False
+    use_brace_delta = 0
+    use_line_start = 0
+    use_is_pub = False
+    use_indent = ""
+    use_scope_id = 0
+    use_attrs: tuple[str, ...] = ()
+    use_buf: list[str] = []
+
+    def finish_use(end_lineno: int) -> None:
+        nonlocal in_use
+        block = use_buf[:]
+        first = block[0]
+        hm = USE_HEADER.match(first)
+        if not hm:
+            errors.append(f"{rel}:{use_line_start}: cannot parse use header: {first.strip()}")
+            in_use = False
+            return
+        body_parts = [hm.group("body")]
+        for extra in block[1:]:
+            body_parts.append(extra)
+        body = "\n".join(body_parts)
+        # Strip trailing `;` from body for storage
+        body_code, _ = strip_strings_and_comments(body, False)
+        # Extract root
+        try:
+            root, _tree = parse_use_body(body_code if body_code.endswith(";") else body_code + ";")
+        except UseParseError as exc:
+            # Fallback root extraction
+            m = re.match(
+                r"^(?P<root>crate|super|self|std|core|alloc|[A-Za-z_][A-Za-z0-9_]*)",
+                body_code.strip(),
+            )
+            root = m.group("root") if m else "?"
+            errors.append(f"{rel}:{use_line_start}: use-tree parse error: {exc}")
+        has_comment = any("//" in ln for ln in block)
+        uses.append(
+            UseRecord(
+                start=use_line_start,
+                end=end_lineno,
+                indent=use_indent,
+                is_pub=use_is_pub,
+                root=root,
+                attrs=use_attrs,
+                body=body,
+                scope_id=use_scope_id,
+                has_comment=has_comment,
+            )
+        )
+        in_use = False
+
+    for lineno, raw in enumerate(lines, 1):
+        code, in_block_comment = strip_strings_and_comments(raw, in_block_comment)
+
+        if in_use:
+            use_buf.append(raw)
+            # Use-tree `{…}` is not a language scope — do not touch `brace`/`stack`.
+            use_brace_delta += code.count("{") - code.count("}")
+            if ";" in code and use_brace_delta <= 0:
+                finish_use(lineno)
+            continue
+
+        if not code.strip():
+            continue
+
+        if DOC_LINE.match(raw) or ATTR_LINE.match(raw):
+            continue
+
+        if USE_ITEM.match(raw):
+            innermost = stack[-1].kind if stack else "mod"
+            if innermost != "mod":
+                scope = stack[-1].name or innermost
+                kind = stack[-1].kind
+                if kind == "fn":
+                    where = f"function `{scope}`"
+                else:
+                    where = f"`{kind}` scope" + (f" `{scope}`" if scope else "")
+                errors.append(
+                    f"{rel}:{lineno}: `use` must be in a module preamble "
+                    f"(file header or `mod` block), not inside {where}: "
+                    f"{raw.strip()}"
+                )
+            hm = USE_HEADER.match(raw)
+            use_line_start = lineno
+            use_is_pub = bool(hm and hm.group("pub"))
+            use_indent = hm.group("indent") if hm else ""
+            use_scope_id = stack[-1].scope_id if stack else 0
+            use_attrs = _leading_attrs(lines, lineno - 1)
+            use_buf = [raw]
+            if ";" not in code:
+                in_use = True
+                use_brace_delta = code.count("{") - code.count("}")
+            else:
+                finish_use(lineno)
+            continue
+
+        if MACRO_RULES.search(code):
+            pending = "macro"
+            pending_name = "macro_rules"
+        else:
+            mod_m = MOD_ITEM.match(raw)
+            if mod_m and ";" not in code:
+                pending = "mod"
+                pending_name = mod_m.group("name")
+            elif FN_ITEM.search(code):
+                pending = "fn"
+                m = FN_ITEM.search(code)
+                pending_name = m.group("name") if m else ""
+            elif IMPL_OR_TRAIT.search(code) or CONST_STATIC.search(code) or TYPE_ALIAS.search(code):
+                if pending is None:
+                    pending = "other"
+                    pending_name = ""
+
+        if pending == "fn" and ";" in code and "{" not in code:
+            pending = None
+            pending_name = ""
+
+        in_macro = any(s.kind == "macro" for s in stack) or pending == "macro"
+        in_entities = "/entities/" in str(rel).replace("\\", "/")
+        looks_like_macro_body = (
+            "$" in code
+            or "::std::" in code
+            or "::core::" in code
+            or "info_from_model!" in code
+        )
+        if not in_macro and not in_entities and not looks_like_macro_body:
+            path_scan = strip_for_path_scan(raw)
+            path_scan_for_match = FUTURE_BOUND.sub(" impl Future ", path_scan)
+            for m in DEEP_PATH.finditer(path_scan_for_match):
+                path = m.group("path")
+                errors.append(
+                    f"{rel}:{lineno}: deep path `{path}` — import at module "
+                    f"preamble and use ≤1 `::` in bodies "
+                    f"(type short name or `module::item`): {raw.strip()}"
+                )
+
+        for ch in code:
+            if ch == "{":
+                brace += 1
+                kind = pending or "other"
+                sid = next_scope_id
+                next_scope_id += 1
+                parent_sid = stack[-1].scope_id if stack else 0
+                stack.append(
+                    Scope(
+                        kind,
+                        brace,
+                        pending_name,
+                        sid if kind == "mod" else parent_sid,
+                    )
+                )
+                pending = None
+                pending_name = ""
+            elif ch == "}":
+                while stack and stack[-1].brace_depth == brace:
+                    stack.pop()
+                brace = max(0, brace - 1)
+
+    if in_use:
+        errors.append(
+            f"{rel}:{use_line_start}: unfinished `use` tree (missing `;`?) — lint aborted mid-file"
+        )
+
+    return lines, uses, errors
+
+
+def tree_import_errors(path: Path, uses: list[UseRecord]) -> list[str]:
+    rel = path.relative_to(ROOT)
+    groups: dict[tuple[int, bool, str, tuple[str, ...]], list[UseRecord]] = {}
+    for u in uses:
+        if u.is_pub:
+            continue
+        if u.root == "?":
+            continue
+        key = (u.scope_id, u.is_pub, u.root, u.attrs)
+        groups.setdefault(key, []).append(u)
+
+    errors: list[str] = []
+    for (_sid, _pub, root, attrs), items in sorted(groups.items(), key=lambda kv: kv[1][0].start):
+        if len(items) < 2:
+            continue
+        attr_note = ""
+        if attrs:
+            attr_note = f" with attrs `{attrs[-1].strip()}`"
+        locs = ", ".join(f"L{u.start}" for u in items)
+        errors.append(
+            f"{rel}:{items[0].start}: multiple `use {root}::…` in the same module "
+            f"scope{attr_note} ({len(items)} statements at {locs}) — merge into one "
+            f"tree (`use {root}::{{…}}`)"
+        )
+    return errors
+
+
+def fix_file(path: Path) -> tuple[bool, list[str]]:
+    """Merge duplicate-root uses. Returns (changed, errors)."""
+    lines, uses, structural = collect_uses(path)
+    # Still try to fix even if deep-path errors exist; parse errors may block groups
+    groups: dict[tuple[int, bool, str, tuple[str, ...]], list[UseRecord]] = {}
+    for u in uses:
+        if u.is_pub:
+            continue
+        if u.root == "?":
+            continue
+        key = (u.scope_id, False, u.root, u.attrs)
+        groups.setdefault(key, []).append(u)
+
+    # Apply merges from bottom to top so line numbers stay valid via full rewrite plan
+    deletions: set[int] = set()  # 0-based line indices to delete
+    replacements: dict[int, list[str]] = {}  # 0-based start -> new lines
+    fix_errors: list[str] = []
+
+    for key, items in groups.items():
+        if len(items) < 2:
+            continue
+        items = sorted(items, key=lambda u: u.start)
+        if any(u.has_comment for u in items):
+            fix_errors.append(
+                f"{path.relative_to(ROOT)}:{items[0].start}: skip autofix — "
+                f"`use {items[0].root}` group has comments; merge manually"
+            )
+            continue
+        try:
+            merged = UseTree()
+            root = items[0].root
+            for u in items:
+                body_code, _ = strip_strings_and_comments(u.body, False)
+                r, tree = parse_use_body(body_code if ";" in body_code else body_code + ";")
+                if r != root:
+                    raise UseParseError(f"root mismatch {r} vs {root}")
+                merged.merge(tree)
+            # Render — prefer multiline brace form; rustfmt will tidy
+            text = render_use(items[0].indent, root, merged)
+            # Normalize nested braces indentation via a simple expand:
+            new_lines = _format_use_lines(text, items[0].indent)
+            # Keep attrs on the first use only (they already sit above start)
+            first = items[0]
+            replacements[first.start - 1] = new_lines
+            for ln in range(first.start - 1, first.end):
+                if ln != first.start - 1:
+                    deletions.add(ln)
+            # Delete the first use's original continuation lines; replacement covers start
+            for ln in range(first.start, first.end):
+                deletions.add(ln)
+            for u in items[1:]:
+                # Delete attrs belonging exclusively to subsequent uses
+                attr_count = len(u.attrs)
+                for ln in range(u.start - 1 - attr_count, u.end):
+                    deletions.add(ln)
+        except (UseParseError, ValueError) as exc:
+            fix_errors.append(
+                f"{path.relative_to(ROOT)}:{items[0].start}: skip autofix for "
+                f"`use {items[0].root}`: {exc}"
+            )
+
+    if not replacements and not deletions:
+        return False, structural + fix_errors
+
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if i in replacements:
+            out.extend(replacements[i])
+            i += 1
+            continue
+        if i in deletions:
+            i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+
+    # Collapse accidental triple blank lines created by deletions
+    cleaned: list[str] = []
+    blank_run = 0
+    for ln in out:
+        if ln.strip() == "":
+            blank_run += 1
+            if blank_run <= 2:
+                cleaned.append(ln)
+        else:
+            blank_run = 0
+            cleaned.append(ln)
+
+    new_text = "\n".join(cleaned) + "\n"
+    old_text = path.read_text(encoding="utf-8", errors="replace")
+    if not old_text.endswith("\n"):
+        # preserve final newline policy: always end with newline
+        pass
+    if new_text != old_text if old_text.endswith("\n") else new_text != old_text + "\n":
+        path.write_text(new_text, encoding="utf-8")
+        return True, structural + fix_errors
+    return False, structural + fix_errors
+
+
+def _format_use_lines(text: str, indent: str) -> list[str]:
+    """Split a rendered use into lines; re-indent nested braces simply."""
+    # render_use may already contain newlines with 4-space inner indent relative to 0.
+    # Re-base so inner content is indent+4.
+    raw_lines = text.splitlines()
+    if len(raw_lines) == 1:
+        return raw_lines
+    out: list[str] = []
+    for i, ln in enumerate(raw_lines):
+        if i == 0:
+            out.append(ln)
+            continue
+        # ln is either `    foo,` or `}` 
+        stripped = ln.lstrip(" ")
+        # depth from leading spaces in renderer (multiples of 4)
+        depth = (len(ln) - len(ln.lstrip(" "))) // 4
+        out.append(indent + ("    " * depth) + stripped)
+    return out
+
+
+def lint_file(path: Path) -> list[str]:
+    _lines, uses, errors = collect_uses(path)
+    errors.extend(tree_import_errors(path, uses))
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+
+def _self_test() -> None:
+    cases: list[tuple[list[str], str]] = [
+        (
+            [
+                "use std::cmp::Ordering;",
+                "use std::panic;",
+                "use std::panic::AssertUnwindSafe;",
+            ],
+            "use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};",
+        ),
+        (
+            [
+                "use crate::entities::quant_trade_policy_artifact;",
+                "use crate::entities::quant_trade_policy_governance_audit;",
+                "use crate::{\n    enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},\n"
+                "    types::{ContentHash, TradePolicyArtifactId},\n};",
+            ],
+            "use crate::{\n    entities::{quant_trade_policy_artifact, quant_trade_policy_governance_audit},\n"
+            "    enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},\n"
+            "    types::{ContentHash, TradePolicyArtifactId},\n};",
+        ),
+        (
+            [
+                "use std::sync::atomic::AtomicU64 as StdSyncAtomicU64;",
+                "use std::sync::atomic::Ordering as StdSyncOrdering;",
+            ],
+            "use std::sync::atomic::{AtomicU64 as StdSyncAtomicU64, Ordering as StdSyncOrdering};",
+        ),
+        (
+            ["use super::*;", "use super::Foo;"],
+            "use super::{*, Foo};",
+        ),
+        (
+            [
+                "use std::sync::atomic::AtomicU64 as StdSyncAtomicU64;",
+                "use std::sync::atomic::Ordering as StdSyncOrdering;",
+                "use std::{\n    sync::{Arc, atomic, atomic::{AtomicU64, Ordering}},\n    time::Instant,\n};",
+            ],
+            "use std::{\n    sync::{\n    Arc,\n    atomic::{self, AtomicU64, AtomicU64 as StdSyncAtomicU64, Ordering, Ordering as StdSyncOrdering},\n},\n    time::Instant,\n};",
+        ),
+    ]
+    for uses, _expected in cases:
+        merged = UseTree()
+        root = None
+        for u in uses:
+            body = u[len("use ") :]
+            r, tree = parse_use_body(body)
+            if root is None:
+                root = r
+            assert r == root, (r, root, u)
+            merged.merge(tree)
+        got = render_use("", root or "", merged)
+        r2, t2 = parse_use_body(got[len("use ") :])
+        assert r2 == root
+        got2 = render_use("", r2, t2)
+        assert got == got2, (got, got2)
+        print("ok:", got.replace("\n", "\\n")[:120])
+    # brace-root pub use
+    r, t = parse_use_body("{\n    a::B,\n    c::D,\n};")
+    assert r == ""
+    assert "a" in t.children
+    print("ok: brace-root")
+    print("self-test passed")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="merge multiple `use Root::…` into one tree per module scope",
+    )
+    parser.add_argument("--self-test", action="store_true", help="run merger unit checks")
+    args = parser.parse_args(argv)
+
+    if args.self_test:
+        _self_test()
+        return 0
+
+    files = iter_rs_files()
+    if args.fix:
+        changed = 0
+        fix_msgs: list[str] = []
+        for path in files:
+            did, errs = fix_file(path)
+            if did:
+                changed += 1
+            fix_msgs.extend(e for e in errs if "skip autofix" in e)
+        print(f"=== Autofix: merged tree imports in {changed} file(s) ===")
+        if fix_msgs:
+            print("\n".join(fix_msgs))
+            print(f"WARNING: {len(fix_msgs)} group(s) skipped")
+        # fall through to check
+
+    all_errors: list[str] = []
+    for path in files:
+        all_errors.extend(lint_file(path))
+
+    use_errs = [e for e in all_errors if "`use` must be" in e]
+    path_errs = [e for e in all_errors if "deep path" in e]
+    tree_errs = [e for e in all_errors if "multiple `use " in e]
+    other = [
+        e
+        for e in all_errors
+        if e not in use_errs and e not in path_errs and e not in tree_errs
+    ]
+
+    print("=== Checking no `use` outside module preambles ===")
+    if use_errs:
+        print("\n".join(use_errs))
+        print(f"ERROR: {len(use_errs)} nested `use` violation(s)")
+    else:
+        print("ok")
+
+    print("=== Checking no deep paths in item bodies (≤1 `::`) ===")
+    if path_errs:
+        print("\n".join(path_errs))
+        print(f"ERROR: {len(path_errs)} deep-path violation(s)")
+    else:
+        print("ok")
+
+    print("=== Checking one `use` tree per root (per attrs / module scope) ===")
+    if tree_errs:
+        print("\n".join(tree_errs))
+        print(f"ERROR: {len(tree_errs)} tree-import violation(s)")
+        print("hint: run `bash scripts/lint-import-style.sh --fix` then `cargo fmt`")
+    else:
+        print("ok")
+
+    if other:
+        print("=== Other ===")
+        print("\n".join(other))
+
+    total = len(all_errors)
+    if total:
+        print(f"{total} import-style violation(s) in {len(files)} files")
+        return 1
+
+    print(f"Import-style checks passed ({len(files)} files).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

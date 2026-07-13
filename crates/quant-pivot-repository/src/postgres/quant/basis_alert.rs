@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 
-use crate::traits::BasisAlertRepository;
+use crate::{postgres::query::paginate_mapped, traits::BasisAlertRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{BasisAlertInfo, BasisAlertListQuery, NewBasisAlert, PageWindow, Paginated},
@@ -14,8 +14,6 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     IntoActiveModel, QueryFilter, QueryOrder,
 };
-
-use crate::postgres::query::paginate_mapped;
 
 /// Postgres-backed append-only basis-alert ledger.
 pub struct PgBasisAlertRepository {

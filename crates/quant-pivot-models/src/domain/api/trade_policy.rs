@@ -6,13 +6,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 
-use crate::types::TradePolicyGovernanceAuditId;
 use crate::{
     domain::{TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, pagination::PageRequest},
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
     types::{
         ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyFitContract,
-        TradePolicyPublicationBlocker, TrainingDatasetId,
+        TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TrainingDatasetId,
     },
 };
 

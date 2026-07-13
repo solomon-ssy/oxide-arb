@@ -1,7 +1,6 @@
 //! On-chain trade-tape ingest availability (shared by feature + monitor planes).
 
-use std::collections::HashMap;
-use std::hash::BuildHasher;
+use std::{collections::HashMap, hash::BuildHasher};
 
 use quant_pivot_api::exchange::{
     EXCHANGE_CONTRACTS, ExchangeContract,

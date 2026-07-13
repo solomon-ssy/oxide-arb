@@ -8,7 +8,7 @@ use super::{
         ReportBundleDeps, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
     },
 };
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{execution::IntentLifecyclePublisher, observability::metrics_hub::MetricsHub};
 use parking_lot::Mutex;
 use quant_pivot_api::{
     clob::ClobClient,
@@ -19,8 +19,6 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{config::DeployConfig, domain::CoreEventPublisher};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-use crate::execution::IntentLifecyclePublisher;
 
 impl AppContext {
     /// Build all subsystems from deploy config.

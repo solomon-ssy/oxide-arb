@@ -94,9 +94,9 @@ pub fn validate_category_scope_weights(
 
 #[cfg(test)]
 mod tests {
-    use super::super::FactorWeight;
-    use super::{infer_training_category_scope, validate_category_scope_weights};
-    use crate::training::fixtures;
+    use super::{
+        super::FactorWeight, infer_training_category_scope, validate_category_scope_weights,
+    };
     use crate::{
         factors::names::{DOMAIN_CRYPTO_STRIKE_PRESSURE, LIQUIDITY_DEPTH},
         features::{
@@ -104,14 +104,15 @@ mod tests {
             names::market as market_names,
         },
         selection::ModelFeatureRequirements,
-        training::TrainingExample,
+        training::{TrainingExample, fixtures},
     };
     use chrono::Utc;
-    use quant_pivot_models::domain::DecisionClock;
-    use quant_pivot_models::types::training::TrainingSampleSource;
     use quant_pivot_models::{
+        domain::DecisionClock,
         enums::{common::MarketCategory, quant::DataQualityStatus},
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId},
+        types::{
+            MarketId, SchemaVersion, TokenId, TrainingExampleId, training::TrainingSampleSource,
+        },
     };
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;

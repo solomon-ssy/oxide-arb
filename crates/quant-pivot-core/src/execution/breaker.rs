@@ -28,7 +28,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -50,8 +50,6 @@ use quant_pivot_repository::traits::OperationLogRepository;
 use rust_decimal::Decimal;
 
 use crate::{execution::admission::VenueHealth, observability::metrics_hub::MetricsHub};
-use std::sync::MutexGuard;
-use std::sync::PoisonError;
 
 /// Audit actor recorded for breaker-initiated kill-switch escalations.
 const BREAKER_ACTOR: &str = "system:execution_breaker";

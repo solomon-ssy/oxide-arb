@@ -10,11 +10,11 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::{CoreEvent, CoreEventPublisher, IntentLifecycleEvent, OrderIntentInfo},
+    domain::{
+        CoreEvent, CoreEventPublisher, IntentEventKind, IntentLifecycleEvent, OrderIntentInfo,
+    },
     enums::quant::OrderIntentStatus,
 };
-
-use quant_pivot_models::domain::IntentEventKind;
 
 /// Publishes `quant.intent` lifecycle events on the shared core event bus.
 #[derive(Clone)]

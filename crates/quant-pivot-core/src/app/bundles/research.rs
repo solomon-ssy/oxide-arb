@@ -1,7 +1,6 @@
 //! Research plane bundle (Phase 3+): artifacts, selection, feature + factor pipelines.
 
 use super::{DataBundle, GovernanceBundle, InfraBundle};
-use crate::service::feature_integrity::RepositoryFeatureParityGate;
 use crate::{
     governance::{
         CoreCalibrationArtifactLoader, FactorGovernanceDeps, FactorGovernanceService,
@@ -11,6 +10,7 @@ use crate::{
     service::{
         bias_table_fit::BiasTableFitService,
         factor_pipeline::FactorPipelineService,
+        feature_integrity::RepositoryFeatureParityGate,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
         frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
@@ -21,11 +21,13 @@ use crate::{
 };
 use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::domain::{
-    CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
-};
 use quant_pivot_models::{
-    clickhouse::QuantFeatureParityEventRow, config::DeployConfig, domain::RuntimeConfigPort,
+    clickhouse::QuantFeatureParityEventRow,
+    config::DeployConfig,
+    domain::{
+        CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
+        RuntimeConfigPort,
+    },
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -40,11 +42,12 @@ use quant_pivot_repository::{
         TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
-use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
-use quant_pivot_research::model::CalibrationArtifactLoader;
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
-    model::{DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder},
+    gates::{DefaultModelQualityGate, ModelQualityGate},
+    model::{
+        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder,
+    },
     selection::{ConfiguredMarketSelector, MarketSelector},
 };
 use std::sync::Arc;

@@ -1,7 +1,6 @@
 //! Trade-tape fact-read fixtures for report/factor E2E harnesses.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;

@@ -1,11 +1,13 @@
 //! Test-only synchronous fact sinks for durable writer contracts.
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_repository::traits::FactWriter;
-use std::sync::Mutex;
 
 /// Acknowledges and discards every batch.
 pub struct DiscardFactWriter<T> {

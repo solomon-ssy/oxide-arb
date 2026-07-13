@@ -15,8 +15,7 @@
 //! 3. no linkage record is PIT-valid at the decision boundary;
 //! 4. the PIT-valid record is `Unresolved` (no binding).
 
-use std::collections::HashMap;
-use std::hash::BuildHasher;
+use std::{collections::HashMap, hash::BuildHasher};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};

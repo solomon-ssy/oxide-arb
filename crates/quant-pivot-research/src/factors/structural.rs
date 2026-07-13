@@ -773,10 +773,12 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::structural_factors;
-    use crate::factors::{names::STRUCT_NEGRISK_LEG_SUM_DRIFT, value::RawFactorEligibility};
-    use crate::features::{
-        FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
-        names::structural as feat,
+    use crate::{
+        factors::{names::STRUCT_NEGRISK_LEG_SUM_DRIFT, value::RawFactorEligibility},
+        features::{
+            FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
+            names::structural as feat,
+        },
     };
 
     fn vector(values: BTreeMap<FeatureName, FeatureCell>) -> FeatureVector {

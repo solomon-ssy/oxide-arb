@@ -158,10 +158,10 @@ mod tests {
         DefaultSubjectValidator, SubjectExtractor, SubjectValidator, ValidationOutcome,
     };
     use chrono::{TimeZone, Utc};
-    use quant_pivot_models::domain::{
-        LinkageSourceMetadata, MarketSubject, PriceComparator, ResolutionOracle,
+    use quant_pivot_models::{
+        domain::{LinkageSourceMetadata, MarketSubject, PriceComparator, ResolutionOracle},
+        types::MarketId,
     };
-    use quant_pivot_models::types::MarketId;
 
     /// The literal Chainlink Data Streams rules-text anchor every observed
     /// short-cycle up/down market carries.

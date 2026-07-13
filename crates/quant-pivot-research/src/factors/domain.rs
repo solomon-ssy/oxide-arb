@@ -376,11 +376,13 @@ impl FactorComputer for BetaRegimeFactor {
 #[cfg(test)]
 mod tests {
     use super::{DomainFactorRegistry, crypto_domain_factors};
-    use crate::factors::value::RawFactorEligibility;
-    use crate::features::NullReason;
-    use crate::features::{
-        DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
-        names::{domain_crypto, market as market_names},
+    use crate::{
+        factors::value::RawFactorEligibility,
+        features::{
+            DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
+            NullReason,
+            names::{domain_crypto, market as market_names},
+        },
     };
     use chrono::Utc;
     use quant_pivot_models::{

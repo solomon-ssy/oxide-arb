@@ -6,7 +6,7 @@
 //! values, which prevents a self-comparison from reporting a false pass.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -61,11 +61,13 @@ use quant_pivot_research::{
 };
 use serde::Serialize;
 
-use crate::prefetch::historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec};
 use crate::{
     observability::serving_evidence::verify_completion,
     pit::platform::ch_historical::DurablePitSource,
-    prefetch::market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
+    prefetch::{
+        historical_window::{HistoricalWindowLoader, ReplaySample, WindowSpec},
+        market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
+    },
     projection::inference_batch::build_runtime_input,
     service::{
         bias_table_fit::resolve_frozen_bias_table,
@@ -80,7 +82,6 @@ use crate::{
         model_runner::{AlignedFeatureCrossSection, project_model_input_rows},
     },
 };
-use std::collections::HashSet;
 /// Process-lifetime dependencies of the production parity source.
 pub struct DurableFeatureParityDeps {
     pub model_runs: Arc<dyn ModelRunRepository>,

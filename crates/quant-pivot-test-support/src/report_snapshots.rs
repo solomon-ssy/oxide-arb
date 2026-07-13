@@ -4,8 +4,7 @@
 //! not-auto-eligible, and revoked report header. Uses [`seeded_uuid`] so snapshots
 //! stay stable across runs.
 
-use std::collections::BTreeMap;
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;

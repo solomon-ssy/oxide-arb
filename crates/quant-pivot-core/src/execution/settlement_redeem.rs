@@ -1249,17 +1249,11 @@ fn decimal_from_str(field: &'static str, value: &str) -> QuantResult<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quant_pivot_models::enums::common::{OrderType, Side};
-    use quant_pivot_models::enums::execution::OrderIntentKind;
-    use quant_pivot_models::types::{
-        Bps, ContentHash, ModelVersionId, OrderAmount, Probability, RecommendationId,
-        RuntimeConfigVersionId, ScaleOutState, ThesisInvalidationPolicy,
-    };
     use quant_pivot_models::{
         domain::OrderIntentInfo,
         enums::{
-            common::{MarketCategory, TickSize},
-            execution::ExitState,
+            common::{MarketCategory, OrderType, Side, TickSize},
+            execution::{ExitState, OrderIntentKind},
             market::MarketStatus,
             quant::{
                 AccountSource, ApprovalStatus, EntryTriggerState, ExitSettlementMode,
@@ -1267,7 +1261,9 @@ mod tests {
             },
         },
         types::{
-            EntryOrderSpec, EntryTrigger, EventId, ExitPolicySpec, OrderIntentId, PositionId, Price,
+            Bps, ContentHash, EntryOrderSpec, EntryTrigger, EventId, ExitPolicySpec,
+            ModelVersionId, OrderAmount, OrderIntentId, PositionId, Price, Probability,
+            RecommendationId, RuntimeConfigVersionId, ScaleOutState, ThesisInvalidationPolicy,
         },
     };
     use rust_decimal_macros::dec;

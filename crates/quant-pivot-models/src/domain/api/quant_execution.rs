@@ -32,8 +32,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
-use serde::de::Error as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 use uuid::Uuid;
 use validator::Validate;
 

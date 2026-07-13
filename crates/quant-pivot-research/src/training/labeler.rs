@@ -569,8 +569,10 @@ impl Labeler for SettlementOutcomeLabeler {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot};
-    use super::*;
+    use super::{
+        super::{DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot},
+        *,
+    };
     use crate::training::{ForwardSample, ForwardWindow, MarketResolution};
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{

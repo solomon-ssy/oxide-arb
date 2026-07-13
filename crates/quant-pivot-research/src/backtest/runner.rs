@@ -8,8 +8,7 @@
 //! ([`backtest_optimizer`](crate::portfolio::backtest_optimizer)) so the report
 //! hash is reproducible and build-independent.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

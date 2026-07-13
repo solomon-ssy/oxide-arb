@@ -273,14 +273,18 @@ fn u256_to_decimal(value: U256, scale: u32) -> Result<Decimal, DecodeRejectReaso
 
 #[cfg(test)]
 mod tests {
-    use crate::exchange::constants::{CTF_EXCHANGE_V1, CTF_EXCHANGE_V2};
-    use crate::exchange::order_filled_v1::OrderFilledV1;
-    use crate::exchange::order_filled_v2::OrderFilledV2;
+    use crate::exchange::{
+        constants::{CTF_EXCHANGE_V1, CTF_EXCHANGE_V2},
+        order_filled_v1::OrderFilledV1,
+        order_filled_v2::OrderFilledV2,
+    };
 
     use super::*;
-    use alloy::primitives::{Address, B256, U256};
-    use alloy::rpc::types::Log;
-    use alloy::sol_types::SolEvent;
+    use alloy::{
+        primitives::{Address, B256, U256},
+        rpc::types::Log,
+        sol_types::SolEvent,
+    };
     use quant_pivot_models::types::MarketId;
     use rust_decimal_macros::dec;
 

@@ -7,8 +7,7 @@ use super::{
     NewAccountSnapshot, NewEquitySnapshot, NewFeatureParityRun, NewPortfolioPlan,
     NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot, NewResearchJob,
 };
-use crate::domain::governance::NewOperationLog;
-use crate::types::FeatureParityStateId;
+use crate::{domain::governance::NewOperationLog, types::FeatureParityStateId};
 
 /// Sampled parity run and durable research job committed with one report.
 ///

@@ -20,10 +20,8 @@
 //! Cross-sectional `net` uses `ndarray` batch reduction; money fields remain
 //! `Decimal` / newtypes after quantization.
 
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::BTreeMap, time::Instant};
 mod batch;
-
-use std::{collections::BTreeMap, time::Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -539,19 +537,17 @@ mod tests {
     use super::WeightedFactorRuntime;
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, FactorDirection, OutcomeSide},
+        enums::{
+            factor::{FactorFamily, FactorIndeterminateReason},
+            quant::{DataQualityStatus, FactorDirection, OutcomeSide},
+        },
         runtime_config::FactorCrossSectionConfig,
         types::{
-            ContentHash, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
-            Probability, TokenId, Usd,
+            ContentHash, FactorDefinitionId, MarketId, ModelInputContract, ModelRunId,
+            ModelVersionId, Price, Probability, TokenId, Usd,
         },
     };
     use rust_decimal_macros::dec;
-
-    use quant_pivot_models::{
-        enums::factor::{FactorFamily, FactorIndeterminateReason},
-        types::ModelInputContract,
-    };
 
     use crate::{
         factors::{

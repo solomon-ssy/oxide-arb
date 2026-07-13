@@ -15,15 +15,16 @@
 //! `preferences_schema_ui_gaps`) that every schema leaf is covered exactly once
 //! and carries a real, bilingual `help`.
 
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
-use crate::domain::{
-    FieldSemantics, FieldWhen, FieldWidget, ModelPickerProps, ModelPickerSide, SchemaFieldRef,
-    SchemaNode, SchemaSection, SchemaUnion, SchemaUnionCase, UiProps, UiText,
+use crate::{
+    domain::{
+        FieldSemantics, FieldWhen, FieldWidget, ModelPickerProps, ModelPickerSide, SchemaFieldRef,
+        SchemaNode, SchemaSection, SchemaUnion, SchemaUnionCase, UiProps, UiText,
+    },
+    enums::common::MarketCategory,
+    schema::factor_names::GENERIC_SCORING_FACTOR_NAMES,
 };
-use crate::enums::common::MarketCategory;
-use crate::schema::factor_names::GENERIC_SCORING_FACTOR_NAMES;
 use serde_json::Value;
 
 /// Per-leaf UI metadata registered at compile time.

@@ -42,7 +42,6 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use crate::service::training_dataset;
 use crate::{
     app::bundles::ResearchBundle,
     service::{
@@ -52,6 +51,7 @@ use crate::{
             CpcvBacktestServiceDeps,
         },
         historical_replay::ReplayConfig,
+        training_dataset,
     },
 };
 

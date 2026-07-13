@@ -176,8 +176,10 @@ const fn evidence_decision_source(source: EvidenceSourceKind) -> Option<Decision
 
 #[cfg(test)]
 mod tests {
-    use super::super::{LabelName, TrainingLabel};
-    use super::*;
+    use super::{
+        super::{LabelName, TrainingLabel},
+        *,
+    };
     use crate::{
         features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector},
         training::fixtures,

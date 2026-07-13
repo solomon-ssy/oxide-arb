@@ -7,10 +7,10 @@
 
 use super::ScheduleCadence;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use croner::Cron;
-use croner::errors::CronError;
-use quant_pivot_error::config::ConfigError;
-use quant_pivot_error::{ConfigValidationError, ConfigValidationReport, QuantError, QuantResult};
+use croner::{Cron, errors::CronError};
+use quant_pivot_error::{
+    ConfigValidationError, ConfigValidationReport, QuantError, QuantResult, config::ConfigError,
+};
 use std::str::FromStr;
 
 /// Upper bound on previewed occurrences per request.

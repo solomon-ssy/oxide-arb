@@ -7,14 +7,15 @@
 //! applies through [`RuntimeConfigPort`] so subscribers (overlay applicator, etc.)
 //! reload atomically with the store swap.
 
-use std::sync::Arc;
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
 use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
-use quant_pivot_models::domain::RuntimeConfigVersionInfo;
 use quant_pivot_models::{
-    domain::{NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigPort},
+    domain::{
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigPort,
+        RuntimeConfigVersionInfo,
+    },
     enums::{
         quant::PublicationStatus,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},

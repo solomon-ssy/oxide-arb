@@ -127,10 +127,9 @@ impl LayeredResolver {
 
 #[cfg(test)]
 mod tests {
-    use super::LayeredResolver;
     use super::{
-        DefaultSubjectValidator, SubjectExtractor, SubjectValidator, Tier0SlugExtractor,
-        ValidationOutcome,
+        DefaultSubjectValidator, LayeredResolver, SubjectExtractor, SubjectValidator,
+        Tier0SlugExtractor, ValidationOutcome,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{

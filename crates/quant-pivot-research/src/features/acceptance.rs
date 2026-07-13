@@ -1,12 +1,15 @@
 //! Phase 03.2 §8 acceptance tests for the feature plane.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, atomic::Ordering};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::runtime_config::SelectionConfig;
 use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionClock, DecisionSource, DomainAvailability, FeatureVectorInfo,
@@ -25,6 +28,7 @@ use quant_pivot_models::{
     },
     runtime_config::{
         DataQualityConfig, DomainConfig, FeatureFamily, FeatureStalenessPolicy, FeaturesConfig,
+        SelectionConfig,
     },
     types::{
         Bps, CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId,
@@ -35,14 +39,16 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-use crate::features::names::structural::{NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_COUNT};
 use crate::{
     features::{
         FeatureBuildInput, FeatureBuilder, MarketWindowSnapshot, MicrostructureBucket,
         ResolvedBook, TradeTapeWindowSnapshot,
         availability::FeatureAvailabilityOracle,
         builder::ConfiguredFeatureBuilder,
-        names::{book, domain_crypto, market},
+        names::{
+            book, domain_crypto, market,
+            structural::{NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_COUNT},
+        },
         null_policy::{NullDecision, NullPolicyEngine},
         schema::FeatureSchema,
         value::{

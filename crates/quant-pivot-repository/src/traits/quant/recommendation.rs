@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{NewOperationLog, RecommendationInfo};
-use quant_pivot_models::types::{RecommendationId, RecommendationReportId};
+use quant_pivot_models::{
+    domain::{NewOperationLog, RecommendationInfo},
+    types::{RecommendationId, RecommendationReportId},
+};
 
 /// Recommendation access + per-recommendation TTL expiry.
 ///

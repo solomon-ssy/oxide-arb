@@ -11,11 +11,13 @@
 //! `TemplateEntailed` treatment of the same fields) remain the operator's
 //! judgment call and are not required to cite a span here either.
 
-use quant_pivot_models::domain::{
-    CryptoSubject, GroundingKind, GroundingProof, GroundingSpan, LinkageSourceMetadata,
-    ManualEvidenceInput,
+use quant_pivot_models::{
+    domain::{
+        CryptoSubject, GroundingKind, GroundingProof, GroundingSpan, LinkageSourceMetadata,
+        ManualEvidenceInput,
+    },
+    types::DomainInstrumentKey,
 };
-use quant_pivot_models::types::DomainInstrumentKey;
 
 use crate::linkage::extractor::{source_field_text, validate_structural_consistency};
 

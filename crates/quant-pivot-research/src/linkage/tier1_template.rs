@@ -21,7 +21,7 @@
 
 use std::sync::LazyLock;
 
-use chrono::{DateTime, Duration, LocalResult, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, LocalResult, TimeZone, Utc};
 use chrono_tz::America::New_York;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
@@ -40,7 +40,6 @@ use crate::linkage::{
     oracle::extract_oracle,
     ruleset::{AssetRule, find_alias, rule_for_alias},
 };
-use chrono::Datelike;
 
 /// Hourly ET up/down slug, with or without a year segment.
 static HOURLY_SLUG: LazyLock<Regex> = LazyLock::new(|| {

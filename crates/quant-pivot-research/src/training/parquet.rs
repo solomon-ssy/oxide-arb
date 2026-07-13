@@ -358,8 +358,10 @@ mod tests {
             RuntimeConfigVersionId, TrainingDatasetId,
         },
     };
-    use std::env;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        env,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn manifest(examples: &[TrainingExample]) -> DatasetManifest {
         let hash = |seed: char| {

@@ -15,9 +15,12 @@ use quant_pivot_models::{
         CompleteFeatureParityRun, FeatureParityExecutionPort, FeatureParityJobParams,
         FeatureParityRunInfo, FeatureParityRunView, JobProgressSink,
     },
-    enums::quant::{
-        FeatureCellState, FeatureParityEventStatus, FeatureParityRunKind, FeatureParityRunStatus,
-        FeatureParityStage, FeatureParityStateTransition,
+    enums::{
+        common::{AlertCategory, AlertLevel, AlertSource},
+        quant::{
+            FeatureCellState, FeatureParityEventStatus, FeatureParityRunKind,
+            FeatureParityRunStatus, FeatureParityStage, FeatureParityStateTransition,
+        },
     },
     types::{
         ContentHash, FeatureParityEventId, MarketId, ModelRunId, ModelVersionId,
@@ -40,7 +43,6 @@ use crate::{
     },
     report::ReportLifecycleService,
 };
-use quant_pivot_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
 const SAMPLE_FRACTION_NUMERATOR: usize = 1;
 const SAMPLE_FRACTION_DENOMINATOR: usize = 10;
 const SAMPLE_MINIMUM: usize = 20;
@@ -1327,9 +1329,11 @@ fn view(info: FeatureParityRunInfo) -> QuantResult<FeatureParityRunView> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::slice;
-    use std::sync::MutexGuard;
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{
+        collections::VecDeque,
+        slice,
+        sync::{Mutex, MutexGuard},
+    };
 
     use quant_pivot_models::{
         domain::{

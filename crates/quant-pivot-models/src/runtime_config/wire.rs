@@ -3,10 +3,9 @@
 use quant_pivot_error::QuantError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr};
 
 use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
-use std::str::FromStr;
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";

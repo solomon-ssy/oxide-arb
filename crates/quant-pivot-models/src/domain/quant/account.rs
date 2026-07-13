@@ -5,10 +5,9 @@
 //! types live in [`crate::types::account`] (shared with the research-plane
 //! `AccountSnapshot` aggregate).
 
-use crate::domain::pagination::PageRequest;
-use crate::entities::quant_account_snapshot;
-use crate::entities::quant_equity_snapshot;
 use crate::{
+    domain::pagination::PageRequest,
+    entities::{quant_account_snapshot, quant_equity_snapshot},
     enums::quant::AccountSource,
     types::{
         AccountPositions, AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, PositionSnapshot,

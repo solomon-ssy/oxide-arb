@@ -26,15 +26,18 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 
-use crate::features::{
-    builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedLeg},
-    generic::stats::{realized_volatility, simple_return},
-    names::structural as names,
-    resolved::{MicrostructureBucket, ResolvedBook},
-    value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
-};
-use crate::trade_tape::{
-    ConcentrationMissing, ParticipantConcentrationGate, compute_concentration, compute_role_gini,
+use crate::{
+    features::{
+        builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedLeg},
+        generic::stats::{realized_volatility, simple_return},
+        names::structural as names,
+        resolved::{MicrostructureBucket, ResolvedBook},
+        value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
+    },
+    trade_tape::{
+        ConcentrationMissing, ParticipantConcentrationGate, compute_concentration,
+        compute_role_gini,
+    },
 };
 
 /// One half of `[0, 1]` — the neutral prediction-market price.

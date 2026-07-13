@@ -289,8 +289,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::slice;
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, slice, sync::Arc};
 
     fn market() -> MarketRegistryInfo {
         let now = Utc.timestamp_millis_opt(1_000_000).single().expect("ts");

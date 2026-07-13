@@ -24,13 +24,12 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::features::value::EvidenceSourceKind;
 use crate::{
     features::{
         FeatureName, FeatureVector, MarketWindowSnapshot, NullReason,
         builder::ResolvedInputs,
         resolved::{ResolvedBook, ResolvedMarketContext},
-        value::EvidenceSourceRef,
+        value::{EvidenceSourceKind, EvidenceSourceRef},
     },
     hashing::ResearchHasher,
     pit::ResolvedMarketSnapshot,
@@ -472,8 +471,10 @@ mod tests {
         book_snapshot_ref_from_resolved, liquidity_score_from_resolved,
         market_context_from_resolved, recommendation_identity_from_resolved,
     };
-    use crate::features::{ResolvedBook, resolved::ResolvedMarketContext};
-    use crate::selection::SelectedMarket;
+    use crate::{
+        features::{ResolvedBook, resolved::ResolvedMarketContext},
+        selection::SelectedMarket,
+    };
     use chrono::Utc;
     use quant_pivot_models::{
         domain::{

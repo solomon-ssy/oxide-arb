@@ -884,10 +884,13 @@ pub(crate) mod fixtures {
         selection::SelectedMarket,
     };
     use chrono::{DateTime, Duration, TimeZone, Utc};
-    use quant_pivot_models::enums::common::TickSize::Hundredth;
     use quant_pivot_models::{
         domain::{DecisionClock, DecisionSource},
-        enums::{common::MarketCategory, market::MarketStatus, quant::DataQualityStatus},
+        enums::{
+            common::{MarketCategory, TickSize::Hundredth},
+            market::MarketStatus,
+            quant::DataQualityStatus,
+        },
         types::{
             BookSnapshotRef, BookSnapshotSource, Bps, CatalogSyncBatchId, ContentHash,
             EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketContext, MarketId, Price,

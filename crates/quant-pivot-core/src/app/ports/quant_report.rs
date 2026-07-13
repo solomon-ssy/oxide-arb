@@ -7,7 +7,10 @@
 //! never touch a repository or a venue client directly.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{
+        BTreeMap, BTreeSet, HashMap, HashSet,
+        hash_map::Entry::{Occupied, Vacant},
+    },
     sync::Arc,
 };
 
@@ -44,8 +47,6 @@ use crate::{
     report::{AdHocReportRequest, ReportLifecycleService, ReportTrigger},
     service::durable_feature_parity::{persisted_capture, report_decision_boundary},
 };
-use std::collections::hash_map::Entry::Occupied;
-use std::collections::hash_map::Entry::Vacant;
 
 /// Web-facing report port assembled from the report plane.
 pub struct CoreQuantReportPort {

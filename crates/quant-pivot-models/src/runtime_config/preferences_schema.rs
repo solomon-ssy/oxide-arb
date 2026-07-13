@@ -12,15 +12,12 @@ use crate::{
         RuntimeConfigSchemaView, UiText,
     },
     runtime_config::RuntimeConfig,
-    schema::ui::FieldUiEntry,
+    schema::ui::{FieldUiEntry, enum_label, field_ui, field_ui_map, schema_tree, tree_field_paths},
 };
-
-use crate::schema::ui::{enum_label, field_ui, field_ui_map, schema_tree, tree_field_paths};
 
 use super::json_schema::fields::{SchemaLeaf, walk_schema_leaves};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Build the preferences envelope for `GET /runtime-config/schema`.
 #[must_use]

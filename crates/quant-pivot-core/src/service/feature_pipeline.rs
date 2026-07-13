@@ -39,10 +39,8 @@ use quant_pivot_repository::traits::{
     BasisAlertRepository, FeatureRepository, MarketLinkageRepository,
     TradeTapeBlockCursorRepository,
 };
-use quant_pivot_research::domain::{
-    build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument,
-};
 use quant_pivot_research::{
+    domain::{build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument},
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureName, FeatureSchema,
         FeatureSourceWindows, FeatureVector, MarketDecisionCapture, MarketWindowSnapshot,

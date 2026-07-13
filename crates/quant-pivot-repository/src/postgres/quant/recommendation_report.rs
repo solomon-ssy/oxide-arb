@@ -2,7 +2,7 @@
 
 use super::equity_snapshot::insert_equity_snapshot_monotonic;
 use crate::{
-    postgres::{error, quant::feature_parity, state_hash},
+    postgres::{error, quant::feature_parity, query::paginate_mapped, state_hash},
     traits::RecommendationReportRepository,
 };
 use chrono::{DateTime, Utc};
@@ -33,7 +33,6 @@ use sea_orm::{
     TransactionTrait,
 };
 
-use crate::postgres::query::paginate_mapped;
 use std::collections::HashSet;
 
 /// Postgres-backed recommendation report repository.
@@ -585,9 +584,9 @@ async fn transition_report_status(
 #[cfg(test)]
 mod tests {
     use super::page_condition;
-    use quant_pivot_models::entities::quant_recommendation_report;
     use quant_pivot_models::{
         domain::{QuantReportListQuery, pagination::PageRequest},
+        entities::quant_recommendation_report,
         enums::quant::{
             QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
         },

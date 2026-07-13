@@ -13,12 +13,12 @@ use quant_pivot_models::{
     enums::common::Side,
     types::{MarketId, Price, Shares, TokenId},
 };
-use std::sync::atomic::AtomicU64 as StdSyncAtomicU64;
-use std::sync::atomic::Ordering as StdSyncOrdering;
 use std::{
     sync::{
-        Arc, atomic,
-        atomic::{AtomicU64, Ordering},
+        Arc,
+        atomic::{
+            self, AtomicU64 as StdSyncAtomicU64, AtomicU64, Ordering as StdSyncOrdering, Ordering,
+        },
     },
     time::Instant,
 };

@@ -1,7 +1,6 @@
 //! Execution kill-switch operational-state persistence DTOs.
 
-use crate::entities::system_kill_switch;
-use crate::enums::execution::KillSwitchState;
+use crate::{entities::system_kill_switch, enums::execution::KillSwitchState};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

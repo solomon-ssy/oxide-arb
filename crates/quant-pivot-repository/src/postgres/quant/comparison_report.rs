@@ -2,7 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::traits::ModelComparisonReportRepository;
+use crate::{
+    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
+    traits::ModelComparisonReportRepository,
+};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
@@ -16,8 +19,6 @@ use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder,
 };
-
-use crate::postgres::query::{list_by_fk_ordered_desc, paginate_mapped};
 
 /// Postgres-backed comparison-report ledger repository.
 pub struct PgModelComparisonReportRepository {

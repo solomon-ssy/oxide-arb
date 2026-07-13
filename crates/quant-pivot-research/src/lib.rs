@@ -56,9 +56,11 @@ pub mod validation;
 
 #[cfg(test)]
 mod acceptance_tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     /// Phase 3.0 §11: default build must not link polars / smartcore / argmin.
     #[test]

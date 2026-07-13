@@ -1,6 +1,9 @@
 //! Report builder orchestration.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
@@ -62,8 +65,6 @@ use super::{
     readiness::ReportReadinessGate,
     types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
 };
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 /// Report builder interface.
 #[async_trait::async_trait]

@@ -6,12 +6,10 @@
 //! catalog ledger. The in-memory [`MaterializedPitEngine`] serves a pre-fetched
 //! immutable window so dataset construction never performs per-row I/O.
 
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 mod materialized;
 
 pub use materialized::MaterializedPitEngine;
-
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -32,7 +30,6 @@ use quant_pivot_models::{
     },
 };
 use serde::Serialize;
-use std::collections::HashMap;
 
 use crate::hashing::ResearchHasher;
 

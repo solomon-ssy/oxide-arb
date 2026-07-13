@@ -24,6 +24,7 @@ use quant_pivot_models::{
     types::{MarketId, Price, Usd},
 };
 use quant_pivot_research::{
+    domain::build_domain_slice_inputs,
     factors::{FactorEngine, MarketFactorOutcome},
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSourceWindows, FeatureVector,
@@ -38,7 +39,6 @@ use quant_pivot_research::{
 use crate::prefetch::historical_window::{
     Prefetched, ReplaySample, feature_window, replay_boundary, selected_market, trade_tape_window,
 };
-use quant_pivot_research::domain::build_domain_slice_inputs;
 
 /// Frozen feature/factor/data-quality config governing a replay.
 #[derive(Clone)]

@@ -1,8 +1,8 @@
 //! Pairwise model-comparison report persistence DTOs.
 
-use crate::entities::quant_model_comparison_report;
-use crate::types::{
-    BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
+use crate::{
+    entities::quant_model_comparison_report,
+    types::{BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;

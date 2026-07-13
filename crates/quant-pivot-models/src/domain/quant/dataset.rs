@@ -1,7 +1,7 @@
 //! Training-dataset ledger persistence DTOs.
 
-use crate::entities::quant_training_dataset;
 use crate::{
+    entities::quant_training_dataset,
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
         ArtifactUri, ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId,

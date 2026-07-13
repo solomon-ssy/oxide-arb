@@ -1,7 +1,6 @@
 use quant_pivot_error::QuantError;
 use rand::RngExt;
-use std::future::Future;
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub struct PeriodicTask;

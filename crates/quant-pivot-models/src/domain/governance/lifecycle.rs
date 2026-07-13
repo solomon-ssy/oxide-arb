@@ -115,8 +115,7 @@ impl MarketDataConnectivity {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::OperationalDegradeReason;
-    use crate::enums::execution::KillSwitchState;
+    use crate::{domain::OperationalDegradeReason, enums::execution::KillSwitchState};
 
     use super::{
         MarketDataConnectivity, OperationalPhase, WS_MARKET_DATA_STALE_THRESHOLD_MS,

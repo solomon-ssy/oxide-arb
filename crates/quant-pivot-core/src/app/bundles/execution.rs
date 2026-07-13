@@ -25,7 +25,6 @@ use quant_pivot_repository::traits::{
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
-use crate::service::feature_integrity::RepositoryFeatureParityGate;
 use crate::{
     execution::{
         AdmissionInputBuilder, AdmissionInputBuilderDeps, AttributionService,
@@ -41,6 +40,7 @@ use crate::{
     },
     prefetch::feature_window::FeatureWindowProvider,
     service::{
+        feature_integrity::RepositoryFeatureParityGate,
         model_backed_reinferer::{
             ModelBackedExitSignalReinferer, ModelBackedExitSignalReinfererDeps,
         },

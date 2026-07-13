@@ -1,7 +1,5 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
-use crate::entities::runtime_config_activation;
-use crate::entities::system_runtime_state;
 use crate::{
     domain::{
         ExecutionRecoverySummary,
@@ -9,6 +7,7 @@ use crate::{
         lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
         ports::runtime_control::CatalogState,
     },
+    entities::{runtime_config_activation, system_runtime_state},
     enums::{
         execution::KillSwitchState,
         quant::QuantRuntimeMode,

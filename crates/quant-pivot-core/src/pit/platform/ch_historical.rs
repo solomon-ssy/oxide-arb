@@ -6,7 +6,7 @@
 //! already-frozen source cutoff; feature-specific staleness policy is evaluated
 //! by the shared feature builder, never hidden inside this storage adapter.
 
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -24,7 +24,6 @@ use quant_pivot_research::pit::{
     BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot, resolve_catalog_snapshot,
 };
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 /// Outcome of decoding persisted book level JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -13,8 +13,8 @@ use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation, OrderIntentListQuery,
-        PageRequest, RecommendationInfo,
+        BookSnapshot, ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation,
+        OrderIntentListQuery, PageRequest, RecommendationInfo,
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult},
@@ -31,15 +31,13 @@ use quant_pivot_repository::traits::{
 };
 
 use super::AppContext;
-use crate::execution::TriggerEvaluation;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
-    execution::{ConfirmationProgress, evaluate_entry_trigger},
+    execution::{ConfirmationProgress, TriggerEvaluation, evaluate_entry_trigger},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::periodic_task::PeriodicTask,
     ingest::book_store::BookStore,
 };
-use quant_pivot_models::domain::BookSnapshot;
 
 /// Max armed intents pulled per dispatch pass.
 const AUTO_DISPATCH_BATCH: u64 = 64;

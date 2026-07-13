@@ -19,7 +19,6 @@ use quant_pivot_error::{
     QuantResult,
     storage::{StorageError, entity},
 };
-use quant_pivot_models::types::RecommendationId;
 use quant_pivot_models::{
     domain::{
         CapitalReconcileSettlement, CoreEvent, CoreEventPublisher, ExecutionOrderInfo,
@@ -35,7 +34,7 @@ use quant_pivot_models::{
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        ExecutionOrderId, OrderIntentId, Price, ReconciliationEvidence,
+        ExecutionOrderId, OrderIntentId, Price, RecommendationId, ReconciliationEvidence,
         ReconciliationEvidenceChain, Shares, Usd,
     },
 };

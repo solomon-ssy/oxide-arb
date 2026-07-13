@@ -1,7 +1,7 @@
 //! Capital-allocation ledger persistence DTOs.
 
-use crate::entities::quant_capital_allocation;
 use crate::{
+    entities::quant_capital_allocation,
     enums::execution::CapitalAllocationState,
     types::{CapitalAllocationId, OrderIntentId, RecommendationId, Usd},
 };

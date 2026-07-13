@@ -1,7 +1,7 @@
 //! Factor registry and factor value persistence DTOs.
 
-use crate::entities::quant_factor_definition;
 use crate::{
+    entities::quant_factor_definition,
     enums::{
         factor::{
             FactorDefinitionScope, FactorFamily, FactorIndeterminateReason, FactorValueState,

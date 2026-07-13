@@ -18,6 +18,7 @@
 
 use std::{
     collections::HashSet,
+    fmt::Display,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -47,7 +48,6 @@ use crate::{
 };
 
 use super::{job_factory::job_for_cadence, overlap::ScheduleOverlapGuard};
-use std::fmt::Display;
 
 fn scheduler_backend(error: impl Display) -> QuantError {
     SchedulerError::Backend {

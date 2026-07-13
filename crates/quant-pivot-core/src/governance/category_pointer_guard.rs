@@ -140,10 +140,14 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
-    use std::env;
-    use std::process;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        env, process,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
 
     struct FakeRegistry {
         version: ModelVersionInfo,

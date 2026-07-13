@@ -1,9 +1,8 @@
 //! Append-only, bitemporal Gamma catalog versions.
 
-use crate::entities::event_catalog_version;
-use crate::entities::market_catalog_version;
 use crate::{
     domain::{UpsertEvent, UpsertMarket},
+    entities::{event_catalog_version, market_catalog_version},
     types::{
         CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId, MarketCatalogVersionId,
         MarketId,

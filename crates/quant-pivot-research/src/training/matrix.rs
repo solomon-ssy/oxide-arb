@@ -996,11 +996,12 @@ mod tests {
         training::fixtures,
     };
     use chrono::{Duration, TimeZone};
-    use quant_pivot_models::types::Probability;
     use quant_pivot_models::{
         domain::DecisionClock,
         enums::quant::DataQualityStatus,
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
+        types::{
+            MarketId, Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
+        },
     };
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;

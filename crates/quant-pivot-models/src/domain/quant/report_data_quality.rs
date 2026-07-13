@@ -1,7 +1,9 @@
 //! Report-level data-quality snapshot persistence DTOs.
 
-use crate::entities::quant_report_data_quality_snapshot;
-use crate::types::{ReportDataQualitySnapshotId, ReportDataQualityTokens, RuntimeConfigVersionId};
+use crate::{
+    entities::quant_report_data_quality_snapshot,
+    types::{ReportDataQualitySnapshotId, ReportDataQualityTokens, RuntimeConfigVersionId},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

@@ -22,13 +22,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-use quant_pivot_models::domain::DecisionBoundary;
-use quant_pivot_models::enums::common::MarketCategory;
-use quant_pivot_models::enums::factor::NormalizationSource;
-use quant_pivot_models::runtime_config::{
-    FactorCrossSectionConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+use quant_pivot_models::{
+    domain::DecisionBoundary,
+    enums::{common::MarketCategory, factor::NormalizationSource},
+    runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy, TrainingOptimizerKind},
+    types::{ContentHash, MarketId, ModelInputContract, TokenId},
 };
-use quant_pivot_models::types::{ContentHash, MarketId, ModelInputContract, TokenId};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -58,9 +57,10 @@ use crate::{
     training::{LabelName, TrainingExample},
     validation::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup},
 };
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::mem;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem,
+};
 /// Which forward label a trainer targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelSelector {
@@ -1301,10 +1301,13 @@ struct TimeBlock {
 mod tests {
     use super::{
         LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
-        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, weighted_training_input_hash,
+        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, coordinate_search,
+        weighted_training_input_hash,
     };
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::slice;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        slice,
+    };
 
     use chrono::{TimeZone, Utc};
     #[cfg(not(feature = "optimize"))]
@@ -1325,7 +1328,6 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use super::coordinate_search;
     use crate::{
         factors::{
             FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
@@ -1886,10 +1888,10 @@ mod tests {
 #[cfg(all(test, feature = "optimize"))]
 mod optimize_tests {
     use super::{coordinate_search, refine};
-    use crate::model::objective::{
-        CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec,
+    use crate::model::{
+        objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec},
+        optimize::refine_weights,
     };
-    use crate::model::optimize::refine_weights;
     use chrono::{TimeZone, Utc};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;

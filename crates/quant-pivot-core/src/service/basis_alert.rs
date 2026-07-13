@@ -71,8 +71,9 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CryptoSubject, GroundingProof, MarketSubject, NewBasisAlert, PriceComparator,
-            ResolutionOracle, ResolvedBinding,
+            BasisAlertInfo, BasisAlertListQuery, CryptoSubject, GroundingProof, MarketSubject,
+            NewBasisAlert, Paginated, PriceComparator, ResolutionOracle, ResolvedBinding,
+            pagination::PageRequest,
         },
         enums::{
             domain::{DomainFamily, KlineInterval},
@@ -80,8 +81,8 @@ mod tests {
         },
         runtime_config::DomainConfig,
         types::{
-            BinanceSymbol, ChainlinkFeedKey, CryptoAsset, CryptoQuote, DomainInstrumentKey,
-            MarketId, SchemaVersion, TokenId,
+            BasisAlertId, BinanceSymbol, ChainlinkFeedKey, CryptoAsset, CryptoQuote,
+            DomainInstrumentKey, MarketId, SchemaVersion, TokenId,
         },
     };
     use quant_pivot_research::{
@@ -92,8 +93,11 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
-    use std::collections::{BTreeMap, HashMap};
-    use std::slice;
+    use std::{
+        collections::{BTreeMap, HashMap},
+        slice,
+        sync::Mutex,
+    };
 
     fn instrument() -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(
@@ -224,12 +228,7 @@ mod tests {
     // ── R6: detect → record → acknowledge closed loop ───────────────────────
 
     use quant_pivot_error::storage::StorageError;
-    use quant_pivot_models::{
-        domain::{BasisAlertInfo, BasisAlertListQuery, Paginated, pagination::PageRequest},
-        types::BasisAlertId,
-    };
     use quant_pivot_repository::traits::BasisAlertRepository;
-    use std::sync::Mutex;
 
     /// A minimal in-memory `BasisAlertRepository`, real enough to prove the
     /// `detect_basis_alerts` → `record` → `acknowledge` wiring end to end

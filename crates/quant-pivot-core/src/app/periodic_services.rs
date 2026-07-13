@@ -11,8 +11,7 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{domain::RuntimeConfigPort, types::Usd};
 use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
 use rust_decimal::Decimal;
-use std::str::FromStr;
-use std::{sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
 const DATA_QUALITY_REFRESH_SECS: u64 = 5;

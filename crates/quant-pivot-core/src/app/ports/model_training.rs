@@ -24,10 +24,10 @@ use quant_pivot_research::{
     validation::PurgeConfig,
 };
 
-use crate::service::frozen_model_parity::FrozenModelParityService;
 use crate::{
     app::bundles::ResearchBundle,
     service::{
+        frozen_model_parity::FrozenModelParityService,
         historical_replay::ReplayConfig,
         model_training::{
             ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,

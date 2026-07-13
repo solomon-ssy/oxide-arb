@@ -85,7 +85,38 @@ bash scripts/lint-dead-semantics.sh
 cargo test --workspace
 ```
 
-## 7.1 Error layering
+## 7.1 Import style
+
+Full rules: [`.cursor/rules/quant-pivot-rust-style.mdc`](.cursor/rules/quant-pivot-rust-style.mdc).
+Enforced by [`scripts/lint-import-style.sh`](scripts/lint-import-style.sh)
+(`--fix` merges duplicate-root trees; then `cargo fmt`).
+
+| Rule | Detail |
+|------|--------|
+| Preamble only | `use` only in file / nested `mod` headers — never inside `fn` / `impl` |
+| Short paths in bodies | After imports, ≤1 `::` (`HashMap::new`, `module::item`) — no `crate::a::B` / `std::a::B` in bodies |
+| One tree per root | In each module scope, one non-`pub` `use` per root (`std`, `crate`, `quant_pivot_*`, …) — merge siblings into a brace tree |
+| Attr exception | Distinct leading `#[cfg(…)]` (etc.) may keep a separate `use` of the same root — attrs cannot sit inside use braces on stable |
+| `pub use` | Barrel re-exports stay separate from ordinary `use` trees |
+
+```rust
+// Good — one tree per root
+use std::{cmp::Ordering, panic::{self, AssertUnwindSafe}};
+use crate::{
+    entities::{quant_trade_policy_artifact, quant_trade_policy_governance_audit},
+    enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
+    types::{ContentHash, TradePolicyArtifactId},
+};
+
+// Forbidden — split roots
+use std::cmp::Ordering;
+use std::panic;
+use std::panic::AssertUnwindSafe;
+use crate::entities::quant_trade_policy_artifact;
+use crate::{enums::quant::TradePolicyStatus, types::ContentHash};
+```
+
+## 7.2 Error layering
 
 Platform failures live in **`quant-pivot-error`** as typed sub-errors composed into
 [`QuantError`](crates/quant-pivot-error/src/lib.rs) via `#[from]`. Third-party errors
@@ -124,6 +155,7 @@ Idempotent writes (e.g. attribution final insert) return repository **outcome en
 | `EndgameDetector`, `ScoredOpportunity`, `OpportunityPipeline` | quant report pipeline types |
 | `ExecutionMode::DryRun/Paper/Live` | `QuantRuntimeMode` |
 | `pub use` compatibility re-exports | explicit module paths |
+| Split `use std::…` / `use crate::…` (same root, same attrs) | one tree: `use std::{…}` / `use crate::{…}` |
 | `unwrap()` in `src/` | `?` / structured errors |
 | `QuantError::Internal(` in production `src/` | typed `quant-pivot-error` sub-variant |
 | `fn *_error(` manual mappers | `From` + `?` |

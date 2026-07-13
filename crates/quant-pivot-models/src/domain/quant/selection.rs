@@ -1,7 +1,7 @@
 //! Selection snapshot persistence DTOs.
 
-use crate::entities::quant_market_selection;
 use crate::{
+    entities::quant_market_selection,
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
         ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,

@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{
-    InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo,
+use quant_pivot_models::{
+    domain::{InsertFinalOutcome, NewRecommendationAttribution, RecommendationAttributionInfo},
+    types::RecommendationId,
 };
-use quant_pivot_models::types::RecommendationId;
 
 /// Recommendation attribution persistence port.
 #[async_trait::async_trait]

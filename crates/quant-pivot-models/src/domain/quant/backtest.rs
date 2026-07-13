@@ -1,8 +1,11 @@
 //! Backtest-report ledger persistence DTOs.
 
-use crate::entities::quant_backtest_report;
-use crate::types::{
-    BacktestReportId, ContentHash, ModelRunId, ModelVersionId, Probability, RuntimeConfigVersionId,
+use crate::{
+    entities::quant_backtest_report,
+    types::{
+        BacktestReportId, ContentHash, ModelRunId, ModelVersionId, Probability,
+        RuntimeConfigVersionId,
+    },
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;

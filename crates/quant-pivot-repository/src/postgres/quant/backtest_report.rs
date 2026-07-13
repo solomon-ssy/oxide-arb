@@ -1,6 +1,9 @@
 //! Postgres-backed backtest-report ledger repository (append-only).
 
-use crate::traits::BacktestReportRepository;
+use crate::{
+    postgres::query::{list_by_fk_ordered_desc, paginate_mapped},
+    traits::BacktestReportRepository,
+};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
@@ -13,8 +16,6 @@ use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder,
 };
-
-use crate::postgres::query::{list_by_fk_ordered_desc, paginate_mapped};
 
 /// Postgres-backed backtest-report ledger repository.
 pub struct PgBacktestReportRepository {

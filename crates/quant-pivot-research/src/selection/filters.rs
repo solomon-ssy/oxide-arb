@@ -12,8 +12,7 @@
 //! or a never-published book all reject the candidate rather than admit it on
 //! incomplete evidence — money decisions must be made on data we actually have.
 
-use std::collections::HashSet;
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};

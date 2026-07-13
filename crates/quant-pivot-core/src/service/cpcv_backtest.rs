@@ -19,7 +19,10 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 #[cfg(feature = "ml-classical")]
-use quant_pivot_research::model::{ClassicalKind, ClassicalModelArtifact, ClassicalParams};
+use quant_pivot_research::model::{
+    ClassicalAdapterRegistry, ClassicalKind, ClassicalModelArtifact, ClassicalParams,
+    ClassicalRuntime,
+};
 use rayon::prelude::*;
 use tokio::{runtime::Handle, task};
 use tokio_util::sync::CancellationToken;
@@ -77,9 +80,6 @@ use crate::service::{
     model_training::weighted_seed_weights,
     training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
-
-#[cfg(feature = "ml-classical")]
-use quant_pivot_research::model::{ClassicalAdapterRegistry, ClassicalRuntime};
 
 /// Coarse CPCV job progress budget (units of work for `ResearchJobProgress`).
 ///
@@ -2003,34 +2003,36 @@ mod tests {
         validate_sell_examples,
     };
     use chrono::{DateTime, TimeZone, Utc};
-    use quant_pivot_models::domain::DecisionClock;
-    use quant_pivot_models::enums::common::MarketCategory;
-    use quant_pivot_models::enums::{factor::FactorFamily, quant::FactorDirection};
-    use quant_pivot_models::types::{
-        BacktestPathSetId, ContentHash, EventId, MarketId, ModelInputContract, ModelVersionId,
-        OrderIntentId, Price, SchemaVersion, Shares, TokenId, TrainingExampleId,
-        TrainingSampleSource,
+    use quant_pivot_models::{
+        domain::DecisionClock,
+        enums::{
+            common::MarketCategory,
+            factor::FactorFamily,
+            quant::{DataQualityStatus, FactorDirection},
+        },
+        types::{
+            BacktestPathSetId, ContentHash, EventId, FactorDefinitionId, MarketId,
+            ModelInputContract, ModelVersionId, OrderIntentId, PositionId, Price, Probability,
+            SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
+        },
     };
-    use quant_pivot_models::types::{FactorDefinitionId, Probability};
-    use quant_pivot_models::{enums::quant::DataQualityStatus, types::PositionId};
-    use quant_pivot_research::factors::FactorValue;
-    use quant_pivot_research::factors::{FactorExplanation, NormalizedFactor, names};
-    use quant_pivot_research::gates::GateStatus;
-    use quant_pivot_research::gates::{
-        CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateSubject,
-        ModelQualityGate, QualityGateInput, QualityGateThresholds, SellQualityGateThresholds,
-        ValidationGateThresholds,
-    };
-    use quant_pivot_research::selection::SelectedMarket;
-    use quant_pivot_research::training::DatasetCoverage;
-    use quant_pivot_research::training::{LabelName, LeakageFindings};
     use quant_pivot_research::{
+        factors::{FactorExplanation, FactorValue, NormalizedFactor, names},
         features::FeatureVector,
+        gates::{
+            CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateStatus,
+            GateSubject, ModelQualityGate, QualityGateInput, QualityGateThresholds,
+            SellQualityGateThresholds, ValidationGateThresholds,
+        },
         model::{
             LabelSelector, ModelArtifactHeader, ModelFamily, PositionStateFeatures,
             SellSignalPolicy, TrainingObjectiveSpec,
         },
-        training::{HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel},
+        selection::SelectedMarket,
+        training::{
+            DatasetCoverage, HOLD_VS_EXIT_ALPHA_BPS, LabelName, LeakageFindings,
+            LotTrainingContext, TrainingExample, TrainingLabel,
+        },
         validation::{
             BacktestPath, BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
             DefaultCombinatorialPurgedBacktester, PurgeConfig, SharpeDistribution,
@@ -2038,8 +2040,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()

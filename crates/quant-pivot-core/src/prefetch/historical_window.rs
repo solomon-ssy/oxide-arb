@@ -39,6 +39,7 @@ use quant_pivot_repository::traits::{
     CatalogVersionRepository, MarketLinkageRepository, QuantFactReadRepository,
 };
 use quant_pivot_research::{
+    domain::{crypto_lookback_secs, oracle_instrument},
     features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
     pit::{BookSnapshotAt, MaterializedPitEngine},
     selection::SelectedMarket,
@@ -46,7 +47,6 @@ use quant_pivot_research::{
 };
 
 use crate::pit::platform::ch_historical::snapshot_from_row;
-use quant_pivot_research::domain::{crypto_lookback_secs, oracle_instrument};
 
 /// One `(market, token)` instant the replay will resolve point-in-time.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,6 +1,6 @@
 //! Postgres-backed model-governance audit ledger repository (append-only WORM).
 
-use crate::traits::ModelGovernanceAuditRepository;
+use crate::{postgres::query::list_by_fk_ordered_desc, traits::ModelGovernanceAuditRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{ModelGovernanceAuditInfo, NewModelGovernanceAudit},
@@ -8,8 +8,6 @@ use quant_pivot_models::{
     types::ModelVersionId,
 };
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
-
-use crate::postgres::query::list_by_fk_ordered_desc;
 
 /// Postgres-backed model-governance audit ledger repository.
 pub struct PgModelGovernanceAuditRepository {

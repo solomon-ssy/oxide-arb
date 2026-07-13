@@ -270,8 +270,7 @@ fn mean_decimal(values: &[Decimal]) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::mean_decimal;
-    use super::{ReliabilitySample, compute_reliability};
+    use super::{ReliabilitySample, compute_reliability, mean_decimal};
     use crate::model::calibrator::{
         IsotonicKnot, MonotoneMapping, ProbabilityCalibrator, isotonic::IsotonicCalibrator,
     };

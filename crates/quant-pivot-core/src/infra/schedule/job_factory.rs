@@ -5,14 +5,13 @@
 //! `FireFutureFactory` so this module stays free of report/lifecycle concerns
 //! (parent doc §23.2 layering).
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{fmt::Display, future::Future, pin::Pin, time::Duration};
 
 use quant_pivot_error::{
     ConfigValidationError, ConfigValidationReport, QuantError, QuantResult,
     scheduler::SchedulerError,
 };
 use quant_pivot_models::runtime_config::ScheduleCadence;
-use std::fmt::Display;
 use tokio_cron_scheduler::Job;
 
 /// Future produced on each fire (the report run, already wrapped).

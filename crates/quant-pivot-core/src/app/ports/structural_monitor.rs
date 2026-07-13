@@ -3,6 +3,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap},
+    iter,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -45,7 +46,6 @@ use crate::{
     },
     prefetch::feature_window::FeatureWindowProvider,
 };
-use std::iter;
 
 const TOP_MARKETS_LIMIT: usize = 50;
 const TOP_PARTICIPANTS_LIMIT: usize = 25;

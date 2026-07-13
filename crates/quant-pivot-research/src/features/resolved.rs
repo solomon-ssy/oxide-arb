@@ -7,8 +7,7 @@
 //! time-series / microstructure features read a [`MarketWindowSnapshot`] that the
 //! orchestrator pre-fetches per round (never a database query in the build loop).
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::research::ResearchError;

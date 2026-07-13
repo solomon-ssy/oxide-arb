@@ -4,7 +4,10 @@
 //! observations into `quant_domain_observation`, and advances durable
 //! `(source, instrument)` cursors only after a successful `ClickHouse` write.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::domain::{DomainDataSource, DomainFetchRequest};
@@ -25,7 +28,6 @@ use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
 use quant_pivot_research::linkage::{AssetRule, rules};
 
 use crate::runtime_config::RuntimeConfigStore;
-use std::collections::HashSet;
 
 /// One `(source, instrument)` scan tick — observations to persist plus the
 /// cursor row to commit after `ClickHouse` acknowledges the batch.

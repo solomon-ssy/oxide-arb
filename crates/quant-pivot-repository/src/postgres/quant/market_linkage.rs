@@ -1,6 +1,6 @@
 //! Postgres-backed market-linkage ledger repository (append-only, bitemporal).
 
-use crate::traits::MarketLinkageRepository;
+use crate::{postgres::query::paginate_mapped, traits::MarketLinkageRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
@@ -14,8 +14,6 @@ use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder, sea_query::OnConflict,
 };
-
-use crate::postgres::query::paginate_mapped;
 
 /// Reduce rows already ordered `(market_id ASC, derived_at DESC, created_at
 /// DESC, linkage_id DESC)` to the first (highest-ranked) row per market.

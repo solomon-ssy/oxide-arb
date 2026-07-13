@@ -6,8 +6,7 @@
 //! binds these specs to the feature-contract hash and derives an immutable,
 //! content-addressed revision identity.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use quant_pivot_models::{
     enums::factor::FactorFamily,

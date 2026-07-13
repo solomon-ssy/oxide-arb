@@ -167,12 +167,13 @@ mod tests {
     use quant_pivot_models::types::ArtifactUri;
 
     use crate::artifact::ArtifactNamespace;
-    use std::env;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::process;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        env, fs,
+        path::PathBuf,
+        process,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temp_root() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);

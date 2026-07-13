@@ -44,13 +44,13 @@ use quant_pivot_models::{
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobId},
 };
-use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, FactWriter, RecommendationReportRepository,
-    RuntimeConfigVersionRepository, ServingEvidenceRepository, TradePolicyRepository,
-};
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
-    traits::FeatureParityRepository,
+    traits::{
+        CalibrationArtifactRepository, FactWriter, FeatureParityRepository,
+        RecommendationReportRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
+        TradePolicyRepository,
+    },
 };
 
 use super::{
@@ -63,12 +63,11 @@ use super::{
     task_id::TaskId,
     task_registry::AppRunner,
 };
-use crate::service::durable_feature_parity::DurableFeatureParityDeps;
-use crate::service::durable_feature_parity::DurableFeatureParitySource;
-use crate::service::feature_parity_executor::FeatureParityExecutor;
 use crate::service::{
-    feature_parity_executor::ReportFeatureParityIncidentResponse,
-    model_calibration_fit::ModelCalibrationFitService, trade_policy::TradePolicyService,
+    durable_feature_parity::{DurableFeatureParityDeps, DurableFeatureParitySource},
+    feature_parity_executor::{FeatureParityExecutor, ReportFeatureParityIncidentResponse},
+    model_calibration_fit::ModelCalibrationFitService,
+    trade_policy::TradePolicyService,
 };
 
 const ALL_KINDS: [ResearchJobKind; 8] = [

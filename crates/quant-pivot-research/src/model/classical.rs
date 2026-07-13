@@ -791,12 +791,11 @@ fn count_f64(n: usize) -> QuantResult<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel};
+    use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel, rolling_validation};
     use chrono::TimeZone;
     use ndarray::Array1;
     use rust_decimal_macros::dec;
 
-    use super::rolling_validation;
     use crate::{
         features::{FeatureName, FeatureUnit, FeatureValueKind},
         model::{classical::dense_matrix, runtime::ClassicalKind, trainer::ValidationSpec},

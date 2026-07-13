@@ -28,8 +28,7 @@ use quant_pivot_models::{
     enums::{common::MarketCategory, quant::CorrelationSource},
     types::{EventId, MarketId, Usd},
 };
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 /// One market's metadata plus its prefetched historical mid-price series.
 #[derive(Debug, Clone)]

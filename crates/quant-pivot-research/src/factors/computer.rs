@@ -13,7 +13,7 @@
 //! too-small or degenerate cross-section yields
 //! [`NormalizedFactor::Indeterminate`](crate::factors::normalize::NormalizedFactor).
 
-use std::{collections::BTreeMap, str::FromStr, sync::Arc};
+use std::{collections::BTreeMap, slice, str::FromStr, sync::Arc};
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -45,7 +45,6 @@ use crate::{
     model::FavoriteLongshotBiasTable,
     parallel::{par_map_with_index, par_try_map, par_try_map_with_index},
 };
-use std::slice;
 
 /// Batch size at or above which the engine spreads its stages across the `rayon`
 /// pool. Below it the serial path wins: parallel scheduling adds fixed overhead

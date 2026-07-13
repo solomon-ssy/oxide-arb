@@ -294,10 +294,12 @@ mod tests {
         domain::ModelVersionInfo,
         enums::quant::PublicationStatus,
         runtime_config::FactorCrossSectionConfig,
-        types::{ContentHash, ModelSpecId, ModelVersionId},
+        types::{
+            CalibrationArtifactId, ContentHash, ModelInputContract, ModelSpecId, ModelVersionId,
+        },
     };
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
+    use std::{env, fmt::Write, process, sync::Arc};
 
     use crate::{
         artifact::{ArtifactStore, LocalArtifactStore},
@@ -315,10 +317,6 @@ mod tests {
 
     use async_trait::async_trait;
     use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-    use quant_pivot_models::types::{CalibrationArtifactId, ModelInputContract};
-    use std::env;
-    use std::fmt::Write;
-    use std::process;
 
     /// Test-only loader: these fixtures never construct a `Calibrated` return
     /// model, so `load` is unreachable in practice; errors closed if it is.

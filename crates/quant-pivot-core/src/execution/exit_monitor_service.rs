@@ -23,16 +23,16 @@ use quant_pivot_models::{
     domain::{OrderIntentInfo, PositionInfo, RecommendationInfo, market::book::BookSnapshot},
     enums::execution::ExitState,
     runtime_config::EmergencyExitPolicy,
-    types::{OrderIntentId, Price, RecommendationId},
+    types::{ExitReinferenceObservation, OrderIntentId, Price, RecommendationId},
 };
 use quant_pivot_repository::traits::{
     ExecutionSubmissionRepository, OrderIntentRepository, PositionRepository,
     RecommendationRepository,
 };
 
-use crate::execution::ExitSignalEvaluation;
 use crate::{
     execution::{
+        ExitSignalEvaluation,
         exit_dispatcher::{CoreExitDispatcher, ExitSubmitRequest},
         exit_monitor::{
             ExitDecision, ExitMonitorHealthHandle, ExitMonitorInput, ExitSignalContext,
@@ -44,7 +44,6 @@ use crate::{
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
-use quant_pivot_models::types::ExitReinferenceObservation;
 
 /// Max lots evaluated per sweep (bounds one pass's book + DB load).
 const SCAN_BATCH_GUARD: usize = 4_096;

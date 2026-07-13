@@ -54,14 +54,13 @@ use quant_pivot_models::{
         SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
-use quant_pivot_repository::postgres::PgMarketSelectionRepository;
 use quant_pivot_repository::{
     clickhouse::ChQuantFactRepository,
     postgres::{
         PgAttributionRepository, PgCapitalAllocationRepository, PgEventRepository,
-        PgExecutionSubmissionRepository, PgMarketRepository, PgOrderIntentRepository,
-        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgSettlementRedeemRepository,
+        PgExecutionSubmissionRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgOrderIntentRepository, PgPositionRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgSettlementRedeemRepository,
     },
     traits::{
         AttributionRepository, CapitalAllocationRepository, EventRepository,

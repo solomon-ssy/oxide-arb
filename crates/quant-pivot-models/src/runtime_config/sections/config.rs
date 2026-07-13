@@ -20,8 +20,7 @@ use crate::{
 use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::iter;
+use std::{collections::BTreeMap, iter};
 
 /// Market selection selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

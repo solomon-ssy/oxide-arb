@@ -30,13 +30,16 @@ use quant_pivot_repository::traits::{
     BacktestPathSetRepository, BacktestReportRepository, FactorRepository, MarketRepository,
     ModelComparisonReportRepository, ModelRegistryRepository, TrainingDatasetRepository,
 };
-use quant_pivot_research::{artifact::ArtifactStore, model::load_hash_verified_artifact};
+use quant_pivot_research::{
+    artifact::ArtifactStore,
+    factors::{
+        FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix, neutralize_by_group,
+    },
+    model::load_hash_verified_artifact,
+};
 use rust_decimal::Decimal;
 
 use crate::app::bundles::ResearchBundle;
-use quant_pivot_research::factors::{
-    FactorCollinearityAnalyzer, FactorName, FactorObservationMatrix, neutralize_by_group,
-};
 
 /// Ceiling on how many published factor definitions the collinearity analysis
 /// pulls in one page (the generic factor set is a dozen; this is generous).

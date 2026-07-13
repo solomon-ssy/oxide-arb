@@ -25,8 +25,12 @@
 //! config)` yields the same plan. `f64` is confined to this module's solver
 //! boundary; every emitted size is a rounded [`Usd`].
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{
+    cmp::Ordering,
+    collections::BTreeMap,
+    panic::{self, AssertUnwindSafe},
+    time::Instant,
+};
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
@@ -53,9 +57,6 @@ use crate::{
     precision::RESEARCH_DECIMAL_SCALE,
 };
 use good_lp::{Expression, ProblemVariables, Solution, Variable, constraint, variable};
-use std::cmp::Ordering;
-use std::panic;
-use std::panic::AssertUnwindSafe;
 
 /// Lexicographic tie-break magnitude applied to objective weights so the solver
 /// resolves equal-utility candidates toward the canonical order deterministically.

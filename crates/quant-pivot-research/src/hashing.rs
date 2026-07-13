@@ -258,19 +258,22 @@ mod tests {
     use crate::{
         factors::{FactorDefinitionSpec, FactorName, FactorOutputKind, FactorSet},
         features::{
-            FeatureName, FeatureSchema, FeatureSpec, FeatureUnit, FeatureValueKind, NullPolicy,
-            PitRule, SourceRequirement, StalenessRule,
+            DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureSchema,
+            FeatureSpec, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
+            FeatureVector, NullPolicy, PitRule, SourceRequirement, StalenessRule,
         },
         selection::ModelFeatureRequirements,
     };
     use quant_pivot_models::{
         enums::{
             common::MarketCategory,
+            domain::DomainFamily,
             factor::{FactorFamily, FactorNormalization},
-            quant::FactorDirection,
+            feature::EvidenceSourceKind,
+            quant::{DataQualityStatus, FactorDirection},
         },
         runtime_config::FeatureFamily,
-        types::SchemaVersion,
+        types::{MarketId, Probability, SchemaVersion, TokenId},
     };
 
     fn sample_factor(name: &'static str) -> FactorDefinitionSpec {
@@ -410,15 +413,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use crate::features::{
-        DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureStaleness, FeatureValue,
-        FeatureVector,
-    };
     use chrono::{TimeZone, Utc};
-    use quant_pivot_models::{
-        enums::{domain::DomainFamily, feature::EvidenceSourceKind, quant::DataQualityStatus},
-        types::{MarketId, Probability, TokenId},
-    };
     use rust_decimal_macros::dec;
 
     /// A minimal, self-contained two-layer vector for hash unit tests. Every

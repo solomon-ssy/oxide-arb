@@ -3,8 +3,8 @@
 //! Payload columns are strong-typed value objects (`types::report_payload`)
 //! serialized into the existing JSONB columns — never a bare `serde_json::Value`.
 
-use crate::entities::quant_recommendation_report;
 use crate::{
+    entities::quant_recommendation_report,
     enums::quant::{
         AccountSource, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
         RecommendationStatus, ReportKind, ReportTriggerKind,
