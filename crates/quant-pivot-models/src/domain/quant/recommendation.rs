@@ -3,6 +3,7 @@
 //! Payload columns are strong-typed value objects (`types::report_payload`)
 //! serialized into the existing JSONB columns — never a bare `serde_json::Value`.
 
+use crate::entities::quant_recommendation_report;
 use crate::{
     enums::quant::{
         AccountSource, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
@@ -58,7 +59,7 @@ pub struct RecommendationReportInfo {
 
 info_from_model!(
     RecommendationReportInfo,
-    crate::entities::quant_recommendation_report::Model,
+    quant_recommendation_report::Model,
     {
         recommendation_report_id,
         report_kind,

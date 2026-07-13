@@ -1,5 +1,6 @@
 //! Shadow-comparison ledger persistence DTOs (append-only governance evidence).
 
+use crate::entities::quant_shadow_comparison;
 use crate::types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -24,7 +25,7 @@ pub struct ShadowComparisonInfo {
 
 info_from_model!(
     ShadowComparisonInfo,
-    crate::entities::quant_shadow_comparison::Model,
+    quant_shadow_comparison::Model,
     {
         shadow_comparison_id,
         active_model_version_id,

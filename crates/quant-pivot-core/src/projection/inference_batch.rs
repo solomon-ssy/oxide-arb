@@ -22,6 +22,7 @@ use quant_pivot_research::{
 };
 
 use crate::projection::inference_context::build_market_inference_context;
+use std::collections::HashSet;
 
 /// Build one factor-inference row from an aligned `(market, vector, outcome)`.
 ///
@@ -128,7 +129,7 @@ pub fn build_frozen_runtime_input(
                 .to_owned(),
         })?;
     let decision_at = first.decision_at();
-    let mut market_ids = std::collections::HashSet::with_capacity(examples.len());
+    let mut market_ids = HashSet::with_capacity(examples.len());
     for example in examples {
         if example.decision_at() != decision_at {
             return Err(ResearchError::DatasetBuild {

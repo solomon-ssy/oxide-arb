@@ -1,6 +1,7 @@
 //! Research plane bundle (Phase 3+): artifacts, selection, feature + factor pipelines.
 
 use super::{DataBundle, GovernanceBundle, InfraBundle};
+use crate::service::feature_integrity::RepositoryFeatureParityGate;
 use crate::{
     governance::{
         CoreCalibrationArtifactLoader, FactorGovernanceDeps, FactorGovernanceService,
@@ -413,12 +414,10 @@ impl ResearchBundle {
             runtime_config: Arc::clone(&deps.governance.runtime_config),
             runtime_config_apply,
             runtime_config_repo,
-            feature_parity_gate: Arc::new(
-                crate::service::feature_integrity::RepositoryFeatureParityGate::new(Arc::clone(
-                    &deps.infra.repos.feature_parity,
-                )
-                    as Arc<dyn FeatureParityRepository>),
-            ),
+            feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
+                &deps.infra.repos.feature_parity,
+            )
+                as Arc<dyn FeatureParityRepository>)),
             frozen_model_parity: Arc::clone(frozen_model_parity),
         }))
     }

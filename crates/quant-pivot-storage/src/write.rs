@@ -21,6 +21,7 @@
 
 use std::{
     future::Future,
+    mem,
     pin::Pin,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
@@ -293,7 +294,7 @@ impl<T: Send + 'static> AsyncWriterWorker<T> {
         if buffer.is_empty() {
             return;
         }
-        let queued = std::mem::take(buffer);
+        let queued = mem::take(buffer);
         // Oldest enqueue instant in the batch → worst-case pipeline lag once the
         // flush is acknowledged below.
         let oldest_enqueued = queued.iter().map(|q| q.enqueued).min();

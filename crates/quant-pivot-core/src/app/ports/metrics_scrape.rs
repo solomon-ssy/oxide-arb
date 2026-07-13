@@ -1,5 +1,6 @@
 //! Prometheus metrics scrape port for the Admin API.
 
+use prometheus::Encoder;
 use quant_pivot_models::domain::MetricsScrapePort;
 
 pub struct CoreMetricsScrape {
@@ -15,7 +16,6 @@ impl CoreMetricsScrape {
 
 impl MetricsScrapePort for CoreMetricsScrape {
     fn gather_prometheus(&self) -> String {
-        use prometheus::Encoder;
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
         let encoder = prometheus::TextEncoder::new();

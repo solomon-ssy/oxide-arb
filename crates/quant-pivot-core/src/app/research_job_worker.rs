@@ -63,6 +63,9 @@ use super::{
     task_id::TaskId,
     task_registry::AppRunner,
 };
+use crate::service::durable_feature_parity::DurableFeatureParityDeps;
+use crate::service::durable_feature_parity::DurableFeatureParitySource;
+use crate::service::feature_parity_executor::FeatureParityExecutor;
 use crate::service::{
     feature_parity_executor::ReportFeatureParityIncidentResponse,
     model_calibration_fit::ModelCalibrationFitService, trade_policy::TradePolicyService,
@@ -277,26 +280,22 @@ impl AppContext {
         let serving_evidence = Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
             &self.infra.ch,
         ))) as Arc<dyn ServingEvidenceRepository>;
-        let parity_replay = Arc::new(
-            crate::service::durable_feature_parity::DurableFeatureParitySource::new(
-                crate::service::durable_feature_parity::DurableFeatureParityDeps {
-                    model_runs: Arc::clone(&self.research.model_run_repo),
-                    model_registry: Arc::clone(&self.research.model_registry_repo),
-                    runtime_configs: Arc::clone(&runtime_config),
-                    selections: Arc::clone(&self.research.market_selection_repo),
-                    feature_vectors: Arc::clone(&self.research.feature_repo),
-                    factors: Arc::clone(&self.research.factor_repo),
-                    reports: Arc::clone(&self.infra.repos.recommendation_report)
-                        as Arc<dyn RecommendationReportRepository>,
-                    serving_evidence,
-                    fact_read: Arc::clone(&self.research.quant_fact_read),
-                    catalog: Arc::clone(&self.research.catalog_version_repo),
-                    linkages: Arc::clone(&self.research.market_linkage_repo),
-                    calibration_artifacts: Arc::clone(&bias_table_repo),
-                    runtime_factory: Arc::clone(&self.research.model_runtime_factory_builder),
-                },
-            ),
-        );
+        let parity_replay = Arc::new(DurableFeatureParitySource::new(DurableFeatureParityDeps {
+            model_runs: Arc::clone(&self.research.model_run_repo),
+            model_registry: Arc::clone(&self.research.model_registry_repo),
+            runtime_configs: Arc::clone(&runtime_config),
+            selections: Arc::clone(&self.research.market_selection_repo),
+            feature_vectors: Arc::clone(&self.research.feature_repo),
+            factors: Arc::clone(&self.research.factor_repo),
+            reports: Arc::clone(&self.infra.repos.recommendation_report)
+                as Arc<dyn RecommendationReportRepository>,
+            serving_evidence,
+            fact_read: Arc::clone(&self.research.quant_fact_read),
+            catalog: Arc::clone(&self.research.catalog_version_repo),
+            linkages: Arc::clone(&self.research.market_linkage_repo),
+            calibration_artifacts: Arc::clone(&bias_table_repo),
+            runtime_factory: Arc::clone(&self.research.model_runtime_factory_builder),
+        }));
         let executor = ResearchJobExecutor {
             datasets: Arc::new(CoreTrainingDatasetPort::from_research(
                 &self.research,
@@ -314,28 +313,25 @@ impl AppContext {
             cpcv_backtests: cpcv_backtest_port as Arc<dyn CpcvBacktestPort>,
             bias_tables: Arc::clone(&self.research.calibration_artifact_fit),
             model_calibration_fit,
-            feature_parity: Arc::new(
-                crate::service::feature_parity_executor::FeatureParityExecutor::new(
-                    Arc::clone(&self.infra.repos.feature_parity)
-                        as Arc<dyn FeatureParityRepository>,
-                    parity_replay,
-                    Arc::new(ChFactWriter::new(
-                        Arc::clone(&self.infra.ch),
-                        Arc::clone(&self.infra.ch_write_manager),
-                        "quant_feature_parity_event",
-                    )) as Arc<dyn FactWriter<QuantFeatureParityEventRow>>,
-                    Arc::new(ReportFeatureParityIncidentResponse::new(
-                        self.report_lifecycle(),
-                        Arc::clone(&self.infra.repos.recommendation_report)
-                            as Arc<dyn RecommendationReportRepository>,
-                        Arc::clone(&self.governance.alerts),
-                        Arc::clone(&self.infra.metrics),
-                    )),
+            feature_parity: Arc::new(FeatureParityExecutor::new(
+                Arc::clone(&self.infra.repos.feature_parity) as Arc<dyn FeatureParityRepository>,
+                parity_replay,
+                Arc::new(ChFactWriter::new(
+                    Arc::clone(&self.infra.ch),
+                    Arc::clone(&self.infra.ch_write_manager),
+                    "quant_feature_parity_event",
+                )) as Arc<dyn FactWriter<QuantFeatureParityEventRow>>,
+                Arc::new(ReportFeatureParityIncidentResponse::new(
+                    self.report_lifecycle(),
+                    Arc::clone(&self.infra.repos.recommendation_report)
+                        as Arc<dyn RecommendationReportRepository>,
+                    Arc::clone(&self.governance.alerts),
                     Arc::clone(&self.infra.metrics),
-                    ChronoDuration::minutes(10),
-                    Duration::from_secs(config.poll_secs.max(1)),
-                ),
-            ) as Arc<dyn FeatureParityExecutionPort>,
+                )),
+                Arc::clone(&self.infra.metrics),
+                ChronoDuration::minutes(10),
+                Duration::from_secs(config.poll_secs.max(1)),
+            )) as Arc<dyn FeatureParityExecutionPort>,
             trade_policies: Arc::new(TradePolicyService::new(
                 Arc::clone(&self.research.training_dataset_repo),
                 Arc::clone(&self.research.artifact_store),

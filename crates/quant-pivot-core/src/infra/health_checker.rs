@@ -9,6 +9,7 @@ use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
 use quant_pivot_models::domain::{CatalogStatusPort, HealthReport, SubsystemHealth};
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Construction dependencies for [`HealthChecker`].
 pub struct HealthCheckerDeps {
@@ -46,7 +47,7 @@ impl HealthChecker {
     }
 
     async fn check_postgres(&self) -> SubsystemHealth {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         match self.pg_pool.health_check().await {
             Ok(()) => SubsystemHealth::healthy(
                 "postgres",
@@ -61,7 +62,7 @@ impl HealthChecker {
     }
 
     async fn check_clickhouse(&self) -> SubsystemHealth {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         match self.ch_pool.health_check().await {
             Ok(()) => SubsystemHealth::healthy(
                 "clickhouse",

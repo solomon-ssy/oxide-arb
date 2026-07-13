@@ -15,7 +15,8 @@ use quant_pivot_models::{
     types::{
         ContentHash, TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TradePolicyArtifactId,
         TradePolicyArtifactPayload, TradePolicyEvidenceGap, TradePolicyExecutionEvidence,
-        TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence, TradePolicyValidationEvidence,
+        TradePolicyFitContract, TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence,
+        TradePolicyValidationEvidence,
     },
 };
 use quant_pivot_repository::traits::{TradePolicyRepository, TrainingDatasetRepository};
@@ -392,7 +393,7 @@ struct PitFitSampleProjection<'a> {
 }
 
 fn label_cutoff_counts(
-    contract: &quant_pivot_models::types::TradePolicyFitContract,
+    contract: &TradePolicyFitContract,
     examples: &[TrainingExample],
 ) -> (u64, u64) {
     let mut matured = 0_u64;
@@ -413,7 +414,7 @@ fn label_cutoff_counts(
 }
 
 fn label_visible_at_cutoff(
-    contract: &quant_pivot_models::types::TradePolicyFitContract,
+    contract: &TradePolicyFitContract,
     decision_at: chrono::DateTime<chrono::Utc>,
     matured_at: chrono::DateTime<chrono::Utc>,
 ) -> bool {

@@ -45,6 +45,7 @@ use crate::{
     },
     prefetch::feature_window::FeatureWindowProvider,
 };
+use std::iter;
 
 const TOP_MARKETS_LIMIT: usize = 50;
 const TOP_PARTICIPANTS_LIMIT: usize = 25;
@@ -353,7 +354,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
                 last_updated_at,
             }],
             missing_reason_breakdown: reason_counts(
-                std::iter::once((
+                iter::once((
                     ConcentrationMissing::TradeTapeUnavailable
                         .monitor_wire()
                         .to_owned(),

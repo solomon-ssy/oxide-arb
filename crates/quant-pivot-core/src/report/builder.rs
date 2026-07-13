@@ -62,6 +62,8 @@ use super::{
     readiness::ReportReadinessGate,
     types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
 };
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// Report builder interface.
 #[async_trait::async_trait]
@@ -737,9 +739,8 @@ impl DefaultReportBuilder {
             )
             .await?;
 
-        let mut by_token: HashMap<String, std::collections::BTreeMap<i64, Decimal>> =
-            HashMap::new();
-        let mut grid: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        let mut by_token: HashMap<String, BTreeMap<i64, Decimal>> = HashMap::new();
+        let mut grid: BTreeSet<i64> = BTreeSet::new();
         for row in rows {
             if let Some(price) = row.mid_price {
                 by_token
@@ -900,10 +901,7 @@ const CORRELATION_BUCKET_SECS: u32 = 3_600;
 /// last observation forward (and back-filling leading gaps with the first
 /// observation). An absent / empty series yields an empty vector, which the
 /// estimator treats as insufficient history (proxy fallback).
-fn aligned_series(
-    series: Option<&std::collections::BTreeMap<i64, Decimal>>,
-    grid: &[i64],
-) -> Vec<Decimal> {
+fn aligned_series(series: Option<&BTreeMap<i64, Decimal>>, grid: &[i64]) -> Vec<Decimal> {
     let Some(series) = series.filter(|series| !series.is_empty()) else {
         return Vec::new();
     };

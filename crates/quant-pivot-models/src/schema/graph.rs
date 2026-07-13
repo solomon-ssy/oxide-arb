@@ -82,6 +82,8 @@ fn topological_order(reverse: bool) -> Vec<&'static TableSpec> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::{create_order, drop_order};
     use crate::{
         schema::{catalog, table::TableLifecycle, trigger::TriggerKind},
@@ -109,7 +111,7 @@ mod tests {
         let tables = catalog::tables()
             .into_iter()
             .map(|spec| (spec.table_name)())
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
 
         for required in [
             "runtime_config_version",
@@ -169,7 +171,7 @@ mod tests {
         let tables = catalog::tables()
             .into_iter()
             .map(|spec| (spec.table_name)())
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
         assert!(
             tables.contains("quant_account_snapshot"),
             "Phase 04.0 table `quant_account_snapshot` must be registered in the schema catalog"
@@ -181,7 +183,7 @@ mod tests {
         let tables = catalog::tables()
             .into_iter()
             .map(|spec| ((spec.table_name)(), spec))
-            .collect::<std::collections::BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
 
         for required in [
             "quant_capital_allocation",

@@ -32,7 +32,6 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{features::FeatureSchema, hashing::ResearchHasher};
 
 use crate::observability::metrics_hub::MetricsHub;
-
 const DEFAULT_FULL_WINDOW_HOURS: i64 = 24;
 const MAX_FULL_WINDOW_DAYS: i64 = 31;
 const AUTOMATIC_FULL_INTERVAL_HOURS: i64 = 24;
@@ -882,6 +881,7 @@ fn resolve_full_window(
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::MutexGuard;
 
     use quant_pivot_models::{
         domain::{
@@ -906,7 +906,7 @@ mod tests {
 
     use super::*;
 
-    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         mutex.lock().expect("test mutex")
     }
 

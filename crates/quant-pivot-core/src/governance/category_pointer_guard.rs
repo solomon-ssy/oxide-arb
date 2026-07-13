@@ -18,7 +18,6 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::ModelRegistryRepository;
 use quant_pivot_research::{artifact::ArtifactStore, model::load_hash_verified_artifact};
 use std::sync::Arc;
-
 /// Validates `model.category_model_pointers` against the model registry and
 /// the content-addressed artifact store on every runtime-config activation.
 pub struct CategoryPointerGuard {
@@ -141,6 +140,9 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
+    use std::env;
+    use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::{collections::BTreeMap, sync::Arc};
 
     struct FakeRegistry {
@@ -336,11 +338,10 @@ mod tests {
     }
 
     fn temp_store() -> Arc<dyn ArtifactStore> {
-        use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        let root = env::temp_dir().join(format!(
             "qp_category_pointer_guard_test_{}_{}_{}",
-            std::process::id(),
+            process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));

@@ -4,7 +4,7 @@
 //! blacklist) or serve RBAC-backed handlers, so readiness fails closed when
 //! either dependency is unreachable.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use quant_pivot_models::domain::{
@@ -44,7 +44,7 @@ impl PgRedisReadiness {
     }
 
     async fn check_postgres(&self) -> DependencyCheck {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let result = self
             .db
             .execute(Statement::from_string(

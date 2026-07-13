@@ -56,12 +56,14 @@ pub mod validation;
 
 #[cfg(test)]
 mod acceptance_tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     /// Phase 3.0 §11: default build must not link polars / smartcore / argmin.
     #[test]
     fn research_default_build_excludes_heavy_deps() {
-        let output = std::process::Command::new("cargo")
+        let output = Command::new("cargo")
             .args(["tree", "-p", "quant-pivot-research", "--depth", "1"])
             .output()
             .expect("cargo tree must succeed");
@@ -100,7 +102,7 @@ mod acceptance_tests {
             if name.contains("classical") || name.ends_with("lib.rs") {
                 continue;
             }
-            let body = std::fs::read_to_string(&entry).unwrap_or_default();
+            let body = fs::read_to_string(&entry).unwrap_or_default();
             assert!(
                 !body.contains("smartcore::"),
                 "smartcore concrete type leaked into non-classical research file {name}"
@@ -111,7 +113,7 @@ mod acceptance_tests {
     /// Assert no `.rs` file under `dir` mentions `token`.
     fn assert_no_token(dir: &Path, token: &str) {
         for entry in walk_rs(dir) {
-            let body = std::fs::read_to_string(&entry).unwrap_or_default();
+            let body = fs::read_to_string(&entry).unwrap_or_default();
             assert!(
                 !body.contains(token),
                 "`{token}` must not appear in {}",
@@ -123,7 +125,7 @@ mod acceptance_tests {
     /// Recursively collect `.rs` files under `dir`.
     fn walk_rs(dir: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let Ok(entries) = fs::read_dir(dir) else {
             return out;
         };
         for entry in entries.flatten() {
@@ -147,7 +149,7 @@ mod acceptance_tests {
             !signal_rs.exists(),
             "domain/quant/signal.rs stub must remain deleted"
         );
-        let mod_src = std::fs::read_to_string(&quant_mod).expect("read domain/quant/mod.rs");
+        let mod_src = fs::read_to_string(&quant_mod).expect("read domain/quant/mod.rs");
         assert!(
             !mod_src.contains("mod signal"),
             "domain/quant/mod.rs must not declare mod signal"
@@ -174,12 +176,15 @@ mod feature_guard_tests {
     // Gated to the default build: heavy-feature CI jobs legitimately enable
     // `optimize` / `ml-classical`, so the guard only asserts the default build.
     #[cfg(not(any(feature = "optimize", feature = "ml-classical")))]
+    use std::hint;
+
+    #[cfg(not(any(feature = "optimize", feature = "ml-classical")))]
     #[test]
     fn default_build_excludes_unlinked_heavy_features() {
         // `black_box` hides the cfg constants from const-eval so this stays a
         // runtime assertion rather than a (clippy-flagged) constant one.
-        let heavy = std::hint::black_box(cfg!(feature = "optimize"))
-            || std::hint::black_box(cfg!(feature = "ml-classical"));
+        let heavy = hint::black_box(cfg!(feature = "optimize"))
+            || hint::black_box(cfg!(feature = "ml-classical"));
         assert!(!heavy, "default build must exclude argmin / smartcore");
     }
 }

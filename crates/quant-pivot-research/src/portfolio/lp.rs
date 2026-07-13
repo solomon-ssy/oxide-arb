@@ -52,6 +52,10 @@ use crate::{
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
+use good_lp::{Expression, ProblemVariables, Solution, Variable, constraint, variable};
+use std::cmp::Ordering;
+use std::panic;
+use std::panic::AssertUnwindSafe;
 
 /// Lexicographic tie-break magnitude applied to objective weights so the solver
 /// resolves equal-utility candidates toward the canonical order deterministically.
@@ -605,7 +609,7 @@ fn candidate_upper_bound(meta: &CandidateMeta<'_>, caps: &PortfolioCaps) -> Deci
 }
 
 /// Canonical ordering: risk-adjusted score desc, then market id, then token id.
-fn canonical_order(a: &CandidateMeta<'_>, b: &CandidateMeta<'_>) -> std::cmp::Ordering {
+fn canonical_order(a: &CandidateMeta<'_>, b: &CandidateMeta<'_>) -> Ordering {
     let ra = a.candidate.composite_score.inner() * a.candidate.confidence.inner();
     let rb = b.candidate.composite_score.inner() * b.candidate.confidence.inner();
     rb.cmp(&ra)
@@ -808,7 +812,7 @@ fn try_milp(ctx: &SolveContext, solver: PortfolioSolverKind) -> Result<Vec<f64>,
         debug_test_hooks::MilpBehavior::Normal => {}
         debug_test_hooks::MilpBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
         debug_test_hooks::MilpBehavior::Panic => {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| {
                 panic!("debug_test_hooks: forced MILP panic");
             }));
             return Err(SolveFail::Panicked);
@@ -829,7 +833,7 @@ fn try_relaxation(ctx: &SolveContext) -> Result<Vec<f64>, SolveFail> {
         debug_test_hooks::RelaxBehavior::Normal => {}
         debug_test_hooks::RelaxBehavior::FailInfeasible => return Err(SolveFail::Infeasible),
         debug_test_hooks::RelaxBehavior::Panic => {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| {
                 panic!("debug_test_hooks: forced relaxation panic");
             }));
             return Err(SolveFail::Panicked);
@@ -871,9 +875,7 @@ where
     F: FnMut(good_lp::variable::UnsolvedProblem) -> M,
     M: good_lp::SolverModel,
 {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        solve_inner(ctx, binary, solver)
-    }));
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| solve_inner(ctx, binary, solver)));
     outcome.unwrap_or(Err(SolveFail::Panicked))
 }
 
@@ -883,8 +885,6 @@ where
     F: FnMut(good_lp::variable::UnsolvedProblem) -> M,
     M: good_lp::SolverModel,
 {
-    use good_lp::{Expression, ProblemVariables, Solution, Variable, constraint, variable};
-
     let mut vars = ProblemVariables::new();
     let u: Vec<Variable> = (0..ctx.n)
         .map(|i| vars.add(variable().min(0.0).max(ctx.ub[i])))

@@ -5,6 +5,7 @@
 //! runtime configuration).
 
 use crate::{
+    enums::factor::FactorNormalization,
     runtime_config::{FeatureFamily, PerFactorNormalization},
     types::CalibrationArtifactId,
 };
@@ -494,8 +495,6 @@ fn validate_per_factor_normalization(
     spec: &PerFactorNormalization,
     report: &mut ConfigValidationReport,
 ) {
-    use crate::enums::factor::FactorNormalization;
-
     if let Some(winsor_p) = &spec.winsor_p {
         winsor_percentile(
             "factors.normalization.per_factor.winsor_p",
@@ -1600,8 +1599,6 @@ mod tests {
 
     #[test]
     fn domain_feature_family_without_any_enabled_vertical_is_rejected() {
-        use crate::runtime_config::FeatureFamily;
-
         let mut config = RuntimeConfig::default();
         assert!(
             config
@@ -1620,8 +1617,6 @@ mod tests {
 
     #[test]
     fn enabled_vertical_without_domain_feature_family_is_rejected() {
-        use crate::runtime_config::FeatureFamily;
-
         let mut config = RuntimeConfig::default();
         config
             .features

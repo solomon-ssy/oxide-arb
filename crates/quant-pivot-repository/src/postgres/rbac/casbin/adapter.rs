@@ -27,6 +27,7 @@ use sea_orm::{
 };
 
 use crate::postgres::rbac::casbin::row;
+use std::error::Error;
 
 /// Persists Casbin policies into the `casbin_rule` table.
 pub struct PgCasbinAdapter {
@@ -47,7 +48,7 @@ impl PgCasbinAdapter {
 /// Wrap any storage/database error as a Casbin adapter error.
 fn adapter_error<E>(error: E) -> casbin::Error
 where
-    E: std::error::Error + Send + Sync + 'static,
+    E: Error + Send + Sync + 'static,
 {
     casbin::Error::from(AdapterError(Box::new(error)))
 }

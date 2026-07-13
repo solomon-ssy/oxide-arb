@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 
+use crate::types::TradePolicyGovernanceAuditId;
 use crate::{
     domain::{TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, pagination::PageRequest},
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
@@ -53,7 +54,7 @@ pub struct TradePolicyAuditListQuery {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TradePolicyGovernanceAuditView {
-    pub audit_id: crate::types::TradePolicyGovernanceAuditId,
+    pub audit_id: TradePolicyGovernanceAuditId,
     pub artifact_id: TradePolicyArtifactId,
     pub action: TradePolicyGovernanceAction,
     pub from_status: TradePolicyStatus,

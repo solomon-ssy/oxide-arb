@@ -10,7 +10,6 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::common::MarketCategory, runtime_config::ModelConfig, types::ModelVersionId,
 };
-
 /// Which weighted scorer path a market follows at inference time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelRouting {
@@ -83,6 +82,7 @@ mod tests {
         runtime_config::{ModelConfig, ModelVersionRef},
         types::ModelVersionId,
     };
+    use std::iter;
 
     fn version_ref(id: &str) -> ModelVersionRef {
         ModelVersionRef { id: id.to_owned() }
@@ -118,7 +118,7 @@ mod tests {
         let generic = ModelVersionId::from_v7();
         let model = ModelConfig {
             active_model_version_id: Some(version_ref(&generic.to_string())),
-            category_model_pointers: std::iter::once((
+            category_model_pointers: iter::once((
                 MarketCategory::Crypto,
                 ModelVersionRef {
                     id: "not-a-uuid".to_owned(),

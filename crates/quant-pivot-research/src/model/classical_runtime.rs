@@ -40,7 +40,6 @@ use crate::{
     precision::RESEARCH_DECIMAL_SCALE,
     training::model_input_cell,
 };
-
 /// A long binary outcome token can lose at most its full cost basis.
 const MAX_LONG_DOWNSIDE_BPS: i64 = 10_000;
 
@@ -821,6 +820,8 @@ fn f64_to_decimal(value: f64) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write;
+
     use super::{ClassicalRuntime, project_settlement_probability};
     use crate::{
         features::{
@@ -856,7 +857,6 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn hash(seed: &str) -> ContentHash {
-        use std::fmt::Write;
         let hex = seed.bytes().fold(String::new(), |mut acc, byte| {
             let _ = write!(acc, "{byte:02x}");
             acc

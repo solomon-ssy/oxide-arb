@@ -53,12 +53,12 @@ use crate::{
         dispatch_wake::DispatchWake,
         intent_lifecycle::IntentLifecyclePublisher,
         mode_gate::{IntentPolicyDecision, RuntimeModeGate},
+        trade_policy_guard::require_frozen_trade_policy,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
     service::feature_integrity::FeatureParityGatePort,
 };
-
 /// Notify the intent plane that a report's recommendations are no longer valid.
 ///
 /// The active intents derived from the report are invalidated and their capital
@@ -190,12 +190,7 @@ impl CoreOrderIntentService {
             .ok_or_else(|| ExecutionError::IntentDenied {
                 reason: "recommendation model version no longer exists".to_owned(),
             })?;
-        crate::execution::require_frozen_trade_policy(
-            self.trade_policies.as_ref(),
-            &version,
-            recommendation,
-        )
-        .await
+        require_frozen_trade_policy(self.trade_policies.as_ref(), &version, recommendation).await
     }
 
     /// Create an intent from a recommendation at `now` (mode-gated, atomic with
@@ -1404,6 +1399,10 @@ mod tests {
     // `SemiAuto`/`AutoExecution` intent) ────────────────────────────────────
 
     mod calibration_recheck {
+        use std::env;
+        use std::process;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         use crate::execution::intent_service::recheck_return_model_calibrated;
         use async_trait::async_trait;
         use chrono::Utc;
@@ -1589,11 +1588,10 @@ mod tests {
         }
 
         fn temp_store() -> Arc<dyn ArtifactStore> {
-            use std::sync::atomic::{AtomicU64, Ordering};
             static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let root = std::env::temp_dir().join(format!(
+            let root = env::temp_dir().join(format!(
                 "qp_intent_calibration_recheck_test_{}_{}_{}",
-                std::process::id(),
+                process::id(),
                 Utc::now().timestamp_nanos_opt().unwrap_or_default(),
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));

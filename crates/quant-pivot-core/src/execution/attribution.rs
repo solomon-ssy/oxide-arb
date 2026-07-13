@@ -34,6 +34,9 @@ use quant_pivot_repository::traits::{
 
 use crate::observability::attribution_fact_writer::AttributionEventWriter;
 use rust_decimal::Decimal;
+use std::cmp::Ordering::Equal;
+use std::cmp::Ordering::Greater;
+use std::cmp::Ordering::Less;
 
 /// Dependencies for [`AttributionService`].
 pub struct AttributionServiceDeps {
@@ -463,9 +466,9 @@ fn exit_outcome(
 
 fn realized_settlement_outcome(realized_pnl_usd: Usd) -> RecommendationOutcome {
     match realized_pnl_usd.cmp(&Usd::ZERO) {
-        std::cmp::Ordering::Greater => RecommendationOutcome::Won,
-        std::cmp::Ordering::Less => RecommendationOutcome::Lost,
-        std::cmp::Ordering::Equal => RecommendationOutcome::Unknown,
+        Greater => RecommendationOutcome::Won,
+        Less => RecommendationOutcome::Lost,
+        Equal => RecommendationOutcome::Unknown,
     }
 }
 

@@ -1,5 +1,6 @@
 //! Factor registry and factor value persistence DTOs.
 
+use crate::entities::quant_factor_definition;
 use crate::{
     enums::{
         factor::{
@@ -42,7 +43,7 @@ pub struct FactorDefinitionInfo {
 
 info_from_model!(
     FactorDefinitionInfo,
-    crate::entities::quant_factor_definition::Model,
+    quant_factor_definition::Model,
     {
         factor_definition_id,
         definition_hash,

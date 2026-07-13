@@ -6,6 +6,8 @@
 //! `AccountSnapshot` aggregate).
 
 use crate::domain::pagination::PageRequest;
+use crate::entities::quant_account_snapshot;
+use crate::entities::quant_equity_snapshot;
 use crate::{
     enums::quant::AccountSource,
     types::{
@@ -37,7 +39,7 @@ pub struct AccountSnapshotInfo {
 
 info_from_model!(
     AccountSnapshotInfo,
-    crate::entities::quant_account_snapshot::Model,
+    quant_account_snapshot::Model,
     {
         account_snapshot_id,
         as_of,
@@ -125,7 +127,7 @@ pub struct EquitySnapshotInfo {
 
 info_from_model!(
     EquitySnapshotInfo,
-    crate::entities::quant_equity_snapshot::Model,
+    quant_equity_snapshot::Model,
     {
         equity_snapshot_id,
         as_of,

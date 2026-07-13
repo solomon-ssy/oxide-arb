@@ -20,6 +20,7 @@
 //! Cross-sectional `net` uses `ndarray` batch reduction; money fields remain
 //! `Decimal` / newtypes after quantization.
 
+use std::cmp::Reverse;
 mod batch;
 
 use std::{collections::BTreeMap, time::Instant};
@@ -504,7 +505,7 @@ fn split_contributions(
         .filter(|c| c.contribution < Decimal::ZERO)
         .cloned()
         .collect();
-    positive.sort_by_key(|item| std::cmp::Reverse(item.contribution));
+    positive.sort_by_key(|item| Reverse(item.contribution));
     negative.sort_by_key(|item| item.contribution);
     positive.truncate(EXPLANATION_TOP_K);
     negative.truncate(EXPLANATION_TOP_K);

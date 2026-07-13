@@ -4,6 +4,7 @@ use linkme::distributed_slice;
 use sea_orm::{
     DbBackend, Schema, entity::ActiveEnum, sea_query::extension::postgres::TypeCreateStatement,
 };
+use std::collections::BTreeSet;
 
 /// Compile-time metadata for one Postgres `CREATE TYPE … AS ENUM` statement.
 #[derive(Clone, Copy)]
@@ -40,7 +41,7 @@ pub fn create_type<E: ActiveEnum>() -> TypeCreateStatement {
 }
 
 fn assert_unique_type_names(specs: &[&PgEnumSpec]) {
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for spec in specs {
         assert!(
             seen.insert(spec.type_name),

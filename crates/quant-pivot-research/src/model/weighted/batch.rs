@@ -140,11 +140,15 @@ fn decimal_from_f64(value: f64) -> QuantResult<Decimal> {
 mod tests {
     use super::ScoringBatchLayout;
     use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, FactorDirection},
+        enums::{
+            factor::FactorFamily,
+            quant::{DataQualityStatus, FactorDirection},
+        },
         types::{FactorDefinitionId, MarketId, Price, Probability, TokenId, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use std::collections::BTreeMap;
 
     use crate::{
         factors::{
@@ -154,8 +158,6 @@ mod tests {
         model::runtime::{FactorInferenceRow, MarketInferenceContext},
         precision::RESEARCH_DECIMAL_SCALE,
     };
-
-    use quant_pivot_models::enums::factor::FactorFamily;
 
     fn factor(
         name: FactorName,
@@ -190,10 +192,7 @@ mod tests {
         }
     }
 
-    fn scalar_net(
-        weights: &std::collections::BTreeMap<FactorName, Decimal>,
-        row: &FactorInferenceRow,
-    ) -> Decimal {
+    fn scalar_net(weights: &BTreeMap<FactorName, Decimal>, row: &FactorInferenceRow) -> Decimal {
         let mut net = Decimal::ZERO;
         for factor in &row.factors {
             let Some(weight) = weights.get(&factor.name) else {
@@ -214,7 +213,7 @@ mod tests {
 
     #[test]
     fn batch_scoring_matches_scalar_reference() {
-        let mut weights = std::collections::BTreeMap::new();
+        let mut weights = BTreeMap::new();
         weights.insert(LIQUIDITY_DEPTH, dec!(0.5));
         weights.insert(MOMENTUM_ROC, dec!(0.5));
         let layout = ScoringBatchLayout::from_weights(&weights).expect("layout");

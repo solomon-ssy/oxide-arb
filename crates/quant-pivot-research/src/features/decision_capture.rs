@@ -24,6 +24,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::features::value::EvidenceSourceKind;
 use crate::{
     features::{
         FeatureName, FeatureVector, MarketWindowSnapshot, NullReason,
@@ -35,6 +36,7 @@ use crate::{
     pit::ResolvedMarketSnapshot,
     selection::SelectedMarket,
 };
+use std::collections::HashMap;
 
 /// Exact immutable catalog revisions used for one decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,7 +290,6 @@ pub fn book_evidence_ref(
     effective_at: DateTime<Utc>,
     available_at: DateTime<Utc>,
 ) -> EvidenceSourceRef {
-    use crate::features::value::EvidenceSourceKind;
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::Book,
         reference: book_snapshot_ref.canonical_string(),
@@ -362,7 +363,7 @@ pub fn draft_data_quality_snapshot(
         }
         .into());
     }
-    let rejected_by_market: std::collections::HashMap<_, _> = rejected_markets
+    let rejected_by_market: HashMap<_, _> = rejected_markets
         .iter()
         .map(|row| (row.market_id.clone(), row))
         .collect();

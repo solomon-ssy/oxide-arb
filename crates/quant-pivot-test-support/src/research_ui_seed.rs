@@ -44,6 +44,10 @@ use sea_orm::{
 };
 
 use crate::execution_pg_seed::SharedDemoInfra;
+use quant_pivot_models::entities::{
+    quant_backtest_report, quant_factor_definition, quant_model_comparison_report,
+    quant_model_spec, quant_model_version, quant_training_dataset,
+};
 
 const RESEARCH_MARKER_SPEC: &str = "ui-demo-research-spec-secondary";
 const PRIMARY_SPEC_NAME: &str = "ui-demo-seed-model";
@@ -114,8 +118,6 @@ pub async fn seed_research_ui_demo_pg(
 }
 
 async fn research_already_seeded(db: &DatabaseConnection) -> bool {
-    use quant_pivot_models::entities::quant_model_spec;
-
     quant_model_spec::Entity::find()
         .filter(quant_model_spec::Column::Name.eq(RESEARCH_MARKER_SPEC))
         .one(db)
@@ -125,8 +127,6 @@ async fn research_already_seeded(db: &DatabaseConnection) -> bool {
 }
 
 async fn primary_model_spec_id(db: &DatabaseConnection) -> ModelSpecId {
-    use quant_pivot_models::entities::quant_model_spec;
-
     quant_model_spec::Entity::find()
         .filter(quant_model_spec::Column::Name.eq(PRIMARY_SPEC_NAME))
         .one(db)
@@ -150,8 +150,6 @@ async fn load_existing_summary(db: &DatabaseConnection) -> ResearchUiSeedSummary
 }
 
 async fn load_existing_primary(db: &DatabaseConnection, summary: &mut ResearchUiSeedSummary) {
-    use quant_pivot_models::entities::{quant_model_spec, quant_model_version};
-
     if let Some(spec) = quant_model_spec::Entity::find()
         .filter(quant_model_spec::Column::Name.eq(PRIMARY_SPEC_NAME))
         .one(db)
@@ -180,8 +178,6 @@ async fn load_existing_primary(db: &DatabaseConnection, summary: &mut ResearchUi
 }
 
 async fn load_existing_datasets(db: &DatabaseConnection, summary: &mut ResearchUiSeedSummary) {
-    use quant_pivot_models::entities::quant_training_dataset;
-
     let dataset_rows = quant_training_dataset::Entity::find()
         .filter(quant_training_dataset::Column::ParquetUri.like("%ui-demo-research%"))
         .all(db)
@@ -199,8 +195,6 @@ async fn load_existing_versions_and_backtests(
     db: &DatabaseConnection,
     summary: &mut ResearchUiSeedSummary,
 ) {
-    use quant_pivot_models::entities::{quant_backtest_report, quant_model_version};
-
     let Some(primary_spec_id) = summary.primary_model_spec_id.clone() else {
         return;
     };
@@ -244,8 +238,6 @@ async fn load_existing_versions_and_backtests(
 }
 
 async fn load_existing_comparison(db: &DatabaseConnection, summary: &mut ResearchUiSeedSummary) {
-    use quant_pivot_models::entities::quant_model_comparison_report;
-
     let comparison_hash = content_hash("comparison-research-pair");
     if let Some(row) = quant_model_comparison_report::Entity::find()
         .filter(quant_model_comparison_report::Column::ComparisonHash.eq(comparison_hash))
@@ -260,8 +252,6 @@ async fn load_existing_comparison(db: &DatabaseConnection, summary: &mut Researc
 }
 
 async fn load_existing_factors(db: &DatabaseConnection, summary: &mut ResearchUiSeedSummary) {
-    use quant_pivot_models::entities::quant_factor_definition;
-
     let factor_rows = quant_factor_definition::Entity::find()
         .filter(quant_factor_definition::Column::Name.starts_with("ui-demo-research"))
         .all(db)
@@ -746,8 +736,6 @@ async fn find_backtest_for_version(
     db: &DatabaseConnection,
     model_version_id: &ModelVersionId,
 ) -> BacktestReportId {
-    use quant_pivot_models::entities::quant_backtest_report;
-
     quant_backtest_report::Entity::find()
         .filter(quant_backtest_report::Column::ModelVersionId.eq(model_version_id.clone()))
         .order_by_desc(quant_backtest_report::Column::CreatedAt)

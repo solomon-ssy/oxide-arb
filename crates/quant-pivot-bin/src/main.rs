@@ -2,7 +2,7 @@ use clap::Parser;
 use quant_pivot_core::app::bootstrap;
 use quant_pivot_models::config::{DeployConfig, ObservabilityConfig};
 use rustls::crypto::aws_lc_rs;
-use std::{error::Error, sync::Arc};
+use std::{env, error::Error, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -30,7 +30,7 @@ const SDK_LOG_DIRECTIVE: &str = "polymarket_client_sdk_v2=error";
 /// `error` (see [`SDK_LOG_DIRECTIVE`]). `log_json` switches the formatter to
 /// structured JSON lines for log aggregation.
 fn init_tracing(observability: &ObservabilityConfig) {
-    let base = std::env::var(EnvFilter::DEFAULT_ENV)
+    let base = env::var(EnvFilter::DEFAULT_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| observability.log_level.clone());

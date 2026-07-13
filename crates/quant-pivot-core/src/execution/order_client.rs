@@ -306,6 +306,9 @@ mod tests {
     use quant_pivot_models::enums::common::OrderType;
 
     use super::VenueOutcome;
+    use super::VenueSubmitResult;
+    use chrono::Utc;
+    use quant_pivot_models::types::{Shares, Usd};
 
     #[test]
     fn fok_partial_normalizes_to_ambiguous() {
@@ -325,10 +328,6 @@ mod tests {
 
     #[test]
     fn submit_result_applies_order_type_semantics() {
-        use super::VenueSubmitResult;
-        use chrono::Utc;
-        use quant_pivot_models::types::{Shares, Usd};
-
         let result = VenueSubmitResult {
             outcome: VenueOutcome::PartiallyFilled,
             venue_order_id: None,

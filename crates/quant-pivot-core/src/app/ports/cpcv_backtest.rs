@@ -42,6 +42,7 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 use serde::Serialize;
 
+use crate::service::training_dataset;
 use crate::{
     app::bundles::ResearchBundle,
     service::{
@@ -226,8 +227,7 @@ impl CoreCpcvBacktestPort {
         request: &RunCpcvBacktestRequest,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
-        let materialization =
-            crate::service::training_dataset::require_dataset_materialization(dataset)?;
+        let materialization = training_dataset::require_dataset_materialization(dataset)?;
         self.model_run_repo
             .create(NewModelRun {
                 model_run_id: model_run_id.clone(),

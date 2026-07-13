@@ -41,7 +41,6 @@ use crate::{
     report::ReportLifecycleService,
 };
 use quant_pivot_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
-
 const SAMPLE_FRACTION_NUMERATOR: usize = 1;
 const SAMPLE_FRACTION_DENOMINATOR: usize = 10;
 const SAMPLE_MINIMUM: usize = 20;
@@ -1328,6 +1327,8 @@ fn view(info: FeatureParityRunInfo) -> QuantResult<FeatureParityRunView> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::slice;
+    use std::sync::MutexGuard;
     use std::{collections::VecDeque, sync::Mutex};
 
     use quant_pivot_models::{
@@ -1340,7 +1341,7 @@ mod tests {
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
 
-    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         mutex.lock().expect("test mutex")
     }
 
@@ -1869,7 +1870,7 @@ mod tests {
             market_id: None,
             decision_at: now,
         };
-        validate_candidates(&run, std::slice::from_ref(&report_candidate))
+        validate_candidates(&run, slice::from_ref(&report_candidate))
             .expect("report-level empty selection is real evidence");
 
         let model_candidate = FeatureParityCandidate {

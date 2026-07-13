@@ -791,11 +791,12 @@ fn count_f64(n: usize) -> QuantResult<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassicalAdapterRegistry, SmartcoreModel};
+    use super::{ClassicalAdapterRegistry, ClassicalParams, SmartcoreModel};
     use chrono::TimeZone;
     use ndarray::Array1;
     use rust_decimal_macros::dec;
 
+    use super::rolling_validation;
     use crate::{
         features::{FeatureName, FeatureUnit, FeatureValueKind},
         model::{classical::dense_matrix, runtime::ClassicalKind, trainer::ValidationSpec},
@@ -865,9 +866,6 @@ mod tests {
 
     #[test]
     fn rolling_validation_purges_overlapping_label_horizons() {
-        use super::rolling_validation;
-        use crate::model::{classical::ClassicalParams, runtime::ClassicalKind};
-
         // Long label horizons so expanding-prefix CV would leak; purged CV must
         // still produce a finite held-out objective (or skip thin folds).
         let rows = 40usize;
@@ -921,9 +919,6 @@ mod tests {
 
     #[test]
     fn rolling_validation_rejects_when_purge_leaves_no_evaluable_fold() {
-        use super::rolling_validation;
-        use crate::model::{classical::ClassicalParams, runtime::ClassicalKind};
-
         let mut matrix = training_matrix();
         let terminal = fixture_ts(1_000_000);
         matrix.row_label_horizon_end.fill(terminal);

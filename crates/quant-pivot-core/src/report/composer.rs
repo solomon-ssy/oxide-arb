@@ -46,6 +46,7 @@ use super::types::{
     ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
     ReportTrigger,
 };
+use quant_pivot_models::domain::market::book::BookLevel;
 
 /// Inputs required to compose one report artifact.
 pub struct ComposeReportInput<'a> {
@@ -510,10 +511,7 @@ fn resolve_recommendation_policy(
     })
 }
 
-fn ask_vwap_for_usd(
-    asks: &[quant_pivot_models::domain::market::book::BookLevel],
-    target: Usd,
-) -> Option<(Price, Price)> {
+fn ask_vwap_for_usd(asks: &[BookLevel], target: Usd) -> Option<(Price, Price)> {
     if !target.is_positive() {
         return None;
     }

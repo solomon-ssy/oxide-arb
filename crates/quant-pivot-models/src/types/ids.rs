@@ -356,7 +356,7 @@ pub struct OperationLogId(Arc<Uuid>);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{thread::sleep, time::Duration};
+    use std::{ptr, thread::sleep, time::Duration};
 
     #[test]
     fn recommendation_report_id_v7_sortable_by_time() {
@@ -427,8 +427,8 @@ mod tests {
         let cloned = id.clone();
         assert_eq!(id, cloned);
         assert_eq!(
-            std::ptr::from_ref::<str>(id.as_str()),
-            std::ptr::from_ref::<str>(cloned.as_str())
+            ptr::from_ref::<str>(id.as_str()),
+            ptr::from_ref::<str>(cloned.as_str())
         );
     }
 }

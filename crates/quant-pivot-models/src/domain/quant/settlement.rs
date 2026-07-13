@@ -1,5 +1,7 @@
 //! Settlement redemption persistence DTOs.
 
+use crate::entities::quant_settlement_redeem;
+use crate::entities::quant_settlement_redeem_lot;
 use crate::{
     domain::PositionExit,
     enums::{
@@ -44,7 +46,7 @@ pub struct SettlementRedeemInfo {
 
 info_from_model!(
     SettlementRedeemInfo,
-    crate::entities::quant_settlement_redeem::Model,
+    quant_settlement_redeem::Model,
     {
         settlement_redeem_id, market_id, funder_address, wallet_kind, state,
         tx_hash, index_sets_json, payout_vector_json, balance_before_json,
@@ -97,7 +99,7 @@ pub struct SettlementRedeemLotInfo {
 
 info_from_model!(
     SettlementRedeemLotInfo,
-    crate::entities::quant_settlement_redeem_lot::Model,
+    quant_settlement_redeem_lot::Model,
     {
         settlement_redeem_lot_id, settlement_redeem_id, position_id,
         order_intent_id, token_id, side, shares_redeemed, cost_basis_usd,

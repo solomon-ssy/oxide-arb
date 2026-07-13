@@ -22,16 +22,17 @@ use quant_pivot_models::{
     },
     domain::{
         CapitalReconcileSettlement, CapitalSettlement, ConfirmSettlementRedeem, InsertFinalOutcome,
-        NewRecommendationAttribution, NewReconciliation, NewSettlementRedeem,
+        NewMarketSelection, NewRecommendationAttribution, NewReconciliation, NewSettlementRedeem,
         NewSettlementRedeemLot, PositionExit, ReconciliationLedgerWrite, SettlementRedeemLotWrite,
         SubmissionLedgerWrite,
     },
-    entities::{market, quant_order_intent},
+    entities::{market, quant_execution_order, quant_order_intent},
     enums::{
         clickhouse::{
             ChCapitalAllocationState, ChExecutionSide, ChOutcomeSide, ChPositionLedgerState,
             ChQuantLedgerEventKind, ChRecommendationAttributionOutcome, ChRecommendationStatus,
         },
+        common::MarketCategory,
         execution::{
             ExecutionOrderPhase, ExitReason, ReconciliationEvidenceKind, ReconciliationResult,
             SettlementRedeemState, VenueOrderStatus,
@@ -43,15 +44,17 @@ use quant_pivot_models::{
         },
     },
     types::{
-        AccountSnapshotId, AttributionDetail, CapitalAllocationId, EntryOutcome, EntryTrigger,
-        ExecutionOrderId, ExitOutcome, MarketId, MarketSelectionId, OrderId, OrderIntentId,
-        PortfolioPlanId, PositionId, Price, RecommendationId, RecommendationReportId,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        ReportDataQualitySnapshotId, RuntimeConfigVersionId, SettlementBalanceEvidence,
-        SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets,
-        SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId, Usd,
+        AccountSnapshotId, AttributionDetail, CapitalAllocationId, ContentHash, EntryOutcome,
+        EntryTrigger, ExecutionOrderId, ExitOutcome, MarketId, MarketSelectionId, OrderId,
+        OrderIntentId, PortfolioPlanId, PositionId, Price, RecommendationId,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, RuntimeConfigVersionId,
+        SelectionExclusionSummary, SettlementBalanceEvidence, SettlementPayoutVector,
+        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId,
+        SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
+use quant_pivot_repository::postgres::PgMarketSelectionRepository;
 use quant_pivot_repository::{
     clickhouse::ChQuantFactRepository,
     postgres::{
@@ -69,9 +72,13 @@ use quant_pivot_repository::{
 };
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use rust_decimal_macros::dec;
-use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    QueryFilter,
+};
 
 use crate::{
+    catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{
         self, EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig,
         SharedDemoInfra, build_custom_report_transaction, close_position_full, demo_recommendation,
@@ -963,8 +970,6 @@ async fn first_entry_order(
     db: &DatabaseConnection,
     intent_id: &OrderIntentId,
 ) -> Option<ExecutionOrderId> {
-    use quant_pivot_models::entities::quant_execution_order;
-    use sea_orm::{ColumnTrait, QueryFilter};
     quant_execution_order::Entity::find()
         .filter(quant_execution_order::Column::OrderIntentId.eq(intent_id.clone()))
         .filter(quant_execution_order::Column::OrderPhase.eq(ExecutionOrderPhase::Entry))
@@ -1400,9 +1405,6 @@ async fn seed_market_catalog_for_diff(
     market_id: &str,
     slug: &str,
 ) {
-    use crate::catalog_fixtures::{make_event, make_market};
-    use quant_pivot_models::enums::common::MarketCategory;
-
     PgEventRepository::new(db.clone())
         .upsert(make_event(
             event_id,
@@ -1429,12 +1431,6 @@ async fn seed_market_selection_for_diff(
     db: &DatabaseConnection,
     runtime_config_version_id: &RuntimeConfigVersionId,
 ) -> MarketSelectionId {
-    use quant_pivot_models::{
-        domain::NewMarketSelection,
-        types::{ContentHash, MarketSelectionId, SelectionExclusionSummary},
-    };
-    use quant_pivot_repository::postgres::PgMarketSelectionRepository;
-
     let id = MarketSelectionId::from_v7();
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(

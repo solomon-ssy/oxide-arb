@@ -33,7 +33,6 @@ use crate::{
         FittedInputTransform, InputStateRates,
     },
 };
-
 /// Decimal precision persisted for fitted numeric statistics.
 const TRANSFORM_DECIMAL_SCALE: u32 = 15;
 
@@ -997,6 +996,7 @@ mod tests {
         training::fixtures,
     };
     use chrono::{Duration, TimeZone};
+    use quant_pivot_models::types::Probability;
     use quant_pivot_models::{
         domain::DecisionClock,
         enums::quant::DataQualityStatus,
@@ -1182,7 +1182,7 @@ mod tests {
         assert!(build_training_matrix(&[absent], &spec(false)).is_err());
 
         let wrong_kind = example(
-            FeatureValue::Probability(quant_pivot_models::types::Probability::new(dec!(0.5))),
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
             false,
             1,
         );
@@ -1201,8 +1201,6 @@ mod tests {
 
     #[test]
     fn category_vocabulary_is_frozen_and_unknown_is_explicit() {
-        use quant_pivot_models::enums::common::MarketCategory;
-
         let examples = vec![
             example(FeatureValue::Category(MarketCategory::Sports), false, 0),
             example(FeatureValue::Category(MarketCategory::Politics), false, 1),

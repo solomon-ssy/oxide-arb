@@ -19,6 +19,8 @@ use crate::schema::ui::{enum_label, field_ui, field_ui_map, schema_tree, tree_fi
 
 use super::json_schema::fields::{SchemaLeaf, walk_schema_leaves};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// Build the preferences envelope for `GET /runtime-config/schema`.
 #[must_use]
@@ -85,7 +87,7 @@ pub fn preferences_schema_ui_gaps() -> Vec<String> {
         .iter()
         .filter(|leaf| leaf.path != "schema_version")
         .map(|leaf| leaf.path.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let ui = field_ui_map();
     let mut gaps = Vec::new();
 
@@ -122,7 +124,7 @@ pub fn preferences_schema_ui_gaps() -> Vec<String> {
     // Layout-tree coverage: every schema leaf appears exactly once in the tree,
     // and the tree references no unknown paths.
     let tree_paths = tree_field_paths();
-    let mut seen = std::collections::BTreeMap::<String, u32>::new();
+    let mut seen = BTreeMap::<String, u32>::new();
     for path in &tree_paths {
         *seen.entry(path.clone()).or_default() += 1;
     }

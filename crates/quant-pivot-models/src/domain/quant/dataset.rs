@@ -1,5 +1,6 @@
 //! Training-dataset ledger persistence DTOs.
 
+use crate::entities::quant_training_dataset;
 use crate::{
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
@@ -57,7 +58,7 @@ pub struct TrainingDatasetInfo {
 
 info_from_model!(
     TrainingDatasetInfo,
-    crate::entities::quant_training_dataset::Model,
+    quant_training_dataset::Model,
     {
         training_dataset_id,
         model_spec_id,

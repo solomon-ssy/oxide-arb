@@ -1,7 +1,7 @@
 //! Persistence layer errors — `PostgreSQL`, `ClickHouse`, and cache.
 
 use sea_orm::DbErr;
-use std::time::Duration;
+use std::{fmt::Display, time::Duration};
 use thiserror::Error;
 
 /// Logical persistence entity names for typed [`StorageError`] variants.
@@ -178,7 +178,7 @@ fn display_optional_entity(entity: Option<&'static str>) -> String {
 
 impl StorageError {
     /// Construct an explicit duplicate-key error.
-    pub fn duplicate(entity: &'static str, key: impl std::fmt::Display) -> Self {
+    pub fn duplicate(entity: &'static str, key: impl Display) -> Self {
         Self::Duplicate {
             entity,
             key: key.to_string(),
@@ -186,7 +186,7 @@ impl StorageError {
     }
 
     /// Construct a not-found error.
-    pub fn not_found(entity: &'static str, id: impl std::fmt::Display) -> Self {
+    pub fn not_found(entity: &'static str, id: impl Display) -> Self {
         Self::NotFound {
             entity,
             id: id.to_string(),
@@ -196,9 +196,9 @@ impl StorageError {
     /// Construct an illegal FSM transition error.
     pub fn illegal_transition(
         entity: &'static str,
-        id: Option<impl std::fmt::Display>,
-        from: impl std::fmt::Display,
-        to: impl std::fmt::Display,
+        id: Option<impl Display>,
+        from: impl Display,
+        to: impl Display,
     ) -> Self {
         Self::IllegalTransition {
             entity,
@@ -211,8 +211,8 @@ impl StorageError {
     /// Construct a lifecycle/state conflict error.
     pub fn state_conflict(
         entity: &'static str,
-        id: Option<impl std::fmt::Display>,
-        detail: impl std::fmt::Display,
+        id: Option<impl Display>,
+        detail: impl Display,
     ) -> Self {
         Self::StateConflict {
             entity,
@@ -222,10 +222,7 @@ impl StorageError {
     }
 
     /// Construct an invariant violation error.
-    pub fn invariant_violation(
-        entity: Option<&'static str>,
-        detail: impl std::fmt::Display,
-    ) -> Self {
+    pub fn invariant_violation(entity: Option<&'static str>, detail: impl Display) -> Self {
         Self::InvariantViolation {
             entity,
             detail: detail.to_string(),

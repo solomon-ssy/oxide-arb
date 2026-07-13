@@ -650,9 +650,7 @@ fn verify_input_contract_binding(
 }
 
 #[cfg(not(feature = "ml-classical"))]
-fn classical_runtime_unavailable(
-    artifact: &quant_pivot_research::model::ClassicalModelArtifact,
-) -> QuantError {
+fn classical_runtime_unavailable(artifact: &ClassicalModelArtifact) -> QuantError {
     ResearchError::RuntimeUnavailable {
         family: artifact.kind.to_string(),
         detail: "classical frozen parity requires the ml-classical build".to_owned(),

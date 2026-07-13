@@ -20,6 +20,8 @@ use crate::model::TrainingObjectiveSpec;
 
 #[cfg(feature = "ml-classical")]
 use crate::model::classical::{ClassicalParams, ForestParams, LinearParams};
+#[cfg(feature = "ml-classical")]
+use rust_decimal::prelude::ToPrimitive;
 
 /// One governed, independently trainable configuration in the trial grid.
 #[derive(Debug, Clone)]
@@ -126,8 +128,6 @@ fn generate_weighted_factor(
 
 #[cfg(feature = "ml-classical")]
 fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
-    use rust_decimal::prelude::ToPrimitive;
-
     // Sum, not Cartesian product: forest and linear params apply to disjoint
     // ClassicalKind families. Crossing them inflated DSR N with inert dimensions.
     let expanded = grid
@@ -253,6 +253,7 @@ fn methodology(detail: impl Into<String>) -> QuantError {
 
 #[cfg(test)]
 mod tests {
+    use super::ClassicalTrialGrid;
     use super::{Trial, TrialGridSpec, WeightedFactorTrialGrid};
     use crate::model::TrainingObjectiveSpec;
     use quant_pivot_models::runtime_config::RankLossKind;
@@ -323,8 +324,6 @@ mod tests {
     #[cfg(feature = "ml-classical")]
     #[test]
     fn classical_grid_sums_forest_and_linear_not_cartesian() {
-        use super::ClassicalTrialGrid;
-
         let grid = TrialGridSpec::Classical(ClassicalTrialGrid {
             forest_n_trees_multipliers: vec![dec!(0.5), dec!(1), dec!(2)],
             linear_alpha_multipliers: vec![dec!(0.5), dec!(1)],

@@ -1,5 +1,6 @@
 //! Execution-order reconciliation persistence DTOs.
 
+use crate::entities::quant_reconciliation;
 use crate::{
     domain::{
         PositionExit, PositionFill,
@@ -38,7 +39,7 @@ pub struct ReconciliationInfo {
 
 info_from_model!(
     ReconciliationInfo,
-    crate::entities::quant_reconciliation::Model,
+    quant_reconciliation::Model,
     {
         reconciliation_id,
         execution_order_id,

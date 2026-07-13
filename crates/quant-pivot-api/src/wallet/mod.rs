@@ -239,7 +239,7 @@ pub const fn signature_type_for(kind: ExecutionWalletKind) -> SignatureType {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
     use async_trait::async_trait;
@@ -254,18 +254,18 @@ mod tests {
 
     struct StubVerifier {
         controlled: bool,
-        called: std::sync::atomic::AtomicBool,
+        called: AtomicBool,
     }
 
     impl StubVerifier {
         fn new(controlled: bool) -> Self {
             Self {
                 controlled,
-                called: std::sync::atomic::AtomicBool::new(false),
+                called: AtomicBool::new(false),
             }
         }
         fn was_called(&self) -> bool {
-            self.called.load(std::sync::atomic::Ordering::SeqCst)
+            self.called.load(Ordering::SeqCst)
         }
     }
 

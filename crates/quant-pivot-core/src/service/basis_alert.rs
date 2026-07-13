@@ -30,7 +30,6 @@ use quant_pivot_research::{
     features::{DomainSliceInputs, FeatureValue, FeatureVector, names::domain_crypto},
 };
 use rust_decimal::Decimal;
-
 /// Scan `accepted` vectors for a basis exceedance and build the alert rows to
 /// persist. Pure and side-effect-free — the caller persists + alerts.
 #[must_use]
@@ -94,6 +93,7 @@ mod tests {
     };
     use rust_decimal_macros::dec;
     use std::collections::{BTreeMap, HashMap};
+    use std::slice;
 
     fn instrument() -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(
@@ -165,7 +165,7 @@ mod tests {
         let domain = DomainConfig::default(); // default max_basis_bps = 50
         let vec = vector(Some(FeatureValue::Bps(dec!(75))));
         let alerts = detect_basis_alerts(
-            std::slice::from_ref(&vec),
+            slice::from_ref(&vec),
             &domain_inputs_for(&vec.market_id),
             &domain,
         );
@@ -181,7 +181,7 @@ mod tests {
         let domain = DomainConfig::default(); // default max_basis_bps = 50
         let vec = vector(Some(FeatureValue::Bps(dec!(-80))));
         let alerts = detect_basis_alerts(
-            std::slice::from_ref(&vec),
+            slice::from_ref(&vec),
             &domain_inputs_for(&vec.market_id),
             &domain,
         );
@@ -193,7 +193,7 @@ mod tests {
         let domain = DomainConfig::default();
         let vec = vector(Some(FeatureValue::Bps(dec!(10))));
         let alerts = detect_basis_alerts(
-            std::slice::from_ref(&vec),
+            slice::from_ref(&vec),
             &domain_inputs_for(&vec.market_id),
             &domain,
         );
@@ -206,7 +206,7 @@ mod tests {
         let domain = DomainConfig::default();
         let vec = vector(None);
         let alerts = detect_basis_alerts(
-            std::slice::from_ref(&vec),
+            slice::from_ref(&vec),
             &domain_inputs_for(&vec.market_id),
             &domain,
         );
@@ -325,7 +325,7 @@ mod tests {
         let domain = DomainConfig::default(); // default max_basis_bps = 50
         let vec = vector(Some(FeatureValue::Bps(dec!(75))));
         let alerts = detect_basis_alerts(
-            std::slice::from_ref(&vec),
+            slice::from_ref(&vec),
             &domain_inputs_for(&vec.market_id),
             &domain,
         );

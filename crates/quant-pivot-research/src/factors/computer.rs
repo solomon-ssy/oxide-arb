@@ -45,6 +45,7 @@ use crate::{
     model::FavoriteLongshotBiasTable,
     parallel::{par_map_with_index, par_try_map, par_try_map_with_index},
 };
+use std::slice;
 
 /// Batch size at or above which the engine spreads its stages across the `rayon`
 /// pool. Below it the serial path wins: parallel scheduling adds fixed overhead
@@ -215,7 +216,7 @@ impl FactorEngine {
         features: &FeatureVector,
         config: &FactorsConfig,
     ) -> QuantResult<MarketFactorOutcome> {
-        let mut outcomes = self.compute_all_batch(std::slice::from_ref(features), config)?;
+        let mut outcomes = self.compute_all_batch(slice::from_ref(features), config)?;
         outcomes.pop().ok_or_else(|| {
             ResearchError::FactorComputation {
                 detail: "factor engine produced no outcome".into(),

@@ -1,5 +1,7 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
+use crate::entities::runtime_config_activation;
+use crate::entities::system_runtime_state;
 use crate::{
     domain::{
         ExecutionRecoverySummary,
@@ -187,7 +189,7 @@ pub struct ShutdownProgress {
 
 // ── Runtime config ───────────────────────────────────────────────────
 //
-// The typed schema for `config_json` is `crate::runtime_config::RuntimeConfig`
+// The typed schema for `config_json` is `RuntimeConfig`
 // (`schema_version` — see `RUNTIME_CONFIG_SCHEMA_VERSION`). This module only
 // carries the persistence DTOs.
 
@@ -241,7 +243,7 @@ pub struct RuntimeConfigActivationInfo {
 
 info_from_model!(
     RuntimeConfigActivationInfo,
-    crate::entities::runtime_config_activation::Model,
+    runtime_config_activation::Model,
     {
         runtime_config_activation_id,
         runtime_config_version_id,
@@ -278,7 +280,7 @@ pub struct NewRuntimeConfigActivation {
 #[sea_orm(entity = "crate::entities::system_runtime_state::Entity")]
 pub struct SystemRuntimeStateInfo {
     pub id: i32,
-    pub quant_runtime_mode: crate::enums::quant::QuantRuntimeMode,
+    pub quant_runtime_mode: QuantRuntimeMode,
     pub changed_by: String,
     pub reason: String,
     pub changed_at: DateTime<Utc>,
@@ -287,7 +289,7 @@ pub struct SystemRuntimeStateInfo {
 
 info_from_model!(
     SystemRuntimeStateInfo,
-    crate::entities::system_runtime_state::Model,
+    system_runtime_state::Model,
     {
         id,
         quant_runtime_mode,

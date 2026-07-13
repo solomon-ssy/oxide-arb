@@ -44,6 +44,8 @@ use crate::{
     report::{AdHocReportRequest, ReportLifecycleService, ReportTrigger},
     service::durable_feature_parity::{persisted_capture, report_decision_boundary},
 };
+use std::collections::hash_map::Entry::Occupied;
+use std::collections::hash_map::Entry::Vacant;
 
 /// Web-facing report port assembled from the report plane.
 pub struct CoreQuantReportPort {
@@ -905,12 +907,10 @@ fn serving_feature_evidence_counts(
             .into());
         }
         match captures.entry(row.feature_vector_id.clone()) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            Vacant(entry) => {
                 entry.insert(row.decision_capture_hash.as_str());
             }
-            std::collections::hash_map::Entry::Occupied(entry)
-                if *entry.get() != row.decision_capture_hash =>
-            {
+            Occupied(entry) if *entry.get() != row.decision_capture_hash => {
                 return Err(ResearchError::Determinism {
                     detail: format!(
                         "feature vector {} carries multiple decision-capture hashes",
@@ -919,7 +919,7 @@ fn serving_feature_evidence_counts(
                 }
                 .into());
             }
-            std::collections::hash_map::Entry::Occupied(_) => {}
+            Occupied(_) => {}
         }
     }
     let count = checked_len(captures.len(), "feature vector")?;

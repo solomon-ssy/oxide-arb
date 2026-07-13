@@ -23,7 +23,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{factors::FactorName, hashing::ResearchHasher};
-
 /// One factor's signed contribution to a candidate's composite score.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorContribution {
@@ -316,6 +315,7 @@ mod tests {
         MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId,
     };
     use rust_decimal::Decimal;
+    use std::slice;
 
     /// Constructs a strongly-typed candidate (replaces the deleted models stub).
     #[test]
@@ -393,8 +393,8 @@ mod tests {
         replayed.model_run_id = ModelRunId::from_v7();
 
         assert_eq!(
-            canonical_business_prediction_hash(std::slice::from_ref(&candidate)).expect("online"),
-            canonical_business_prediction_hash(std::slice::from_ref(&replayed)).expect("replay")
+            canonical_business_prediction_hash(slice::from_ref(&candidate)).expect("online"),
+            canonical_business_prediction_hash(slice::from_ref(&replayed)).expect("replay")
         );
     }
 
@@ -417,7 +417,7 @@ mod tests {
     fn business_prediction_hash_commits_downstream_business_fields() {
         let candidate = sample_candidate();
         let baseline =
-            canonical_business_prediction_hash(std::slice::from_ref(&candidate)).expect("baseline");
+            canonical_business_prediction_hash(slice::from_ref(&candidate)).expect("baseline");
 
         macro_rules! assert_business_change {
             ($label:literal, $mutate:expr) => {{
@@ -486,7 +486,7 @@ mod tests {
         );
         assert_eq!(row.stop_price.to_price(), Price::new(Decimal::new(380, 3)));
 
-        let batch = signal_candidate_events(std::slice::from_ref(&candidate), 1);
+        let batch = signal_candidate_events(slice::from_ref(&candidate), 1);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].rejection_reason, "");
     }

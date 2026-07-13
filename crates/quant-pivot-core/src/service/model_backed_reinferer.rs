@@ -48,6 +48,7 @@ use crate::{
     projection::inference_batch::build_runtime_input,
     service::signal_reinference::{ExitSignalReinferer, FreshSignal},
 };
+use std::slice;
 
 /// Dependencies for [`ModelBackedExitSignalReinferer`].
 pub struct ModelBackedExitSignalReinfererDeps {
@@ -248,9 +249,9 @@ async fn infer_lot(
         runtime,
         model_run_id,
         as_of,
-        std::slice::from_ref(market),
-        std::slice::from_ref(vector),
-        std::slice::from_ref(outcome),
+        slice::from_ref(market),
+        slice::from_ref(vector),
+        slice::from_ref(outcome),
     );
     runtime.infer_batch(input).await
 }
@@ -486,7 +487,7 @@ async fn load_window(
     }
     let lookback = Duration::from_secs(features.max_microstructure_lookback_secs());
     let mut windows = window_provider
-        .load_windows(std::slice::from_ref(market), boundary, lookback)
+        .load_windows(slice::from_ref(market), boundary, lookback)
         .await?;
     windows.remove(&market.primary_token_id).ok_or_else(|| {
         QuantError::config(format!(
@@ -512,7 +513,7 @@ async fn load_trade_tape_window(
     }
     let lookback = Duration::from_secs(features.structural.trade_tape_window_secs);
     let mut windows = window_provider
-        .load_trade_tape_windows(std::slice::from_ref(market), boundary, lookback)
+        .load_trade_tape_windows(slice::from_ref(market), boundary, lookback)
         .await?;
     windows.remove(&market.market_id).ok_or_else(|| {
         QuantError::config(format!(

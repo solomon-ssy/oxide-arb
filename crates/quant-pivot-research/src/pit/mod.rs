@@ -6,6 +6,7 @@
 //! catalog ledger. The in-memory [`MaterializedPitEngine`] serves a pre-fetched
 //! immutable window so dataset construction never performs per-row I/O.
 
+use std::fmt::Display;
 mod materialized;
 
 pub use materialized::MaterializedPitEngine;
@@ -325,7 +326,7 @@ fn decode_event_members(
 
 fn decode_catalog_payload<T>(
     entity: &'static str,
-    version_id: &impl std::fmt::Display,
+    version_id: &impl Display,
     payload: serde_json::Value,
 ) -> QuantResult<T>
 where

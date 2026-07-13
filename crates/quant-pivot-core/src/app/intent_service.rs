@@ -11,6 +11,7 @@ use quant_pivot_repository::traits::{
 };
 
 use super::AppContext;
+use crate::service::feature_integrity::RepositoryFeatureParityGate;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
     execution::{
@@ -47,12 +48,10 @@ impl AppContext {
             trade_policies: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
             artifact_store: Arc::clone(&self.research.artifact_store),
             calibration_loader: Arc::clone(&self.research.calibration_loader),
-            feature_parity_gate: Arc::new(
-                crate::service::feature_integrity::RepositoryFeatureParityGate::new(Arc::clone(
-                    &repos.feature_parity,
-                )
-                    as Arc<dyn FeatureParityRepository>),
-            ),
+            feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
+                &repos.feature_parity,
+            )
+                as Arc<dyn FeatureParityRepository>)),
         }))
     }
 

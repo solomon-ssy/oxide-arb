@@ -80,7 +80,7 @@ use crate::{
         model_runner::{AlignedFeatureCrossSection, project_model_input_rows},
     },
 };
-
+use std::collections::HashSet;
 /// Process-lifetime dependencies of the production parity source.
 pub struct DurableFeatureParityDeps {
     pub model_runs: Arc<dyn ModelRunRepository>,
@@ -449,7 +449,7 @@ impl DurableFeatureParitySource {
             .collect::<QuantResult<Vec<_>>>()?
             .into_iter()
             .flatten()
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         let online_features = dedupe_feature_rows(
@@ -2367,7 +2367,7 @@ fn unique_run_ids(candidates: &[FeatureParityCandidate]) -> Vec<ModelRunId> {
             FeatureParitySubject::ModelRun(run_id) => Some(run_id.clone()),
             FeatureParitySubject::PreInferenceReport(_) => None,
         })
-        .collect::<std::collections::HashSet<_>>()
+        .collect::<HashSet<_>>()
         .into_iter()
         .collect()
 }
@@ -2598,7 +2598,7 @@ fn validate_pre_inference_stage_evidence(
             }
         }
         PreInferenceStageCeiling::Feature => {
-            let mut vector_ids = std::collections::HashSet::new();
+            let mut vector_ids = HashSet::new();
             let mut dq_markets = BTreeSet::new();
             for record in &dq.tokens_json.0 {
                 let feature_vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
@@ -2847,6 +2847,7 @@ mod tests {
     };
     use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
+    use std::slice;
 
     fn candidate(
         run_id: &ModelRunId,
@@ -2989,7 +2990,7 @@ mod tests {
             created_at: report.created_at,
         };
         assert_eq!(
-            validate_pre_inference_stage_evidence(&report, std::slice::from_ref(&member), &dq)
+            validate_pre_inference_stage_evidence(&report, slice::from_ref(&member), &dq)
                 .expect("selection-only evidence"),
             PreInferenceStageCeiling::Selection
         );

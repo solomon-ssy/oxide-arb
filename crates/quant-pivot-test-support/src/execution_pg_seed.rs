@@ -77,10 +77,21 @@ use quant_pivot_repository::{
 use quant_pivot_research::hashing::ResearchHasher;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+};
 use uuid::Uuid;
 
-use crate::{report_fixtures, seeded_uuid};
+use crate::{
+    catalog_fixtures::{make_event, make_market},
+    report_fixtures, seeded_uuid,
+};
+use quant_pivot_models::{
+    entities::{
+        quant_feature_parity_state, quant_model_run, quant_model_spec, quant_model_version,
+    },
+    enums::common::TickSize::Hundredth,
+};
 
 /// shares (100) * `limit_price` (0.6).
 pub const EXECUTION_NOTIONAL: Decimal = dec!(60);
@@ -199,9 +210,6 @@ async fn find_existing_demo_infra(
     db: &DatabaseConnection,
     active_runtime_config_version_id: &RuntimeConfigVersionId,
 ) -> Option<SharedDemoInfra> {
-    use quant_pivot_models::entities::{quant_model_run, quant_model_spec, quant_model_version};
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
-
     let spec = quant_model_spec::Entity::find()
         .filter(quant_model_spec::Column::Name.eq("ui-demo-seed-model"))
         .one(db)
@@ -245,8 +253,6 @@ async fn find_existing_demo_infra(
 }
 
 async fn ensure_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
-    use quant_pivot_models::entities::quant_feature_parity_state;
-
     let repository = PgFeatureParityRepository::new(db.clone());
     if let Some(state) = repository
         .current_state()
@@ -790,8 +796,6 @@ async fn seed_market_catalog(
     market_question: &str,
     market_slug: &str,
 ) {
-    use crate::catalog_fixtures::{make_event, make_market};
-
     PgEventRepository::new(db.clone())
         .upsert(make_event(
             event_id,
@@ -1005,9 +1009,6 @@ async fn seed_model_version_named(
     rc_id: &RuntimeConfigVersionId,
     model_name: &str,
 ) -> (ModelVersionId, ModelRunId, TradePolicyCohortProvenance) {
-    use quant_pivot_models::entities::quant_model_spec;
-    use sea_orm::{ColumnTrait, QueryFilter};
-
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = if let Some(existing) = quant_model_spec::Entity::find()
         .filter(quant_model_spec::Column::Name.eq(model_name))
@@ -1361,7 +1362,7 @@ const fn market_context() -> MarketContext {
         time_to_resolution_secs: Some(86_400),
         market_status: MarketStatus::Active,
         neg_risk: false,
-        tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
+        tick_size: Hundredth,
         fee_rate: None,
     }
 }

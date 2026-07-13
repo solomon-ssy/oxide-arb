@@ -431,6 +431,7 @@ fn set_path(document: &mut Value, path: &str, value: Value) -> Result<(), Runtim
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_config::validate_runtime_config;
     use serde_json::json;
 
     #[test]
@@ -505,8 +506,6 @@ mod tests {
 
     #[test]
     fn patch_merge_invalid_schedule_top_n_fails_semantic_validation() {
-        use crate::runtime_config::validate_runtime_config;
-
         let current = RuntimeConfig::default();
         let max_top_n = current.reports.max_top_n;
         let mut patch = BTreeMap::new();

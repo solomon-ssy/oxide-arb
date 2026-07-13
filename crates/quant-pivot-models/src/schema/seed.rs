@@ -3,6 +3,8 @@
 use sea_orm::DbErr;
 
 use crate::seed::{SeedConflictPolicy, SeedContext};
+use std::future::Future;
+use std::pin::Pin;
 
 /// Typed key for passing seed artifacts between graph-ordered seeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -53,9 +55,7 @@ impl SeedArtifact {
 pub type SeedLoader = for<'a> fn(
     &'a dyn sea_orm::ConnectionTrait,
     &'a mut SeedContext,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<u64, DbErr>> + Send + 'a>,
->;
+) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>>;
 
 /// A versioned, auditable seed unit.
 #[derive(Clone, Copy)]

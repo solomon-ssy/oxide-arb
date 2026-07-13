@@ -31,7 +31,6 @@ use sea_orm::{
     EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
     Select, TransactionTrait,
 };
-
 /// Postgres-backed model registry repository.
 pub struct PgModelRegistryRepository {
     db: DatabaseConnection,
@@ -941,6 +940,7 @@ async fn update_model_version_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::slice;
 
     #[test]
     fn model_version_sequence_is_checked() {
@@ -994,7 +994,7 @@ mod tests {
             PublicationStatus::Published,
             &fixture.spec,
             PublicationStatus::Retired,
-            std::slice::from_ref(&fixture.current),
+            slice::from_ref(&fixture.current),
         ))
         .expect("exact rollback state is valid");
     }
@@ -1009,7 +1009,7 @@ mod tests {
             PublicationStatus::Published,
             &fixture.spec,
             PublicationStatus::Retired,
-            std::slice::from_ref(&fixture.target),
+            slice::from_ref(&fixture.target),
         ))
         .expect_err("stale current must fail closed");
         assert!(stale_current.to_string().contains("sole published version"));
@@ -1019,7 +1019,7 @@ mod tests {
             PublicationStatus::Published,
             &other_spec,
             PublicationStatus::Retired,
-            std::slice::from_ref(&fixture.current),
+            slice::from_ref(&fixture.current),
         ))
         .expect_err("cross-spec target must fail closed");
         assert!(cross_spec.to_string().contains("locked model spec"));
@@ -1029,7 +1029,7 @@ mod tests {
             PublicationStatus::Retired,
             &fixture.spec,
             PublicationStatus::Published,
-            std::slice::from_ref(&fixture.target),
+            slice::from_ref(&fixture.target),
         ))
         .expect_err("half-switched state must fail closed");
         assert!(
@@ -1091,7 +1091,7 @@ mod tests {
             failed_target_status: PublicationStatus::Published,
             failed_target_published_at: Some(published_at),
             expected_target_published_at: Some(published_at),
-            published_ids: std::slice::from_ref(&fixture.target),
+            published_ids: slice::from_ref(&fixture.target),
         })
         .expect("exact just-switched state may be compensated");
 
@@ -1107,7 +1107,7 @@ mod tests {
             failed_target_status: PublicationStatus::Published,
             failed_target_published_at: Some(published_at),
             expected_target_published_at: Some(published_at),
-            published_ids: std::slice::from_ref(&fixture.target),
+            published_ids: slice::from_ref(&fixture.target),
         })
         .expect_err("a later switch must make compensation stale");
         assert!(stale.to_string().contains("timestamps are stale"));

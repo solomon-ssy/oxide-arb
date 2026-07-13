@@ -15,6 +15,7 @@
 
 use crate::{enums::rbac::ResourceType, types::MarketId};
 use serde_with::DeserializeFromStr;
+use std::error::Error;
 use std::{
     fmt::{self, Display, Formatter},
     str::FromStr,
@@ -148,7 +149,7 @@ impl Display for UnknownChannel {
     }
 }
 
-impl std::error::Error for UnknownChannel {}
+impl Error for UnknownChannel {}
 
 impl FromStr for WsChannel {
     type Err = UnknownChannel;

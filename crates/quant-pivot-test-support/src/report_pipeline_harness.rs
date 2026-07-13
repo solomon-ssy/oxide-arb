@@ -127,6 +127,9 @@ use crate::{
     report_fixtures,
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
+use quant_pivot_models::entities::quant_feature_parity_state;
+use std::env;
+use std::process;
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
 pub const EVENT_ID: &str = "evt-report-pipeline-e2e";
@@ -1007,8 +1010,6 @@ async fn build_lifecycle_service(
 }
 
 async fn seed_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
-    use quant_pivot_models::entities::quant_feature_parity_state;
-
     if let Some(state) = PgFeatureParityRepository::new(db.clone())
         .current_state()
         .await
@@ -1380,9 +1381,9 @@ async fn publish_weighted_model(
 }
 
 fn artifact_store() -> Arc<dyn ArtifactStore> {
-    let root = std::env::temp_dir().join(format!(
+    let root = env::temp_dir().join(format!(
         "qp_report_pipeline_e2e_{}_{}",
-        std::process::id(),
+        process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
     Arc::new(LocalArtifactStore::new(root))

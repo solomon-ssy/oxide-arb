@@ -19,7 +19,6 @@ use super::{
     LabelBuildInput, LabelBuildOutput, LabelDelayReason, LabelName, Labeler, MissingLabelReason,
     TrainingLabel, TrainingSampleSource,
 };
-
 /// `return_to_horizon`: signed mid-price return from entry to the horizon, bps.
 pub const RETURN_TO_HORIZON: LabelName = LabelName::from_static("return_to_horizon");
 /// `max_favorable_excursion_bps`: best favorable move reached within the horizon.
@@ -570,15 +569,17 @@ impl Labeler for SettlementOutcomeLabeler {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot};
     use super::*;
     use crate::training::{ForwardSample, ForwardWindow, MarketResolution};
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::BookLevel,
-        types::{MarketId, Price, TokenId, Usd},
+        types::{Bps, MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use std::sync::Arc;
 
     fn at(offset: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_000_000 + offset, 0)
@@ -823,12 +824,6 @@ mod tests {
 
     #[test]
     fn hold_vs_exit_uses_book_when_mark_is_missing() {
-        use super::super::{
-            DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot,
-        };
-        use quant_pivot_models::types::{Bps, Shares, Usd};
-        use std::sync::Arc;
-
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let terminal = LotTerminalSnapshot {

@@ -11,7 +11,6 @@ use quant_pivot_models::{
     types::MarketId,
 };
 use std::collections::HashMap;
-
 /// Reason a market was transitioned to [`MarketStatus::Paused`] during sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseReason {
@@ -89,6 +88,7 @@ mod tests {
         types::{EventId, TokenId},
     };
     use rust_decimal_macros::dec;
+    use std::slice;
 
     fn sample_market(status: MarketStatus, end_date: Option<DateTime<Utc>>) -> MarketRegistryInfo {
         MarketRegistryInfo {
@@ -165,8 +165,8 @@ mod tests {
         let mut registry = sample_market(MarketStatus::Active, Some(now - Duration::hours(2)));
         let mut upsert = UpsertMarket::try_from(&registry).expect("valid upsert");
         let paused = apply_past_deadline_to_sync_batch(
-            std::slice::from_mut(&mut registry),
-            std::slice::from_mut(&mut upsert),
+            slice::from_mut(&mut registry),
+            slice::from_mut(&mut upsert),
             now,
         );
         assert_eq!(paused, 1);

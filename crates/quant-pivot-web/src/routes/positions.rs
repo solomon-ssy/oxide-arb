@@ -11,7 +11,10 @@ use crate::{
     auth::casbin::Rule,
     error::WebError,
     response::WebResponse,
-    routes::registry::{RouteSpec, spec},
+    routes::{
+        quant_intents::exit_monitor_observation,
+        registry::{RouteSpec, spec},
+    },
     state::AppState,
 };
 
@@ -64,8 +67,7 @@ async fn get_position(
         })?;
     let intent_view = OrderIntentView::from(intent);
     let exit_monitor_observation =
-        super::quant_intents::exit_monitor_observation(&state, &intent_view, &summary.position)
-            .await?;
+        exit_monitor_observation(&state, &intent_view, &summary.position).await?;
     Ok(WebResponse::ok(PositionDetailView {
         position: PositionView::from(summary),
         exit_monitor_observation,

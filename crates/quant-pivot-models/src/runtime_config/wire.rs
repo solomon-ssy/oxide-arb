@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
+use std::str::FromStr;
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
@@ -31,8 +32,6 @@ impl TryFrom<&ModelVersionRef> for ModelVersionId {
     type Error = QuantError;
 
     fn try_from(reference: &ModelVersionRef) -> Result<Self, Self::Error> {
-        use std::str::FromStr;
-
         Self::from_str(reference.id.trim()).map_err(|error| {
             Self::Error::config(format!(
                 "invalid model_version_id `{}`: {error}",

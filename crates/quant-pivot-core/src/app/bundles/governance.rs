@@ -45,6 +45,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
 pub struct RuntimeSnapshot {
@@ -330,7 +331,7 @@ fn wire_operational_controls(deps: OperationalControlsDeps<'_>) -> OperationalCo
         reconciliation_repo,
     } = deps;
     let repos = &infra.repos;
-    let recovery_slot = Arc::new(std::sync::OnceLock::new());
+    let recovery_slot = Arc::new(OnceLock::new());
     let kill_switch: Arc<dyn KillSwitchPort> = Arc::new(KillSwitchControl::new(
         kill_switch_handle.clone(),
         kill_switch_view,

@@ -188,8 +188,6 @@ impl FavoriteLongshotBiasTable {
     /// the persisted `content_hash` (fail-closed: a tampered / corrupt / wrong-
     /// kind artifact never binds to the factor plane).
     pub fn from_persisted(info: &CalibrationArtifactInfo) -> QuantResult<Self> {
-        use quant_pivot_error::{QuantError, research::ResearchError};
-
         if info.kind != CalibrationKind::MarketPriceBias {
             return Err(QuantError::from(ResearchError::DatasetBuild {
                 detail: format!(

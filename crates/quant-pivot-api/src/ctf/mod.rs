@@ -17,7 +17,7 @@ use quant_pivot_models::{
     types::{MarketId, TokenId},
 };
 use reqwest::Url;
-use std::{str::FromStr, time::Duration};
+use std::{fmt::Display, str::FromStr, time::Duration};
 
 const STANDARD_BINARY_INDEX_SETS: [u64; 2] = [1, 2];
 
@@ -413,7 +413,7 @@ fn parse_address(value: &str, label: &str) -> Result<Address, RpcError> {
     Address::from_str(value).map_err(|e| RpcError::ConnectionFailed(format!("{label}: {e}")))
 }
 
-fn rpc_call_failed<E: std::fmt::Display>(method: &str, err: E) -> RpcError {
+fn rpc_call_failed<E: Display>(method: &str, err: E) -> RpcError {
     RpcError::CallFailed {
         method: method.into(),
         reason: err.to_string(),

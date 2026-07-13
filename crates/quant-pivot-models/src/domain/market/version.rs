@@ -1,5 +1,7 @@
 //! Append-only, bitemporal Gamma catalog versions.
 
+use crate::entities::event_catalog_version;
+use crate::entities::market_catalog_version;
 use crate::{
     domain::{UpsertEvent, UpsertMarket},
     types::{
@@ -175,7 +177,7 @@ pub struct EventCatalogVersionInfo {
 
 info_from_model!(
     EventCatalogVersionInfo,
-    crate::entities::event_catalog_version::Model,
+    event_catalog_version::Model,
     {
         event_catalog_version_id,
         catalog_sync_batch_id,
@@ -224,7 +226,7 @@ pub struct MarketCatalogVersionInfo {
 
 info_from_model!(
     MarketCatalogVersionInfo,
-    crate::entities::market_catalog_version::Model,
+    market_catalog_version::Model,
     {
         market_catalog_version_id,
         catalog_sync_batch_id,

@@ -24,6 +24,7 @@ use quant_pivot_research::{
     validation::PurgeConfig,
 };
 
+use crate::service::frozen_model_parity::FrozenModelParityService;
 use crate::{
     app::bundles::ResearchBundle,
     service::{
@@ -40,7 +41,7 @@ pub struct CoreModelTrainingPort {
     artifact_store: Arc<dyn ArtifactStore>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
-    frozen_model_parity: Arc<crate::service::frozen_model_parity::FrozenModelParityService>,
+    frozen_model_parity: Arc<FrozenModelParityService>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
 }
 

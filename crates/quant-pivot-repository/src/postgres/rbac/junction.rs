@@ -5,11 +5,12 @@ use std::hash::BuildHasher;
 
 use quant_pivot_error::storage::StorageError;
 use sea_orm::{ConnectionTrait, EntityTrait, IntoActiveModel, sea_query::OnConflict};
+use std::hash::Hash;
 
 /// Compute added and removed ids between a target set and the current junction rows.
 pub fn replace_set_diff<T, S>(target: &HashSet<T, S>, current: &HashSet<T, S>) -> (Vec<T>, Vec<T>)
 where
-    T: Eq + std::hash::Hash + Clone,
+    T: Eq + Hash + Clone,
     S: BuildHasher,
 {
     (

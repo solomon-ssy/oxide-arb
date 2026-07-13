@@ -40,6 +40,7 @@ use crate::linkage::{
     oracle::extract_oracle,
     ruleset::{AssetRule, find_alias, rule_for_alias},
 };
+use chrono::Datelike;
 
 /// Hourly ET up/down slug, with or without a year segment.
 static HOURLY_SLUG: LazyLock<Regex> = LazyLock::new(|| {
@@ -437,8 +438,6 @@ fn infer_year(
     hour: u32,
     minute: u32,
 ) -> Option<i32> {
-    use chrono::Datelike;
-
     let end_date = metadata.end_date?;
     let anchor_year = end_date.with_timezone(&New_York).year();
     let mut best: Option<(i32, Duration)> = None;

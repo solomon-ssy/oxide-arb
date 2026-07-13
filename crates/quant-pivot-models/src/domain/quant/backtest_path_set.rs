@@ -1,6 +1,7 @@
 //! Combinatorial Purged Cross-Validation (CPCV) path-set ledger persistence
 //! DTOs (Phase 11.5 §3.3/§6).
 
+use crate::entities::quant_backtest_path_set;
 use crate::types::{
     BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
     TrainingDatasetId,
@@ -59,7 +60,7 @@ pub struct BacktestPathSetInfo {
 
 info_from_model!(
     BacktestPathSetInfo,
-    crate::entities::quant_backtest_path_set::Model,
+    quant_backtest_path_set::Model,
     {
         path_set_id,
         model_version_id,

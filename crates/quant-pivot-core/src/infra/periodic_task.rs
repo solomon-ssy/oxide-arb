@@ -1,5 +1,6 @@
 use quant_pivot_error::QuantError;
 use rand::RngExt;
+use std::future::Future;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -25,7 +26,7 @@ impl PeriodicTask {
     where
         I: Fn() -> Duration,
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<(), QuantError>>,
+        Fut: Future<Output = Result<(), QuantError>>,
     {
         if !skip_first_tick {
             if shutdown.is_cancelled() {

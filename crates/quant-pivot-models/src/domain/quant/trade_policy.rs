@@ -5,6 +5,8 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::entities::quant_trade_policy_artifact;
+use crate::entities::quant_trade_policy_governance_audit;
 use crate::{
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
     types::{
@@ -27,7 +29,7 @@ pub struct TradePolicyArtifactInfo {
 
 info_from_model!(
     TradePolicyArtifactInfo,
-    crate::entities::quant_trade_policy_artifact::Model,
+    quant_trade_policy_artifact::Model,
     {
         artifact_id,
         content_hash,
@@ -78,7 +80,7 @@ pub struct TradePolicyGovernanceAuditInfo {
 
 info_from_model!(
     TradePolicyGovernanceAuditInfo,
-    crate::entities::quant_trade_policy_governance_audit::Model,
+    quant_trade_policy_governance_audit::Model,
     {
         audit_id,
         artifact_id,

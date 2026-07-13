@@ -418,45 +418,67 @@ const fn spec(
 }
 
 fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::MarketMetadata as F;
-    use FeatureValueKind::{Bool, Category, Count};
-    use PitRule::MetadataVersionAtOrBeforeSourceCutoff as Pit;
-    use SourceRequirement::GammaMetadata as Src;
-    use StalenessRule::None as Fresh;
-
     out.push(
-        spec(market_names::CATEGORY, F, Category, Src, Pit, Fresh)
-            .null_policy(NullPolicy::RejectMarket)
-            .build(),
+        spec(
+            market_names::CATEGORY,
+            FeatureFamily::MarketMetadata,
+            FeatureValueKind::Category,
+            SourceRequirement::GammaMetadata,
+            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+            StalenessRule::None,
+        )
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
     );
     out.push(
         spec(
             market_names::TIME_TO_RESOLUTION_SECS,
-            F,
-            Count,
-            Src,
-            Pit,
-            Fresh,
+            FeatureFamily::MarketMetadata,
+            FeatureValueKind::Count,
+            SourceRequirement::GammaMetadata,
+            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+            StalenessRule::None,
         )
         .unit(FeatureUnit::Seconds)
         .null_policy(NullPolicy::RejectMarket)
         .build(),
     );
     out.push(
-        spec(market_names::EVENT_AGE_SECS, F, Count, Src, Pit, Fresh)
-            .unit(FeatureUnit::Seconds)
-            .null_policy(NullPolicy::Penalize)
-            .build(),
+        spec(
+            market_names::EVENT_AGE_SECS,
+            FeatureFamily::MarketMetadata,
+            FeatureValueKind::Count,
+            SourceRequirement::GammaMetadata,
+            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+            StalenessRule::None,
+        )
+        .unit(FeatureUnit::Seconds)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
     );
     out.push(
-        spec(market_names::NEG_RISK, F, Bool, Src, Pit, Fresh)
-            .null_policy(NullPolicy::NeutralValue(Decimal::ZERO))
-            .build(),
+        spec(
+            market_names::NEG_RISK,
+            FeatureFamily::MarketMetadata,
+            FeatureValueKind::Bool,
+            SourceRequirement::GammaMetadata,
+            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+            StalenessRule::None,
+        )
+        .null_policy(NullPolicy::NeutralValue(Decimal::ZERO))
+        .build(),
     );
     out.push(
-        spec(market_names::IS_ACTIVE, F, Bool, Src, Pit, Fresh)
-            .null_policy(NullPolicy::RejectMarket)
-            .build(),
+        spec(
+            market_names::IS_ACTIVE,
+            FeatureFamily::MarketMetadata,
+            FeatureValueKind::Bool,
+            SourceRequirement::GammaMetadata,
+            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+            StalenessRule::None,
+        )
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
     );
 }
 
@@ -544,27 +566,28 @@ fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 }
 
 fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::TimeSeries as F;
-    use FeatureValueKind::Decimal as Dec;
-    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
-    use SourceRequirement::MicrostructureWindow as Src;
-    use StalenessRule::MaxFeatureBucketAge as Stale;
-
     for window in &config.bar_windows_secs {
         out.push(
-            spec(FeatureName::ts_return(*window), F, Dec, Src, Pit, Stale)
-                .unit(FeatureUnit::Ratio)
-                .null_policy(NullPolicy::Penalize)
-                .build(),
+            spec(
+                FeatureName::ts_return(*window),
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
         );
         out.push(
             spec(
                 FeatureName::ts_spread_trend(*window),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
             )
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
@@ -573,11 +596,11 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         out.push(
             spec(
                 FeatureName::ts_depth_trend(*window),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
             )
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
@@ -589,11 +612,11 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         out.push(
             spec(
                 FeatureName::ts_realized_vol(*window),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
             )
             .unit(FeatureUnit::Ratio)
             .range(Decimal::ZERO, Decimal::from(1_000_000))
@@ -603,11 +626,11 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         out.push(
             spec(
                 FeatureName::ts_vol_adjusted_return(*window),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
             )
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
@@ -615,31 +638,32 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         );
     }
     out.push(
-        spec(ts::PRICE_REVERSAL, F, Dec, Src, Pit, Stale)
-            .unit(FeatureUnit::Ratio)
-            .null_policy(NullPolicy::Penalize)
-            .build(),
+        spec(
+            ts::PRICE_REVERSAL,
+            FeatureFamily::TimeSeries,
+            FeatureValueKind::Decimal,
+            SourceRequirement::MicrostructureWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxFeatureBucketAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
     );
 }
 
 /// Momentum-family time-series specs: lag-skipped ROC, EMA slope, and the
 /// vol-normalized MACD (distinct estimators, never a return clone).
 fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::TimeSeries as F;
-    use FeatureValueKind::Decimal as Dec;
-    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
-    use SourceRequirement::MicrostructureWindow as Src;
-    use StalenessRule::MaxFeatureBucketAge as Stale;
-
     for window in &config.momentum.roc_windows_secs {
         out.push(
             spec(
                 FeatureName::ts_momentum_roc(*window),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
             )
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
@@ -648,49 +672,84 @@ fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     }
     for window in &config.momentum.slope_windows_secs {
         out.push(
-            spec(FeatureName::ts_ema_slope(*window), F, Dec, Src, Pit, Stale)
-                .unit(FeatureUnit::Ratio)
-                .null_policy(NullPolicy::Penalize)
-                .build(),
-        );
-    }
-    out.push(
-        spec(ts::MACD_NORM, F, Dec, Src, Pit, Stale)
+            spec(
+                FeatureName::ts_ema_slope(*window),
+                FeatureFamily::TimeSeries,
+                FeatureValueKind::Decimal,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
+            )
             .unit(FeatureUnit::Ratio)
             .null_policy(NullPolicy::Penalize)
             .build(),
+        );
+    }
+    out.push(
+        spec(
+            ts::MACD_NORM,
+            FeatureFamily::TimeSeries,
+            FeatureValueKind::Decimal,
+            SourceRequirement::MicrostructureWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxFeatureBucketAge,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
     );
 }
 
 fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::Microstructure as F;
-    use FeatureValueKind::{Decimal as Dec, Probability};
-    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
-    use SourceRequirement::MicrostructureWindow as Src;
-    use StalenessRule::MaxFeatureBucketAge as Stale;
-
     for (name, kind, unit) in [
-        (micro::QUOTE_UPDATE_RATE, Dec, FeatureUnit::PerSecond),
-        (micro::BOOK_CHURN, Dec, FeatureUnit::Ratio),
-        (micro::QUEUE_DEPLETION, Dec, FeatureUnit::Ratio),
-        (micro::SUDDEN_LIQUIDITY_WITHDRAWAL, Dec, FeatureUnit::Ratio),
-        (micro::ADVERSE_SELECTION_PROXY, Dec, FeatureUnit::Ratio),
+        (
+            micro::QUOTE_UPDATE_RATE,
+            FeatureValueKind::Decimal,
+            FeatureUnit::PerSecond,
+        ),
+        (
+            micro::BOOK_CHURN,
+            FeatureValueKind::Decimal,
+            FeatureUnit::Ratio,
+        ),
+        (
+            micro::QUEUE_DEPLETION,
+            FeatureValueKind::Decimal,
+            FeatureUnit::Ratio,
+        ),
+        (
+            micro::SUDDEN_LIQUIDITY_WITHDRAWAL,
+            FeatureValueKind::Decimal,
+            FeatureUnit::Ratio,
+        ),
+        (
+            micro::ADVERSE_SELECTION_PROXY,
+            FeatureValueKind::Decimal,
+            FeatureUnit::Ratio,
+        ),
     ] {
         out.push(
-            spec(name, F, kind, Src, Pit, Stale)
-                .unit(unit)
-                .null_policy(NullPolicy::Penalize)
-                .build(),
+            spec(
+                name,
+                FeatureFamily::Microstructure,
+                kind,
+                SourceRequirement::MicrostructureWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxFeatureBucketAge,
+            )
+            .unit(unit)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
         );
     }
     out.push(
         spec(
             micro::STALE_QUOTE_FREQUENCY,
-            F,
-            Probability,
-            Src,
-            Pit,
-            Stale,
+            FeatureFamily::Microstructure,
+            FeatureValueKind::Probability,
+            SourceRequirement::MicrostructureWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxFeatureBucketAge,
         )
         .unit(FeatureUnit::Probability)
         .range(Decimal::ZERO, Decimal::ONE)
@@ -707,68 +766,59 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
 /// `NullReason::NotApplicable`, and on a missing leg to `NullReason::LegBookMissing`
 /// — never a fabricated zero.
 fn structural_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::Structural as F;
-    use FeatureValueKind::Decimal as Dec;
-    use NullPolicy::Penalize;
-    use PitRule::{
-        BookVersionAtOrBeforeSourceCutoff as BookPit, FactAtOrBeforeSourceCutoff as WindowPit,
-    };
-    use SourceRequirement::{MicrostructureWindow, PublishedL2Book};
-    use StalenessRule::{MaxBookAge, MaxFeatureBucketAge};
-
     out.push(
         spec(
             structural_names::SHORT_RETURN,
-            F,
-            Dec,
-            MicrostructureWindow,
-            WindowPit,
-            MaxFeatureBucketAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::MicrostructureWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxFeatureBucketAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     out.push(
         spec(
             structural_names::SHOCK_RATIO,
-            F,
-            Dec,
-            MicrostructureWindow,
-            WindowPit,
-            MaxFeatureBucketAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::MicrostructureWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxFeatureBucketAge,
         )
         .unit(FeatureUnit::Ratio)
         .range(Decimal::ZERO, Decimal::from(1_000_000))
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     out.push(
         spec(
             structural_names::PRICE_EXTREMITY,
-            F,
-            Dec,
-            PublishedL2Book,
-            BookPit,
-            MaxBookAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::PublishedL2Book,
+            PitRule::BookVersionAtOrBeforeSourceCutoff,
+            StalenessRule::MaxBookAge,
         )
         .unit(FeatureUnit::Ratio)
         // Signed `mid − 0.5` ∈ [−0.5, 0.5].
         .range(Decimal::new(-5, 1), Decimal::new(5, 1))
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     out.push(
         spec(
             structural_names::BOOK_CHURN_INTENSITY,
-            F,
-            Dec,
-            MicrostructureWindow,
-            WindowPit,
-            MaxFeatureBucketAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::MicrostructureWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxFeatureBucketAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     trade_tape_structural_specs(out);
@@ -776,50 +826,43 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
 }
 
 fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::Structural as F;
-    use FeatureValueKind::{Count, Decimal as Dec, Usd};
-    use NullPolicy::Penalize;
-    use PitRule::FactAtOrBeforeSourceCutoff as WindowPit;
-    use SourceRequirement::TradeTapeWindow;
-    use StalenessRule::MaxTradeTapeAge;
-
     out.push(
         spec(
             structural_names::TRADE_TAPE_COUNT,
-            F,
-            Count,
-            TradeTapeWindow,
-            WindowPit,
-            MaxTradeTapeAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Count,
+            SourceRequirement::TradeTapeWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxTradeTapeAge,
         )
         .unit(FeatureUnit::Count)
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     out.push(
         spec(
             structural_names::PARTICIPANT_COUNT,
-            F,
-            Count,
-            TradeTapeWindow,
-            WindowPit,
-            MaxTradeTapeAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Count,
+            SourceRequirement::TradeTapeWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxTradeTapeAge,
         )
         .unit(FeatureUnit::Count)
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     out.push(
         spec(
             structural_names::TRADE_TAPE_NOTIONAL_USD,
-            F,
-            Usd,
-            TradeTapeWindow,
-            WindowPit,
-            MaxTradeTapeAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Usd,
+            SourceRequirement::TradeTapeWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxTradeTapeAge,
         )
         .unit(FeatureUnit::Usd)
-        .null_policy(Penalize)
+        .null_policy(NullPolicy::Penalize)
         .build(),
     );
     for name in [
@@ -831,73 +874,73 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
         structural_names::TAKER_GINI,
     ] {
         out.push(
-            spec(name, F, Dec, TradeTapeWindow, WindowPit, MaxTradeTapeAge)
-                .unit(FeatureUnit::Ratio)
-                .range(Decimal::ZERO, Decimal::ONE)
-                .null_policy(Penalize)
-                .build(),
+            spec(
+                name,
+                FeatureFamily::Structural,
+                FeatureValueKind::Decimal,
+                SourceRequirement::TradeTapeWindow,
+                PitRule::FactAtOrBeforeSourceCutoff,
+                StalenessRule::MaxTradeTapeAge,
+            )
+            .unit(FeatureUnit::Ratio)
+            .range(Decimal::ZERO, Decimal::ONE)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
         );
     }
 }
 
 fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::Structural as F;
-    use FeatureValueKind::{Count, Decimal as Dec};
-    use NullPolicy::Optional;
-    use PitRule::BookVersionAtOrBeforeSourceCutoff as BookPit;
-    use SourceRequirement::NegRiskSiblingLegs;
-    use StalenessRule::MaxBookAge;
-
     out.push(
         spec(
             structural_names::NEGRISK_LEG_ASK_SUM,
-            F,
-            Dec,
-            NegRiskSiblingLegs,
-            BookPit,
-            MaxBookAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::NegRiskSiblingLegs,
+            PitRule::BookVersionAtOrBeforeSourceCutoff,
+            StalenessRule::MaxBookAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
         spec(
             structural_names::NEGRISK_LEG_BID_SUM,
-            F,
-            Dec,
-            NegRiskSiblingLegs,
-            BookPit,
-            MaxBookAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::NegRiskSiblingLegs,
+            PitRule::BookVersionAtOrBeforeSourceCutoff,
+            StalenessRule::MaxBookAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
         spec(
             structural_names::NEGRISK_LEG_COUNT,
-            F,
-            Count,
-            NegRiskSiblingLegs,
-            BookPit,
-            MaxBookAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Count,
+            SourceRequirement::NegRiskSiblingLegs,
+            PitRule::BookVersionAtOrBeforeSourceCutoff,
+            StalenessRule::MaxBookAge,
         )
         .unit(FeatureUnit::Count)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
         spec(
             structural_names::NEGRISK_CONVERT_EDGE,
-            F,
-            Dec,
-            NegRiskSiblingLegs,
-            BookPit,
-            MaxBookAge,
+            FeatureFamily::Structural,
+            FeatureValueKind::Decimal,
+            SourceRequirement::NegRiskSiblingLegs,
+            PitRule::BookVersionAtOrBeforeSourceCutoff,
+            StalenessRule::MaxBookAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
 }
@@ -906,56 +949,49 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
 ///
 /// Every spec requires a resolved PIT linkage. Observation-derived specs also
 /// require a PIT window of external domain facts; subject-derived specs cite
-/// the linkage revision itself. All are `Optional`: a market whose category
+/// the linkage revision itself. All are `NullPolicy::Optional`: a market whose category
 /// maps to no vertical simply carries no domain slice, and a linked market with
 /// a source gap keeps an explicit present-but-missing value — never a
 /// fabricated zero, never market rejection.
 fn domain_specs(out: &mut Vec<FeatureSpec>) {
-    use FeatureFamily::Domain as F;
-    use FeatureValueKind::{Bps, Count, Decimal as Dec};
-    use NullPolicy::Optional;
-    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
-    use SourceRequirement::{DomainObservationWindow as Src, ResolvedLinkage};
-    use StalenessRule::{MaxDomainObservationAge, None as Fresh};
-
     out.push(
         spec(
             domain_crypto_names::DISTANCE_TO_STRIKE,
-            F,
-            Dec,
-            Src,
-            Pit,
-            MaxDomainObservationAge,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
         spec(
             domain_crypto_names::UNDERLYING_MOMENTUM,
-            F,
-            Dec,
-            Src,
-            Pit,
-            MaxDomainObservationAge,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
         )
         .unit(FeatureUnit::Ratio)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
         spec(
             domain_crypto_names::UNDERLYING_REALIZED_VOL,
-            F,
-            Dec,
-            Src,
-            Pit,
-            MaxDomainObservationAge,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
         )
         .unit(FeatureUnit::Ratio)
         .range(Decimal::ZERO, Decimal::from(1_000_000))
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
@@ -963,27 +999,27 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
         // observation instant, not from any observation feed.
         spec(
             domain_crypto_names::TIME_TO_OBSERVATION,
-            F,
-            Count,
-            ResolvedLinkage,
+            FeatureFamily::Domain,
+            FeatureValueKind::Count,
+            SourceRequirement::ResolvedLinkage,
             PitRule::LinkageVersionAtOrBeforeSourceCutoff,
-            Fresh,
+            StalenessRule::None,
         )
         .unit(FeatureUnit::Seconds)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
     out.push(
         spec(
             domain_crypto_names::BASIS_VS_RESOLUTION_SOURCE,
-            F,
-            Bps,
-            Src,
-            Pit,
-            MaxDomainObservationAge,
+            FeatureFamily::Domain,
+            FeatureValueKind::Bps,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
         )
         .unit(FeatureUnit::Bps)
-        .null_policy(Optional)
+        .null_policy(NullPolicy::Optional)
         .build(),
     );
 }

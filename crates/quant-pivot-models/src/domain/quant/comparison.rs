@@ -1,5 +1,6 @@
 //! Pairwise model-comparison report persistence DTOs.
 
+use crate::entities::quant_model_comparison_report;
 use crate::types::{
     BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
 };
@@ -31,7 +32,7 @@ pub struct ModelComparisonReportInfo {
 
 info_from_model!(
     ModelComparisonReportInfo,
-    crate::entities::quant_model_comparison_report::Model,
+    quant_model_comparison_report::Model,
     {
         comparison_report_id,
         baseline_model_version_id,

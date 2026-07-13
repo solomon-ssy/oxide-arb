@@ -9,7 +9,10 @@ use super::{
     task_id::TaskId,
 };
 use crate::observability::metrics_hub::MetricsHub;
+use core::array;
 use quant_pivot_models::enums::quant::QuantRuntimeMode;
+use std::pin::Pin;
+use std::sync::Mutex;
 use std::{
     mem::take,
     sync::{
@@ -223,7 +226,7 @@ impl DrainTelemetry {
 }
 
 type PendingSpawnFn =
-    Box<dyn FnOnce(CancellationToken) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+    Box<dyn FnOnce(CancellationToken) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 pub struct PendingTask {
     pub id: TaskId,
@@ -232,7 +235,7 @@ pub struct PendingTask {
 
 #[derive(Clone, Default)]
 pub struct PendingTaskQueue {
-    inner: Arc<std::sync::Mutex<Vec<PendingTask>>>,
+    inner: Arc<Mutex<Vec<PendingTask>>>,
 }
 
 impl PendingTaskQueue {
@@ -241,9 +244,8 @@ impl PendingTaskQueue {
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let factory: PendingSpawnFn = Box::new(move |tok| {
-            Box::pin(factory(tok)) as std::pin::Pin<Box<dyn Future<Output = ()> + Send>>
-        });
+        let factory: PendingSpawnFn =
+            Box::new(move |tok| Box::pin(factory(tok)) as Pin<Box<dyn Future<Output = ()> + Send>>);
         if let Ok(mut guard) = self.inner.lock() {
             guard.push(PendingTask {
                 id,
@@ -272,11 +274,11 @@ pub struct TaskRegistry {
 impl TaskRegistry {
     #[must_use]
     pub fn new(root_shutdown: CancellationToken) -> Self {
-        let stage_tokens = core::array::from_fn(|_| root_shutdown.child_token());
+        let stage_tokens = array::from_fn(|_| root_shutdown.child_token());
         Self {
             root: root_shutdown,
             stage_tokens,
-            stages: core::array::from_fn(|_| StageBucket::default()),
+            stages: array::from_fn(|_| StageBucket::default()),
             telemetry: DrainTelemetry::default(),
         }
     }

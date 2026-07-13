@@ -1,5 +1,7 @@
 //! Feature-parity run and governed latch persistence contracts.
 
+use crate::entities::quant_feature_parity_run;
+use crate::entities::quant_feature_parity_state;
 use crate::{
     enums::quant::{
         FeatureParityLatchState, FeatureParityRunKind, FeatureParityRunStatus,
@@ -49,7 +51,7 @@ pub struct FeatureParityRunInfo {
 
 info_from_model!(
     FeatureParityRunInfo,
-    crate::entities::quant_feature_parity_run::Model,
+    quant_feature_parity_run::Model,
     {
         run_id,
         kind,
@@ -145,7 +147,7 @@ pub struct FeatureParityStateInfo {
 
 info_from_model!(
     FeatureParityStateInfo,
-    crate::entities::quant_feature_parity_state::Model,
+    quant_feature_parity_state::Model,
     {
         state_id,
         state,

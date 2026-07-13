@@ -624,7 +624,7 @@ impl WeightedFactorModelArtifact {
             .into());
         }
         let mut sum = Decimal::ZERO;
-        let mut factor_names = std::collections::BTreeSet::new();
+        let mut factor_names = BTreeSet::new();
         for weight in &self.weights {
             if !factor_names.insert(weight.factor.clone()) {
                 return Err(ResearchError::InvalidModelArtifact {

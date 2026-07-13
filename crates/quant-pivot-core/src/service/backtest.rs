@@ -52,6 +52,7 @@ use crate::{
     projection::inference_batch::build_frozen_runtime_input,
     service::training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
+use std::collections::HashMap;
 
 /// Repository + store + factory dependencies for the backtest service.
 pub struct BacktestServiceDeps {
@@ -675,7 +676,7 @@ pub(crate) fn frozen_ticks(
             .market_contexts()
             .into_iter()
             .map(|(market_id, context)| (market_id.clone(), context))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         if contexts.is_empty() {
             continue;
         }

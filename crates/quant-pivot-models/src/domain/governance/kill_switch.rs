@@ -1,5 +1,6 @@
 //! Execution kill-switch operational-state persistence DTOs.
 
+use crate::entities::system_kill_switch;
 use crate::enums::execution::KillSwitchState;
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -20,7 +21,7 @@ pub struct KillSwitchStateInfo {
 
 info_from_model!(
     KillSwitchStateInfo,
-    crate::entities::system_kill_switch::Model,
+    system_kill_switch::Model,
     {
         id,
         state,

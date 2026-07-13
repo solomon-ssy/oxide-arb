@@ -18,6 +18,7 @@ use quant_pivot_models::{
     },
 };
 use std::collections::HashMap;
+use std::fmt::Display;
 
 /// Prior probe outcome per subsystem name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +155,7 @@ pub const fn ws_probe_skipped(phase: &OperationalPhase) -> Option<&'static str> 
 #[must_use]
 pub fn evaluate_ws_probe(
     last_message_age_ms: Option<u64>,
-    shards: impl std::fmt::Display,
+    shards: impl Display,
 ) -> SubsystemHealth {
     match last_message_age_ms {
         Some(age_ms) if age_ms < WS_MARKET_DATA_STALE_THRESHOLD_MS => {
@@ -185,6 +186,7 @@ mod tests {
         enums::quant::QuantRuntimeMode,
     };
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     #[test]
     fn ws_skipped_during_warming_phases() {
@@ -218,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_alert_on_healthy_transition() {
-        let recordings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recordings = Arc::new(Mutex::new(Vec::new()));
         let alerts = Arc::new(AlertDispatcher::with_recordings(Arc::clone(&recordings)));
         let state = HealthAlertState::default();
         {

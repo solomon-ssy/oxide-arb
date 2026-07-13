@@ -18,7 +18,6 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::types::{DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest};
 
 use super::{TrainingExample, verify_dataset_manifest};
-
 const MANIFEST_ROW: &str = "manifest";
 const EXAMPLE_ROW: &str = "example";
 
@@ -350,6 +349,7 @@ mod tests {
         },
     };
     use chrono::{Duration, Utc};
+    use polars::prelude::{Column, DataFrame, ParquetWriter};
     use quant_pivot_models::{
         domain::{DecisionClock, DecisionSource},
         enums::quant::DatasetPurpose,
@@ -358,6 +358,8 @@ mod tests {
             RuntimeConfigVersionId, TrainingDatasetId,
         },
     };
+    use std::env;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn manifest(examples: &[TrainingExample]) -> DatasetManifest {
         let hash = |seed: char| {
@@ -454,8 +456,6 @@ mod tests {
 
     #[test]
     fn legacy_parquet_without_format_version_is_rejected() {
-        use polars::prelude::{Column, DataFrame, ParquetWriter};
-
         let example = example("legacy", 100);
         let payload = serde_json::to_string(&example).expect("payload");
         let mut frame =
@@ -474,10 +474,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn parquet_roundtrip_via_local_artifact_store() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("quant-pivot-parquet-it-{nanos}"));
+        let root = env::temp_dir().join(format!("quant-pivot-parquet-it-{nanos}"));
         let store = LocalArtifactStore::new(&root);
         let examples = vec![example("store-roundtrip", 123)];
         let bytes = DatasetParquetCodec::encode(&examples, &manifest(&examples)).expect("encode");

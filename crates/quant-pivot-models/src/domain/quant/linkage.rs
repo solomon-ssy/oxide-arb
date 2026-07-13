@@ -28,6 +28,7 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    entities::quant_market_linkage,
     enums::domain::{DomainFamily, KlineInterval, LinkageStatus, ResolverTier},
     hashing::CanonicalDigest,
     types::{
@@ -427,7 +428,7 @@ pub struct MarketLinkageInfo {
 
 info_from_model!(
     MarketLinkageInfo,
-    crate::entities::quant_market_linkage::Model,
+    quant_market_linkage::Model,
     {
         linkage_id,
         market_id,

@@ -168,7 +168,12 @@ impl DeployConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{env::var, path::Path};
+    use std::{
+        env::{self, var},
+        fs, iter,
+        path::{Path, PathBuf},
+        process,
+    };
 
     #[test]
     fn default_config_loads_when_file_absent() {
@@ -239,7 +244,7 @@ mod tests {
     }
 
     /// Resolve the workspace `config/` directory from the crate manifest.
-    fn workspace_config_dir() -> std::path::PathBuf {
+    fn workspace_config_dir() -> PathBuf {
         let crate_dir = var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
         Path::new(&crate_dir)
             .ancestors()
@@ -279,21 +284,21 @@ mod tests {
 
     #[test]
     fn keys_env_overrides_toml_file() {
-        let dir = std::env::temp_dir().join(format!("quant_pivot_cfg_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp config dir");
+        let dir = env::temp_dir().join(format!("quant_pivot_cfg_test_{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp config dir");
 
         let toml = r#"
 [keys]
 private_key = "0xfrom_toml"
 "#;
-        std::fs::write(dir.join("quant-pivot.toml"), toml).expect("write toml");
+        fs::write(dir.join("quant-pivot.toml"), toml).expect("write toml");
 
         let dir_str = dir.to_str().expect("utf-8");
         let from_file = DeployConfig::load(dir_str).expect("load from toml");
         assert_eq!(from_file.keys.private_key.as_deref(), Some("0xfrom_toml"));
 
-        let map = std::iter::once((
+        let map = iter::once((
             "QUANT_PIVOT__KEYS__PRIVATE_KEY".to_owned(),
             "0xfrom_env".to_owned(),
         ))
@@ -305,17 +310,16 @@ private_key = "0xfrom_toml"
         from_env.keys.normalize();
         assert_eq!(from_env.keys.private_key.as_deref(), Some("0xfrom_env"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn keys_local_toml_overrides_base_toml() {
-        let dir =
-            std::env::temp_dir().join(format!("quant_pivot_local_cfg_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp config dir");
+        let dir = env::temp_dir().join(format!("quant_pivot_local_cfg_test_{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp config dir");
 
-        std::fs::write(
+        fs::write(
             dir.join("quant-pivot.toml"),
             r#"
 [keys]
@@ -323,7 +327,7 @@ private_key = "0xbase"
 "#,
         )
         .expect("write base");
-        std::fs::write(
+        fs::write(
             dir.join("quant-pivot.local.toml"),
             r#"
 [keys]
@@ -335,7 +339,7 @@ private_key = "0xlocal"
         let deploy = DeployConfig::load(dir.to_str().expect("utf-8")).expect("load");
         assert_eq!(deploy.keys.private_key.as_deref(), Some("0xlocal"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -375,7 +379,7 @@ private_key = "0xlocal"
             eprintln!("skipping production_example_toml_deserializes: {template:?} missing");
             return;
         }
-        let raw = std::fs::read_to_string(&template).expect("read production example");
+        let raw = fs::read_to_string(&template).expect("read production example");
         let parsed: DeployConfig =
             toml::from_str(&raw).expect("production example must deserialize");
         parsed

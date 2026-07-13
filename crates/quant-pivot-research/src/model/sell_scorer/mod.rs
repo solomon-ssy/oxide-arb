@@ -298,11 +298,12 @@ fn logistic_probability(z: Decimal) -> QuantResult<Probability> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PositionStateFeatures, SellScoreInput, SellScorerRuntime, WeightedSellScorerRuntime,
-        logistic_probability,
+        PositionStateFeatures, SellScoreInput, SellScorerRuntime, SellSignalPolicy,
+        WeightedSellScorerRuntime, logistic_probability,
     };
     use quant_pivot_models::{
         enums::{factor::FactorFamily, quant::FactorDirection},
+        runtime_config::{DecimalString, OpportunisticSellPolicy},
         types::{ContentHash, FactorDefinitionId, ModelInputContract, ModelVersionId, Probability},
     };
     use rust_decimal_macros::dec;
@@ -425,10 +426,6 @@ mod tests {
 
     #[test]
     fn sell_signal_policy_try_from_runtime_parses_defaults() {
-        use quant_pivot_models::runtime_config::OpportunisticSellPolicy;
-
-        use super::SellSignalPolicy;
-
         let policy = OpportunisticSellPolicy::default();
         let parsed = SellSignalPolicy::try_from_runtime(&policy).expect("parse");
         assert_eq!(parsed.min_confidence, dec!(0.65));
@@ -439,10 +436,6 @@ mod tests {
 
     #[test]
     fn sell_signal_policy_try_from_runtime_rejects_malformed_decimal() {
-        use quant_pivot_models::runtime_config::{DecimalString, OpportunisticSellPolicy};
-
-        use super::SellSignalPolicy;
-
         let policy = OpportunisticSellPolicy {
             min_confidence: DecimalString::new("not-a-decimal"),
             ..Default::default()

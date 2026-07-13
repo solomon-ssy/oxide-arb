@@ -1,5 +1,6 @@
 //! Recommendation attribution persistence DTOs.
 
+use crate::entities::quant_recommendation_attribution;
 use crate::{
     enums::quant::RecommendationAttributionOutcome,
     types::{AttributionDetail, EntryOutcome, ExitOutcome, RecommendationId, Usd},
@@ -27,7 +28,7 @@ pub struct RecommendationAttributionInfo {
 
 info_from_model!(
     RecommendationAttributionInfo,
-    crate::entities::quant_recommendation_attribution::Model,
+    quant_recommendation_attribution::Model,
     {
         recommendation_id,
         outcome,

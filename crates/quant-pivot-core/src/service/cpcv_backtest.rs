@@ -30,9 +30,9 @@ use quant_pivot_models::{
     enums::{common::MarketCategory, quant::TrainingDatasetStatus},
     runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
-        BacktestPathSetId, BacktestReportId, ContentHash, ModelInputContract, ModelRunId,
-        ModelVersionId, PositionId, RuntimeConfigVersionId, TrainingDatasetId,
-        TrainingSampleSource,
+        ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, ModelArtifactId,
+        ModelInputContract, ModelRunId, ModelVersionId, PositionId, RuntimeConfigVersionId,
+        TrainingDatasetId, TrainingSampleSource,
     },
 };
 use quant_pivot_repository::traits::TrainingDatasetRepository;
@@ -77,6 +77,9 @@ use crate::service::{
     model_training::weighted_seed_weights,
     training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
+
+#[cfg(feature = "ml-classical")]
+use quant_pivot_research::model::{ClassicalAdapterRegistry, ClassicalRuntime};
 
 /// Coarse CPCV job progress budget (units of work for `ResearchJobProgress`).
 ///
@@ -1359,9 +1362,6 @@ struct ClassicalFoldSource<'a> {
 #[cfg(feature = "ml-classical")]
 impl FoldModelSource for ClassicalFoldSource<'_> {
     fn train_fold(&self, filter: &GroupRowFilter) -> QuantResult<FoldRuntime> {
-        use quant_pivot_models::types::{ArtifactUri, ModelArtifactId};
-        use quant_pivot_research::model::{ClassicalAdapterRegistry, ClassicalRuntime};
-
         let allowed_as_of: HashSet<DateTime<Utc>> = filter
             .group_indices
             .iter()
@@ -1997,27 +1997,44 @@ fn min_trl_for_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        LotDecisionSequence, SellReplayTemplate, TimelineGroup, build_lot_timeline_groups,
-        calendarize_sell_path_set, selected_label_matured_at, validate_sell_examples,
+        FoldReplayEngineAdapter, FoldTemplate, LotDecisionSequence, ReplayTemplate,
+        SellFoldTemplate, SellReplayTemplate, TimelineGroup, build_lot_timeline_groups,
+        calendarize_sell_path_set, selected_label_matured_at, sell_seed_weights,
+        validate_sell_examples,
     };
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::domain::DecisionClock;
     use quant_pivot_models::enums::common::MarketCategory;
+    use quant_pivot_models::enums::{factor::FactorFamily, quant::FactorDirection};
     use quant_pivot_models::types::{
         BacktestPathSetId, ContentHash, EventId, MarketId, ModelInputContract, ModelVersionId,
         OrderIntentId, Price, SchemaVersion, Shares, TokenId, TrainingExampleId,
         TrainingSampleSource,
     };
+    use quant_pivot_models::types::{FactorDefinitionId, Probability};
     use quant_pivot_models::{enums::quant::DataQualityStatus, types::PositionId};
     use quant_pivot_research::factors::FactorValue;
+    use quant_pivot_research::factors::{FactorExplanation, NormalizedFactor, names};
     use quant_pivot_research::gates::GateStatus;
+    use quant_pivot_research::gates::{
+        CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateSubject,
+        ModelQualityGate, QualityGateInput, QualityGateThresholds, SellQualityGateThresholds,
+        ValidationGateThresholds,
+    };
     use quant_pivot_research::selection::SelectedMarket;
+    use quant_pivot_research::training::DatasetCoverage;
     use quant_pivot_research::training::{LabelName, LeakageFindings};
     use quant_pivot_research::{
         features::FeatureVector,
-        model::{LabelSelector, PositionStateFeatures, SellSignalPolicy},
+        model::{
+            LabelSelector, ModelArtifactHeader, ModelFamily, PositionStateFeatures,
+            SellSignalPolicy, TrainingObjectiveSpec,
+        },
         training::{HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel},
-        validation::{BacktestPath, BacktestPathSet, SharpeDistribution},
+        validation::{
+            BacktestPath, BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
+            DefaultCombinatorialPurgedBacktester, PurgeConfig, SharpeDistribution,
+        },
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -2294,11 +2311,6 @@ mod tests {
     }
 
     fn market_factor(score: rust_decimal::Decimal) -> FactorValue {
-        use quant_pivot_models::{
-            enums::{factor::FactorFamily, quant::FactorDirection},
-            types::{FactorDefinitionId, Probability},
-        };
-        use quant_pivot_research::factors::{FactorExplanation, NormalizedFactor, names};
         FactorValue {
             definition_id: FactorDefinitionId::from_v7(),
             name: names::MOMENTUM_ROC,
@@ -2381,19 +2393,6 @@ mod tests {
     /// `ClickHouse` / Postgres (those are covered by governance bind e2e).
     #[test]
     fn sell_cpcv_pipeline_produces_calendarized_diagnostics_for_gates() {
-        use super::{
-            FoldReplayEngineAdapter, FoldTemplate, ReplayTemplate, SellFoldTemplate,
-            calendarize_sell_path_set, sell_seed_weights,
-        };
-        use quant_pivot_research::{
-            factors::names,
-            model::{ModelArtifactHeader, ModelFamily, TrainingObjectiveSpec},
-            validation::{
-                CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-                DefaultCombinatorialPurgedBacktester, PurgeConfig,
-            },
-        };
-
         let examples = sell_cpcv_examples();
         validate_sell_examples(&examples, &label()).expect("validate");
         let (groups, sequences) = build_lot_timeline_groups(&examples, &label()).expect("groups");
@@ -2467,17 +2466,6 @@ mod tests {
     }
 
     fn assert_sell_cpcv_gate_shape(path_set: &BacktestPathSet, groups_arc: &[TimelineGroup]) {
-        use quant_pivot_models::types::Probability;
-        use quant_pivot_research::{
-            gates::{
-                CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateSubject,
-                ModelQualityGate, QualityGateInput, QualityGateThresholds,
-                SellQualityGateThresholds, ValidationGateThresholds,
-            },
-            model::ModelFamily,
-            training::DatasetCoverage,
-        };
-
         let dist = &path_set.sharpe_distribution;
         assert!(dist.median_max_drawdown.is_some());
         assert!(dist.median_tail_loss.is_some());

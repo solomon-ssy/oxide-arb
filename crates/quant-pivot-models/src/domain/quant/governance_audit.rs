@@ -1,5 +1,6 @@
 //! Model-governance audit ledger persistence DTOs (append-only WORM trail).
 
+use crate::entities::quant_model_governance_audit;
 use crate::{
     enums::quant::{ModelGovernanceAction, PublicationStatus},
     types::{AuditEventId, ModelGovernanceAuditId, ModelVersionId, TrainingDatasetId},
@@ -33,7 +34,7 @@ pub struct ModelGovernanceAuditInfo {
 
 info_from_model!(
     ModelGovernanceAuditInfo,
-    crate::entities::quant_model_governance_audit::Model,
+    quant_model_governance_audit::Model,
     {
         audit_id,
         model_version_id,

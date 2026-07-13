@@ -338,6 +338,7 @@ mod tests {
     use super::{SubscriptionSource, SubscriptionState};
     use quant_pivot_models::types::TokenId;
     use std::collections::HashSet;
+    use std::iter;
 
     fn tok(s: &str) -> TokenId {
         TokenId::new(s)
@@ -397,7 +398,7 @@ mod tests {
         // Engine reconciles to {a}: it drops `b` from its own set, but `b` stays
         // on the wire because the web overlay still holds it; only engine-only
         // tokens would be removed (none here besides what web protects).
-        let desired: HashSet<TokenId> = std::iter::once(tok("a")).collect();
+        let desired: HashSet<TokenId> = iter::once(tok("a")).collect();
         let (to_subscribe, to_unsubscribe) = state.sync(SubscriptionSource::Engine, desired);
         assert!(to_subscribe.is_empty());
         assert!(

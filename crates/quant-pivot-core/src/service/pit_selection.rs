@@ -76,7 +76,6 @@ use quant_pivot_research::{
 };
 
 use crate::prefetch::domain_availability::DomainAvailabilitySource;
-
 /// Replays the online selection funnel over point-in-time facts, per `as_of`.
 pub struct OfflinePitSelector {
     selector: ConfiguredMarketSelector,
@@ -290,6 +289,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use std::slice;
     use std::{collections::HashMap, sync::Arc};
 
     fn market() -> MarketRegistryInfo {
@@ -648,7 +648,7 @@ mod tests {
         let result = selector
             .select_at(
                 &boundary,
-                std::slice::from_ref(&market.market_id),
+                slice::from_ref(&market.market_id),
                 &pit,
                 &domain_source,
             )
@@ -702,7 +702,7 @@ mod tests {
         let result = selector
             .select_at(
                 &boundary,
-                std::slice::from_ref(&market.market_id),
+                slice::from_ref(&market.market_id),
                 &pit,
                 &domain_source,
             )

@@ -50,6 +50,8 @@ use quant_pivot_repository::traits::OperationLogRepository;
 use rust_decimal::Decimal;
 
 use crate::{execution::admission::VenueHealth, observability::metrics_hub::MetricsHub};
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
 
 /// Audit actor recorded for breaker-initiated kill-switch escalations.
 const BREAKER_ACTOR: &str = "system:execution_breaker";
@@ -442,10 +444,8 @@ impl ExecutionBreaker {
             .store(self.combined_health(&venue_health, daily_loss));
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BreakerInner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, BreakerInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub async fn trip_kill_switch(&self, dimension: &str, detail: &str) {

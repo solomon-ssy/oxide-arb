@@ -29,6 +29,7 @@ use quant_pivot_models::{
     types::{EventId, MarketId, Usd},
 };
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 /// One market's metadata plus its prefetched historical mid-price series.
 #[derive(Debug, Clone)]
@@ -294,7 +295,6 @@ fn pearson(first: &[f64], second: &[f64]) -> QuantResult<Option<f64>> {
 
 /// Convert a (small) observation count to `f64` without a lossy `as` cast.
 fn count_to_f64(count: usize, field: &'static str) -> QuantResult<f64> {
-    use rust_decimal::prelude::ToPrimitive;
     count
         .to_f64()
         .filter(|value| value.is_finite())
@@ -359,7 +359,6 @@ fn historical_cluster_rho(
 
 /// Lossy `Decimal → f64` for statistical estimation only (never money).
 fn decimal_to_f64(value: Decimal, field: &'static str) -> QuantResult<f64> {
-    use rust_decimal::prelude::ToPrimitive;
     value
         .to_f64()
         .filter(|value| value.is_finite())

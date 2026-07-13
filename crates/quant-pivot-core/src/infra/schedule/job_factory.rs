@@ -12,6 +12,7 @@ use quant_pivot_error::{
     scheduler::SchedulerError,
 };
 use quant_pivot_models::runtime_config::ScheduleCadence;
+use std::fmt::Display;
 use tokio_cron_scheduler::Job;
 
 /// Future produced on each fire (the report run, already wrapped).
@@ -22,7 +23,7 @@ pub trait FireFutureFactory: Fn() -> FireFuture + Send + Sync + 'static {}
 
 impl<F> FireFutureFactory for F where F: Fn() -> FireFuture + Send + Sync + 'static {}
 
-fn invalid_job(detail: impl std::fmt::Display) -> QuantError {
+fn invalid_job(detail: impl Display) -> QuantError {
     SchedulerError::InvalidJobSpec {
         detail: detail.to_string(),
     }

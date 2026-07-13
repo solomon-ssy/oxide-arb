@@ -32,7 +32,6 @@ use crate::{
         weighted::WeightedFactorRuntime,
     },
 };
-
 /// The active feature / factor schema hashes a loaded artifact must bind to.
 ///
 /// Computed per round from the frozen runtime config (the `FeatureSchema` digest
@@ -317,7 +316,9 @@ mod tests {
     use async_trait::async_trait;
     use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
     use quant_pivot_models::types::{CalibrationArtifactId, ModelInputContract};
+    use std::env;
     use std::fmt::Write;
+    use std::process;
 
     /// Test-only loader: these fixtures never construct a `Calibrated` return
     /// model, so `load` is unreachable in practice; errors closed if it is.
@@ -404,9 +405,9 @@ mod tests {
     }
 
     fn temp_store() -> Arc<dyn ArtifactStore> {
-        let root = std::env::temp_dir().join(format!(
+        let root = env::temp_dir().join(format!(
             "qp_factory_test_{}_{}",
-            std::process::id(),
+            process::id(),
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
         Arc::new(LocalArtifactStore::new(root))

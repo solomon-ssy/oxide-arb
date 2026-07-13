@@ -49,7 +49,6 @@ use crate::{
     },
     training::TrainingExample,
 };
-
 /// Absolute share tolerance when comparing simulated vs historical remaining
 /// (Decimal money-domain equality under rounding).
 fn remaining_eps() -> Decimal {
@@ -456,6 +455,8 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use std::vec::IntoIter;
 
     fn ts(secs: i64) -> DateTime<Utc> {
         Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()
@@ -525,13 +526,13 @@ mod tests {
 
     /// Scripted scorer: `(exit_alpha_bps, recommended_cumulative_exit_pct)` per call.
     struct ScriptedScorer {
-        script: std::sync::Mutex<std::vec::IntoIter<(Decimal, Decimal)>>,
+        script: Mutex<IntoIter<(Decimal, Decimal)>>,
     }
 
     impl ScriptedScorer {
         fn new(script: Vec<(Decimal, Decimal)>) -> Self {
             Self {
-                script: std::sync::Mutex::new(script.into_iter()),
+                script: Mutex::new(script.into_iter()),
             }
         }
     }

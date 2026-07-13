@@ -34,6 +34,7 @@ use sea_orm::{
 };
 
 use crate::postgres::query::paginate_mapped;
+use std::collections::HashSet;
 
 /// Postgres-backed recommendation report repository.
 pub struct PgRecommendationReportRepository {
@@ -120,8 +121,8 @@ fn validate_report_data_quality(
             "report DQ snapshot must bind the exact report decision and runtime config",
         ));
     }
-    let mut vector_ids = std::collections::HashSet::new();
-    let mut markets = std::collections::HashSet::new();
+    let mut vector_ids = HashSet::new();
+    let mut markets = HashSet::new();
     for record in &dq.tokens_json.0 {
         let vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
             StorageError::invariant_violation(

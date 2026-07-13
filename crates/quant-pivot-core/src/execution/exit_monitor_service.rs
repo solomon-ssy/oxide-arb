@@ -30,6 +30,7 @@ use quant_pivot_repository::traits::{
     RecommendationRepository,
 };
 
+use crate::execution::ExitSignalEvaluation;
 use crate::{
     execution::{
         exit_dispatcher::{CoreExitDispatcher, ExitSubmitRequest},
@@ -43,6 +44,7 @@ use crate::{
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
+use quant_pivot_models::types::ExitReinferenceObservation;
 
 /// Max lots evaluated per sweep (bounds one pass's book + DB load).
 const SCAN_BATCH_GUARD: usize = 4_096;
@@ -302,7 +304,7 @@ impl ExitMonitorService {
         now: DateTime<Utc>,
         peak_mark_price: Option<Price>,
         did_recheck: bool,
-        latest_reinference: Option<quant_pivot_models::types::ExitReinferenceObservation>,
+        latest_reinference: Option<ExitReinferenceObservation>,
     ) -> QuantResult<()> {
         let next_check_at =
             now + Duration::seconds(i64::try_from(monitor_secs).unwrap_or(i64::MAX));
@@ -336,7 +338,7 @@ struct ExitSignalResolve<'a> {
 async fn resolve_exit_signal(
     signal: &dyn ExitSignalEvaluator,
     input: ExitSignalResolve<'_>,
-) -> (crate::execution::ExitSignalEvaluation, bool) {
+) -> (ExitSignalEvaluation, bool) {
     let ExitSignalResolve {
         intent,
         lot,
@@ -361,7 +363,7 @@ async fn resolve_exit_signal(
         (evaluation, true)
     } else {
         (
-            crate::execution::ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds),
+            ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds),
             false,
         )
     }

@@ -1,6 +1,6 @@
 //! Phase 03.2 §8 acceptance tests for the feature plane.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, atomic::Ordering};
 
@@ -12,8 +12,9 @@ use quant_pivot_models::{
         DecisionBoundary, DecisionClock, DecisionSource, DomainAvailability, FeatureVectorInfo,
         MarketCandidate, MarketDataHealth, MarketRegistryInfo, TokenInfo,
         market::{
+            MarketInfo,
             book::BookLevel,
-            registry::{EventRegistryInfo, NegRiskLeg, NegRiskLegSet},
+            registry::{CatalogMarketLeg, EventRegistryInfo, NegRiskLeg, NegRiskLegSet},
         },
     },
     enums::{
@@ -57,7 +58,6 @@ use crate::{
         SelectionThresholds,
     },
 };
-
 fn test_context(
     market_id: &MarketId,
     boundary: &DecisionBoundary,
@@ -560,7 +560,7 @@ async fn unquoted_secondary_ask_preserves_snapshot_evidence_without_a_value() {
 
 fn sample_vector() -> FeatureVector {
     let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-    let mut values = std::collections::BTreeMap::new();
+    let mut values = BTreeMap::new();
     values.insert(
         book::MID,
         FeatureCell::observed(
@@ -1599,7 +1599,7 @@ async fn feature_out_of_valid_range_rejects() {
 fn category_feature_projects_table_index() {
     let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
     let as_of = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
-    let mut values = std::collections::BTreeMap::new();
+    let mut values = BTreeMap::new();
     values.insert(
         market::CATEGORY,
         FeatureCell::observed(
@@ -2055,21 +2055,6 @@ async fn negrisk_missing_catalog_leg_fails_closed() {
 
 #[test]
 fn negrisk_from_catalog_excludes_non_neg_risk_members() {
-    use std::sync::Arc;
-
-    use chrono::Utc;
-    use quant_pivot_models::{
-        domain::market::{
-            MarketInfo,
-            registry::{CatalogMarketLeg, NegRiskLegSet},
-        },
-        enums::{
-            common::{MarketCategory, TickSize},
-            market::MarketStatus,
-        },
-        types::{EventId, MarketId, TokenId},
-    };
-
     let now = Utc::now();
     let catalog = |id: &str, neg_risk: bool| {
         Arc::new(MarketInfo {
@@ -2108,7 +2093,7 @@ fn negrisk_from_catalog_excludes_non_neg_risk_members() {
         (binary.market_id.clone(), binary),
     ]
     .into_iter()
-    .collect::<std::collections::HashMap<_, _>>();
+    .collect::<HashMap<_, _>>();
     let market_ids = [
         MarketId::new("leg-a"),
         MarketId::new("leg-b"),

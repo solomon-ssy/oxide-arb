@@ -1,7 +1,9 @@
 //! Local filesystem [`ArtifactStore`] backend (`file://` URIs).
 
 use std::{
-    path::{Path, PathBuf},
+    io::{Error, ErrorKind},
+    path::{self, Path, PathBuf},
+    process,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -89,7 +91,7 @@ impl ArtifactStore for LocalArtifactStore {
         let path = self.path_from_uri(uri)?;
         match fs::read(&path).await {
             Ok(bytes) => Ok(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
                 Err(ResearchError::ArtifactNotFound {
                     uri: uri.as_str().to_owned(),
                 }
@@ -110,7 +112,7 @@ impl ArtifactStore for LocalArtifactStore {
         let path = self.absolute_path(key)?;
         match fs::read(&path).await {
             Ok(bytes) => Ok(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == ErrorKind::NotFound => {
                 Err(ResearchError::ArtifactNotFound {
                     uri: path.display().to_string(),
                 }
@@ -130,7 +132,7 @@ impl ArtifactStore for LocalArtifactStore {
 
 /// Make `path` absolute without requiring it to exist (no symlink resolution).
 fn absolutize(path: &Path) -> QuantResult<PathBuf> {
-    std::path::absolute(path).map_err(|error| {
+    path::absolute(path).map_err(|error| {
         ResearchError::ArtifactIo {
             uri: path.display().to_string(),
             detail: format!("failed to absolutize path: {error}"),
@@ -140,7 +142,7 @@ fn absolutize(path: &Path) -> QuantResult<PathBuf> {
 }
 
 /// Build an [`ResearchError::ArtifactIo`] from a filesystem error at `path`.
-fn io_error(path: &Path, error: &std::io::Error) -> ResearchError {
+fn io_error(path: &Path, error: &Error) -> ResearchError {
     ResearchError::ArtifactIo {
         uri: path.display().to_string(),
         detail: error.to_string(),
@@ -155,7 +157,7 @@ fn temp_file_name(key: &ArtifactKey) -> String {
     format!(
         ".{}.{}.{nanos}.tmp",
         key.namespace().as_str(),
-        std::process::id()
+        process::id()
     )
 }
 
@@ -165,15 +167,20 @@ mod tests {
     use quant_pivot_models::types::ArtifactUri;
 
     use crate::artifact::ArtifactNamespace;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_root() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
+    fn temp_root() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        std::env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "qp_artifact_test_{}_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos()),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ))
@@ -189,7 +196,7 @@ mod tests {
         assert!(uri.as_str().starts_with("file://"));
         assert!(store.exists(&uri).await.expect("exists"));
         assert_eq!(store.get(&uri).await.expect("get"), b"hello bytes");
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -203,6 +210,6 @@ mod tests {
         .expect("uri");
         let err = store.get(&uri).await.expect_err("missing must error");
         assert!(err.to_string().contains("artifact not found"));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root);
     }
 }

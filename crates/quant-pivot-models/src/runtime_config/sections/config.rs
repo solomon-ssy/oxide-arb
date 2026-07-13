@@ -17,9 +17,11 @@ use crate::{
     },
     types::{SchemaVersion, Usd},
 };
+use rust_decimal::Decimal;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::iter;
 
 /// Market selection selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -215,7 +217,7 @@ impl FeaturesConfig {
             .iter()
             .chain(self.momentum.roc_windows_secs.iter())
             .chain(self.momentum.slope_windows_secs.iter())
-            .chain(std::iter::once(&self.momentum.ema_slow_secs))
+            .chain(iter::once(&self.momentum.ema_slow_secs))
             .chain(self.volatility_windows_secs.iter())
             .copied()
             .max()
@@ -845,7 +847,6 @@ impl Default for TrainingConfig {
 impl TrainingConfig {
     /// Resolve [`TrainingConfig::min_exit_depth_usd`] into a typed [`Usd`] value.
     pub fn min_exit_depth_usd_typed(&self) -> Result<Usd, String> {
-        use rust_decimal::Decimal;
         self.min_exit_depth_usd
             .value
             .parse::<Decimal>()

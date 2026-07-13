@@ -13,6 +13,7 @@ use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
+use crate::entities::quant_domain_source_cursor;
 use crate::{
     clickhouse::{ChDecimal64, ChSchemaVersion, DomainObservationRow},
     enums::domain::{DomainFamily, DomainMetric},
@@ -136,7 +137,7 @@ pub struct DomainSourceCursorInfo {
 
 info_from_model!(
     DomainSourceCursorInfo,
-    crate::entities::quant_domain_source_cursor::Model,
+    quant_domain_source_cursor::Model,
     {
         source_id,
         instrument_key,

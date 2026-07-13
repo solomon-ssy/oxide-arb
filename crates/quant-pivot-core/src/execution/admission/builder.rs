@@ -40,7 +40,10 @@ use super::{
     AdmissionVenueMetadata, StateVersion,
 };
 use crate::{
-    execution::{breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle},
+    execution::{
+        breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle,
+        trade_policy_guard::require_frozen_trade_policy,
+    },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     ingest::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
@@ -127,12 +130,8 @@ impl AdmissionInputBuilder {
                 .ok_or_else(|| ExecutionError::IntentDenied {
                     reason: "intent model version no longer exists".to_owned(),
                 })?;
-        crate::execution::require_frozen_trade_policy(
-            deps.trade_policies.as_ref(),
-            model_version,
-            &recommendation,
-        )
-        .await?;
+        require_frozen_trade_policy(deps.trade_policies.as_ref(), model_version, &recommendation)
+            .await?;
         let model_state = self.resolve_model_state(fetched.model_version).await?;
         let exposure = AdmissionExposureState {
             has_blocking_inflight: fetched.has_blocking_inflight,

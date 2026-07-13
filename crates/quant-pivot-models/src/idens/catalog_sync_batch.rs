@@ -9,6 +9,7 @@ use crate::schema::{
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
+    timestamp_with_write_default,
 };
 
 /// Append-only ledger for one committed Gamma catalog synchronization.
@@ -81,12 +82,8 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            CatalogSyncBatch::CreatedAt,
-        ))
-        .col(crate::schema::timestamp_with_write_default(
-            CatalogSyncBatch::UpdatedAt,
-        ))
+        .col(timestamp_with_write_default(CatalogSyncBatch::CreatedAt))
+        .col(timestamp_with_write_default(CatalogSyncBatch::UpdatedAt))
         .check(Expr::cust(
             "status IN ('preparing', 'committed', 'failed') AND \
              event_count >= 0 AND market_count >= 0 AND rejected_count >= 0 AND \

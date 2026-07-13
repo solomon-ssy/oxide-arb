@@ -116,6 +116,7 @@ impl MarketDataConnectivity {
 #[cfg(test)]
 mod tests {
     use crate::domain::OperationalDegradeReason;
+    use crate::enums::execution::KillSwitchState;
 
     use super::{
         MarketDataConnectivity, OperationalPhase, WS_MARKET_DATA_STALE_THRESHOLD_MS,
@@ -171,7 +172,7 @@ mod tests {
     fn kill_switch_tightened_degraded_still_allows_reports() {
         let phase = OperationalPhase::Degraded {
             reasons: vec![OperationalDegradeReason::KillSwitchTightened {
-                state: crate::enums::execution::KillSwitchState::ReportOnlyForced,
+                state: KillSwitchState::ReportOnlyForced,
             }],
         };
         assert!(phase.allows_report_generation());

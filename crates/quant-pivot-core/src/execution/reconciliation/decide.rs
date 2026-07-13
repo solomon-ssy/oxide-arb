@@ -56,16 +56,14 @@ pub struct ReconciliationDecision {
 /// Decide the reconciliation verdict from venue facts (deterministic).
 #[must_use]
 pub fn decide(facts: &ReconcileFacts) -> ReconciliationDecision {
-    use ReconciliationResult as Result;
-
     let filled = facts.filled_shares;
     let result = if filled > facts.order_shares {
         // Venue reports more shares than ordered — impossible; never guess.
-        Result::Unresolvable
+        ReconciliationResult::Unresolvable
     } else if filled.is_positive() && facts.token_balance < filled {
         // We believe shares filled, but the account does not hold them: a hard
         // contradiction between trades and the token balance.
-        Result::Unresolvable
+        ReconciliationResult::Unresolvable
     } else {
         match facts.presence {
             // Unattributable (no venue id) or still resting: no terminal truth
@@ -74,21 +72,21 @@ pub fn decide(facts: &ReconcileFacts) -> ReconciliationDecision {
             // freeze for an operator (fail-closed). Otherwise retry next sweep.
             VenuePresence::Unattributable | VenuePresence::Resting => {
                 if facts.past_stale_deadline {
-                    Result::Unresolvable
+                    ReconciliationResult::Unresolvable
                 } else {
-                    Result::Pending
+                    ReconciliationResult::Pending
                 }
             }
             // Settled at the venue: trades are the terminal fill truth.
             VenuePresence::Settled => {
                 if filled == facts.order_shares {
-                    Result::Filled
+                    ReconciliationResult::Filled
                 } else if filled.is_positive() {
-                    Result::PartiallyFilled
+                    ReconciliationResult::PartiallyFilled
                 } else if facts.gtd_expired {
-                    Result::NotFilled
+                    ReconciliationResult::NotFilled
                 } else {
-                    Result::Cancelled
+                    ReconciliationResult::Cancelled
                 }
             }
         }

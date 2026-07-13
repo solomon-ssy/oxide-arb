@@ -74,6 +74,7 @@ use crate::{
     projection::inference_batch::build_runtime_input,
     service::factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
 };
+use std::mem;
 
 /// Decimal places shadow-diff aggregates are rounded to.
 const DIFF_SCALE: u32 = 12;
@@ -357,7 +358,7 @@ impl ModelRunner {
             .await
         {
             Ok(mut active) => {
-                let model_input_rows = std::mem::take(&mut active.model_input_rows);
+                let model_input_rows = mem::take(&mut active.model_input_rows);
                 if let Err(error) = self
                     .model_input_writer
                     .commit_run(

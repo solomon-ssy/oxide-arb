@@ -47,8 +47,9 @@ use crate::{
 };
 
 use super::{job_factory::job_for_cadence, overlap::ScheduleOverlapGuard};
+use std::fmt::Display;
 
-fn scheduler_backend(error: impl std::fmt::Display) -> QuantError {
+fn scheduler_backend(error: impl Display) -> QuantError {
     SchedulerError::Backend {
         detail: error.to_string(),
     }

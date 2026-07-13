@@ -23,7 +23,6 @@ use rust_decimal::{
 use serde::{Deserialize, Serialize};
 
 use crate::{backtest::metrics, precision::RESEARCH_DECIMAL_SCALE, stats};
-
 const BPS_PER_UNIT_RETURN: i64 = 10_000;
 
 /// Full governed objective snapshot frozen into model versions and artifacts.
@@ -620,9 +619,12 @@ fn parse_tail_fraction(value: &str) -> QuantResult<Decimal> {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use quant_pivot_models::runtime_config::RankLossKind;
+    use quant_pivot_models::runtime_config::{
+        RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind, wire::DecimalString,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use std::slice;
 
     use super::{
         CrossSectionGroup, ObjectiveEvaluator, SampleRow, TrainingObjectiveSpec, ndcg_at_k,
@@ -652,7 +654,7 @@ mod tests {
             ..TrainingObjectiveSpec::default()
         });
         let correct = evaluator
-            .evaluate(&[dec!(1)], std::slice::from_ref(&group))
+            .evaluate(&[dec!(1)], slice::from_ref(&group))
             .expect("eval");
         let reversed_group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -797,7 +799,7 @@ mod tests {
             lambda_l2: Decimal::ZERO,
             ..TrainingObjectiveSpec::default()
         })
-        .evaluate(&[dec!(1)], std::slice::from_ref(&group))
+        .evaluate(&[dec!(1)], slice::from_ref(&group))
         .expect("pairwise");
         let weighted = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             rank_loss: RankLossKind::RankIcWeightedRanknet,
@@ -825,10 +827,6 @@ mod tests {
 
     #[test]
     fn from_runtime_config_honors_ndcg_k_and_pseudo_top_n() {
-        use quant_pivot_models::runtime_config::{
-            RankLossKind, ResearchTrainingConfig, TrainingOptimizerKind, wire::DecimalString,
-        };
-
         let config = ResearchTrainingConfig {
             rank_loss: RankLossKind::PairwiseRanknet,
             optimizer: TrainingOptimizerKind::CoordinateSearch,

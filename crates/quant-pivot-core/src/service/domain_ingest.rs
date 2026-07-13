@@ -25,6 +25,7 @@ use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
 use quant_pivot_research::linkage::{AssetRule, rules};
 
 use crate::runtime_config::RuntimeConfigStore;
+use std::collections::HashSet;
 
 /// One `(source, instrument)` scan tick — observations to persist plus the
 /// cursor row to commit after `ClickHouse` acknowledges the batch.
@@ -347,7 +348,7 @@ fn checkpoint_status(
 }
 
 fn dedup_observations(observations: Vec<DomainObservation>) -> Vec<DomainObservation> {
-    let mut seen = std::collections::HashSet::<(String, String, i64)>::new();
+    let mut seen = HashSet::<(String, String, i64)>::new();
     let mut deduped = Vec::with_capacity(observations.len());
     for observation in observations {
         let key = (

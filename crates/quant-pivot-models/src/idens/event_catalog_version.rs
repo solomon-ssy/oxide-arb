@@ -13,6 +13,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -71,9 +72,7 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            EventCatalogVersion::CreatedAt,
-        ))
+        .col(timestamp_with_write_default(EventCatalogVersion::CreatedAt))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_event_catalog_version_batch")

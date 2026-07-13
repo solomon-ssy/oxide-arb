@@ -31,6 +31,7 @@ use quant_pivot_repository::traits::{
 };
 
 use super::AppContext;
+use crate::execution::TriggerEvaluation;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
     execution::{ConfirmationProgress, evaluate_entry_trigger},
@@ -38,6 +39,7 @@ use crate::{
     infra::periodic_task::PeriodicTask,
     ingest::book_store::BookStore,
 };
+use quant_pivot_models::domain::BookSnapshot;
 
 /// Max armed intents pulled per dispatch pass.
 const AUTO_DISPATCH_BATCH: u64 = 64;
@@ -282,13 +284,11 @@ fn evaluate_armed_intent(
     recommendation: &RecommendationInfo,
     book_store: &BookStore,
     progress: Option<ConfirmationProgress>,
-) -> crate::execution::TriggerEvaluation {
+) -> TriggerEvaluation {
     let now = Utc::now();
     let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(u64::MAX);
     let snapshot = book_store.load(&recommendation.token_id);
-    let best_ask = snapshot
-        .as_deref()
-        .and_then(quant_pivot_models::domain::BookSnapshot::best_ask);
+    let best_ask = snapshot.as_deref().and_then(BookSnapshot::best_ask);
     let max_book_age_ms = recommendation
         .trade_plan
         .frozen()

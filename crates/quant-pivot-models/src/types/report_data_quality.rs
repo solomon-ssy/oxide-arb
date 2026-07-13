@@ -8,6 +8,7 @@ use crate::{
     jsonb_active,
     types::{FeatureVectorId, MarketId, Probability, TokenId, report_payload::DataQualitySummary},
 };
+use rust_decimal::Decimal;
 
 /// Per-token DQ row inside one report fire snapshot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +59,6 @@ impl ReportDataQualityTokens {
 /// Map feature DQ classification to a normalized score in `[0, 1]`.
 #[must_use]
 pub fn data_quality_score(status: DataQualityStatus) -> Probability {
-    use rust_decimal::Decimal;
     let value = match status {
         DataQualityStatus::Fresh => Decimal::ONE,
         DataQualityStatus::Acceptable => Decimal::new(85, 2),

@@ -18,7 +18,7 @@ pub async fn shutdown_signal(token: CancellationToken) {
     };
 
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let terminate = future::pending::<()>();
 
     tokio::select! {
         () = async { ctrl_c.await.expect("ctrl-c listener is infallible in a running tokio runtime") } => {
@@ -45,7 +45,7 @@ pub async fn force_exit_on_second_signal() {
     };
 
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    let terminate = future::pending::<()>();
 
     tokio::select! {
         () = async { ctrl_c.await.expect("ctrl-c listener is infallible in a running tokio runtime") } => {

@@ -77,9 +77,14 @@ mod tests {
     use super::event_envelope;
     use crate::{
         domain::{
-            CoreEvent, MarketBookView, SubscriptionKey, SystemStatus, ws::channel::WsChannel,
+            CoreEvent, MarketBookView, MaterializationRunEvent, MaterializationRunKind,
+            MaterializationRunStatus, ReconciliationLifecycleEvent, SettlementRedeemLifecycleEvent,
+            SubscriptionKey, SystemStatus, ws::channel::WsChannel,
         },
-        enums::quant::QuantRuntimeMode,
+        enums::{
+            execution::{ReconciliationResult, SettlementRedeemState},
+            quant::{QuantRuntimeMode, TrainingDatasetStatus},
+        },
         types::MarketId,
     };
 
@@ -112,9 +117,6 @@ mod tests {
 
     #[test]
     fn dataset_build_status_maps_to_materialization_run_status() {
-        use crate::domain::MaterializationRunStatus;
-        use crate::enums::quant::TrainingDatasetStatus;
-
         assert_eq!(
             MaterializationRunStatus::from(TrainingDatasetStatus::Failed),
             MaterializationRunStatus::Failed
@@ -131,9 +133,6 @@ mod tests {
 
     #[test]
     fn materialization_run_maps_to_global_channel() {
-        use crate::domain::{
-            MaterializationRunEvent, MaterializationRunKind, MaterializationRunStatus,
-        };
         let event = CoreEvent::MaterializationRun(MaterializationRunEvent::revision(
             "run-1",
             MaterializationRunKind::Training,
@@ -149,7 +148,6 @@ mod tests {
 
     #[test]
     fn reconciliation_maps_to_global_channel() {
-        use crate::{domain::ReconciliationLifecycleEvent, enums::execution::ReconciliationResult};
         let event = CoreEvent::Reconciliation(ReconciliationLifecycleEvent {
             execution_order_id: "eo-1".to_owned(),
             order_intent_id: "oi-1".to_owned(),
@@ -163,9 +161,6 @@ mod tests {
 
     #[test]
     fn settlement_maps_to_global_channel() {
-        use crate::{
-            domain::SettlementRedeemLifecycleEvent, enums::execution::SettlementRedeemState,
-        };
         let event = CoreEvent::Settlement(SettlementRedeemLifecycleEvent {
             settlement_redeem_id: "sr-1".to_owned(),
             market_id: MarketId::new("0xabc"),

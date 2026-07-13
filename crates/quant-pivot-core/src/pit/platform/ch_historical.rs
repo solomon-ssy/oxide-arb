@@ -24,6 +24,7 @@ use quant_pivot_research::pit::{
     BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot, resolve_catalog_snapshot,
 };
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 /// Outcome of decoding persisted book level JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +111,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         &self,
         token_ids: &[TokenId],
         boundary: &DecisionBoundary,
-    ) -> QuantResult<std::collections::HashMap<TokenId, BookSnapshotAt>> {
+    ) -> QuantResult<HashMap<TokenId, BookSnapshotAt>> {
         let cutoff = boundary.cutoff_for(DecisionSource::Book);
         let rows = self
             .fact_read
@@ -121,7 +122,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             )
             .await
             .map_err(PitResolutionStorageError::from)?;
-        let mut books = std::collections::HashMap::with_capacity(rows.len());
+        let mut books = HashMap::with_capacity(rows.len());
         for row in rows {
             if let Some(book) = decode_book_row(row, cutoff, boundary.decision_at())? {
                 books.insert(book.token_id.clone(), book);

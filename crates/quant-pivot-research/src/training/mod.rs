@@ -884,6 +884,7 @@ pub(crate) mod fixtures {
         selection::SelectedMarket,
     };
     use chrono::{DateTime, Duration, TimeZone, Utc};
+    use quant_pivot_models::enums::common::TickSize::Hundredth;
     use quant_pivot_models::{
         domain::{DecisionClock, DecisionSource},
         enums::{common::MarketCategory, market::MarketStatus, quant::DataQualityStatus},
@@ -1019,7 +1020,7 @@ pub(crate) mod fixtures {
                 time_to_resolution_secs: None,
                 market_status: MarketStatus::Active,
                 neg_risk: false,
-                tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
+                tick_size: Hundredth,
                 fee_rate: None,
             },
             data_quality: example.feature_vector.data_quality,

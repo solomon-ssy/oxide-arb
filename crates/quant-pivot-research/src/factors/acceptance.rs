@@ -5,6 +5,7 @@
 //! no silent neutral — small / degenerate cross-sections are indeterminate).
 
 use std::collections::BTreeMap;
+use std::slice;
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -19,7 +20,7 @@ use quant_pivot_models::{
         DecimalString, DomainConfig, FactorsConfig, FeaturesConfig, MissingFactorPolicy,
         SmallCrossSectionPolicy,
     },
-    types::{MarketId, Price, Probability, SchemaVersion, TokenId, Usd},
+    types::{CalibrationArtifactId, MarketId, Price, Probability, SchemaVersion, TokenId, Usd},
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -42,7 +43,6 @@ use crate::{
     },
     hashing::ResearchHasher,
 };
-
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 /// Config for the given families with a small `min_size` so modest test batches
@@ -752,7 +752,7 @@ fn frozen_reference_quantile_scores_small_cross_section() {
         Utc::now(),
     );
     let outcomes = engine
-        .compute_all_batch_with_references(std::slice::from_ref(&vector), &config, &references)
+        .compute_all_batch_with_references(slice::from_ref(&vector), &config, &references)
         .expect("frozen-reference compute");
     let factor = scored(&outcomes[0], "liquidity_depth");
     assert!(
@@ -1139,10 +1139,6 @@ fn favorite_longshot_uses_bias_table_not_constant() {
 
 #[test]
 fn structural_factor_ic_gate_disables_insignificant_category() {
-    use std::collections::BTreeMap;
-
-    use quant_pivot_models::types::{CalibrationArtifactId, Price, Probability};
-
     // A retained price bin carrying a bias, but the curve's IC is NOT
     // significant — an insignificant category must be gated off when the IC
     // gate is on (never served as a real edge), yet readable with the gate off.

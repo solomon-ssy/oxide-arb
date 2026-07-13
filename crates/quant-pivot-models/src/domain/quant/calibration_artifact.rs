@@ -6,6 +6,7 @@
 //! table, no alias). The kind-specific shape lives in `payload_json`; callers
 //! branch on `kind` to deserialize the matching payload type.
 
+use crate::entities::quant_calibration_artifact;
 use crate::{
     enums::quant::CalibrationKind,
     types::{CalibrationArtifactId, ContentHash},
@@ -32,7 +33,7 @@ pub struct CalibrationArtifactInfo {
 
 info_from_model!(
     CalibrationArtifactInfo,
-    crate::entities::quant_calibration_artifact::Model,
+    quant_calibration_artifact::Model,
     {
         artifact_id,
         kind,

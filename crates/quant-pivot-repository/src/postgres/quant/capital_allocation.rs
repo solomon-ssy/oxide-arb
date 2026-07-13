@@ -365,10 +365,7 @@ pub async fn reconcile_capital(
     settlement: &CapitalReconcileSettlement,
     reason: String,
 ) -> Result<(), StorageError> {
-    use CapitalAllocationState as State;
-    use CapitalReconcileSettlement as Recon;
-
-    if matches!(settlement, Recon::Hold) {
+    if matches!(settlement, CapitalReconcileSettlement::Hold) {
         return Ok(());
     }
     let cap = load_capital(db, intent_id).await?;
@@ -377,23 +374,44 @@ pub async fn reconcile_capital(
     // (target_state, spent, released, contradiction). `contradiction` forces
     // `Impaired` while preserving the persisted amounts.
     let (state, spent_usd, released_usd, contradiction) = match settlement {
-        Recon::Hold => return Ok(()),
-        Recon::Settle { spent_usd } => match cap.state {
-            State::Spent => return Ok(()),
-            State::Locked | State::Impaired => {
-                (State::Spent, *spent_usd, basis - *spent_usd, false)
-            }
-            _ => (State::Impaired, cap.spent_usd, cap.released_usd, true),
+        CapitalReconcileSettlement::Hold => return Ok(()),
+        CapitalReconcileSettlement::Settle { spent_usd } => match cap.state {
+            CapitalAllocationState::Spent => return Ok(()),
+            CapitalAllocationState::Locked | CapitalAllocationState::Impaired => (
+                CapitalAllocationState::Spent,
+                *spent_usd,
+                basis - *spent_usd,
+                false,
+            ),
+            _ => (
+                CapitalAllocationState::Impaired,
+                cap.spent_usd,
+                cap.released_usd,
+                true,
+            ),
         },
-        Recon::Release => match cap.state {
-            State::Released => return Ok(()),
-            State::Locked | State::Impaired => {
-                (State::Released, cap.spent_usd, basis - cap.spent_usd, false)
-            }
-            _ => (State::Impaired, cap.spent_usd, cap.released_usd, true),
+        CapitalReconcileSettlement::Release => match cap.state {
+            CapitalAllocationState::Released => return Ok(()),
+            CapitalAllocationState::Locked | CapitalAllocationState::Impaired => (
+                CapitalAllocationState::Released,
+                cap.spent_usd,
+                basis - cap.spent_usd,
+                false,
+            ),
+            _ => (
+                CapitalAllocationState::Impaired,
+                cap.spent_usd,
+                cap.released_usd,
+                true,
+            ),
         },
-        Recon::Impair => match cap.state {
-            State::Locked => (State::Impaired, cap.spent_usd, cap.released_usd, false),
+        CapitalReconcileSettlement::Impair => match cap.state {
+            CapitalAllocationState::Locked => (
+                CapitalAllocationState::Impaired,
+                cap.spent_usd,
+                cap.released_usd,
+                false,
+            ),
             // Already impaired, or terminal (Spent/Released): never un-settle.
             _ => return Ok(()),
         },

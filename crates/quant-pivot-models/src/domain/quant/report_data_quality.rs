@@ -1,5 +1,6 @@
 //! Report-level data-quality snapshot persistence DTOs.
 
+use crate::entities::quant_report_data_quality_snapshot;
 use crate::types::{ReportDataQualitySnapshotId, ReportDataQualityTokens, RuntimeConfigVersionId};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -18,7 +19,7 @@ pub struct ReportDataQualitySnapshotInfo {
 
 info_from_model!(
     ReportDataQualitySnapshotInfo,
-    crate::entities::quant_report_data_quality_snapshot::Model,
+    quant_report_data_quality_snapshot::Model,
     {
         report_data_quality_snapshot_id,
         decision_at,

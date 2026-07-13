@@ -13,6 +13,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -83,7 +84,7 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
+        .col(timestamp_with_write_default(
             MarketCatalogVersion::CreatedAt,
         ))
         .foreign_key(

@@ -270,6 +270,7 @@ fn mean_decimal(values: &[Decimal]) -> Decimal {
 
 #[cfg(test)]
 mod tests {
+    use super::mean_decimal;
     use super::{ReliabilitySample, compute_reliability};
     use crate::model::calibrator::{
         IsotonicKnot, MonotoneMapping, ProbabilityCalibrator, isotonic::IsotonicCalibrator,
@@ -449,9 +450,6 @@ mod tests {
 
     #[test]
     fn isotonic_calibration_improves_brier_vs_uncalibrated() {
-        use super::mean_decimal;
-        use crate::model::calibrator::{ProbabilityCalibrator, isotonic::IsotonicCalibrator};
-
         let mut scores = Vec::new();
         let mut outcomes = Vec::new();
         for i in 0..300_i32 {

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
+use quant_pivot_test_support::research_ui_seed::ResearchUiSeedSummary;
 use quant_pivot_test_support::ui_demo_seed::{UiDemoSeedSummary, seed_ui_demo_ck, seed_ui_demo_pg};
 use tracing_subscriber::EnvFilter;
 
@@ -127,9 +128,7 @@ fn print_summary(summary: &UiDemoSeedSummary) {
 
 const SETTLE_MARKET: &str = "ui-demo-settle-mkt";
 
-fn print_research_summary(
-    research: &quant_pivot_test_support::research_ui_seed::ResearchUiSeedSummary,
-) {
+fn print_research_summary(research: &ResearchUiSeedSummary) {
     eprintln!("\n--- 10.5 research catalog ---");
     if research.skipped {
         eprintln!("(skipped — fixtures already present)");

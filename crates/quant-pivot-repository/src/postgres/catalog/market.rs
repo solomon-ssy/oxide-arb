@@ -372,7 +372,7 @@ impl MarketRepository for PgMarketRepositoryTxn<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::page_condition;
+    use super::{MarketEntity, page_condition};
     use quant_pivot_models::{
         domain::{MarketPageQuery, pagination::PageRequest},
         enums::{common::MarketCategory, market::MarketStatus},
@@ -392,7 +392,7 @@ mod tests {
             ..Default::default()
         };
 
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn page_condition_empty_matches_all_rows() {
         let query = MarketPageQuery::default();
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
@@ -424,7 +424,7 @@ mod tests {
             keyword: Some(String::new()),
             ..Default::default()
         };
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
@@ -439,7 +439,7 @@ mod tests {
             resolved_subscribed_tokens: Some([TokenId::new("tok-yes")].into()),
             ..Default::default()
         };
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
@@ -454,7 +454,7 @@ mod tests {
             category_unknown: Some(true),
             ..Default::default()
         };
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
@@ -469,7 +469,7 @@ mod tests {
             resolved_subscribed_tokens: Some(HashSet::new()),
             ..Default::default()
         };
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();
@@ -484,7 +484,7 @@ mod tests {
             resolved_subscribed_tokens: Some([TokenId::new("tok-a"), TokenId::new("tok-b")].into()),
             ..Default::default()
         };
-        let sql = super::MarketEntity::find()
+        let sql = MarketEntity::find()
             .filter(page_condition(&query))
             .build(DbBackend::Postgres)
             .to_string();

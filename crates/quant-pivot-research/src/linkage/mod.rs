@@ -128,6 +128,10 @@ impl LayeredResolver {
 #[cfg(test)]
 mod tests {
     use super::LayeredResolver;
+    use super::{
+        DefaultSubjectValidator, SubjectExtractor, SubjectValidator, Tier0SlugExtractor,
+        ValidationOutcome,
+    };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         domain::{GroundingField, LinkageOutcome, LinkageSourceMetadata},
@@ -183,10 +187,6 @@ mod tests {
     fn grounding_rejects_field_absent_from_source() {
         // Anti-hallucination: a candidate whose spans do not literally appear
         // in the source metadata must be rejected by the single gate.
-        use super::{
-            DefaultSubjectValidator, SubjectExtractor, SubjectValidator, Tier0SlugExtractor,
-            ValidationOutcome,
-        };
         // Build a valid candidate, then corrupt one span's text.
         let source = metadata(
             "btc-updown-5m-1780319100",

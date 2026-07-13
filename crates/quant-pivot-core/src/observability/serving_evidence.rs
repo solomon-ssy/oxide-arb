@@ -16,7 +16,6 @@ use quant_pivot_models::{
 };
 use quant_pivot_research::hashing::ResearchHasher;
 use serde::Serialize;
-
 pub const SERVING_EVIDENCE_FORMAT_VERSION: u32 = 2;
 
 /// Producer-side commitment for the complete feature evidence batch used by a
@@ -452,22 +451,20 @@ mod tests {
         types::{FeatureVectorId, MarketId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
     };
     use quant_pivot_repository::traits::FactWriter;
+    use std::slice;
+    use std::sync::Mutex;
     use std::{marker::PhantomData, sync::Arc};
     use uuid::Uuid;
 
     struct OrderedSink<T> {
         label: &'static str,
-        calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
         fail: bool,
         _row: PhantomData<fn(T)>,
     }
 
     impl<T> OrderedSink<T> {
-        fn new(
-            label: &'static str,
-            calls: Arc<std::sync::Mutex<Vec<&'static str>>>,
-            fail: bool,
-        ) -> Self {
+        fn new(label: &'static str, calls: Arc<Mutex<Vec<&'static str>>>, fail: bool) -> Self {
             Self {
                 label,
                 calls,
@@ -646,8 +643,7 @@ mod tests {
             &market_id,
             decision_at.timestamp_millis(),
         )];
-        let features =
-            feature_commitment(std::slice::from_ref(&first)).expect("feature commitment");
+        let features = feature_commitment(slice::from_ref(&first)).expect("feature commitment");
         let mut marker = completion_marker(&run_id, &boundary, &features, &input_rows, 100)
             .expect("completion marker");
         assert_eq!(marker.format_version, SERVING_EVIDENCE_FORMAT_VERSION);
@@ -686,7 +682,7 @@ mod tests {
         )];
         let features = feature_commitment(&feature_rows)
             .expect("feature commitment")
-            .bind_model_vectors(std::slice::from_ref(&admitted_id))
+            .bind_model_vectors(slice::from_ref(&admitted_id))
             .expect("admission binding");
         let marker = completion_marker(&run_id, &boundary, &features, &input_rows, 100)
             .expect("completion marker");
@@ -721,7 +717,7 @@ mod tests {
             &market_id,
             decision_at.timestamp_millis(),
         )];
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let writer = ModelInputEventWriter::new(
             Arc::new(OrderedSink::new("inputs", Arc::clone(&calls), false)),
             Arc::new(OrderedSink::new("completion", Arc::clone(&calls), false)),
@@ -758,7 +754,7 @@ mod tests {
             &market_id,
             decision_at.timestamp_millis(),
         )];
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let writer = ModelInputEventWriter::new(
             Arc::new(OrderedSink::new("inputs", Arc::clone(&calls), true)),
             Arc::new(OrderedSink::new("completion", Arc::clone(&calls), false)),

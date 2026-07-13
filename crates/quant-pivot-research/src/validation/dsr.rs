@@ -29,6 +29,7 @@ use rust_decimal::{
 };
 
 use crate::{precision::RESEARCH_DECIMAL_SCALE, stats};
+use std::f64::consts::E;
 
 /// Euler–Mascheroni constant, used by the expected-maximum-Sharpe benchmark.
 const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
@@ -97,8 +98,7 @@ fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> Quan
     }
     let variance = variance.max(1e-12);
     let term_a = (1.0 - EULER_MASCHERONI) * stats::normal_inverse_cdf(1.0 - 1.0 / n);
-    let term_b =
-        EULER_MASCHERONI * stats::normal_inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
+    let term_b = EULER_MASCHERONI * stats::normal_inverse_cdf(1.0 - 1.0 / (n * E));
     let benchmark = variance.sqrt() * (term_a + term_b);
     if !benchmark.is_finite() {
         return Err(methodology(

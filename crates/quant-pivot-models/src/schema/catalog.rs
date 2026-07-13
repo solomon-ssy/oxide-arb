@@ -2,6 +2,7 @@
 
 use super::{seed::SeedSpec, table::TableSpec};
 use linkme::distributed_slice;
+use std::collections::BTreeSet;
 
 #[allow(unsafe_code)]
 #[distributed_slice]
@@ -26,7 +27,7 @@ pub fn seeds() -> Vec<SeedSpec> {
 }
 
 fn assert_unique_table_names(specs: &[&TableSpec]) {
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for spec in specs {
         let name = (spec.table_name)();
         assert!(

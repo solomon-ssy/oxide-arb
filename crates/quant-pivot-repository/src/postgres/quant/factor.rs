@@ -23,6 +23,7 @@ use sea_orm::{
     DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
     QuerySelect, SqlErr, Statement, TransactionTrait,
 };
+use std::slice;
 
 /// Postgres-backed factor repository: immutable, content-addressed definition
 /// revisions plus the insert-only factor-value ledger.
@@ -203,8 +204,7 @@ impl FactorRepository for PgFactorRepository {
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<FactorDefinitionInfo, StorageError> {
         let mut rows =
-            publish_definition_revisions(&self.db, std::slice::from_ref(factor_definition_id))
-                .await?;
+            publish_definition_revisions(&self.db, slice::from_ref(factor_definition_id)).await?;
         rows.pop().ok_or_else(|| {
             error::invariant_violation(
                 Some(entity::QUANT_FACTOR),

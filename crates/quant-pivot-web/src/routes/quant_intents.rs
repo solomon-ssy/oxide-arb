@@ -21,7 +21,7 @@ use actix_web::{http::Method, web};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
-        ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand,
+        ApproveIntentCommand, BookSnapshot, CancelIntentCommand, CreateIntentCommand,
         EntryTriggerObservationView, ExitMonitorObservationView, OrderIntentListQuery,
         OrderIntentView, Paginated, PositionInfo, RejectIntentCommand,
     },
@@ -142,9 +142,7 @@ pub(crate) async fn exit_monitor_observation(
     let snapshot = state
         .market_data
         .book_for_token(&intent.entry_order.token_id);
-    let current_executable_bid = snapshot
-        .as_deref()
-        .and_then(quant_pivot_models::domain::BookSnapshot::best_bid);
+    let current_executable_bid = snapshot.as_deref().and_then(BookSnapshot::best_bid);
     let book_observed_at = snapshot
         .as_deref()
         .and_then(|book| i64::try_from(book.timestamp_ms).ok())

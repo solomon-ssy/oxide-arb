@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use chrono::{Duration, TimeZone, Utc};
 use rust_decimal_macros::dec;
 
+use quant_pivot_models::enums::common::TickSize::Hundredth;
 use quant_pivot_models::enums::market::MarketStatus;
 use quant_pivot_models::{
     domain::{
@@ -381,7 +382,7 @@ const fn market_context() -> MarketContext {
         time_to_resolution_secs: Some(86_400),
         market_status: MarketStatus::Active,
         neg_risk: false,
-        tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
+        tick_size: Hundredth,
         fee_rate: None,
     }
 }

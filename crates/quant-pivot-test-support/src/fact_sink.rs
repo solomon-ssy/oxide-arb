@@ -5,6 +5,7 @@ use std::{marker::PhantomData, sync::Arc};
 use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_repository::traits::FactWriter;
+use std::sync::Mutex;
 
 /// Acknowledges and discards every batch.
 pub struct DiscardFactWriter<T> {
@@ -33,12 +34,12 @@ impl<T: Send + Sync + 'static> FactWriter<T> for DiscardFactWriter<T> {
 
 /// Captures every durably acknowledged batch in insertion order.
 pub struct RecordingFactWriter<T> {
-    rows: Arc<std::sync::Mutex<Vec<T>>>,
+    rows: Arc<Mutex<Vec<T>>>,
 }
 
 impl<T> RecordingFactWriter<T> {
     #[must_use]
-    pub const fn new(rows: Arc<std::sync::Mutex<Vec<T>>>) -> Self {
+    pub const fn new(rows: Arc<Mutex<Vec<T>>>) -> Self {
         Self { rows }
     }
 }

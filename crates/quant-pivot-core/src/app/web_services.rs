@@ -1,6 +1,7 @@
 //! Web admin surface assembly for Phase 0.
 
 use super::AppContext;
+use crate::service::feature_integrity::CatalogFeatureIntegrityCoverage;
 use crate::{
     app::{
         ports::{
@@ -47,6 +48,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
+use quant_pivot_web::auth::casbin::PermChecker;
 use quant_pivot_web::{
     AppState,
     audit::OperationLogBuffer,
@@ -224,12 +226,10 @@ fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {
         Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
             &ctx.infra.ch,
         ))) as Arc<dyn FeatureParityEventRepository>,
-        Some(Arc::new(
-            crate::service::feature_integrity::CatalogFeatureIntegrityCoverage::new(Arc::clone(
-                &ctx.research.catalog_version_repo,
-            )
-                as Arc<dyn CatalogVersionRepository>),
-        )),
+        Some(Arc::new(CatalogFeatureIntegrityCoverage::new(Arc::clone(
+            &ctx.research.catalog_version_repo,
+        )
+            as Arc<dyn CatalogVersionRepository>))),
         Arc::clone(&ctx.infra.metrics),
     ))
 }
@@ -237,7 +237,7 @@ fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {
 struct WebAuthServices {
     casbin: Arc<CasbinService>,
     jwt: Arc<JwtService>,
-    perm_checker: Arc<quant_pivot_web::auth::casbin::PermChecker>,
+    perm_checker: Arc<PermChecker>,
 }
 
 async fn build_web_auth(ctx: &AppContext) -> QuantResult<WebAuthServices> {

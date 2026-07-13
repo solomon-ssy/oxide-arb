@@ -32,6 +32,8 @@ use quant_pivot_models::types::{ContentHash, MarketId, ModelInputContract, Token
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "optimize")]
+use crate::model::optimize;
 use crate::{
     factors::{FactorName, FrozenReferenceCdf, FrozenReferenceQuantiles, NormalizedFactor},
     hashing::ResearchHasher,
@@ -56,7 +58,9 @@ use crate::{
     training::{LabelName, TrainingExample},
     validation::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup},
 };
-
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::mem;
 /// Which forward label a trainer targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelSelector {
@@ -415,7 +419,7 @@ fn apply_reference_quantiles(
             detail: format!("factor cross-section min_size conversion failed: {error}"),
         })
     })?;
-    let mut present_counts = std::collections::BTreeMap::new();
+    let mut present_counts = BTreeMap::new();
     for example in examples {
         for factor in &example.factor_values {
             if factor.raw_value.is_some() {
@@ -703,7 +707,7 @@ fn fit_validation_fold(
     let train_decision_at = train_indices
         .iter()
         .map(|index| timeline_dataset.groups[*index].decision_at)
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let reference_examples = context
         .examples
         .iter()
@@ -899,8 +903,6 @@ fn refine(
     train_groups: &[CrossSectionGroup],
     evaluator: &ObjectiveEvaluator,
 ) -> QuantResult<(Vec<Decimal>, ObjectiveComponentReport)> {
-    use crate::model::optimize;
-
     if evaluator.spec().optimizer != TrainingOptimizerKind::Argmin {
         return Ok((
             grid_weights.to_vec(),
@@ -1103,7 +1105,7 @@ impl TrainingDataset {
                     &mut groups,
                     current_decision_at,
                     current_horizon_end,
-                    std::mem::take(&mut current_rows),
+                    mem::take(&mut current_rows),
                     &mut dropped_singleton_groups,
                     &mut dropped_singleton_rows,
                 )?;
@@ -1301,9 +1303,12 @@ mod tests {
         LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
         TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, weighted_training_input_hash,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::slice;
 
     use chrono::{TimeZone, Utc};
+    #[cfg(not(feature = "optimize"))]
+    use quant_pivot_models::runtime_config::TrainingOptimizerKind;
     use quant_pivot_models::{
         domain::DecisionClock,
         enums::{
@@ -1320,6 +1325,7 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
+    use super::coordinate_search;
     use crate::{
         factors::{
             FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
@@ -1332,6 +1338,7 @@ mod tests {
                 FactorWeight, ModelArtifact, ModelArtifactHeader, ScoreMultiplierSpec,
                 SubstitutionConfidenceRules,
             },
+            objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow},
             runtime::ModelFamily,
             trainer::train_weighted,
         },
@@ -1499,7 +1506,7 @@ mod tests {
         let mut group_times = baseline_examples
             .iter()
             .map(TrainingExample::decision_at)
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
         group_times.sort();
@@ -1652,7 +1659,7 @@ mod tests {
             &factors,
         )
         .expect("dataset");
-        let distinct_decision_times: std::collections::BTreeSet<_> =
+        let distinct_decision_times: BTreeSet<_> =
             examples.iter().map(TrainingExample::decision_at).collect();
         assert_eq!(
             dataset.groups.len(),
@@ -1710,8 +1717,6 @@ mod tests {
 
     #[test]
     fn lambda_tail_changes_total_loss_when_pseudo_topn_is_negative() {
-        use crate::model::objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow};
-
         // Two-row group: selecting the high-score name yields a large loss.
         let group = CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
@@ -1737,7 +1742,7 @@ mod tests {
             pseudo_top_n: 1,
             ..TrainingObjectiveSpec::default()
         })
-        .evaluate(&weights, std::slice::from_ref(&group))
+        .evaluate(&weights, slice::from_ref(&group))
         .expect("zero");
         let heavy_tail = ObjectiveEvaluator::new(TrainingObjectiveSpec {
             lambda_tail: dec!(2),
@@ -1774,8 +1779,6 @@ mod tests {
     #[cfg(not(feature = "optimize"))]
     #[test]
     fn argmin_without_optimize_feature_fails_closed() {
-        use quant_pivot_models::runtime_config::TrainingOptimizerKind;
-
         let mut req = request(momentum_dataset());
         req.objective.optimizer = TrainingOptimizerKind::Argmin;
         let err = train_weighted(&req).expect_err("argmin must fail closed");
@@ -1845,9 +1848,6 @@ mod tests {
 
     #[test]
     fn coordinate_search_effective_n_at_least_seed() {
-        use super::coordinate_search;
-        use crate::model::objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow};
-
         let groups = vec![CrossSectionGroup {
             decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),

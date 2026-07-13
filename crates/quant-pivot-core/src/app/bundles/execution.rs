@@ -25,6 +25,7 @@ use quant_pivot_repository::traits::{
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
+use crate::service::feature_integrity::RepositoryFeatureParityGate;
 use crate::{
     execution::{
         AdmissionInputBuilder, AdmissionInputBuilderDeps, AttributionService,
@@ -132,11 +133,10 @@ impl ExecutionBundle {
                 metrics: Arc::clone(&infra.metrics),
                 execution_events: Arc::clone(&infra.execution_event_writer),
                 intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
-                feature_parity_gate: Arc::new(
-                    crate::service::feature_integrity::RepositoryFeatureParityGate::new(
-                        Arc::clone(&repos.feature_parity) as Arc<dyn FeatureParityRepository>,
-                    ),
-                ),
+                feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
+                    &repos.feature_parity,
+                )
+                    as Arc<dyn FeatureParityRepository>)),
             }));
 
         // Reconciliation engine (05.5): venue reader + fixed-order evidence

@@ -1,5 +1,6 @@
 //! Backtest-report ledger persistence DTOs.
 
+use crate::entities::quant_backtest_report;
 use crate::types::{
     BacktestReportId, ContentHash, ModelRunId, ModelVersionId, Probability, RuntimeConfigVersionId,
 };
@@ -38,7 +39,7 @@ pub struct BacktestReportInfo {
 
 info_from_model!(
     BacktestReportInfo,
-    crate::entities::quant_backtest_report::Model,
+    quant_backtest_report::Model,
     {
         backtest_report_id,
         model_version_id,

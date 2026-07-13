@@ -176,6 +176,7 @@ const fn evidence_decision_source(source: EvidenceSourceKind) -> Option<Decision
 
 #[cfg(test)]
 mod tests {
+    use super::super::{LabelName, TrainingLabel};
     use super::*;
     use crate::{
         features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector},
@@ -261,8 +262,6 @@ mod tests {
 
     #[test]
     fn scan_rejects_label_matured_before_as_of() {
-        use super::super::{LabelName, TrainingLabel};
-
         let mut ex = example(-5);
         ex.labels.push(TrainingLabel {
             label_name: LabelName::from_static("settlement_outcome"),

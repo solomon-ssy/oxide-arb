@@ -1,5 +1,6 @@
 //! Selection snapshot persistence DTOs.
 
+use crate::entities::quant_market_selection;
 use crate::{
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
@@ -26,7 +27,7 @@ pub struct MarketSelectionInfo {
 
 info_from_model!(
     MarketSelectionInfo,
-    crate::entities::quant_market_selection::Model,
+    quant_market_selection::Model,
     {
         market_selection_id,
         decision_at,
