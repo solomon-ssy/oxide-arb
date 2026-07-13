@@ -1,7 +1,7 @@
-//! Market-metadata feature builder: resolution timing, age, outcome structure,
+//! Market-metadata feature builder: resolution timing, age,
 //! and lifecycle flags derived from Gamma catalog context.
 
-use chrono::{DateTime, Utc};
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{enums::market::MarketStatus, runtime_config::FeatureFamily};
 
 use crate::features::{
@@ -19,19 +19,20 @@ impl FeatureGroupBuilder for MarketMetadataFeatureBuilder {
         FeatureFamily::MarketMetadata
     }
 
-    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
-        // No metadata ⇒ produce nothing; critical metadata specs then reject the
+    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> QuantResult<Vec<RawFeature>> {
+        // No metadata ⇒ produce nothing; model-required metadata inputs then reject the
         // market via the null policy (never silently defaulted).
         let Some(market) = ctx.market else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let evidence = EvidenceSourceRef {
             source_kind: EvidenceSourceKind::GammaMetadata,
             reference: market.market_id.as_str().to_owned(),
-            observed_at: market.observed_at,
+            effective_at: market.effective_at,
+            available_at: Some(market.available_at),
         };
 
-        vec![
+        Ok(vec![
             // Category is carried faithfully as the enum; it comes from the frozen
             // selection snapshot (identical online and offline), so the build is
             // parity-stable. Numeric encoding is a downstream normalization
@@ -42,16 +43,7 @@ impl FeatureGroupBuilder for MarketMetadataFeatureBuilder {
                 evidence.clone(),
             ),
             time_to_resolution(ctx, market, &evidence),
-            RawFeature::present(
-                market::EVENT_AGE_SECS,
-                FeatureValue::Count(secs_since(market.created_at, ctx)),
-                evidence.clone(),
-            ),
-            RawFeature::present(
-                market::OUTCOME_COUNT,
-                FeatureValue::Count(u64::from(market.outcome_count)),
-                evidence.clone(),
-            ),
+            event_age(ctx, market, &evidence),
             RawFeature::present(
                 market::NEG_RISK,
                 FeatureValue::Bool(market.neg_risk),
@@ -62,7 +54,7 @@ impl FeatureGroupBuilder for MarketMetadataFeatureBuilder {
                 FeatureValue::Bool(market.status == MarketStatus::Active),
                 evidence,
             ),
-        ]
+        ])
     }
 }
 
@@ -80,15 +72,43 @@ fn time_to_resolution(
             )
         },
         |end_date| {
-            let secs = (end_date - ctx.as_of).num_seconds();
-            let value = FeatureValue::Count(u64::try_from(secs).unwrap_or(0));
-            RawFeature::present(market::TIME_TO_RESOLUTION_SECS, value, evidence.clone())
+            let secs = (end_date - ctx.decision_at).num_seconds();
+            u64::try_from(secs).map_or_else(
+                |_| {
+                    RawFeature::missing(
+                        market::TIME_TO_RESOLUTION_SECS,
+                        NullReason::OutOfValidRange,
+                    )
+                },
+                |secs| {
+                    RawFeature::present(
+                        market::TIME_TO_RESOLUTION_SECS,
+                        FeatureValue::Count(secs),
+                        evidence.clone(),
+                    )
+                },
+            )
         },
     )
 }
 
-/// Whole seconds elapsed since `since` at the decision time (clamped at zero).
-fn secs_since(since: DateTime<Utc>, ctx: &FeatureComputeCtx<'_>) -> u64 {
-    let secs = (ctx.as_of - since).num_seconds();
-    u64::try_from(secs).unwrap_or(0)
+fn event_age(
+    ctx: &FeatureComputeCtx<'_>,
+    market: &ResolvedMarketContext,
+    evidence: &EvidenceSourceRef,
+) -> RawFeature {
+    let Some(created_at) = market.created_at else {
+        return RawFeature::missing(market::EVENT_AGE_SECS, NullReason::SourceUnavailable);
+    };
+    let seconds = (ctx.decision_at - created_at).num_seconds();
+    u64::try_from(seconds).map_or_else(
+        |_| RawFeature::missing(market::EVENT_AGE_SECS, NullReason::OutOfValidRange),
+        |seconds| {
+            RawFeature::present(
+                market::EVENT_AGE_SECS,
+                FeatureValue::Count(seconds),
+                evidence.clone(),
+            )
+        },
+    )
 }

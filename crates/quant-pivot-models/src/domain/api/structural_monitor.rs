@@ -35,7 +35,7 @@ pub struct NegRiskEventDriftView {
     /// The individual legs and their asks.
     pub legs: Vec<NegRiskLegView>,
     /// When the snapshot was computed.
-    pub as_of: DateTime<Utc>,
+    pub computed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,11 +60,10 @@ pub struct TradeTapeSourceHealthView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TradeTapeCoverageView {
-    pub as_of: DateTime<Utc>,
-    pub pit_as_of: DateTime<Utc>,
-    pub pit_cutoff: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
+    pub knowledge_cutoff: DateTime<Utc>,
     pub window_secs: u64,
-    pub source_delay_secs: u64,
+    pub knowledge_lag_secs: u64,
     pub active_market_count: u64,
     pub token_cursor_count: u64,
     pub market_cursor_count: u64,
@@ -78,8 +77,7 @@ pub struct ParticipantConcentrationMarketView {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub question: String,
-    pub pit_as_of: DateTime<Utc>,
-    pub pit_cutoff: DateTime<Utc>,
+    pub knowledge_cutoff: DateTime<Utc>,
     pub trade_count: Option<u64>,
     pub participant_count: Option<u64>,
     pub notional_usd: Option<Decimal>,
@@ -94,11 +92,10 @@ pub struct ParticipantConcentrationMarketView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParticipantConcentrationSummaryView {
-    pub as_of: DateTime<Utc>,
-    pub pit_as_of: DateTime<Utc>,
-    pub pit_cutoff: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
+    pub knowledge_cutoff: DateTime<Utc>,
     pub window_secs: u64,
-    pub source_delay_secs: u64,
+    pub knowledge_lag_secs: u64,
     pub min_unique_participants: u64,
     pub min_notional_usd: Decimal,
     pub min_coverage_ratio: Decimal,
@@ -117,9 +114,8 @@ pub struct ParticipantConcentrationParticipantView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParticipantConcentrationDetailView {
-    pub as_of: DateTime<Utc>,
-    pub pit_as_of: DateTime<Utc>,
-    pub pit_cutoff: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
+    pub knowledge_cutoff: DateTime<Utc>,
     pub market: ParticipantConcentrationMarketView,
     pub top_participants: Vec<ParticipantConcentrationParticipantView>,
 }

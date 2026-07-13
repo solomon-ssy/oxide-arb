@@ -59,7 +59,7 @@ fn candidate(market: &str, composite: Decimal, expected_bps: Decimal) -> SignalC
         liquidity_score: Probability::ZERO,
         data_quality_score: Probability::ZERO,
         model_score_percentile: Probability::ZERO,
-        as_of: Utc::now(),
+        decision_at: Utc::now(),
     }
 }
 

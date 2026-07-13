@@ -274,7 +274,10 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::market::TokenInfo,
-        enums::common::{CategorySet, MarketCategory, TickSize},
+        enums::{
+            common::{CategorySet, MarketCategory, TickSize},
+            market::EventStatus,
+        },
     };
     use rust_decimal_macros::dec;
     fn sample_market(id: &str, status: MarketStatus) -> MarketRegistryInfo {
@@ -321,7 +324,7 @@ mod tests {
             fee_schedule: None,
             end_date: None,
             resolved_at: None,
-            created_at: Utc::now(),
+            created_at: Some(Utc::now()),
             updated_at: Utc::now(),
         }
     }
@@ -332,10 +335,12 @@ mod tests {
             title: "Neg-risk event".into(),
             slug: event_id.into(),
             series_slug: None,
+            status: EventStatus::Active,
             market_ids: market_ids.into_iter().map(MarketId::new).collect(),
             categories: CategorySet::from(MarketCategory::Crypto),
             tags: Vec::new(),
             neg_risk: true,
+            end_date: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

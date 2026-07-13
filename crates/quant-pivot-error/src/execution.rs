@@ -22,6 +22,15 @@ pub enum ExecutionError {
     #[error("recommendation expired: {reason}")]
     RecommendationExpired { reason: String },
 
+    /// A persisted or configured execution timestamp/duration cannot be
+    /// represented at the target boundary. Never substitute epoch/zero/MAX.
+    #[error("execution time conversion failed for `{field}` value `{value}`: {detail}")]
+    TimeConversion {
+        field: &'static str,
+        value: String,
+        detail: String,
+    },
+
     /// Intent state cannot accept the requested transition.
     #[error("order intent `{intent_id}` is not submittable from state `{state}`")]
     NotSubmittable { intent_id: String, state: String },

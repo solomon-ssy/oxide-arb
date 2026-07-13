@@ -25,11 +25,11 @@ use quant_pivot_models::{
     types::{FactorDefinitionId, Probability},
 };
 use rust_decimal::Decimal;
-use uuid::Uuid;
 
 use crate::{
     factors::{
         computer::FactorComputer,
+        identity::provisional_factor_definition_id,
         names::{
             BOOK_IMBALANCE, DATA_QUALITY, LIQUIDITY_DEPTH, MARKET_ACTIVITY, MEAN_REVERSION,
             MOMENTUM_EMA_SLOPE, MOMENTUM_MACD, MOMENTUM_ROC, MOMENTUM_VOL_ADJUSTED,
@@ -46,16 +46,6 @@ use crate::{
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
-
-/// Stable namespace for deterministic factor-definition ids (UUID v5). Fixed
-/// forever: changing it would re-key every persisted factor definition.
-const FACTOR_NAMESPACE: Uuid = Uuid::from_u128(0x7c9e_6a55_3f1b_4d2a_8e0f_1c2d_3e4f_5a6b);
-
-/// Deterministic factor-definition id from a stable factor name.
-#[must_use]
-pub fn factor_definition_id(name: &str) -> FactorDefinitionId {
-    FactorDefinitionId::new(Uuid::new_v5(&FACTOR_NAMESPACE, name.as_bytes()))
-}
 
 /// Every generic `(spec, computer)` pair, resolved against the feature config
 /// (windowed factors bind their input feature name from the configured windows).
@@ -212,7 +202,7 @@ fn feature_factor(
     headline_label: &'static str,
 ) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     let name_str = name.as_str();
-    let definition_id = factor_definition_id(name_str);
+    let definition_id = provisional_factor_definition_id(name_str);
     let quality_gates = if required {
         vec![FactorQualityGate {
             name: format!("{name_str}_present"),
@@ -242,7 +232,7 @@ fn feature_factor(
 
 /// Build the data-quality `(spec, computer)` pair (`MinMax` bounds from config).
 fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
-    let definition_id = factor_definition_id(DATA_QUALITY.as_str());
+    let definition_id = provisional_factor_definition_id(DATA_QUALITY.as_str());
     let spec = FactorDefinitionSpec {
         name: DATA_QUALITY,
         family: FactorFamily::DataQuality,
@@ -375,8 +365,14 @@ impl FactorComputer for DataQualityFactor {
         let base = data_quality_confidence(features.data_quality);
         let total = features.value_count();
         let missing = features
-            .iter_values()
-            .filter(|(_, value)| value.is_missing())
+            .iter_cells()
+            .filter(|(_, cell)| {
+                matches!(
+                    cell.state,
+                    crate::features::FeatureCellState::Missing
+                        | crate::features::FeatureCellState::NotApplicable
+                )
+            })
             .count();
         let missing_ratio = if total == 0 {
             Decimal::ZERO
@@ -384,7 +380,9 @@ impl FactorComputer for DataQualityFactor {
             Decimal::from(missing) / Decimal::from(total)
         };
         let missing_penalty = (missing_ratio * Decimal::new(5, 1)).round_dp(RESEARCH_DECIMAL_SCALE);
-        let staleness_penalty = staleness_penalty(features.staleness_ms);
+        let staleness_penalty = features
+            .max_known_staleness_ms()
+            .map_or_else(|| Decimal::new(5, 1), staleness_penalty);
         let raw = (base - missing_penalty - staleness_penalty)
             .clamp(Decimal::ZERO, Decimal::ONE)
             .round_dp(RESEARCH_DECIMAL_SCALE);
@@ -422,13 +420,9 @@ impl FactorComputer for DataQualityFactor {
     }
 }
 
-/// Extract a numeric value from a feature, treating `Missing` as absent.
+/// Extract a numeric value from a present feature value.
 pub(super) fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
-    if value.is_missing() {
-        None
-    } else {
-        value.to_fact_decimal()
-    }
+    crate::features::feature_scalar(value)
 }
 
 /// Map an aggregate data-quality status to a `[0, 1]` confidence / score.

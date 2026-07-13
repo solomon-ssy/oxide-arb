@@ -4,7 +4,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{NewEquitySnapshot, capital_drawdown},
     enums::quant::AccountSource,
-    types::{EquitySnapshotId, Usd},
+    types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };
 use quant_pivot_repository::{
     postgres::{PgEquitySnapshotRepository, PgExecutionSubmissionRepository, PgPositionRepository},
@@ -20,7 +20,7 @@ fn new_equity_snapshot(
     as_of: chrono::DateTime<Utc>,
     capital_base_usd: Usd,
     high_water_mark_usd: Usd,
-    account_snapshot_ref: Option<quant_pivot_models::types::AccountSnapshotId>,
+    account_snapshot_ref: Option<AccountSnapshotId>,
 ) -> NewEquitySnapshot {
     NewEquitySnapshot {
         equity_snapshot_id: EquitySnapshotId::from_v7(),

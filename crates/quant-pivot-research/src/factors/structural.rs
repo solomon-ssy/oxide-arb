@@ -25,7 +25,8 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use crate::{
     factors::{
         computer::FactorComputer,
-        generic::{data_quality_confidence, extract_decimal, factor_definition_id},
+        generic::{data_quality_confidence, extract_decimal},
+        identity::provisional_factor_definition_id,
         names::{
             STRUCT_BOOK_CHURN_INTENSITY, STRUCT_FAVORITE_LONGSHOT, STRUCT_NEGRISK_CONVERT_EDGE,
             STRUCT_NEGRISK_LEG_SUM_DRIFT, STRUCT_PARTICIPANT_CONCENTRATION,
@@ -66,7 +67,7 @@ pub fn structural_factors(
 
     vec![
         computer(ReversalAfterShockFactor {
-            definition_id: factor_definition_id(STRUCT_REVERSAL_AFTER_SHOCK.as_str()),
+            definition_id: provisional_factor_definition_id(STRUCT_REVERSAL_AFTER_SHOCK.as_str()),
             spec: structural_spec(
                 STRUCT_REVERSAL_AFTER_SHOCK,
                 vec![feat::SHOCK_RATIO, feat::SHORT_RETURN],
@@ -78,7 +79,9 @@ pub fn structural_factors(
             shock_cap,
         }),
         computer(ResolutionProximityRegimeFactor {
-            definition_id: factor_definition_id(STRUCT_RESOLUTION_PROXIMITY_REGIME.as_str()),
+            definition_id: provisional_factor_definition_id(
+                STRUCT_RESOLUTION_PROXIMITY_REGIME.as_str(),
+            ),
             spec: structural_spec(
                 STRUCT_RESOLUTION_PROXIMITY_REGIME,
                 vec![feat::PRICE_EXTREMITY, market_names::TIME_TO_RESOLUTION_SECS],
@@ -88,7 +91,7 @@ pub fn structural_factors(
             ),
         }),
         computer(SingleFeatureStructuralFactor {
-            definition_id: factor_definition_id(STRUCT_BOOK_CHURN_INTENSITY.as_str()),
+            definition_id: provisional_factor_definition_id(STRUCT_BOOK_CHURN_INTENSITY.as_str()),
             spec: structural_spec(
                 STRUCT_BOOK_CHURN_INTENSITY,
                 vec![feat::BOOK_CHURN_INTENSITY],
@@ -101,7 +104,7 @@ pub fn structural_factors(
         }),
         participant_concentration_factor(structural),
         computer(NegRiskLegSumDriftFactor {
-            definition_id: factor_definition_id(STRUCT_NEGRISK_LEG_SUM_DRIFT.as_str()),
+            definition_id: provisional_factor_definition_id(STRUCT_NEGRISK_LEG_SUM_DRIFT.as_str()),
             spec: structural_spec(
                 STRUCT_NEGRISK_LEG_SUM_DRIFT,
                 vec![
@@ -120,7 +123,7 @@ pub fn structural_factors(
             min_legs,
         }),
         computer(NegRiskConvertEdgeFactor {
-            definition_id: factor_definition_id(STRUCT_NEGRISK_CONVERT_EDGE.as_str()),
+            definition_id: provisional_factor_definition_id(STRUCT_NEGRISK_CONVERT_EDGE.as_str()),
             spec: structural_spec(
                 STRUCT_NEGRISK_CONVERT_EDGE,
                 vec![feat::NEGRISK_CONVERT_EDGE, feat::NEGRISK_LEG_COUNT],
@@ -137,7 +140,7 @@ pub fn structural_factors(
             min_legs,
         }),
         computer(FavoriteLongshotFactor {
-            definition_id: factor_definition_id(STRUCT_FAVORITE_LONGSHOT.as_str()),
+            definition_id: provisional_factor_definition_id(STRUCT_FAVORITE_LONGSHOT.as_str()),
             spec: structural_spec(
                 STRUCT_FAVORITE_LONGSHOT,
                 vec![
@@ -168,7 +171,7 @@ fn participant_concentration_factor(
 ) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     let participant = &structural.participant_concentration;
     computer(ParticipantConcentrationFactor {
-        definition_id: factor_definition_id(STRUCT_PARTICIPANT_CONCENTRATION.as_str()),
+        definition_id: provisional_factor_definition_id(STRUCT_PARTICIPANT_CONCENTRATION.as_str()),
         spec: structural_spec(
             STRUCT_PARTICIPANT_CONCENTRATION,
             vec![
@@ -527,14 +530,18 @@ fn negrisk_outcome(
     value_name: &FeatureName,
     min_legs: u32,
 ) -> NegRiskOutcome {
-    match features.value(value_name) {
-        Some(FeatureValue::Missing(NullReason::NotApplicable)) => NegRiskOutcome::NotApplicable,
-        Some(FeatureValue::Missing(NullReason::LegBookMissing)) => NegRiskOutcome::LegMissing,
-        Some(value) if !value.is_missing() => {
-            let Some(decimal) = value.to_fact_decimal() else {
+    match features.cell(value_name) {
+        Some(cell) if cell.state == crate::features::FeatureCellState::NotApplicable => {
+            NegRiskOutcome::NotApplicable
+        }
+        Some(cell) if cell.reason == Some(NullReason::LegBookMissing) => NegRiskOutcome::LegMissing,
+        Some(cell) if cell.value().is_some() => {
+            let Some(decimal) = cell.value().and_then(crate::features::feature_scalar) else {
                 return NegRiskOutcome::LegMissing;
             };
-            let legs = read(features, &feat::NEGRISK_LEG_COUNT).unwrap_or(Decimal::ZERO);
+            let Some(legs) = read(features, &feat::NEGRISK_LEG_COUNT) else {
+                return NegRiskOutcome::LegMissing;
+            };
             if legs < Decimal::from(min_legs) {
                 NegRiskOutcome::NotApplicable
             } else {
@@ -701,7 +708,22 @@ impl FactorComputer for FavoriteLongshotFactor {
                 "missing category, mid, or time-to-resolution".to_owned(),
             ));
         };
-        let ttr_secs = ttr_secs.max(Decimal::ZERO).to_u64().unwrap_or(u64::MAX);
+        if ttr_secs < Decimal::ZERO {
+            return Ok(inert(
+                self.definition_id.clone(),
+                &self.spec,
+                RawFactorEligibility::Normalizable,
+                "negative time-to-resolution".to_owned(),
+            ));
+        }
+        let Some(ttr_secs) = ttr_secs.to_u64() else {
+            return Ok(inert(
+                self.definition_id.clone(),
+                &self.spec,
+                RawFactorEligibility::Normalizable,
+                "time-to-resolution is outside u64 range".to_owned(),
+            ));
+        };
         Ok(table
             .bias_for(category, ttr_secs, Price::new(mid), self.ic_gate)
             .map_or_else(
@@ -753,25 +775,23 @@ mod tests {
     use super::structural_factors;
     use crate::factors::{names::STRUCT_NEGRISK_LEG_SUM_DRIFT, value::RawFactorEligibility};
     use crate::features::{
-        FeatureName, FeatureValue, FeatureVector, NullReason, names::structural as feat,
+        FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
+        names::structural as feat,
     };
 
-    fn vector(values: BTreeMap<FeatureName, FeatureValue>) -> FeatureVector {
+    fn vector(values: BTreeMap<FeatureName, FeatureCell>) -> FeatureVector {
         FeatureVector {
             market_id: MarketId::new("m"),
             token_id: None,
-            as_of: Utc.timestamp_opt(0, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(0, 0).unwrap(),
             generic_schema_version: SchemaVersion::FIRST,
             generic: values,
             domain: None,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         }
     }
 
-    fn drift_eligibility(values: BTreeMap<FeatureName, FeatureValue>) -> RawFactorEligibility {
+    fn drift_eligibility(values: BTreeMap<FeatureName, FeatureCell>) -> RawFactorEligibility {
         let factors = FactorsConfig::default();
         let features = FeaturesConfig::default();
         let (_, computer) = structural_factors(&factors, &features, None)
@@ -786,11 +806,11 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert(
             feat::NEGRISK_LEG_ASK_SUM,
-            FeatureValue::Missing(NullReason::NotApplicable),
+            FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         values.insert(
             feat::NEGRISK_LEG_COUNT,
-            FeatureValue::Missing(NullReason::NotApplicable),
+            FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         assert!(matches!(
             drift_eligibility(values),
@@ -803,11 +823,11 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert(
             feat::NEGRISK_LEG_ASK_SUM,
-            FeatureValue::Missing(NullReason::LegBookMissing),
+            FeatureCell::missing(NullReason::LegBookMissing, None, FeatureStaleness::Unknown),
         );
         values.insert(
             feat::NEGRISK_LEG_COUNT,
-            FeatureValue::Missing(NullReason::LegBookMissing),
+            FeatureCell::missing(NullReason::LegBookMissing, None, FeatureStaleness::Unknown),
         );
         assert!(matches!(
             drift_eligibility(values),
@@ -821,9 +841,16 @@ mod tests {
         // Σ best-ask across 3 legs = 1.08 ⇒ drift = 0.08.
         values.insert(
             feat::NEGRISK_LEG_ASK_SUM,
-            FeatureValue::Decimal(Decimal::new(108, 2)),
+            FeatureCell::observed(
+                FeatureValue::Decimal(Decimal::new(108, 2)),
+                None,
+                FeatureStaleness::Unknown,
+            ),
         );
-        values.insert(feat::NEGRISK_LEG_COUNT, FeatureValue::Count(3));
+        values.insert(
+            feat::NEGRISK_LEG_COUNT,
+            FeatureCell::observed(FeatureValue::Count(3), None, FeatureStaleness::Unknown),
+        );
         let factors = FactorsConfig::default();
         let features = FeaturesConfig::default();
         let (_, computer) = structural_factors(&factors, &features, None)

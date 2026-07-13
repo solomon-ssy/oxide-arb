@@ -11,7 +11,7 @@
 ## 0. 核心原则
 
 - 数据先成为事实，再成为特征，再成为因子，再进入模型。
-- 任何训练、回测、报告都必须声明 `as_of` 与 `source_delay`。
+- 任何训练、回测、报告都必须声明 `as_of` 与 `knowledge_lag`。
 - 线上 feature builder 和离线 backtest feature builder 必须共用同一套定义。
 - 模型可以简单，但治理、版本、质量门禁不能省。
 - Endgame 只能作为一个可选 factor family，不能作为系统架构中心。
@@ -48,7 +48,7 @@
 所有 report/model run 使用窗口：
 
 ```text
-[trigger_time - source_delay - lookback, trigger_time - source_delay)
+[trigger_time - knowledge_lag - lookback, trigger_time - knowledge_lag)
 ```
 
 默认：
@@ -567,7 +567,7 @@ pub struct DatasetPlanRequest {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub horizons: Vec<PredictionHorizon>,
-    pub source_delay: Duration,
+    pub knowledge_lag: Duration,
     pub runtime_config_version_id: RuntimeConfigVersionId,
 }
 ```
@@ -701,7 +701,7 @@ pub async fn build_training_dataset(
                 .build(FeatureBuildInput {
                     market: &member,
                     as_of,
-                    source_delay: plan.source_delay,
+                    knowledge_lag: plan.knowledge_lag,
                     required_features: plan.required_features.clone(),
                 })
                 .await?;

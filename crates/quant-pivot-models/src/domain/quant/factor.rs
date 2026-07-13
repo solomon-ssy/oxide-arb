@@ -9,8 +9,8 @@ use crate::{
         quant::{FactorDirection, PublicationStatus},
     },
     types::{
-        FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
-        SchemaVersion,
+        ContentHash, FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId,
+        Probability, SchemaVersion,
     },
 };
 use chrono::{DateTime, Utc};
@@ -24,6 +24,10 @@ use uuid::Uuid;
 #[sea_orm(entity = "crate::entities::quant_factor_definition::Entity")]
 pub struct FactorDefinitionInfo {
     pub factor_definition_id: FactorDefinitionId,
+    /// Content address of the canonical definition and its feature contract.
+    pub definition_hash: ContentHash,
+    /// Frozen feature contract consumed by this revision.
+    pub feature_contract_hash: ContentHash,
     pub name: String,
     pub factor_family: FactorFamily,
     pub scope: FactorDefinitionScope,
@@ -41,6 +45,8 @@ info_from_model!(
     crate::entities::quant_factor_definition::Model,
     {
         factor_definition_id,
+        definition_hash,
+        feature_contract_hash,
         name,
         factor_family,
         scope,
@@ -59,6 +65,8 @@ info_from_model!(
 #[sea_orm(active_model = "crate::entities::quant_factor_definition::ActiveModel")]
 pub struct NewFactorDefinition {
     pub factor_definition_id: FactorDefinitionId,
+    pub definition_hash: ContentHash,
+    pub feature_contract_hash: ContentHash,
     pub name: String,
     pub factor_family: FactorFamily,
     pub scope: FactorDefinitionScope,
@@ -78,7 +86,7 @@ pub struct FactorValueInfo {
     pub feature_vector_id: FeatureVectorId,
     pub model_run_id: ModelRunId,
     pub market_id: MarketId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Authoritative factor-value state (scored / missing-input / not-applicable
     /// / indeterminate).
     pub value_state: FactorValueState,
@@ -97,7 +105,7 @@ pub struct FactorValueInfo {
 }
 
 info_from_model!(FactorValueInfo, crate::entities::quant_factor_value::Model, {
-    factor_value_id, factor_definition_id, feature_vector_id, model_run_id, market_id, as_of,
+    factor_value_id, factor_definition_id, feature_vector_id, model_run_id, market_id, decision_at,
     value_state, raw_value, normalized_score, normalization_source, indeterminate_reason,
     direction, confidence, explanation, created_at,
 });
@@ -111,7 +119,7 @@ pub struct NewFactorValue {
     pub feature_vector_id: FeatureVectorId,
     pub model_run_id: ModelRunId,
     pub market_id: MarketId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Authoritative factor-value state (scored / missing-input / not-applicable
     /// / indeterminate).
     pub value_state: FactorValueState,

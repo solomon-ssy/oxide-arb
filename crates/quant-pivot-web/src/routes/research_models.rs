@@ -4,6 +4,7 @@
 //!
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
+//! | GET | `/research/feature-contract` | `materialization:read` | Active hash-bound model-input catalog |
 //! | POST | `/research/models/train` | `materialization:create` | Train + register a Candidate version |
 //! | GET | `/research/models/{id}` | `materialization:read` | Poll a registered version |
 //! | POST | `/research/models/{id}/backtest` | `replay:create` | PIT backtest over a frozen dataset |
@@ -24,11 +25,12 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         BacktestPathSetListQuery, BacktestPathSetView, BacktestReportListQuery, BacktestReportView,
-        ComparisonReportListQuery, CreateModelSpecCommand, CreateModelSpecRequest, GovernanceActor,
-        JobSubmitContext, ModelComparisonReportView, ModelPublishedCatalogQuery,
-        ModelSpecListQuery, ModelVersionListQuery, Paginated, PublishedModelOptionView,
-        QualityGatePreviewQuery, QualityGateReportView, QuantModelSpecView, ResearchJobView,
-        RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest, TrainedModelView,
+        ComparisonReportListQuery, CreateModelSpecCommand, CreateModelSpecRequest,
+        FeatureContractView, GovernanceActor, JobSubmitContext, ModelComparisonReportView,
+        ModelPublishedCatalogQuery, ModelSpecListQuery, ModelVersionListQuery, Paginated,
+        PublishedModelOptionView, QualityGatePreviewQuery, QualityGateReportView,
+        QuantModelSpecView, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
+        TrainModelRequest, TrainedModelView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -51,7 +53,19 @@ use crate::{
 
 /// Trainer + backtest research routes.
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
+    let mut routes = model_route_specs();
+    routes.extend(validation_route_specs());
+    routes
+}
+
+fn model_route_specs() -> Vec<RouteSpec> {
     vec![
+        spec(
+            Method::GET,
+            "/research/feature-contract",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            get_feature_contract,
+        ),
         spec(
             Method::GET,
             "/research/model-specs",
@@ -100,6 +114,11 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             preview_quality_gate,
         ),
+    ]
+}
+
+fn validation_route_specs() -> Vec<RouteSpec> {
+    vec![
         spec(
             Method::GET,
             "/research/backtest-reports",
@@ -151,6 +170,17 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
+/// `GET /api/research/feature-contract` — active, hash-bound raw-feature
+/// catalog.
+///
+/// This is the only model-spec editor source; it is rebuilt from the same
+/// runtime snapshot used to validate model-spec creation.
+pub async fn get_feature_contract(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<FeatureContractView>, WebError> {
+    Ok(WebResponse::ok(state.model_spec.feature_contract().await?))
+}
+
 /// `GET /api/research/model-specs` — paginated model-spec catalog (the
 /// dataset/training selector source).
 pub async fn list_model_specs(
@@ -190,7 +220,8 @@ pub async fn create_model_spec(
                 feature_schema_version: request.feature_schema_version,
                 label_schema_version: request.label_schema_version,
                 spec_json: request.spec_json,
-                feature_requirements: request.feature_requirements,
+                input_contract: request.input_contract,
+                training_contract: request.training_contract,
                 reason: reason.clone(),
             },
             GovernanceActor {

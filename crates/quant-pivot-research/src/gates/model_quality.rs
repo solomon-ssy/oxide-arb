@@ -8,8 +8,8 @@
 //!
 //! Gates split into **hard** (any failure ⇒ the model may not advance) and
 //! **soft** (recorded as warnings, never blocking). The intent
-//! ([`GateIntent`]) selects which hard gates apply: a `DatasetReady` promotion
-//! has no backtest, a `Publish` adds shadow-stability, and an `AutoExecution`
+//! ([`GateIntent`]) selects which hard gates apply: a `Publish` adds
+//! shadow-stability, and an `AutoExecution`
 //! evaluation additionally requires liquidity-exit feasibility (parent §18).
 //!
 //! The resulting [`QualityGateReport`] is content-addressed and serializes into
@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::model::ModelFamily,
-    types::{ContentHash, ModelVersionId, Probability, TrainingDatasetId},
+    types::{ContentHash, ModelVersionId, Probability},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -33,16 +33,13 @@ use crate::{
     training::{DatasetCoverage, LeakageFindings},
 };
 
-/// What a gate evaluation is gating: a model version (publish path) or a training
-/// dataset (promotion path). Self-describing so the persisted report / audit
-/// detail carries the subject.
+/// What a gate evaluation is gating. Dataset integrity is evaluated
+/// deterministically during materialization and is not a governance action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum GateSubject {
     /// A model version under candidate / publish / auto evaluation.
     ModelVersion(ModelVersionId),
-    /// A training dataset under `Built → Ready` promotion.
-    TrainingDataset(TrainingDatasetId),
 }
 
 impl GateSubject {
@@ -51,7 +48,6 @@ impl GateSubject {
     pub fn id_string(&self) -> String {
         match self {
             Self::ModelVersion(id) => id.to_string(),
-            Self::TrainingDataset(id) => id.to_string(),
         }
     }
 
@@ -60,7 +56,6 @@ impl GateSubject {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::ModelVersion(_) => "model_version",
-            Self::TrainingDataset(_) => "training_dataset",
         }
     }
 }
@@ -69,8 +64,6 @@ impl GateSubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateIntent {
-    /// Promote a `Built` training dataset to `Ready` (coverage + leakage only).
-    DatasetReady,
     /// Register a trained model as a candidate (coverage + leakage + backtest).
     Candidate,
     /// Publish a model version (adds shadow overlap stability).
@@ -92,7 +85,7 @@ impl GateIntent {
         matches!(self, Self::AutoExecution)
     }
 
-    /// Whether this intent requires a persisted backtest report (not `DatasetReady`).
+    /// Whether this intent requires a persisted backtest report.
     #[must_use]
     pub const fn requires_backtest(self) -> bool {
         matches!(self, Self::Candidate | Self::Publish | Self::AutoExecution)
@@ -102,7 +95,6 @@ impl GateIntent {
     #[must_use]
     pub const fn wire_name(self) -> &'static str {
         match self {
-            Self::DatasetReady => "dataset_ready",
             Self::Candidate => "candidate",
             Self::Publish => "publish",
             Self::AutoExecution => "auto_execution",
@@ -119,7 +111,7 @@ pub enum GateId {
     /// Fraction of labels resolved (hard).
     LabelCoverage,
     /// Fraction of planned samples materialized (hard).
-    CriticalFeatureCoverage,
+    MaterializationCoverage,
     /// No point-in-time leakage (hard).
     NoPitLeakage,
     /// Maximum drawdown within budget (hard, backtest intents).
@@ -166,7 +158,7 @@ impl GateId {
         match self {
             Self::SampleCount => "sample_count",
             Self::LabelCoverage => "label_coverage",
-            Self::CriticalFeatureCoverage => "critical_feature_coverage",
+            Self::MaterializationCoverage => "materialization_coverage",
             Self::NoPitLeakage => "no_pit_leakage",
             Self::MaxDrawdown => "max_drawdown",
             Self::LiquidityExitFeasible => "liquidity_exit_feasible",
@@ -377,8 +369,8 @@ pub struct QualityGateThresholds {
     pub min_sample_count: u64,
     /// Minimum label coverage in `[0, 1]` (default 0.70).
     pub min_label_coverage: Decimal,
-    /// Minimum critical-feature (build) coverage in `[0, 1]` (default 0.95).
-    pub min_critical_feature_coverage: Decimal,
+    /// Minimum planned-sample materialization coverage in `[0, 1]` (default 0.95).
+    pub min_materialization_coverage: Decimal,
     /// Maximum tolerated drawdown in `[0, 1]` (configured).
     pub max_drawdown: Decimal,
     /// Minimum liquidity-exit feasibility in `[0, 1]` (auto, default 0.90).
@@ -483,7 +475,7 @@ impl QualityGateThresholds {
         Self {
             min_sample_count: 500,
             min_label_coverage: Decimal::new(70, 2),
-            min_critical_feature_coverage: Decimal::new(95, 2),
+            min_materialization_coverage: Decimal::new(95, 2),
             max_drawdown: Decimal::new(30, 2),
             min_liquidity_exit_feasibility: Decimal::new(90, 2),
             min_shadow_overlap_stability: Decimal::new(60, 2),
@@ -505,7 +497,7 @@ pub struct QualityGateInput {
     pub subject: GateSubject,
     /// What the evaluation gates (selects the applicable hard gates).
     pub intent: GateIntent,
-    /// Frozen backtest report (`None` for a `DatasetReady` promotion).
+    /// Frozen backtest report.
     pub backtest: Option<BacktestReport>,
     /// Dataset coverage accounting.
     pub dataset: DatasetCoverage,
@@ -530,12 +522,6 @@ pub struct QualityGateInput {
     /// `Publish`/`AutoExecution` intents hard-gate on this; exit scorers and
     /// other intents ignore it (they have no `ReturnModelSpec` concept).
     pub return_model_calibrated: bool,
-    /// `model.calibration.require_for_publish` (Phase 11.3 closed-loop
-    /// hardening): when `false`, `GateId::CalibrationRequired` records an
-    /// explicit `NotApplicable` (never a silent pass) instead of hard-gating —
-    /// an auditable, operator-governed cold-start bootstrap window. `true`
-    /// (the production default) preserves the original hard-gate behavior.
-    pub calibration_gate_enabled: bool,
 }
 
 /// A content-addressed, persisted quality-gate evaluation.
@@ -667,7 +653,7 @@ fn evaluate_coverage_gates(input: &QualityGateInput, is_exit: bool, ledger: &mut
     let t = &input.thresholds;
     if !is_exit {
         // Sample count: prefer the backtest's resolved samples, else the dataset's
-        // built examples (DatasetReady has no backtest).
+        // built examples when a caller has not supplied a backtest.
         let samples = input
             .backtest
             .as_ref()
@@ -692,11 +678,11 @@ fn evaluate_coverage_gates(input: &QualityGateInput, is_exit: bool, ledger: &mut
 
     let feature_coverage = input.dataset.feature_build_coverage();
     ledger.hard(
-        GateId::CriticalFeatureCoverage,
-        feature_coverage >= t.min_critical_feature_coverage,
+        GateId::MaterializationCoverage,
+        feature_coverage >= t.min_materialization_coverage,
         feature_coverage.to_string(),
-        t.min_critical_feature_coverage.to_string(),
-        "critical-feature coverage below minimum",
+        t.min_materialization_coverage.to_string(),
+        "planned-sample materialization coverage below minimum",
     );
 
     ledger.hard(
@@ -1096,16 +1082,6 @@ fn evaluate_calibration_gate(input: &QualityGateInput, is_exit: bool, ledger: &m
             input.intent,
             GateIntent::Publish | GateIntent::AutoExecution
         );
-    if applies && !input.calibration_gate_enabled {
-        ledger.not_applicable(
-            GateId::CalibrationRequired,
-            GateClass::Hard,
-            "calibrated",
-            "disabled by model.calibration.require_for_publish=false — an operator-governed \
-             cold-start bootstrap window, not a silent pass",
-        );
-        return;
-    }
     if !applies {
         let detail = if is_exit {
             "sell / hold-vs-exit scorers never carry a return model"
@@ -1196,7 +1172,7 @@ mod tests {
         enums::model::ModelFamily,
         types::{
             BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
-            RuntimeConfigVersionId, TokenId, TrainingDatasetId,
+            RuntimeConfigVersionId, TokenId,
         },
     };
     use rust_decimal_macros::dec;
@@ -1292,7 +1268,6 @@ mod tests {
             sell_thresholds: SellQualityGateThresholds::default(),
             model_family: None,
             return_model_calibrated: true,
-            calibration_gate_enabled: true,
         }
     }
 
@@ -1326,33 +1301,6 @@ mod tests {
             candidate.is_pass(),
             "candidate intent does not require calibration"
         );
-    }
-
-    #[test]
-    fn calibration_gate_disabled_records_not_applicable_not_a_silent_pass() {
-        // `model.calibration.require_for_publish = false` must still record an
-        // explicit, auditable `NotApplicable` row (never simply omit the gate
-        // or silently flip it to `Pass`), and the overall decision must still
-        // pass since no hard failure was recorded.
-        let input = QualityGateInput {
-            return_model_calibrated: false,
-            calibration_gate_enabled: false,
-            ..passing_input(GateIntent::Publish)
-        };
-        let decision = DefaultModelQualityGate::new()
-            .evaluate(input)
-            .expect("evaluate");
-        assert!(
-            decision.is_pass(),
-            "a disabled calibration gate must not itself block publish"
-        );
-        let calibration_row = decision
-            .report()
-            .gates
-            .iter()
-            .find(|outcome| outcome.gate == GateId::CalibrationRequired)
-            .expect("CalibrationRequired row must still be recorded when disabled");
-        assert_eq!(calibration_row.status, GateStatus::NotApplicable);
     }
 
     #[test]
@@ -1504,7 +1452,7 @@ mod tests {
             violations: vec![LeakageViolation {
                 market_id: MarketId::new("m"),
                 token_id: TokenId::new("t"),
-                as_of: Utc::now(),
+                decision_at: Utc::now(),
                 cutoff: Utc::now(),
                 reference: "future_book".to_owned(),
                 observed_at: Utc::now(),
@@ -1652,22 +1600,6 @@ mod tests {
                 .hard_failures
                 .iter()
                 .any(|failure| failure.gate == GateId::DeflatedSharpe)
-        );
-    }
-
-    #[test]
-    fn dataset_ready_gate_needs_no_backtest() {
-        let decision = DefaultModelQualityGate::new()
-            .evaluate(QualityGateInput {
-                subject: GateSubject::TrainingDataset(TrainingDatasetId::from_v7()),
-                intent: GateIntent::DatasetReady,
-                backtest: None,
-                ..passing_input(GateIntent::DatasetReady)
-            })
-            .expect("evaluate");
-        assert!(
-            decision.is_pass(),
-            "dataset-ready clears on coverage + leakage"
         );
     }
 }

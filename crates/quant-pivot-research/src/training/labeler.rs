@@ -94,14 +94,18 @@ fn return_bps(entry: Decimal, value: Decimal) -> Option<Decimal> {
 }
 
 /// The horizon cutoff for a sample.
-fn horizon_end(input: &LabelBuildInput<'_>) -> chrono::DateTime<chrono::Utc> {
-    input.as_of + Duration::seconds(i64::try_from(input.horizon_secs).unwrap_or(i64::MAX))
-}
-
-/// Whether the available data fully covers the horizon (else the label is not
-/// yet mature).
-fn horizon_matured(input: &LabelBuildInput<'_>) -> bool {
-    input.forward.data_available_until >= horizon_end(input)
+fn horizon_end(input: &LabelBuildInput<'_>) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    let seconds = i64::try_from(input.horizon_secs)
+        .map_err(|error| format!("label horizon does not fit chrono seconds: {error}"))?;
+    input
+        .decision_at
+        .checked_add_signed(Duration::seconds(seconds))
+        .ok_or_else(|| {
+            format!(
+                "label horizon {}s overflows chrono range from {}",
+                input.horizon_secs, input.decision_at
+            )
+        })
 }
 
 /// `return_to_horizon` labeler.
@@ -118,13 +122,16 @@ impl Labeler for ReturnToHorizonLabeler {
                 reason: MissingLabelReason::NoEntryPrice,
             };
         };
-        if !horizon_matured(input) {
+        let cutoff = match horizon_end(input) {
+            Ok(cutoff) => cutoff,
+            Err(detail) => return LabelBuildOutput::Invalid { detail },
+        };
+        if input.forward.data_available_until < cutoff {
             return LabelBuildOutput::NotMature {
-                available_after: horizon_end(input),
+                available_after: cutoff,
                 reason: LabelDelayReason::HorizonNotElapsed,
             };
         }
-        let cutoff = horizon_end(input);
         let exit = input
             .forward
             .samples
@@ -195,13 +202,16 @@ fn excursion(input: &LabelBuildInput<'_>, name: LabelName, extreme: Extreme) -> 
             reason: MissingLabelReason::NoEntryPrice,
         };
     };
-    if !horizon_matured(input) {
+    let cutoff = match horizon_end(input) {
+        Ok(cutoff) => cutoff,
+        Err(detail) => return LabelBuildOutput::Invalid { detail },
+    };
+    if input.forward.data_available_until < cutoff {
         return LabelBuildOutput::NotMature {
-            available_after: horizon_end(input),
+            available_after: cutoff,
             reason: LabelDelayReason::HorizonNotElapsed,
         };
     }
-    let cutoff = horizon_end(input);
     let mut extreme_price: Option<Decimal> = None;
     for sample in input.forward.samples.iter().filter(|s| s.at <= cutoff) {
         let candidate = match extreme {
@@ -247,13 +257,16 @@ impl Labeler for LiquidityExitLabeler {
     }
 
     fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput {
-        if !horizon_matured(input) {
+        let cutoff = match horizon_end(input) {
+            Ok(cutoff) => cutoff,
+            Err(detail) => return LabelBuildOutput::Invalid { detail },
+        };
+        if input.forward.data_available_until < cutoff {
             return LabelBuildOutput::NotMature {
-                available_after: horizon_end(input),
+                available_after: cutoff,
                 reason: LabelDelayReason::HorizonNotElapsed,
             };
         }
-        let cutoff = horizon_end(input);
         let mut saw_forward = false;
         let mut exit_possible = false;
         for sample in input.forward.samples.iter().filter(|s| s.at <= cutoff) {
@@ -307,7 +320,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         };
-        if input.as_of >= ctx.terminal.closed_at {
+        if input.decision_at >= ctx.terminal.closed_at {
             return LabelBuildOutput::Unavailable {
                 reason: MissingLabelReason::NoExitPrice,
             };
@@ -328,7 +341,12 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         };
-        let sim = ExitFillSimulator::new(ctx.fee_bps);
+        let Some(fee_bps) = ctx.fee_bps else {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoExitPrice,
+            };
+        };
+        let sim = ExitFillSimulator::new(fee_bps);
         let fill = match book {
             DecisionBook::L2 { bids } => sim.simulate_l2(bids, ctx.remaining_shares),
             DecisionBook::Microstructure { best_bid, depth } => {
@@ -341,7 +359,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
             };
         }
         let exit_proceeds = fill.net_proceeds.inner();
-        let hold_terminal = hold_terminal_proceeds(&ctx.terminal, input.as_of).inner();
+        let hold_terminal = hold_terminal_proceeds(&ctx.terminal, input.decision_at).inner();
         let alpha = (exit_proceeds - hold_terminal) / cost_basis * bps_denominator();
         LabelBuildOutput::Available(TrainingLabel {
             label_name: self.label_name(),
@@ -372,7 +390,7 @@ impl Labeler for SettlementOutcomeLabeler {
                 reason: LabelDelayReason::SettlementPending,
             };
         };
-        if resolution.resolved_at <= input.as_of {
+        if resolution.resolved_at <= input.decision_at {
             return LabelBuildOutput::NotMature {
                 available_after: resolution.resolved_at,
                 reason: LabelDelayReason::SettlementPending,
@@ -439,7 +457,7 @@ mod tests {
             market_id: market,
             token_id: token,
             yes_token_id: token,
-            as_of: at(0),
+            decision_at: at(0),
             entry_mid,
             horizon_secs,
             min_exit_depth_usd: Usd::new(Decimal::from(100)),
@@ -582,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_vs_exit_proceeds_prefers_exiting_when_terminal_is_worse() {
+    fn hold_vs_exit_uses_book_when_mark_is_missing() {
         use super::super::{
             DecisionBook, ExitDecisionLabelContext, LotExitEvent, LotTerminalSnapshot,
         };
@@ -605,7 +623,7 @@ mod tests {
         let ctx = ExitDecisionLabelContext {
             remaining_shares: Shares::new(dec!(100)),
             avg_price: price("0.50"),
-            fee_bps: Bps::ZERO,
+            fee_bps: Some(Bps::ZERO),
             terminal,
             decision_book: Some(DecisionBook::L2 {
                 bids: Arc::new([BookLevel::from_decimal_unchecked(
@@ -615,7 +633,7 @@ mod tests {
             }),
         };
         let window = forward(Vec::new(), 0, None);
-        let mut input = input(&market, &token, Some(price("0.55")), 0, &window);
+        let mut input = input(&market, &token, None, 0, &window);
         input.exit_decision = Some(&ctx);
         let out = HoldVsExitProceedsLabeler.build_label(&input);
         assert!(matches!(out, LabelBuildOutput::Available(l) if l.value > Decimal::ZERO));
@@ -681,5 +699,23 @@ mod tests {
             out,
             LabelBuildOutput::Available(l) if l.value == Decimal::ONE
         ));
+    }
+
+    #[test]
+    fn horizon_outside_chrono_range_is_invalid_not_saturated() {
+        let market = MarketId::new("m");
+        let token = TokenId::new("t");
+        let window = forward(Vec::new(), 120, None);
+        let out = ReturnToHorizonLabeler.build_label(&input(
+            &market,
+            &token,
+            Some(price("0.50")),
+            u64::MAX,
+            &window,
+        ));
+
+        assert!(
+            matches!(out, LabelBuildOutput::Invalid { detail } if detail.contains("does not fit chrono seconds"))
+        );
     }
 }

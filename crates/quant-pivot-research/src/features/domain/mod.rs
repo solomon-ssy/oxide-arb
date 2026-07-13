@@ -3,10 +3,10 @@
 //! A [`DomainFeatureBuilder`] is the domain-plane sibling of
 //! [`FeatureGroupBuilder`](crate::features::FeatureGroupBuilder): a pure
 //! function from a frozen linkage binding plus pre-fetched PIT observation
-//! windows to raw features. The pipeline invokes the builder for a market
-//! **only** when the market's category maps to an enabled vertical with a
-//! `Resolved` linkage — otherwise the vector carries `domain: None`
-//! (structurally absent, never a row of missing values).
+//! windows to raw features. A `Resolved` linkage supplies compute inputs; an
+//! unresolved linkage is materialized as explicit missing cells whenever the
+//! category maps to an enabled vertical. `domain: None` is reserved for
+//! structural non-applicability.
 
 pub mod crypto;
 
@@ -17,14 +17,19 @@ use quant_pivot_models::{
     domain::ResolvedBinding, enums::domain::DomainFamily, runtime_config::CryptoDomainConfig,
 };
 
-use crate::{domain::DomainObservationWindow, features::builder::RawFeature};
+use crate::{
+    domain::DomainObservationWindow,
+    features::{EvidenceSourceRef, builder::RawFeature},
+};
 
 /// Pure inputs to one market's domain-slice computation.
 pub struct DomainComputeCtx<'a> {
     /// Decision time.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// The frozen, validated linkage binding (subject + instrument + grounding).
     pub binding: &'a ResolvedBinding,
+    /// Exact linkage revision and its effective/availability clocks.
+    pub linkage_evidence: &'a EvidenceSourceRef,
     /// PIT window for the feature-source instrument (e.g. Binance klines).
     pub primary: &'a DomainObservationWindow,
     /// PIT window for the settlement-oracle instrument (e.g. Chainlink feed),
@@ -54,6 +59,8 @@ pub struct DomainSliceInputs {
     pub family: DomainFamily,
     /// The frozen, validated linkage binding.
     pub binding: ResolvedBinding,
+    /// Exact linkage revision and its effective/availability clocks.
+    pub linkage_evidence: EvidenceSourceRef,
     /// PIT window for the feature-source instrument.
     pub primary: DomainObservationWindow,
     /// PIT window for the settlement-oracle instrument, when ingested.

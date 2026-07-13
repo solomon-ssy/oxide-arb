@@ -351,8 +351,6 @@ crate::pg_enum! {
         Retire => "retire",
         /// A published version was rolled back to its predecessor.
         Rollback => "rollback",
-        /// A built training dataset was promoted to `Ready` (gated).
-        DatasetReady => "dataset_ready",
         /// A candidate model version bound a calibrated return model (Phase 11.3).
         BindCalibration => "bind_calibration",
         /// A candidate / shadow version bound the CPCV path set used by publish
@@ -405,15 +403,14 @@ crate::pg_enum! {
     type_name = "qp_training_dataset_status",
     /// Frozen training-dataset lifecycle state (ledger).
     ///
-    /// Transitions: `Planned → Building → {Built | InsufficientLabels | Failed}`;
-    /// a `Built` dataset is promoted to `Ready` once it passes validation, and may
-    /// later become `Expired`. `Failed` / `InsufficientLabels` are terminal.
+    /// Transitions: `Planned → Building → {Ready | InsufficientLabels | Failed}`;
+    /// `Ready` may later become `Expired`. Integrity validation is part of the
+    /// build transaction, so there is no operator-controlled intermediate state.
     @derive(Default)
     pub enum TrainingDatasetStatus {
         #[default]
         Planned => "planned",
         Building => "building",
-        Built => "built",
         InsufficientLabels => "insufficient_labels",
         Ready => "ready",
         Expired => "expired",
@@ -439,6 +436,8 @@ crate::pg_enum! {
         /// Run Combinatorial Purged Cross-Validation + the governed trial
         /// grid over a model version (Phase 11.5 §3.3/§3.5).
         CpcvBacktest => "cpcv_backtest",
+        /// Deterministic training/serving feature replay (Phase 11.6).
+        FeatureParity => "feature_parity",
     }
 }
 
@@ -472,6 +471,91 @@ impl ResearchJobStatus {
     #[must_use]
     pub const fn is_active(self) -> bool {
         matches!(self, Self::Queued | Self::Running)
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_feature_parity_run_kind",
+    /// Scope that caused a deterministic feature-parity replay.
+    pub enum FeatureParityRunKind {
+        Sampled => "sampled",
+        Full => "full",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_feature_parity_run_status",
+    /// Durable lifecycle of one parity replay.
+    @derive(Default)
+    pub enum FeatureParityRunStatus {
+        #[default]
+        Queued => "queued",
+        Running => "running",
+        PendingMaterialization => "pending_materialization",
+        Passed => "passed",
+        Mismatched => "mismatched",
+        Failed => "failed",
+    }
+}
+
+impl FeatureParityRunStatus {
+    /// Whether no more work may be recorded for this run.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Passed | Self::Mismatched | Self::Failed)
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_feature_parity_latch_state",
+    /// Governed admission latch state. Absence of a row is treated as open.
+    pub enum FeatureParityLatchState {
+        Open => "open",
+        Clear => "clear",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_feature_parity_state_transition",
+    /// Why a new append-only latch-state row exists.
+    pub enum FeatureParityStateTransition {
+        DeterministicMismatch => "deterministic_mismatch",
+        IntegrityFailure => "integrity_failure",
+        GovernedAcknowledge => "governed_acknowledge",
+    }
+}
+
+crate::wire_enum! {
+    /// Deterministic layer compared by one parity event.
+    pub enum FeatureParityStage {
+        Selection => "selection",
+        Snapshot => "snapshot",
+        Capture => "capture",
+        FeatureCell => "feature_cell",
+        DataQuality => "data_quality",
+        Factor => "factor",
+        ModelInput => "model_input",
+        Prediction => "prediction",
+    }
+}
+
+crate::wire_enum! {
+    /// Row-level result recorded in the parity event fact stream.
+    pub enum FeatureParityEventStatus {
+        Matched => "matched",
+        Mismatched => "mismatched",
+        PendingMaterialization => "pending_materialization",
+    }
+}
+
+crate::wire_enum! {
+    /// Explicit state carried by feature evidence; absence is never a value.
+    @derive(PartialOrd, Ord)
+    pub enum FeatureCellState {
+        Observed => "observed",
+        Substituted => "substituted",
+        Missing => "missing",
+        NotApplicable => "not_applicable",
     }
 }
 
@@ -982,7 +1066,23 @@ crate::wire_enum! {
 
 #[cfg(test)]
 mod tests {
-    use super::{OrderIntentStatus, RecommendationStatus};
+    use std::str::FromStr;
+
+    use super::{FeatureParityStage, OrderIntentStatus, RecommendationStatus};
+
+    #[test]
+    fn feature_parity_stage_wire_contract_includes_capture_and_data_quality() {
+        for (wire, stage) in [
+            ("capture", FeatureParityStage::Capture),
+            ("data_quality", FeatureParityStage::DataQuality),
+        ] {
+            assert_eq!(FeatureParityStage::from_str(wire), Ok(stage));
+            assert_eq!(
+                serde_json::to_string(&stage).expect("serialize stage"),
+                format!("\"{wire}\"")
+            );
+        }
+    }
 
     #[test]
     fn recommendation_terminal_states_drive_report_roll_up() {

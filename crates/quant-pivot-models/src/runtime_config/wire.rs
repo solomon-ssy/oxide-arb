@@ -42,23 +42,6 @@ impl TryFrom<&ModelVersionRef> for ModelVersionId {
     }
 }
 
-/// Runtime-config feature-name reference (wire label for a governed feature).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-#[schemars(transparent)]
-pub struct FeatureNameRef {
-    /// Stable feature identifier (must exist in the active [`FeatureSchema`]).
-    pub name: String,
-}
-
-impl FeatureNameRef {
-    /// Build a feature-name reference from a wire label.
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
-    }
-}
-
 impl DecimalString {
     /// Build a decimal string value from a static default.
     #[must_use]
@@ -95,14 +78,15 @@ pub enum MissingFactorPolicy {
 /// cross-section is smaller than `factors.cross_section.min_size`.
 ///
 /// There is **no silent-neutral** option: either the factor is normalized
-/// against its own historical distribution, or it is explicitly indeterminate.
+/// against the model artifact's frozen training reference, or it is explicitly
+/// indeterminate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SmallCrossSectionPolicy {
     /// Emit an indeterminate factor (recorded reason, contributes nothing).
     Indeterminate,
-    /// Normalize against the factor's historical rolling quantile.
-    HistoricalQuantile,
+    /// Normalize against the factor CDF frozen into the model artifact.
+    FrozenReferenceQuantile,
 }
 
 /// Ranking loss optimized by the governed learning-to-rank trainer.

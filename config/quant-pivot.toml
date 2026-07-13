@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 2),
+# They live in the versioned runtime configuration (schema_version = 10),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -157,7 +157,7 @@ max_blocks_per_tick = 2000
 batch_size = 1000
 
 # ── External Domain Sources (Phase 11.2.2 crypto vertical) ───────────────────
-# Runtime tunables (family enablement, source delay, backfill depth, basis
+# Runtime tunables (family enablement, availability lag, backfill depth, basis
 # thresholds) are runtime config under `domain.*` — only connections live here.
 
 [domain_sources.binance]
@@ -231,6 +231,8 @@ global_concurrency = 2
 dataset_build_concurrency = 1
 model_train_concurrency = 1
 backtest_concurrency = 2
+# Deterministic feature-parity replays are I/O and CPU intensive; serialize.
+feature_parity_concurrency = 1
 # Lease TTL (seconds): a lease not renewed within this window is reclaimable by
 # the boot recovery sweep. Default: 90.
 lease_ttl_secs = 90

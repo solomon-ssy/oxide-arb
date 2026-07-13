@@ -11,6 +11,8 @@ pub mod factor_fact_writer;
 pub mod feature_fact_writer;
 pub mod ledger_fact_projection;
 pub mod metrics_hub;
+pub mod model_input_fact_writer;
 pub mod position_fact_writer;
 pub mod recommendation_fact_writer;
+pub mod serving_evidence;
 pub mod signal_candidate_fact_writer;

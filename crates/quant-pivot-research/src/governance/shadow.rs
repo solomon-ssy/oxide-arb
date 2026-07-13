@@ -72,8 +72,8 @@ pub struct ShadowComparison {
     pub active_model_version_id: ModelVersionId,
     /// Shadow (candidate) model version.
     pub shadow_model_version_id: ModelVersionId,
-    /// Decision time of the compared cross-section.
-    pub as_of: DateTime<Utc>,
+    /// Frozen decision time of the compared cross-section.
+    pub decision_at: DateTime<Utc>,
     /// `TopN` market-set overlap (Jaccard) in `[0, 1]`; higher ⇒ more stable.
     pub topn_overlap: Probability,
     /// Per-market rank divergence.
@@ -93,7 +93,7 @@ pub struct ShadowComparison {
 struct ComparisonHashInput<'a> {
     active_model_version_id: &'a ModelVersionId,
     shadow_model_version_id: &'a ModelVersionId,
-    as_of: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
     topn_overlap: &'a Probability,
     rank_delta: &'a RankDelta,
     score_delta: &'a ScoreDelta,
@@ -119,7 +119,7 @@ struct Ranked {
 pub fn compute_shadow_comparison(
     active_model_version_id: ModelVersionId,
     shadow_model_version_id: ModelVersionId,
-    as_of: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
     active: &[SignalCandidate],
     shadow: &[SignalCandidate],
     top_n: usize,
@@ -186,7 +186,7 @@ pub fn compute_shadow_comparison(
     let comparison_hash = ResearchHasher::canonical(&ComparisonHashInput {
         active_model_version_id: &active_model_version_id,
         shadow_model_version_id: &shadow_model_version_id,
-        as_of,
+        decision_at,
         topn_overlap: &topn_overlap,
         rank_delta: &rank_delta,
         score_delta: &score_delta,
@@ -197,7 +197,7 @@ pub fn compute_shadow_comparison(
         shadow_comparison_id: ShadowComparisonId::from_v7(),
         active_model_version_id,
         shadow_model_version_id,
-        as_of,
+        decision_at,
         topn_overlap,
         rank_delta,
         score_delta,
@@ -314,7 +314,7 @@ mod tests {
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
         }
     }
 

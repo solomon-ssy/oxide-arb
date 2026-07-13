@@ -1,9 +1,10 @@
 //! Category-aware model routing (Phase 11.2.2 §3.8).
 //!
 //! Runtime config may pin a category-specific published model via
-//! `model.category_model_pointers`; markets whose category has no pointer (or
-//! whose artifact is unavailable at load time) fall back to the generic
-//! `active_model_version_id`.
+//! `model.category_model_pointers`; markets whose category has no pointer use
+//! the generic `active_model_version_id`. A configured pointer is an explicit
+//! operator decision: malformed or unavailable targets fail the round rather
+//! than silently changing which model scores the market.
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
@@ -26,16 +27,19 @@ pub enum ModelRouting {
 
 /// Resolve the routing decision for one market category from frozen config.
 ///
-/// A configured pointer wins; parse failures are ignored so a malformed ref
-/// fails closed into the generic route rather than breaking the whole batch.
-#[must_use]
-pub fn resolve_model_route(category: MarketCategory, model: &ModelConfig) -> ModelRouting {
-    if let Some(reference) = model.category_model_pointers.get(&category)
-        && let Ok(artifact) = ModelVersionId::try_from(reference)
-    {
-        return ModelRouting::CategorySpecific { category, artifact };
+/// A configured pointer wins. Malformed pointers are errors because falling
+/// back would silently substitute a different model for the governed route.
+pub fn resolve_model_route(
+    category: MarketCategory,
+    model: &ModelConfig,
+) -> QuantResult<ModelRouting> {
+    if let Some(reference) = model.category_model_pointers.get(&category) {
+        return Ok(ModelRouting::CategorySpecific {
+            category,
+            artifact: ModelVersionId::try_from(reference)?,
+        });
     }
-    ModelRouting::GenericWeighted
+    Ok(ModelRouting::GenericWeighted)
 }
 
 /// The generic active model version, when configured.
@@ -53,8 +57,8 @@ pub fn generic_model_version_id(model: &ModelConfig) -> QuantResult<Option<Model
 
 /// Resolve the model version id that should score a market in this category.
 ///
-/// Category pointers override the generic active model; absent or invalid
-/// pointers fall back to generic.
+/// Category pointers override the generic active model; only absent pointers
+/// use the generic model.
 ///
 /// # Errors
 ///
@@ -63,7 +67,7 @@ pub fn version_id_for_category(
     category: MarketCategory,
     model: &ModelConfig,
 ) -> QuantResult<Option<ModelVersionId>> {
-    match resolve_model_route(category, model) {
+    match resolve_model_route(category, model)? {
         ModelRouting::GenericWeighted => generic_model_version_id(model),
         ModelRouting::CategorySpecific { artifact, .. } => Ok(Some(artifact)),
     }
@@ -93,14 +97,14 @@ mod tests {
             .insert(MarketCategory::Crypto, version_ref(&version.to_string()));
 
         assert_eq!(
-            resolve_model_route(MarketCategory::Crypto, &model),
+            resolve_model_route(MarketCategory::Crypto, &model).expect("valid route"),
             ModelRouting::CategorySpecific {
                 category: MarketCategory::Crypto,
                 artifact: version.clone(),
             }
         );
         assert_eq!(
-            resolve_model_route(MarketCategory::Sports, &model),
+            resolve_model_route(MarketCategory::Sports, &model).expect("valid route"),
             ModelRouting::GenericWeighted
         );
         assert_eq!(
@@ -110,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_category_pointer_falls_back_to_generic() {
+    fn invalid_category_pointer_is_rejected() {
         let generic = ModelVersionId::from_v7();
         let model = ModelConfig {
             active_model_version_id: Some(version_ref(&generic.to_string())),
@@ -124,10 +128,7 @@ mod tests {
             ..ModelConfig::default()
         };
 
-        assert_eq!(
-            resolve_model_route(MarketCategory::Crypto, &model),
-            ModelRouting::GenericWeighted
-        );
+        assert!(resolve_model_route(MarketCategory::Crypto, &model).is_err());
         assert_eq!(generic_model_version_id(&model).expect("ok"), Some(generic));
     }
 
@@ -135,7 +136,7 @@ mod tests {
     fn empty_pointers_use_generic_only() {
         let model = ModelConfig::default();
         assert_eq!(
-            resolve_model_route(MarketCategory::Politics, &model),
+            resolve_model_route(MarketCategory::Politics, &model).expect("generic route"),
             ModelRouting::GenericWeighted
         );
         assert!(generic_model_version_id(&model).expect("ok").is_none());

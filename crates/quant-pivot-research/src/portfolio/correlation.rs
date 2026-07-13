@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::{common::MarketCategory, quant::CorrelationSource},
     types::{EventId, MarketId, Usd},
@@ -177,12 +177,16 @@ impl HistoricalCorrelationEstimator {
 
 impl CorrelationEstimator for HistoricalCorrelationEstimator {
     fn estimate(&self, input: &CorrelationInput<'_>) -> QuantResult<CorrelationGroups> {
-        let min_obs = input.min_observations as usize;
+        let min_obs = usize::try_from(input.min_observations).map_err(|error| {
+            ResearchError::PortfolioOptimization {
+                detail: format!("correlation min_observations exceeds usize: {error}"),
+            }
+        })?;
         let returns: Vec<Vec<f64>> = input
             .markets
             .iter()
             .map(|market| log_returns(&market.mid_series))
-            .collect();
+            .collect::<QuantResult<Vec<_>>>()?;
 
         // Historical estimation is only trustworthy when at least two markets
         // carry enough paired observations; otherwise fall back to the proxy.
@@ -191,7 +195,8 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
             return self.proxy.estimate(input);
         }
 
-        let threshold = decimal_to_f64(input.cluster_threshold).abs();
+        let threshold =
+            decimal_to_f64(input.cluster_threshold, "correlation cluster threshold")?.abs();
         let mut uf = UnionFind::new(input.markets.len());
         // Every evaluated pair's |ρ| (not just the above-threshold ones that
         // drove clustering) — a cluster formed via transitive closure (A-B and
@@ -208,7 +213,7 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
                 if overlap < min_obs {
                     continue;
                 }
-                let Some(corr) = pearson(&returns[i][..overlap], &returns[j][..overlap]) else {
+                let Some(corr) = pearson(&returns[i][..overlap], &returns[j][..overlap])? else {
                     continue;
                 };
                 pair_corrs.push((i, j, corr.abs()));
@@ -225,7 +230,7 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
                 &clusters,
                 &pair_corrs,
                 input.cluster_threshold,
-            ),
+            )?,
             source: CorrelationSource::Historical,
         })
     }
@@ -233,26 +238,35 @@ impl CorrelationEstimator for HistoricalCorrelationEstimator {
 
 /// Natural-log returns of a price series (`ln(p[t+1] / p[t])`), skipping any
 /// non-positive price (degenerate for a probability mid, but guarded).
-fn log_returns(series: &[Decimal]) -> Vec<f64> {
+fn log_returns(series: &[Decimal]) -> QuantResult<Vec<f64>> {
     let mut out = Vec::with_capacity(series.len().saturating_sub(1));
     for window in series.windows(2) {
-        let prev = decimal_to_f64(window[0]);
-        let next = decimal_to_f64(window[1]);
+        let prev = decimal_to_f64(window[0], "correlation previous mid price")?;
+        let next = decimal_to_f64(window[1], "correlation next mid price")?;
         if prev > 0.0 && next > 0.0 {
-            out.push((next / prev).ln());
+            let log_return = (next / prev).ln();
+            if !log_return.is_finite() {
+                return Err(ResearchError::PortfolioOptimization {
+                    detail: format!(
+                        "correlation log return is non-finite for previous={prev}, next={next}"
+                    ),
+                }
+                .into());
+            }
+            out.push(log_return);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Pearson correlation of two equal-length samples, or `None` when a sample has
 /// zero variance (correlation undefined).
-fn pearson(first: &[f64], second: &[f64]) -> Option<f64> {
+fn pearson(first: &[f64], second: &[f64]) -> QuantResult<Option<f64>> {
     let len = first.len();
     if len == 0 || len != second.len() {
-        return None;
+        return Ok(None);
     }
-    let count = count_to_f64(len);
+    let count = count_to_f64(len, "correlation paired observation count")?;
     let mean_first = first.iter().sum::<f64>() / count;
     let mean_second = second.iter().sum::<f64>() / count;
     let mut covariance = 0.0;
@@ -266,14 +280,30 @@ fn pearson(first: &[f64], second: &[f64]) -> Option<f64> {
         variance_second = delta_right.mul_add(delta_right, variance_second);
     }
     if variance_first <= 0.0 || variance_second <= 0.0 {
-        return None;
+        return Ok(None);
     }
-    Some(covariance / (variance_first.sqrt() * variance_second.sqrt()))
+    let correlation = covariance / (variance_first.sqrt() * variance_second.sqrt());
+    if !correlation.is_finite() {
+        return Err(ResearchError::PortfolioOptimization {
+            detail: "Pearson correlation produced a non-finite coefficient".to_owned(),
+        }
+        .into());
+    }
+    Ok(Some(correlation))
 }
 
 /// Convert a (small) observation count to `f64` without a lossy `as` cast.
-fn count_to_f64(count: usize) -> f64 {
-    u32::try_from(count).map_or(f64::MAX, f64::from)
+fn count_to_f64(count: usize, field: &'static str) -> QuantResult<f64> {
+    use rust_decimal::prelude::ToPrimitive;
+    count
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            ResearchError::PortfolioOptimization {
+                detail: format!("{field} {count} is not representable as finite f64"),
+            }
+            .into()
+        })
 }
 
 fn proxy_cluster_rho(clusters: &[Vec<MarketId>], threshold: Decimal) -> BTreeMap<usize, Decimal> {
@@ -290,7 +320,7 @@ fn historical_cluster_rho(
     clusters: &[Vec<MarketId>],
     pair_corrs: &[(usize, usize, f64)],
     fallback: Decimal,
-) -> BTreeMap<usize, Decimal> {
+) -> QuantResult<BTreeMap<usize, Decimal>> {
     let market_index: BTreeMap<&str, usize> = markets
         .iter()
         .enumerate()
@@ -312,20 +342,33 @@ fn historical_cluster_rho(
             fallback.abs().min(Decimal::ONE)
         } else {
             let sum: f64 = rhos.iter().sum();
-            Decimal::from_f64_retain(sum / count_to_f64(rhos.len()))
-                .unwrap_or(fallback)
+            let count = count_to_f64(rhos.len(), "within-cluster correlation count")?;
+            Decimal::from_f64_retain(sum / count)
+                .ok_or_else(|| ResearchError::PortfolioOptimization {
+                    detail: format!(
+                        "within-cluster mean correlation is not representable as Decimal: sum={sum}, count={count}"
+                    ),
+                })?
                 .abs()
                 .min(Decimal::ONE)
         };
         out.insert(cluster_idx, mean);
     }
-    out
+    Ok(out)
 }
 
 /// Lossy `Decimal → f64` for statistical estimation only (never money).
-fn decimal_to_f64(value: Decimal) -> f64 {
+fn decimal_to_f64(value: Decimal, field: &'static str) -> QuantResult<f64> {
     use rust_decimal::prelude::ToPrimitive;
-    value.to_f64().unwrap_or(0.0)
+    value
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            ResearchError::PortfolioOptimization {
+                detail: format!("{field} Decimal {value} is not representable as finite f64"),
+            }
+            .into()
+        })
 }
 
 /// Disjoint-set union over candidate indices for deterministic clustering.
@@ -382,7 +425,6 @@ impl UnionFind {
 }
 
 #[cfg(test)]
-#[allow(clippy::unreadable_literal)]
 mod tests {
     use super::{
         CorrelationEstimator, CorrelationInput, CorrelationMarket, HistoricalCorrelationEstimator,
@@ -515,31 +557,34 @@ mod tests {
     }
 
     const A_MIDS: &[f64] = &[
-        0.500000, 0.500171, 0.497625, 0.500468, 0.491308, 0.494662, 0.496958, 0.496199, 0.488742,
-        0.479446, 0.473759, 0.478029, 0.479873, 0.482494, 0.478584, 0.483872, 0.479833, 0.482373,
-        0.486354, 0.491024, 0.493993, 0.492757, 0.492667, 0.495625, 0.493046, 0.492169, 0.501064,
-        0.503399, 0.509768, 0.516448, 0.509731, 0.520150, 0.523823, 0.519929, 0.518871, 0.520471,
-        0.513826, 0.512848, 0.515574, 0.513201, 0.526559, 0.529707, 0.527857, 0.527974, 0.529707,
-        0.533940, 0.536844, 0.542331, 0.538378, 0.535439, 0.533628, 0.534831, 0.531401, 0.535437,
-        0.531074, 0.534054, 0.534985, 0.531000, 0.534295, 0.535987, 0.535106,
+        0.500_000, 0.500_171, 0.497_625, 0.500_468, 0.491_308, 0.494_662, 0.496_958, 0.496_199,
+        0.488_742, 0.479_446, 0.473_759, 0.478_029, 0.479_873, 0.482_494, 0.478_584, 0.483_872,
+        0.479_833, 0.482_373, 0.486_354, 0.491_024, 0.493_993, 0.492_757, 0.492_667, 0.495_625,
+        0.493_046, 0.492_169, 0.501_064, 0.503_399, 0.509_768, 0.516_448, 0.509_731, 0.520_150,
+        0.523_823, 0.519_929, 0.518_871, 0.520_471, 0.513_826, 0.512_848, 0.515_574, 0.513_201,
+        0.526_559, 0.529_707, 0.527_857, 0.527_974, 0.529_707, 0.533_940, 0.536_844, 0.542_331,
+        0.538_378, 0.535_439, 0.533_628, 0.534_831, 0.531_401, 0.535_437, 0.531_074, 0.534_054,
+        0.534_985, 0.531_000, 0.534_295, 0.535_987, 0.535_106,
     ];
     const B_MIDS: &[f64] = &[
-        0.500000, 0.503741, 0.500774, 0.503056, 0.499322, 0.501857, 0.506030, 0.507202, 0.501758,
-        0.491522, 0.482751, 0.485850, 0.489288, 0.494266, 0.491760, 0.493027, 0.485076, 0.485364,
-        0.490385, 0.490928, 0.488876, 0.489849, 0.490658, 0.492889, 0.493523, 0.494420, 0.497861,
-        0.499586, 0.501608, 0.502934, 0.498008, 0.501924, 0.509153, 0.506727, 0.503897, 0.504970,
-        0.498207, 0.493643, 0.501410, 0.495653, 0.504412, 0.504762, 0.503772, 0.506311, 0.502037,
-        0.503876, 0.509743, 0.513866, 0.509369, 0.506757, 0.500205, 0.504035, 0.499378, 0.507473,
-        0.504980, 0.508838, 0.505574, 0.502705, 0.507541, 0.509156, 0.507118,
+        0.500_000, 0.503_741, 0.500_774, 0.503_056, 0.499_322, 0.501_857, 0.506_030, 0.507_202,
+        0.501_758, 0.491_522, 0.482_751, 0.485_850, 0.489_288, 0.494_266, 0.491_760, 0.493_027,
+        0.485_076, 0.485_364, 0.490_385, 0.490_928, 0.488_876, 0.489_849, 0.490_658, 0.492_889,
+        0.493_523, 0.494_420, 0.497_861, 0.499_586, 0.501_608, 0.502_934, 0.498_008, 0.501_924,
+        0.509_153, 0.506_727, 0.503_897, 0.504_970, 0.498_207, 0.493_643, 0.501_410, 0.495_653,
+        0.504_412, 0.504_762, 0.503_772, 0.506_311, 0.502_037, 0.503_876, 0.509_743, 0.513_866,
+        0.509_369, 0.506_757, 0.500_205, 0.504_035, 0.499_378, 0.507_473, 0.504_980, 0.508_838,
+        0.505_574, 0.502_705, 0.507_541, 0.509_156, 0.507_118,
     ];
     const C_MIDS: &[f64] = &[
-        0.500000, 0.506766, 0.504003, 0.505421, 0.508206, 0.508954, 0.513658, 0.515991, 0.513943,
-        0.505618, 0.496311, 0.496921, 0.500812, 0.506604, 0.506438, 0.502848, 0.493367, 0.491986,
-        0.496765, 0.493345, 0.487153, 0.489777, 0.490801, 0.491907, 0.495806, 0.498820, 0.496320,
-        0.496448, 0.493983, 0.489734, 0.488649, 0.485121, 0.493735, 0.493372, 0.489906, 0.490072,
-        0.485732, 0.479791, 0.490050, 0.483428, 0.485188, 0.482789, 0.483378, 0.487181, 0.478038,
-        0.477523, 0.484732, 0.486135, 0.481901, 0.480441, 0.471555, 0.476872, 0.473395, 0.483818,
-        0.483912, 0.487569, 0.481409, 0.480105, 0.485105, 0.485980, 0.483676,
+        0.500_000, 0.506_766, 0.504_003, 0.505_421, 0.508_206, 0.508_954, 0.513_658, 0.515_991,
+        0.513_943, 0.505_618, 0.496_311, 0.496_921, 0.500_812, 0.506_604, 0.506_438, 0.502_848,
+        0.493_367, 0.491_986, 0.496_765, 0.493_345, 0.487_153, 0.489_777, 0.490_801, 0.491_907,
+        0.495_806, 0.498_820, 0.496_320, 0.496_448, 0.493_983, 0.489_734, 0.488_649, 0.485_121,
+        0.493_735, 0.493_372, 0.489_906, 0.490_072, 0.485_732, 0.479_791, 0.490_050, 0.483_428,
+        0.485_188, 0.482_789, 0.483_378, 0.487_181, 0.478_038, 0.477_523, 0.484_732, 0.486_135,
+        0.481_901, 0.480_441, 0.471_555, 0.476_872, 0.473_395, 0.483_818, 0.483_912, 0.487_569,
+        0.481_409, 0.480_105, 0.485_105, 0.485_980, 0.483_676,
     ];
 
     #[test]

@@ -35,7 +35,6 @@ use quant_pivot_core::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
     },
-    pit::platform::live_book::LiveBookDataSource,
     prefetch::feature_window::FeatureWindowProvider,
     service::{
         factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
@@ -56,12 +55,12 @@ use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
         NewModelRun,
-        market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
         quant::{ModelRunKind, ModelRunStatus},
     },
     runtime_config::{
@@ -84,7 +83,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     factors::{FactorEngine, names::STRUCT_PARTICIPANT_CONCENTRATION},
-    features::{FeatureValue, FeatureVector, PitView, names::structural as structural_features},
+    features::{FeatureValue, FeatureVector, names::structural as structural_features},
     selection::{ModelFeatureRequirements, SelectedMarket},
     trade_tape::{
         ConcentrationCompositeWeights, participant_concentration::composite_concentration,
@@ -100,6 +99,7 @@ use quant_pivot_test_support::{
         ConfigurableFactRead, live_trade_tape_block_cursor_repo, whale_concentration_by_market,
     },
 };
+use quant_pivot_test_support::{fact_sink::DiscardFactWriter, pit::InMemoryDecisionSnapshotSource};
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
 use testcontainers::ContainerAsync;
@@ -153,6 +153,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -162,6 +163,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -172,6 +174,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -191,6 +194,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
@@ -200,7 +204,8 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
-    ) -> Result<Option<BookSnapshotRow>, quant_pivot_error::storage::StorageError> {
+        _decision_at_ms: i64,
+    ) -> Result<Option<BookSnapshotRow>, StorageError> {
         Ok(None)
     }
 
@@ -209,6 +214,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -216,7 +222,8 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn resolution_at(
         &self,
         _market_id: &MarketId,
-        _as_of_ms: i64,
+        _source_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         Ok(None)
     }
@@ -226,6 +233,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -235,6 +243,8 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_keys: Vec<DomainInstrumentKey>,
         _from_ms: i64,
         _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -244,6 +254,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_key: &DomainInstrumentKey,
         _metric: &str,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         Ok(None)
     }
@@ -252,6 +263,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
     }
@@ -292,7 +304,7 @@ fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
         fee_schedule: None,
         end_date: Some(Utc::now() + ChronoDuration::days(5)),
         resolved_at: None,
-        created_at: Utc::now() - ChronoDuration::days(2),
+        created_at: Some(Utc::now() - ChronoDuration::days(2)),
         updated_at: Utc::now(),
     }
 }
@@ -323,7 +335,22 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &Catalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &Catalog) {
-    registry.register_market(registry_market(catalog));
+    let market = registry_market(catalog);
+    registry.register_event(EventRegistryInfo {
+        event_id: market.event_id.clone(),
+        title: "Tape Conc E2E".to_owned(),
+        slug: "tape-conc-e2e".to_owned(),
+        series_slug: None,
+        status: EventStatus::Active,
+        market_ids: vec![market.market_id.clone()],
+        categories: CategorySet::from(MarketCategory::Sports),
+        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        neg_risk: false,
+        end_date: market.end_date,
+        created_at: Utc::now() - ChronoDuration::days(2),
+        updated_at: market.updated_at,
+    });
+    registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
     book_store.apply_snapshot(
         &yes,
@@ -335,19 +362,14 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
             Price::new(Decimal::new(53, 2)),
             Shares::new(Decimal::from(120)),
         )]),
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        u64::try_from(Utc::now().timestamp_millis())
+            .expect("test book timestamp must be non-negative"),
         None,
     );
 }
 
 fn noop_feature_writer() -> Arc<FeatureEventWriter> {
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("tape-conc-feature-events").capacity(256),
-        |_| Box::pin(async { Ok(()) }),
-        prometheus::IntCounter::new("tape_conc_feat_drops", "drops").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    Arc::new(FeatureEventWriter::new(Arc::new(writer)))
+    Arc::new(FeatureEventWriter::new(Arc::new(DiscardFactWriter::new())))
 }
 
 fn noop_factor_writer() -> Arc<FactorEventWriter> {
@@ -397,7 +419,7 @@ struct WhaleTapeConcHarness {
     db: DatabaseConnection,
     registry: Arc<MarketRegistry>,
     book_store: Arc<BookStore>,
-    live_pit: LiveBookDataSource,
+    live_pit: InMemoryDecisionSnapshotSource,
     fact_read: Arc<dyn QuantFactReadRepository>,
     market_id: MarketId,
     as_of: DateTime<Utc>,
@@ -411,7 +433,7 @@ async fn whale_tape_conc_harness() -> WhaleTapeConcHarness {
     let registry = Arc::new(MarketRegistry::new());
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
-    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
+    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let as_of = Utc::now();
     let event_time_ms = (as_of - ChronoDuration::seconds(60)).timestamp_millis();
@@ -454,13 +476,14 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
     feature_pipeline
         .run(FeaturePipelineRequest {
             included: &included,
-            as_of: harness.as_of,
+            boundary: quant_pivot_models::domain::DecisionClock::new(0)
+                .boundary(harness.as_of)
+                .expect("decision boundary"),
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
-            source_delay_secs: 0,
-            pit: PitView::Live(&harness.live_pit),
+            pit: &harness.live_pit,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
         })

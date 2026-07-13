@@ -200,6 +200,7 @@ pub async fn microstructure(
             tokens.clone(),
             from_ms,
             to_ms,
+            to_ms,
             window.resolution.is_minute(),
         )
         .await?;

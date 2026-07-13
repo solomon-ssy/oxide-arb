@@ -12,14 +12,15 @@ use quant_pivot_models::{
         BuildTrainingDatasetRequest, JobProgressSink, TrainingDatasetInfo, TrainingDatasetPlanView,
         TrainingDatasetPort, TrainingDatasetView,
     },
+    enums::quant::TrainingDatasetStatus,
     runtime_config::RuntimeConfig,
     types::{RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CalibrationArtifactRepository, EventRepository, FeatureRepository,
-    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    AttributionRepository, CalibrationArtifactRepository, CatalogVersionRepository,
+    FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+    ModelRegistryRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -40,13 +41,14 @@ use crate::{
 /// Admin port wired from [`ResearchBundle`] plus runtime-config catalog reads.
 pub struct CoreTrainingDatasetPort {
     fact_read: Arc<dyn QuantFactReadRepository>,
+    catalog_repo: Arc<dyn CatalogVersionRepository>,
     market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
     attribution_repo: Arc<dyn AttributionRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
+    selection_repo: Arc<dyn MarketSelectionRepository>,
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
@@ -74,13 +76,14 @@ impl CoreTrainingDatasetPort {
     ) -> Self {
         Self {
             fact_read: Arc::clone(&research.quant_fact_read),
+            catalog_repo: Arc::clone(&research.catalog_version_repo),
             market_repo: Arc::clone(&research.market_repo),
-            event_repo: Arc::clone(&research.event_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
             attribution_repo: Arc::clone(&research.attribution_repo),
             recommendation_repo: Arc::clone(&research.recommendation_repo),
             feature_repo: Arc::clone(&research.feature_repo),
+            selection_repo: Arc::clone(&research.market_selection_repo),
             position_repo: Arc::clone(&research.position_repo),
             fee_calculator: Arc::clone(&research.fee_calculator),
             linkage_repo: Arc::clone(&research.market_linkage_repo),
@@ -111,13 +114,14 @@ impl CoreTrainingDatasetPort {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.fact_read),
+                catalog_repo: Arc::clone(&self.catalog_repo),
                 market_repo: Arc::clone(&self.market_repo),
-                event_repo: Arc::clone(&self.event_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 attribution_repo: Arc::clone(&self.attribution_repo),
                 recommendation_repo: Arc::clone(&self.recommendation_repo),
                 feature_repo: Arc::clone(&self.feature_repo),
+                selection_repo: Arc::clone(&self.selection_repo),
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
                 linkage_repo: Arc::clone(&self.linkage_repo),
@@ -145,7 +149,7 @@ impl CoreTrainingDatasetPort {
             window_end: body.window_end,
             sample_interval_secs: body.sample_interval_secs,
             horizons_secs: body.horizons_secs.clone(),
-            source_delay_secs: body.source_delay_secs,
+            knowledge_lag_secs: body.knowledge_lag_secs,
             feature_schema_version: body.feature_schema_version,
             sample_sources: body.sample_sources.clone(),
             training_dataset_id: None,
@@ -161,7 +165,7 @@ impl CoreTrainingDatasetPort {
             window_end: body.window_end,
             sample_interval_secs: body.sample_interval_secs,
             horizons_secs: body.horizons_secs.clone(),
-            source_delay_secs: body.source_delay_secs,
+            knowledge_lag_secs: body.knowledge_lag_secs,
             feature_schema_version: body.feature_schema_version,
             sample_sources: body.sample_sources.clone(),
             training_dataset_id: body.training_dataset_id.clone(),
@@ -217,15 +221,28 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetView> {
-        // Idempotent recovery (effectively-once): a re-run of an async job whose
-        // artifact + ledger row already persisted returns the existing row rather
-        // than rebuilding or double-inserting. The result id is pre-assigned at
-        // enqueue and frozen in the job's `params_json`, so a deterministic re-run
-        // reproduces the identical content-addressed dataset.
+        // Effectively-once recovery: completed artifacts are returned as-is;
+        // planned/building rows are validated and resumed by the service.
         if let Some(training_dataset_id) = &request.training_dataset_id
             && let Some(existing) = self.dataset_repo.find_by_id(training_dataset_id).await?
         {
-            return Ok(TrainingDatasetView::from(existing));
+            match existing.status {
+                TrainingDatasetStatus::Ready | TrainingDatasetStatus::InsufficientLabels => {
+                    return Ok(TrainingDatasetView::from(existing));
+                }
+                TrainingDatasetStatus::Failed | TrainingDatasetStatus::Expired => {
+                    return Err(StorageError::state_conflict(
+                        "quant_training_dataset",
+                        Some(training_dataset_id),
+                        format!(
+                            "dataset build cannot resume from terminal status {}",
+                            existing.status
+                        ),
+                    )
+                    .into());
+                }
+                TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => {}
+            }
         }
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let plan = service.plan(Self::build_plan_request(&request)).await?;

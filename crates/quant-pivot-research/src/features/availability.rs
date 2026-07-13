@@ -52,7 +52,7 @@ impl<'a> FeatureAvailabilityOracle<'a> {
 }
 
 /// Whether a candidate carries the evidence a source requirement needs.
-const fn source_available(candidate: &MarketCandidate, requirement: SourceRequirement) -> bool {
+fn source_available(candidate: &MarketCandidate, requirement: SourceRequirement) -> bool {
     match requirement {
         // Gamma metadata is always present for a catalog-backed candidate.
         // Trade-tape availability is PIT/window-level; the selection candidate
@@ -73,13 +73,17 @@ const fn source_available(candidate: &MarketCandidate, requirement: SourceRequir
         SourceRequirement::DomainObservationWindow => {
             matches!(candidate.domain_availability, DomainAvailability::Available)
         }
+        SourceRequirement::ResolvedLinkage => matches!(
+            candidate.domain_availability,
+            DomainAvailability::SourceEmpty | DomainAvailability::Available
+        ),
     }
 }
 
 /// Whether the candidate has a fresh, two-sided published book.
-const fn has_two_sided_book(candidate: &MarketCandidate) -> bool {
+fn has_two_sided_book(candidate: &MarketCandidate) -> bool {
     candidate.book_age_ms.is_some()
         && candidate.best_bid.is_some()
         && candidate.best_ask.is_some()
-        && !candidate.empty
+        && candidate.empty == Some(false)
 }

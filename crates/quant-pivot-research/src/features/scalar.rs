@@ -14,8 +14,8 @@ use crate::features::value::FeatureValue;
 
 /// Project a [`FeatureValue`] to a scalar decimal.
 ///
-/// `None` when the value is missing or not a numeric/boolean scalar
-/// (categoricals are intentionally rejected — they must be one-hot encoded
+/// `None` when the value is not a numeric/boolean scalar (categoricals are
+/// intentionally rejected — they must be one-hot encoded
 /// upstream, never fed as ordinals).
 #[must_use]
 pub fn feature_scalar(value: &FeatureValue) -> Option<Decimal> {
@@ -25,7 +25,7 @@ pub fn feature_scalar(value: &FeatureValue) -> Option<Decimal> {
         FeatureValue::Usd(u) => Some(u.inner()),
         FeatureValue::Count(c) => Some(Decimal::from(*c)),
         FeatureValue::Bool(b) => Some(if *b { Decimal::ONE } else { Decimal::ZERO }),
-        FeatureValue::Category(_) | FeatureValue::Missing(_) => None,
+        FeatureValue::Category(_) => None,
     }
 }
 
@@ -41,7 +41,10 @@ pub fn finite_f64(decimal: Decimal) -> Option<f64> {
 mod tests {
     use super::{feature_scalar, finite_f64};
     use crate::features::value::FeatureValue;
-    use quant_pivot_models::types::{Probability, Usd};
+    use quant_pivot_models::{
+        enums::common::MarketCategory,
+        types::{Probability, Usd},
+    };
     use rust_decimal_macros::dec;
 
     #[test]
@@ -65,11 +68,9 @@ mod tests {
     }
 
     #[test]
-    fn non_numeric_variants_reject() {
+    fn categorical_values_reject_ordinal_projection() {
         assert_eq!(
-            feature_scalar(&FeatureValue::Missing(
-                crate::features::value::NullReason::NotApplicable
-            )),
+            feature_scalar(&FeatureValue::Category(MarketCategory::Other,)),
             None
         );
     }

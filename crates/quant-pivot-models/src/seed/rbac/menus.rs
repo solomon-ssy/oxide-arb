@@ -27,14 +27,14 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v15 (Phase 11.2.2) adds market-linkage governance and domain-source
-    // cursor health pages. The loader is idempotent (`on_conflict do_nothing`).
-    version: 15,
+    // v16 adds the governed training-serving feature-integrity workbench.
+    // The loader is idempotent (`on_conflict do_nothing`).
+    version: 16,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v15",
+    checksum: "rbac.menus.bootstrap.v16",
     loader: load_boxed,
 };
 
@@ -548,6 +548,7 @@ fn build_research(t: &mut MenuTree) {
         icon: "lucide:line-chart",
     });
     build_research_jobs(t, &research);
+    build_research_feature_integrity(t, &research);
     let factors = t.page(PageSpec {
         parent: &research,
         name: "research-factors",
@@ -582,6 +583,25 @@ fn build_research(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
         icon: "lucide:git-compare",
     });
+}
+
+/// Deterministic serving/replay diagnostics and governed parity recovery.
+fn build_research_feature_integrity(t: &mut MenuTree, research: &MenuId) {
+    let feature_integrity = t.page(PageSpec {
+        parent: research,
+        name: "research-feature-integrity",
+        title: "page.menu.researchFeatureIntegrity",
+        path: "/research/feature-integrity",
+        component: "research/feature-integrity/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:scan-search",
+    });
+    t.button(
+        &feature_integrity,
+        "feature_integrity:govern",
+        "Run Full Parity / Clear Latch",
+        perm(ResourceType::Materialization, Operation::Create),
+    );
 }
 
 /// Unified calibration-artifact catalog (Phase 11.3 §3.4): content-addressed
@@ -933,6 +953,8 @@ mod tests {
             "research-models",
             "research-backtests",
             "research-jobs",
+            "research-feature-integrity",
+            "feature_integrity:govern",
             "research-factors",
             "report-detail",
             "recommendation-detail",
@@ -947,6 +969,53 @@ mod tests {
         assert!(
             !names.contains("system"),
             "legacy /system page must be removed"
+        );
+    }
+
+    #[test]
+    fn feature_integrity_page_uses_materialization_read_and_real_component() {
+        let tree = build_tree();
+        let page = tree
+            .models
+            .iter()
+            .find(|model| {
+                matches!(
+                    &model.name,
+                    sea_orm::ActiveValue::Set(name) if name == "research-feature-integrity"
+                )
+            })
+            .expect("feature-integrity menu page");
+        assert_eq!(
+            page.permission_code,
+            sea_orm::ActiveValue::Set(Some("materialization:read".to_owned()))
+        );
+        assert_eq!(
+            page.path,
+            sea_orm::ActiveValue::Set(Some("/research/feature-integrity".to_owned()))
+        );
+        assert_eq!(
+            page.component,
+            sea_orm::ActiveValue::Set(Some("research/feature-integrity/index".to_owned()))
+        );
+        assert_eq!(page.hide_in_menu, sea_orm::ActiveValue::Set(false));
+
+        let action = tree
+            .models
+            .iter()
+            .find(|model| {
+                matches!(
+                    &model.name,
+                    sea_orm::ActiveValue::Set(name) if name == "feature_integrity:govern"
+                )
+            })
+            .expect("feature-integrity governed action");
+        assert_eq!(
+            action.parent_id,
+            sea_orm::ActiveValue::Set(Some(stable_menu_id("research-feature-integrity")))
+        );
+        assert_eq!(
+            action.permission_code,
+            sea_orm::ActiveValue::Set(Some("materialization:create".to_owned()))
         );
     }
 

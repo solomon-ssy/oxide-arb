@@ -1,38 +1,38 @@
 //! End-to-end feature plane: provider → selector → pipeline → Postgres.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
     ingest::{book_store::BookStore, market_registry::MarketRegistry},
-    observability::{
-        fact_lag::IngestPipelineLagTracker, feature_fact_writer::FeatureEventWriter,
-        metrics_hub::MetricsHub,
-    },
-    pit::platform::live_book::LiveBookDataSource,
+    observability::{feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub},
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
     service::feature_pipeline::{
-        FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineService,
+        FeaturePipelineDeps, FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService,
     },
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        MidPriceBucketRow, QuantFeatureEventRow, TickEventRow, TradeTapeRow,
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        FeatureVectorInfo, NewFeatureVector,
-        market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+        DecisionClock, FeatureVectorInfo, NewFeatureVector,
+        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
+        clickhouse::ChFeatureCellState,
         common::{CategorySet, MarketCategory, TickSize},
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
@@ -45,20 +45,22 @@ use quant_pivot_repository::{
     traits::{EventRepository, FeatureRepository, MarketRepository, QuantFactReadRepository},
 };
 use quant_pivot_research::{
-    features::{PitView, names},
+    features::{FeatureVector, names},
     hashing::ResearchHasher,
+    pit::PointInTimeSnapshotSource,
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector,
         ModelFeatureRequirements, SelectedMarket,
     },
 };
-use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
     report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
-    ws::WsShardHealth,
+};
+use quant_pivot_test_support::{
+    fact_sink::RecordingFactWriter, pit::InMemoryDecisionSnapshotSource,
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
@@ -112,7 +114,7 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         fee_schedule: None,
         end_date: Some(Utc::now() + ChronoDuration::days(5)),
         resolved_at: None,
-        created_at: Utc::now() - ChronoDuration::days(2),
+        created_at: Some(Utc::now() - ChronoDuration::days(2)),
         updated_at: Utc::now(),
     }
 }
@@ -143,7 +145,22 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &E2eCatalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E2eCatalog) {
-    registry.register_market(registry_market(catalog));
+    let market = registry_market(catalog);
+    registry.register_event(EventRegistryInfo {
+        event_id: market.event_id.clone(),
+        title: "Feature E2E".to_owned(),
+        slug: "feature-e2e".to_owned(),
+        series_slug: None,
+        status: EventStatus::Active,
+        market_ids: vec![market.market_id.clone()],
+        categories: CategorySet::from(MarketCategory::Sports),
+        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        neg_risk: false,
+        end_date: market.end_date,
+        created_at: Utc::now() - ChronoDuration::days(2),
+        updated_at: market.updated_at,
+    });
+    registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
     book_store.apply_snapshot(
         &yes,
@@ -155,7 +172,8 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
             Price::new(Decimal::new(53, 2)),
             Shares::new(Decimal::from(120)),
         )]),
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        u64::try_from(Utc::now().timestamp_millis())
+            .expect("test book timestamp must be non-negative"),
         None,
     );
 }
@@ -169,6 +187,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -178,6 +197,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -188,6 +208,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -207,6 +228,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
@@ -216,6 +238,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
         Ok(None)
     }
@@ -225,6 +248,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -232,7 +256,8 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn resolution_at(
         &self,
         _market_id: &MarketId,
-        _as_of_ms: i64,
+        _source_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         Ok(None)
     }
@@ -242,6 +267,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -251,6 +277,8 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_keys: Vec<DomainInstrumentKey>,
         _from_ms: i64,
         _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -260,6 +288,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_key: &DomainInstrumentKey,
         _metric: &str,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         Ok(None)
     }
@@ -268,13 +297,13 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
     }
 }
 
-/// A feature repository that records how many rows it was asked to persist, so a
-/// test can prove that rejected vectors never reach persistence.
+/// A feature repository that records audit persistence for rejected vectors.
 struct RecordingFeatureRepo {
     persisted_rows: AtomicUsize,
 }
@@ -291,9 +320,26 @@ impl FeatureRepository for RecordingFeatureRepo {
     ) -> Result<Vec<FeatureVectorInfo>, StorageError> {
         self.persisted_rows
             .fetch_add(vectors.len(), Ordering::Relaxed);
-        // The partition test only ever feeds an empty accepted set; returning an
-        // empty projection is sufficient (and asserted by the row counter).
-        Ok(Vec::new())
+        let created_at = Utc::now();
+        Ok(vectors
+            .into_iter()
+            .map(|vector| FeatureVectorInfo {
+                feature_vector_id: vector.feature_vector_id,
+                market_id: vector.market_id,
+                token_id: vector.token_id,
+                decision_at: vector.decision_at,
+                decision_boundary: vector.decision_boundary,
+                feature_schema_version: vector.feature_schema_version,
+                feature_hash: vector.feature_hash,
+                data_quality: vector.data_quality,
+                staleness_ms: vector.staleness_ms,
+                payload: vector.payload,
+                source_refs: vector.source_refs,
+                decision_capture: vector.decision_capture,
+                decision_capture_hash: vector.decision_capture_hash,
+                created_at,
+            })
+            .collect())
     }
 
     async fn find_by_id(
@@ -311,37 +357,86 @@ impl FeatureRepository for RecordingFeatureRepo {
     }
 }
 
+fn assert_feature_evidence(result: &FeaturePipelineResult) {
+    let vector = &result.accepted[0];
+    let persisted = &result.persisted[0];
+    let evidence = result
+        .feature_evidence
+        .as_ref()
+        .expect("accepted vector must have a serving evidence commitment");
+
+    assert_eq!(
+        evidence.expected_row_count(),
+        u64::try_from(vector.value_count()).expect("feature cell count fits u64")
+    );
+    assert_eq!(
+        evidence.feature_vector_ids(),
+        std::slice::from_ref(&persisted.feature_vector_id)
+    );
+}
+
+fn assert_emitted_feature_cells(
+    flushed_events: &std::sync::Mutex<Vec<QuantFeatureEventRow>>,
+    vector: &FeatureVector,
+    persisted: &FeatureVectorInfo,
+) {
+    let emitted = flushed_events.lock().expect("feature event sink");
+    assert_eq!(
+        emitted.len(),
+        vector.value_count(),
+        "every accepted FeatureCell must emit one stateful fact"
+    );
+    assert!(
+        emitted
+            .iter()
+            .all(|row| row.feature_vector_id == persisted.feature_vector_id),
+        "every emitted cell must bind to the Postgres-returned vector id"
+    );
+    let emitted_names: HashSet<_> = emitted
+        .iter()
+        .map(|row| row.feature_name.as_str())
+        .collect();
+    let vector_names: HashSet<_> = vector.iter_cells().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(emitted_names, vector_names);
+    assert!(
+        emitted
+            .iter()
+            .any(|row| row.cell_state == ChFeatureCellState::Missing),
+        "missing cells must be explicit facts, not omitted rows"
+    );
+    drop(emitted);
+}
+
 #[tokio::test]
-async fn insufficient_vectors_are_partitioned_and_not_persisted() {
-    // A market whose token has no book and whose metadata is unavailable: every
-    // critical feature is missing, so the vector is `Insufficient`.
+async fn insufficient_vectors_are_audited_but_partitioned_from_model_input() {
+    // Catalog and book inputs are valid, but the required microstructure window
+    // is absent. The model contract must reject the vector without inventing a
+    // replacement value, while retaining its complete audit evidence.
     let registry = Arc::new(MarketRegistry::new());
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
+    wire_live_book(&registry, &book_store, &CATALOG);
+    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let features = FeaturesConfig::default();
     let as_of = Utc::now();
     let market = SelectedMarket {
-        market_id: MarketId::new("0xno-data"),
-        event_id: EventId::new("evt-no-data"),
+        market_id: MarketId::new(CATALOG.market_id),
+        event_id: EventId::new(CATALOG.event_id),
         category: MarketCategory::Sports,
-        primary_token_id: TokenId::new("token-no-book"),
-        secondary_token_id: None,
-        liquidity_usd: None,
-        volume_24h_usd: None,
+        primary_token_id: TokenId::new(CATALOG.yes_token),
+        secondary_token_id: Some(TokenId::new(CATALOG.no_token)),
+        liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
+        volume_24h_usd: Some(Usd::new(Decimal::from(9_000))),
         source_refs: Vec::new(),
     };
 
     let repo = Arc::new(RecordingFeatureRepo {
         persisted_rows: AtomicUsize::new(0),
     });
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("e2e-reject-events").capacity(64),
-        |_| Box::pin(async { Ok(()) }),
-        prometheus::IntCounter::new("e2e_reject_drops", "drops").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(writer)));
+    let rejected_events = Arc::new(std::sync::Mutex::new(Vec::<QuantFeatureEventRow>::new()));
+    let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(RecordingFactWriter::new(
+        Arc::clone(&rejected_events),
+    ))));
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
         window_provider,
@@ -359,13 +454,16 @@ async fn insufficient_vectors_are_partitioned_and_not_persisted() {
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
-            as_of,
+            boundary: DecisionClock::new(0)
+                .boundary(as_of)
+                .expect("decision boundary"),
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
-            model_requirements: &ModelFeatureRequirements::default(),
-            source_delay_secs: 0,
-            pit: PitView::Live(&live_pit),
+            model_requirements: &ModelFeatureRequirements::generic_only(vec![
+                names::micro::QUOTE_UPDATE_RATE,
+            ]),
+            pit: &live_pit,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
@@ -377,17 +475,28 @@ async fn insufficient_vectors_are_partitioned_and_not_persisted() {
         "the bad vector must not be accepted"
     );
     assert_eq!(result.persisted.len(), 0);
+    assert!(
+        result.feature_evidence.is_none(),
+        "rejected feature cells must not enter the serving evidence commitment"
+    );
     assert_eq!(result.rejected.len(), 1);
-    assert_eq!(result.rejected[0].market_id.as_str(), "0xno-data");
+    assert_eq!(result.rejected[0].market_id.as_str(), CATALOG.market_id);
     assert!(
         !result.rejected[0].missing_required.is_empty(),
-        "rejection must report the missing critical features"
+        "rejection must report the missing required features"
     );
     assert_eq!(
         repo.persisted_rows
             .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "rejected vectors must never reach persistence"
+        1,
+        "rejected vectors must be retained as audit evidence"
+    );
+    assert!(
+        !rejected_events
+            .lock()
+            .expect("rejected event sink mutex poisoned")
+            .is_empty(),
+        "rejected feature cells must be written to the durable audit fact stream"
     );
 }
 
@@ -401,11 +510,11 @@ async fn create_feature_vector_then_find() {
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
 
+    let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(
+        InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref()),
+    );
     let provider = MarketCandidateProvider::new(
-        Arc::clone(&registry),
-        Arc::clone(&book_store),
-        WsShardHealth::operational(),
-        Arc::new(IngestPipelineLagTracker::new()),
+        pit_source,
         Arc::new(EmptyLinkageRepo),
         Arc::new(EmptyFactRead),
     );
@@ -415,7 +524,7 @@ async fn create_feature_vector_then_find() {
     let as_of = Utc::now();
 
     let request = MarketSelectionBuildRequest {
-        as_of,
+        decision_at: as_of,
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         selection: SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
@@ -425,29 +534,28 @@ async fn create_feature_vector_then_find() {
         data_quality: DataQualityConfig::default(),
         features: features.clone(),
         model_requirements: ModelFeatureRequirements::generic_only(vec![names::book::BEST_BID]),
-        source_delay_secs: 0,
+        knowledge_lag_secs: 0,
     };
 
-    let candidates = provider
-        .candidates(as_of, &domain)
+    let boundary = DecisionClock::new(0)
+        .boundary(as_of)
+        .expect("decision boundary");
+    let candidate_batch = provider
+        .candidates(&boundary, &domain)
         .await
         .expect("candidates");
     let snapshot = selector
-        .build_snapshot(request, candidates)
+        .build_snapshot(request, candidate_batch.candidates)
         .await
         .expect("selection");
     assert_eq!(snapshot.included.len(), 1);
 
-    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
 
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("e2e-feature-events").capacity(512),
-        |_| Box::pin(async { Ok(()) }),
-        prometheus::IntCounter::new("e2e_drops", "drops").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(writer)));
+    let flushed_events = Arc::new(std::sync::Mutex::new(Vec::<QuantFeatureEventRow>::new()));
+    let event_writer = Arc::new(FeatureEventWriter::new(Arc::new(RecordingFactWriter::new(
+        Arc::clone(&flushed_events),
+    ))));
 
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
@@ -464,13 +572,12 @@ async fn create_feature_vector_then_find() {
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &snapshot.included,
-            as_of,
+            boundary,
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
-            source_delay_secs: 0,
-            pit: PitView::Live(&live_pit),
+            pit: candidate_batch.snapshot_source.as_ref(),
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
@@ -485,6 +592,7 @@ async fn create_feature_vector_then_find() {
     let expected_hash = ResearchHasher::feature_vector(vector).expect("hash");
     let persisted = &result.persisted[0];
     assert_eq!(persisted.feature_hash, expected_hash);
+    assert_feature_evidence(&result);
 
     let loaded = feature_repo
         .find_by_id(&persisted.feature_vector_id)
@@ -494,6 +602,12 @@ async fn create_feature_vector_then_find() {
     assert_eq!(loaded.feature_hash, expected_hash);
     assert_eq!(loaded.market_id.as_str(), CATALOG.market_id);
 
-    let mapped = vector.try_to_new().expect("map");
+    let boundary = DecisionClock::new(0)
+        .boundary(as_of)
+        .expect("decision boundary");
+    let mapped = vector.try_to_new(&boundary).expect("map");
     assert_eq!(mapped.feature_hash, expected_hash);
+    assert_eq!(loaded.decision_boundary, Some(boundary));
+
+    assert_emitted_feature_cells(&flushed_events, vector, persisted);
 }

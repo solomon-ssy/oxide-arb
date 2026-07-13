@@ -29,7 +29,7 @@ pub fn map_snapshot_to_model(
 
     let snapshot_row = NewMarketSelection {
         market_selection_id: snapshot.market_selection_id.clone(),
-        as_of: snapshot.as_of,
+        decision_at: snapshot.decision_at,
         runtime_config_version_id: snapshot.runtime_config_version_id.clone(),
         selector_hash: snapshot.selector_hash.clone(),
         market_count: i32::try_from(snapshot.included.len()).map_err(|err| {
@@ -83,7 +83,7 @@ mod tests {
     use super::map_snapshot_to_model;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{DomainAvailability, MarketCandidate},
+        domain::{DomainAvailability, MarketCandidate, MarketDataHealth},
         enums::{common::MarketCategory, market::MarketStatus},
         types::{
             ContentHash, EventId, MarketId, MarketSelectionId, Price, RuntimeConfigVersionId,
@@ -114,11 +114,11 @@ mod tests {
             best_ask: Some(Price::new(Decimal::new(51, 2))),
             depth_usd: Some(Usd::new(Decimal::from(2_000))),
             book_age_ms: Some(500),
-            crossed: false,
-            empty: false,
-            connection_healthy: true,
-            ingest_lag_ms: 1_000,
-            observed_at: as_of(),
+            crossed: Some(false),
+            empty: Some(false),
+            market_data_health: MarketDataHealth::Healthy,
+            ingest_lag_ms: Some(1_000),
+            decision_at: as_of(),
             domain_availability: DomainAvailability::Unresolved,
         }
     }
@@ -127,7 +127,7 @@ mod tests {
     fn map_snapshot_to_model_projects_members_and_summary() {
         let snapshot = MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
-            as_of: as_of(),
+            decision_at: as_of(),
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             selector_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
                 .expect("valid hash"),

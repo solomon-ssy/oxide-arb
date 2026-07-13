@@ -9,6 +9,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
+use quant_pivot_core::pit::platform::ch_historical::DurablePitSource;
 use quant_pivot_core::service::training_dataset::{
     TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
     default_labelers,
@@ -21,18 +22,24 @@ use quant_pivot_models::{
         DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
-        CryptoSubject, GroundingProof, JobProgressSink, LinkageOutcome, MarketLinkage,
-        MarketSubject, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset,
-        NoopProgressSink, PriceComparator, ResolutionOracle, ResolvedBinding,
-        market::book::BookLevel,
+        CatalogCommit, CompleteTrainingDatasetBuild, CryptoSubject, DecisionSource,
+        EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
+        MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogSyncBatch,
+        NewEventCatalogVersion, NewMarketCatalogVersion, NewMarketLinkage, NewModelSpec,
+        NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan, NoopProgressSink,
+        PriceComparator, ResolutionOracle, ResolvedBinding, UpsertEvent, UpsertMarket,
+        market::{book::BookLevel, registry::TokenInfo},
     },
-    entities::market::{Column as MarketColumn, Entity as MarketEntity},
+    entities::{
+        market::{Column as MarketColumn, Entity as MarketEntity},
+        quant_market_linkage::{Column as LinkageColumn, Entity as LinkageEntity},
+    },
     enums::{
         clickhouse::{ChFactSource, ChSnapshotReason},
-        common::MarketCategory,
+        common::{CategorySet, MarketCategory, TickSize},
         domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
         factor::FactorFamily,
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
         model::ModelFamily,
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
@@ -42,31 +49,34 @@ use quant_pivot_models::{
         FeaturesConfig, SelectionConfig, TrainingConfig,
     },
     types::{
-        ArtifactUri, BinanceSymbol, ContentHash, CryptoAsset, CryptoQuote, DatasetCoverage,
-        DomainInstrumentKey, DomainSourceId, MarketId, MarketLinkageId, ModelSpecId,
-        ModelVersionId, Price, Probability, ResolverVersion, RuntimeConfigVersionId, SchemaVersion,
-        Shares, TokenId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
+        ArtifactUri, BinanceSymbol, CatalogSyncBatchId, ContentHash, CryptoAsset, CryptoQuote,
+        DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage, DatasetManifest, DomainInstrumentKey,
+        DomainSourceId, EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketId,
+        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, Price, Probability,
+        ResolverVersion, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
+        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
         default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAttributionRepository, PgEventRepository, PgFeatureRepository, PgMarketLinkageRepository,
-        PgMarketRepository, PgModelRegistryRepository, PgPositionRepository,
-        PgRecommendationRepository, PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgAttributionRepository, PgCatalogVersionRepository, PgFeatureRepository,
+        PgMarketLinkageRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgPositionRepository, PgRecommendationRepository,
+        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        EventRepository, MarketLinkageRepository, MarketRepository, ModelRegistryRepository,
+        CatalogVersionRepository, MarketLinkageRepository, ModelRegistryRepository,
         QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
-    features::FeatureName,
-    pit::{BookSnapshotAt, MarketContextAt, PitQueryEngine},
+    features::{EvidenceSourceKind, FeatureName},
+    pit::{BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot},
     training::{
         DatasetPlan, DatasetPlanRequest, LabelName, TrainingDatasetArtifact,
-        TrainingDatasetBuilder, TrainingDatasetPlanner,
+        TrainingDatasetBuilder, TrainingDatasetPlanner, dataset_manifest_hash,
     },
 };
 use quant_pivot_test_support::{
@@ -109,7 +119,11 @@ async fn seed_runtime_config(db: &DatabaseConnection) -> RuntimeConfigVersionId 
 }
 
 fn dataset_window() -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-    let start = Utc::now() - ChronoDuration::hours(2);
+    // Catalog coverage begins at the durable commit visibility barrier. Use a
+    // logical replay clock after that barrier; these fake facts do not depend
+    // on wall-clock maturity, and backdating coverage would invalidate the PIT
+    // contract this suite is meant to exercise.
+    let start = Utc::now() + ChronoDuration::hours(1);
     // One sample at `start` when `sample_interval_secs == 60`.
     let end = start + ChronoDuration::seconds(60);
     (start, end)
@@ -117,6 +131,35 @@ fn dataset_window() -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
 
 const fn sample_as_of(window_start: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     window_start
+}
+
+fn ledger_manifest(
+    training_dataset_id: &TrainingDatasetId,
+    model_spec_id: &ModelSpecId,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    hash: &ContentHash,
+    sample_count: u64,
+) -> DatasetManifest {
+    DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: training_dataset_id.clone(),
+        model_spec_id: model_spec_id.clone(),
+        runtime_config_version_id: runtime_config_version_id.clone(),
+        window_start,
+        window_end,
+        purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: 10,
+        sample_interval_secs: 3_600,
+        horizons_secs: vec![3_600],
+        feature_schema_hash: hash.clone(),
+        factor_schema_hash: hash.clone(),
+        label_schema_hash: hash.clone(),
+        semantic_dataset_hash: hash.clone(),
+        source_fingerprint: hash.clone(),
+        sample_count,
+    }
 }
 
 #[derive(Default)]
@@ -144,13 +187,17 @@ impl QuantFactReadRepository for ControllableFactRead {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         let mut rows = Vec::new();
         for token_id in token_ids {
             if let Some(series) = scenario.micro.get(&token_id) {
                 for row in series {
-                    if row.bucket_time >= from_ms && row.bucket_time < to_ms {
+                    if row.bucket_time >= from_ms
+                        && row.bucket_time < to_ms
+                        && row.available_at <= decision_at_ms
+                    {
                         rows.push(row.clone());
                     }
                 }
@@ -164,6 +211,7 @@ impl QuantFactReadRepository for ControllableFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -174,6 +222,7 @@ impl QuantFactReadRepository for ControllableFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -191,12 +240,15 @@ impl QuantFactReadRepository for ControllableFactRead {
     async fn book_snapshot_at(
         &self,
         token_id: &TokenId,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         Ok(scenario.books.get(token_id).and_then(|rows| {
             rows.iter()
-                .filter(|row| row.event_time <= as_of_ms)
+                .filter(|row| {
+                    row.event_time <= source_cutoff_ms && row.ingestion_time <= decision_at_ms
+                })
                 .max_by_key(|row| (row.event_time, row.ingestion_time, row.sequence))
                 .cloned()
         }))
@@ -207,13 +259,17 @@ impl QuantFactReadRepository for ControllableFactRead {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         let mut rows = Vec::new();
         for token_id in token_ids {
             if let Some(series) = scenario.books.get(&token_id) {
                 for row in series {
-                    if row.event_time >= from_ms && row.event_time <= to_ms {
+                    if row.event_time >= from_ms
+                        && row.event_time <= to_ms
+                        && row.ingestion_time <= available_by_ms
+                    {
                         rows.push(row.clone());
                     }
                 }
@@ -225,12 +281,15 @@ impl QuantFactReadRepository for ControllableFactRead {
     async fn resolution_at(
         &self,
         market_id: &MarketId,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         Ok(scenario.resolutions.get(market_id).and_then(|rows| {
             rows.iter()
-                .filter(|row| row.resolved_at <= as_of_ms)
+                .filter(|row| {
+                    row.resolved_at <= source_cutoff_ms && row.observed_at <= decision_at_ms
+                })
                 .max_by_key(|row| (row.resolved_at, row.observed_at, row.sequence))
                 .cloned()
         }))
@@ -241,13 +300,17 @@ impl QuantFactReadRepository for ControllableFactRead {
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         let mut rows = Vec::new();
         for market_id in market_ids {
             if let Some(series) = scenario.resolutions.get(&market_id) {
                 for row in series {
-                    if row.resolved_at >= from_ms && row.resolved_at <= to_ms {
+                    if row.resolved_at >= from_ms
+                        && row.resolved_at <= to_ms
+                        && row.observed_at <= decision_at_ms
+                    {
                         rows.push(row.clone());
                     }
                 }
@@ -260,6 +323,7 @@ impl QuantFactReadRepository for ControllableFactRead {
         &self,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         let markets: BTreeSet<MarketId> = {
             let scenario = self.scenario.lock().expect("lock");
@@ -267,7 +331,11 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .books
                 .values()
                 .flatten()
-                .filter(|row| row.event_time >= from_ms && row.event_time <= to_ms)
+                .filter(|row| {
+                    row.event_time >= from_ms
+                        && row.event_time <= to_ms
+                        && row.ingestion_time <= decision_at_ms
+                })
                 .filter_map(|row| row.market_id.clone())
                 .collect()
         };
@@ -279,13 +347,19 @@ impl QuantFactReadRepository for ControllableFactRead {
         instrument_keys: Vec<DomainInstrumentKey>,
         from_ms: i64,
         to_ms: i64,
+        publish_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         let mut rows = Vec::new();
         for instrument_key in instrument_keys {
             if let Some(series) = scenario.domain_observations.get(&instrument_key) {
                 for row in series {
-                    if row.event_time >= from_ms && row.event_time < to_ms {
+                    if row.event_time >= from_ms
+                        && row.event_time < to_ms
+                        && row.publish_time <= publish_cutoff_ms
+                        && row.ingestion_time <= decision_at_ms
+                    {
                         rows.push(row.clone());
                     }
                 }
@@ -298,7 +372,8 @@ impl QuantFactReadRepository for ControllableFactRead {
         &self,
         instrument_key: &DomainInstrumentKey,
         metric: &str,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         Ok(scenario
@@ -306,7 +381,12 @@ impl QuantFactReadRepository for ControllableFactRead {
             .get(instrument_key)
             .and_then(|rows| {
                 rows.iter()
-                    .filter(|row| row.metric == metric && row.event_time <= as_of_ms)
+                    .filter(|row| {
+                        row.metric == metric
+                            && row.event_time <= source_cutoff_ms
+                            && row.publish_time <= source_cutoff_ms
+                            && row.ingestion_time <= decision_at_ms
+                    })
                     .max_by_key(|row| (row.event_time, row.ingestion_time))
                     .cloned()
             }))
@@ -317,30 +397,35 @@ impl QuantFactReadRepository for ControllableFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
     }
 }
 
-/// PIT engine that deliberately returns a book observed after `as_of`.
+/// PIT engine that deliberately returns a book observed after the source cutoff.
 struct LeakyPitEngine {
     token_id: TokenId,
-    market_id: MarketId,
     leak_ms: i64,
+    catalog: Arc<dyn PointInTimeSnapshotSource>,
 }
 
 #[async_trait]
-impl PitQueryEngine for LeakyPitEngine {
-    async fn book_at(
+impl PointInTimeSnapshotSource for LeakyPitEngine {
+    async fn book_at_boundary(
         &self,
         token_id: &TokenId,
-        as_of: chrono::DateTime<Utc>,
+        boundary: &quant_pivot_models::domain::DecisionBoundary,
     ) -> QuantResult<Option<BookSnapshotAt>> {
         if token_id != &self.token_id {
             return Ok(None);
         }
-        let observed_ms = as_of.timestamp_millis().saturating_add(self.leak_ms);
+        let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
+        let observed_ms = source_cutoff
+            .timestamp_millis()
+            .checked_add(self.leak_ms)
+            .expect("test leak timestamp must be representable");
         let bid = BookLevel::from_decimal_unchecked(
             Price::new(Decimal::new(48, 2)),
             Shares::new(Decimal::from(100)),
@@ -351,32 +436,30 @@ impl PitQueryEngine for LeakyPitEngine {
         );
         Ok(Some(BookSnapshotAt {
             token_id: token_id.clone(),
-            as_of,
+            source_cutoff,
+            decision_at: boundary.decision_at(),
             bids: Arc::from([bid]),
             asks: Arc::from([ask]),
-            timestamp_ms: u64::try_from(observed_ms).unwrap_or(0),
+            timestamp_ms: u64::try_from(observed_ms).expect("positive test timestamp"),
             version: 1,
+            sequence: 1,
+            available_at: boundary.decision_at(),
         }))
     }
 
-    async fn market_at(
+    async fn market_snapshot_at(
         &self,
         market_id: &MarketId,
-        as_of: chrono::DateTime<Utc>,
-    ) -> QuantResult<Option<MarketContextAt>> {
-        if market_id != &self.market_id {
-            return Ok(None);
-        }
-        Ok(Some(MarketContextAt {
-            market_id: market_id.clone(),
-            as_of,
-            observed_at: as_of - ChronoDuration::days(1),
-            status: MarketStatus::Active,
-            neg_risk: false,
-            end_date: Some(as_of + ChronoDuration::days(7)),
-            created_at: as_of - ChronoDuration::days(2),
-            outcome_count: 2,
-        }))
+        boundary: &quant_pivot_models::domain::DecisionBoundary,
+    ) -> QuantResult<Option<ResolvedMarketSnapshot>> {
+        self.catalog.market_snapshot_at(market_id, boundary).await
+    }
+
+    async fn market_snapshots_at_boundary(
+        &self,
+        boundary: &quant_pivot_models::domain::DecisionBoundary,
+    ) -> QuantResult<Vec<ResolvedMarketSnapshot>> {
+        self.catalog.market_snapshots_at_boundary(boundary).await
     }
 }
 
@@ -435,15 +518,26 @@ fn micro_row(token: &str, bucket_time_ms: i64, mid: Decimal) -> BookMicrostructu
         last_trade_count: 0,
         max_book_age_ms: 0,
         schema_version: ChSchemaVersion::FIRST,
+        available_at: bucket_time_ms,
     }
 }
 
 fn pit_scenario(as_of_ms: i64) -> FactScenario {
     let token = TokenId::new(YES_TOKEN);
-    // Book and micro evidence must precede `as_of - source_delay` (10s in tests).
+    // Book and micro evidence must precede the frozen source cutoff (10s lag here).
     let evidence_ms = as_of_ms - 15_000;
     let mut books = HashMap::new();
-    books.insert(token.clone(), vec![book_row(YES_TOKEN, evidence_ms)]);
+    books.insert(
+        token.clone(),
+        vec![
+            book_row(YES_TOKEN, evidence_ms),
+            // Keep-rate midpoint slices must each see a genuinely fresh PIT
+            // book; one stale fixture row would measure fixture age, not the
+            // selection funnel's keep rate.
+            book_row(YES_TOKEN, as_of_ms + 5_000),
+            book_row(YES_TOKEN, as_of_ms + 25_000),
+        ],
+    );
 
     let mut micro = HashMap::new();
     micro.insert(
@@ -498,33 +592,181 @@ async fn seed_catalog(db: &DatabaseConnection, window_start: chrono::DateTime<Ut
     seed_catalog_with_category(db, window_start, MarketCategory::Sports).await;
 }
 
-async fn seed_catalog_with_category(
-    db: &DatabaseConnection,
-    window_start: chrono::DateTime<Utc>,
+struct CatalogSeedContext {
+    source_effective_at: DateTime<Utc>,
+    end_date: DateTime<Utc>,
+    batch_id: CatalogSyncBatchId,
+    event_version_id: EventCatalogVersionId,
+    event_id: EventId,
+    market_id: MarketId,
+}
+
+impl CatalogSeedContext {
+    fn new(window_start: DateTime<Utc>) -> Self {
+        Self {
+            source_effective_at: window_start - ChronoDuration::days(1),
+            end_date: window_start + ChronoDuration::days(7),
+            batch_id: CatalogSyncBatchId::from_v7(),
+            event_version_id: EventCatalogVersionId::from_v7(),
+            event_id: EventId::new(EVENT_ID),
+            market_id: MarketId::new(MARKET_ID),
+        }
+    }
+}
+
+fn catalog_fixture_hash(seed: char) -> ContentHash {
+    ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64)))
+        .expect("catalog fixture hash")
+}
+
+fn current_event_projection(context: &CatalogSeedContext, category: MarketCategory) -> UpsertEvent {
+    let mut event = make_event(EVENT_ID, "Dataset E2E", "dataset-e2e", category);
+    event.catalog_market_ids = vec![context.market_id.clone()].into();
+    event
+}
+
+fn current_market_projection(
+    context: &CatalogSeedContext,
     category: MarketCategory,
-) {
-    PgEventRepository::new(db.clone())
-        .upsert(make_event(EVENT_ID, "Dataset E2E", "dataset-e2e", category))
-        .await
-        .expect("seed event");
+) -> UpsertMarket {
     let mut market = make_market(
         MARKET_ID,
         EVENT_ID,
         "Dataset E2E?",
         "dataset-e2e",
         category,
-        Some(window_start + ChronoDuration::days(7)),
+        Some(context.end_date),
     );
     market.yes_token_id = TokenId::new(YES_TOKEN);
     market.no_token_id = TokenId::new(NO_TOKEN);
-    PgMarketRepository::new(db.clone())
-        .upsert(market)
-        .await
-        .expect("seed market");
+    market
+}
 
-    let created_at = window_start - ChronoDuration::days(1);
+fn event_registry_payload(
+    context: &CatalogSeedContext,
+    category: MarketCategory,
+) -> EventRegistryInfo {
+    EventRegistryInfo {
+        event_id: context.event_id.clone(),
+        title: "Dataset E2E".to_owned(),
+        slug: "dataset-e2e".to_owned(),
+        series_slug: None,
+        status: EventStatus::Active,
+        market_ids: vec![context.market_id.clone()],
+        categories: CategorySet::from(category),
+        tags: vec![category.as_str().to_owned()],
+        neg_risk: false,
+        end_date: Some(context.end_date),
+        created_at: context.source_effective_at,
+        updated_at: context.source_effective_at,
+    }
+}
+
+fn market_registry_payload(
+    context: &CatalogSeedContext,
+    category: MarketCategory,
+) -> MarketRegistryInfo {
+    MarketRegistryInfo {
+        market_id: context.market_id.clone(),
+        event_id: context.event_id.clone(),
+        token_yes: TokenId::new(YES_TOKEN),
+        token_no: TokenId::new(NO_TOKEN),
+        question: "Dataset E2E?".to_owned(),
+        slug: "dataset-e2e".to_owned(),
+        description: None,
+        categories: CategorySet::from(category),
+        status: MarketStatus::Active,
+        outcome: None,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![
+            TokenInfo {
+                token_id: TokenId::new(YES_TOKEN),
+                outcome: "Yes".to_owned(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: TokenId::new(NO_TOKEN),
+                outcome: "No".to_owned(),
+                neg_risk: false,
+            },
+        ],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: Decimal::ONE,
+        liquidity_usd: Some(Usd::new(dec!(1000))),
+        volume_24h: Some(Usd::new(dec!(1000))),
+        fee_schedule: None,
+        end_date: Some(context.end_date),
+        resolved_at: None,
+        created_at: Some(context.source_effective_at),
+        updated_at: context.source_effective_at,
+    }
+}
+
+fn durable_catalog_commit(context: &CatalogSeedContext, category: MarketCategory) -> CatalogCommit {
+    let event_payload = event_registry_payload(context, category);
+    let market_payload = market_registry_payload(context, category);
+
+    CatalogCommit {
+        batch: NewCatalogSyncBatch {
+            catalog_sync_batch_id: context.batch_id.clone(),
+            sync_kind: "full".to_owned(),
+            source_cursor: None,
+            started_at: context.source_effective_at,
+            fetched_at: context.source_effective_at,
+            event_count: 1,
+            market_count: 1,
+            rejected_count: 0,
+            batch_hash: catalog_fixture_hash('1'),
+        },
+        current_events: vec![current_event_projection(context, category)],
+        event_versions: vec![NewEventCatalogVersion {
+            event_catalog_version_id: context.event_version_id.clone(),
+            catalog_sync_batch_id: context.batch_id.clone(),
+            event_id: context.event_id.clone(),
+            source_effective_at: context.source_effective_at,
+            source_timestamp_quality: "source".to_owned(),
+            available_at: context.source_effective_at,
+            origin: "gamma_sync".to_owned(),
+            content_hash: catalog_fixture_hash('2'),
+            payload: serde_json::to_value(&event_payload).expect("event payload"),
+        }],
+        current_markets: vec![current_market_projection(context, category)],
+        market_versions: vec![NewMarketCatalogVersion {
+            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+            catalog_sync_batch_id: context.batch_id.clone(),
+            event_catalog_version_id: context.event_version_id.clone(),
+            market_id: context.market_id.clone(),
+            event_id: context.event_id.clone(),
+            source_effective_at: context.source_effective_at,
+            source_timestamp_quality: "source".to_owned(),
+            source_created_at: Some(context.source_effective_at),
+            available_at: context.source_effective_at,
+            origin: "gamma_sync".to_owned(),
+            content_hash: catalog_fixture_hash('3'),
+            payload: serde_json::to_value(&market_payload).expect("market payload"),
+        }],
+    }
+}
+
+async fn seed_catalog_with_category(
+    db: &DatabaseConnection,
+    window_start: chrono::DateTime<Utc>,
+    category: MarketCategory,
+) {
+    let context = CatalogSeedContext::new(window_start);
+    PgCatalogVersionRepository::new(db.clone())
+        .commit(durable_catalog_commit(&context, category))
+        .await
+        .expect("seed durable catalog");
+
     MarketEntity::update_many()
-        .col_expr(MarketColumn::CreatedAt, Expr::value(created_at))
+        .col_expr(
+            MarketColumn::CreatedAt,
+            Expr::value(context.source_effective_at),
+        )
         .filter(MarketColumn::MarketId.eq(MARKET_ID))
         .exec(db)
         .await
@@ -532,12 +774,12 @@ async fn seed_catalog_with_category(
 }
 
 async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
-    seed_model_spec_with_requirements(db, serde_json::json!({})).await
+    seed_model_spec_with_contract(db, ModelInputContract::single_required("book.mid")).await
 }
 
-async fn seed_model_spec_with_requirements(
+async fn seed_model_spec_with_contract(
     db: &DatabaseConnection,
-    feature_requirements: serde_json::Value,
+    input_contract: ModelInputContract,
 ) -> ModelSpecId {
     let model_spec_id = ModelSpecId::from_v7();
     PgModelRegistryRepository::new(db.clone())
@@ -549,7 +791,8 @@ async fn seed_model_spec_with_requirements(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements,
+            input_contract,
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -570,7 +813,6 @@ fn service(
             enabled_categories: vec![MarketCategory::Sports],
             ..SelectionConfig::default()
         },
-        DecimalString::new("0"),
     )
 }
 
@@ -579,7 +821,6 @@ fn service_with_selection(
     store: Arc<dyn ArtifactStore>,
     fact_read: Arc<dyn QuantFactReadRepository>,
     selection: SelectionConfig,
-    min_selection_depth_usd: DecimalString,
 ) -> TrainingDatasetService {
     service_with_selection_and_linkage(
         db,
@@ -588,7 +829,6 @@ fn service_with_selection(
         Arc::new(EmptyLinkageRepo),
         features_config(),
         selection,
-        min_selection_depth_usd,
     )
 }
 
@@ -606,18 +846,18 @@ fn service_with_selection_and_linkage(
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     features: FeaturesConfig,
     selection: SelectionConfig,
-    min_selection_depth_usd: DecimalString,
 ) -> TrainingDatasetService {
     TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             fact_read,
+            catalog_repo: Arc::new(PgCatalogVersionRepository::new(db.clone())),
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
-            event_repo: Arc::new(PgEventRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
             attribution_repo: Arc::new(PgAttributionRepository::new(db.clone())),
             recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
+            selection_repo: Arc::new(PgMarketSelectionRepository::new(db.clone())),
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
             fee_calculator: Arc::new(FeeCalculator::new()),
             linkage_repo,
@@ -628,18 +868,14 @@ fn service_with_selection_and_linkage(
             factors: factors_config(),
             domain: DomainConfig::default(),
             data_quality: DataQualityConfig {
-                // Default `max_book_age_ms` (5s) conflicts with `source_delay_secs`
+                // Default `max_book_age_ms` (5s) conflicts with `knowledge_lag_secs`
                 // (10s): PIT evidence must be older than the delay but younger than
                 // the book-age bound.
                 max_book_age_ms: 60_000,
                 max_feature_bucket_age_secs: 120,
                 ..DataQualityConfig::default()
             },
-            training: TrainingConfig {
-                // Offline PIT selection uses book depth as the liquidity proxy.
-                min_selection_depth_usd,
-                ..TrainingConfig::default()
-            },
+            training: TrainingConfig::default(),
             // The point-in-time selection funnel replayed during the build uses
             // this frozen selection policy.
             selection,
@@ -675,7 +911,7 @@ async fn plan_request(
             window_end,
             sample_interval_secs: 60,
             horizons_secs: vec![60],
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
@@ -685,17 +921,40 @@ async fn plan_request(
         .expect("plan")
 }
 
-fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, source_delay_secs: u64) {
-    let delay = ChronoDuration::seconds(i64::try_from(source_delay_secs).unwrap_or(i64::MAX));
+fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, knowledge_lag_secs: u64) {
     for example in &artifact.examples {
-        let cutoff = example.as_of - delay;
+        assert_eq!(
+            example.decision_boundary.knowledge_lag_secs(),
+            knowledge_lag_secs
+        );
         for source in &example.source_refs {
+            let cutoff = match source.source_kind {
+                EvidenceSourceKind::Book => {
+                    example.decision_boundary.cutoff_for(DecisionSource::Book)
+                }
+                EvidenceSourceKind::GammaMetadata => example
+                    .decision_boundary
+                    .cutoff_for(DecisionSource::Catalog),
+                EvidenceSourceKind::ClickHouseFact => example
+                    .decision_boundary
+                    .cutoff_for(DecisionSource::Microstructure),
+                EvidenceSourceKind::TradeTape => example
+                    .decision_boundary
+                    .cutoff_for(DecisionSource::TradeTape),
+                EvidenceSourceKind::DomainExternal => example
+                    .decision_boundary
+                    .cutoff_for(DecisionSource::DomainCrypto),
+                EvidenceSourceKind::Linkage => example
+                    .decision_boundary
+                    .cutoff_for(DecisionSource::Linkage),
+                EvidenceSourceKind::Derived => example.decision_at(),
+            };
             assert!(
-                source.observed_at <= cutoff,
-                "future feature evidence: observed_at {} > cutoff {} (as_of {})",
-                source.observed_at,
+                source.effective_at <= cutoff,
+                "future feature evidence: observed_at {} > cutoff {} (decision_at {})",
+                source.effective_at,
                 cutoff,
-                example.as_of,
+                example.decision_at(),
             );
         }
     }
@@ -738,7 +997,7 @@ async fn historical_pit_no_look_ahead_via_dataset_build() {
 #[tokio::test(flavor = "multi_thread")]
 async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     // Phase 11.3 P1-8: a `purpose = Calibration` dataset whose window
-    // overlaps a `Built` training dataset must fail closed at *build* time
+    // overlaps a `Ready` training dataset must fail closed at *build* time
     // (not only later, at calibrator-fit time) — the purge primitive shared
     // with `ModelCalibrationFitService`/`BiasTableFitService`. The
     // existing training dataset is seeded directly (its own materialization
@@ -752,28 +1011,59 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     let model_spec_id = seed_model_spec(&db).await;
 
     let hash = ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("hash");
-    PgTrainingDatasetRepository::new(db.clone())
-        .create(NewTrainingDataset {
-            training_dataset_id: TrainingDatasetId::from_v7(),
+    let dataset_id = TrainingDatasetId::from_v7();
+    let manifest = ledger_manifest(
+        &dataset_id,
+        &model_spec_id,
+        &rc_id,
+        window_start,
+        window_end,
+        &hash,
+        10,
+    );
+    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    dataset_repo
+        .create_plan(NewTrainingDatasetPlan {
+            training_dataset_id: dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
             window_start,
             window_end,
-            status: TrainingDatasetStatus::Built,
             purpose: DatasetPurpose::Training,
-            feature_schema_hash: hash.clone(),
-            factor_schema_hash: hash.clone(),
-            label_schema_hash: hash.clone(),
-            dataset_hash: hash,
-            parquet_uri: ArtifactUri::parse("file:///tmp/existing-training.parquet").expect("uri"),
-            sample_count: 10,
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             sample_interval_secs: 3600,
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
-            coverage_json: DatasetCoverage::default(),
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             runtime_config_version_id: rc_id.clone(),
         })
         .await
-        .expect("seed existing Built training dataset");
+        .expect("seed existing training dataset plan");
+    dataset_repo
+        .start_build(&dataset_id)
+        .await
+        .expect("start existing training dataset");
+    dataset_repo
+        .complete_build(
+            &dataset_id,
+            CompleteTrainingDatasetBuild {
+                status: TrainingDatasetStatus::Ready,
+                feature_schema_hash: hash.clone(),
+                factor_schema_hash: hash.clone(),
+                label_schema_hash: hash.clone(),
+                dataset_hash: hash.clone(),
+                manifest_hash,
+                manifest_json: manifest,
+                artifact_bytes_hash: hash,
+                parquet_uri: ArtifactUri::parse("file:///tmp/existing-training.parquet")
+                    .expect("uri"),
+                sample_count: 10,
+                coverage_json: DatasetCoverage::default(),
+                failure_detail: None,
+            },
+        )
+        .await
+        .expect("seed existing Ready training dataset");
 
     let as_of_ms = sample_as_of(window_start).timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
@@ -792,7 +1082,7 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
             window_end,
             sample_interval_secs: 60,
             horizons_secs: vec![60],
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
@@ -803,7 +1093,7 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     let err = svc
         .build(calibration_plan)
         .await
-        .expect_err("a calibration dataset overlapping a Built training dataset must fail closed");
+        .expect_err("a calibration dataset overlapping a Ready training dataset must fail closed");
     assert!(
         matches!(
             err,
@@ -835,8 +1125,8 @@ async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
     let dataset_id = plan.training_dataset_id.clone();
 
     // A cancel observed at the first cross-section boundary unwinds the build
-    // cooperatively (~one section): it fails closed with `Cancelled` and never
-    // persists a partial artifact or ledger row.
+    // cooperatively (~one section): it fails closed with `Cancelled`, persists
+    // no partial artifact, and retains a terminal Failed audit row.
     let cancel = CancellationToken::new();
     cancel.cancel();
     let sink: Arc<dyn JobProgressSink> = Arc::new(NoopProgressSink);
@@ -848,13 +1138,17 @@ async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
         matches!(err, QuantError::Research(ResearchError::Cancelled { .. })),
         "expected Cancelled, got {err:?}"
     );
+    let row = PgTrainingDatasetRepository::new(db)
+        .find_by_id(&dataset_id)
+        .await
+        .expect("lookup")
+        .expect("cancelled build audit row");
+    assert_eq!(row.status, TrainingDatasetStatus::Failed);
     assert!(
-        PgTrainingDatasetRepository::new(db)
-            .find_by_id(&dataset_id)
-            .await
-            .expect("lookup")
-            .is_none(),
-        "a cancelled build must not persist a ledger row"
+        row.failure_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("cancelled")),
+        "cancelled build must retain its terminal audit reason"
     );
 }
 
@@ -873,16 +1167,16 @@ async fn pit_selection_excludes_disabled_category_market() {
     let store = temp_artifact_store();
     // The market passes the cheap plan prefilter (Sports + lifetime) so it enters
     // the spine as a candidate, but the point-in-time FilterChain then rejects it:
-    // its ~100 USD book depth is below this liquidity floor.
+    // its historical Gamma liquidity is below this governed online/offline floor.
     let svc = service_with_selection(
         &db,
         Arc::clone(&store),
         Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
         SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
+            min_liquidity_usd: DecimalString::new("1000000"),
             ..SelectionConfig::default()
         },
-        DecimalString::new("1000000"),
     );
 
     let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
@@ -893,7 +1187,7 @@ async fn pit_selection_excludes_disabled_category_market() {
     );
     assert_eq!(
         artifact.coverage.pit_selection_included, 0,
-        "a market below the book-depth floor must be excluded by the PIT funnel",
+        "a market below the catalog-liquidity floor must be excluded by the PIT funnel",
     );
     assert!(
         artifact
@@ -916,14 +1210,9 @@ async fn pit_selection_excludes_crypto_market_when_model_requires_unavailable_do
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
-    let model_spec_id = seed_model_spec_with_requirements(
+    let model_spec_id = seed_model_spec_with_contract(
         &db,
-        serde_json::json!({
-            "generic": [],
-            "by_category": {
-                "crypto": ["domain.crypto.distance_to_strike"]
-            }
-        }),
+        ModelInputContract::single_required("domain.crypto.distance_to_strike"),
     )
     .await;
 
@@ -944,7 +1233,6 @@ async fn pit_selection_excludes_crypto_market_when_model_requires_unavailable_do
             enabled_categories: vec![MarketCategory::Crypto],
             ..SelectionConfig::default()
         },
-        DecimalString::new("0"),
     );
 
     let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
@@ -980,7 +1268,7 @@ fn crypto_instrument() -> DomainInstrumentKey {
 fn resolved_crypto_linkage(
     derived_at: DateTime<Utc>,
     reference_at: DateTime<Utc>,
-) -> MarketLinkage {
+) -> NewMarketLinkage {
     let market_id = MarketId::new(MARKET_ID);
     let outcome = LinkageOutcome::Resolved(ResolvedBinding {
         subject: MarketSubject::Crypto(CryptoSubject {
@@ -1000,28 +1288,16 @@ fn resolved_crypto_linkage(
         override_context: None,
     });
     let metadata_hash = ContentHash::parse(format!("blake3:{}", "7".repeat(64))).expect("hash");
-    let content_hash = MarketLinkage::compute_content_hash(
-        &market_id,
-        DomainFamily::Crypto,
-        &outcome,
-        ResolverTier::Tier0Slug,
-        ResolverVersion::FIRST,
-        &metadata_hash,
-    )
-    .expect("content hash");
-    MarketLinkage {
-        linkage_id: MarketLinkageId::from_v7(),
+    NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id,
-        domain_family: DomainFamily::Crypto,
         outcome,
         confidence: Probability::ONE,
         resolver_tier: ResolverTier::Tier0Slug,
         resolver_version: ResolverVersion::FIRST,
         metadata_hash,
-        content_hash,
-        derived_at,
-        created_at: derived_at,
-    }
+        effective_at: derived_at,
+    })
+    .expect("new linkage")
 }
 
 fn crypto_close_observation(event_time_ms: i64) -> DomainObservationRow {
@@ -1044,14 +1320,9 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
     let rc_id = seed_runtime_config(&db).await;
     let (window_start, window_end) = dataset_window();
     seed_catalog_with_category(&db, window_start, MarketCategory::Crypto).await;
-    let model_spec_id = seed_model_spec_with_requirements(
+    let model_spec_id = seed_model_spec_with_contract(
         &db,
-        serde_json::json!({
-            "generic": [],
-            "by_category": {
-                "crypto": ["domain.crypto.distance_to_strike"]
-            }
-        }),
+        ModelInputContract::single_required("domain.crypto.distance_to_strike"),
     )
     .await;
 
@@ -1068,17 +1339,26 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
     let store = temp_artifact_store();
 
     let linkage_repo = Arc::new(PgMarketLinkageRepository::new(db.clone()));
-    linkage_repo
-        .append(
-            resolved_crypto_linkage(
-                as_of - ChronoDuration::hours(1),
-                as_of - ChronoDuration::seconds(10),
-            )
-            .to_new()
-            .expect("linkage to_new"),
-        )
+    let seeded_linkage = linkage_repo
+        .append(resolved_crypto_linkage(
+            as_of - ChronoDuration::hours(1),
+            as_of - ChronoDuration::seconds(10),
+        ))
         .await
         .expect("seed resolved crypto linkage");
+    // `created_at` is the database-owned availability clock. This historical
+    // fixture represents a linkage that had already been persisted before the
+    // sampled decision, so backdate that clock explicitly instead of letting a
+    // row inserted by this test at wall-clock "now" leak into a past replay.
+    LinkageEntity::update_many()
+        .col_expr(
+            LinkageColumn::CreatedAt,
+            Expr::value(as_of - ChronoDuration::seconds(30)),
+        )
+        .filter(LinkageColumn::LinkageId.eq(seeded_linkage.linkage_id))
+        .exec(&db)
+        .await
+        .expect("backdate linkage availability");
 
     let svc = service_with_selection_and_linkage(
         &db,
@@ -1090,7 +1370,6 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
             enabled_categories: vec![MarketCategory::Crypto],
             ..SelectionConfig::default()
         },
-        DecimalString::new("0"),
     );
 
     let plan = svc
@@ -1101,7 +1380,7 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
             window_end,
             sample_interval_secs: 60,
             horizons_secs: vec![60],
-            source_delay_secs: domain_config.crypto.source_delay_secs,
+            knowledge_lag_secs: domain_config.crypto.availability_lag_secs,
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
@@ -1140,7 +1419,7 @@ fn assert_crypto_pit_selection_includes_domain_feature(artifact: &TrainingDatase
             .domain
             .as_ref()
             .and_then(|slice| slice.values.get(&distance_to_strike))
-            .is_some_and(|value| !value.is_missing())
+            .is_some_and(|cell| cell.value().is_some())
     });
     assert!(
         computed,
@@ -1181,7 +1460,7 @@ async fn plan_estimates_pit_keep_rate() {
         window_end,
         sample_interval_secs: 60,
         horizons_secs: vec![60],
-        source_delay_secs: 10,
+        knowledge_lag_secs: 10,
         feature_schema_version: SchemaVersion::FIRST,
         sample_sources: vec![TrainingSampleSource::HistoricalPit],
         training_dataset_id: None,
@@ -1215,39 +1494,47 @@ async fn dataset_builder_rejects_future_features() {
     let as_of_ms = as_of.timestamp_millis();
     let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
     let store = temp_artifact_store();
+    let fact_read = Arc::new(ControllableFactRead::new(Arc::clone(&scenario)));
     let svc = service(
         &db,
         Arc::clone(&store),
-        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+        Arc::clone(&fact_read) as Arc<dyn QuantFactReadRepository>,
     );
     let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
     let dataset_id = plan.training_dataset_id.clone();
 
     let leaky = LeakyPitEngine {
         token_id: TokenId::new(YES_TOKEN),
-        market_id: MarketId::new(MARKET_ID),
         leak_ms: 5_000,
+        catalog: Arc::new(DurablePitSource::new(
+            fact_read as Arc<dyn QuantFactReadRepository>,
+            Arc::new(PgCatalogVersionRepository::new(db.clone())),
+        )),
     };
     let err = svc
         .build_with_pit_source(plan, &leaky)
         .await
-        .expect_err("leaky pit must fail leakage gate");
+        .expect_err("a future book must fail at the PIT resolver boundary");
 
     assert!(
         matches!(
             err,
-            QuantError::Research(ResearchError::LeakageDetected { .. })
+            QuantError::Research(ResearchError::PitResolution { .. })
         ),
-        "expected LeakageDetected, got {err:?}"
+        "expected PitResolution, got {err:?}"
     );
 
-    let repo = PgTrainingDatasetRepository::new(db.clone());
+    let row = PgTrainingDatasetRepository::new(db.clone())
+        .find_by_id(&dataset_id)
+        .await
+        .expect("lookup")
+        .expect("failed build audit row");
+    assert_eq!(row.status, TrainingDatasetStatus::Failed);
     assert!(
-        repo.find_by_id(&dataset_id)
-            .await
-            .expect("lookup")
-            .is_none(),
-        "failed build must not persist ledger row"
+        row.failure_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("after source cutoff")),
+        "failed build must retain the precise PIT boundary violation"
     );
 }
 
@@ -1546,29 +1833,58 @@ async fn model_version_training_dataset_id_is_typed() {
     let dataset_id = TrainingDatasetId::from_v7();
     let (window_start, window_end) = dataset_window();
     let hash = ContentHash::parse(format!("blake3:{}", "b".repeat(64))).expect("hash");
+    let manifest = ledger_manifest(
+        &dataset_id,
+        &model_spec_id,
+        &rc_id,
+        window_start,
+        window_end,
+        &hash,
+        10,
+    );
+    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
 
-    PgTrainingDatasetRepository::new(db.clone())
-        .create(NewTrainingDataset {
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    dataset_repo
+        .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
             window_start,
             window_end,
-            status: TrainingDatasetStatus::Built,
             purpose: DatasetPurpose::Training,
-            feature_schema_hash: hash.clone(),
-            factor_schema_hash: hash.clone(),
-            label_schema_hash: hash.clone(),
-            dataset_hash: hash.clone(),
-            parquet_uri: ArtifactUri::parse("file:///tmp/dataset.parquet").expect("uri"),
-            sample_count: 10,
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             sample_interval_secs: 3600,
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
-            coverage_json: DatasetCoverage::default(),
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             runtime_config_version_id: rc_id,
         })
         .await
-        .expect("create dataset");
+        .expect("create dataset plan");
+    dataset_repo
+        .start_build(&dataset_id)
+        .await
+        .expect("start dataset build");
+    dataset_repo
+        .complete_build(
+            &dataset_id,
+            CompleteTrainingDatasetBuild {
+                status: TrainingDatasetStatus::Ready,
+                feature_schema_hash: hash.clone(),
+                factor_schema_hash: hash.clone(),
+                label_schema_hash: hash.clone(),
+                dataset_hash: hash.clone(),
+                manifest_hash,
+                manifest_json: manifest,
+                artifact_bytes_hash: hash.clone(),
+                parquet_uri: ArtifactUri::parse("file:///tmp/dataset.parquet").expect("uri"),
+                sample_count: 10,
+                coverage_json: DatasetCoverage::default(),
+                failure_detail: None,
+            },
+        )
+        .await
+        .expect("complete dataset");
 
     let version_id = ModelVersionId::from_v7();
     PgModelRegistryRepository::new(db.clone())
@@ -1631,7 +1947,7 @@ async fn plan_count_respects_sample_sources() {
             window_end,
             sample_interval_secs: 60,
             horizons_secs: vec![60],
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: vec![TrainingSampleSource::HistoricalPit],
             training_dataset_id: None,

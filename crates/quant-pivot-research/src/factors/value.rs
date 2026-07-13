@@ -303,8 +303,8 @@ impl FactorEligibility {
 pub struct MarketFactorOutcome {
     /// The market this outcome describes.
     pub market_id: MarketId,
-    /// Decision time the factors were computed as of.
-    pub as_of: DateTime<Utc>,
+    /// Frozen decision time for the factor computation.
+    pub decision_at: DateTime<Utc>,
     /// Market-level eligibility verdict.
     pub eligibility: FactorEligibility,
     /// Every enabled factor for this market, with transient scoring flags.

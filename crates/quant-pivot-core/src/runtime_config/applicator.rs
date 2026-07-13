@@ -151,11 +151,13 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
             .validate(&arc.model)
             .await?;
 
-        self.propagate(&arc);
         let breaker = self.execution_breaker.lock().clone();
         if let Some(breaker) = breaker {
-            breaker.reload(&arc.execution.breaker);
+            breaker
+                .reload(&arc.execution.breaker)
+                .map_err(ControlError::from)?;
         }
+        self.propagate(&arc);
         self.store.swap(Arc::clone(&arc));
         Ok(())
     }

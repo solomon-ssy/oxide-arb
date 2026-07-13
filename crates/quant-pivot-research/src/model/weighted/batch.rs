@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use ndarray::{Array1, Array2};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 
@@ -25,33 +26,49 @@ pub struct ScoringBatchLayout {
 
 impl ScoringBatchLayout {
     /// Build the batch layout from the runtime's frozen weight index.
-    #[must_use]
-    pub fn from_weights(weights: &BTreeMap<FactorName, Decimal>) -> Self {
+    pub fn from_weights(weights: &BTreeMap<FactorName, Decimal>) -> QuantResult<Self> {
         let factor_columns: Vec<FactorName> = weights.keys().cloned().collect();
-        let weight_values: Vec<f64> = factor_columns
+        let weight_values = factor_columns
             .iter()
-            .map(|name| weights.get(name).and_then(Decimal::to_f64).unwrap_or(0.0))
-            .collect();
+            .map(|name| {
+                let weight =
+                    weights
+                        .get(name)
+                        .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                            detail: format!("weighted batch column {name} has no frozen weight"),
+                        })?;
+                weight
+                    .to_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| {
+                        ResearchError::InvalidModelArtifact {
+                            detail: format!(
+                                "weight for factor {name} cannot be represented as f64"
+                            ),
+                        }
+                        .into()
+                    })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
         let column_index = factor_columns
             .iter()
             .enumerate()
             .map(|(index, name)| (name.clone(), index))
             .collect();
-        Self {
+        Ok(Self {
             weights: Array1::from_vec(weight_values),
             column_index,
-        }
+        })
     }
 
     /// Compute the directional net score for each inference row.
-    #[must_use]
-    pub fn compute_nets(&self, rows: &[FactorInferenceRow]) -> Vec<Decimal> {
+    pub fn compute_nets(&self, rows: &[FactorInferenceRow]) -> QuantResult<Vec<Decimal>> {
         if rows.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let factor_count = self.weights.len();
         if factor_count == 0 {
-            return vec![Decimal::ZERO; rows.len()];
+            return Ok(vec![Decimal::ZERO; rows.len()]);
         }
 
         let mut signed_matrix = Array2::<f64>::zeros((rows.len(), factor_count));
@@ -68,8 +85,14 @@ impl ScoringBatchLayout {
                 let Some(score) = factor.normalized_score() else {
                     continue;
                 };
-                let normalized = score.inner().to_f64().unwrap_or(0.0);
-                let confidence = factor.confidence.inner().to_f64().unwrap_or(0.0);
+                let normalized = decimal_to_f64(
+                    score.inner(),
+                    &format!("normalized score for factor {}", factor.name),
+                )?;
+                let confidence = decimal_to_f64(
+                    factor.confidence.inner(),
+                    &format!("confidence for factor {}", factor.name),
+                )?;
                 let direction = f64::from(factor.direction.as_i8());
                 signed_matrix[[row_index, *column]] = direction * normalized * confidence;
             }
@@ -83,11 +106,34 @@ impl ScoringBatchLayout {
     }
 }
 
+fn decimal_to_f64(value: Decimal, field: &str) -> QuantResult<f64> {
+    value
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            ResearchError::Inference {
+                detail: format!("{field} cannot be represented as finite f64"),
+            }
+            .into()
+        })
+}
+
 /// Quantize an `f64` batch result back to the research decimal scale.
-fn decimal_from_f64(value: f64) -> Decimal {
-    Decimal::from_f64(value).map_or(Decimal::ZERO, |decimal| {
-        decimal.round_dp(RESEARCH_DECIMAL_SCALE)
-    })
+fn decimal_from_f64(value: f64) -> QuantResult<Decimal> {
+    if !value.is_finite() {
+        return Err(ResearchError::Inference {
+            detail: "weighted batch produced a non-finite net score".to_owned(),
+        }
+        .into());
+    }
+    Decimal::from_f64(value)
+        .map(|decimal| decimal.round_dp(RESEARCH_DECIMAL_SCALE))
+        .ok_or_else(|| {
+            ResearchError::Inference {
+                detail: "weighted batch net score cannot be represented as Decimal".to_owned(),
+            }
+            .into()
+        })
 }
 
 #[cfg(test)]
@@ -136,11 +182,11 @@ mod tests {
         MarketInferenceContext {
             secondary_token_id: Some(TokenId::new("no")),
             yes_price: Price::new(dec!(0.5)),
-            no_price: None,
+            no_price: Some(Price::new(dec!(0.52))),
             liquidity_usd: Some(Usd::new(dec!(60000))),
             data_quality: DataQualityStatus::Fresh,
             time_to_resolution_secs: Some(86_400),
-            substitutions: Vec::new(),
+            substitution_reasons: Vec::new(),
         }
     }
 
@@ -171,7 +217,7 @@ mod tests {
         let mut weights = std::collections::BTreeMap::new();
         weights.insert(LIQUIDITY_DEPTH, dec!(0.5));
         weights.insert(MOMENTUM_ROC, dec!(0.5));
-        let layout = ScoringBatchLayout::from_weights(&weights);
+        let layout = ScoringBatchLayout::from_weights(&weights).expect("layout");
 
         let bullish = FactorInferenceRow {
             market_id: MarketId::new("0xbull"),
@@ -208,7 +254,7 @@ mod tests {
             context: context(),
         };
         let rows = vec![bullish, bearish];
-        let batch_nets = layout.compute_nets(&rows);
+        let batch_nets = layout.compute_nets(&rows).expect("batch nets");
         for (row, batch_net) in rows.iter().zip(batch_nets) {
             assert_eq!(batch_net, scalar_net(&weights, row));
         }

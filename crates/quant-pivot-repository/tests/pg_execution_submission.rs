@@ -15,13 +15,16 @@ use quant_pivot_error::storage::{
 use quant_pivot_models::{
     domain::{
         CapitalReconcileSettlement, CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot,
-        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewMarketSelection,
-        NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent,
-        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, PositionExit,
-        PositionFill, ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
+        NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
+        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+        NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewRuntimeConfigVersion, PositionExit, PositionFill, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
     },
-    entities::{quant_order_intent, quant_recommendation},
+    entities::{
+        quant_execution_order, quant_feature_parity_state, quant_order_intent, quant_recommendation,
+    },
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
@@ -35,10 +38,10 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerKind,
-            ExecutionOrderState, ExitSettlementMode, FactorDirection, ModelRunKind, ModelRunStatus,
-            OrderIntentStatus, OutcomeSide, PublicationStatus, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
-            ReportTriggerKind, SizingModelKind,
+            ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
+            FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
+            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
@@ -47,16 +50,16 @@ use quant_pivot_models::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
         ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec,
         EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId,
-        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
-        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
-        OperationLogId, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId,
-        Usd,
+        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId, OrderId,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
+        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -77,6 +80,7 @@ use quant_pivot_repository::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    report_fixtures,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -127,7 +131,10 @@ async fn create_entry_locks_capital_and_advances_intent() {
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
 
@@ -151,6 +158,42 @@ async fn create_entry_locks_capital_and_advances_intent() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn stale_parity_generation_blocks_entry_write_ahead() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    submission
+        .claim_for_submission(&intent_id, Utc::now())
+        .await
+        .expect("claim");
+
+    let stale_generation = FeatureParityStateId::from_v7();
+    let error = submission
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &stale_generation,
+        )
+        .await
+        .expect_err("stale clear generation must fail before write-ahead");
+    assert!(matches!(error, StorageError::StateConflict { .. }));
+
+    let orders = quant_execution_order::Entity::find()
+        .all(&db)
+        .await
+        .expect("execution orders");
+    assert!(orders.is_empty());
+    let intent = quant_order_intent::Entity::find_by_id(intent_id)
+        .one(&db)
+        .await
+        .expect("intent lookup")
+        .expect("intent row");
+    assert_eq!(intent.status, OrderIntentStatus::AdmissionPending);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn create_entry_advances_recommendation_to_executed() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -163,7 +206,10 @@ async fn create_entry_advances_recommendation_to_executed() {
         .await
         .expect("claim");
     submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
 
@@ -245,7 +291,10 @@ async fn partial_fill_splits_capital_while_locked() {
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create");
 
@@ -350,7 +399,10 @@ async fn full_fill_spends_capital_and_writes_position() {
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create");
 
@@ -409,7 +461,10 @@ async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create");
 
@@ -479,7 +534,10 @@ async fn rejected_releases_capital_without_position() {
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create");
 
@@ -527,7 +585,10 @@ async fn recover_dangling_returns_in_flight_orders() {
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create");
 
@@ -704,7 +765,10 @@ async fn ambiguous_order(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(&intent_id, ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create");
     submission
@@ -1274,7 +1338,30 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
         .order_intent_id
 }
 
+async fn seed_clear_feature_parity_state(db: &sea_orm::DatabaseConnection) -> FeatureParityStateId {
+    let state_id = FeatureParityStateId::from_v7();
+    quant_feature_parity_state::Entity::insert(
+        NewFeatureParityState {
+            state_id: state_id.clone(),
+            state: FeatureParityLatchState::Clear,
+            transition: FeatureParityStateTransition::GovernedAcknowledge,
+            cause_run_id: None,
+            recovery_run_id: None,
+            previous_state_id: None,
+            actor: Some("pg-execution-test".to_owned()),
+            acting_role: Some("risk_owner".to_owned()),
+            reason: "test fixture clear generation".to_owned(),
+        }
+        .into_active_model(),
+    )
+    .exec(db)
+    .await
+    .expect("seed feature parity clear generation");
+    state_id
+}
+
 async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
+    let feature_parity_state_id = seed_clear_feature_parity_state(db).await;
     let rc_id = seed_runtime_config(db).await;
     let (model_version_id, model_run_id) = seed_model_version(db, &rc_id).await;
     let event_id = "evt-1";
@@ -1282,6 +1369,7 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
     seed_market_catalog(db, event_id, market_id).await;
     let market_selection_id = seed_market_selection(db, &rc_id, market_id).await;
     let ids = TxnIds {
+        feature_parity_state_id,
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -1356,7 +1444,8 @@ async fn seed_model_version(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -1413,7 +1502,7 @@ async fn seed_market_selection(
         .create_snapshot(
             NewMarketSelection {
                 market_selection_id: id.clone(),
-                as_of: Utc::now(),
+                decision_at: Utc::now(),
                 runtime_config_version_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
@@ -1427,6 +1516,7 @@ async fn seed_market_selection(
 }
 
 struct TxnIds {
+    feature_parity_state_id: FeatureParityStateId,
     account_snapshot: AccountSnapshotId,
     data_quality_snapshot: ReportDataQualitySnapshotId,
     portfolio_plan: PortfolioPlanId,
@@ -1442,102 +1532,126 @@ struct TxnIds {
 
 fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
+    let report = report_row(ids, equity_snapshot_id.clone());
+    let sampled_feature_parity = report_fixtures::sampled_parity(&report);
     NewReportTransaction {
+        feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot()
         },
-        equity_snapshot: NewEquitySnapshot {
-            equity_snapshot_id: equity_snapshot_id.clone(),
-            as_of: Utc::now(),
-            source: AccountSource::Polymarket,
-            venue_net_liquidation_usd: Usd::new(dec!(10000)),
-            capital_base_usd: Usd::new(dec!(10000)),
-            available_usd: Usd::new(dec!(9000)),
-            reserved_usd: Usd::ZERO,
-            realized_pnl_cumulative_usd: Usd::ZERO,
-            unrealized_pnl_usd: Usd::ZERO,
-            high_water_mark_usd: Usd::new(dec!(10000)),
-            drawdown_pct: Decimal::ZERO,
-            account_snapshot_ref: Some(ids.account_snapshot.clone()),
-        },
+        equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id),
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
             runtime_config_version_id: ids.runtime_config_version.clone(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
-        portfolio_plan: NewPortfolioPlan {
-            portfolio_plan_id: ids.portfolio_plan.clone(),
-            model_run_id: Some(ids.model_run.clone()),
-            market_selection_id: ids.market_selection.clone(),
-            as_of: Utc::now(),
-            budget_usd: Usd::new(dec!(10000)),
-            allocated_usd: Usd::new(NOTIONAL),
-            risk_budget_json: PortfolioRiskBudget::default(),
-            constraints_json: PortfolioConstraintsSnapshot::default(),
-            rejected_summary: PortfolioRejectedSummary::default(),
-            optimizer_meta_json: PortfolioOptimizerMeta::default(),
-        },
-        report: NewRecommendationReport {
-            recommendation_report_id: ids.report.clone(),
-            report_kind: ReportKind::TopN,
-            trigger_kind: ReportTriggerKind::Scheduled,
-            trigger_key: format!("scheduled:test:{}", ids.report),
-            trigger_time: Utc::now(),
-            source_delay_secs: 10,
-            as_of: Utc::now(),
-            horizon_secs: 86_400,
-            runtime_mode: QuantRuntimeMode::AutoExecution,
-            runtime_config_version_id: ids.runtime_config_version.clone(),
-            model_version_id: ids.model_version.clone(),
-            market_selection_id: ids.market_selection.clone(),
-            portfolio_plan_id: ids.portfolio_plan.clone(),
-            top_n: 20,
-            status: RecommendationReportStatus::Published,
-            account_source: AccountSource::Polymarket,
-            capital_base_usd: Usd::new(dec!(10000)),
-            account_snapshot_ref: ids.account_snapshot.clone(),
-            equity_snapshot_ref: equity_snapshot_id,
-            data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
-            summary_json: report_summary(),
-            published_at: Some(Utc::now()),
-            valid_until: Some(Utc::now() + chrono::Duration::hours(1)),
-            revoked_at: None,
-            expired_at: None,
-            status_reason: None,
-        },
-        recommendations: vec![NewRecommendation {
-            recommendation_id: ids.recommendation.clone(),
-            recommendation_report_id: ids.report.clone(),
-            rank: 1,
-            market_id: MarketId::new(&ids.market),
-            event_id: EventId::new(&ids.event),
-            token_id: TokenId::new("token-1"),
-            outcome_side: OutcomeSide::Yes,
-            composite_score: Probability::new(dec!(0.7)),
-            risk_adjusted_score: Probability::new(dec!(0.65)),
-            confidence: Probability::new(dec!(0.72)),
-            expected_return_bps: Bps::new(dec!(150)),
-            downside_bps: Bps::new(dec!(80)),
-            identity: recommendation_identity(),
-            market_context: market_context(),
-            rank_before_portfolio: 1,
-            liquidity_score: Probability::new(dec!(0.8)),
-            data_quality_score: Probability::new(dec!(0.9)),
-            model_score_percentile: Probability::new(dec!(0.75)),
-            entry_plan: entry_plan(),
-            sizing_plan: sizing_plan(),
-            exit_plan: exit_plan(),
-            risk_envelope: risk_envelope(),
-            factor_breakdown: factor_breakdown(),
-            evidence_refs: evidence_refs(),
-            execution_eligibility: execution_eligibility(),
-            valid_from: Utc::now(),
-            valid_until: Utc::now() + chrono::Duration::hours(1),
-            status: RecommendationStatus::Published,
-        }],
+        portfolio_plan: report_portfolio_plan(ids),
+        report,
+        recommendations: vec![report_recommendation(ids)],
+        sampled_feature_parity: Some(sampled_feature_parity),
         operation_log: report_operation_log(ids),
+    }
+}
+
+fn report_equity_snapshot(
+    ids: &TxnIds,
+    equity_snapshot_id: &EquitySnapshotId,
+) -> NewEquitySnapshot {
+    NewEquitySnapshot {
+        equity_snapshot_id: equity_snapshot_id.clone(),
+        as_of: Utc::now(),
+        source: AccountSource::Polymarket,
+        venue_net_liquidation_usd: Usd::new(dec!(10000)),
+        capital_base_usd: Usd::new(dec!(10000)),
+        available_usd: Usd::new(dec!(9000)),
+        reserved_usd: Usd::ZERO,
+        realized_pnl_cumulative_usd: Usd::ZERO,
+        unrealized_pnl_usd: Usd::ZERO,
+        high_water_mark_usd: Usd::new(dec!(10000)),
+        drawdown_pct: Decimal::ZERO,
+        account_snapshot_ref: Some(ids.account_snapshot.clone()),
+    }
+}
+
+fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
+    NewPortfolioPlan {
+        portfolio_plan_id: ids.portfolio_plan.clone(),
+        model_run_id: Some(ids.model_run.clone()),
+        market_selection_id: ids.market_selection.clone(),
+        decision_at: Utc::now(),
+        budget_usd: Usd::new(dec!(10000)),
+        allocated_usd: Usd::new(NOTIONAL),
+        risk_budget_json: PortfolioRiskBudget::default(),
+        constraints_json: PortfolioConstraintsSnapshot::default(),
+        rejected_summary: PortfolioRejectedSummary::default(),
+        optimizer_meta_json: PortfolioOptimizerMeta::default(),
+    }
+}
+
+fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommendationReport {
+    NewRecommendationReport {
+        recommendation_report_id: ids.report.clone(),
+        report_kind: ReportKind::TopN,
+        trigger_kind: ReportTriggerKind::Scheduled,
+        trigger_key: format!("scheduled:test:{}", ids.report),
+        trigger_time: Utc::now(),
+        knowledge_lag_secs: 10,
+        decision_at: Utc::now(),
+        horizon_secs: 86_400,
+        runtime_mode: QuantRuntimeMode::AutoExecution,
+        runtime_config_version_id: ids.runtime_config_version.clone(),
+        model_run_id: None,
+        model_version_id: ids.model_version.clone(),
+        market_selection_id: ids.market_selection.clone(),
+        portfolio_plan_id: ids.portfolio_plan.clone(),
+        top_n: 20,
+        status: RecommendationReportStatus::Published,
+        account_source: AccountSource::Polymarket,
+        capital_base_usd: Usd::new(dec!(10000)),
+        account_snapshot_ref: ids.account_snapshot.clone(),
+        equity_snapshot_ref: equity_snapshot_id,
+        data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
+        summary_json: report_summary(),
+        published_at: Some(Utc::now()),
+        valid_until: Some(Utc::now() + chrono::Duration::hours(1)),
+        revoked_at: None,
+        expired_at: None,
+        status_reason: None,
+    }
+}
+
+fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
+    NewRecommendation {
+        recommendation_id: ids.recommendation.clone(),
+        recommendation_report_id: ids.report.clone(),
+        rank: 1,
+        market_id: MarketId::new(&ids.market),
+        event_id: EventId::new(&ids.event),
+        token_id: TokenId::new("token-1"),
+        outcome_side: OutcomeSide::Yes,
+        composite_score: Probability::new(dec!(0.7)),
+        risk_adjusted_score: Probability::new(dec!(0.65)),
+        confidence: Probability::new(dec!(0.72)),
+        expected_return_bps: Bps::new(dec!(150)),
+        downside_bps: Bps::new(dec!(80)),
+        identity: recommendation_identity(),
+        market_context: market_context(),
+        rank_before_portfolio: 1,
+        liquidity_score: Probability::new(dec!(0.8)),
+        data_quality_score: Probability::new(dec!(0.9)),
+        model_score_percentile: Probability::new(dec!(0.75)),
+        entry_plan: entry_plan(),
+        sizing_plan: sizing_plan(),
+        exit_plan: exit_plan(),
+        risk_envelope: risk_envelope(),
+        factor_breakdown: factor_breakdown(),
+        evidence_refs: evidence_refs(),
+        execution_eligibility: execution_eligibility(),
+        valid_from: Utc::now(),
+        valid_until: Utc::now() + chrono::Duration::hours(1),
+        status: RecommendationStatus::Published,
     }
 }
 
@@ -1721,7 +1835,7 @@ fn evidence_refs() -> EvidenceRefs {
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
-            "book:live:token-1:1:1700000000@blake3:{}",
+            "book:ch:token-1:1700000000:1700000000:1:1@blake3:{}",
             "0".repeat(64)
         ))
         .expect("book ref"),
@@ -1782,7 +1896,10 @@ async fn fill_entry_lot(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(intent_id, ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(intent_id, ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
     submission

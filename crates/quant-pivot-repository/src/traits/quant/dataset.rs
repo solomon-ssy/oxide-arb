@@ -2,18 +2,20 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewTrainingDataset, Paginated, TrainingDatasetInfo, TrainingDatasetListQuery},
-    enums::quant::TrainingDatasetStatus,
+    domain::{
+        CompleteTrainingDatasetBuild, NewTrainingDatasetPlan, Paginated, TrainingDatasetInfo,
+        TrainingDatasetListQuery,
+    },
     types::TrainingDatasetId,
 };
 
 /// Persistence port for the frozen training-dataset ledger.
 #[async_trait::async_trait]
 pub trait TrainingDatasetRepository: Send + Sync {
-    /// Insert a new training-dataset row, returning the persisted projection.
-    async fn create(
+    /// Persist the immutable plan before materialization starts.
+    async fn create_plan(
         &self,
-        dataset: NewTrainingDataset,
+        plan: NewTrainingDatasetPlan,
     ) -> Result<TrainingDatasetInfo, StorageError>;
 
     /// Look up a training dataset by id.
@@ -28,12 +30,30 @@ pub trait TrainingDatasetRepository: Send + Sync {
         query: TrainingDatasetListQuery,
     ) -> Result<Paginated<TrainingDatasetInfo>, StorageError>;
 
-    /// Transition a training dataset to `next`, enforcing the lifecycle state
-    /// machine. Returns [`StorageError::IllegalTransition`] on an illegal transition or
-    /// a missing row.
-    async fn mark_status(
+    /// Claim a planned build. Re-reading an already-building row is idempotent
+    /// so a lease-recovered research job can resume deterministic work.
+    async fn start_build(
         &self,
         training_dataset_id: &TrainingDatasetId,
-        next: TrainingDatasetStatus,
+    ) -> Result<TrainingDatasetInfo, StorageError>;
+
+    /// Atomically bind every verified artifact field and terminal build status.
+    async fn complete_build(
+        &self,
+        training_dataset_id: &TrainingDatasetId,
+        completion: CompleteTrainingDatasetBuild,
+    ) -> Result<TrainingDatasetInfo, StorageError>;
+
+    /// Fail a planned/building row without inventing artifact bindings.
+    async fn fail_build(
+        &self,
+        training_dataset_id: &TrainingDatasetId,
+        detail: String,
+    ) -> Result<TrainingDatasetInfo, StorageError>;
+
+    /// Retire a ready dataset while preserving its immutable artifact binding.
+    async fn expire(
+        &self,
+        training_dataset_id: &TrainingDatasetId,
     ) -> Result<TrainingDatasetInfo, StorageError>;
 }

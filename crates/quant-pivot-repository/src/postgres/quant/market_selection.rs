@@ -1,6 +1,6 @@
 //! Postgres-backed market selection snapshot repository.
 
-use crate::traits::MarketSelectionRepository;
+use crate::{postgres::query::find_models_by_id_chunks, traits::MarketSelectionRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
@@ -76,5 +76,24 @@ impl MarketSelectionRepository for PgMarketSelectionRepository {
             .await
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_members_by_snapshot_ids(
+        &self,
+        snapshot_ids: &[MarketSelectionId],
+    ) -> Result<Vec<MarketSelectionMemberInfo>, StorageError> {
+        let mut rows = find_models_by_id_chunks::<quant_market_selection_member::Entity, _, _>(
+            &self.db,
+            snapshot_ids,
+            quant_market_selection_member::Column::MarketSelectionId,
+        )
+        .await?;
+        rows.sort_by(|left, right| {
+            left.market_selection_id
+                .to_string()
+                .cmp(&right.market_selection_id.to_string())
+                .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
+        });
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 }

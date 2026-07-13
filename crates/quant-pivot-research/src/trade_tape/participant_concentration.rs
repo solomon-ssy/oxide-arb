@@ -298,6 +298,7 @@ mod tests {
             market_id: MarketId::new("m1"),
             token_id: TokenId::new("t1"),
             event_time: Utc::now(),
+            available_at: None,
             participant_address: address.to_owned(),
             participant_role: role,
             side: None,

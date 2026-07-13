@@ -105,7 +105,7 @@ impl From<NormalizationSource> for ChNormalizationSource {
         match value {
             NormalizationSource::CrossSection => Self::CrossSection,
             NormalizationSource::PerMarket => Self::PerMarket,
-            NormalizationSource::HistoricalQuantile => Self::HistoricalQuantile,
+            NormalizationSource::FrozenReferenceQuantile => Self::FrozenReferenceQuantile,
         }
     }
 }
@@ -125,6 +125,7 @@ impl From<EvidenceSourceKind> for ChFeatureSourceKind {
             EvidenceSourceKind::TradeTape => Self::TradeTape,
             EvidenceSourceKind::Derived => Self::Derived,
             EvidenceSourceKind::DomainExternal => Self::DomainExternal,
+            EvidenceSourceKind::Linkage => Self::Linkage,
         }
     }
 }

@@ -6,6 +6,8 @@
 //! book/quant facts, the `Postgres` operation-log audit). Durable business state
 //! (reports, order intents, execution orders) must **not** use this writer; it
 //! is written synchronously through repositories so it can never be lost.
+//! Training-serving evidence and its run-completion marker are also durability
+//! barriers and must use an acknowledged sink directly.
 //!
 //! The sink is backend-agnostic: `ClickHouse` facts flush through
 //! `ChWriteManager::write_batch`, `Postgres` audit rows through a repository.

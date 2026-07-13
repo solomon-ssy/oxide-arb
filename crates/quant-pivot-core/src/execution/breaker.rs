@@ -34,6 +34,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, NaiveDate, Utc};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{KillSwitchPort, KillSwitchView, NewOperationLog, SetKillSwitchCommand},
     enums::{
@@ -238,17 +239,25 @@ struct BreakerThresholds {
 }
 
 impl BreakerThresholds {
-    fn new(config: ExecutionBreakerConfig) -> Self {
+    fn new(config: ExecutionBreakerConfig) -> QuantResult<Self> {
         let daily_loss_cap = config
             .daily_realized_loss_cap_usd
             .value
             .parse::<Decimal>()
-            .unwrap_or(Decimal::ZERO)
-            .max(Decimal::ZERO);
-        Self {
+            .map_err(|error| {
+                QuantError::config(format!(
+                    "execution.breaker.daily_realized_loss_cap_usd is not a Decimal: {error}"
+                ))
+            })?;
+        if daily_loss_cap < Decimal::ZERO {
+            return Err(QuantError::config(
+                "execution.breaker.daily_realized_loss_cap_usd must be non-negative",
+            ));
+        }
+        Ok(Self {
             config,
             daily_loss_cap,
-        }
+        })
     }
 }
 
@@ -265,21 +274,20 @@ pub struct ExecutionBreaker {
 }
 
 impl ExecutionBreaker {
-    #[must_use]
     pub fn new(
         config: ExecutionBreakerConfig,
         kill_switch: Arc<dyn KillSwitchPort>,
         operation_log: Arc<dyn OperationLogRepository>,
         metrics: Arc<MetricsHub>,
-    ) -> Self {
-        Self {
-            thresholds: ArcSwap::from_pointee(BreakerThresholds::new(config)),
+    ) -> QuantResult<Self> {
+        Ok(Self {
+            thresholds: ArcSwap::from_pointee(BreakerThresholds::new(config)?),
             inner: Mutex::new(BreakerInner::default()),
             health: VenueHealthHandle::default(),
             kill_switch,
             operation_log,
             metrics,
-        }
+        })
     }
 
     /// Hot-reload the breaker thresholds from a newly activated runtime config.
@@ -289,15 +297,16 @@ impl ExecutionBreaker {
     /// an activation never resets in-flight safety state. The published venue
     /// health is recomputed immediately so a tightened daily-loss cap can move
     /// the breaker into the 80% degrade band without waiting for the next event.
-    pub fn reload(&self, config: &ExecutionBreakerConfig) {
-        self.thresholds
-            .store(Arc::new(BreakerThresholds::new(config.clone())));
+    pub fn reload(&self, config: &ExecutionBreakerConfig) -> QuantResult<()> {
+        let thresholds = BreakerThresholds::new(config.clone())?;
+        self.thresholds.store(Arc::new(thresholds));
         let (venue_health, daily_loss) = {
             let inner = self.lock();
             (inner.health.clone(), inner.daily_loss())
         };
         self.health
             .store(self.combined_health(&venue_health, daily_loss));
+        Ok(())
     }
 
     /// Clone of the venue-health hot-read handle (injected into admission).
@@ -508,6 +517,24 @@ impl ExecutionBreaker {
         };
         if let Err(error) = self.operation_log.append(log).await {
             tracing::error!(%error, "execution breaker failed to write trip audit log");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::runtime_config::{DecimalString, ExecutionBreakerConfig};
+
+    use super::BreakerThresholds;
+
+    #[test]
+    fn breaker_thresholds_reject_invalid_or_negative_daily_cap() {
+        for value in ["not-a-decimal", "-1"] {
+            let config = ExecutionBreakerConfig {
+                daily_realized_loss_cap_usd: DecimalString::new(value),
+                ..ExecutionBreakerConfig::default()
+            };
+            assert!(BreakerThresholds::new(config).is_err());
         }
     }
 }

@@ -22,6 +22,8 @@ pub enum EvidenceSourceKind {
     /// An external-vertical domain observation (`quant_domain_observation`
     /// window: Binance klines / Chainlink oracle quotes).
     DomainExternal,
+    /// A version from the append-only market-linkage ledger.
+    Linkage,
 }
 
 impl EvidenceSourceKind {
@@ -36,6 +38,7 @@ impl EvidenceSourceKind {
             Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
             Self::DomainExternal => "domain_external",
+            Self::Linkage => "linkage",
         }
     }
 }

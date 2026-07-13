@@ -19,14 +19,36 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        ResearchJobInfo, RunBacktestRequest, RunCpcvBacktestRequest, pagination::PageRequest,
+        ResearchJobInfo, RunBacktestRequest, RunCpcvBacktestRequest, RunFullFeatureParityRequest,
+        TrainModelRequest, pagination::PageRequest,
     },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
-        DatasetCoverage, ModelSpecId, ModelVersionId, ResearchJobError, ResearchJobId,
-        ResearchJobProgress, RuntimeConfigVersionId,
+        DatasetCoverage, FeatureParityRunId, ModelSpecId, ModelVersionId, ResearchJobError,
+        ResearchJobId, ResearchJobProgress, RuntimeConfigVersionId,
     },
 };
+
+/// Frozen params for a deterministic feature-parity replay job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureParityJobParams {
+    pub parity_run_id: FeatureParityRunId,
+    /// Frozen writer grace period. It is `max(10 minutes, 2 × the longest
+    /// enabled report cadence)` at enqueue time and starts at first pending
+    /// observation, never at queue creation.
+    pub materialization_timeout_secs: u64,
+    #[serde(flatten)]
+    pub request: RunFullFeatureParityRequest,
+}
+
+/// Internal durable envelope for model training. The public request contains
+/// only dataset id + reason; the worker-owned result id is assigned at enqueue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTrainJobParams {
+    pub model_version_id: ModelVersionId,
+    #[serde(flatten)]
+    pub request: TrainModelRequest,
+}
 
 /// Frozen params for a `backtest` job: the path model version + the replay body.
 ///
@@ -120,6 +142,9 @@ pub struct ResearchJobListQuery {
     pub kind: Option<ResearchJobKind>,
     pub status: Option<ResearchJobStatus>,
     pub model_spec_id: Option<ModelSpecId>,
+    /// Exact terminal result artifact. For feature-parity jobs this is the
+    /// `parity_run_id`, enabling a durable run → job audit deep-link.
+    pub result_ref: Option<Uuid>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     #[normalize_page]

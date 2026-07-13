@@ -1,6 +1,6 @@
 //! Core implementation of [`CpcvBacktestPort`] for the Admin API (Phase 11.5).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -9,30 +9,29 @@ use tokio_util::sync::CancellationToken;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetView, CpcvBacktestPort, JobProgressSink, NewBacktestPathSet, NewModelRun,
-        RunCpcvBacktestRequest, TrainingDatasetInfo,
+        BacktestPathSetView, CpcvBacktestPort, JobProgressSink, ModelSpecInfo, ModelVersionInfo,
+        NewBacktestPathSet, NewModelRun, RunCpcvBacktestRequest, TrainingDatasetInfo,
     },
     enums::{
         common::MarketCategory,
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     },
     hashing::CanonicalDigest,
-    runtime_config::RuntimeConfig,
+    runtime_config::{DecimalString, RuntimeConfig},
     types::{
-        BacktestPathSetId, ContentHash, ModelRunId, ModelVersionId, RuntimeConfigVersionId,
-        TrainingDatasetId,
+        BacktestPathSetId, ContentHash, ModelInputContract, ModelRunId, ModelVersionId,
+        RuntimeConfigVersionId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestPathSetRepository, CalibrationArtifactRepository, EventRepository,
-    MarketLinkageRepository, MarketRepository, ModelRegistryRepository, ModelRunRepository,
-    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    BacktestPathSetRepository, CalibrationArtifactRepository, ModelRegistryRepository,
+    ModelRunRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{
-        LabelSelector, ModelArtifact, ModelFamily, ModelFamilyParseError, SellSignalPolicy,
-        TrainingObjectiveSpec,
+        LabelSelector, ModelFamily, SellSignalPolicy, TrainingObjectiveSpec,
+        load_hash_verified_artifact,
     },
     training::LabelName,
     validation::{
@@ -62,10 +61,6 @@ pub struct CoreCpcvBacktestPortDeps {
     pub path_set_repo: Arc<dyn BacktestPathSetRepository>,
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     pub model_run_repo: Arc<dyn ModelRunRepository>,
-    pub fact_read: Arc<dyn QuantFactReadRepository>,
-    pub market_repo: Arc<dyn MarketRepository>,
-    pub event_repo: Arc<dyn EventRepository>,
-    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
     pub runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     pub bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
@@ -77,12 +72,19 @@ pub struct CoreCpcvBacktestPort {
     path_set_repo: Arc<dyn BacktestPathSetRepository>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
-    fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
-    linkage_repo: Arc<dyn MarketLinkageRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
+}
+
+/// Authoritative CPCV training contract resolved from the candidate's immutable
+/// registry lineage. No client-owned family, label, or horizon can enter this
+/// structure.
+struct ResolvedCpcvContract {
+    version: ModelVersionInfo,
+    dataset: TrainingDatasetInfo,
+    label: LabelSelector,
+    prediction_horizon_secs: u64,
+    input_contract: ModelInputContract,
 }
 
 impl CoreCpcvBacktestPort {
@@ -95,10 +97,6 @@ impl CoreCpcvBacktestPort {
             path_set_repo: deps.path_set_repo,
             model_registry_repo: deps.model_registry_repo,
             model_run_repo: deps.model_run_repo,
-            fact_read: deps.fact_read,
-            market_repo: deps.market_repo,
-            event_repo: deps.event_repo,
-            linkage_repo: deps.linkage_repo,
             runtime_config: deps.runtime_config,
             bias_table_repo: deps.bias_table_repo,
         }
@@ -117,10 +115,6 @@ impl CoreCpcvBacktestPort {
             path_set_repo: Arc::clone(&research.backtest_path_set_repo),
             model_registry_repo: Arc::clone(&research.model_registry_repo),
             model_run_repo: Arc::clone(&research.model_run_repo),
-            fact_read: Arc::clone(&research.quant_fact_read),
-            market_repo: Arc::clone(&research.market_repo),
-            event_repo: Arc::clone(&research.event_repo),
-            linkage_repo: Arc::clone(&research.market_linkage_repo),
             runtime_config,
             bias_table_repo,
         })
@@ -130,18 +124,13 @@ impl CoreCpcvBacktestPort {
         &self,
         runtime: &RuntimeConfig,
         model_family: ModelFamily,
-        max_book_staleness: Duration,
     ) -> QuantResult<CpcvBacktestService> {
         let bias_table =
             resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
-        Ok(CpcvBacktestService::new(
+        CpcvBacktestService::new(
             CpcvBacktestServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
-                fact_read: Arc::clone(&self.fact_read),
-                market_repo: Arc::clone(&self.market_repo),
-                event_repo: Arc::clone(&self.event_repo),
-                linkage_repo: Arc::clone(&self.linkage_repo),
             },
             cpcv_config_from_runtime(runtime, model_family)?,
             &runtime.portfolio,
@@ -152,8 +141,7 @@ impl CoreCpcvBacktestPort {
                 data_quality: runtime.data_quality.clone(),
                 bias_table,
             },
-            max_book_staleness,
-        ))
+        )
     }
 
     async fn load_runtime_config(
@@ -172,49 +160,46 @@ impl CoreCpcvBacktestPort {
     }
 
     /// Read `metrics_json.validation.coord_search_effective_n` from the
-    /// production model version (`WeightedFactor`). Missing / classical → 0.
+    /// already-resolved production model version (`WeightedFactor`). Missing /
+    /// classical → 0.
     /// Persisted on the path set for audit only — **not** part of DSR N
     /// (Bailey N/V must describe the same trial-grid population).
-    async fn coord_search_effective_n(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> QuantResult<u32> {
-        let Some(version) = self
-            .model_registry_repo
-            .find_model_version_by_id(model_version_id)
-            .await
-            .map_err(QuantError::from)?
-        else {
-            return Ok(0);
-        };
-        Ok(version
+    fn coord_search_effective_n(version: &ModelVersionInfo) -> u32 {
+        version
             .metrics_json
             .pointer("/validation/coord_search_effective_n")
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
-            .unwrap_or(0))
+            .unwrap_or(0)
     }
 
     /// Resolve the trained artifact's `category_scope` so CPCV folds evaluate
     /// the same population the published model was fit on.
     async fn category_scope_for_version(
         &self,
-        model_version_id: &ModelVersionId,
+        version: &ModelVersionInfo,
     ) -> QuantResult<Option<MarketCategory>> {
-        let version = self
-            .model_registry_repo
-            .find_model_version_by_id(model_version_id)
-            .await
-            .map_err(QuantError::from)?
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "model_version",
-                id: model_version_id.to_string(),
-            })?;
-        let bytes = self
-            .artifact_store
-            .get_by_key(&ModelArtifact::artifact_key(&version.artifact_hash)?)
-            .await?;
-        let artifact = ModelArtifact::from_bytes(&bytes)?;
+        let artifact = load_hash_verified_artifact(&self.artifact_store, version).await?;
+        if artifact.header().model_version_id != version.model_version_id {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV artifact model_version_id {} does not match registry version {}",
+                    artifact.header().model_version_id,
+                    version.model_version_id
+                ),
+            }
+            .into());
+        }
+        if artifact.header().model_family != version.model_family {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV artifact family {} does not match frozen model-spec family {}",
+                    artifact.header().model_family,
+                    version.model_family
+                ),
+            }
+            .into());
+        }
         Ok(artifact.category_scope())
     }
 
@@ -241,6 +226,8 @@ impl CoreCpcvBacktestPort {
         request: &RunCpcvBacktestRequest,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
+        let materialization =
+            crate::service::training_dataset::require_dataset_materialization(dataset)?;
         self.model_run_repo
             .create(NewModelRun {
                 model_run_id: model_run_id.clone(),
@@ -251,7 +238,7 @@ impl CoreCpcvBacktestPort {
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
                 status: ModelRunStatus::Running,
-                input_hash: dataset.dataset_hash.clone(),
+                input_hash: materialization.dataset_hash.clone(),
                 output_hash: None,
                 metrics_json: serde_json::json!({}),
                 error_code: None,
@@ -327,11 +314,11 @@ impl CoreCpcvBacktestPort {
         Ok(BacktestPathSetView::from(info))
     }
 
-    async fn ensure_cpcv_request_matches_version(
+    async fn resolve_cpcv_contract(
         &self,
         model_version_id: &ModelVersionId,
         request: &RunCpcvBacktestRequest,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<ResolvedCpcvContract> {
         let version = self
             .model_registry_repo
             .find_model_version_by_id(model_version_id)
@@ -341,70 +328,69 @@ impl CoreCpcvBacktestPort {
                 entity: "model_version",
                 id: model_version_id.to_string(),
             })?;
-        let Some(expected) = version.training_dataset_id else {
-            return Err(ResearchError::ValidationMethodology {
-                detail: format!(
-                    "model version {model_version_id} has no linked training_dataset_id; \
-                     CPCV requires the same frozen dataset the model was trained on"
-                ),
-            }
-            .into());
-        };
-        if expected != request.training_dataset_id {
-            return Err(ResearchError::ValidationMethodology {
-                detail: format!(
-                    "CPCV training_dataset_id {} does not match model version linked dataset {expected}",
-                    request.training_dataset_id
-                ),
-            }
-            .into());
-        }
-        Ok(())
+        let dataset = self.load_dataset(&request.training_dataset_id).await?;
+        validate_cpcv_dataset_binding(&version, &dataset, &request.training_dataset_id)?;
+        let model_spec = self
+            .model_registry_repo
+            .find_model_spec_by_id(&version.model_spec_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "model_spec",
+                id: version.model_spec_id.to_string(),
+            })?;
+        let (label, prediction_horizon_secs, input_contract) =
+            validated_cpcv_model_spec(&version, model_spec)?;
+        Ok(ResolvedCpcvContract {
+            version,
+            dataset,
+            label,
+            prediction_horizon_secs,
+            input_contract,
+        })
     }
 
     async fn execute_cpcv_job(
         &self,
-        model_version_id: ModelVersionId,
+        contract: ResolvedCpcvContract,
         request: RunCpcvBacktestRequest,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<BacktestPathSetView> {
-        let model_family = request
-            .model_family
-            .parse()
-            .map_err(|error: ModelFamilyParseError| QuantError::config(error.to_string()))?;
+        let model_version_id = contract.version.model_version_id.clone();
+        let model_family = contract.version.model_family;
         let runtime = self
             .load_runtime_config(&request.runtime_config_version_id)
             .await?;
-        let max_book_staleness = Duration::from_millis(runtime.training.max_book_staleness_ms);
-        let service = self
-            .service_for(&runtime, model_family, max_book_staleness)
-            .await?;
+        let service = self.service_for(&runtime, model_family).await?;
 
         let path_set_id = request
             .path_set_id
             .clone()
             .unwrap_or_else(BacktestPathSetId::from_v7);
-        let dataset = self.load_dataset(&request.training_dataset_id).await?;
-        let category_scope = self.category_scope_for_version(&model_version_id).await?;
-        let coord_search_effective_n = self.coord_search_effective_n(&model_version_id).await?;
+        let category_scope = self.category_scope_for_version(&contract.version).await?;
+        let coord_search_effective_n = Self::coord_search_effective_n(&contract.version);
 
         let model_run_id = ModelRunId::from_v7();
-        self.create_run(&model_run_id, &model_version_id, &request, &dataset)
-            .await?;
+        self.create_run(
+            &model_run_id,
+            &model_version_id,
+            &request,
+            &contract.dataset,
+        )
+        .await?;
 
         let outcome = match service
             .run(
                 CpcvBacktestInput {
+                    model_run_id: model_run_id.clone(),
                     training_dataset_id: request.training_dataset_id.clone(),
                     runtime_config_version_id: request.runtime_config_version_id.clone(),
-                    label: LabelSelector {
-                        name: LabelName::new(request.label_name.clone()),
-                        horizon_secs: request.label_horizon_secs,
-                    },
+                    label: contract.label,
                     model_family,
-                    prediction_horizon_secs: request.prediction_horizon_secs,
+                    prediction_horizon_secs: contract.prediction_horizon_secs,
                     category_scope,
+                    input_contract: contract.input_contract,
                     path_set_id: Some(path_set_id.clone()),
                     coord_search_effective_n,
                 },
@@ -415,15 +401,7 @@ impl CoreCpcvBacktestPort {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                let _ = self
-                    .model_run_repo
-                    .fail(
-                        &model_run_id,
-                        ModelRunErrorCode::ActiveInferenceFailed,
-                        error.to_string(),
-                        Utc::now(),
-                    )
-                    .await;
+                self.fail_model_run(&model_run_id, &error).await;
                 return Err(error);
             }
         };
@@ -440,15 +418,7 @@ impl CoreCpcvBacktestPort {
         {
             Ok(view) => view,
             Err(error) => {
-                let _ = self
-                    .model_run_repo
-                    .fail(
-                        &model_run_id,
-                        ModelRunErrorCode::ActiveInferenceFailed,
-                        error.to_string(),
-                        Utc::now(),
-                    )
-                    .await;
+                self.fail_model_run(&model_run_id, &error).await;
                 return Err(error);
             }
         };
@@ -471,10 +441,23 @@ impl CoreCpcvBacktestPort {
         Ok(view)
     }
 
+    async fn fail_model_run(&self, model_run_id: &ModelRunId, error: &QuantError) {
+        let _ = self
+            .model_run_repo
+            .fail(
+                model_run_id,
+                ModelRunErrorCode::ActiveInferenceFailed,
+                error.to_string(),
+                Utc::now(),
+            )
+            .await;
+    }
+
     async fn find_path_set_for_version(
         &self,
         path_set_id: &BacktestPathSetId,
         model_version_id: &ModelVersionId,
+        request: &RunCpcvBacktestRequest,
     ) -> QuantResult<Option<BacktestPathSetView>> {
         let Some(view) = self
             .path_set_repo
@@ -490,6 +473,20 @@ impl CoreCpcvBacktestPort {
                 detail: format!(
                     "path set {path_set_id} belongs to model version {}, not {model_version_id}",
                     view.model_version_id
+                ),
+            }
+            .into());
+        }
+        if view.training_dataset_id != request.training_dataset_id
+            || view.runtime_config_version_id != request.runtime_config_version_id
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "path set {path_set_id} retry binding differs: stored dataset/runtime = {}/{}, requested = {}/{}",
+                    view.training_dataset_id,
+                    view.runtime_config_version_id,
+                    request.training_dataset_id,
+                    request.runtime_config_version_id
                 ),
             }
             .into());
@@ -535,13 +532,12 @@ fn cpcv_config_from_runtime(
             })
         })
     };
-    let parse_multipliers =
-        |field: &'static str, values: &[quant_pivot_models::runtime_config::DecimalString]| {
-            values
-                .iter()
-                .map(|value| decimal(field, &value.value))
-                .collect::<QuantResult<Vec<_>>>()
-        };
+    let parse_multipliers = |field: &'static str, values: &[DecimalString]| {
+        values
+            .iter()
+            .map(|value| decimal(field, &value.value))
+            .collect::<QuantResult<Vec<_>>>()
+    };
 
     let trials = if model_family.is_classical() {
         TrialGridSpec::Classical(ClassicalTrialGrid {
@@ -597,6 +593,109 @@ fn cpcv_config_from_runtime(
     })
 }
 
+fn validate_cpcv_dataset_binding(
+    version: &ModelVersionInfo,
+    dataset: &TrainingDatasetInfo,
+    requested_dataset_id: &TrainingDatasetId,
+) -> QuantResult<()> {
+    let expected = version.training_dataset_id.as_ref().ok_or_else(|| {
+        ResearchError::ValidationMethodology {
+            detail: format!(
+                "model version {} has no linked training_dataset_id; CPCV requires the same \
+                 frozen dataset the model was trained on",
+                version.model_version_id
+            ),
+        }
+    })?;
+    if expected != requested_dataset_id {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "CPCV training_dataset_id {requested_dataset_id} does not match model version linked dataset {expected}"
+            ),
+        }
+        .into());
+    }
+    if dataset.model_spec_id != version.model_spec_id {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "CPCV dataset {} belongs to model spec {}, but model version {} belongs to {}",
+                dataset.training_dataset_id,
+                dataset.model_spec_id,
+                version.model_version_id,
+                version.model_spec_id
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn validated_cpcv_model_spec(
+    version: &ModelVersionInfo,
+    model_spec: ModelSpecInfo,
+) -> QuantResult<(LabelSelector, u64, ModelInputContract)> {
+    if model_spec.model_family != version.model_family {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "CPCV registry family {} does not match model spec {} family {}",
+                version.model_family, model_spec.model_spec_id, model_spec.model_family
+            ),
+        }
+        .into());
+    }
+    model_spec.training_contract.validate().map_err(|detail| {
+        ResearchError::ValidationMethodology {
+            detail: format!(
+                "model spec {} carries invalid training_contract: {detail}",
+                model_spec.model_spec_id
+            ),
+        }
+    })?;
+    model_spec.input_contract.validate().map_err(|detail| {
+        ResearchError::ValidationMethodology {
+            detail: format!(
+                "model spec {} carries invalid input_contract: {detail}",
+                model_spec.model_spec_id
+            ),
+        }
+    })?;
+    if model_spec.input_contract.inputs.is_empty() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "model spec {} input_contract must contain at least one raw feature",
+                model_spec.model_spec_id
+            ),
+        }
+        .into());
+    }
+    let prediction_horizon_secs =
+        u64::try_from(model_spec.prediction_horizon_secs).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!(
+                    "model spec {} prediction_horizon_secs is invalid: {error}",
+                    model_spec.model_spec_id
+                ),
+            }
+        })?;
+    if prediction_horizon_secs == 0 {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "model spec {} prediction_horizon_secs must be positive",
+                model_spec.model_spec_id
+            ),
+        }
+        .into());
+    }
+    Ok((
+        LabelSelector {
+            name: LabelName::new(model_spec.training_contract.target_label_name),
+            horizon_secs: model_spec.training_contract.target_label_horizon_secs,
+        },
+        prediction_horizon_secs,
+        model_spec.input_contract,
+    ))
+}
+
 #[async_trait]
 impl CpcvBacktestPort for CoreCpcvBacktestPort {
     async fn run(
@@ -608,14 +707,15 @@ impl CpcvBacktestPort for CoreCpcvBacktestPort {
     ) -> QuantResult<BacktestPathSetView> {
         if let Some(path_set_id) = &request.path_set_id
             && let Some(view) = self
-                .find_path_set_for_version(path_set_id, &model_version_id)
+                .find_path_set_for_version(path_set_id, &model_version_id, &request)
                 .await?
         {
             return Ok(view);
         }
-        self.ensure_cpcv_request_matches_version(&model_version_id, &request)
+        let contract = self
+            .resolve_cpcv_contract(&model_version_id, &request)
             .await?;
-        self.execute_cpcv_job(model_version_id, request, progress, cancel)
+        self.execute_cpcv_job(contract, request, progress, cancel)
             .await
     }
 

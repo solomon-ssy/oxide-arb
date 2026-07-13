@@ -5,7 +5,7 @@ use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
     infra::periodic_task::PeriodicTask,
     ingest::data_quality::DataQualityService,
-    service::equity::EquitySnapshotService,
+    service::{equity::EquitySnapshotService, feature_integrity::AutomaticFullParityOutcome},
 };
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{domain::RuntimeConfigPort, types::Usd};
@@ -16,6 +16,9 @@ use std::{sync::Arc, time::Duration};
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
 const DATA_QUALITY_REFRESH_SECS: u64 = 5;
+/// Fast reconciliation cadence; the coordinator itself admits at most one full
+/// 24-hour replay per day and deduplicates exact windows in Postgres.
+const FEATURE_PARITY_SCHEDULER_SECS: u64 = 60;
 
 impl AppContext {
     pub fn register_periodic_services(&self, runner: &mut AppRunner) {
@@ -98,6 +101,35 @@ impl AppContext {
                         let account = account_factory.create(budget_cap)?.snapshot(as_of).await?;
                         equity_service.record_history_snapshot(&account).await?;
                         Ok(())
+                    }
+                },
+            )
+            .await;
+        });
+    }
+
+    pub fn register_feature_parity_scheduler(&self, runner: &mut AppRunner) {
+        let coordinator = Arc::clone(&self.report.feature_parity);
+        runner.spawn(TaskId::FeatureParityScheduler, move |token| async move {
+            let _ = PeriodicTask::run(
+                "feature-parity-scheduler",
+                || Duration::from_secs(FEATURE_PARITY_SCHEDULER_SECS),
+                0.0,
+                true,
+                token,
+                move || {
+                    let coordinator = Arc::clone(&coordinator);
+                    async move {
+                        match coordinator.ensure_automatic_full(chrono::Utc::now()).await? {
+                            AutomaticFullParityOutcome::Enqueued { run_id, job_id } => {
+                                tracing::info!(%run_id, %job_id, "enqueued automatic 24-hour feature parity replay");
+                            }
+                            AutomaticFullParityOutcome::Existing(run_id) => {
+                                tracing::debug!(%run_id, "automatic feature parity window already queued");
+                            }
+                            AutomaticFullParityOutcome::NotDue => {}
+                        }
+                        QuantResult::Ok(())
                     }
                 },
             )

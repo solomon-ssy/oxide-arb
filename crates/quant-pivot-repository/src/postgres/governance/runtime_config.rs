@@ -12,12 +12,15 @@ use quant_pivot_models::{
         },
         runtime_config_version::{Column as VersionColumn, Entity as VersionEntity},
     },
-    types::{ContentHash, RuntimeConfigVersionId},
+    types::{ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    Statement, TransactionTrait,
 };
+
+const RUNTIME_CONFIG_ACTIVATION_LOCK_KEY: i64 = 0x_11_06_52_43;
 
 pub struct PgRuntimeConfigVersionRepository {
     db: DatabaseConnection,
@@ -65,10 +68,60 @@ async fn do_load_current_activation(
 ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
     ActivationEntity::find()
         .order_by_desc(ActivationColumn::ActivatedAt)
+        .order_by_desc(ActivationColumn::RuntimeConfigActivationId)
         .one(db)
         .await
         .map_err(StorageError::from)
         .map(|row| row.map(Into::into))
+}
+
+async fn acquire_activation_lock(txn: &DatabaseTransaction) -> Result<(), StorageError> {
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "SELECT pg_advisory_xact_lock($1)",
+        [RUNTIME_CONFIG_ACTIVATION_LOCK_KEY.into()],
+    ))
+    .await
+    .map_err(StorageError::from)?;
+    Ok(())
+}
+
+async fn verify_current_activation(
+    db: &impl ConnectionTrait,
+    expected: Option<&RuntimeConfigActivationId>,
+) -> Result<(), StorageError> {
+    let current = do_load_current_activation(db).await?;
+    if current
+        .as_ref()
+        .map(|row| &row.runtime_config_activation_id)
+        != expected
+    {
+        return Err(StorageError::state_conflict(
+            "runtime_config_activation",
+            expected,
+            format!(
+                "runtime config activation generation changed; current is {}",
+                current.as_ref().map_or_else(
+                    || "<none>".to_owned(),
+                    |row| row.runtime_config_activation_id.to_string(),
+                )
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn append_activation_if_current(
+    txn: &DatabaseTransaction,
+    expected: Option<&RuntimeConfigActivationId>,
+    activation: Option<NewRuntimeConfigActivation>,
+) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+    acquire_activation_lock(txn).await?;
+    verify_current_activation(txn, expected).await?;
+    match activation {
+        Some(activation) => do_activate_version(txn, activation).await.map(Some),
+        None => Ok(None),
+    }
 }
 
 async fn do_load_version(
@@ -100,6 +153,7 @@ async fn do_load_current(
     VersionEntity::find()
         .join_rev(JoinType::InnerJoin, ActivationRelation::Version.def())
         .order_by_desc(ActivationColumn::ActivatedAt)
+        .order_by_desc(ActivationColumn::RuntimeConfigActivationId)
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -114,6 +168,7 @@ async fn do_load_active_at(
         .join_rev(JoinType::InnerJoin, ActivationRelation::Version.def())
         .filter(ActivationColumn::ActivatedAt.lte(at))
         .order_by_desc(ActivationColumn::ActivatedAt)
+        .order_by_desc(ActivationColumn::RuntimeConfigActivationId)
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -159,7 +214,30 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepository {
         &self,
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
-        do_activate_version(&self.db, activation).await
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        acquire_activation_lock(&txn).await?;
+        let activated = do_activate_version(&txn, activation).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(activated)
+    }
+
+    async fn activate_version_if_current(
+        &self,
+        expected_current_activation_id: Option<&RuntimeConfigActivationId>,
+        activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let activated =
+            append_activation_if_current(&txn, expected_current_activation_id, Some(activation))
+                .await?
+                .ok_or_else(|| {
+                    StorageError::invariant_violation(
+                        Some("runtime_config_activation"),
+                        "activation CAS returned no inserted activation",
+                    )
+                })?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(activated)
     }
 
     async fn load_current_activation(
@@ -221,7 +299,23 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepositoryTxn<'_> 
         &self,
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        acquire_activation_lock(self.txn).await?;
         do_activate_version(self.txn, activation).await
+    }
+
+    async fn activate_version_if_current(
+        &self,
+        expected_current_activation_id: Option<&RuntimeConfigActivationId>,
+        activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        append_activation_if_current(self.txn, expected_current_activation_id, Some(activation))
+            .await?
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("runtime_config_activation"),
+                    "activation CAS returned no inserted activation",
+                )
+            })
     }
 
     async fn load_current_activation(

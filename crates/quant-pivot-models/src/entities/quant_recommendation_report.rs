@@ -5,9 +5,9 @@ use crate::{
         AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
     },
     types::{
-        AccountSnapshotId, EquitySnapshotId, MarketSelectionId, ModelVersionId, PortfolioPlanId,
-        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
-        Usd,
+        AccountSnapshotId, EquitySnapshotId, MarketSelectionId, ModelRunId, ModelVersionId,
+        PortfolioPlanId, RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary,
+        RuntimeConfigVersionId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -22,11 +22,12 @@ pub struct Model {
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
     pub trigger_time: DateTime<Utc>,
-    pub source_delay_secs: i64,
-    pub as_of: DateTime<Utc>,
+    pub knowledge_lag_secs: i64,
+    pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_run_id: Option<ModelRunId>,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
@@ -60,6 +61,12 @@ pub enum Relation {
         to = "super::quant_model_version::Column::ModelVersionId"
     )]
     ModelVersion,
+    #[sea_orm(
+        belongs_to = "super::quant_model_run::Entity",
+        from = "Column::ModelRunId",
+        to = "super::quant_model_run::Column::ModelRunId"
+    )]
+    ModelRun,
     #[sea_orm(
         belongs_to = "super::quant_market_selection::Entity",
         from = "Column::MarketSelectionId",
@@ -97,6 +104,12 @@ pub enum Relation {
 impl Related<super::quant_model_version::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ModelVersion.def()
+    }
+}
+
+impl Related<super::quant_model_run::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ModelRun.def()
     }
 }
 

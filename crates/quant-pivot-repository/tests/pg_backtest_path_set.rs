@@ -3,8 +3,8 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
-        NewBacktestPathSet, NewModelRun, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
-        NewTrainingDataset,
+        CompleteTrainingDatasetBuild, NewBacktestPathSet, NewModelRun, NewModelSpec,
+        NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan,
     },
     enums::{
         model::ModelFamily,
@@ -14,9 +14,10 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        ArtifactUri, BacktestPathSetId, ContentHash, DatasetCoverage, ModelRunId, ModelSpecId,
-        ModelVersionId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
-        TrainingHorizonsSecs,
+        ArtifactUri, BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        DatasetCoverage, DatasetManifest, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, RuntimeConfigVersionId, SchemaVersion,
+        TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -57,6 +58,17 @@ async fn seed_model_and_dataset(
     db: &sea_orm::DatabaseConnection,
     rc_id: &RuntimeConfigVersionId,
 ) -> (ModelVersionId, ModelRunId, TrainingDatasetId) {
+    let model_spec_id = seed_model_spec(db).await;
+    let window_start = Utc::now() - ChronoDuration::hours(2);
+    let training_dataset_id = seed_training_dataset(db, rc_id, &model_spec_id, window_start).await;
+    let (model_version_id, model_run_id) =
+        seed_model_version_and_run(db, rc_id, model_spec_id, &training_dataset_id, window_start)
+            .await;
+
+    (model_version_id, model_run_id, training_dataset_id)
+}
+
+async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
@@ -68,37 +80,93 @@ async fn seed_model_and_dataset(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
+    model_spec_id
+}
 
+async fn seed_training_dataset(
+    db: &sea_orm::DatabaseConnection,
+    rc_id: &RuntimeConfigVersionId,
+    model_spec_id: &ModelSpecId,
+    window_start: chrono::DateTime<Utc>,
+) -> TrainingDatasetId {
     let training_dataset_id = TrainingDatasetId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
-    PgTrainingDatasetRepository::new(db.clone())
-        .create(NewTrainingDataset {
+    let window_end = window_start + ChronoDuration::hours(1);
+    let manifest = DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: training_dataset_id.clone(),
+        model_spec_id: model_spec_id.clone(),
+        runtime_config_version_id: rc_id.clone(),
+        window_start,
+        window_end,
+        purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: 10,
+        sample_interval_secs: 3_600,
+        horizons_secs: vec![0],
+        feature_schema_hash: content_hash('1'),
+        factor_schema_hash: content_hash('2'),
+        label_schema_hash: content_hash('3'),
+        semantic_dataset_hash: content_hash('4'),
+        source_fingerprint: content_hash('7'),
+        sample_count: 10,
+    };
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    dataset_repo
+        .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: training_dataset_id.clone(),
             model_spec_id: model_spec_id.clone(),
             window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            status: TrainingDatasetStatus::Ready,
+            window_end,
             purpose: DatasetPurpose::Training,
-            feature_schema_hash: content_hash('1'),
-            factor_schema_hash: content_hash('2'),
-            label_schema_hash: content_hash('3'),
-            dataset_hash: content_hash('4'),
-            parquet_uri: ArtifactUri::parse("file:///tmp/pg-path-set-it.parquet").expect("uri"),
-            sample_count: 10,
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             sample_interval_secs: 3_600,
             horizons_secs: TrainingHorizonsSecs(vec![0]),
-            coverage_json: DatasetCoverage::default(),
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             runtime_config_version_id: rc_id.clone(),
         })
         .await
+        .expect("dataset plan");
+    dataset_repo
+        .start_build(&training_dataset_id)
+        .await
+        .expect("start dataset");
+    dataset_repo
+        .complete_build(
+            &training_dataset_id,
+            CompleteTrainingDatasetBuild {
+                status: TrainingDatasetStatus::Ready,
+                feature_schema_hash: content_hash('1'),
+                factor_schema_hash: content_hash('2'),
+                label_schema_hash: content_hash('3'),
+                dataset_hash: content_hash('4'),
+                manifest_hash: content_hash('5'),
+                manifest_json: manifest,
+                artifact_bytes_hash: content_hash('6'),
+                parquet_uri: ArtifactUri::parse("file:///tmp/pg-path-set-it.parquet").expect("uri"),
+                sample_count: 10,
+                coverage_json: DatasetCoverage::default(),
+                failure_detail: None,
+            },
+        )
+        .await
         .expect("dataset");
+    training_dataset_id
+}
 
+async fn seed_model_version_and_run(
+    db: &sea_orm::DatabaseConnection,
+    rc_id: &RuntimeConfigVersionId,
+    model_spec_id: ModelSpecId,
+    training_dataset_id: &TrainingDatasetId,
+    window_start: chrono::DateTime<Utc>,
+) -> (ModelVersionId, ModelRunId) {
+    let registry = PgModelRegistryRepository::new(db.clone());
     let model_version_id = ModelVersionId::from_v7();
     registry
         .create_model_version(NewModelVersion {
@@ -140,7 +208,7 @@ async fn seed_model_and_dataset(
         .await
         .expect("model run");
 
-    (model_version_id, model_run_id, training_dataset_id)
+    (model_version_id, model_run_id)
 }
 
 #[tokio::test]

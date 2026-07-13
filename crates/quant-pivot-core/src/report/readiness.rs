@@ -58,9 +58,15 @@ impl ReportReadinessGate for DefaultReportReadinessGate {
             return OperationalPhase::CatalogWarming;
         }
         let shards = self.ws_manager.shard_health();
+        let (Ok(total), Ok(disconnected)) = (
+            u32::try_from(shards.total),
+            u32::try_from(shards.disconnected),
+        ) else {
+            return OperationalPhase::MarketDataConnecting;
+        };
         let ws_shards = WsShardConnectivity {
-            total: u32::try_from(shards.total).unwrap_or(u32::MAX),
-            disconnected: u32::try_from(shards.disconnected).unwrap_or(u32::MAX),
+            total,
+            disconnected,
             oldest_disconnected_secs: shards.oldest_disconnected_secs,
             connected_ratio_bps: shards.connected_ratio_bps,
         };

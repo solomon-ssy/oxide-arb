@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
         ExecutionRecoveryStep, ExecutionRecoverySummary, ExecutionRecoveryView, KillSwitchPort,
@@ -43,7 +44,7 @@ impl ExecutionRecoveryHandle {
         reconciliation: &Arc<dyn ReconciliationRepository>,
         kill_switch: &Arc<dyn KillSwitchPort>,
         runtime_mode: &RuntimeModeHandle,
-    ) -> quant_pivot_error::QuantResult<()> {
+    ) -> QuantResult<()> {
         let summary =
             build_execution_recovery_summary(reconciliation, kill_switch, runtime_mode).await?;
         self.inner.store(Arc::new(summary));
@@ -83,7 +84,7 @@ impl ExecutionRecoveryCoordinator {
     }
 
     /// Recompute and publish the recovery summary.
-    pub async fn refresh(&self) -> quant_pivot_error::QuantResult<()> {
+    pub async fn refresh(&self) -> QuantResult<()> {
         self.handle
             .refresh(&self.reconciliation, &self.kill_switch, &self.runtime_mode)
             .await
@@ -95,7 +96,7 @@ pub async fn build_execution_recovery_summary(
     reconciliation: &Arc<dyn ReconciliationRepository>,
     kill_switch: &Arc<dyn KillSwitchPort>,
     runtime_mode: &RuntimeModeHandle,
-) -> quant_pivot_error::QuantResult<ExecutionRecoverySummary> {
+) -> QuantResult<ExecutionRecoverySummary> {
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;
     let kill_switch_view = kill_switch.view();
     let mode = runtime_mode.current();
@@ -111,7 +112,7 @@ pub async fn build_execution_recovery_view(
     reconciliation: &Arc<dyn ReconciliationRepository>,
     kill_switch: &Arc<dyn KillSwitchPort>,
     runtime_mode: &RuntimeModeHandle,
-) -> quant_pivot_error::QuantResult<ExecutionRecoveryView> {
+) -> QuantResult<ExecutionRecoveryView> {
     let kill_switch_view = kill_switch.view();
     let mode = runtime_mode.current();
     let unresolvable_count = reconciliation.count_blocking_unresolvable().await?;

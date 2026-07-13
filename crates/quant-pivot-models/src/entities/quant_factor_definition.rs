@@ -5,7 +5,7 @@ use crate::{
         factor::{FactorDefinitionScope, FactorFamily},
         quant::PublicationStatus,
     },
-    types::{FactorDefinitionId, SchemaVersion},
+    types::{ContentHash, FactorDefinitionId, SchemaVersion},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -17,6 +17,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub factor_definition_id: FactorDefinitionId,
     #[sea_orm(column_type = "Text", unique)]
+    pub definition_hash: ContentHash,
+    #[sea_orm(column_type = "Text")]
+    pub feature_contract_hash: ContentHash,
+    #[sea_orm(column_type = "Text")]
     pub name: String,
     pub factor_family: FactorFamily,
     pub scope: FactorDefinitionScope,

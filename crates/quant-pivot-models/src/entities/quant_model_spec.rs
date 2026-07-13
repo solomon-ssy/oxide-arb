@@ -2,7 +2,7 @@
 
 use crate::{
     enums::{model::ModelFamily, quant::PublicationStatus},
-    types::{ModelSpecId, SchemaVersion},
+    types::{ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -20,12 +20,13 @@ pub struct Model {
     pub label_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub spec_json: Json,
-    /// Structured, governed feature-requirements contract (11.2.2 remediation
-    /// R7) — deserializes to `quant_pivot_research::selection::ModelFeatureRequirements`.
-    /// Kept as opaque `Json` at this layer (models cannot depend on
-    /// `quant-pivot-research`); `quant-pivot-core` owns the typed round trip.
+    /// Ordered raw features consumed by this model. Encoded columns are derived
+    /// exclusively by the fitted input transform and cannot be persisted here.
     #[sea_orm(column_type = "JsonBinary")]
-    pub feature_requirements: Json,
+    pub input_contract: ModelInputContract,
+    /// Frozen target and validation policy; train requests cannot override it.
+    #[sea_orm(column_type = "JsonBinary")]
+    pub training_contract: ModelTrainingContract,
     pub status: PublicationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

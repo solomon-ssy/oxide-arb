@@ -43,10 +43,10 @@ use flume::Receiver;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{CoreEvent, CoreEventPublisher, ExecutionSubmitPort, PointInTimeDataSource},
+    domain::{CoreEvent, CoreEventPublisher, ExecutionSubmitPort},
 };
 use quant_pivot_repository::traits::FactorRepository;
-use quant_pivot_research::artifact::ArtifactStore;
+use quant_pivot_research::{artifact::ArtifactStore, pit::PointInTimeSnapshotSource};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -120,8 +120,8 @@ impl AppContext {
         Arc::clone(&self.research.factor_repo)
     }
 
-    /// Live point-in-time source for online feature / report builders.
-    pub fn live_pit(&self) -> &dyn PointInTimeDataSource {
+    /// Durable point-in-time source shared by serving and replay.
+    pub fn pit_source(&self) -> &dyn PointInTimeSnapshotSource {
         self.data.pit_source.as_ref()
     }
 

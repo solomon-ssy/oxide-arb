@@ -22,6 +22,7 @@
 //!   a target confidence, given the same skew/kurtosis correction.
 
 use chrono::Duration;
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
@@ -81,18 +82,30 @@ pub struct DsrReport {
 /// trials with per-trial Sharpe variance `V` (Bailey & López de Prado 2014
 /// eq. 8): `SR* ≈ sqrt(V) · [(1-γ)·Φ⁻¹(1-1/N) + γ·Φ⁻¹(1-1/(N·e))]`. A single
 /// trial needs no multiple-testing correction (`SR* = 0`).
-fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> f64 {
+fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> QuantResult<f64> {
     if trial_count <= 1 {
-        return 0.0;
+        return Ok(0.0);
     }
     let n = f64::from(trial_count);
     // When every trial Sharpe is identical, V=0 would erase the multiple-testing
     // correction. Floor V at a tiny positive value so SR* still rises with N.
-    let v = trial_sharpe_variance.to_f64().unwrap_or(0.0).max(1e-12);
+    let variance = decimal_to_f64(trial_sharpe_variance, "trial_sharpe_variance")?;
+    if variance < 0.0 {
+        return Err(methodology(
+            "trial_sharpe_variance must be non-negative".to_owned(),
+        ));
+    }
+    let variance = variance.max(1e-12);
     let term_a = (1.0 - EULER_MASCHERONI) * stats::normal_inverse_cdf(1.0 - 1.0 / n);
     let term_b =
         EULER_MASCHERONI * stats::normal_inverse_cdf(1.0 - 1.0 / (n * std::f64::consts::E));
-    v.sqrt() * (term_a + term_b)
+    let benchmark = variance.sqrt() * (term_a + term_b);
+    if !benchmark.is_finite() {
+        return Err(methodology(
+            "expected maximum Sharpe calculation produced a non-finite result".to_owned(),
+        ));
+    }
+    Ok(benchmark)
 }
 
 /// The PSR denominator `sqrt(1 - γ3·SR_hat + (γ4-1)/4·SR_hat²)`, guarding the
@@ -101,20 +114,29 @@ fn expected_max_sharpe(trial_count: u32, trial_sharpe_variance: Decimal) -> f64 
 /// `None` in that case — callers must fail closed (never divide by an
 /// imaginary/zero denominator or silently substitute the normal-distribution
 /// formula).
-fn psr_denominator(skewness: Decimal, kurtosis: Decimal, observed_sharpe: Decimal) -> Option<f64> {
-    let gamma3 = skewness.to_f64().unwrap_or(0.0);
+fn psr_denominator(
+    skewness: Decimal,
+    kurtosis: Decimal,
+    observed_sharpe: Decimal,
+) -> QuantResult<Option<f64>> {
+    let gamma3 = decimal_to_f64(skewness, "skewness")?;
     // Degenerate series report kurtosis=0 from `stats::kurtosis`; treat that as
     // the normal-distribution default γ4=3 so DSR does not silently under-correct.
-    let gamma4 = match kurtosis.to_f64() {
-        Some(value) if value > 0.0 => value,
-        _ => 3.0,
+    let converted_kurtosis = decimal_to_f64(kurtosis, "kurtosis")?;
+    let gamma4 = if converted_kurtosis > 0.0 {
+        converted_kurtosis
+    } else {
+        3.0
     };
-    let sr = observed_sharpe.to_f64().unwrap_or(0.0);
-    let radicand = ((gamma4 - 1.0) / 4.0 * sr).mul_add(sr, 1.0 - gamma3 * sr);
-    if radicand <= 0.0 {
-        return None;
+    let sr = decimal_to_f64(observed_sharpe, "observed_sharpe")?;
+    let normal_term = gamma3.mul_add(-sr, 1.0);
+    let radicand = ((gamma4 - 1.0) / 4.0 * sr).mul_add(sr, normal_term);
+    if !radicand.is_finite() {
+        return Err(methodology(
+            "PSR denominator calculation produced a non-finite radicand".to_owned(),
+        ));
     }
-    Some(radicand.sqrt())
+    Ok((radicand > 0.0).then(|| radicand.sqrt()))
 }
 
 /// Evaluate the Deflated Sharpe Ratio for `input`.
@@ -123,42 +145,54 @@ fn psr_denominator(skewness: Decimal, kurtosis: Decimal, observed_sharpe: Decima
 /// moment-based variance correction is degenerate (see [`psr_denominator`])
 /// or when fewer than two return periods are available (a Sharpe ratio is
 /// not estimable from a single observation).
-#[must_use]
-pub fn deflated_sharpe_ratio(input: &DsrInput) -> DsrReport {
-    let benchmark = expected_max_sharpe(input.trial_count, input.trial_sharpe_variance);
-    let benchmark_sharpe = Decimal::from_f64(benchmark)
-        .unwrap_or(Decimal::ZERO)
-        .round_dp(RESEARCH_DECIMAL_SCALE);
+///
+/// # Errors
+///
+/// Returns [`ResearchError::ValidationMethodology`] when a numeric input or
+/// derived statistic cannot be represented without a non-finite/saturated
+/// value, or when the trial Sharpe variance is negative.
+pub fn deflated_sharpe_ratio(input: &DsrInput) -> QuantResult<DsrReport> {
+    let benchmark = expected_max_sharpe(input.trial_count, input.trial_sharpe_variance)?;
+    let benchmark_sharpe =
+        decimal_from_f64(benchmark, "benchmark_sharpe")?.round_dp(RESEARCH_DECIMAL_SCALE);
 
     if input.returns_period_count < 2 {
-        return DsrReport {
+        return Ok(DsrReport {
             observed_sharpe: input.observed_sharpe,
             benchmark_sharpe,
             deflated_sharpe: Decimal::ZERO,
-        };
+        });
     }
-    let Some(denominator) = psr_denominator(input.skewness, input.kurtosis, input.observed_sharpe)
+    let Some(denominator) = psr_denominator(input.skewness, input.kurtosis, input.observed_sharpe)?
     else {
-        return DsrReport {
+        return Ok(DsrReport {
             observed_sharpe: input.observed_sharpe,
             benchmark_sharpe,
             deflated_sharpe: Decimal::ZERO,
-        };
+        });
     };
-    let sr_hat = input.observed_sharpe.to_f64().unwrap_or(0.0);
-    let t_minus_one =
-        f64::from(u32::try_from(input.returns_period_count.saturating_sub(1)).unwrap_or(u32::MAX));
+    let sr_hat = decimal_to_f64(input.observed_sharpe, "observed_sharpe")?;
+    let t_minus_one = exact_u64_to_f64(
+        input.returns_period_count.checked_sub(1).ok_or_else(|| {
+            methodology("returns_period_count underflowed while computing DSR".to_owned())
+        })?,
+        "returns_period_count - 1",
+    )?;
     let z = (sr_hat - benchmark) * t_minus_one.sqrt() / denominator;
-    let deflated = Decimal::from_f64(stats::normal_cdf(z))
-        .unwrap_or(Decimal::ZERO)
+    if !z.is_finite() {
+        return Err(methodology(
+            "deflated Sharpe z-score is non-finite".to_owned(),
+        ));
+    }
+    let deflated = decimal_from_f64(stats::normal_cdf(z), "deflated_sharpe")?
         .clamp(Decimal::ZERO, Decimal::ONE)
         .round_dp(RESEARCH_DECIMAL_SCALE);
 
-    DsrReport {
+    Ok(DsrReport {
         observed_sharpe: input.observed_sharpe,
         benchmark_sharpe,
         deflated_sharpe: deflated,
-    }
+    })
 }
 
 /// The minimum number of return periods needed for `input.observed_sharpe` to
@@ -171,28 +205,102 @@ pub fn deflated_sharpe_ratio(input: &DsrInput) -> DsrReport {
 /// record makes a non-positive Sharpe ratio significant against zero) or the
 /// moment correction is degenerate — an informational/soft signal, never a
 /// hard failure.
-#[must_use]
-pub fn min_track_record_length(input: &DsrInput, target_significance: Decimal) -> Option<Duration> {
+///
+/// # Errors
+///
+/// Returns [`ResearchError::ValidationMethodology`] when significance is
+/// outside `(0, 0.5]`, a conversion is non-finite/out of range, or the final
+/// duration exceeds `chrono::Duration`'s supported range.
+pub fn min_track_record_length(
+    input: &DsrInput,
+    target_significance: Decimal,
+) -> QuantResult<Option<Duration>> {
     if input.observed_sharpe <= Decimal::ZERO {
-        return None;
+        return Ok(None);
     }
-    let _denominator = psr_denominator(input.skewness, input.kurtosis, input.observed_sharpe)?;
-    let gamma3 = input.skewness.to_f64().unwrap_or(0.0);
-    let gamma4 = input.kurtosis.to_f64().unwrap_or(3.0);
-    let sr = input.observed_sharpe.to_f64().unwrap_or(0.0);
-    let alpha = target_significance
-        .to_f64()
-        .unwrap_or(0.05)
-        .clamp(1e-6, 0.5);
+    if psr_denominator(input.skewness, input.kurtosis, input.observed_sharpe)?.is_none() {
+        return Ok(None);
+    }
+    let gamma3 = decimal_to_f64(input.skewness, "skewness")?;
+    let converted_kurtosis = decimal_to_f64(input.kurtosis, "kurtosis")?;
+    let gamma4 = if converted_kurtosis > 0.0 {
+        converted_kurtosis
+    } else {
+        3.0
+    };
+    let sr = decimal_to_f64(input.observed_sharpe, "observed_sharpe")?;
+    let alpha = decimal_to_f64(target_significance, "target_significance")?;
+    if !(0.0..=0.5).contains(&alpha) || alpha == 0.0 {
+        return Err(methodology(format!(
+            "target_significance must be in (0, 0.5], got {target_significance}"
+        )));
+    }
     let z = stats::normal_inverse_cdf(1.0 - alpha);
-    let moment_term = ((gamma4 - 1.0) / 4.0 * sr).mul_add(sr, 1.0 - gamma3 * sr);
+    let normal_term = gamma3.mul_add(-sr, 1.0);
+    let moment_term = ((gamma4 - 1.0) / 4.0 * sr).mul_add(sr, normal_term);
+    if !moment_term.is_finite() {
+        return Err(methodology(
+            "minimum track-record calculation produced a non-finite moment term".to_owned(),
+        ));
+    }
     if moment_term <= 0.0 {
-        return None;
+        return Ok(None);
     }
     let periods = 1.0 + moment_term * z * z / (sr * sr);
-    let periods = periods.ceil().max(1.0);
-    let period_count = i64::from_f64(periods).unwrap_or(i64::MAX);
-    Some(input.period_length * i32::try_from(period_count).unwrap_or(i32::MAX))
+    if !periods.is_finite() || periods < 1.0 {
+        return Err(methodology(
+            "minimum track-record period count is non-finite or below one".to_owned(),
+        ));
+    }
+    let period_count = periods.ceil().to_i32().ok_or_else(|| {
+        methodology(format!(
+            "minimum track-record period count {periods} exceeds the supported i32 range"
+        ))
+    })?;
+    input
+        .period_length
+        .checked_mul(period_count)
+        .map(Some)
+        .ok_or_else(|| {
+            methodology(format!(
+                "minimum track-record duration overflows for {period_count} periods"
+            ))
+        })
+}
+
+fn decimal_to_f64(value: Decimal, field: &'static str) -> QuantResult<f64> {
+    value
+        .to_f64()
+        .filter(|converted| converted.is_finite())
+        .ok_or_else(|| {
+            methodology(format!(
+                "{field}={value} cannot be represented as finite f64"
+            ))
+        })
+}
+
+fn decimal_from_f64(value: f64, field: &'static str) -> QuantResult<Decimal> {
+    if !value.is_finite() {
+        return Err(methodology(format!("{field} is non-finite")));
+    }
+    Decimal::from_f64(value)
+        .ok_or_else(|| methodology(format!("{field}={value} cannot be represented as Decimal")))
+}
+
+fn exact_u64_to_f64(value: u64, field: &'static str) -> QuantResult<f64> {
+    const MAX_EXACT_F64_INTEGER: u64 = 1_u64 << f64::MANTISSA_DIGITS;
+    if value > MAX_EXACT_F64_INTEGER {
+        return Err(methodology(format!(
+            "{field}={value} exceeds the exact integer range of f64"
+        )));
+    }
+    value
+        .to_f64()
+        .ok_or_else(|| methodology(format!("{field}={value} cannot be represented as f64")))
+}
+
+fn methodology(detail: String) -> QuantError {
+    ResearchError::ValidationMethodology { detail }.into()
 }
 
 #[cfg(test)]
@@ -227,8 +335,8 @@ mod tests {
             trial_count,
             ..normal_input(dec!(0.3), trial_count)
         };
-        let one_trial = deflated_sharpe_ratio(&short_track_record(1));
-        let many_trials = deflated_sharpe_ratio(&short_track_record(50));
+        let one_trial = deflated_sharpe_ratio(&short_track_record(1)).expect("DSR");
+        let many_trials = deflated_sharpe_ratio(&short_track_record(50)).expect("DSR");
         assert_eq!(one_trial.benchmark_sharpe, rust_decimal::Decimal::ZERO);
         assert!(
             many_trials.benchmark_sharpe > one_trial.benchmark_sharpe,
@@ -243,32 +351,68 @@ mod tests {
 
     #[test]
     fn deflated_sharpe_increases_with_trial_count_pushed_further() {
-        let fifty = deflated_sharpe_ratio(&normal_input(dec!(2.0), 50));
-        let five_hundred = deflated_sharpe_ratio(&normal_input(dec!(2.0), 500));
+        let fifty = deflated_sharpe_ratio(&normal_input(dec!(2.0), 50)).expect("DSR");
+        let five_hundred = deflated_sharpe_ratio(&normal_input(dec!(2.0), 500)).expect("DSR");
         assert!(five_hundred.benchmark_sharpe > fifty.benchmark_sharpe);
         assert!(five_hundred.deflated_sharpe <= fifty.deflated_sharpe);
     }
 
     #[test]
     fn deflated_sharpe_is_bounded_probability() {
-        let report = deflated_sharpe_ratio(&normal_input(dec!(3.0), 1));
+        let report = deflated_sharpe_ratio(&normal_input(dec!(3.0), 1)).expect("DSR");
         assert!(report.deflated_sharpe >= rust_decimal::Decimal::ZERO);
         assert!(report.deflated_sharpe <= rust_decimal::Decimal::ONE);
     }
 
     #[test]
     fn non_positive_sharpe_has_no_min_track_record_length() {
-        assert!(min_track_record_length(&normal_input(dec!(-0.5), 1), dec!(0.05)).is_none());
-        assert!(min_track_record_length(&normal_input(dec!(0), 1), dec!(0.05)).is_none());
+        assert!(
+            min_track_record_length(&normal_input(dec!(-0.5), 1), dec!(0.05))
+                .expect("MinTRL")
+                .is_none()
+        );
+        assert!(
+            min_track_record_length(&normal_input(dec!(0), 1), dec!(0.05))
+                .expect("MinTRL")
+                .is_none()
+        );
     }
 
     #[test]
     fn higher_sharpe_needs_shorter_min_track_record_length() {
-        let low = min_track_record_length(&normal_input(dec!(0.5), 1), dec!(0.05)).expect("some");
-        let high = min_track_record_length(&normal_input(dec!(2.0), 1), dec!(0.05)).expect("some");
+        let low = min_track_record_length(&normal_input(dec!(0.5), 1), dec!(0.05))
+            .expect("MinTRL")
+            .expect("some");
+        let high = min_track_record_length(&normal_input(dec!(2.0), 1), dec!(0.05))
+            .expect("MinTRL")
+            .expect("some");
         assert!(
             high < low,
             "a stronger Sharpe needs fewer periods to prove significant"
         );
+    }
+
+    #[test]
+    fn negative_trial_variance_is_rejected_instead_of_floored() {
+        let input = DsrInput {
+            trial_sharpe_variance: dec!(-0.01),
+            ..normal_input(dec!(1), 10)
+        };
+        assert!(deflated_sharpe_ratio(&input).is_err());
+    }
+
+    #[test]
+    fn period_count_beyond_exact_f64_integer_range_is_rejected() {
+        let input = DsrInput {
+            returns_period_count: (1_u64 << f64::MANTISSA_DIGITS) + 2,
+            ..normal_input(dec!(1), 1)
+        };
+        assert!(deflated_sharpe_ratio(&input).is_err());
+    }
+
+    #[test]
+    fn invalid_significance_is_rejected_instead_of_clamped() {
+        assert!(min_track_record_length(&normal_input(dec!(1), 1), dec!(0)).is_err());
+        assert!(min_track_record_length(&normal_input(dec!(1), 1), dec!(0.6)).is_err());
     }
 }

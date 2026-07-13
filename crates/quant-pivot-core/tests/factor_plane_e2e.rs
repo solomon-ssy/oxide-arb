@@ -14,7 +14,6 @@ use quant_pivot_core::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub,
     },
-    pit::platform::live_book::LiveBookDataSource,
     prefetch::feature_window::FeatureWindowProvider,
     service::{
         factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
@@ -29,13 +28,13 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        NewModelRun,
-        market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+        DecisionClock, NewModelRun,
+        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
         factor::{FactorDefinitionScope, FactorFamily},
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
         quant::{ModelRunKind, ModelRunStatus},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
@@ -55,8 +54,8 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::{
-    factors::{FactorEngine, factor_definition_id, factor_events},
-    features::{FeatureVector, PitView},
+    factors::{FactorEngine, FactorName, factor_events},
+    features::FeatureVector,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
@@ -67,6 +66,7 @@ use quant_pivot_test_support::{
     report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
+use quant_pivot_test_support::{fact_sink::DiscardFactWriter, pit::InMemoryDecisionSnapshotSource};
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
 use tokio_util::sync::CancellationToken;
@@ -120,7 +120,7 @@ fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
         fee_schedule: None,
         end_date: Some(Utc::now() + ChronoDuration::days(5)),
         resolved_at: None,
-        created_at: Utc::now() - ChronoDuration::days(2),
+        created_at: Some(Utc::now() - ChronoDuration::days(2)),
         updated_at: Utc::now(),
     }
 }
@@ -151,7 +151,22 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &Catalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &Catalog) {
-    registry.register_market(registry_market(catalog));
+    let market = registry_market(catalog);
+    registry.register_event(EventRegistryInfo {
+        event_id: market.event_id.clone(),
+        title: "Factor E2E".to_owned(),
+        slug: "factor-e2e".to_owned(),
+        series_slug: None,
+        status: EventStatus::Active,
+        market_ids: vec![market.market_id.clone()],
+        categories: CategorySet::from(MarketCategory::Sports),
+        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        neg_risk: false,
+        end_date: market.end_date,
+        created_at: Utc::now() - ChronoDuration::days(2),
+        updated_at: market.updated_at,
+    });
+    registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
     book_store.apply_snapshot(
         &yes,
@@ -163,7 +178,8 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &C
             Price::new(Decimal::new(53, 2)),
             Shares::new(Decimal::from(80)),
         )]),
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        u64::try_from(Utc::now().timestamp_millis())
+            .expect("test book timestamp must be non-negative"),
         None,
     );
 }
@@ -177,6 +193,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -186,6 +203,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -196,6 +214,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -215,6 +234,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
@@ -224,6 +244,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
         Ok(None)
     }
@@ -233,6 +254,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -240,7 +262,8 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn resolution_at(
         &self,
         _market_id: &MarketId,
-        _as_of_ms: i64,
+        _source_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         Ok(None)
     }
@@ -250,6 +273,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -259,6 +283,8 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_keys: Vec<DomainInstrumentKey>,
         _from_ms: i64,
         _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -268,6 +294,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_key: &DomainInstrumentKey,
         _metric: &str,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         Ok(None)
     }
@@ -276,19 +303,14 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
     }
 }
 
 fn noop_feature_writer() -> Arc<FeatureEventWriter> {
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("factor-e2e-feature-events").capacity(256),
-        |_| Box::pin(async { Ok(()) }),
-        prometheus::IntCounter::new("factor_e2e_feat_drops", "drops").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    Arc::new(FeatureEventWriter::new(Arc::new(writer)))
+    Arc::new(FeatureEventWriter::new(Arc::new(DiscardFactWriter::new())))
 }
 
 fn factors_config() -> FactorsConfig {
@@ -321,7 +343,7 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     let registry = Arc::new(MarketRegistry::new());
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
-    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
+    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let window_provider = FeatureWindowProvider::new(Arc::new(EmptyFactRead));
@@ -342,13 +364,14 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
-            as_of: Utc::now(),
+            boundary: DecisionClock::new(0)
+                .boundary(Utc::now())
+                .expect("decision boundary"),
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
-            source_delay_secs: 0,
-            pit: PitView::Live(&live_pit),
+            pit: &live_pit,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
         })
@@ -454,7 +477,10 @@ async fn create_definition_and_values_then_list_for_run() {
     );
 
     // The data-quality definition is always registered and idempotent.
-    let definition_id = factor_definition_id("data_quality");
+    let definition_id = FactorEngine::new(&factors, &features, &DomainConfig::default(), None)
+        .definition_identity(&FactorName::new("data_quality"))
+        .expect("data-quality identity")
+        .factor_definition_id;
     let definition = factor_repo
         .find_definition(&definition_id)
         .await
@@ -620,7 +646,7 @@ fn sample_vector(
 
     use quant_pivot_models::{enums::quant::DataQualityStatus, types::SchemaVersion};
     use quant_pivot_research::features::{
-        FeatureName, FeatureValue,
+        FeatureCell, FeatureName, FeatureStaleness, FeatureValue,
         names::{book, market},
     };
 
@@ -638,16 +664,22 @@ fn sample_vector(
         market::TIME_TO_RESOLUTION_SECS,
         FeatureValue::Count(172_800),
     );
+    let values = values
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                FeatureCell::observed(value, None, FeatureStaleness::Unknown),
+            )
+        })
+        .collect();
     FeatureVector {
         market_id: MarketId::new(market),
         token_id: Some(TokenId::new("token")),
-        as_of,
+        decision_at: as_of,
         generic_schema_version: SchemaVersion::FIRST,
         generic: values,
         domain: None,
-        substitutions: Vec::new(),
         data_quality: DataQualityStatus::Fresh,
-        staleness_ms: 0,
-        source_refs: Vec::new(),
     }
 }

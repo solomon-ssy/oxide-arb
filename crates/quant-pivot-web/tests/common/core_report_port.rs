@@ -4,17 +4,25 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use quant_pivot_core::{
-    app::ports::quant_report::CoreQuantReportPort, infra::schedule::ReportScheduleRunner,
+    app::ports::quant_report::{CoreQuantReportPort, CoreQuantReportPortDeps},
+    infra::schedule::ReportScheduleRunner,
     report::AdHocReportRequest,
 };
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
+    clickhouse::{
+        QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
+    },
     domain::CoreEventPublisher,
     runtime_config::{ReportScheduleConfig, ReportsConfig},
+    types::{FeatureVectorId, ModelRunId},
 };
-use quant_pivot_repository::postgres::PgOrderIntentRepository;
+use quant_pivot_repository::postgres::{
+    PgFeatureRepository, PgOrderIntentRepository, PgRuntimeConfigVersionRepository,
+};
 use quant_pivot_repository::traits::{
-    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+    FeatureRepository, OrderIntentRepository, RecommendationReportRepository,
+    RecommendationRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
 };
 use quant_pivot_test_support::report_pipeline_harness::FixtureReportSeedContext;
 use quant_pivot_test_support::report_pipeline_harness::{HarnessOptions, ReportPipelineHarness};
@@ -57,6 +65,32 @@ impl ReportScheduleRunner for FakeReportScheduleRunner {
     }
 }
 
+struct EmptyServingEvidenceRepository;
+
+#[async_trait]
+impl ServingEvidenceRepository for EmptyServingEvidenceRepository {
+    async fn completions_for_runs(
+        &self,
+        _model_run_ids: &[ModelRunId],
+    ) -> Result<Vec<QuantServingEvidenceCompletionRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn model_inputs_for_runs(
+        &self,
+        _model_run_ids: &[ModelRunId],
+    ) -> Result<Vec<QuantModelInputEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn feature_cells_for_vectors(
+        &self,
+        _feature_vector_ids: &[FeatureVectorId],
+    ) -> Result<Vec<QuantFeatureEventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+}
+
 /// Wired core report port plus handles tests inspect (ad-hoc queue).
 pub struct CoreReportTestHandle {
     pub port: Arc<CoreQuantReportPort>,
@@ -80,13 +114,17 @@ pub async fn build_core_report_stack(
     let order_intent_repo =
         Arc::new(PgOrderIntentRepository::new(db.clone())) as Arc<dyn OrderIntentRepository>;
 
-    let port = Arc::new(CoreQuantReportPort::new(
+    let port = Arc::new(CoreQuantReportPort::new(CoreQuantReportPortDeps {
         report_repo,
         recommendation_repo,
         order_intent_repo,
-        Arc::new(harness.lifecycle),
+        lifecycle: Arc::new(harness.lifecycle),
         scheduler,
-    ));
+        serving_evidence: Arc::new(EmptyServingEvidenceRepository),
+        feature_repo: Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>,
+        runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
+            as Arc<dyn RuntimeConfigVersionRepository>,
+    }));
 
     CoreReportTestHandle {
         port,

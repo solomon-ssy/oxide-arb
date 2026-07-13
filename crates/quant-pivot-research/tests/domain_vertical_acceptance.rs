@@ -1,42 +1,51 @@
 //! Phase 11.2.2 §9 acceptance tests (research plane).
 
 use std::collections::BTreeMap;
-use std::time::Duration as StdDuration;
+use std::sync::Arc;
 
 use chrono::{Duration, TimeZone, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        CryptoSubject, DomainObservation, GroundingProof, LinkageOutcome, LinkageSourceMetadata,
-        MarketLinkage, MarketSubject, PriceComparator, ResolutionOracle, ResolvedBinding,
+        CryptoSubject, DecisionClock, DecisionSource, DomainObservation, GroundingProof,
+        LinkageOutcome, LinkageSourceMetadata, MarketLinkage, MarketSubject, PriceComparator,
+        ResolutionOracle, ResolvedBinding,
+        market::{
+            book::BookLevel,
+            registry::{MarketRegistryInfo, TokenInfo},
+        },
     },
     enums::{
-        common::MarketCategory,
+        common::{CategorySet, MarketCategory, TickSize},
         domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
+        feature::EvidenceSourceKind,
+        market::MarketStatus,
         quant::{DataQualityStatus, DatasetPurpose},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
     types::{
-        BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
-        DomainInstrumentKey, DomainSourceId, EventId, MarketId, MarketLinkageId, Probability,
-        ResolverVersion, SchemaVersion, TokenId, Usd,
+        BinanceSymbol, CatalogSyncBatchId, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
+        DomainInstrumentKey, DomainSourceId, EventCatalogVersionId, EventId,
+        MarketCatalogVersionId, MarketId, MarketLinkageId, Price, Probability, ResolverVersion,
+        SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_research::{
-    domain::{build_domain_slice_inputs, linkage_valid_at},
+    domain::{DomainObservationWindow, build_domain_slice_inputs, linkage_valid_at},
     factors::{
         DomainFactorRegistry, FactorEngine, FactorName, MarketFactorOutcome, ScoredFactor,
         names::{DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE},
     },
     features::{
-        ConfiguredFeatureBuilder, CryptoDomainFeatureBuilder, DomainComputeCtx,
+        CatalogDecisionRef, ConfiguredFeatureBuilder, CryptoDomainFeatureBuilder, DomainComputeCtx,
         DomainFeatureBuilder, DomainFeatureSlice, DomainSliceInputs, EvidenceSourceRef,
-        FeatureValue, FeatureVector, MarketWindowSnapshot, ResolvedInputs, ResolvedMarketBundle,
-        TradeTapeWindowSnapshot, empty_book, market_decision_capture_from_resolved,
+        FeatureCell, FeatureStaleness, FeatureValue, FeatureVector, MarketWindowSnapshot,
+        ResolvedBook, ResolvedInputs, ResolvedMarketBundle, ResolvedMarketContext,
+        TradeTapeWindowSnapshot, market_decision_capture_from_resolved,
         names::{
             domain_crypto::{self, BASIS_VS_RESOLUTION_SOURCE},
             market as market_names,
         },
-        stub_market_context,
     },
     hashing::ResearchHasher,
     linkage::{
@@ -45,7 +54,7 @@ use quant_pivot_research::{
     },
     selection::SelectedMarket,
     training::{
-        LabelName, TrainingDatasetArtifact, TrainingExample, TrainingLabel,
+        DatasetHashContract, LabelName, TrainingDatasetArtifact, TrainingExample, TrainingLabel,
         assert_no_future_leakage,
     },
 };
@@ -74,7 +83,11 @@ fn crypto_slice() -> DomainFeatureSlice {
     let mut values = BTreeMap::new();
     values.insert(
         domain_crypto::DISTANCE_TO_STRIKE,
-        FeatureValue::Decimal(dec!(0.02)),
+        FeatureCell::observed(
+            FeatureValue::Decimal(dec!(0.02)),
+            None,
+            FeatureStaleness::Unknown,
+        ),
     );
     DomainFeatureSlice {
         family: DomainFamily::Crypto,
@@ -96,18 +109,215 @@ fn find_factor<'a>(outcome: &'a MarketFactorOutcome, name: &FactorName) -> &'a S
 
 fn vector(category: MarketCategory, domain: Option<DomainFeatureSlice>) -> FeatureVector {
     let mut generic = BTreeMap::new();
-    generic.insert(market_names::CATEGORY, FeatureValue::Category(category));
+    generic.insert(
+        market_names::CATEGORY,
+        FeatureCell::observed(
+            FeatureValue::Category(category),
+            None,
+            FeatureStaleness::Unknown,
+        ),
+    );
     FeatureVector {
         market_id: MarketId::new("m"),
         token_id: Some(TokenId::new("t")),
-        as_of: Utc::now(),
+        decision_at: Utc::now(),
         generic_schema_version: SchemaVersion::FIRST,
         generic,
         domain,
-        substitutions: Vec::new(),
         data_quality: DataQualityStatus::Fresh,
-        staleness_ms: 0,
+    }
+}
+
+fn domain_test_market(category: MarketCategory) -> SelectedMarket {
+    SelectedMarket {
+        market_id: MarketId::new("m"),
+        event_id: EventId::new("e"),
+        category,
+        primary_token_id: TokenId::new("yes"),
+        secondary_token_id: Some(TokenId::new("no")),
+        liquidity_usd: None,
+        volume_24h_usd: None,
         source_refs: Vec::new(),
+    }
+}
+
+fn domain_test_book(market: &SelectedMarket, cutoff: chrono::DateTime<Utc>) -> ResolvedBook {
+    ResolvedBook {
+        token_id: market.primary_token_id.clone(),
+        bids: Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(dec!(0.49)),
+            Shares::new(dec!(100)),
+        )]),
+        asks: Arc::from([BookLevel::from_decimal_unchecked(
+            Price::new(dec!(0.51)),
+            Shares::new(dec!(100)),
+        )]),
+        timestamp_ms: u64::try_from(cutoff.timestamp_millis()).expect("positive timestamp"),
+        version: 1,
+        sequence: 1,
+        effective_at: cutoff,
+        available_at: cutoff,
+    }
+}
+
+fn domain_test_registry(
+    market: &SelectedMarket,
+    context: &ResolvedMarketContext,
+    cutoff: chrono::DateTime<Utc>,
+) -> MarketRegistryInfo {
+    MarketRegistryInfo {
+        market_id: market.market_id.clone(),
+        event_id: market.event_id.clone(),
+        token_yes: market.primary_token_id.clone(),
+        token_no: market.secondary_token_id.clone().expect("secondary token"),
+        question: "domain acceptance".to_owned(),
+        slug: "domain-acceptance".to_owned(),
+        description: None,
+        categories: CategorySet::from(market.category),
+        status: MarketStatus::Active,
+        outcome: None,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![TokenInfo {
+            token_id: market.primary_token_id.clone(),
+            outcome: "Yes".to_owned(),
+            neg_risk: false,
+        }],
+        best_bid: Some(dec!(0.49)),
+        best_ask: Some(dec!(0.51)),
+        depth_usd: Some(Usd::new(dec!(100))),
+        min_order_size: dec!(1),
+        liquidity_usd: Some(Usd::new(dec!(100))),
+        volume_24h: None,
+        fee_schedule: None,
+        end_date: context.end_date,
+        resolved_at: None,
+        created_at: context.created_at,
+        updated_at: cutoff,
+    }
+}
+
+fn build_domain_test_vector(
+    builder: &ConfiguredFeatureBuilder,
+    features: &FeaturesConfig,
+    as_of: chrono::DateTime<Utc>,
+    cutoff: chrono::DateTime<Utc>,
+    category: MarketCategory,
+    domain: Option<&DomainSliceInputs>,
+) -> QuantResult<FeatureVector> {
+    let market = domain_test_market(category);
+    let book = domain_test_book(&market, cutoff);
+    let market_ctx = ResolvedMarketContext {
+        market_id: market.market_id.clone(),
+        effective_at: cutoff,
+        available_at: as_of,
+        status: MarketStatus::Active,
+        neg_risk: false,
+        end_date: Some(as_of + Duration::days(1)),
+        created_at: Some(as_of - Duration::days(1)),
+    };
+    let registry = domain_test_registry(&market, &market_ctx, cutoff);
+    let lag_secs = u64::try_from((as_of - cutoff).num_seconds()).map_err(|error| {
+        ResearchError::DatasetBuild {
+            detail: format!("test boundary lag conversion failed: {error}"),
+        }
+    })?;
+    let boundary = DecisionClock::new(lag_secs).boundary(as_of)?;
+    let hash = |seed: char| {
+        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
+    };
+    let capture = market_decision_capture_from_resolved(
+        &boundary,
+        &market,
+        book.clone(),
+        market_ctx.clone(),
+        Some(&registry),
+        CatalogDecisionRef {
+            catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
+            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+            event_catalog_version_id: EventCatalogVersionId::from_v7(),
+            market_content_hash: hash('a'),
+            event_content_hash: hash('b'),
+            membership_hash: hash('c'),
+            market_effective_at: cutoff,
+            market_available_at: as_of,
+            event_effective_at: cutoff,
+            event_available_at: as_of,
+            market_timestamp_quality: "source".to_owned(),
+            event_timestamp_quality: "source".to_owned(),
+        },
+        Usd::ZERO,
+    )?;
+    let window = MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, cutoff);
+    let trade_tape = TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, cutoff);
+    let bundle = ResolvedMarketBundle {
+        inputs: ResolvedInputs {
+            market: &market,
+            decision_at: as_of,
+            book: Some(book),
+            secondary_book: None,
+            secondary_book_snapshot_ref: None,
+            market_ctx: Some(market_ctx),
+            window: &window,
+            trade_tape: &trade_tape,
+            domain,
+            sibling_legs: Vec::new(),
+            sibling_leg_total: 0,
+        },
+        capture,
+    };
+    builder.compute_vector(&bundle, &[], features, &DataQualityConfig::default())
+}
+
+fn crypto_domain_inputs(as_of: chrono::DateTime<Utc>) -> DomainSliceInputs {
+    let observed_at = as_of - Duration::minutes(1);
+    let instrument_key = DomainInstrumentKey::binance_kline(
+        &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+        KlineInterval::OneMinute,
+    );
+    DomainSliceInputs {
+        family: DomainFamily::Crypto,
+        binding: ResolvedBinding {
+            subject: MarketSubject::Crypto(CryptoSubject {
+                asset: CryptoAsset::parse("BTC").expect("asset"),
+                quote: CryptoQuote::parse("USD").expect("quote"),
+                comparator: PriceComparator::Above,
+                strike: Some(Usd::new(dec!(99000))),
+                reference_at: None,
+                observation_at: as_of,
+                resolution_oracle: ResolutionOracle::BinanceKline {
+                    symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                    interval: KlineInterval::OneMinute,
+                },
+            }),
+            instrument_key: instrument_key.clone(),
+            grounding: GroundingProof { spans: Vec::new() },
+            override_context: None,
+        },
+        linkage_evidence: linkage_evidence(as_of),
+        primary: DomainObservationWindow {
+            cutoff: as_of,
+            observations: vec![DomainObservation {
+                family: DomainFamily::Crypto,
+                source_id: DomainSourceId::binance(),
+                instrument_key,
+                metric: DomainMetric::Close,
+                value: dec!(100000),
+                observed_at,
+                publish_time: observed_at,
+                available_at: Some(observed_at),
+            }],
+        },
+        oracle: None,
+    }
+}
+
+fn linkage_evidence(as_of: chrono::DateTime<Utc>) -> EvidenceSourceRef {
+    EvidenceSourceRef {
+        source_kind: EvidenceSourceKind::Linkage,
+        reference: "linkage:test@blake3:test".to_owned(),
+        effective_at: as_of - Duration::minutes(1),
+        available_at: Some(as_of - Duration::minutes(1)),
     }
 }
 
@@ -118,102 +328,38 @@ fn feature_vector_domain_slice_only_for_mapped_category() {
     // `FeatureVector` literal (11.2.2 remediation R11).
     let features = FeaturesConfig::default();
     let domain_config = DomainConfig::default();
-    let builder = ConfiguredFeatureBuilder::new(&features, &domain_config);
+    let builder =
+        ConfiguredFeatureBuilder::new(&features, &domain_config).expect("feature builder");
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-    let source_delay = StdDuration::from_secs(5);
-
-    let build = |category: MarketCategory, domain: Option<DomainSliceInputs>| {
-        let market = SelectedMarket {
-            market_id: MarketId::new("m"),
-            event_id: EventId::new("e"),
-            category,
-            primary_token_id: TokenId::new("yes"),
-            secondary_token_id: Some(TokenId::new("no")),
-            liquidity_usd: None,
-            volume_24h_usd: None,
-            source_refs: Vec::new(),
-        };
-        let book = empty_book(market.primary_token_id.clone(), as_of);
-        let market_ctx = stub_market_context(market.market_id.clone(), as_of);
-        let capture = market_decision_capture_from_resolved(
-            as_of,
-            &market,
-            book.clone(),
-            market_ctx.clone(),
-            None,
-            Usd::ZERO,
-        )
-        .expect("capture");
-        let window =
-            MarketWindowSnapshot::empty(market.primary_token_id.clone(), as_of, source_delay);
-        let trade_tape =
-            TradeTapeWindowSnapshot::empty(market.market_id.clone(), as_of, source_delay);
-        let bundle = ResolvedMarketBundle {
-            inputs: ResolvedInputs {
-                market: &market,
-                as_of,
-                book: Some(book),
-                market_ctx: Some(market_ctx),
-                window: &window,
-                trade_tape: &trade_tape,
-                domain: domain.as_ref(),
-                sibling_legs: Vec::new(),
-                sibling_leg_total: 0,
-            },
-            capture,
-        };
-        builder.compute_vector(&bundle, &[], &features, &DataQualityConfig::default())
-    };
+    let knowledge_cutoff = as_of - Duration::seconds(5);
 
     // Sports never prefetches domain inputs at all (no vertical maps to it) —
     // the pipeline passes `domain: None` upstream of the builder.
-    let sports = build(MarketCategory::Sports, None);
+    let sports = build_domain_test_vector(
+        &builder,
+        &features,
+        as_of,
+        knowledge_cutoff,
+        MarketCategory::Sports,
+        None,
+    )
+    .expect("sports vector");
     assert!(
         sports.domain.is_none(),
         "a category with no domain vertical must never carry a domain slice"
     );
 
     // Crypto with a resolved linkage + PIT window DOES carry a domain slice.
-    let observed_at = as_of - Duration::minutes(1);
-    let instrument_key = DomainInstrumentKey::binance_kline(
-        &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-        KlineInterval::OneMinute,
-    );
-    let binding = ResolvedBinding {
-        subject: MarketSubject::Crypto(CryptoSubject {
-            asset: CryptoAsset::parse("BTC").expect("asset"),
-            quote: CryptoQuote::parse("USD").expect("quote"),
-            comparator: PriceComparator::Above,
-            strike: Some(Usd::new(dec!(99000))),
-            reference_at: None,
-            observation_at: as_of,
-            resolution_oracle: ResolutionOracle::BinanceKline {
-                symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-                interval: KlineInterval::OneMinute,
-            },
-        }),
-        instrument_key: instrument_key.clone(),
-        grounding: GroundingProof { spans: Vec::new() },
-        override_context: None,
-    };
-    let domain_inputs = DomainSliceInputs {
-        family: DomainFamily::Crypto,
-        binding,
-        primary: quant_pivot_research::domain::DomainObservationWindow {
-            cutoff: as_of,
-            observations: vec![DomainObservation {
-                family: DomainFamily::Crypto,
-                source_id: DomainSourceId::binance(),
-                instrument_key,
-                metric: DomainMetric::Close,
-                value: dec!(100000),
-                observed_at,
-                publish_time: observed_at,
-            }],
-        },
-        oracle: None,
-    };
-    let crypto = build(MarketCategory::Crypto, Some(domain_inputs));
+    let domain_inputs = crypto_domain_inputs(as_of);
+    let crypto = build_domain_test_vector(
+        &builder,
+        &features,
+        as_of,
+        knowledge_cutoff,
+        MarketCategory::Crypto,
+        Some(&domain_inputs),
+    )
+    .expect("crypto vector");
     assert!(
         crypto.domain.is_some(),
         "a category-mapped market with a resolved linkage must carry a domain slice"
@@ -320,48 +466,67 @@ fn dataset_hash_changes_when_domain_slice_added() {
         CanonicalDigest::content_hash_json("label").expect("h"),
     );
 
-    let make = |domain: Option<DomainFeatureSlice>| TrainingExample {
-        example_id: TrainingExampleId::from_v7(),
-        market_id: MarketId::new("m"),
-        token_id: TokenId::new("m-yes"),
-        as_of,
-        sample_source: TrainingSampleSource::HistoricalPit,
-        feature_vector: vector(MarketCategory::Crypto, domain),
-        factor_values: Vec::new(),
-        labels: vec![TrainingLabel {
-            label_name: LabelName::from_static("return_to_horizon"),
-            horizon_secs: 60,
-            value: Decimal::ONE,
-            is_resolved: true,
-            matured_at: as_of + Duration::seconds(60),
-        }],
-        source_refs: Vec::new(),
-        lot_context: None,
-        position_state: None,
-        book_fidelity: None,
+    let make = |domain: Option<DomainFeatureSlice>| {
+        let mut feature_vector = vector(MarketCategory::Crypto, domain);
+        feature_vector.decision_at = as_of;
+        TrainingExample {
+            example_id: TrainingExampleId::from_v7(),
+            market_id: MarketId::new("m"),
+            token_id: TokenId::new("m-yes"),
+            selected_market: SelectedMarket {
+                market_id: MarketId::new("m"),
+                event_id: EventId::new("event:m"),
+                category: MarketCategory::Crypto,
+                primary_token_id: TokenId::new("m-yes"),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+                source_refs: Vec::new(),
+            },
+            decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
+            sample_source: TrainingSampleSource::HistoricalPit,
+            feature_vector,
+            factor_values: Vec::new(),
+            labels: vec![TrainingLabel {
+                label_name: LabelName::from_static("return_to_horizon"),
+                horizon_secs: 60,
+                value: Decimal::ONE,
+                is_resolved: true,
+                matured_at: as_of + Duration::seconds(60),
+            }],
+            source_refs: Vec::new(),
+            decision_capture: None,
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
+        }
     };
 
     let without = vec![make(None)];
     let with = vec![make(Some(crypto_slice()))];
     let h0 = TrainingDatasetArtifact::compute_dataset_hash(
-        &spec,
-        as_of,
-        as_of,
-        DatasetPurpose::Training,
-        &feature,
-        &factor,
-        &label,
+        DatasetHashContract {
+            model_spec_id: &spec,
+            window_start: as_of,
+            window_end: as_of,
+            purpose: DatasetPurpose::Training,
+            feature_schema_hash: &feature,
+            factor_schema_hash: &factor,
+            label_schema_hash: &label,
+        },
         &without,
     )
     .expect("hash");
     let h1 = TrainingDatasetArtifact::compute_dataset_hash(
-        &spec,
-        as_of,
-        as_of,
-        DatasetPurpose::Training,
-        &feature,
-        &factor,
-        &label,
+        DatasetHashContract {
+            model_spec_id: &spec,
+            window_start: as_of,
+            window_end: as_of,
+            purpose: DatasetPurpose::Training,
+            feature_schema_hash: &feature,
+            factor_schema_hash: &factor,
+            label_schema_hash: &label,
+        },
         &with,
     )
     .expect("hash");
@@ -370,20 +535,27 @@ fn dataset_hash_changes_when_domain_slice_added() {
 
 #[test]
 fn dataset_builder_domain_slice_no_future_leakage() {
-    use quant_pivot_models::{
-        enums::feature::EvidenceSourceKind,
-        types::{TrainingExampleId, TrainingSampleSource},
-    };
+    use quant_pivot_models::types::{TrainingExampleId, TrainingSampleSource};
 
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
     let cutoff = as_of - Duration::seconds(5);
     let mut fv = vector(MarketCategory::Crypto, Some(crypto_slice()));
-    fv.as_of = as_of;
+    fv.decision_at = as_of;
     let clean = TrainingExample {
         example_id: TrainingExampleId::from_v7(),
         market_id: MarketId::new("m"),
         token_id: TokenId::new("m-yes"),
-        as_of,
+        selected_market: SelectedMarket {
+            market_id: MarketId::new("m"),
+            event_id: EventId::new("event:m"),
+            category: MarketCategory::Crypto,
+            primary_token_id: TokenId::new("m-yes"),
+            secondary_token_id: None,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        },
+        decision_boundary: DecisionClock::new(5).boundary(as_of).expect("boundary"),
         sample_source: TrainingSampleSource::HistoricalPit,
         feature_vector: fv,
         factor_values: Vec::new(),
@@ -391,23 +563,26 @@ fn dataset_builder_domain_slice_no_future_leakage() {
         source_refs: vec![EvidenceSourceRef {
             source_kind: EvidenceSourceKind::DomainExternal,
             reference: "binance:BTCUSDT:1m".to_owned(),
-            observed_at: cutoff,
+            effective_at: cutoff,
+            available_at: Some(cutoff),
         }],
+        decision_capture: None,
         lot_context: None,
         position_state: None,
         book_fidelity: None,
     };
-    assert!(assert_no_future_leakage(std::slice::from_ref(&clean), 5).is_ok());
+    assert!(assert_no_future_leakage(std::slice::from_ref(&clean)).is_ok());
 
     let bad = TrainingExample {
         source_refs: vec![EvidenceSourceRef {
             source_kind: EvidenceSourceKind::DomainExternal,
             reference: "binance:BTCUSDT:1m".to_owned(),
-            observed_at: as_of,
+            effective_at: as_of,
+            available_at: Some(as_of),
         }],
         ..clean
     };
-    assert!(assert_no_future_leakage(&[bad], 5).is_err());
+    assert!(assert_no_future_leakage(&[bad]).is_err());
 }
 
 #[test]
@@ -560,6 +735,7 @@ fn crypto_domain_feature_present_with_domain_external_evidence() {
             value: dec!(100000),
             observed_at: at,
             publish_time: at,
+            available_at: Some(at),
         }],
     };
     let binding = ResolvedBinding {
@@ -579,9 +755,11 @@ fn crypto_domain_feature_present_with_domain_external_evidence() {
         grounding: GroundingProof { spans: Vec::new() },
         override_context: None,
     };
+    let linkage_evidence = linkage_evidence(as_of);
     let ctx = DomainComputeCtx {
-        as_of,
+        decision_at: as_of,
         binding: &binding,
+        linkage_evidence: &linkage_evidence,
         primary: &primary,
         oracle: None,
         crypto: &CryptoDomainConfig::default(),
@@ -602,8 +780,8 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
     // offline planes call — rather than a deleted, never-wired dual-engine
     // mirror (11.2.2 remediation R9).
     let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-    let source_delay_secs = 5_u64;
-    let cutoff = as_of - Duration::seconds(i64::try_from(source_delay_secs).expect("small delay"));
+    let knowledge_lag_secs = 5_u64;
+    let cutoff = as_of - Duration::seconds(i64::try_from(knowledge_lag_secs).expect("small delay"));
 
     let instrument_key = DomainInstrumentKey::binance_kline(
         &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
@@ -619,6 +797,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
         value: dec!(100000),
         observed_at,
         publish_time: observed_at,
+        available_at: Some(observed_at),
     };
     let observations = std::collections::HashMap::from([(
         instrument_key.clone(),
@@ -626,7 +805,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
     )]);
 
     let mut domain_config = DomainConfig::default();
-    domain_config.crypto.source_delay_secs = source_delay_secs;
+    domain_config.crypto.availability_lag_secs = knowledge_lag_secs;
     let binding = ResolvedBinding {
         subject: MarketSubject::Crypto(CryptoSubject {
             asset: CryptoAsset::parse("BTC").expect("asset"),
@@ -655,17 +834,26 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
         resolver_version: ResolverVersion::FIRST,
         metadata_hash: content_hash.clone(),
         content_hash,
-        derived_at: as_of - Duration::days(1),
-        created_at: as_of - Duration::days(1),
+        effective_at: as_of - Duration::days(1),
+        available_at: as_of - Duration::days(1),
     };
 
+    let boundary = DecisionClock::new(0)
+        .boundary(as_of)
+        .expect("boundary")
+        .with_source_cutoff(
+            DecisionSource::DomainCrypto,
+            domain_config.crypto.availability_lag_secs,
+        )
+        .expect("domain cutoff");
     let inputs = build_domain_slice_inputs(
         MarketCategory::Crypto,
         std::slice::from_ref(&linkage),
-        as_of,
+        &boundary,
         &domain_config,
         &observations,
     )
+    .expect("domain slice build")
     .expect("domain slice inputs");
 
     let observed_times: Vec<_> = inputs
@@ -676,12 +864,12 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
         .collect();
     assert!(
         observed_times.contains(&visible_at),
-        "an observation at or before `as_of - source_delay` must be visible"
+        "an observation at or before the frozen source cutoff must be visible"
     );
     assert!(
         !observed_times.contains(&invisible_at),
-        "an observation after `as_of - source_delay` must be excluded, even though \
-         it is still before `as_of` itself"
+        "an observation after the frozen source cutoff must be excluded, even though \
+         it is still before `decision_at` itself"
     );
 }
 
@@ -729,8 +917,8 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
         resolver_version: ResolverVersion::FIRST,
         metadata_hash: hash("aa"),
         content_hash: hash("11"),
-        derived_at: t1,
-        created_at: t1,
+        effective_at: t1,
+        available_at: t1,
     };
     // A metadata revision at `t2` changed the resolved asset (simulating a
     // corrected/edited market description that re-derivation picked up).
@@ -744,14 +932,15 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
         resolver_version: ResolverVersion::FIRST,
         metadata_hash: hash("bb"),
         content_hash: hash("22"),
-        derived_at: t2,
-        created_at: t2,
+        effective_at: t2,
+        available_at: t2,
     };
     let ledger = [v1, v2];
 
     // Read strictly between the two revisions: must see v1 (BTC), never v2.
     let between = t1 + Duration::days(1);
-    let resolved = linkage_valid_at(&ledger, between).expect("a valid record exists");
+    let between_boundary = DecisionClock::new(0).boundary(between).expect("boundary");
+    let resolved = linkage_valid_at(&ledger, &between_boundary).expect("a valid record exists");
     let LinkageOutcome::Resolved(binding) = &resolved.outcome else {
         panic!("expected resolved outcome");
     };
@@ -765,7 +954,8 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
 
     // Read at/after the second revision: must see v2 (ETH).
     let after = t2 + Duration::hours(1);
-    let resolved_after = linkage_valid_at(&ledger, after).expect("a valid record exists");
+    let after_boundary = DecisionClock::new(0).boundary(after).expect("boundary");
+    let resolved_after = linkage_valid_at(&ledger, &after_boundary).expect("a valid record exists");
     let LinkageOutcome::Resolved(binding_after) = &resolved_after.outcome else {
         panic!("expected resolved outcome");
     };
@@ -774,7 +964,8 @@ fn linkage_pit_uses_metadata_version_not_future_revision() {
 
     // Read before either revision exists: no valid record.
     let before = t1 - Duration::days(1);
-    assert!(linkage_valid_at(&ledger, before).is_none());
+    let before_boundary = DecisionClock::new(0).boundary(before).expect("boundary");
+    assert!(linkage_valid_at(&ledger, &before_boundary).is_none());
 }
 
 /// Focused, pure feature-computation test: `basis_vs_resolution_source` is
@@ -806,6 +997,7 @@ fn basis_vs_resolution_source_computes_bps_from_close_and_oracle() {
             value: dec!(100500),
             observed_at: as_of - Duration::minutes(1),
             publish_time: as_of - Duration::minutes(1),
+            available_at: Some(as_of - Duration::minutes(1)),
         }],
     };
     let oracle = DomainObservationWindow {
@@ -820,6 +1012,7 @@ fn basis_vs_resolution_source_computes_bps_from_close_and_oracle() {
             value: dec!(100000),
             observed_at: as_of - Duration::minutes(1),
             publish_time: as_of - Duration::minutes(1),
+            available_at: Some(as_of - Duration::minutes(1)),
         }],
     };
     let binding = ResolvedBinding {
@@ -838,9 +1031,11 @@ fn basis_vs_resolution_source_computes_bps_from_close_and_oracle() {
         grounding: GroundingProof { spans: Vec::new() },
         override_context: None,
     };
+    let linkage_evidence = linkage_evidence(as_of);
     let ctx = DomainComputeCtx {
-        as_of,
+        decision_at: as_of,
         binding: &binding,
+        linkage_evidence: &linkage_evidence,
         primary: &primary,
         oracle: Some(&oracle),
         crypto: &CryptoDomainConfig::default(),

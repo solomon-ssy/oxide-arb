@@ -18,7 +18,7 @@ pub struct PortfolioPlanInfo {
     pub portfolio_plan_id: PortfolioPlanId,
     pub model_run_id: Option<ModelRunId>,
     pub market_selection_id: MarketSelectionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
     pub risk_budget_json: PortfolioRiskBudget,
@@ -29,7 +29,7 @@ pub struct PortfolioPlanInfo {
 }
 
 info_from_model!(PortfolioPlanInfo, crate::entities::quant_portfolio_plan::Model, {
-    portfolio_plan_id, model_run_id, market_selection_id, as_of, budget_usd,
+    portfolio_plan_id, model_run_id, market_selection_id, decision_at, budget_usd,
     allocated_usd, risk_budget_json, constraints_json, rejected_summary,
     optimizer_meta_json, created_at,
 });
@@ -41,7 +41,7 @@ pub struct NewPortfolioPlan {
     pub portfolio_plan_id: PortfolioPlanId,
     pub model_run_id: Option<ModelRunId>,
     pub market_selection_id: MarketSelectionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
     pub risk_budget_json: PortfolioRiskBudget,

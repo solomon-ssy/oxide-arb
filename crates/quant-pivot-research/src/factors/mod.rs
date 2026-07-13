@@ -18,9 +18,11 @@ mod computer;
 mod domain;
 mod frozen;
 mod generic;
+mod identity;
 pub mod names;
 mod normalize;
 mod persistence;
+mod reference;
 mod registry;
 mod structural;
 mod value;
@@ -33,16 +35,18 @@ pub use collinearity::{
     CollinearPair, FactorCollinearityAnalyzer, FactorCollinearityReport, FactorObservationMatrix,
     neutralize_by_group,
 };
-pub use computer::{FactorComputer, FactorEngine, FactorHistory};
+pub use computer::{FactorComputer, FactorEngine};
 pub use domain::{DomainFactorRegistry, crypto_domain_factors};
 pub use frozen::frozen_factor_outcome;
-pub use generic::{factor_definition_id, generic_factors};
+pub use generic::generic_factors;
+pub use identity::{FactorDefinitionIdentity, factor_definition_identity};
 pub use normalize::{
     CrossSectionalNormalizer, MinMaxNormalizer, NormalizationClampAudit, NormalizationStats,
     NormalizedFactor, RankNormalizer, RawFactorColumn, WinsorizedZScoreNormalizer,
     resolve_normalizer,
 };
 pub use persistence::FactorValueInsertContext;
+pub use reference::{FrozenReferenceCdf, FrozenReferenceQuantiles};
 pub use registry::FactorRegistry;
 pub use structural::structural_factors;
 pub use value::{

@@ -7,19 +7,23 @@
 //! computed `ReportDiff`; the persistence structs are never serialized directly.
 
 use crate::{
-    domain::{RecommendationDelta, RecommendationReportInfo, ReportDiff, pagination::PageRequest},
+    domain::{
+        DecisionBoundaryEvidenceView, ModelRouteEvidenceView, RecommendationDelta,
+        RecommendationReportInfo, ReportDiff, pagination::PageRequest,
+    },
     enums::quant::{
-        AccountSource, EmptyReportReason, OutcomeSide, QuantRuntimeMode,
+        AccountSource, EmptyReportReason, FeatureParityStage, OutcomeSide, QuantRuntimeMode,
         RecommendationReportStatus, ReportKind, ReportTriggerKind,
     },
     types::{
-        AccountSnapshotId, EligibilitySummary, MarketSelectionId, ModelVersionId, RecommendationId,
-        RecommendationReportId, ReportSummary, RuntimeConfigVersionId, Usd,
+        AccountSnapshotId, EligibilitySummary, MarketSelectionId, ModelRunId, ModelVersionId,
+        RecommendationId, RecommendationReportId, ReportSummary, RuntimeConfigVersionId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_macros::NormalizePageQuery;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use validator::Validate;
 
 /// List-row projection of a recommendation report (header + summary roll-up).
@@ -30,7 +34,7 @@ pub struct QuantReportView {
     pub trigger_kind: ReportTriggerKind,
     pub status: RecommendationReportStatus,
     pub runtime_mode: QuantRuntimeMode,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub top_n: i32,
     pub account_source: AccountSource,
     pub capital_base_usd: Usd,
@@ -52,7 +56,7 @@ impl From<RecommendationReportInfo> for QuantReportView {
             trigger_kind: info.trigger_kind,
             status: info.status,
             runtime_mode: info.runtime_mode,
-            as_of: info.as_of,
+            decision_at: info.decision_at,
             top_n: info.top_n,
             account_source: info.account_source,
             capital_base_usd: info.capital_base_usd,
@@ -77,8 +81,8 @@ pub struct QuantReportDetailView {
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
     pub trigger_time: DateTime<Utc>,
-    pub source_delay_secs: i64,
-    pub as_of: DateTime<Utc>,
+    pub knowledge_lag_secs: i64,
+    pub decision_at: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
     pub top_n: i32,
@@ -87,6 +91,7 @@ pub struct QuantReportDetailView {
     pub capital_base_usd: Usd,
     pub account_snapshot_ref: AccountSnapshotId,
     pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_run_id: Option<ModelRunId>,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub summary: ReportSummary,
@@ -105,8 +110,8 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
             trigger_kind: info.trigger_kind,
             trigger_key: info.trigger_key,
             trigger_time: info.trigger_time,
-            source_delay_secs: info.source_delay_secs,
-            as_of: info.as_of,
+            knowledge_lag_secs: info.knowledge_lag_secs,
+            decision_at: info.decision_at,
             horizon_secs: info.horizon_secs,
             runtime_mode: info.runtime_mode,
             top_n: info.top_n,
@@ -115,6 +120,7 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
             capital_base_usd: info.capital_base_usd,
             account_snapshot_ref: info.account_snapshot_ref,
             runtime_config_version_id: info.runtime_config_version_id,
+            model_run_id: info.model_run_id,
             model_version_id: info.model_version_id,
             market_selection_id: info.market_selection_id,
             summary: info.summary_json,
@@ -127,9 +133,41 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
     }
 }
 
+/// Subject whose durable evidence is projected by report diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportDiagnosticsSubject {
+    /// A real serving model run; the report stores its exact `model_run_id`.
+    ModelRun,
+    /// A committed report that intentionally stopped before model inference.
+    PreInferenceReport,
+}
+
+/// Durable serving diagnostics through the last stage actually executed.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantReportDiagnosticsView {
+    pub subject: ReportDiagnosticsSubject,
+    pub stage_ceiling: FeatureParityStage,
+    pub evidence_complete: bool,
+    pub decision_boundary: Option<DecisionBoundaryEvidenceView>,
+    pub model_route: Option<ModelRouteEvidenceView>,
+    /// Selection is committed for every report, including an empty selection.
+    pub selection_count: u64,
+    /// `None` means the feature/capture stage was not executed or its evidence
+    /// is unavailable; it is never encoded as a synthetic zero.
+    pub decision_capture_count: Option<u64>,
+    pub feature_vector_count: Option<u64>,
+    pub feature_state_counts: Option<BTreeMap<String, u64>>,
+    pub feature_cell_count: Option<u64>,
+    /// `None` is the only valid representation before model inference or when
+    /// serving-input evidence is unavailable.
+    pub model_input_state_counts: Option<BTreeMap<String, u64>>,
+    pub model_input_count: Option<u64>,
+}
+
 /// Paginated filter for listing recommendation reports.
 ///
-/// `from` / `to` bound `created_at`; the pagination window is the shared
+/// `from` / `to` bound the report `decision_at`; the pagination window is the shared
 /// [`PageRequest`], flattened so the query string stays flat.
 #[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
 pub struct QuantReportListQuery {
@@ -156,7 +194,7 @@ pub struct RunReportRequest {
     pub reason: String,
     #[validate(range(min = 1, max = 500))]
     pub top_n: Option<u32>,
-    pub source_delay_secs: Option<u64>,
+    pub knowledge_lag_secs: Option<u64>,
 }
 
 /// Inbound body for `POST /quant/reports/{id}/revoke`.

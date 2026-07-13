@@ -1,7 +1,8 @@
 //! Future-leakage detection — the hard, money-critical dataset invariant.
 //!
-//! A training feature must never observe state newer than `as_of - source_delay`.
-//! (Labels look strictly forward of `as_of` by design; their forward reads are
+//! A training feature must never observe state newer than the source cutoff
+//! frozen in its [`DecisionBoundary`](quant_pivot_models::domain::DecisionBoundary).
+//! (Labels look strictly forward of `decision_at` by design; their forward reads are
 //! validated by labeler maturity, not here — only feature provenance is checked.)
 //!
 //! Two surfaces over the same scan:
@@ -13,15 +14,18 @@
 //!   runs the same scan and turns any violation into
 //!   [`ResearchError::LeakageDetected`], so a leaking artifact is never persisted.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::{MarketId, TokenId};
+use quant_pivot_models::{
+    domain::DecisionSource,
+    types::{MarketId, TokenId},
+};
 use serde::{Deserialize, Serialize};
 
 use super::TrainingExample;
 
 /// One future-leakage violation: a feature evidence reference observed after the
-/// point-in-time cutoff `as_of - source_delay`.
+/// frozen point-in-time cutoff for its source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeakageViolation {
     /// Market the leaking example describes.
@@ -29,8 +33,8 @@ pub struct LeakageViolation {
     /// Outcome token the leaking example describes.
     pub token_id: TokenId,
     /// Decision time the example was computed as of.
-    pub as_of: DateTime<Utc>,
-    /// Point-in-time cutoff (`as_of - source_delay`) the evidence violated.
+    pub decision_at: DateTime<Utc>,
+    /// Point-in-time source cutoff the evidence violated.
     pub cutoff: DateTime<Utc>,
     /// The offending evidence reference.
     pub reference: String,
@@ -59,8 +63,8 @@ impl LeakageFindings {
 
     /// Number of violations found.
     #[must_use]
-    pub fn violation_count(&self) -> u64 {
-        u64::try_from(self.violations.len()).unwrap_or(u64::MAX)
+    pub const fn violation_count(&self) -> usize {
+        self.violations.len()
     }
 }
 
@@ -68,42 +72,52 @@ impl LeakageFindings {
 /// violations (non-aborting).
 ///
 /// Each [`TrainingExample::source_refs`] entry (feature evidence) must have been
-/// observed at or before the PIT cutoff `as_of - source_delay`. Unlike
+/// observed at or before the PIT cutoff frozen for its source. Unlike
 /// [`assert_no_future_leakage`], this records every violation rather than
 /// aborting on the first, so the quality gate can report the full picture.
-#[must_use]
-pub fn scan_future_leakage(
-    examples: &[TrainingExample],
-    source_delay_secs: u64,
-) -> LeakageFindings {
-    let delay = Duration::seconds(i64::try_from(source_delay_secs).unwrap_or(i64::MAX));
+pub fn scan_future_leakage(examples: &[TrainingExample]) -> QuantResult<LeakageFindings> {
     let mut findings = LeakageFindings::default();
     for example in examples {
-        let cutoff = example.as_of - delay;
+        let decision_at = example.decision_at();
         for source in &example.source_refs {
-            findings.scanned = findings.scanned.saturating_add(1);
-            if source.observed_at > cutoff {
+            findings.scanned =
+                findings
+                    .scanned
+                    .checked_add(1)
+                    .ok_or_else(|| ResearchError::LeakageDetected {
+                        detail: "future-leakage evidence count overflow".to_owned(),
+                    })?;
+            let cutoff = evidence_decision_source(source.source_kind).map_or(decision_at, |kind| {
+                example.decision_boundary.cutoff_for(kind)
+            });
+            if source.effective_at > cutoff {
                 findings.violations.push(LeakageViolation {
                     market_id: example.market_id.clone(),
                     token_id: example.token_id.clone(),
-                    as_of: example.as_of,
+                    decision_at,
                     cutoff,
                     reference: source.reference.clone(),
-                    observed_at: source.observed_at,
+                    observed_at: source.effective_at,
                 });
             }
         }
         // Label-horizon invariant (Phase 11.5 publish rescan): every label must
-        // mature at/after `as_of`. A matured_at in the past of the decision time
+        // mature at/after `decision_at`. A matured_at in the past of the decision time
         // means the labeler wrote a non-forward horizon — fail closed.
         for label in &example.labels {
-            findings.scanned = findings.scanned.saturating_add(1);
-            if label.matured_at < example.as_of {
+            findings.scanned =
+                findings
+                    .scanned
+                    .checked_add(1)
+                    .ok_or_else(|| ResearchError::LeakageDetected {
+                        detail: "future-leakage label count overflow".to_owned(),
+                    })?;
+            if label.matured_at < decision_at {
                 findings.violations.push(LeakageViolation {
                     market_id: example.market_id.clone(),
                     token_id: example.token_id.clone(),
-                    as_of: example.as_of,
-                    cutoff: example.as_of,
+                    decision_at,
+                    cutoff: decision_at,
                     reference: format!(
                         "label:{}:horizon={}s:matured_at",
                         label.label_name.as_str(),
@@ -114,7 +128,7 @@ pub fn scan_future_leakage(
             }
         }
     }
-    findings
+    Ok(findings)
 }
 
 /// Assert that no example's feature provenance leaks future state.
@@ -127,18 +141,15 @@ pub fn scan_future_leakage(
 ///
 /// Returns [`ResearchError::LeakageDetected`] when any feature evidence is dated
 /// after its point-in-time cutoff.
-pub fn assert_no_future_leakage(
-    examples: &[TrainingExample],
-    source_delay_secs: u64,
-) -> QuantResult<()> {
-    let findings = scan_future_leakage(examples, source_delay_secs);
+pub fn assert_no_future_leakage(examples: &[TrainingExample]) -> QuantResult<()> {
+    let findings = scan_future_leakage(examples)?;
     if let Some(first) = findings.violations.first() {
         return Err(ResearchError::LeakageDetected {
             detail: format!(
-                "market {} token {} as_of {} source `{}` observed_at {} > cutoff {} ({} total violations)",
+                "market {} token {} decision_at {} source `{}` observed_at {} > cutoff {} ({} total violations)",
                 first.market_id,
                 first.token_id,
-                first.as_of,
+                first.decision_at,
                 first.reference,
                 first.observed_at,
                 first.cutoff,
@@ -150,13 +161,28 @@ pub fn assert_no_future_leakage(
     Ok(())
 }
 
+const fn evidence_decision_source(
+    source: crate::features::EvidenceSourceKind,
+) -> Option<DecisionSource> {
+    match source {
+        crate::features::EvidenceSourceKind::Book => Some(DecisionSource::Book),
+        crate::features::EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
+        crate::features::EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
+        crate::features::EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
+        crate::features::EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
+        crate::features::EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
+        crate::features::EvidenceSourceKind::Derived => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector};
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        enums::quant::DataQualityStatus,
+        domain::DecisionClock,
+        enums::{common::MarketCategory, quant::DataQualityStatus},
         types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
     };
     use rust_decimal::Decimal;
@@ -167,20 +193,22 @@ mod tests {
         let vector = FeatureVector {
             market_id: MarketId::new("m"),
             token_id: Some(TokenId::new("t")),
-            as_of,
+            decision_at: as_of,
             generic_schema_version: SchemaVersion::FIRST,
             generic: BTreeMap::new(),
             domain: None,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         };
         TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new("m"),
             token_id: TokenId::new("t"),
-            as_of,
+            selected_market: crate::training::fixtures::selected_market(
+                &MarketId::new("m"),
+                &TokenId::new("t"),
+                MarketCategory::Sports,
+            ),
+            decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: vector,
             factor_values: Vec::new(),
@@ -188,8 +216,10 @@ mod tests {
             source_refs: vec![EvidenceSourceRef {
                 source_kind: EvidenceSourceKind::Derived,
                 reference: "fixture".to_owned(),
-                observed_at: as_of + Duration::seconds(source_offset_secs),
+                effective_at: as_of + Duration::seconds(source_offset_secs),
+                available_at: Some(as_of),
             }],
+            decision_capture: None,
             lot_context: None,
             position_state: None,
             book_fidelity: None,
@@ -200,19 +230,19 @@ mod tests {
     fn leakage_accepts_past_evidence() {
         // Evidence observed 5s before the cutoff (as_of - 0 delay) is fine.
         let examples = vec![example(-5)];
-        assert!(assert_no_future_leakage(&examples, 0).is_ok());
+        assert!(assert_no_future_leakage(&examples).is_ok());
     }
 
     #[test]
     fn leakage_rejects_future_features() {
-        // Evidence observed 5s after as_of with zero source delay → leakage.
+        // Evidence observed 5s after decision_at with zero knowledge lag is leakage.
         let examples = vec![example(5)];
-        assert!(assert_no_future_leakage(&examples, 0).is_err());
+        assert!(assert_no_future_leakage(&examples).is_err());
     }
 
     #[test]
     fn scan_collects_every_violation_without_aborting() {
-        let findings = scan_future_leakage(&[example(5), example(-5), example(10)], 0);
+        let findings = scan_future_leakage(&[example(5), example(-5), example(10)]).expect("scan");
         assert_eq!(findings.scanned, 3);
         assert_eq!(findings.violation_count(), 2);
         assert!(!findings.is_clean());
@@ -222,7 +252,7 @@ mod tests {
 
     #[test]
     fn scan_clean_dataset_has_no_violations() {
-        let findings = scan_future_leakage(&[example(-5), example(-1)], 0);
+        let findings = scan_future_leakage(&[example(-5), example(-1)]).expect("scan");
         assert!(findings.is_clean());
         assert_eq!(findings.scanned, 2);
     }
@@ -237,9 +267,9 @@ mod tests {
             horizon_secs: 0,
             value: Decimal::ZERO,
             is_resolved: true,
-            matured_at: ex.as_of - Duration::seconds(1),
+            matured_at: ex.decision_at() - Duration::seconds(1),
         });
-        let findings = scan_future_leakage(&[ex], 0);
+        let findings = scan_future_leakage(&[ex]).expect("scan");
         assert!(!findings.is_clean());
         assert!(
             findings

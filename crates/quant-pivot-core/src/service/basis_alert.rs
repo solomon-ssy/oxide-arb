@@ -60,7 +60,7 @@ pub fn detect_basis_alerts<S: BuildHasher>(
                 oracle_instrument_key: oracle_key.to_string(),
                 basis_bps: Bps::new(*basis),
                 threshold_bps,
-                as_of: vector.as_of,
+                as_of: vector.decision_at,
             })
         })
         .collect()
@@ -87,7 +87,10 @@ mod tests {
     };
     use quant_pivot_research::{
         domain::DomainObservationWindow,
-        features::{DomainSliceInputs, FeatureValue, FeatureVector, names::domain_crypto},
+        features::{
+            DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef, FeatureCell,
+            FeatureStaleness, FeatureValue, FeatureVector, names::domain_crypto,
+        },
     };
     use rust_decimal_macros::dec;
     use std::collections::{BTreeMap, HashMap};
@@ -123,19 +126,19 @@ mod tests {
         let market_id = MarketId::new("m1");
         let mut generic = BTreeMap::new();
         if let Some(value) = basis_bps {
-            generic.insert(domain_crypto::BASIS_VS_RESOLUTION_SOURCE, value);
+            generic.insert(
+                domain_crypto::BASIS_VS_RESOLUTION_SOURCE,
+                FeatureCell::observed(value, None, FeatureStaleness::Unknown),
+            );
         }
         FeatureVector {
             market_id,
             token_id: Some(TokenId::new("t1")),
-            as_of: Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap(),
+            decision_at: Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap(),
             generic_schema_version: SchemaVersion::FIRST,
             generic,
             domain: None,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         }
     }
 
@@ -145,6 +148,12 @@ mod tests {
             DomainSliceInputs {
                 family: DomainFamily::Crypto,
                 binding: binding(),
+                linkage_evidence: EvidenceSourceRef {
+                    source_kind: EvidenceSourceKind::Linkage,
+                    reference: "linkage:test".to_owned(),
+                    effective_at: Utc.with_ymd_and_hms(2026, 7, 1, 11, 59, 0).unwrap(),
+                    available_at: Some(Utc.with_ymd_and_hms(2026, 7, 1, 11, 59, 1).unwrap()),
+                },
                 primary: DomainObservationWindow::default(),
                 oracle: None,
             },

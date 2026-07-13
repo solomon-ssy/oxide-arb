@@ -11,26 +11,33 @@ use crate::{
         bias_table_fit::BiasTableFitService,
         factor_pipeline::FactorPipelineService,
         feature_pipeline::{FeaturePipelineDeps, FeaturePipelineService},
+        frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         training_dataset::{
             TrainingDatasetService, TrainingDatasetServiceDeps, TrainingDatasetServiceWire,
         },
     },
 };
-use quant_pivot_api::{fees::FeeCalculator, ws::WsShardHealthPort};
+use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::{
     CalibrationArtifactFitPort, FactorGovernancePort, ModelGovernancePort, ModelSpecPort,
 };
-use quant_pivot_models::{config::DeployConfig, domain::RuntimeConfigPort};
-use quant_pivot_repository::traits::{
-    AttributionRepository, BacktestPathSetRepository, BacktestReportRepository,
-    BasisAlertRepository, CalibrationArtifactRepository, EventRepository, FactorRepository,
-    FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
-    ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
-    ModelRunRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository, ShadowComparisonRepository, TradeTapeBlockCursorRepository,
-    TrainingDatasetRepository,
+use quant_pivot_models::{
+    clickhouse::QuantFeatureParityEventRow, config::DeployConfig, domain::RuntimeConfigPort,
+};
+use quant_pivot_repository::{
+    clickhouse::ChFactWriter,
+    traits::{
+        AttributionRepository, BacktestPathSetRepository, BacktestReportRepository,
+        BasisAlertRepository, CalibrationArtifactRepository, CatalogVersionRepository, FactWriter,
+        FactorRepository, FeatureParityRepository, FeatureRepository, MarketLinkageRepository,
+        MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
+        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
+        PositionRepository, QuantFactReadRepository, RecommendationRepository,
+        RuntimeConfigVersionRepository, ShadowComparisonRepository, TradeTapeBlockCursorRepository,
+        TrainingDatasetRepository,
+    },
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::model::CalibrationArtifactLoader;
@@ -51,6 +58,16 @@ pub struct ResearchBundleDeps<'a> {
     pub data: &'a DataBundle,
     /// Governance plane (operator alert dispatcher for inference degradation).
     pub governance: &'a GovernanceBundle,
+}
+
+fn frozen_parity_evidence_writer(
+    infra: &InfraBundle,
+) -> Arc<dyn FactWriter<QuantFeatureParityEventRow>> {
+    Arc::new(ChFactWriter::new(
+        Arc::clone(&infra.ch),
+        Arc::clone(&infra.ch_write_manager),
+        "quant_feature_parity_event",
+    ))
 }
 
 /// Research plane: selection, feature/factor pipelines, and artifact store (Phase 3+).
@@ -75,6 +92,8 @@ pub struct ResearchBundle {
     pub model_run_repo: Arc<dyn ModelRunRepository>,
     /// Model registry persistence (resolve active / shadow versions) (3.4).
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    /// Full frozen dataset/model verification used by training and publish.
+    pub frozen_model_parity: Arc<FrozenModelParityService>,
     /// Online inference orchestrator: selection/features/factors → candidates (3.4).
     pub model_runner: Arc<ModelRunner>,
     /// Frozen training-dataset ledger persistence (3.5).
@@ -105,10 +124,10 @@ pub struct ResearchBundle {
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
+    /// Append-only catalog ledger for every offline PIT metadata read.
+    pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
     pub market_repo: Arc<dyn MarketRepository>,
-    /// Event catalog snapshot for offline neg-risk leg enumeration (11.2.1).
-    pub event_repo: Arc<dyn EventRepository>,
     /// Frozen market → external-subject linkage ledger (11.2.2).
     pub market_linkage_repo: Arc<dyn MarketLinkageRepository>,
     /// Position ledger for `ExitDecision` lot-timeline training (06.1).
@@ -143,10 +162,7 @@ fn assemble_research_pipelines(
     market_linkage_repo: &Arc<dyn MarketLinkageRepository>,
 ) -> ResearchPipelines {
     let candidate_provider = Arc::new(MarketCandidateProvider::new(
-        Arc::clone(&deps.data.market_registry),
-        Arc::clone(&deps.data.book_store),
-        Arc::clone(&deps.data.ws_manager) as Arc<dyn WsShardHealthPort>,
-        Arc::clone(&deps.infra.ingest_lag_tracker),
+        Arc::clone(&deps.data.pit_source),
         Arc::clone(market_linkage_repo),
         Arc::clone(&deps.infra.quant_fact_read),
     ));
@@ -230,6 +246,14 @@ impl ResearchBundle {
 
         let offline = Self::assemble_offline_repositories(deps);
 
+        let frozen_model_parity = Arc::new(FrozenModelParityService::new(FrozenModelParityDeps {
+            dataset_repo: Arc::clone(&offline.training_dataset),
+            model_registry_repo: Arc::clone(&model_registry_repo),
+            parity_repo: Arc::clone(&deps.infra.repos.feature_parity)
+                as Arc<dyn FeatureParityRepository>,
+            artifact_store: Arc::clone(&artifact_store),
+            evidence_writer: frozen_parity_evidence_writer(deps.infra),
+        }));
         let model_governance = Self::assemble_model_governance(
             deps,
             &artifact_store,
@@ -237,21 +261,15 @@ impl ResearchBundle {
             &shadow_comparison_repo,
             &offline,
             &calibration_loader,
+            &frozen_model_parity,
         );
         let factor_governance = Self::assemble_factor_governance(&factor_repo);
         let model_spec: Arc<dyn ModelSpecPort> = Arc::new(ModelSpecService::new(ModelSpecDeps {
             model_registry: Arc::clone(&model_registry_repo),
+            runtime_config: Arc::clone(&deps.governance.runtime_config),
         }));
-        let calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort> =
-            Arc::new(BiasTableFitService::new(
-                Arc::clone(&deps.infra.quant_fact_read),
-                Arc::clone(&deps.data.market_repo),
-                Arc::clone(&repos.event) as Arc<dyn EventRepository>,
-                Arc::clone(&market_linkage_repo),
-                Arc::clone(&repos.calibration_artifact) as Arc<dyn CalibrationArtifactRepository>,
-                Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
-                Arc::clone(&offline.training_dataset) as Arc<dyn TrainingDatasetRepository>,
-            ));
+        let calibration_artifact_fit =
+            assemble_calibration_artifact_fit(deps, &market_linkage_repo, &offline);
 
         Self {
             artifact_store,
@@ -264,6 +282,7 @@ impl ResearchBundle {
             factor_pipeline,
             model_run_repo,
             model_registry_repo,
+            frozen_model_parity,
             model_runner,
             training_dataset_repo: offline.training_dataset,
             attribution_repo: offline.attribution,
@@ -279,8 +298,8 @@ impl ResearchBundle {
             model_runtime_factory_builder,
             calibration_loader,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
+            catalog_version_repo: Arc::clone(&deps.data.catalog_version_repo),
             market_repo: Arc::clone(&deps.data.market_repo),
-            event_repo: Arc::clone(&repos.event) as Arc<dyn EventRepository>,
             market_linkage_repo: Arc::clone(&market_linkage_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             fee_calculator: Arc::clone(&deps.data.fee_calculator),
@@ -299,13 +318,14 @@ impl ResearchBundle {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.quant_fact_read),
+                catalog_repo: Arc::clone(&self.catalog_version_repo),
                 market_repo: Arc::clone(&self.market_repo),
-                event_repo: Arc::clone(&self.event_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.training_dataset_repo),
                 attribution_repo: Arc::clone(&self.attribution_repo),
                 recommendation_repo: Arc::clone(&self.recommendation_repo),
                 feature_repo: Arc::clone(&self.feature_repo),
+                selection_repo: Arc::clone(&self.market_selection_repo),
                 position_repo: Arc::clone(&self.position_repo),
                 fee_calculator: Arc::clone(&self.fee_calculator),
                 linkage_repo: Arc::clone(&self.market_linkage_repo),
@@ -332,6 +352,7 @@ impl ResearchBundle {
             factory_builder: Arc::clone(factory_builder),
             factor_pipeline: Arc::clone(factor_pipeline),
             signal_writer: Arc::clone(&deps.infra.signal_candidate_event_writer),
+            model_input_writer: Arc::clone(&deps.infra.model_input_event_writer),
             alerts: Arc::new(DispatcherAlertSink::new(Arc::clone(
                 &deps.governance.alerts,
             ))),
@@ -366,6 +387,7 @@ impl ResearchBundle {
         shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
         offline: &OfflineResearchRepos,
         calibration_loader: &Arc<dyn CalibrationArtifactLoader>,
+        frozen_model_parity: &Arc<FrozenModelParityService>,
     ) -> Arc<dyn ModelGovernancePort> {
         let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
         let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
@@ -387,6 +409,13 @@ impl ResearchBundle {
             runtime_config: Arc::clone(&deps.governance.runtime_config),
             runtime_config_apply,
             runtime_config_repo,
+            feature_parity_gate: Arc::new(
+                crate::service::feature_integrity::RepositoryFeatureParityGate::new(Arc::clone(
+                    &deps.infra.repos.feature_parity,
+                )
+                    as Arc<dyn FeatureParityRepository>),
+            ),
+            frozen_model_parity: Arc::clone(frozen_model_parity),
         }))
     }
 
@@ -397,4 +426,21 @@ impl ResearchBundle {
             factor_repo: Arc::clone(factor_repo),
         }))
     }
+}
+
+fn assemble_calibration_artifact_fit(
+    deps: &ResearchBundleDeps<'_>,
+    market_linkage_repo: &Arc<dyn MarketLinkageRepository>,
+    offline: &OfflineResearchRepos,
+) -> Arc<dyn CalibrationArtifactFitPort> {
+    Arc::new(BiasTableFitService::new(
+        Arc::clone(&deps.infra.quant_fact_read),
+        Arc::clone(&deps.data.catalog_version_repo),
+        Arc::clone(&deps.data.market_repo),
+        Arc::clone(market_linkage_repo),
+        Arc::clone(&deps.infra.repos.calibration_artifact)
+            as Arc<dyn CalibrationArtifactRepository>,
+        Arc::clone(&deps.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
+        Arc::clone(&offline.training_dataset) as Arc<dyn TrainingDatasetRepository>,
+    ))
 }

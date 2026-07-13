@@ -10,15 +10,16 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        MissingReasonCountView, NegRiskEventDriftView, NegRiskLegView,
-        ParticipantConcentrationDetailView, ParticipantConcentrationMarketView,
-        ParticipantConcentrationParticipantView, ParticipantConcentrationSummaryView,
-        RuntimeConfigPort, StructuralMonitorPort, TradeParticipantRole, TradeTapeCoverageView,
-        TradeTapePrint, TradeTapeSourceHealthView, TradeTapeSourceKind,
+        DecisionBoundary, DecisionClock, DecisionSource, MissingReasonCountView,
+        NegRiskEventDriftView, NegRiskLegView, ParticipantConcentrationDetailView,
+        ParticipantConcentrationMarketView, ParticipantConcentrationParticipantView,
+        ParticipantConcentrationSummaryView, RuntimeConfigPort, StructuralMonitorPort,
+        TradeParticipantRole, TradeTapeCoverageView, TradeTapePrint, TradeTapeSourceHealthView,
+        TradeTapeSourceKind,
         market::{MarketRegistryInfo, registry::NegRiskLeg},
     },
     types::{EventId, MarketId, Price},
@@ -44,7 +45,6 @@ use crate::{
     },
     prefetch::feature_window::FeatureWindowProvider,
 };
-use quant_pivot_research::pit::TradeTapePitParams;
 
 const TOP_MARKETS_LIMIT: usize = 50;
 const TOP_PARTICIPANTS_LIMIT: usize = 25;
@@ -110,30 +110,28 @@ impl CoreStructuralMonitor {
         markets
     }
 
-    fn pit_params(&self, trigger_time: DateTime<Utc>) -> TradeTapePitParams {
+    fn pit_boundary(
+        &self,
+        trigger_time: DateTime<Utc>,
+    ) -> QuantResult<(DecisionBoundary, Duration)> {
         let runtime = self.runtime_config.current();
-        let default_delay_secs = runtime
-            .reports
-            .schedules
-            .first()
-            .map_or(0, |schedule| schedule.source_delay_secs);
-        let source_delay = Duration::from_secs(
-            runtime
-                .pit_source_delay_secs()
-                .unwrap_or(default_delay_secs),
-        );
-        TradeTapePitParams {
-            trigger_time,
-            source_delay,
-            lookback: Duration::from_secs(runtime.features.structural.trade_tape_window_secs),
-        }
+        let knowledge_lag_secs = runtime.pit_knowledge_lag_secs().ok_or_else(|| {
+            QuantError::config("runtime report schedules do not define one canonical knowledge lag")
+        })?;
+        let boundary = DecisionClock::new(knowledge_lag_secs)
+            .boundary(trigger_time)?
+            .with_source_cutoff(DecisionSource::TradeTape, 0)?;
+        Ok((
+            boundary,
+            Duration::from_secs(runtime.features.structural.trade_tape_window_secs),
+        ))
     }
 
     async fn participant_markets(
         &self,
         markets: Vec<MarketRegistryInfo>,
     ) -> QuantResult<(
-        TradeTapePitParams,
+        DecisionBoundary,
         Vec<ParticipantConcentrationMarketView>,
         HashMap<MarketId, Vec<TradeTapePrint>>,
     )> {
@@ -143,31 +141,40 @@ impl CoreStructuralMonitor {
                 .features
                 .structural
                 .trade_tape_min_unique_participants,
-            min_notional_usd: Decimal::from_str(
+            min_notional_usd: parse_decimal(
+                "features.structural.trade_tape_min_notional_usd",
                 &runtime
                     .features
                     .structural
                     .trade_tape_min_notional_usd
                     .value,
-            )
-            .unwrap_or(Decimal::ZERO),
-            min_coverage_ratio: Decimal::from_str(
+            )?,
+            min_coverage_ratio: parse_decimal(
+                "features.structural.trade_tape_min_coverage_ratio",
                 &runtime
                     .features
                     .structural
                     .trade_tape_min_coverage_ratio
                     .value,
-            )
-            .unwrap_or(Decimal::ONE),
+            )?,
         };
         let factor = &runtime.factors.structural.participant_concentration;
         let weights = ConcentrationCompositeWeights {
-            gini: Decimal::from_str(&factor.gini_weight.value).unwrap_or(Decimal::ZERO),
-            cr1_share: Decimal::from_str(&factor.cr1_share_weight.value).unwrap_or(Decimal::ZERO),
-            hhi: Decimal::from_str(&factor.hhi_weight.value).unwrap_or(Decimal::ZERO),
+            gini: parse_decimal(
+                "factors.structural.participant_concentration.gini_weight",
+                &factor.gini_weight.value,
+            )?,
+            cr1_share: parse_decimal(
+                "factors.structural.participant_concentration.cr1_share_weight",
+                &factor.cr1_share_weight.value,
+            )?,
+            hhi: parse_decimal(
+                "factors.structural.participant_concentration.hhi_weight",
+                &factor.hhi_weight.value,
+            )?,
         };
         let trigger_time = Utc::now();
-        let pit = self.pit_params(trigger_time);
+        let (boundary, lookback) = self.pit_boundary(trigger_time)?;
         let selected = markets
             .iter()
             .map(|market| SelectedMarket {
@@ -183,7 +190,7 @@ impl CoreStructuralMonitor {
             .collect::<Vec<_>>();
         let windows = self
             .feature_windows
-            .load_trade_tape_windows(&selected, pit.trigger_time, pit.lookback, pit.source_delay)
+            .load_trade_tape_windows(&selected, &boundary, lookback)
             .await?;
         let cursors = self
             .block_cursor_repo
@@ -210,14 +217,14 @@ impl CoreStructuralMonitor {
                     market,
                     &prints,
                     lag_blocks,
-                    pit,
+                    &boundary,
                     gate,
                     weights,
                     source_available,
                 )
             })
             .collect();
-        Ok((pit, views, prints_by_market))
+        Ok((boundary, views, prints_by_market))
     }
 }
 
@@ -255,7 +262,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
                 ask_sum,
                 drift,
                 legs: leg_views,
-                as_of,
+                computed_at: as_of,
             });
         }
         events.sort_by_key(|event| Reverse(drift_magnitude(event.drift)));
@@ -264,7 +271,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
 
     async fn trade_tape_coverage(&self) -> QuantResult<TradeTapeCoverageView> {
         let trigger_time = Utc::now();
-        let pit = self.pit_params(trigger_time);
+        let (boundary, _) = self.pit_boundary(trigger_time)?;
         let runtime = self.runtime_config.current();
         let active_markets = self.active_markets();
         let active_market_count = u64::try_from(active_markets.len()).unwrap_or(u64::MAX);
@@ -325,11 +332,10 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
             .count();
         let missing_markets = u64::try_from(missing_markets).unwrap_or(u64::MAX);
         Ok(TradeTapeCoverageView {
-            as_of: trigger_time,
-            pit_as_of: pit.cutoff(),
-            pit_cutoff: pit.cutoff(),
+            decision_at: trigger_time,
+            knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
             window_secs: runtime.features.structural.trade_tape_window_secs,
-            source_delay_secs: pit.source_delay.as_secs(),
+            knowledge_lag_secs: boundary.knowledge_lag_secs(),
             active_market_count,
             token_cursor_count: contract_cursor_count,
             market_cursor_count: live_contract_count,
@@ -360,7 +366,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
 
     async fn participant_concentration(&self) -> QuantResult<ParticipantConcentrationSummaryView> {
         let runtime = self.runtime_config.current();
-        let (pit, mut markets, _) = self.participant_markets(self.active_markets()).await?;
+        let (boundary, mut markets, _) = self.participant_markets(self.active_markets()).await?;
         let missing_reason_breakdown = missing_reason_breakdown(&markets);
         markets.sort_by(|left, right| {
             right
@@ -370,31 +376,30 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         });
         markets.truncate(TOP_MARKETS_LIMIT);
         Ok(ParticipantConcentrationSummaryView {
-            as_of: pit.trigger_time,
-            pit_as_of: pit.cutoff(),
-            pit_cutoff: pit.cutoff(),
+            decision_at: boundary.decision_at(),
+            knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
             window_secs: runtime.features.structural.trade_tape_window_secs,
-            source_delay_secs: pit.source_delay.as_secs(),
+            knowledge_lag_secs: boundary.knowledge_lag_secs(),
             min_unique_participants: runtime
                 .features
                 .structural
                 .trade_tape_min_unique_participants,
-            min_notional_usd: Decimal::from_str(
+            min_notional_usd: parse_decimal(
+                "features.structural.trade_tape_min_notional_usd",
                 &runtime
                     .features
                     .structural
                     .trade_tape_min_notional_usd
                     .value,
-            )
-            .unwrap_or(Decimal::ZERO),
-            min_coverage_ratio: Decimal::from_str(
+            )?,
+            min_coverage_ratio: parse_decimal(
+                "features.structural.trade_tape_min_coverage_ratio",
                 &runtime
                     .features
                     .structural
                     .trade_tape_min_coverage_ratio
                     .value,
-            )
-            .unwrap_or(Decimal::ZERO),
+            )?,
             markets,
             missing_reason_breakdown,
         })
@@ -407,7 +412,7 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
         let Some(market) = self.market_registry.get_market(market_id) else {
             return Ok(None);
         };
-        let (pit, mut markets, prints_by_market) =
+        let (boundary, mut markets, prints_by_market) =
             self.participant_markets(vec![(*market).clone()]).await?;
         let Some(view) = markets.pop() else {
             return Ok(None);
@@ -419,13 +424,20 @@ impl StructuralMonitorPort for CoreStructuralMonitor {
             TOP_PARTICIPANTS_LIMIT,
         );
         Ok(Some(ParticipantConcentrationDetailView {
-            as_of: pit.trigger_time,
-            pit_as_of: pit.cutoff(),
-            pit_cutoff: pit.cutoff(),
+            decision_at: boundary.decision_at(),
+            knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
             market: view,
             top_participants,
         }))
     }
+}
+
+fn parse_decimal(field: &'static str, value: &str) -> QuantResult<Decimal> {
+    Decimal::from_str(value).map_err(|error| {
+        QuantError::config(format!(
+            "runtime config field {field} is not a valid decimal: {error}"
+        ))
+    })
 }
 
 fn leg_sum(legs: &[NegRiskLegView]) -> (Option<Decimal>, Option<Decimal>) {
@@ -447,7 +459,7 @@ fn concentration_market_view(
     market: &MarketRegistryInfo,
     prints: &[TradeTapePrint],
     lag_blocks: Option<i64>,
-    pit: TradeTapePitParams,
+    boundary: &DecisionBoundary,
     gate: ParticipantConcentrationGate,
     weights: ConcentrationCompositeWeights,
     source_available: bool,
@@ -489,8 +501,7 @@ fn concentration_market_view(
         market_id: market.market_id.clone(),
         token_id: market.token_yes.clone(),
         question: market.question.clone(),
-        pit_as_of: pit.cutoff(),
-        pit_cutoff: pit.cutoff(),
+        knowledge_cutoff: boundary.cutoff_for(DecisionSource::TradeTape),
         trade_count,
         participant_count,
         notional_usd,

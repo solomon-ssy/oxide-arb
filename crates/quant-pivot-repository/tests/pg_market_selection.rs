@@ -61,7 +61,7 @@ async fn create_snapshot_then_find_and_list_members() {
     let selection_id = MarketSelectionId::from_v7();
     let snapshot = NewMarketSelection {
         market_selection_id: selection_id.clone(),
-        as_of: Utc::now(),
+        decision_at: Utc::now(),
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         selector_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
             .expect("valid content hash"),

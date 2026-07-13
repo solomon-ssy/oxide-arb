@@ -2,6 +2,7 @@
 //! liquidity withdrawal, adverse-selection proxy, and stale-quote frequency from
 //! the pre-fetched microstructure window.
 
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     runtime_config::FeatureFamily,
     types::{Probability, Usd},
@@ -23,23 +24,24 @@ impl FeatureGroupBuilder for MicrostructureFeatureBuilder {
         FeatureFamily::Microstructure
     }
 
-    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
+    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> QuantResult<Vec<RawFeature>> {
         let window = ctx.window;
         let evidence = EvidenceSourceRef {
             source_kind: EvidenceSourceKind::ClickHouseFact,
             reference: window.token_id.as_str().to_owned(),
             // Anchor on the freshest fact so the fact-lag staleness check sees the
             // true age; an empty window falls back to the PIT cutoff.
-            observed_at: window
+            effective_at: window
                 .freshest_bucket_time()
                 .unwrap_or_else(|| window.cutoff()),
+            available_at: window.latest_available_at(),
         };
         let buckets = &window.buckets;
         if buckets.is_empty() {
-            return missing_all();
+            return Ok(missing_all());
         }
 
-        vec![
+        Ok(vec![
             decimal(
                 micro::QUOTE_UPDATE_RATE,
                 quote_update_rate(buckets),
@@ -58,7 +60,7 @@ impl FeatureGroupBuilder for MicrostructureFeatureBuilder {
                 &evidence,
             ),
             stale_quote_frequency(ctx, buckets, &evidence),
-        ]
+        ])
     }
 }
 
@@ -155,7 +157,13 @@ fn stale_quote_frequency(
             NullReason::InsufficientHistory,
         );
     }
-    let fraction = Decimal::from(u64::try_from(stale).unwrap_or(0)) / Decimal::from(total);
+    let Ok(stale) = u64::try_from(stale) else {
+        return RawFeature::missing(
+            micro::STALE_QUOTE_FREQUENCY,
+            NullReason::InsufficientHistory,
+        );
+    };
+    let fraction = Decimal::from(stale) / Decimal::from(total);
     RawFeature::present(
         micro::STALE_QUOTE_FREQUENCY,
         FeatureValue::Probability(Probability::new(fraction)),

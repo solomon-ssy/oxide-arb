@@ -67,6 +67,8 @@ pub struct PublishFactorsBatchRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct FactorDefinitionView {
     pub factor_definition_id: String,
+    pub definition_hash: String,
+    pub feature_contract_hash: String,
     pub name: String,
     pub factor_family: String,
     pub scope: String,
@@ -193,6 +195,8 @@ impl From<FactorDefinitionInfo> for FactorDefinitionView {
         );
         Self {
             factor_definition_id: info.factor_definition_id.to_string(),
+            definition_hash: info.definition_hash.to_string(),
+            feature_contract_hash: info.feature_contract_hash.to_string(),
             name: info.name,
             factor_family: info.factor_family.as_str().to_owned(),
             scope: info.scope.as_str().to_owned(),

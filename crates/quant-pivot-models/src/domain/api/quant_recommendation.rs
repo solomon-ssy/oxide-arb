@@ -11,7 +11,10 @@
 //! reconstruct the decision trail without binding to internal id newtypes.
 
 use crate::{
-    domain::RecommendationInfo,
+    domain::{
+        DecisionBoundaryEvidenceView, FeatureCellEvidenceView, ModelInputEvidenceView,
+        RecommendationInfo,
+    },
     enums::quant::{OutcomeSide, RecommendationReportStatus, RecommendationStatus},
     types::{
         Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketContext,
@@ -138,6 +141,13 @@ pub struct QuantEvidenceView {
     pub model_version_id: String,
     pub factor_definition_versions: Vec<String>,
     pub data_quality_snapshot_ref: String,
+    /// True only when the serving run's durable completion marker exists.
+    pub evidence_complete: bool,
+    pub decision_boundary: Option<DecisionBoundaryEvidenceView>,
+    pub feature_schema_hash: Option<String>,
+    pub feature_hash: Option<String>,
+    pub feature_cells: Vec<FeatureCellEvidenceView>,
+    pub model_inputs: Vec<ModelInputEvidenceView>,
 }
 
 impl QuantEvidenceView {
@@ -159,6 +169,12 @@ impl QuantEvidenceView {
                 .map(|id| id.to_string())
                 .collect(),
             data_quality_snapshot_ref: evidence.data_quality_snapshot_ref.to_string(),
+            evidence_complete: false,
+            decision_boundary: None,
+            feature_schema_hash: None,
+            feature_hash: None,
+            feature_cells: Vec::new(),
+            model_inputs: Vec::new(),
         }
     }
 }

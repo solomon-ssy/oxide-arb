@@ -13,9 +13,9 @@ use clickhouse::{RowOwned, RowWrite};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::clickhouse::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-    QuantFactorEventRow, QuantFeatureEventRow, QuantPositionEventRow,
-    QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
-    QuantSignalCandidateEventRow,
+    QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
+    QuantPositionEventRow, QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
+    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow,
 };
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 
@@ -94,6 +94,37 @@ impl QuantFactRepository for ChQuantFactRepository {
     ) -> Result<(), StorageError> {
         self.write_manager
             .write_batch(self.pool.client(), "quant_factor_event", rows)
+            .await
+    }
+
+    async fn insert_model_input_events(
+        &self,
+        rows: Vec<QuantModelInputEventRow>,
+    ) -> Result<(), StorageError> {
+        self.write_manager
+            .write_batch(self.pool.client(), "quant_model_input_event", rows)
+            .await
+    }
+
+    async fn insert_serving_evidence_completions(
+        &self,
+        rows: Vec<QuantServingEvidenceCompletionRow>,
+    ) -> Result<(), StorageError> {
+        self.write_manager
+            .write_batch(
+                self.pool.client(),
+                "quant_serving_evidence_completion",
+                rows,
+            )
+            .await
+    }
+
+    async fn insert_feature_parity_events(
+        &self,
+        rows: Vec<QuantFeatureParityEventRow>,
+    ) -> Result<(), StorageError> {
+        self.write_manager
+            .write_batch(self.pool.client(), "quant_feature_parity_event", rows)
             .await
     }
 

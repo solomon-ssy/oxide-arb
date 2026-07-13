@@ -217,7 +217,8 @@ impl From<ExecutionError> for WebError {
             ExecutionError::ReconciliationResolveInvalid { .. } => {
                 Self::BadRequest(error.to_string())
             }
-            ExecutionError::SettlementRedeemInvariant { .. } => Self::Internal(error.to_string()),
+            ExecutionError::SettlementRedeemInvariant { .. }
+            | ExecutionError::TimeConversion { .. } => Self::Internal(error.to_string()),
         }
     }
 }
@@ -265,6 +266,10 @@ impl From<GovernanceError> for WebError {
             GovernanceError::QualityGateFailed { .. }
             | GovernanceError::ShadowNotStable { .. }
             | GovernanceError::IllegalTransition { .. } => Self::Conflict(error.to_string()),
+            GovernanceError::NumericOverflow { .. }
+            | GovernanceError::LinkagePayloadSerialization { .. } => {
+                Self::Internal(error.to_string())
+            }
         }
     }
 }

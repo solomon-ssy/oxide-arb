@@ -1,19 +1,14 @@
 //! Offline backtest orchestration (Phase 3.6).
 //!
-//! Replays a registered model over a frozen training dataset by **recomputing**
-//! each `as_of` cross-section's features and factors point-in-time through the
-//! shared [`materialize_cross_section`] kernel — the same computation graph the
-//! dataset build and the online plane use. The frozen Parquet supplies only the
-//! replay **schedule** (`(as_of, market, token)`) and the forward **settlement
-//! truth**; it is never trusted as the factor source, so a backtest validates
-//! the exact model the live runtime would run, and config/schema drift is caught
-//! rather than masked. No live `BookStore` is ever touched (the window is
-//! batch-prefetched from `ClickHouse`).
+//! Replays a registered model over the exact immutable v2 Parquet rows. Frozen
+//! selection context, `FeatureCell`s, factor values, and labels are the sole
+//! evaluation input. Historical rematerialization is a separate parity job and
+//! can never replace bytes consumed by training, CPCV, or backtest.
 //!
 //! Per run it persists a `quant_backtest_report` + a `Backtest` `quant_model_run`
 //! and optionally fits a calibrated return curve into a fresh Candidate version.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use tokio::{runtime::Handle, task};
@@ -31,14 +26,13 @@ use quant_pivot_models::{
     },
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, ModelComparisonReportId, ModelRunId, ModelVersionId,
+        BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
         RuntimeConfigVersionId, TrainingDatasetId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, EventRepository, MarketLinkageRepository, MarketRepository,
-    ModelComparisonReportRepository, ModelRegistryRepository, ModelRunRepository,
-    QuantFactReadRepository, TrainingDatasetRepository,
+    BacktestReportRepository, ModelComparisonReportRepository, ModelRegistryRepository,
+    ModelRunRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -47,26 +41,16 @@ use quant_pivot_research::{
         BacktestTick, Backtester, MarketOutcome, ModelComparisonReport, PortfolioCaps,
         PortfolioReplayBacktester, SampleOutcome, compare_reports,
     },
-    factors::FactorEngine,
-    features::ConfiguredFeatureBuilder,
     model::{
         ActiveSchemaBinding, CalibrationSample, ModelArtifact, ModelRuntimeFactoryBuilder,
         QuantModelRuntime, calibrate_weighted_artifact,
     },
-    training::DatasetParquetCodec,
+    training::{LabelName, TrainingExample},
 };
 
 use crate::{
-    prefetch::historical_window::{HistoricalWindow, HistoricalWindowLoader, WindowSpec},
-    projection::{
-        inference_batch::build_runtime_input, inference_context::build_market_inference_context,
-    },
-    service::{
-        dataset_replay::{ReplaySchedule, ReplaySettlementMap, max_horizon},
-        historical_replay::{
-            CrossSectionRequest, ReplayConfig, ReplayCrossSection, materialize_cross_section,
-        },
-    },
+    projection::inference_batch::build_frozen_runtime_input,
+    service::training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
 
 /// Repository + store + factory dependencies for the backtest service.
@@ -85,14 +69,6 @@ pub struct BacktestServiceDeps {
     pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
     /// Runtime factory builder (loads the model under test).
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    /// `ClickHouse` fact reader for the point-in-time replay window.
-    pub fact_read: Arc<dyn QuantFactReadRepository>,
-    /// Postgres market catalog for the replay window.
-    pub market_repo: Arc<dyn MarketRepository>,
-    /// Postgres event catalog snapshot for neg-risk leg enumeration.
-    pub event_repo: Arc<dyn EventRepository>,
-    /// Frozen market → external-subject linkage ledger (11.2.2).
-    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
 }
 
 /// A backtest request resolved by the admin port.
@@ -113,25 +89,26 @@ pub struct BacktestInput {
 pub struct BacktestService {
     deps: BacktestServiceDeps,
     caps: PortfolioCaps,
-    replay: ReplayConfig,
-    max_book_staleness: Duration,
+    bias_table_hash: Option<ContentHash>,
 }
 
 impl BacktestService {
     /// Assemble the service from deps + the frozen replay/portfolio config.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error when any frozen portfolio cap is not a
+    /// valid decimal; invalid caps never become a zero budget/cap.
     pub fn new(
         deps: BacktestServiceDeps,
         portfolio: &PortfolioConfig,
-        replay: ReplayConfig,
-        max_book_staleness: Duration,
-    ) -> Self {
-        Self {
+        bias_table_hash: Option<ContentHash>,
+    ) -> QuantResult<Self> {
+        Ok(Self {
             deps,
-            caps: PortfolioCaps::from(portfolio),
-            replay,
-            max_book_staleness,
-        }
+            caps: PortfolioCaps::try_from(portfolio)?,
+            bias_table_hash,
+        })
     }
 
     /// Run a single backtest and persist its report.
@@ -340,46 +317,25 @@ impl BacktestService {
             dataset,
             input,
         } = ctx;
+        let materialization = require_dataset_materialization(dataset)?;
         // Load the model under test, bound to the dataset's frozen schema.
         let binding = ActiveSchemaBinding {
-            feature_schema_hash: dataset.feature_schema_hash.clone(),
-            factor_schema_hash: dataset.factor_schema_hash.clone(),
-            bias_table_hash: self
-                .replay
-                .bias_table
-                .as_ref()
-                .map(|table| table.content_hash.clone()),
+            feature_schema_hash: materialization.feature_schema_hash.clone(),
+            factor_schema_hash: materialization.factor_schema_hash.clone(),
+            bias_table_hash: self.bias_table_hash.clone(),
         };
         let factory = self.deps.factory_builder.build(binding);
         // Backtests are deterministic and never apply a config weight overlay.
         let model = factory.load(version, None).await?;
 
-        // Prefetch the replay window (real ClickHouse I/O) on the async runtime.
-        let bytes = self.deps.artifact_store.get(&dataset.parquet_uri).await?;
-        let examples = DatasetParquetCodec::decode(&bytes)?;
-        let schedule = ReplaySchedule::from_examples(&examples);
-        let source_delay =
-            Duration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
-        let lookback = Duration::from_secs(self.replay.features.max_lookback_secs());
-        let max_horizon_secs = max_horizon(dataset);
-        let loader = HistoricalWindowLoader::new(
-            Arc::clone(&self.deps.fact_read),
-            Arc::clone(&self.deps.market_repo),
-            Arc::clone(&self.deps.event_repo),
-            Arc::clone(&self.deps.linkage_repo),
-            self.max_book_staleness,
-        );
-        let window = loader
-            .load(&WindowSpec {
-                window_start: dataset.window_start,
-                window_end: dataset.window_end,
-                samples: schedule.sample_set.clone(),
-                lookback,
-                source_delay,
-                max_horizon_secs,
-                domain: self.replay.domain.clone(),
-            })
+        // Exact frozen bytes are the evaluation input; no rematerialization is
+        // permitted on this path.
+        let bytes = self
+            .deps
+            .artifact_store
+            .get(materialization.parquet_uri)
             .await?;
+        let examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
 
         let request = BacktestRequest {
             backtest_report_id: backtest_report_id.clone(),
@@ -389,19 +345,15 @@ impl BacktestService {
             window_end: dataset.window_end,
         };
 
-        // Offload the CPU-bound per-section factor recompute + portfolio replay
+        // Offload frozen tick assembly + portfolio replay
         // to a blocking thread so it never occupies an async runtime worker,
         // polling `cancel` at each cross-section boundary.
         let inputs = BacktestReplayInputs {
             model,
-            window,
-            schedule,
-            replay: self.replay.clone(),
+            examples,
             caps: self.caps.clone(),
             request,
             model_run_id: model_run_id.clone(),
-            source_delay,
-            lookback,
             sink: Arc::clone(progress),
             cancel: cancel.clone(),
         };
@@ -557,13 +509,10 @@ impl BacktestService {
                 entity: "training_dataset",
                 id: training_dataset_id.to_string(),
             })?;
-        if !matches!(
-            dataset.status,
-            TrainingDatasetStatus::Built | TrainingDatasetStatus::Ready
-        ) {
+        if dataset.status != TrainingDatasetStatus::Ready {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "backtest requires a Built/Ready dataset, got {}",
+                    "backtest requires a Ready dataset, got {}",
                     dataset.status.as_str()
                 ),
             }
@@ -578,6 +527,7 @@ impl BacktestService {
         input: &BacktestInput,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
+        let materialization = require_dataset_materialization(dataset)?;
         self.deps
             .model_run_repo
             .create(NewModelRun {
@@ -589,7 +539,7 @@ impl BacktestService {
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
                 status: ModelRunStatus::Running,
-                input_hash: dataset.dataset_hash.clone(),
+                input_hash: materialization.dataset_hash.clone(),
                 output_hash: None,
                 metrics_json: serde_json::json!({}),
                 error_code: None,
@@ -623,22 +573,18 @@ struct RecordedRun {
 /// Owned inputs for the blocking backtest replay (moved into `spawn_blocking`).
 struct BacktestReplayInputs {
     model: Box<dyn QuantModelRuntime>,
-    window: HistoricalWindow,
-    schedule: ReplaySchedule,
-    replay: ReplayConfig,
+    examples: Vec<TrainingExample>,
     caps: PortfolioCaps,
     request: BacktestRequest,
     model_run_id: ModelRunId,
-    source_delay: Duration,
-    lookback: Duration,
     sink: Arc<dyn JobProgressSink>,
     cancel: CancellationToken,
 }
 
 /// Run the backtest replay on a blocking thread.
 ///
-/// The per-section materialization is in-memory (`Ready` async), so `block_on`
-/// drives it on this blocking thread without occupying an async runtime worker.
+/// Frozen tick assembly is synchronous; `block_on` drives only the pure async
+/// portfolio replay without occupying an async runtime worker.
 /// Returns `None` when cancelled at a cross-section boundary.
 fn run_backtest_replay_blocking(
     inputs: BacktestReplayInputs,
@@ -646,26 +592,17 @@ fn run_backtest_replay_blocking(
     Handle::current().block_on(run_backtest_replay(inputs))
 }
 
-/// Recompute every `as_of` cross-section point-in-time, assemble the replay
-/// ticks (factor table + forward settlement truth + market metadata), and run
-/// the portfolio replay. The schedule + settlement come from the frozen dataset
-/// Parquet; the factors are recomputed through the shared kernel (never trusted
-/// from Parquet). Polls `cancel` per section for a ~one-section cancel latency.
+/// Assemble exact frozen runtime inputs and run the portfolio replay.
 async fn run_backtest_replay(
     inputs: BacktestReplayInputs,
 ) -> QuantResult<Option<BacktestRunResult>> {
-    let Some(ticks) = materialize_ticks(
-        &inputs.window,
-        &inputs.schedule,
-        &inputs.replay,
+    let Some(ticks) = frozen_ticks(
+        &inputs.examples,
         inputs.model.as_ref(),
         &inputs.model_run_id,
-        inputs.source_delay,
-        inputs.lookback,
         &inputs.cancel,
         inputs.sink.as_ref(),
-    )
-    .await?
+    )?
     else {
         return Ok(None);
     };
@@ -685,71 +622,87 @@ async fn run_backtest_replay(
     Ok(Some(result))
 }
 
-/// Recompute every `as_of` cross-section point-in-time and assemble the
-/// replay ticks (factor table + forward settlement truth + market metadata),
-/// **without** running the portfolio replay itself. Shared by the single-path
-/// [`run_backtest_replay`] and Phase 11.5's CPCV/trial-grid orchestration
-/// (`quant-pivot-core::service::cpcv_backtest`), which both need the exact
-/// same PIT-recomputed tick set but replay it differently (one full window
-/// vs. many purged/embargoed fold subsets). Returns `None` when cancelled at
-/// a cross-section boundary.
+/// Assemble replay ticks directly from immutable v2 Parquet examples.
+///
+/// Shared by single-path backtest and CPCV. No database, current config, or
+/// rematerialized feature/factor value participates in the scored input.
 ///
 /// # Errors
 ///
-/// Propagates [`materialize_cross_section`] failures.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn materialize_ticks(
-    window: &HistoricalWindow,
-    schedule: &ReplaySchedule,
-    replay: &ReplayConfig,
+/// Rejects malformed cross-sections, duplicate market rows, and invalid frozen
+/// model-input bindings.
+pub(crate) fn frozen_ticks(
+    examples: &[TrainingExample],
     model: &dyn QuantModelRuntime,
     model_run_id: &ModelRunId,
-    source_delay: Duration,
-    lookback: Duration,
     cancel: &CancellationToken,
     sink: &dyn JobProgressSink,
 ) -> QuantResult<Option<Vec<BacktestTick>>> {
-    let builder = ConfiguredFeatureBuilder::new(&replay.features, &replay.domain);
-    let engine = FactorEngine::new(
-        &replay.factors,
-        &replay.features,
-        &replay.domain,
-        replay.bias_table.clone(),
-    );
-
-    let total_sections = schedule.by_as_of.len() as u64;
+    let mut by_decision: BTreeMap<DateTime<Utc>, Vec<&TrainingExample>> = BTreeMap::new();
+    for example in examples {
+        by_decision
+            .entry(example.decision_at())
+            .or_default()
+            .push(example);
+    }
+    let total_sections =
+        u64::try_from(by_decision.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("frozen cross-section count does not fit u64: {error}"),
+        })?;
     let mut processed_sections: u64 = 0;
-    let mut ticks = Vec::with_capacity(schedule.by_as_of.len());
-    for (as_of, group) in &schedule.by_as_of {
+    let mut ticks = Vec::with_capacity(by_decision.len());
+    let settlement_label = LabelName::new("settlement_outcome");
+    let mae_label = LabelName::new("max_adverse_excursion_bps");
+    for (decision_at, group) in by_decision {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        processed_sections += 1;
+        processed_sections =
+            processed_sections
+                .checked_add(1)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "frozen cross-section progress overflowed u64".to_owned(),
+                })?;
         sink.report(ResearchJobProgress::with_total(
-            "materialize",
+            "frozen_input",
             processed_sections,
             total_sections,
         ));
-        let Some(cross) = materialize_cross_section(
-            &builder,
-            &engine,
-            replay,
-            &CrossSectionRequest {
-                pit: &window.pit,
-                prefetched: &window.prefetched,
-                as_of: *as_of,
-                group,
-                source_delay,
-                lookback,
-            },
-        )
-        .await?
-        else {
+        let model_input = build_frozen_runtime_input(model, model_run_id, &group)?;
+        let contexts = model_input
+            .market_contexts()
+            .into_iter()
+            .map(|(market_id, context)| (market_id.clone(), context))
+            .collect::<std::collections::HashMap<_, _>>();
+        if contexts.is_empty() {
             continue;
-        };
-        if let Some(tick) = build_tick(model, model_run_id, *as_of, &cross, &schedule.settlement) {
-            ticks.push(tick);
         }
+        let mut market_meta = Vec::with_capacity(contexts.len());
+        let mut outcomes = Vec::with_capacity(contexts.len());
+        for example in group {
+            let Some(context) = contexts.get(&example.market_id) else {
+                continue;
+            };
+            market_meta.push(BacktestMarketMeta {
+                market_id: example.market_id.clone(),
+                category: example.selected_market.category,
+                event_id: Some(example.selected_market.event_id.clone()),
+                liquidity_usd: context.liquidity_usd,
+            });
+            let (settled_yes, matured) = settlement_outcome(example, &settlement_label);
+            outcomes.push(MarketOutcome {
+                market_id: example.market_id.clone(),
+                settled_yes,
+                matured,
+                max_adverse_excursion_bps: max_adverse_excursion(example, &mae_label),
+            });
+        }
+        ticks.push(BacktestTick {
+            decision_at,
+            model_input,
+            outcomes,
+            market_meta,
+        });
     }
     if cancel.is_cancelled() {
         return Ok(None);
@@ -757,60 +710,25 @@ pub(crate) async fn materialize_ticks(
     Ok(Some(ticks))
 }
 
-/// Assemble one replay tick from a recomputed cross-section + forward settlement.
-///
-/// The model input is built for the runtime under test's family (factor table or
-/// feature matrix) from the same cross-section; the per-market metadata +
-/// realized outcomes cover every scoreable market in the cross-section (the
-/// runner joins them to emitted candidates by market id).
-fn build_tick(
-    model: &dyn QuantModelRuntime,
-    model_run_id: &ModelRunId,
-    as_of: DateTime<Utc>,
-    cross: &ReplayCrossSection,
-    settlement: &ReplaySettlementMap,
-) -> Option<BacktestTick> {
-    let model_input = build_runtime_input(
-        model,
-        model_run_id,
-        as_of,
-        &cross.markets,
-        &cross.vectors,
-        &cross.outcomes,
-    );
-    if model_input.market_contexts().is_empty() {
-        return None;
-    }
+fn settlement_outcome(example: &TrainingExample, label: &LabelName) -> (bool, bool) {
+    example
+        .labels
+        .iter()
+        .find(|row| row.label_name == *label)
+        .map_or((false, false), |row| {
+            (row.value >= rust_decimal::Decimal::ONE, row.is_resolved)
+        })
+}
 
-    let mut market_meta = Vec::new();
-    let mut outcomes = Vec::new();
-    for (market, vector) in cross.markets.iter().zip(&cross.vectors) {
-        let Some(context) = build_market_inference_context(vector, market) else {
-            continue;
-        };
-        market_meta.push(BacktestMarketMeta {
-            market_id: market.market_id.clone(),
-            category: market.category,
-            event_id: Some(market.event_id.clone()),
-            liquidity_usd: context.liquidity_usd,
-        });
-        let (settled_yes, matured, max_adverse_excursion_bps) = settlement
-            .get(&(as_of, market.market_id.clone()))
-            .copied()
-            .unwrap_or((false, false, None));
-        outcomes.push(MarketOutcome {
-            market_id: market.market_id.clone(),
-            settled_yes,
-            matured,
-            max_adverse_excursion_bps,
-        });
-    }
-    Some(BacktestTick {
-        as_of,
-        model_input,
-        outcomes,
-        market_meta,
-    })
+fn max_adverse_excursion(
+    example: &TrainingExample,
+    label: &LabelName,
+) -> Option<rust_decimal::Decimal> {
+    example
+        .labels
+        .iter()
+        .find(|row| row.label_name == *label && row.is_resolved)
+        .map(|row| row.value)
 }
 
 /// Project a resolved backtest outcome into a calibration sample, carrying the
@@ -824,10 +742,6 @@ fn calibration_sample(sample: &SampleOutcome) -> CalibrationSample {
         liquidity_usd: sample.liquidity_usd.map(Usd::inner),
         time_to_resolution_secs: sample.time_to_resolution_secs,
         prediction_horizon_secs: sample.prediction_horizon_secs,
-        substitution_reasons: sample
-            .substitutions
-            .iter()
-            .map(|audit| audit.reason)
-            .collect(),
+        substitution_reasons: sample.substitution_reasons.clone(),
     }
 }

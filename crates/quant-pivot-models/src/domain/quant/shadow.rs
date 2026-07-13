@@ -12,7 +12,7 @@ pub struct ShadowComparisonInfo {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
     pub rank_delta_json: serde_json::Value,
     pub score_delta_json: serde_json::Value,
@@ -29,7 +29,7 @@ info_from_model!(
         shadow_comparison_id,
         active_model_version_id,
         shadow_model_version_id,
-        as_of,
+        decision_at,
         topn_overlap,
         rank_delta_json,
         score_delta_json,
@@ -47,7 +47,7 @@ pub struct NewShadowComparison {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
     pub rank_delta_json: serde_json::Value,
     pub score_delta_json: serde_json::Value,
@@ -64,9 +64,9 @@ pub struct ShadowStabilitySummary {
     pub shadow_model_version_id: ModelVersionId,
     /// Number of comparisons observed in the window.
     pub sample_count: u64,
-    /// Earliest comparison `as_of` in the window (window coverage start).
+    /// Earliest comparison `decision_at` in the window (window coverage start).
     pub window_start: Option<DateTime<Utc>>,
-    /// Latest comparison `as_of` in the window (window coverage end).
+    /// Latest comparison `decision_at` in the window (window coverage end).
     pub window_end: Option<DateTime<Utc>>,
     /// Mean `TopN` overlap across the window in `[0, 1]`.
     pub mean_topn_overlap: Probability,

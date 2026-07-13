@@ -15,6 +15,7 @@ use quant_pivot_models::{
         TradeTapeBlockCursorInfo, TradeTapeBlockCursorStatus, TradeTapePrint, TradeTapeSourceKind,
         UpsertTradeTapeBlockCursor,
     },
+    types::TokenId,
 };
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
@@ -165,9 +166,7 @@ impl TradeTapeWorker {
             .await
             .map_err(|error| QuantError::Rpc(error.into()))?;
 
-        let market_for_token = |token_id: &quant_pivot_models::types::TokenId| {
-            self.market_registry.market_for_token(token_id)
-        };
+        let market_for_token = |token_id: &TokenId| self.market_registry.market_for_token(token_id);
 
         let mut prints = Vec::new();
         let mut rejected_unknown_token = 0_u64;
@@ -351,6 +350,7 @@ mod tests {
             market_id: MarketId::new("m1"),
             token_id: TokenId::new("t1"),
             event_time: Utc::now(),
+            available_at: None,
             participant_address: "0xabc".to_owned(),
             participant_role: TradeParticipantRole::Maker,
             side: None,

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use quant_pivot_core::{
     ingest::{book_store::BookStore, market_registry::MarketRegistry},
-    observability::{fact_lag::IngestPipelineLagTracker, metrics_hub::MetricsHub},
+    observability::metrics_hub::MetricsHub,
     prefetch::market_candidates::MarketCandidateProvider,
     service::market_selection::map_snapshot_to_model,
 };
@@ -16,10 +16,13 @@ use quant_pivot_models::{
         BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
         MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
-    domain::market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+    domain::{
+        DecisionClock,
+        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
+    },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
     },
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
@@ -32,14 +35,18 @@ use quant_pivot_repository::{
         EventRepository, MarketRepository, MarketSelectionRepository, QuantFactReadRepository,
     },
 };
-use quant_pivot_research::selection::{
-    ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector, ModelFeatureRequirements,
+use quant_pivot_research::{
+    pit::PointInTimeSnapshotSource,
+    selection::{
+        ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector,
+        ModelFeatureRequirements,
+    },
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
+    pit::InMemoryDecisionSnapshotSource,
     report_pipeline_harness::EmptyLinkageRepo,
-    ws::WsShardHealth,
 };
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
@@ -93,7 +100,7 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         fee_schedule: None,
         end_date: Some(Utc::now() + Duration::days(7)),
         resolved_at: None,
-        created_at: Utc::now(),
+        created_at: Some(Utc::now()),
         updated_at: Utc::now(),
     }
 }
@@ -107,6 +114,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -116,6 +124,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -126,6 +135,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -145,6 +155,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
@@ -154,6 +165,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
         Ok(None)
     }
@@ -163,6 +175,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -170,7 +183,8 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn resolution_at(
         &self,
         _market_id: &MarketId,
-        _as_of_ms: i64,
+        _source_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         Ok(None)
     }
@@ -180,6 +194,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -189,6 +204,8 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_keys: Vec<DomainInstrumentKey>,
         _from_ms: i64,
         _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -198,6 +215,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_key: &DomainInstrumentKey,
         _metric: &str,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         Ok(None)
     }
@@ -206,6 +224,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
     }
@@ -237,7 +256,22 @@ async fn seed_catalog(db: &DatabaseConnection, catalog: &E2eCatalog) {
 }
 
 fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E2eCatalog) {
-    registry.register_market(registry_market(catalog));
+    let market = registry_market(catalog);
+    registry.register_event(EventRegistryInfo {
+        event_id: market.event_id.clone(),
+        title: "Selection E2E".to_owned(),
+        slug: "selection-e2e".to_owned(),
+        series_slug: None,
+        status: EventStatus::Active,
+        market_ids: vec![market.market_id.clone()],
+        categories: CategorySet::from(MarketCategory::Sports),
+        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        neg_risk: false,
+        end_date: market.end_date,
+        created_at: Utc::now() - Duration::days(1),
+        updated_at: market.updated_at,
+    });
+    registry.register_market(market);
     let yes = TokenId::new(catalog.yes_token);
     book_store.apply_snapshot(
         &yes,
@@ -249,7 +283,8 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
             Price::new(Decimal::new(51, 2)),
             Shares::new(Decimal::from(100)),
         )]),
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        u64::try_from(Utc::now().timestamp_millis())
+            .expect("test book timestamp must be non-negative"),
         None,
     );
 }
@@ -265,11 +300,11 @@ async fn provider_selector_mapper_persist_round_trip() {
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
     wire_live_book(&registry, &book_store, &CATALOG);
 
+    let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(
+        InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref()),
+    );
     let provider = MarketCandidateProvider::new(
-        Arc::clone(&registry),
-        Arc::clone(&book_store),
-        WsShardHealth::operational(),
-        Arc::new(IngestPipelineLagTracker::new()),
+        pit_source,
         Arc::new(EmptyLinkageRepo),
         Arc::new(EmptyFactRead),
     );
@@ -279,9 +314,15 @@ async fn provider_selector_mapper_persist_round_trip() {
     let as_of = Utc::now();
     let domain = DomainConfig::default();
     let candidates = provider
-        .candidates(as_of, &domain)
+        .candidates(
+            &DecisionClock::new(0)
+                .boundary(as_of)
+                .expect("decision boundary"),
+            &domain,
+        )
         .await
-        .expect("candidates");
+        .expect("candidates")
+        .candidates;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
         candidates[0].volume_24h_usd,
@@ -289,7 +330,7 @@ async fn provider_selector_mapper_persist_round_trip() {
     );
 
     let request = MarketSelectionBuildRequest {
-        as_of,
+        decision_at: as_of,
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         selection: SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
@@ -299,7 +340,7 @@ async fn provider_selector_mapper_persist_round_trip() {
         data_quality: DataQualityConfig::default(),
         features: FeaturesConfig::default(),
         model_requirements: ModelFeatureRequirements::default(),
-        source_delay_secs: 0,
+        knowledge_lag_secs: 0,
     };
 
     let snapshot = selector

@@ -43,3 +43,19 @@ where
         .map(|(index, item)| f(index, item))
         .collect()
 }
+
+/// Fallible indexed parallel map, preserving source order and propagating the
+/// first computation error without manufacturing a result for that element.
+pub fn par_try_map_with_index<T, R, E, F>(items: &[T], f: F) -> Result<Vec<R>, E>
+where
+    T: Sync,
+    R: Send,
+    E: Send,
+    F: Fn(usize, &T) -> Result<R, E> + Sync + Send,
+{
+    items
+        .par_iter()
+        .enumerate()
+        .map(|(index, item)| f(index, item))
+        .collect()
+}

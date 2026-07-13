@@ -23,10 +23,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{DomainAvailability, LinkageOutcome, MarketInfo},
+    domain::{DecisionBoundary, DecisionSource, DomainAvailability, LinkageOutcome},
     enums::{
         common::MarketCategory,
         domain::{DomainFamily, DomainMetric, LinkageStatus},
@@ -50,8 +49,8 @@ pub trait DomainAvailabilitySource: Send + Sync {
     /// Resolve availability for every entry in `markets` as of `as_of`.
     async fn resolve(
         &self,
-        as_of: DateTime<Utc>,
-        markets: &[&MarketInfo],
+        boundary: &DecisionBoundary,
+        markets: &[(MarketId, MarketCategory)],
     ) -> QuantResult<HashMap<MarketId, DomainAvailability>>;
 }
 
@@ -74,9 +73,15 @@ pub async fn resolve_domain_availability(
     linkage_repo: &dyn MarketLinkageRepository,
     fact_read: &dyn QuantFactReadRepository,
     domain: &DomainConfig,
-    as_of: DateTime<Utc>,
+    boundary: &DecisionBoundary,
     markets: &[(MarketId, MarketCategory)],
 ) -> QuantResult<HashMap<MarketId, DomainAvailability>> {
+    let source_cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
+    let decision_at = boundary.decision_at();
+    let mut by_market: HashMap<MarketId, DomainAvailability> = markets
+        .iter()
+        .map(|(market_id, _)| (market_id.clone(), DomainAvailability::NotMapped))
+        .collect();
     let mapped: Vec<MarketId> = markets
         .iter()
         .filter(|(_, category)| {
@@ -86,7 +91,7 @@ pub async fn resolve_domain_availability(
         .map(|(market_id, _)| market_id.clone())
         .collect();
     if mapped.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(by_market);
     }
 
     // PIT-correct: the record that was actually valid at `as_of`, never the
@@ -94,13 +99,12 @@ pub async fn resolve_domain_availability(
     // *after* `as_of` must never leak into this decision (`latest_for_markets`
     // is reserved for resolver idempotence only).
     let valid_at = linkage_repo
-        .valid_at_for_markets(&mapped, as_of)
+        .valid_at_for_markets(&mapped, boundary)
         .await
         .map_err(QuantError::from)?;
-    let mut by_market: HashMap<MarketId, DomainAvailability> = mapped
-        .iter()
-        .map(|market_id| (market_id.clone(), DomainAvailability::Unresolved))
-        .collect();
+    for market_id in &mapped {
+        by_market.insert(market_id.clone(), DomainAvailability::Unresolved);
+    }
 
     // Resolve source presence once per distinct instrument.
     let mut instrument_by_market: HashMap<MarketId, DomainInstrumentKey> = HashMap::new();
@@ -122,24 +126,31 @@ pub async fn resolve_domain_availability(
         }
     }
 
-    let cutoff_ms = (as_of
-        - ChronoDuration::seconds(i64::try_from(domain.crypto.source_delay_secs).unwrap_or(0)))
-    .timestamp_millis();
+    let cutoff_ms = source_cutoff.timestamp_millis();
     let mut instrument_has_data: HashMap<DomainInstrumentKey, bool> = HashMap::new();
     for instrument in instruments {
         let observation = fact_read
-            .domain_observation_at(&instrument, DomainMetric::Close.as_str(), cutoff_ms)
+            .domain_observation_at(
+                &instrument,
+                DomainMetric::Close.as_str(),
+                cutoff_ms,
+                decision_at.timestamp_millis(),
+            )
             .await
             .map_err(QuantError::from)?;
         instrument_has_data.insert(instrument, observation.is_some());
     }
 
     for (market_id, instrument) in instrument_by_market {
-        let availability = if instrument_has_data
+        let has_data = instrument_has_data
             .get(&instrument)
             .copied()
-            .unwrap_or(false)
-        {
+            .ok_or_else(|| {
+                QuantError::config(format!(
+                    "domain availability batch omitted instrument {instrument}"
+                ))
+            })?;
+        let availability = if has_data {
             DomainAvailability::Available
         } else {
             DomainAvailability::SourceEmpty
@@ -153,7 +164,7 @@ pub async fn resolve_domain_availability(
 ///
 /// Used by the offline keep-rate dry-run estimator (bounded `slices ×
 /// markets` trials — a live read per trial round is acceptable and mirrors
-/// the existing per-market `PitQueryEngine` reads that estimator already
+/// the existing per-market `PointInTimeSnapshotSource` reads that estimator already
 /// performs). The historical spine build itself never takes this path — see
 /// [`PrefetchedDomainAvailabilitySource`].
 pub struct LiveDomainAvailabilitySource {
@@ -183,19 +194,15 @@ impl LiveDomainAvailabilitySource {
 impl DomainAvailabilitySource for LiveDomainAvailabilitySource {
     async fn resolve(
         &self,
-        as_of: DateTime<Utc>,
-        markets: &[&MarketInfo],
+        boundary: &DecisionBoundary,
+        markets: &[(MarketId, MarketCategory)],
     ) -> QuantResult<HashMap<MarketId, DomainAvailability>> {
-        let pairs: Vec<(MarketId, MarketCategory)> = markets
-            .iter()
-            .map(|info| (info.market_id.clone(), info.fee_category()))
-            .collect();
         resolve_domain_availability(
             self.linkage_repo.as_ref(),
             self.fact_read.as_ref(),
             &self.domain,
-            as_of,
-            &pairs,
+            boundary,
+            markets,
         )
         .await
     }
@@ -223,25 +230,25 @@ impl<'a> PrefetchedDomainAvailabilitySource<'a> {
 impl DomainAvailabilitySource for PrefetchedDomainAvailabilitySource<'_> {
     async fn resolve(
         &self,
-        as_of: DateTime<Utc>,
-        markets: &[&MarketInfo],
+        boundary: &DecisionBoundary,
+        markets: &[(MarketId, MarketCategory)],
     ) -> QuantResult<HashMap<MarketId, DomainAvailability>> {
         Ok(markets
             .iter()
-            .map(|info| {
+            .map(|(market_id, category)| {
                 let linkages = self
                     .prefetched
                     .linkages
-                    .get(&info.market_id)
+                    .get(market_id)
                     .map_or(&[][..], Vec::as_slice);
                 let availability = domain_availability_at(
-                    info.fee_category(),
+                    *category,
                     linkages,
-                    as_of,
+                    boundary,
                     self.domain,
                     &self.prefetched.domain_observations,
                 );
-                (info.market_id.clone(), availability)
+                (market_id.clone(), availability)
             })
             .collect())
     }
@@ -263,8 +270,9 @@ mod tests {
             MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
         },
         domain::{
-            CryptoSubject, DomainAvailability, DomainObservation, GroundingProof, LinkageOutcome,
-            MarketInfo, MarketLinkage, MarketLinkageInfo, MarketLinkageListQuery, MarketSubject,
+            CatalogWindowInfo, CryptoSubject, DecisionBoundary, DecisionClock, DecisionSource,
+            DomainAvailability, DomainObservation, GroundingProof, LinkageOutcome, MarketInfo,
+            MarketLinkage, MarketLinkageInfo, MarketLinkageListQuery, MarketSubject,
             NewMarketLinkage, Paginated, PriceComparator, ResolutionOracle, ResolvedBinding,
         },
         enums::{
@@ -288,6 +296,17 @@ mod tests {
             &BinanceSymbol::parse(symbol).expect("symbol"),
             KlineInterval::OneMinute,
         )
+    }
+
+    fn boundary(as_of: DateTime<Utc>, domain: &DomainConfig) -> DecisionBoundary {
+        DecisionClock::new(0)
+            .boundary(as_of)
+            .expect("boundary")
+            .with_source_cutoff(
+                DecisionSource::DomainCrypto,
+                domain.crypto.availability_lag_secs,
+            )
+            .expect("domain cutoff")
     }
 
     fn instrument() -> DomainInstrumentKey {
@@ -360,7 +379,7 @@ mod tests {
             &metadata_hash,
         )
         .expect("hash");
-        let derived_at = Utc.with_ymd_and_hms(2026, 7, 1, 11, 0, 0).unwrap();
+        let effective_at = Utc.with_ymd_and_hms(2026, 7, 1, 11, 0, 0).unwrap();
         MarketLinkage {
             linkage_id: MarketLinkageId::from_v7(),
             market_id,
@@ -371,8 +390,8 @@ mod tests {
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
             content_hash,
-            derived_at,
-            created_at: derived_at,
+            effective_at,
+            available_at: effective_at + ChronoDuration::milliseconds(1),
         }
     }
 
@@ -384,8 +403,10 @@ mod tests {
             micro: HashMap::new(),
             trade_tape: HashMap::new(),
             resolutions: HashMap::new(),
-            markets_by_id: HashMap::new(),
-            neg_risk_leg_sets: HashMap::new(),
+            catalog: CatalogWindowInfo {
+                market_versions: Vec::new(),
+                event_versions: Vec::new(),
+            },
             domain_observations: HashMap::new(),
             linkages: HashMap::new(),
         }
@@ -429,6 +450,7 @@ mod tests {
                 value: dec!(100000),
                 observed_at: as_of - ChronoDuration::seconds(5),
                 publish_time: as_of - ChronoDuration::seconds(5),
+                available_at: Some(as_of - ChronoDuration::seconds(4)),
             }],
         );
 
@@ -438,10 +460,14 @@ mod tests {
             market_info("unresolved", MarketCategory::Crypto),
             market_info("sports", MarketCategory::Sports),
         ];
-        let refs: Vec<&MarketInfo> = markets.iter().collect();
+        let refs: Vec<_> = markets
+            .iter()
+            .map(|market| (market.market_id.clone(), market.fee_category()))
+            .collect();
 
         let source = PrefetchedDomainAvailabilitySource::new(&prefetched, &domain);
-        let result = source.resolve(as_of, &refs).await.expect("resolve");
+        let boundary = boundary(as_of, &domain);
+        let result = source.resolve(&boundary, &refs).await.expect("resolve");
 
         assert_eq!(
             result.get(&MarketId::new("resolved-available")).copied(),
@@ -479,7 +505,7 @@ mod tests {
         async fn valid_at(
             &self,
             _market_id: &MarketId,
-            _as_of: DateTime<Utc>,
+            _boundary: &DecisionBoundary,
         ) -> Result<Option<MarketLinkageInfo>, StorageError> {
             unimplemented!("unused by this test")
         }
@@ -487,12 +513,16 @@ mod tests {
         async fn valid_at_for_markets(
             &self,
             market_ids: &[MarketId],
-            _as_of: DateTime<Utc>,
+            boundary: &DecisionBoundary,
         ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
             Ok(self
                 .rows
                 .iter()
-                .filter(|row| market_ids.contains(&row.market_id))
+                .filter(|row| {
+                    market_ids.contains(&row.market_id)
+                        && row.derived_at <= boundary.cutoff_for(DecisionSource::Linkage)
+                        && row.created_at <= boundary.decision_at()
+                })
                 .cloned()
                 .collect())
         }
@@ -507,7 +537,7 @@ mod tests {
         async fn ledger_for_markets(
             &self,
             _market_ids: &[MarketId],
-            _derived_before: DateTime<Utc>,
+            _end_boundary: &DecisionBoundary,
         ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
             unimplemented!("unused by this test")
         }
@@ -538,6 +568,7 @@ mod tests {
             _token_ids: Vec<TokenId>,
             _from_ms: i64,
             _to_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
             Ok(Vec::new())
         }
@@ -547,6 +578,7 @@ mod tests {
             _token_ids: Vec<TokenId>,
             _from_ms: i64,
             _to_ms: i64,
+            _available_by_ms: i64,
             _minute: bool,
         ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
             Ok(Vec::new())
@@ -567,6 +599,7 @@ mod tests {
             _market_ids: Vec<MarketId>,
             _from_ms: i64,
             _to_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Vec<TradeTapeRow>, StorageError> {
             Ok(Vec::new())
         }
@@ -576,6 +609,7 @@ mod tests {
             _token_ids: Vec<TokenId>,
             _from_ms: i64,
             _to_ms: i64,
+            _decision_at_ms: i64,
             _bucket_secs: u32,
         ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
             Ok(Vec::new())
@@ -585,6 +619,7 @@ mod tests {
             &self,
             _token_id: &TokenId,
             _as_of_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Option<BookSnapshotRow>, StorageError> {
             Ok(None)
         }
@@ -594,6 +629,7 @@ mod tests {
             _token_ids: Vec<TokenId>,
             _from_ms: i64,
             _to_ms: i64,
+            _available_by_ms: i64,
         ) -> Result<Vec<BookSnapshotRow>, StorageError> {
             Ok(Vec::new())
         }
@@ -601,7 +637,8 @@ mod tests {
         async fn resolution_at(
             &self,
             _market_id: &MarketId,
-            _as_of_ms: i64,
+            _source_cutoff_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Option<MarketResolutionRow>, StorageError> {
             Ok(None)
         }
@@ -611,6 +648,7 @@ mod tests {
             _market_ids: Vec<MarketId>,
             _from_ms: i64,
             _to_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Vec<MarketResolutionRow>, StorageError> {
             Ok(Vec::new())
         }
@@ -619,6 +657,7 @@ mod tests {
             &self,
             _from_ms: i64,
             _to_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Vec<MarketId>, StorageError> {
             Ok(Vec::new())
         }
@@ -628,6 +667,8 @@ mod tests {
             _instrument_keys: Vec<DomainInstrumentKey>,
             _from_ms: i64,
             _to_ms: i64,
+            _publish_cutoff_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Vec<DomainObservationRow>, StorageError> {
             Ok(Vec::new())
         }
@@ -637,6 +678,7 @@ mod tests {
             _instrument_key: &DomainInstrumentKey,
             _metric: &str,
             _as_of_ms: i64,
+            _decision_at_ms: i64,
         ) -> Result<Option<DomainObservationRow>, StorageError> {
             if self.has_observation {
                 Ok(Some(DomainObservationRow {
@@ -674,10 +716,10 @@ mod tests {
             instrument_key: Some(instrument()),
             metadata_hash: linkage.metadata_hash,
             content_hash: linkage.content_hash,
-            derived_at: linkage.derived_at,
+            derived_at: linkage.effective_at,
             override_reason: None,
             override_actor: None,
-            created_at: linkage.created_at,
+            created_at: linkage.available_at,
         }
     }
 
@@ -697,7 +739,14 @@ mod tests {
         };
         let source = LiveDomainAvailabilitySource::new(Arc::new(repo), Arc::new(fact_read), domain);
         let market = market_info("0xcrypto", MarketCategory::Crypto);
-        let result = source.resolve(as_of, &[&market]).await.expect("resolve");
+        let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
+        let result = source
+            .resolve(
+                &boundary,
+                &[(market.market_id.clone(), market.fee_category())],
+            )
+            .await
+            .expect("resolve");
         assert_eq!(
             result.get(&MarketId::new("0xcrypto")).copied(),
             Some(DomainAvailability::Available)
@@ -712,11 +761,12 @@ mod tests {
         let fact_read = FakeFactRead {
             has_observation: false,
         };
+        let boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
         let result = resolve_domain_availability(
             &repo,
             &fact_read,
             &domain,
-            as_of,
+            &boundary,
             &[(MarketId::new("0xnoledger"), MarketCategory::Crypto)],
         )
         .await

@@ -7,8 +7,8 @@
 //!
 //! This is the minimal, literature-standard `WalkForwardSplit`-with-embargo
 //! purge primitive (López de Prado, *Advances in Financial Machine
-//! Learning*, Ch. 7): a calibration/fit window must not overlap any `Built`/
-//! `Ready` training-dataset window (purge), and — when calibrating a specific
+//! Learning*, Ch. 7): a calibration/fit window must not overlap any `Ready`
+//! training-dataset window (purge), and — when calibrating a specific
 //! model version — must start no earlier than that model's own training
 //! window end plus a governed embargo gap (drops the serially-correlated
 //! buffer immediately after training). Phase 11.5 upgrades this to full
@@ -39,7 +39,7 @@ pub fn half_open_windows_overlap(
     a_start < b_end && b_start < a_end
 }
 
-/// Fail closed when `window` overlaps any `Built`/`Ready` training-dataset window.
+/// Fail closed when `window` overlaps any `Ready` training-dataset window.
 ///
 /// This is the purge primitive shared by every calibration fit. A calibration
 /// artifact must never be fit on the same spine a model trains on.
@@ -62,10 +62,7 @@ pub async fn assert_disjoint_from_all_training_datasets(
             .await
             .map_err(QuantError::from)?;
         for dataset in &batch.items {
-            if !matches!(
-                dataset.status,
-                TrainingDatasetStatus::Built | TrainingDatasetStatus::Ready
-            ) {
+            if dataset.status != TrainingDatasetStatus::Ready {
                 continue;
             }
             if half_open_windows_overlap(
@@ -88,7 +85,12 @@ pub async fn assert_disjoint_from_all_training_datasets(
                 }));
             }
         }
-        if page.saturating_mul(query.page.size) >= batch.total {
+        let consumed = page.checked_mul(query.page.size).ok_or_else(|| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: "calibration dataset pagination count overflow".to_owned(),
+            })
+        })?;
+        if consumed >= batch.total {
             break;
         }
         page += 1;

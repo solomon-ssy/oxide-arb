@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{CalibrationArtifactInfo, NewCalibrationArtifact, query::TimeWindow},
     enums::{common::MarketCategory, quant::CalibrationKind},
@@ -244,26 +244,37 @@ impl FavoriteLongshotBiasTable {
     }
 }
 
-impl From<FavoriteLongshotBiasTable> for NewCalibrationArtifact {
-    fn from(table: FavoriteLongshotBiasTable) -> Self {
-        Self {
+impl TryFrom<FavoriteLongshotBiasTable> for NewCalibrationArtifact {
+    type Error = QuantError;
+
+    fn try_from(table: FavoriteLongshotBiasTable) -> Result<Self, Self::Error> {
+        let total_samples = table.by_category.values().try_fold(0_u64, |total, curve| {
+            total
+                .checked_add(curve.sample_count)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "bias-table total sample count exceeds u64".to_owned(),
+                })
+        })?;
+        let sample_count =
+            i64::try_from(total_samples).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("bias-table sample count exceeds Postgres bigint: {error}"),
+            })?;
+        let payload_json = serde_json::to_value(&table.by_category).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!("bias-table payload serialization failed: {error}"),
+            }
+        })?;
+        Ok(Self {
             artifact_id: table.table_id,
             kind: CalibrationKind::MarketPriceBias,
             content_hash: table.content_hash,
             calibration_split_hash: table.calibration_split_hash,
             fit_window_start: table.fit_window.from,
             fit_window_end: table.fit_window.to,
-            sample_count: i64::try_from(
-                table
-                    .by_category
-                    .values()
-                    .map(|c| c.sample_count)
-                    .sum::<u64>(),
-            )
-            .unwrap_or(i64::MAX),
-            payload_json: serde_json::to_value(&table.by_category).unwrap_or_default(),
+            sample_count,
+            payload_json,
             active: false,
-        }
+        })
     }
 }
 
@@ -321,7 +332,7 @@ impl FavoriteLongshotBiasTable {
         calibration_split_hash: ContentHash,
         config: &BiasFitConfig,
     ) -> QuantResult<Option<Self>> {
-        let z = wilson_z(config.ci_confidence);
+        let z = wilson_z(config.ci_confidence)?;
         let ranges = ttr_ranges(&config.ttr_bucket_bounds_secs);
         let mut by_category: BTreeMap<MarketCategory, CategoryBiasCurve> = BTreeMap::new();
         for category in MarketCategory::ALL_VARIANTS {
@@ -334,17 +345,21 @@ impl FavoriteLongshotBiasTable {
                     .copied()
                     .filter(|s| s.ttr_secs >= lo && hi.is_none_or(|hi| s.ttr_secs < hi))
                     .collect();
-                let total = bucket_samples.len() as u64;
+                let total = u64::try_from(bucket_samples.len()).map_err(|error| {
+                    ResearchError::DatasetBuild {
+                        detail: format!("bias-curve sample count exceeds u64: {error}"),
+                    }
+                })?;
                 if total < config.min_curve_samples {
                     continue;
                 }
-                let bins = fit_bins(&bucket_samples, config, z);
+                let bins = fit_bins(&bucket_samples, config, z)?;
                 if bins.is_empty() {
                     continue;
                 }
                 let ic = curve_ic(&bucket_samples, &bins);
                 let ic_significant =
-                    ic_is_significant(ic, total, config.ci_confidence, config.ic_significance_min);
+                    ic_is_significant(ic, total, config.ci_confidence, config.ic_significance_min)?;
                 by_ttr.push(TtrBucketCurve {
                     ttr_lo_secs: lo,
                     ttr_hi_secs: hi,
@@ -414,7 +429,11 @@ fn ttr_ranges(bounds: &[u64]) -> Vec<(u64, Option<u64>)> {
 /// A bin is retained only when it clears `min_bin_samples` **and** its Wilson
 /// interval for the realized frequency excludes the implied mid — i.e. the bias
 /// is statistically distinct from the market price at `ci_confidence`.
-fn fit_bins(samples: &[&BiasSample], config: &BiasFitConfig, z: f64) -> Vec<PriceBiasBin> {
+fn fit_bins(
+    samples: &[&BiasSample],
+    config: &BiasFitConfig,
+    z: f64,
+) -> QuantResult<Vec<PriceBiasBin>> {
     let bin_count = config.bins.max(1);
     let width = Decimal::ONE / Decimal::from(bin_count);
     let mut bins = Vec::new();
@@ -433,17 +452,26 @@ fn fit_bins(samples: &[&BiasSample], config: &BiasFitConfig, z: f64) -> Vec<Pric
                 mid >= lo && (mid < hi || (top && mid <= hi))
             })
             .collect();
-        let n = u64::try_from(in_bin.len()).unwrap_or(u64::MAX);
+        let n = u64::try_from(in_bin.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("bias-bin sample count exceeds u64: {error}"),
+        })?;
         if n < config.min_bin_samples {
             continue;
         }
-        let yes = u64::try_from(in_bin.iter().filter(|s| s.settled_yes).count()).unwrap_or(0);
-        let p_hat = count_f64(yes) / count_f64(n);
+        let yes =
+            u64::try_from(in_bin.iter().filter(|s| s.settled_yes).count()).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("bias-bin positive count exceeds u64: {error}"),
+                }
+            })?;
+        let p_hat = count_f64(yes)? / count_f64(n)?;
         let implied_mid = (lo + hi) / Decimal::from(2);
         let realized = Decimal::from_f64(p_hat)
-            .unwrap_or(Decimal::ZERO)
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "bias-bin realized frequency is not representable as Decimal".to_owned(),
+            })?
             .round_dp(STAT_SCALE);
-        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z, STAT_SCALE);
+        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z, STAT_SCALE)?;
         // Wilson significance gate: retain the bias only when the implied mid
         // falls outside the empirical-frequency confidence interval.
         let implied = implied_mid.round_dp(STAT_SCALE);
@@ -461,7 +489,7 @@ fn fit_bins(samples: &[&BiasSample], config: &BiasFitConfig, z: f64) -> Vec<Pric
             sample_count: n,
         });
     }
-    bins
+    Ok(bins)
 }
 
 /// Per-curve information coefficient: the Pearson correlation between the
@@ -498,28 +526,50 @@ fn curve_ic(samples: &[&BiasSample], curve: &[PriceBiasBin]) -> Decimal {
 /// Whether a correlation `ic` over `n` paired samples is significant: it must
 /// clear the absolute `|IC|` floor **and** a two-sided Student-t test at
 /// `ci_confidence` (`t = IC·√((n−2)/(1−IC²))`, df = `n − 2`).
-fn ic_is_significant(ic: Decimal, n: u64, ci_confidence: Decimal, ic_floor: Decimal) -> bool {
+fn ic_is_significant(
+    ic: Decimal,
+    n: u64,
+    ci_confidence: Decimal,
+    ic_floor: Decimal,
+) -> QuantResult<bool> {
     if ic.abs() < ic_floor {
-        return false;
+        return Ok(false);
     }
     if n < 3 {
-        return false;
+        return Ok(false);
     }
-    let Some(r) = ic.to_f64() else {
-        return false;
-    };
-    let nn = count_f64(n);
+    let r = ic
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!("bias-curve IC {ic} is not representable as finite f64"),
+        })?;
+    let nn = count_f64(n)?;
     let denom = r.mul_add(-r, 1.0).max(1e-12);
     let t = r * ((nn - 2.0) / denom).sqrt();
-    let level = ci_confidence.to_f64().unwrap_or(0.95).clamp(0.5, 0.999_999);
+    let level = ci_confidence
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "bias-curve confidence {ci_confidence} is not representable as finite f64"
+            ),
+        })?
+        .clamp(0.5, 0.999_999);
     let upper = 1.0 - (1.0 - level) / 2.0;
     let df = nn - 2.0;
-    let t_crit = StudentsT::new(0.0, 1.0, df).map_or(1.96, |dist| dist.inverse_cdf(upper));
-    t.abs() >= t_crit
+    let distribution =
+        StudentsT::new(0.0, 1.0, df).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("bias-curve Student-t construction failed: {error}"),
+        })?;
+    let t_crit = distribution.inverse_cdf(upper);
+    Ok(t.abs() >= t_crit)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::model::CategoryBiasCurve;
+
     use super::{BiasFitConfig, BiasSample, BiasTableCanonical, FavoriteLongshotBiasTable};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -678,7 +728,7 @@ mod tests {
     }
 
     fn persisted_info(active: bool) -> CalibrationArtifactInfo {
-        let by_category: BTreeMap<MarketCategory, super::CategoryBiasCurve> = BTreeMap::new();
+        let by_category: BTreeMap<MarketCategory, CategoryBiasCurve> = BTreeMap::new();
         let fit_window = window();
         let calibration_split_hash = split_hash();
         let content_hash = crate::hashing::ResearchHasher::canonical(&BiasTableCanonical {

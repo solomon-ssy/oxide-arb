@@ -9,7 +9,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub report_data_quality_snapshot_id: ReportDataQualitySnapshotId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     #[sea_orm(column_type = "JsonBinary")]
     pub tokens_json: ReportDataQualityTokens,

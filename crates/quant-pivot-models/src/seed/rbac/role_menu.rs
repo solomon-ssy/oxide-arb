@@ -32,14 +32,14 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const ROLE_MENU_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    // v2 re-grants role→menu visibility after the `research-jobs` node was added
-    // (idempotent `on_conflict do_nothing` inserts only the new grants).
-    version: 2,
+    // v3 grants visibility for the feature-integrity page and its governed
+    // action button (idempotent inserts only add the new grants).
+    version: 3,
     target_table: role_menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.role_menu.bootstrap.v2",
+    checksum: "rbac.role_menu.bootstrap.v3",
     loader: load_boxed,
 };
 
@@ -134,5 +134,33 @@ mod tests {
             policies,
         ));
         assert!(menu_granted(MenuKind::Menu, Some("market:read"), policies));
+    }
+
+    #[test]
+    fn feature_integrity_menu_and_governance_button_follow_role_policy() {
+        let sets = policy_sets();
+        let viewer = sets.get("viewer").expect("viewer policies");
+        let risk_owner = sets.get("risk_owner").expect("risk-owner policies");
+
+        assert!(menu_granted(
+            MenuKind::Menu,
+            Some("materialization:read"),
+            viewer,
+        ));
+        assert!(!menu_granted(
+            MenuKind::Button,
+            Some("materialization:create"),
+            viewer,
+        ));
+        assert!(menu_granted(
+            MenuKind::Menu,
+            Some("materialization:read"),
+            risk_owner,
+        ));
+        assert!(menu_granted(
+            MenuKind::Button,
+            Some("materialization:create"),
+            risk_owner,
+        ));
     }
 }

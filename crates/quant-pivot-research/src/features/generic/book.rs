@@ -8,6 +8,7 @@ use crate::features::{
     resolved::ResolvedBook,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     runtime_config::FeatureFamily,
     types::{Bps, Price, Probability},
@@ -22,23 +23,25 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
         FeatureFamily::PriceBook
     }
 
-    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
-        // No book ⇒ produce nothing; critical book specs then reject the market.
+    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> QuantResult<Vec<RawFeature>> {
+        // No book ⇒ produce nothing; model-required book inputs then reject the market.
         let Some(book) = ctx.book else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let evidence = ctx.book_snapshot_ref.map_or_else(
             || EvidenceSourceRef {
                 source_kind: EvidenceSourceKind::Book,
                 reference: book.token_id.as_str().to_owned(),
-                observed_at: book.observed_at,
+                effective_at: book.effective_at,
+                available_at: Some(book.available_at),
             },
-            |book_ref| book_evidence_ref(book_ref, book.observed_at),
+            |book_ref| book_evidence_ref(book_ref, book.effective_at, book.available_at),
         );
 
         let mut out = vec![
             price_feature(book::BEST_BID, book.best_bid().map(Price::inner), &evidence),
             price_feature(book::BEST_ASK, book.best_ask().map(Price::inner), &evidence),
+            secondary_best_ask(ctx),
             price_feature(book::MID, book.mid().map(Price::inner), &evidence),
             spread_bps(book, &evidence),
             decimal_feature(
@@ -58,11 +61,7 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
                 FeatureValue::Usd(book.visible_liquidity_usd()),
                 evidence.clone(),
             ),
-            RawFeature::present(
-                book::AGE_MS,
-                FeatureValue::Count(book_age_ms(ctx, book)),
-                evidence.clone(),
-            ),
+            book_age(ctx, book, &evidence),
             RawFeature::present(
                 book::CROSSED,
                 FeatureValue::Bool(book.is_crossed()),
@@ -82,8 +81,28 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
                 evidence.clone(),
             ));
         }
-        out
+        Ok(out)
     }
+}
+
+fn secondary_best_ask(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
+    let Some(secondary) = ctx.secondary_book else {
+        return RawFeature::missing(book::SECONDARY_BEST_ASK, NullReason::SourceUnavailable);
+    };
+    let evidence = ctx.secondary_book_snapshot_ref.map_or_else(
+        || EvidenceSourceRef {
+            source_kind: EvidenceSourceKind::Book,
+            reference: secondary.token_id.as_str().to_owned(),
+            effective_at: secondary.effective_at,
+            available_at: Some(secondary.available_at),
+        },
+        |book_ref| book_evidence_ref(book_ref, secondary.effective_at, secondary.available_at),
+    );
+    price_feature(
+        book::SECONDARY_BEST_ASK,
+        secondary.best_ask().map(Price::inner),
+        &evidence,
+    )
 }
 
 /// A price feature carried as a `[0, 1]` probability, or missing when unquoted.
@@ -98,7 +117,9 @@ fn price_feature(
             FeatureValue::Probability(Probability::new(decimal)),
             evidence.clone(),
         ),
-        None => RawFeature::missing(name, NullReason::SourceUnavailable),
+        None => {
+            RawFeature::missing_with_evidence(name, NullReason::SourceUnavailable, evidence.clone())
+        }
     }
 }
 
@@ -121,16 +142,30 @@ fn decimal_feature(
 fn spread_bps(book: &ResolvedBook, evidence: &EvidenceSourceRef) -> RawFeature {
     match (book.best_bid(), book.best_ask(), book.mid()) {
         (Some(bid), Some(ask), Some(mid)) if mid.inner() > Decimal::ZERO => {
-            let bps = Bps::relative(ask.inner() - bid.inner(), mid.inner())
-                .map_or(Decimal::ZERO, Bps::inner);
-            RawFeature::present(book::SPREAD_BPS, FeatureValue::Bps(bps), evidence.clone())
+            Bps::relative(ask.inner() - bid.inner(), mid.inner()).map_or_else(
+                || RawFeature::missing(book::SPREAD_BPS, NullReason::OutOfValidRange),
+                |bps| {
+                    RawFeature::present(
+                        book::SPREAD_BPS,
+                        FeatureValue::Bps(bps.inner()),
+                        evidence.clone(),
+                    )
+                },
+            )
         }
         _ => RawFeature::missing(book::SPREAD_BPS, NullReason::SourceUnavailable),
     }
 }
 
-/// Book age in milliseconds at the decision time (clamped at zero).
-fn book_age_ms(ctx: &FeatureComputeCtx<'_>, book: &ResolvedBook) -> u64 {
-    let age = (ctx.as_of - book.observed_at).num_milliseconds();
-    u64::try_from(age).unwrap_or(0)
+/// Book age in milliseconds at the decision time.
+fn book_age(
+    ctx: &FeatureComputeCtx<'_>,
+    book: &ResolvedBook,
+    evidence: &EvidenceSourceRef,
+) -> RawFeature {
+    let age = (ctx.decision_at - book.effective_at).num_milliseconds();
+    u64::try_from(age).map_or_else(
+        |_| RawFeature::missing(book::AGE_MS, NullReason::OutOfValidRange),
+        |age| RawFeature::present(book::AGE_MS, FeatureValue::Count(age), evidence.clone()),
+    )
 }

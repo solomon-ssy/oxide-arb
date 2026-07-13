@@ -1,4 +1,9 @@
-CREATE MATERIALIZED VIEW IF NOT EXISTS book_microstructure_1m_mv
+-- The legacy view omitted `available_at`; drop it once and install a new,
+-- versioned view so CREATE IF NOT EXISTS cannot silently preserve the old
+-- projection on an upgraded database.
+DROP TABLE IF EXISTS book_microstructure_1m_mv;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS book_microstructure_1m_availability_v2_mv
 TO book_microstructure_1m
 AS
 SELECT
@@ -31,6 +36,7 @@ SELECT
     sum(gap_count) AS gap_count,
     sum(last_trade_count) AS last_trade_count,
     max(max_book_age_ms) AS max_book_age_ms,
-    max(schema_version) AS schema_version
+    max(schema_version) AS schema_version,
+    max(available_at) AS available_at
 FROM book_microstructure_1s
 GROUP BY token_id, bucket_time

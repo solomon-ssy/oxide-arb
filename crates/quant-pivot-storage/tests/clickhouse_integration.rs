@@ -155,7 +155,7 @@ async fn clickhouse_table_ttl_policies() {
 #[ignore = "requires Docker"]
 async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
-    let expected: [(&str, &[&str]); 4] = [
+    let expected: [(&str, &[&str]); 8] = [
         (
             "tick_events",
             &[
@@ -188,6 +188,31 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
                 "`cost_usd` Decimal(38, 18)",
             ],
         ),
+        (
+            "quant_model_input_event",
+            &[
+                "`raw_state` LowCardinality(String)",
+                "`encoded_value_bits` Nullable(UInt64)",
+                "`audit_fingerprint` String",
+            ],
+        ),
+        (
+            "quant_feature_parity_event",
+            &[
+                "`stage` LowCardinality(String)",
+                "`online_state` LowCardinality(Nullable(String))",
+                "`replay_state` LowCardinality(Nullable(String))",
+                "ReplacingMergeTree(ingestion_time)",
+            ],
+        ),
+        (
+            "quant_trade_tape",
+            &["ENGINE = MergeTree", "ingestion_time"],
+        ),
+        (
+            "quant_domain_observation",
+            &["ENGINE = MergeTree", "ingestion_time"],
+        ),
     ];
 
     for (table, fragments) in expected {
@@ -201,6 +226,12 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
                 ddl.statement.contains(fragment),
                 "table {table} should contain `{fragment}`; got:\n{}",
                 ddl.statement
+            );
+        }
+        if matches!(table, "quant_trade_tape" | "quant_domain_observation") {
+            assert!(
+                !ddl.statement.contains("ReplacingMergeTree"),
+                "PIT source table {table} must retain every ingested revision"
             );
         }
     }

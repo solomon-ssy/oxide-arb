@@ -8,7 +8,7 @@
 //! critical path.
 //!
 //! Wire shape follows the official [`OpenAPI`] `Position` schema:
-//! <https://polymarket-docs.copilot.markets/api-reference/core/get-current-positions-for-a-user>.
+//! <https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user>.
 //! Unknown response fields are ignored so the venue may extend the schema without
 //! breaking reads.
 //!
@@ -38,58 +38,50 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct VenuePosition {
     /// Proxy wallet that holds the position on-chain (when present).
-    #[serde(default)]
     pub proxy_wallet: Option<String>,
     /// CLOB outcome token id.
-    #[serde(default)]
     pub asset: String,
     /// Owning market (`condition_id`).
-    #[serde(default)]
     pub condition_id: String,
     /// Shares held.
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub size: Decimal,
     /// Average entry price (cost basis).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub avg_price: Decimal,
     /// Initial marked value at entry (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub initial_value: Decimal,
     /// Current venue mark price.
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub cur_price: Decimal,
     /// Current marked value in USD (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub current_value: Decimal,
     /// Unrealized cash `PnL` (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub cash_pnl: Decimal,
     /// Unrealized percent `PnL` (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub percent_pnl: Decimal,
     /// Total shares bought (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub total_bought: Decimal,
     /// Realized cash `PnL` (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub realized_pnl: Decimal,
     /// Realized percent `PnL` (venue-reported).
-    #[serde(default, deserialize_with = "de_decimal")]
+    #[serde(deserialize_with = "de_decimal")]
     pub percent_realized_pnl: Decimal,
     /// Whether the position is redeemable (market resolved).
-    #[serde(default)]
     pub redeemable: bool,
     /// Whether the position can be merged with its opposite outcome.
-    #[serde(default)]
     pub mergeable: bool,
     /// Whether the market uses negative-risk collateral.
-    #[serde(default)]
     pub negative_risk: bool,
     /// Outcome label (e.g. `Yes` / `No`).
-    #[serde(default)]
     pub outcome: String,
     /// Outcome index within the market.
-    #[serde(default)]
     pub outcome_index: i32,
 }
 
@@ -246,14 +238,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_optional_numbers_default_to_zero() {
+    fn missing_position_evidence_is_rejected_instead_of_defaulted() {
         let json = serde_json::json!({
             "asset": "1",
             "conditionId": "0x1"
         });
-        let position: VenuePosition = serde_json::from_value(json).expect("parse");
-        assert_eq!(position.size, Decimal::ZERO);
-        assert_eq!(position.current_value, Decimal::ZERO);
-        assert!(!position.redeemable);
+        let error = serde_json::from_value::<VenuePosition>(json)
+            .expect_err("missing critical account evidence must fail closed");
+        assert!(error.to_string().contains("size"));
     }
 }

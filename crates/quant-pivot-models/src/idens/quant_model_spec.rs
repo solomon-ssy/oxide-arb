@@ -15,13 +15,8 @@ use crate::{
     },
 };
 
-// `feature_requirements` (11.2.2 remediation R7) is the governed contract a
-// dataset build's offline point-in-time selector gates on: it is the exact
-// requirement set the eventual model (trained under this spec) would impose
-// online, so the offline funnel mirrors the real serving population instead
-// of guessing. Structured JSON deserializing to
-// `quant_pivot_research::selection::ModelFeatureRequirements`; validated at
-// authoring time in `quant-pivot-core`'s `ModelSpecService`.
+// `input_contract` is the ordered raw feature graph consumed by the model.
+// Synthetic/encoded columns are fitted artifact outputs and never schema inputs.
 #[quant_schema(lifecycle = "control")]
 pub enum QuantModelSpec {
     Table,
@@ -32,7 +27,8 @@ pub enum QuantModelSpec {
     FeatureSchemaVersion,
     LabelSchemaVersion,
     SpecJson,
-    FeatureRequirements,
+    InputContract,
+    TrainingContract,
     Status,
     CreatedAt,
     UpdatedAt,
@@ -71,14 +67,28 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
-            ColumnDef::new(QuantModelSpec::FeatureRequirements)
+            ColumnDef::new(QuantModelSpec::InputContract)
                 .json_binary()
-                .not_null()
-                .default(Expr::cust("'{}'::jsonb")),
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantModelSpec::TrainingContract)
+                .json_binary()
+                .not_null(),
         )
         .col(column::pg_enum::<PublicationStatus>(QuantModelSpec::Status))
         .col(timestamp_with_write_default(QuantModelSpec::CreatedAt))
         .col(timestamp_with_write_default(QuantModelSpec::UpdatedAt))
+        .check(Expr::cust(
+            "status = 'retired'::qp_publication_status OR (\
+             jsonb_typeof(input_contract) = 'object' AND \
+             jsonb_typeof(input_contract->'inputs') = 'array' AND \
+             jsonb_array_length(input_contract->'inputs') > 0 AND \
+             jsonb_typeof(training_contract) = 'object' AND \
+             jsonb_typeof(training_contract->'target_label_name') = 'string' AND \
+             length(training_contract->>'target_label_name') BETWEEN 1 AND 128 AND \
+             (training_contract->>'validation_folds')::integer BETWEEN 2 AND 20)",
+        ))
         .to_owned()
 }
 

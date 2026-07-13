@@ -97,7 +97,7 @@ RuntimeConfig {
 
 `max_ingest_lag_ms` 衡量入库管道 enqueue→ClickHouse flush-ack 背压（实时数据质量 / 执行准入 / 选市）；`max_feature_bucket_age_secs` 衡量物化特征桶陈旧度（训练 / 回测 / 在线特征）。二者语义独立，不可混用。
 
-> **v7 删除**：`allow_degraded_domain_features`、`source_delay_secs`（前者从未消费；后者只作 ad-hoc 报告 source-delay 回退，已合并——见 §2.8）。exit 再推断的 as-of 回退改用 `max_feature_bucket_age_secs`。
+> **v7 删除**：`allow_degraded_domain_features`、`knowledge_lag_secs`（前者从未消费；后者只作 ad-hoc 报告 source-delay 回退，已合并——见 §2.8）。exit 再推断的 as-of 回退改用 `max_feature_bucket_age_secs`。
 > **拆分**：旧 `max_fact_lag_secs` 拆为 `max_ingest_lag_ms`（管道背压）与 `max_feature_bucket_age_secs`（特征桶陈旧度）。
 
 ### 2.3 `features`
@@ -128,9 +128,9 @@ RuntimeConfig {
 
 `schedules`, `max_top_n`, `fallback_horizon_secs`, `publish_empty_reports`, `entry_window_ratio`, `ad_hoc_report_enabled`, `delivery_policy`。
 
-Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs` 或 `cron{expr, timezone?}`）, `top_n`, `source_delay_secs`, `enabled`。
+Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs` 或 `cron{expr, timezone?}`）, `top_n`, `knowledge_lag_secs`, `enabled`。
 
-> **v7 破坏式合并**：`schedule` 层是 `top_n` / `source_delay` 的**唯一权威**。删除 `reports.default_top_n` 与 `data_quality.source_delay_secs`。**ad-hoc 报告必须在请求中显式携带 `top_n` + `source_delay_secs`**，缺失即 fail closed（无配置回退）。schedule 上删除死占位符 `market_filter_ref` / `model_version_ref`。
+> **v7 破坏式合并**：`schedule` 层是 `top_n` / `knowledge_lag` 的**唯一权威**。删除 `reports.default_top_n` 与 `data_quality.knowledge_lag_secs`。**ad-hoc 报告必须在请求中显式携带 `top_n` + `knowledge_lag_secs`**，缺失即 fail closed（无配置回退）。schedule 上删除死占位符 `market_filter_ref` / `model_version_ref`。
 
 ### 2.9 `portfolio`
 
@@ -246,7 +246,7 @@ Critical：report schedule missed、model quality gate failed、fact writer lag�
 
 ## 9. Runbooks
 
-新增：启动 report_only、标准二元 CTF auto-redeem、发布模型、运行 ad-hoc report（**须显式提供 top_n + source_delay_secs**）、切换 auto_execution、Auto-execution 恢复（unresolvable / latched kill-switch）、审批 OrderIntent、kill switch、处理 stale report / fact lag / unresolvable execution。
+新增：启动 report_only、标准二元 CTF auto-redeem、发布模型、运行 ad-hoc report（**须显式提供 top_n + knowledge_lag_secs**）、切换 auto_execution、Auto-execution 恢复（unresolvable / latched kill-switch）、审批 OrderIntent、kill switch、处理 stale report / fact lag / unresolvable execution。
 
 ## 10. Bootstrap 与 schema 变更
 
@@ -264,7 +264,7 @@ Critical：report schedule missed、model quality gate failed、fact writer lag�
 - semi_auto/auto_execution preflight 额外覆盖签名/下单 credentials 与 order client readiness。
 - admission 为 22 条；`capital.{max_open_intents, max_reserved_usd}` 生效（0=禁用）。
 - `execution.breaker.*` 激活即热更新，无需重启。
-- ad-hoc 报告缺 `top_n` / `source_delay_secs` 时 fail closed。
+- ad-hoc 报告缺 `top_n` / `knowledge_lag_secs` 时 fail closed。
 - CI gate 能阻止旧 Endgame 符号回流。
 
 ## 12. 第三方依赖治理

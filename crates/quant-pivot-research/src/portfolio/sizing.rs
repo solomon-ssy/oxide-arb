@@ -507,7 +507,11 @@ mod tests {
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    use crate::model::signal::{ModelExplanation, SignalCandidate};
+    use crate::{
+        model::signal::{ModelExplanation, SignalCandidate},
+        portfolio::SizingSuggestion,
+        precision::RESEARCH_DECIMAL_SCALE,
+    };
 
     /// A `Calibrated`-path candidate: `win_probability` is `Some`, so
     /// `KellySizingModel` uses the `Resolution` bet structure directly
@@ -584,7 +588,7 @@ mod tests {
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
         }
     }
 
@@ -614,7 +618,7 @@ mod tests {
         )
     }
 
-    fn sized(outcome: SizingOutcome) -> super::SizingSuggestion {
+    fn sized(outcome: SizingOutcome) -> SizingSuggestion {
         match outcome {
             SizingOutcome::Sized(s) => *s,
             SizingOutcome::Rejected(r) => panic!("expected sized, got {r:?}"),
@@ -1180,7 +1184,7 @@ mod tests {
             * provenance.drawdown_shrink
             * provenance.edge_uncertainty_shrink
             * provenance.correlation_shrink)
-            .round_dp(super::RESEARCH_DECIMAL_SCALE);
+            .round_dp(RESEARCH_DECIMAL_SCALE);
         assert_eq!(
             reproduced, provenance.raw_fraction,
             "the waterfall's per-stage product must reproduce raw_fraction exactly"

@@ -4,7 +4,10 @@
 //! bare `Decimal`). This is the model runtime's output before portfolio
 //! pruning; 3.4 maps it to `QuantSignalCandidateEventRow` for `ClickHouse`.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
     enums::{
@@ -12,14 +15,14 @@ use quant_pivot_models::{
         quant::{FactorDirection, OutcomeSide},
     },
     types::{
-        Bps, FactorDefinitionId, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
-        TokenId,
+        Bps, ContentHash, FactorDefinitionId, MarketId, ModelRunId, Price, Probability,
+        SignalCandidateId, TokenId,
     },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::factors::FactorName;
+use crate::{factors::FactorName, hashing::ResearchHasher};
 
 /// One factor's signed contribution to a candidate's composite score.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,14 +135,106 @@ pub struct SignalCandidate {
     pub rejection_warnings: Vec<SignalWarning>,
     /// Rank among candidates before portfolio pruning.
     pub rank_before_portfolio: u32,
-    /// Normalized liquidity depth factor score in `[0, 1]`.
+    /// Governed liquidity-context score in `[0, 1]`, projected directly from
+    /// the same decision snapshot the runtime scored.
     pub liquidity_score: Probability,
-    /// Aggregate data-quality factor score in `[0, 1]`.
+    /// Governed data-quality-context score in `[0, 1]`.
     pub data_quality_score: Probability,
     /// Within-batch composite-score percentile in `(0, 1]`.
     pub model_score_percentile: Probability,
-    /// Decision time.
-    pub as_of: DateTime<Utc>,
+    /// Frozen decision time that produced this prediction.
+    pub decision_at: DateTime<Utc>,
+}
+
+/// Stable, identity-free projection of one model prediction.
+///
+/// Candidate and run ids identify one execution attempt, not the business
+/// prediction. Every remaining field is consumed by ranking, sizing, report
+/// composition, execution evidence, or operator diagnostics and therefore
+/// participates in deterministic parity.
+#[derive(Serialize)]
+struct CanonicalBusinessPrediction<'a> {
+    market_id: &'a MarketId,
+    token_id: &'a TokenId,
+    outcome_side: &'a OutcomeSide,
+    composite_score: &'a Probability,
+    confidence: &'a Probability,
+    expected_return_bps: &'a Decimal,
+    downside_bps: &'a Decimal,
+    win_probability: &'a Option<Probability>,
+    entry_price_ref: &'a Price,
+    suggested_horizon_secs: u64,
+    factor_breakdown: &'a [FactorContribution],
+    model_explanation: &'a ModelExplanation,
+    rejection_warnings: &'a [SignalWarning],
+    rank_before_portfolio: u32,
+    liquidity_score: &'a Probability,
+    data_quality_score: &'a Probability,
+    model_score_percentile: &'a Probability,
+    decision_at: &'a DateTime<Utc>,
+}
+
+impl<'a> From<&'a SignalCandidate> for CanonicalBusinessPrediction<'a> {
+    fn from(candidate: &'a SignalCandidate) -> Self {
+        Self {
+            market_id: &candidate.market_id,
+            token_id: &candidate.token_id,
+            outcome_side: &candidate.outcome_side,
+            composite_score: &candidate.composite_score,
+            confidence: &candidate.confidence,
+            expected_return_bps: &candidate.expected_return_bps,
+            downside_bps: &candidate.downside_bps,
+            win_probability: &candidate.win_probability,
+            entry_price_ref: &candidate.entry_price_ref,
+            suggested_horizon_secs: candidate.suggested_horizon_secs,
+            factor_breakdown: &candidate.factor_breakdown,
+            model_explanation: &candidate.model_explanation,
+            rejection_warnings: &candidate.rejection_warnings,
+            rank_before_portfolio: candidate.rank_before_portfolio,
+            liquidity_score: &candidate.liquidity_score,
+            data_quality_score: &candidate.data_quality_score,
+            model_score_percentile: &candidate.model_score_percentile,
+            decision_at: &candidate.decision_at,
+        }
+    }
+}
+
+/// Hash canonical business predictions independently of execution ids and
+/// caller-provided row order.
+///
+/// A model may emit at most one prediction for a `(market, token, outcome)`
+/// business key. Rejecting duplicates prevents ordering from hiding ambiguous
+/// or conflicting predictions.
+pub fn canonical_business_prediction_hash(
+    candidates: &[SignalCandidate],
+) -> QuantResult<ContentHash> {
+    let mut business_keys = BTreeSet::new();
+    let mut predictions = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let key = (
+            candidate.market_id.as_str(),
+            candidate.token_id.as_str(),
+            candidate.outcome_side.as_str(),
+        );
+        if !business_keys.insert(key) {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "duplicate business prediction for market {}, token {}, outcome {}",
+                    candidate.market_id, candidate.token_id, candidate.outcome_side
+                ),
+            }
+            .into());
+        }
+        predictions.push(CanonicalBusinessPrediction::from(candidate));
+    }
+    predictions.sort_by(|left, right| {
+        left.market_id
+            .as_str()
+            .cmp(right.market_id.as_str())
+            .then_with(|| left.token_id.as_str().cmp(right.token_id.as_str()))
+            .then_with(|| left.outcome_side.as_str().cmp(right.outcome_side.as_str()))
+    });
+    ResearchHasher::canonical(&predictions)
 }
 
 /// Apply a basis-point move to an entry price, clamped into `[0, 1]`.
@@ -213,8 +308,8 @@ pub fn signal_candidate_events(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelExplanation, OutcomeSide, SignalCandidate, signal_candidate_event,
-        signal_candidate_events,
+        ModelExplanation, OutcomeSide, SignalCandidate, SignalWarning,
+        canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
     };
     use chrono::Utc;
     use quant_pivot_models::types::{
@@ -249,7 +344,7 @@ mod tests {
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
         };
 
         assert_eq!(candidate.outcome_side, OutcomeSide::Yes);
@@ -286,8 +381,89 @@ mod tests {
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn business_prediction_hash_ignores_execution_ids() {
+        let candidate = sample_candidate();
+        let mut replayed = candidate.clone();
+        replayed.signal_candidate_id = SignalCandidateId::from_v7();
+        replayed.model_run_id = ModelRunId::from_v7();
+
+        assert_eq!(
+            canonical_business_prediction_hash(std::slice::from_ref(&candidate)).expect("online"),
+            canonical_business_prediction_hash(std::slice::from_ref(&replayed)).expect("replay")
+        );
+    }
+
+    #[test]
+    fn business_prediction_hash_is_order_independent() {
+        let first = sample_candidate();
+        let mut second = first.clone();
+        second.signal_candidate_id = SignalCandidateId::from_v7();
+        second.market_id = MarketId::new("0xsecond");
+        second.token_id = TokenId::new("654321");
+        second.outcome_side = OutcomeSide::Yes;
+
+        assert_eq!(
+            canonical_business_prediction_hash(&[first.clone(), second.clone()]).expect("forward"),
+            canonical_business_prediction_hash(&[second, first]).expect("reverse")
+        );
+    }
+
+    #[test]
+    fn business_prediction_hash_commits_downstream_business_fields() {
+        let candidate = sample_candidate();
+        let baseline =
+            canonical_business_prediction_hash(std::slice::from_ref(&candidate)).expect("baseline");
+
+        macro_rules! assert_business_change {
+            ($label:literal, $mutate:expr) => {{
+                let mut changed = candidate.clone();
+                $mutate(&mut changed);
+                assert_ne!(
+                    baseline,
+                    canonical_business_prediction_hash(std::slice::from_ref(&changed))
+                        .expect("changed prediction"),
+                    "{} must participate in the business prediction hash",
+                    $label
+                );
+            }};
+        }
+
+        assert_business_change!("score", |row: &mut SignalCandidate| {
+            row.composite_score = Probability::new(Decimal::new(73, 2));
+        });
+        assert_business_change!("return", |row: &mut SignalCandidate| {
+            row.expected_return_bps += Decimal::ONE;
+        });
+        assert_business_change!("explanation", |row: &mut SignalCandidate| {
+            row.model_explanation.headline = "changed".to_owned();
+        });
+        assert_business_change!("warnings", |row: &mut SignalCandidate| {
+            row.rejection_warnings.push(SignalWarning::LowConfidence);
+        });
+        assert_business_change!("rank", |row: &mut SignalCandidate| {
+            row.rank_before_portfolio += 1;
+        });
+        assert_business_change!("liquidity", |row: &mut SignalCandidate| {
+            row.liquidity_score = Probability::new(Decimal::new(1, 1));
+        });
+    }
+
+    #[test]
+    fn business_prediction_hash_rejects_duplicate_business_key() {
+        let first = sample_candidate();
+        let mut duplicate = first.clone();
+        duplicate.signal_candidate_id = SignalCandidateId::from_v7();
+        duplicate.model_run_id = ModelRunId::from_v7();
+        duplicate.composite_score = Probability::new(Decimal::new(90, 2));
+
+        let error = canonical_business_prediction_hash(&[first, duplicate])
+            .expect_err("duplicate business key must fail");
+        assert!(error.to_string().contains("duplicate business prediction"));
     }
 
     #[test]

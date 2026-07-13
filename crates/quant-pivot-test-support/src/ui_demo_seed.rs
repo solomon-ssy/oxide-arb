@@ -13,6 +13,7 @@ fn demo_run_id() -> &'static str {
 }
 
 use chrono::Utc;
+use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd, QuantCapitalAllocationEventRow,
@@ -169,7 +170,7 @@ pub async fn seed_ui_demo_pg(db: &DatabaseConnection, funder: &str) -> UiDemoSee
 pub async fn seed_ui_demo_ck(
     pool: Arc<ClickHousePool>,
     summary: &UiDemoSeedSummary,
-) -> Result<usize, quant_pivot_error::storage::StorageError> {
+) -> Result<usize, StorageError> {
     pool.ensure_schema().await?;
     let write_manager = Arc::new(ChWriteManager::new(4));
     let facts = ChQuantFactRepository::new(pool, write_manager);
@@ -281,7 +282,7 @@ fn push_demo_ck_rows(record: &DemoSeedRecord, now: i64, batches: &mut DemoCkFact
 async fn flush_demo_ck_batches(
     facts: &ChQuantFactRepository,
     batches: DemoCkFactBatches,
-) -> Result<usize, quant_pivot_error::storage::StorageError> {
+) -> Result<usize, StorageError> {
     let mut rows = 0usize;
     if !batches.recommendation.is_empty() {
         rows += batches.recommendation.len();
@@ -443,7 +444,10 @@ async fn seed_submitted(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(entry_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            entry_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
     record.execution_order_id = Some(order.execution_order_id);
@@ -464,7 +468,10 @@ async fn seed_partial(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(entry_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            entry_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
     let partial_cost = Usd::new(dec!(30));
@@ -589,7 +596,10 @@ async fn seed_failed(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(entry_execution_order(&intent_id, &ids))
+        .create_entry_order_and_lock_capital(
+            entry_execution_order(&intent_id, &ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
     submission
@@ -949,7 +959,10 @@ async fn ambiguous_order(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(entry_execution_order(intent_id, ids))
+        .create_entry_order_and_lock_capital(
+            entry_execution_order(intent_id, ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
     submission
@@ -1268,6 +1281,7 @@ async fn seed_diff_report(
     let report_id = RecommendationReportId::from_v7();
     let primary = markets.first().expect("at least one market");
     let ids = ExecutionTxnIds {
+        feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -1328,6 +1342,7 @@ async fn seed_custom_report(
     let market_selection_id =
         seed_market_selection_for_diff(db, &infra.runtime_config_version_id).await;
     let ids = ExecutionTxnIds {
+        feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -1398,7 +1413,7 @@ async fn seed_market_selection_for_diff(
         .create_snapshot(
             NewMarketSelection {
                 market_selection_id: id.clone(),
-                as_of: Utc::now(),
+                decision_at: Utc::now(),
                 runtime_config_version_id: runtime_config_version_id.clone(),
                 selector_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
                     .expect("hash"),

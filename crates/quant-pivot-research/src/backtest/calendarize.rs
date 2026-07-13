@@ -54,7 +54,7 @@ pub fn calendarize_lot_returns(outcomes: &[LotOutcome], period_secs: u64) -> Vec
         let mut rows: Vec<CalendarReturn> = outcomes
             .iter()
             .map(|outcome| CalendarReturn {
-                period_start: outcome.as_of,
+                period_start: outcome.decision_at,
                 return_value: outcome.return_value,
             })
             .collect();
@@ -65,13 +65,13 @@ pub fn calendarize_lot_returns(outcomes: &[LotOutcome], period_secs: u64) -> Vec
     // (bucket_epoch, return_sum) — BTreeMap keeps ascending order.
     let mut buckets: BTreeMap<i64, Decimal> = BTreeMap::new();
     for outcome in outcomes {
-        let epoch = (outcome.as_of.timestamp() / period_i64) * period_i64;
+        let epoch = (outcome.decision_at.timestamp() / period_i64) * period_i64;
         *buckets.entry(epoch).or_insert(Decimal::ZERO) += outcome.return_value;
     }
     buckets
         .into_iter()
         .map(|(epoch, return_value)| CalendarReturn {
-            period_start: DateTime::from_timestamp(epoch, 0).unwrap_or(outcomes[0].as_of),
+            period_start: DateTime::from_timestamp(epoch, 0).unwrap_or(outcomes[0].decision_at),
             return_value,
         })
         .collect()
@@ -109,7 +109,7 @@ mod tests {
     fn outcome(as_of: chrono::DateTime<Utc>, return_value: Decimal) -> LotOutcome {
         LotOutcome {
             position_id: PositionId::from_v7(),
-            as_of,
+            decision_at: as_of,
             return_value,
             cumulative_exit_pct: Decimal::ONE,
             rank_pairs: Vec::new(),

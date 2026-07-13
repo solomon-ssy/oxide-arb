@@ -14,7 +14,7 @@ pub mod isotonic;
 pub mod platt;
 
 use async_trait::async_trait;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::CalibrationMethod,
     types::{CalibrationArtifactId, Price, Probability},
@@ -62,19 +62,78 @@ pub trait ProbabilityCalibrator: Send + Sync {
     fn fit(&self, scores: &[Decimal], outcomes: &[bool]) -> QuantResult<MonotoneMapping>;
 
     /// Map one raw score to a calibrated win probability, clamped to `[0, 1]`.
-    fn calibrate(&self, mapping: &MonotoneMapping, score: Decimal) -> Probability;
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed inference error when the fitted mapping cannot be
+    /// represented by the runtime numeric boundary.
+    fn calibrate(&self, mapping: &MonotoneMapping, score: Decimal) -> QuantResult<Probability>;
 }
 
 /// Apply a fitted [`MonotoneMapping`] to one score (shared by every caller —
 /// runtime scoring, reliability recomputation, and tests — so "how a mapping
 /// is applied" has exactly one implementation).
-#[must_use]
-pub fn apply_mapping(mapping: &MonotoneMapping, score: Decimal) -> Probability {
+pub fn apply_mapping(mapping: &MonotoneMapping, score: Decimal) -> QuantResult<Probability> {
+    validate_mapping(mapping)?;
     let raw = match mapping {
-        MonotoneMapping::Isotonic { knots } => isotonic::interpolate(knots, score),
-        MonotoneMapping::Platt { a, b } => platt::sigmoid(*a, *b, score),
+        MonotoneMapping::Isotonic { knots } => isotonic::interpolate(knots, score)?,
+        MonotoneMapping::Platt { a, b } => platt::sigmoid(*a, *b, score)?,
     };
-    Probability::new(raw.clamp(Decimal::ZERO, Decimal::ONE))
+    Ok(Probability::new(raw.clamp(Decimal::ZERO, Decimal::ONE)))
+}
+
+/// Validate the frozen transform graph of a probability calibrator.
+///
+/// # Errors
+///
+/// Rejects empty, unordered, duplicate, out-of-range, or non-monotone
+/// isotonic knots. Both artifact loading and inference call this boundary so a
+/// malformed artifact cannot silently emit a plausible probability.
+pub fn validate_mapping(mapping: &MonotoneMapping) -> QuantResult<()> {
+    let MonotoneMapping::Isotonic { knots } = mapping else {
+        return Ok(());
+    };
+    if knots.is_empty() {
+        return Err(ResearchError::Inference {
+            detail: "isotonic calibration mapping has no fitted knots".to_owned(),
+        }
+        .into());
+    }
+    for knot in knots {
+        if knot.probability < Decimal::ZERO || knot.probability > Decimal::ONE {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "isotonic calibration probability {} at score {} is outside [0, 1]",
+                    knot.probability, knot.score
+                ),
+            }
+            .into());
+        }
+    }
+    for pair in knots.windows(2) {
+        let [left, right] = pair else {
+            continue;
+        };
+        if left.score >= right.score {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "isotonic calibration scores must be strictly increasing, got {} then {}",
+                    left.score, right.score
+                ),
+            }
+            .into());
+        }
+        if left.probability > right.probability {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "isotonic calibration probabilities must be non-decreasing, got {} then {}",
+                    left.probability, right.probability
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// A `model_score` calibration artifact resolved for runtime scoring.
@@ -92,8 +151,7 @@ pub struct ResolvedCalibration {
 
 impl ResolvedCalibration {
     /// Calibrated `P(win)` for one candidate's composite score.
-    #[must_use]
-    pub fn calibrate(&self, composite_score: Decimal) -> Probability {
+    pub fn calibrate(&self, composite_score: Decimal) -> QuantResult<Probability> {
         apply_mapping(&self.mapping, composite_score)
     }
 
@@ -103,26 +161,28 @@ impl ResolvedCalibration {
     /// **calibrated-probability** bucket (matching the reliability report's
     /// ECE bucketing — never the raw pre-calibration score bucket). An
     /// invalid market price (outside `(0, 1)`) or a probability bucket with
-    /// no MAE evidence yields a zero estimate — never fabricated — which
-    /// downstream Kelly sizing rejects via `InvalidEdgeInputs`.
+    /// no MAE evidence rejects inference. Neither condition is a business zero.
     ///
     /// `win_probability` on the returned [`ReturnEstimate`] is the *same*
     /// `P(win)` used to derive `expected_return_bps` — Kelly sizing (Phase
     /// 11.3 §4 redesign) consumes it directly as `q`, so the sizing decision
     /// and the return estimate always share one probability, never two
     /// independently-derived numbers.
-    #[must_use]
-    pub fn estimate_return(&self, composite_score: Decimal, market_price: Price) -> ReturnEstimate {
+    pub fn estimate_return(
+        &self,
+        composite_score: Decimal,
+        market_price: Price,
+    ) -> QuantResult<ReturnEstimate> {
         let p = market_price.inner();
         if p <= Decimal::ZERO || p >= Decimal::ONE {
-            return ReturnEstimate {
-                expected_return_bps: Decimal::ZERO,
-                downside_bps: Decimal::ZERO,
-                calibrated: true,
-                win_probability: None,
-            };
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "calibrated return requires an executable market price in (0, 1), got {p}"
+                ),
+            }
+            .into());
         }
-        let p_win = self.calibrate(composite_score);
+        let p_win = self.calibrate(composite_score)?;
         let p_win_inner = p_win.inner();
         let bps = Decimal::from(10_000);
         let expected_return_bps =
@@ -132,15 +192,19 @@ impl ResolvedCalibration {
             .reliability
             .bin_for(p_win_inner)
             .and_then(|bin| bin.mean_adverse_excursion_bps)
-            .map_or(Decimal::ZERO, |mae| {
-                mae.abs().round_dp(RESEARCH_DECIMAL_SCALE)
-            });
-        ReturnEstimate {
+            .ok_or_else(|| ResearchError::Inference {
+                detail: format!(
+                    "calibrated probability {p_win_inner} has no frozen MAE downside evidence"
+                ),
+            })?
+            .abs()
+            .round_dp(RESEARCH_DECIMAL_SCALE);
+        Ok(ReturnEstimate {
             expected_return_bps,
             downside_bps,
             calibrated: true,
             win_probability: Some(p_win),
-        }
+        })
     }
 }
 
@@ -165,8 +229,8 @@ pub trait CalibrationArtifactLoader: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{IsotonicKnot, MonotoneMapping, ResolvedCalibration};
-    use crate::model::reliability::ReliabilityReport;
-    use quant_pivot_models::types::{CalibrationArtifactId, Price};
+    use crate::model::reliability::{ReliabilityBin, ReliabilityReport};
+    use quant_pivot_models::types::{CalibrationArtifactId, Price, Probability};
     use rust_decimal_macros::dec;
 
     fn resolved() -> ResolvedCalibration {
@@ -185,7 +249,15 @@ mod tests {
                 ],
             },
             reliability: ReliabilityReport {
-                bins: Vec::new(),
+                bins: vec![ReliabilityBin {
+                    predicted_lo: dec!(0),
+                    predicted_hi: dec!(1),
+                    sample_count: 100,
+                    mean_predicted: Probability::new(dec!(0.5)),
+                    empirical_frequency: Probability::new(dec!(0.5)),
+                    wilson_ci: (Probability::new(dec!(0.4)), Probability::new(dec!(0.6))),
+                    mean_adverse_excursion_bps: Some(dec!(-500)),
+                }],
                 brier_score: dec!(0.1),
                 log_loss: dec!(0.3),
                 ece: dec!(0.05),
@@ -199,17 +271,15 @@ mod tests {
         // `market_price` outside the *open* interval `(0, 1)` — a price of
         // exactly 0 or 1 is not an executable YES-leg price on a real
         // Polymarket order book, and `p=0` would divide by zero in
-        // `(1-p)/p` if not rejected first — must yield a zero, never-
-        // fabricated estimate, not a panic or a garbage value.
+        // `(1-p)/p` if not rejected first — must be a typed inference failure,
+        // never a zero-valued business prediction.
         let resolved = resolved();
         for boundary in [dec!(0), dec!(1)] {
-            let estimate = resolved.estimate_return(dec!(0.5), Price::new(boundary));
-            assert_eq!(estimate.expected_return_bps, rust_decimal::Decimal::ZERO);
-            assert_eq!(estimate.downside_bps, rust_decimal::Decimal::ZERO);
-            assert!(estimate.calibrated);
             assert!(
-                estimate.win_probability.is_none(),
-                "a rejected boundary price must never carry a fabricated win probability"
+                resolved
+                    .estimate_return(dec!(0.5), Price::new(boundary))
+                    .is_err(),
+                "boundary price {boundary} must fail closed"
             );
         }
     }
@@ -217,9 +287,30 @@ mod tests {
     #[test]
     fn estimate_return_accepts_interior_market_prices() {
         let resolved = resolved();
-        let estimate = resolved.estimate_return(dec!(0.5), Price::new(dec!(0.01)));
+        let estimate = resolved
+            .estimate_return(dec!(0.5), Price::new(dec!(0.01)))
+            .expect("interior estimate");
         assert!(estimate.win_probability.is_some());
-        let estimate = resolved.estimate_return(dec!(0.5), Price::new(dec!(0.99)));
+        let estimate = resolved
+            .estimate_return(dec!(0.5), Price::new(dec!(0.99)))
+            .expect("interior estimate");
         assert!(estimate.win_probability.is_some());
+    }
+
+    #[test]
+    fn estimate_return_rejects_missing_downside_evidence() {
+        let mut resolved = resolved();
+        resolved.reliability.bins[0].mean_adverse_excursion_bps = None;
+        assert!(
+            resolved
+                .estimate_return(dec!(0.5), Price::new(dec!(0.5)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_isotonic_mapping_fails_closed() {
+        let mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
+        assert!(super::apply_mapping(&mapping, dec!(0.5)).is_err());
     }
 }

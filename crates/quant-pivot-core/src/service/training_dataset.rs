@@ -4,18 +4,20 @@
 //! build needs (book snapshots, microstructure, market metadata, settlements),
 //! serves point-in-time lookups from an in-memory
 //! [`MaterializedPitEngine`] so the build loop issues zero DB queries, then —
-//! per `as_of` cross-section — runs the **same** feature builder + factor engine
+//! per `decision_at` cross-section — runs the **same** feature builder + factor engine
 //! the online path uses, attaches forward-looking labels, asserts no future
 //! leakage, materializes a content-hashed Parquet artifact, and records the
-//! ledger row. Features are bounded by `as_of - source_delay`; labels look
-//! strictly forward; the dataset hash makes the whole thing reproducible.
+//! ledger row. Features are bounded by the source cutoffs frozen in each
+//! [`DecisionBoundary`]; labels look strictly forward from `decision_at`; the
+//! dataset hash makes the whole thing reproducible.
 
 use crate::{
-    pit::platform::ch_historical::ChHistoricalPitSource,
+    pit::platform::ch_historical::DurablePitSource,
     prefetch::{
         domain_availability::{LiveDomainAvailabilitySource, PrefetchedDomainAvailabilitySource},
         historical_window::{
             HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
+            replay_boundary,
         },
     },
     service::{
@@ -33,27 +35,33 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChPrice, ChUsd},
     domain::{
-        ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo, NewTrainingDataset,
-        NoopProgressSink, RecommendationAttributionInfo, RecommendationInfo, ResearchJobProgress,
-        query::TimeWindow,
+        CompleteTrainingDatasetBuild, DecisionBoundary, DecisionClock, DecisionSource,
+        ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo,
+        MarketSelectionMemberInfo, NewTrainingDatasetPlan, NoopProgressSink,
+        RecommendationAttributionInfo, RecommendationInfo, ResearchJobProgress,
+        TrainingDatasetInfo, TrainingDatasetMaterialization, fee::FeeQuoteInput, query::TimeWindow,
     },
     enums::{
-        common::MarketCategory,
+        common::{MarketCategory, Side},
+        fee::FeeLiquidityRole,
         quant::{DatasetPurpose, RecommendationAttributionOutcome, TrainingDatasetStatus},
     },
+    hashing::CanonicalDigest,
     runtime_config::{
-        DataQualityConfig, DecimalString, DomainConfig, FactorsConfig, FeaturesConfig,
-        SelectionConfig, TrainingConfig,
+        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, SelectionConfig,
+        TrainingConfig,
     },
     types::{
-        Bps, FeatureVectorId, MarketId, ModelSpecId, Price, RecommendationId, Shares, TokenId,
-        TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, Usd,
+        ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetFeatureStateCounts,
+        DatasetManifest, FeatureVectorId, MarketId, MarketSelectionId, ModelInputContract,
+        ModelSpecId, Price, RecommendationId, Shares, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, EventRepository, FeatureRepository, MarketLinkageRepository,
-    MarketRepository, ModelRegistryRepository, PositionRepository, QuantFactReadRepository,
-    RecommendationRepository, TrainingDatasetRepository,
+    AttributionRepository, CatalogVersionRepository, FeatureRepository, MarketLinkageRepository,
+    MarketRepository, MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -63,29 +71,29 @@ use quant_pivot_research::{
         MarketFactorOutcome, NormalizedFactor,
     },
     features::{
-        ConfiguredFeatureBuilder, DomainFeatureSlice, EvidenceSourceRef, FeatureName, FeatureValue,
-        FeatureVector, SubstitutionAudit,
+        ConfiguredFeatureBuilder, DecisionCaptureEvidence, DomainFeatureSlice, FeatureCell,
+        FeatureCellState, FeatureName, FeatureVector,
     },
     hashing::ResearchHasher,
     model::{
         FavoriteLongshotBiasTable,
-        sell_scorer::{LotStateInput, position_state_factor_values, position_state_features},
+        sell_scorer::{LotStateInput, PositionStateFeatures, position_state_features},
     },
-    pit::PitQueryEngine,
+    pit::PointInTimeSnapshotSource,
     selection::{ModelFeatureRequirements, SelectedMarket},
     training::{
-        DatasetCoverage, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest, DecisionBook,
-        ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler, LabelBuildInput,
-        LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
+        DatasetCoverage, DatasetHashContract, DatasetParquetCodec, DatasetPlan, DatasetPlanRequest,
+        DecisionBook, ExitDecisionLabelContext, ForwardWindow, HoldVsExitProceedsLabeler,
+        LabelBuildInput, LabelBuildOutput, LabelName, Labeler, LiquidityExitLabeler, LotSamplePlan,
         LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
         MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
         SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
         TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
-        count_samples, label_names_for_sources, plan_lot_timeline_samples, plan_samples,
-        probe_matrix_coverage, remaining_shares_at,
+        count_samples, dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
+        plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
     },
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
@@ -95,6 +103,14 @@ use tokio::{runtime::Handle, task};
 use tokio_util::sync::CancellationToken;
 
 const LIVE_ATTRIBUTION_SAMPLE_LIMIT: u64 = 10_000;
+const DATASET_FAILURE_DETAIL_MAX_CHARS: usize = 2_048;
+
+fn bounded_failure_detail(detail: &str) -> String {
+    detail
+        .chars()
+        .take(DATASET_FAILURE_DETAIL_MAX_CHARS)
+        .collect()
+}
 
 /// Non-materializing dry-run counts for the `plan` endpoint.
 #[derive(Debug, Clone, Copy)]
@@ -115,6 +131,161 @@ pub struct PlanCounts {
     pub keep_rate: Option<f64>,
     /// Number of `(market, slice)` eligibility trials backing [`Self::keep_rate`].
     pub keep_rate_sample_size: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeepRateEstimate {
+    included: u64,
+    trials: u64,
+}
+
+impl KeepRateEstimate {
+    fn rate(self) -> QuantResult<f64> {
+        if self.trials == 0 || self.included > self.trials {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "invalid keep-rate counts: included={}, trials={}",
+                    self.included, self.trials
+                ),
+            }
+            .into());
+        }
+        let included = self
+            .included
+            .to_f64()
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: format!(
+                    "keep-rate included count {} is not a finite f64",
+                    self.included
+                ),
+            })?;
+        let trials = self
+            .trials
+            .to_f64()
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: format!("keep-rate trial count {} is not a finite f64", self.trials),
+            })?;
+        let rate = included / trials;
+        if !rate.is_finite() || !(0.0..=1.0).contains(&rate) {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!("computed keep rate {rate} is outside [0, 1]"),
+            }
+            .into());
+        }
+        Ok(rate)
+    }
+
+    fn scale(self, count: u64) -> QuantResult<u64> {
+        if self.trials == 0 || self.included > self.trials {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "invalid keep-rate counts: included={}, trials={}",
+                    self.included, self.trials
+                ),
+            }
+            .into());
+        }
+        let numerator = u128::from(count)
+            .checked_mul(u128::from(self.included))
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "keep-rate scaled-count numerator overflowed u128".to_owned(),
+            })?;
+        let half = u128::from(self.trials) / 2;
+        let rounded = numerator
+            .checked_add(half)
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "keep-rate rounded numerator overflowed u128".to_owned(),
+            })?
+            / u128::from(self.trials);
+        u64::try_from(rounded).map_err(|error| {
+            ResearchError::DatasetPlan {
+                detail: format!("keep-rate scaled count does not fit u64: {error}"),
+            }
+            .into()
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeepRateGrid {
+    window_start: DateTime<Utc>,
+    span_secs: u128,
+    slices: u32,
+    midpoint_denominator: u128,
+    knowledge_lag_secs: u64,
+    domain_availability_lag_secs: u64,
+}
+
+impl KeepRateGrid {
+    fn new(
+        request: &DatasetPlanRequest,
+        slices: u32,
+        domain_availability_lag_secs: u64,
+    ) -> QuantResult<Self> {
+        let span_secs = (request.window_end - request.window_start).num_seconds();
+        if span_secs <= 0 {
+            return Err(ResearchError::DatasetPlan {
+                detail: "keep-rate estimate requires a positive dataset window".to_owned(),
+            }
+            .into());
+        }
+        let span_secs = u128::try_from(span_secs).map_err(|error| ResearchError::DatasetPlan {
+            detail: format!("dataset window seconds do not fit u128: {error}"),
+        })?;
+        let midpoint_denominator = u128::from(slices)
+            .checked_mul(2)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "keep-rate slice denominator is zero or overflowed".to_owned(),
+            })?;
+        Ok(Self {
+            window_start: request.window_start,
+            span_secs,
+            slices,
+            midpoint_denominator,
+            knowledge_lag_secs: request.knowledge_lag_secs,
+            domain_availability_lag_secs,
+        })
+    }
+
+    fn boundary(self, index: u32) -> QuantResult<quant_pivot_models::domain::DecisionBoundary> {
+        if index >= self.slices {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "keep-rate slice index {index} is outside configured grid of {} slices",
+                    self.slices
+                ),
+            }
+            .into());
+        }
+        let midpoint = u128::from(index)
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "keep-rate slice midpoint overflowed u128".to_owned(),
+            })?;
+        let offset =
+            self.span_secs
+                .checked_mul(midpoint)
+                .ok_or_else(|| ResearchError::DatasetPlan {
+                    detail: "keep-rate slice offset numerator overflowed u128".to_owned(),
+                })?
+                / self.midpoint_denominator;
+        let offset = i64::try_from(offset).map_err(|error| ResearchError::DatasetPlan {
+            detail: format!("keep-rate slice offset does not fit i64: {error}"),
+        })?;
+        let decision_at = self
+            .window_start
+            .checked_add_signed(ChronoDuration::seconds(offset))
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "keep-rate decision time is outside chrono range".to_owned(),
+            })?;
+        replay_boundary(
+            decision_at,
+            self.knowledge_lag_secs,
+            self.domain_availability_lag_secs,
+        )
+    }
 }
 
 /// The default labeler set materialized by a dataset build.
@@ -138,14 +309,122 @@ pub fn exit_decision_labelers() -> Vec<Box<dyn Labeler>> {
     ]
 }
 
+/// Verify exact bytes, the embedded v2 manifest and semantic rows against the
+/// immutable dataset ledger.
+///
+/// This gate runs before any trainer, calibrator or backtest consumes the
+/// artifact; callers must never replace its rows with a rematerialized replay.
+///
+/// The returned examples are the only authorized training input.
+pub fn verify_frozen_dataset_artifact(
+    dataset: &TrainingDatasetInfo,
+    bytes: &[u8],
+) -> QuantResult<Vec<TrainingExample>> {
+    let materialization = dataset
+        .materialization()
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!(
+                "dataset {} does not have a complete materialization binding",
+                dataset.training_dataset_id
+            ),
+        })?;
+    let expected_bytes_hash = materialization.artifact_bytes_hash;
+    let actual_bytes_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(bytes))?;
+    if &actual_bytes_hash != expected_bytes_hash {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "frozen dataset byte hash mismatch: recorded {expected_bytes_hash}, loaded {actual_bytes_hash}"
+            ),
+        }
+        .into());
+    }
+
+    let decoded = DatasetParquetCodec::decode_with_manifest(bytes)?;
+    let expected_manifest_hash = materialization.manifest_hash;
+    let actual_manifest_hash = dataset_manifest_hash(&decoded.manifest)?;
+    if &actual_manifest_hash != expected_manifest_hash {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "frozen dataset manifest hash mismatch: recorded {expected_manifest_hash}, loaded {actual_manifest_hash}"
+            ),
+        }
+        .into());
+    }
+
+    let manifest = &decoded.manifest;
+    if manifest != materialization.manifest {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "frozen dataset manifest payload differs from the ledger for {}",
+                dataset.training_dataset_id
+            ),
+        }
+        .into());
+    }
+    let knowledge_lag_secs =
+        u64::try_from(dataset.knowledge_lag_secs).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("negative or invalid dataset knowledge lag: {error}"),
+        })?;
+    let sample_interval_secs = u64::try_from(dataset.sample_interval_secs).map_err(|error| {
+        ResearchError::DatasetBuild {
+            detail: format!("negative or invalid dataset sample interval: {error}"),
+        }
+    })?;
+    let sample_count = u64::try_from(materialization.sample_count).map_err(|error| {
+        ResearchError::DatasetBuild {
+            detail: format!("negative or invalid dataset sample count: {error}"),
+        }
+    })?;
+    let bindings_match = manifest.training_dataset_id == dataset.training_dataset_id
+        && manifest.model_spec_id == dataset.model_spec_id
+        && manifest.runtime_config_version_id == dataset.runtime_config_version_id
+        && manifest.window_start == dataset.window_start
+        && manifest.window_end == dataset.window_end
+        && manifest.purpose == dataset.purpose
+        && manifest.knowledge_lag_secs == knowledge_lag_secs
+        && manifest.sample_interval_secs == sample_interval_secs
+        && manifest.horizons_secs == dataset.horizons_secs.0
+        && &manifest.feature_schema_hash == materialization.feature_schema_hash
+        && &manifest.factor_schema_hash == materialization.factor_schema_hash
+        && &manifest.label_schema_hash == materialization.label_schema_hash
+        && &manifest.semantic_dataset_hash == materialization.dataset_hash
+        && manifest.sample_count == sample_count;
+    if !bindings_match {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "dataset {} manifest does not match its immutable ledger bindings",
+                dataset.training_dataset_id
+            ),
+        }
+        .into());
+    }
+    Ok(decoded.examples)
+}
+
+/// Require a complete artifact binding without manufacturing values for a
+/// planned, building, failed-before-materialization, or legacy row.
+pub fn require_dataset_materialization(
+    dataset: &TrainingDatasetInfo,
+) -> QuantResult<TrainingDatasetMaterialization<'_>> {
+    dataset.materialization().ok_or_else(|| {
+        ResearchError::DatasetBuild {
+            detail: format!(
+                "dataset {} has no complete integrity-gated materialization",
+                dataset.training_dataset_id
+            ),
+        }
+        .into()
+    })
+}
+
 /// Dependencies injected into [`TrainingDatasetService`].
 pub struct TrainingDatasetServiceDeps {
     /// `ClickHouse` fact reader for batch prefetch.
     pub fact_read: Arc<dyn QuantFactReadRepository>,
+    /// Append-only catalog ledger for all historical metadata resolution.
+    pub catalog_repo: Arc<dyn CatalogVersionRepository>,
     /// Postgres market catalog.
     pub market_repo: Arc<dyn MarketRepository>,
-    /// Postgres event catalog snapshot for neg-risk leg enumeration.
-    pub event_repo: Arc<dyn EventRepository>,
     /// Content-addressed artifact store for Parquet output.
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Training-dataset ledger repository.
@@ -156,6 +435,8 @@ pub struct TrainingDatasetServiceDeps {
     pub recommendation_repo: Arc<dyn RecommendationRepository>,
     /// Frozen feature-vector ledger referenced by recommendations.
     pub feature_repo: Arc<dyn FeatureRepository>,
+    /// Immutable selection members referenced by live recommendations.
+    pub selection_repo: Arc<dyn MarketSelectionRepository>,
     /// Position ledger for closed-lot `ExitDecision` sampling.
     pub position_repo: Arc<dyn PositionRepository>,
     /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
@@ -218,13 +499,14 @@ pub struct TrainingDatasetBuildConfig {
 /// Orchestrates the offline training-dataset build for one frozen config.
 pub struct TrainingDatasetService {
     fact_read: Arc<dyn QuantFactReadRepository>,
+    catalog_repo: Arc<dyn CatalogVersionRepository>,
     market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
     attribution_repo: Arc<dyn AttributionRepository>,
     recommendation_repo: Arc<dyn RecommendationRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
+    selection_repo: Arc<dyn MarketSelectionRepository>,
     position_repo: Arc<dyn PositionRepository>,
     fee_calculator: Arc<FeeCalculator>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
@@ -240,8 +522,6 @@ pub struct TrainingDatasetService {
     /// Enabled-category set (derived from [`Self::selection`]) for the cheap
     /// upper-bound candidate prefilter.
     enabled_categories: HashSet<MarketCategory>,
-    /// Frozen book-depth floor for offline point-in-time selection.
-    min_selection_depth: DecimalString,
     /// Deploy guard: hard cap on the deterministic historical spine.
     max_spine_samples: u64,
     /// Shared so the historical spine can be built inside a `spawn_blocking`
@@ -269,13 +549,14 @@ impl TrainingDatasetService {
         let max_book_staleness = Duration::from_millis(config.training.max_book_staleness_ms);
         Ok(Self {
             fact_read: deps.fact_read,
+            catalog_repo: deps.catalog_repo,
             market_repo: deps.market_repo,
-            event_repo: deps.event_repo,
             artifact_store: deps.artifact_store,
             dataset_repo: deps.dataset_repo,
             attribution_repo: deps.attribution_repo,
             recommendation_repo: deps.recommendation_repo,
             feature_repo: deps.feature_repo,
+            selection_repo: deps.selection_repo,
             position_repo: deps.position_repo,
             fee_calculator: deps.fee_calculator,
             linkage_repo: deps.linkage_repo,
@@ -292,7 +573,6 @@ impl TrainingDatasetService {
                 .iter()
                 .copied()
                 .collect(),
-            min_selection_depth: config.training.min_selection_depth_usd.clone(),
             selection: config.selection,
             max_spine_samples,
             labelers: Arc::new(config.labelers),
@@ -300,15 +580,12 @@ impl TrainingDatasetService {
         })
     }
 
-    /// Resolve the target `ModelSpec`'s governed feature-requirements
-    /// contract (11.2.2 remediation R7).
+    /// Resolve the target `ModelSpec`'s governed required raw inputs.
     ///
     /// `DatasetPlanRequest.model_spec_id` names the spec this dataset is
     /// built for, so the requirement set is genuinely known at plan/build
-    /// time — not a hypothetical future model. Fails closed (never defaults)
-    /// when the spec is missing or its stored contract does not parse: both
-    /// indicate a governance-data problem that must surface, not silently
-    /// degrade to an unfiltered selection funnel.
+    /// time — not a hypothetical future model. Optional inputs are retained by
+    /// the fitted transform and therefore do not gate selection.
     async fn resolve_model_requirements(
         &self,
         model_spec_id: &ModelSpecId,
@@ -322,11 +599,9 @@ impl TrainingDatasetService {
                 entity: "quant_model_spec",
                 id: model_spec_id.to_string(),
             })?;
-        serde_json::from_value(spec.feature_requirements).map_err(|error| {
-            QuantError::config(format!(
-                "model spec {model_spec_id} has an invalid feature_requirements contract: {error}"
-            ))
-        })
+        Ok(ModelFeatureRequirements::from_input_contract(
+            &spec.input_contract,
+        ))
     }
 
     /// The historical candidate set for a window, sourced point-in-time
@@ -344,14 +619,23 @@ impl TrainingDatasetService {
         window_start: DateTime<Utc>,
         window_end: DateTime<Utc>,
     ) -> QuantResult<Vec<MarketInfo>> {
-        let staleness = ChronoDuration::milliseconds(
-            i64::try_from(self.max_book_staleness.as_millis()).unwrap_or(i64::MAX),
-        );
-        let from_ms = (window_start - staleness).timestamp_millis();
+        let staleness_ms = i64::try_from(self.max_book_staleness.as_millis()).map_err(|error| {
+            ResearchError::DatasetPlan {
+                detail: format!("max book staleness does not fit chrono milliseconds: {error}"),
+            }
+        })?;
+        let from = window_start
+            .checked_sub_signed(ChronoDuration::milliseconds(staleness_ms))
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: format!(
+                    "max book staleness {staleness_ms}ms overflows before dataset window {window_start}"
+                ),
+            })?;
+        let from_ms = from.timestamp_millis();
         let to_ms = window_end.timestamp_millis();
         let ids = self
             .fact_read
-            .observed_markets_between(from_ms, to_ms)
+            .observed_markets_between(from_ms, to_ms, to_ms)
             .await
             .map_err(QuantError::from)?;
         let markets = self
@@ -421,32 +705,78 @@ impl TrainingDatasetService {
         // Candidate `MarketInfo` set (category + lifetime), reused for both the
         // arithmetic spine upper bound and the sampled keep-rate estimate. Sourced
         // from ClickHouse-observed markets so since-resolved markets are included.
-        let markets = if wants_historical {
+        let candidate_markets = if wants_historical {
             self.historical_candidate_markets(request.window_start, request.window_end)
                 .await?
+                .into_iter()
+                .filter(|info| self.in_selection(info, request.window_start, request.window_end))
+                .collect()
         } else {
             Vec::new()
         };
-        let candidate_infos: Vec<&MarketInfo> = markets
-            .iter()
-            .filter(|info| self.in_selection(info, request.window_start, request.window_end))
-            .collect();
-        let spine_upper_bound = if wants_historical {
-            let plan_markets: Vec<PlanMarket> = candidate_infos
-                .iter()
-                .map(|info| PlanMarket {
-                    market_id: info.market_id.clone(),
-                    token_id: info.yes_token_id.clone(),
-                    created_at: info.created_at,
-                    end_date: info.end_date,
-                })
-                .collect();
-            count_samples(request, &plan_markets, self.max_spine_samples)
-        } else {
-            0
-        };
-        total += spine_upper_bound;
+        let candidate_infos = candidate_markets.iter().collect::<Vec<_>>();
+        let spine_upper_bound =
+            self.spine_upper_bound(request, wants_historical, &candidate_markets)?;
+        total = total
+            .checked_add(spine_upper_bound)
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "historical spine count overflowed u64".to_owned(),
+            })?;
+        total = total
+            .checked_add(self.additional_plan_sample_count(request).await?)
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "total plan sample count overflowed u64".to_owned(),
+            })?;
 
+        // Bounded point-in-time keep-rate estimate: sample K `as_of` slices × M
+        // candidate markets, replay the selection funnel, and scale the spine.
+        let keep_rate_estimate = if wants_historical
+            && spine_upper_bound > 0
+            && sample_slices > 0
+            && sample_markets > 0
+            && !candidate_infos.is_empty()
+        {
+            self.estimate_keep_rate(request, &candidate_infos, sample_slices, sample_markets)
+                .await?
+        } else {
+            None
+        };
+        let (keep_rate, keep_rate_sample_size, estimated_eligible_samples) =
+            summarize_keep_rate(total, spine_upper_bound, keep_rate_estimate)?;
+
+        Ok(PlanCounts {
+            spine_upper_bound,
+            total,
+            hard_cap_exceeded: total > self.max_spine_samples,
+            estimated_eligible_samples,
+            keep_rate,
+            keep_rate_sample_size,
+        })
+    }
+
+    fn spine_upper_bound(
+        &self,
+        request: &DatasetPlanRequest,
+        wants_historical: bool,
+        candidates: &[MarketInfo],
+    ) -> QuantResult<u64> {
+        if !wants_historical {
+            return Ok(0);
+        }
+        let plan_markets = candidates
+            .iter()
+            .map(|info| PlanMarket {
+                market_id: info.market_id.clone(),
+                token_id: info.yes_token_id.clone(),
+                created_at: info.created_at,
+                end_date: info.end_date,
+            })
+            .collect::<Vec<_>>();
+        count_samples(request, &plan_markets, self.max_spine_samples)
+    }
+
+    async fn additional_plan_sample_count(&self, request: &DatasetPlanRequest) -> QuantResult<u64> {
+        let mut total = 0_u64;
         if wants_sample_source(request, TrainingSampleSource::LiveAttribution) {
             let attributions = self
                 .attribution_repo
@@ -457,7 +787,7 @@ impl TrainingDatasetService {
                 )
                 .await
                 .map_err(QuantError::from)?;
-            total += attributions.len() as u64;
+            total = checked_sample_count_add(total, attributions.len(), "attribution")?;
         }
         if wants_sample_source(request, TrainingSampleSource::ExitDecision) {
             let lots = self
@@ -473,42 +803,10 @@ impl TrainingDatasetService {
                 request.sample_interval_secs,
                 request.window_start,
                 &lots,
-            );
-            total += lot_samples.len() as u64;
+            )?;
+            total = checked_sample_count_add(total, lot_samples.len(), "exit-decision")?;
         }
-
-        // Bounded point-in-time keep-rate estimate: sample K `as_of` slices × M
-        // candidate markets, replay the selection funnel, and scale the spine.
-        let (keep_rate, keep_rate_sample_size) = if wants_historical
-            && spine_upper_bound > 0
-            && sample_slices > 0
-            && sample_markets > 0
-            && !candidate_infos.is_empty()
-        {
-            self.estimate_keep_rate(request, &candidate_infos, sample_slices, sample_markets)
-                .await?
-        } else {
-            (None, 0)
-        };
-        let estimated_eligible_samples = keep_rate.map_or(total, |rate| {
-            #[allow(
-                clippy::cast_precision_loss,
-                clippy::cast_sign_loss,
-                clippy::cast_possible_truncation
-            )]
-            let scaled = (spine_upper_bound as f64 * rate).round() as u64;
-            // Non-historical sources (attribution / exit) are not selection-gated.
-            scaled + (total - spine_upper_bound)
-        });
-
-        Ok(PlanCounts {
-            spine_upper_bound,
-            total,
-            hard_cap_exceeded: total > self.max_spine_samples,
-            estimated_eligible_samples,
-            keep_rate,
-            keep_rate_sample_size,
-        })
+        Ok(total)
     }
 
     /// Estimate the point-in-time selection keep-rate by replaying the funnel
@@ -524,16 +822,17 @@ impl TrainingDatasetService {
         candidates: &[&MarketInfo],
         slices: u32,
         markets: u32,
-    ) -> QuantResult<(Option<f64>, u64)> {
-        let sampled = stride_sample(candidates, markets as usize);
+    ) -> QuantResult<Option<KeepRateEstimate>> {
+        let market_limit =
+            usize::try_from(markets).map_err(|error| ResearchError::DatasetPlan {
+                detail: format!("keep-rate market limit does not fit usize: {error}"),
+            })?;
+        let sampled = stride_sample(candidates, market_limit);
         if sampled.is_empty() {
-            return Ok((None, 0));
+            return Ok(None);
         }
-        let pit = ChHistoricalPitSource::new(
-            Arc::clone(&self.fact_read),
-            Arc::clone(&self.market_repo),
-            self.max_book_staleness,
-        );
+        let pit =
+            DurablePitSource::new(Arc::clone(&self.fact_read), Arc::clone(&self.catalog_repo));
         let model_requirements = self
             .resolve_model_requirements(&request.model_spec_id)
             .await?;
@@ -547,28 +846,76 @@ impl TrainingDatasetService {
             Arc::clone(&self.fact_read),
             self.domain.clone(),
         );
-        let span_secs = (request.window_end - request.window_start)
-            .num_seconds()
-            .max(1);
+        let grid = KeepRateGrid::new(request, slices, self.domain.crypto.availability_lag_secs)?;
+        let market_ids = sampled
+            .iter()
+            .map(|market| market.market_id.clone())
+            .collect::<Vec<_>>();
+        let trials_per_slice = checked_len_u64(sampled.len(), "keep-rate trial")?;
         let mut included: u64 = 0;
         let mut trials: u64 = 0;
         for index in 0..slices {
-            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-            let offset = ((f64::from(index) + 0.5) / f64::from(slices) * span_secs as f64) as i64;
-            let as_of = request.window_start + ChronoDuration::seconds(offset);
+            let boundary = grid.boundary(index)?;
             let result = selector
-                .select_at(as_of, &sampled, &pit, &domain_source)
+                .select_at(&boundary, &market_ids, &pit, &domain_source)
                 .await?;
-            included += result.included.len() as u64;
-            trials += sampled.len() as u64;
+            included = checked_u64_add(
+                included,
+                checked_len_u64(result.included.len(), "included keep-rate")?,
+                "keep-rate included count",
+            )?;
+            trials = checked_u64_add(trials, trials_per_slice, "keep-rate trial count")?;
         }
         if trials == 0 {
-            return Ok((None, 0));
+            return Ok(None);
         }
-        #[allow(clippy::cast_precision_loss)]
-        let keep_rate = included as f64 / trials as f64;
-        Ok((Some(keep_rate), trials))
+        Ok(Some(KeepRateEstimate { included, trials }))
     }
+}
+
+fn checked_len_u64(len: usize, label: &str) -> QuantResult<u64> {
+    u64::try_from(len).map_err(|error| {
+        ResearchError::DatasetPlan {
+            detail: format!("{label} count does not fit u64: {error}"),
+        }
+        .into()
+    })
+}
+
+fn checked_u64_add(left: u64, right: u64, label: &str) -> QuantResult<u64> {
+    left.checked_add(right).ok_or_else(|| {
+        ResearchError::DatasetPlan {
+            detail: format!("{label} overflowed u64"),
+        }
+        .into()
+    })
+}
+
+fn checked_sample_count_add(total: u64, len: usize, label: &str) -> QuantResult<u64> {
+    checked_u64_add(
+        total,
+        checked_len_u64(len, &format!("{label} sample"))?,
+        "additional plan sample count",
+    )
+}
+
+fn summarize_keep_rate(
+    total: u64,
+    spine_upper_bound: u64,
+    estimate: Option<KeepRateEstimate>,
+) -> QuantResult<(Option<f64>, u64, u64)> {
+    let Some(estimate) = estimate else {
+        return Ok((None, 0, total));
+    };
+    let scaled = estimate.scale(spine_upper_bound)?;
+    let non_historical =
+        total
+            .checked_sub(spine_upper_bound)
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "total sample count is below historical spine count".to_owned(),
+            })?;
+    let estimated = checked_u64_add(scaled, non_historical, "estimated eligible sample count")?;
+    Ok((Some(estimate.rate()?), estimate.trials, estimated))
 }
 
 /// Deterministically stride-sample up to `limit` markets across the id-sorted set.
@@ -603,7 +950,7 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             .await?;
         let plan_markets =
             self.candidate_plan_markets(&markets, request.window_start, request.window_end);
-        let samples = plan_samples(&request, &plan_markets);
+        let samples = plan_samples(&request, &plan_markets)?;
         let mut lot_samples = Vec::new();
         let mut exit_training_lots = Vec::new();
         if wants_sample_source(&request, TrainingSampleSource::ExitDecision) {
@@ -620,7 +967,7 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
                 request.sample_interval_secs,
                 request.window_start,
                 &exit_training_lots,
-            );
+            )?;
         }
         let training_dataset_id = request
             .training_dataset_id
@@ -687,6 +1034,19 @@ impl TrainingDatasetService {
         sink: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
+        self.prepare_build_ledger(&plan).await?;
+        let training_dataset_id = plan.training_dataset_id.clone();
+        let result = self.materialize_inner(plan, sink, cancel).await;
+        self.persist_build_failure(&training_dataset_id, result)
+            .await
+    }
+
+    async fn materialize_inner(
+        &self,
+        plan: DatasetPlan,
+        sink: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetArtifact> {
         self.ensure_factors_enabled()?;
         // Fail closed on an oversized spine: a build this large would exhaust
         // memory/time; the operator must narrow the window / interval / selection
@@ -703,7 +1063,7 @@ impl TrainingDatasetService {
             .into());
         }
         sink.report(ResearchJobProgress::indeterminate("prefetch", 0));
-        let context = ReplayContext::new(&plan, &self.features);
+        let context = ReplayContext::new(&plan, &self.features)?;
         let loader = self.window_loader();
         // Prefetch is real ClickHouse I/O — stays on the async runtime.
         let window = loader
@@ -714,7 +1074,7 @@ impl TrainingDatasetService {
             book_decode_failures: window.book_decode_failures,
             ..DatasetCoverage::default()
         };
-        let pit: Arc<dyn PitQueryEngine> = Arc::new(window.pit);
+        let pit: Arc<dyn PointInTimeSnapshotSource> = Arc::new(window.pit);
         let prefetched = Arc::new(window.prefetched);
 
         // Offload the unbounded historical PIT loop to a blocking thread so it
@@ -767,6 +1127,111 @@ impl TrainingDatasetService {
         .await
     }
 
+    async fn prepare_build_ledger(&self, plan: &DatasetPlan) -> QuantResult<()> {
+        let knowledge_lag_secs =
+            i64::try_from(plan.request.knowledge_lag_secs).map_err(|error| {
+                ResearchError::DatasetPlan {
+                    detail: format!("dataset knowledge lag exceeds Postgres bigint: {error}"),
+                }
+            })?;
+        let sample_interval_secs =
+            i64::try_from(plan.request.sample_interval_secs).map_err(|error| {
+                ResearchError::DatasetPlan {
+                    detail: format!("dataset sample interval exceeds Postgres bigint: {error}"),
+                }
+            })?;
+        let existing = self
+            .dataset_repo
+            .find_by_id(&plan.training_dataset_id)
+            .await?;
+        let row = if let Some(existing) = existing {
+            existing
+        } else {
+            let create_result = self
+                .dataset_repo
+                .create_plan(NewTrainingDatasetPlan {
+                    training_dataset_id: plan.training_dataset_id.clone(),
+                    model_spec_id: plan.request.model_spec_id.clone(),
+                    window_start: plan.request.window_start,
+                    window_end: plan.request.window_end,
+                    purpose: plan.request.purpose,
+                    knowledge_lag_secs,
+                    sample_interval_secs,
+                    horizons_secs: TrainingHorizonsSecs(plan.request.horizons_secs.clone()),
+                    feature_schema_version: Some(plan.request.feature_schema_version),
+                    sample_sources: Some(TrainingSampleSources(
+                        plan.request.sample_sources.clone(),
+                    )),
+                    runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
+                })
+                .await;
+            match create_result {
+                Ok(created) => created,
+                Err(StorageError::Duplicate { .. }) => self
+                    .dataset_repo
+                    .find_by_id(&plan.training_dataset_id)
+                    .await?
+                    .ok_or_else(|| {
+                        StorageError::state_conflict(
+                            "quant_training_dataset",
+                            Some(&plan.training_dataset_id),
+                            "concurrent plan insert reported duplicate but the row is not visible",
+                        )
+                    })?,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let binding_matches = row.model_spec_id == plan.request.model_spec_id
+            && row.runtime_config_version_id == plan.request.runtime_config_version_id
+            && row.window_start == plan.request.window_start
+            && row.window_end == plan.request.window_end
+            && row.purpose == plan.request.purpose
+            && row.knowledge_lag_secs == knowledge_lag_secs
+            && row.sample_interval_secs == sample_interval_secs
+            && row.horizons_secs.0 == plan.request.horizons_secs
+            && row.feature_schema_version == Some(plan.request.feature_schema_version)
+            && row.sample_sources.as_ref().map(|sources| &sources.0)
+                == Some(&plan.request.sample_sources);
+        if !binding_matches {
+            return Err(StorageError::state_conflict(
+                "quant_training_dataset",
+                Some(&plan.training_dataset_id),
+                "pre-assigned dataset id is already bound to a different immutable plan",
+            )
+            .into());
+        }
+        self.dataset_repo
+            .start_build(&plan.training_dataset_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn persist_build_failure<T>(
+        &self,
+        training_dataset_id: &TrainingDatasetId,
+        result: QuantResult<T>,
+    ) -> QuantResult<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(build_error) => {
+                let detail = bounded_failure_detail(&build_error.to_string());
+                if let Err(persistence_error) = self
+                    .dataset_repo
+                    .fail_build(training_dataset_id, detail)
+                    .await
+                {
+                    return Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "dataset build failed ({build_error}); persisting terminal failure also failed ({persistence_error})"
+                        ),
+                    }
+                    .into());
+                }
+                Err(build_error)
+            }
+        }
+    }
+
     /// Build a dataset using a caller-supplied PIT engine (integration tests only).
     ///
     /// Prefetch still runs against the configured fact reader; only point-in-time
@@ -777,10 +1242,22 @@ impl TrainingDatasetService {
     pub async fn build_with_pit_source(
         &self,
         plan: DatasetPlan,
-        pit: &dyn PitQueryEngine,
+        pit: &dyn PointInTimeSnapshotSource,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        self.prepare_build_ledger(&plan).await?;
+        let training_dataset_id = plan.training_dataset_id.clone();
+        let result = self.materialize_with_pit_source(plan, pit).await;
+        self.persist_build_failure(&training_dataset_id, result)
+            .await
+    }
+
+    async fn materialize_with_pit_source(
+        &self,
+        plan: DatasetPlan,
+        pit: &dyn PointInTimeSnapshotSource,
     ) -> QuantResult<TrainingDatasetArtifact> {
         self.ensure_factors_enabled()?;
-        let context = ReplayContext::new(&plan, &self.features);
+        let context = ReplayContext::new(&plan, &self.features)?;
         let loader = self.window_loader();
         let prefetched = loader
             .prefetch(&context.window_spec(&plan, &self.domain))
@@ -818,7 +1295,7 @@ impl TrainingDatasetService {
     async fn historical_inputs(
         &self,
         plan: &DatasetPlan,
-        pit: Arc<dyn PitQueryEngine>,
+        pit: Arc<dyn PointInTimeSnapshotSource>,
         prefetched: Arc<Prefetched>,
         sink: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
@@ -839,12 +1316,11 @@ impl TrainingDatasetService {
             data_quality: self.data_quality.clone(),
             domain: self.domain.clone(),
             selection: self.selection.clone(),
-            min_selection_depth: self.min_selection_depth.clone(),
             model_requirements,
             labelers: Arc::clone(&self.labelers),
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: self.bias_table.as_ref().map(Arc::clone),
-            context: ReplayContext::new(plan, &self.features),
+            context: ReplayContext::new(plan, &self.features)?,
             coverage,
         })
     }
@@ -853,7 +1329,7 @@ impl TrainingDatasetService {
     async fn historical_params<'a>(
         &'a self,
         plan: &'a DatasetPlan,
-        pit: &'a dyn PitQueryEngine,
+        pit: &'a dyn PointInTimeSnapshotSource,
         prefetched: &'a Prefetched,
         sink: &'a dyn JobProgressSink,
         cancel: &'a CancellationToken,
@@ -873,12 +1349,11 @@ impl TrainingDatasetService {
             data_quality: &self.data_quality,
             domain: &self.domain,
             selection: &self.selection,
-            min_selection_depth: &self.min_selection_depth,
             model_requirements,
             labelers: &self.labelers,
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: &self.bias_table,
-            context: ReplayContext::new(plan, &self.features),
+            context: ReplayContext::new(plan, &self.features)?,
         })
     }
 
@@ -898,7 +1373,7 @@ impl TrainingDatasetService {
             context,
             sink,
         } = tail;
-        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain);
+        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
         let engine = FactorEngine::new(
             &self.factors,
             &self.features,
@@ -963,16 +1438,15 @@ impl TrainingDatasetService {
     fn window_loader(&self) -> HistoricalWindowLoader {
         HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
-            Arc::clone(&self.market_repo),
-            Arc::clone(&self.event_repo),
+            Arc::clone(&self.catalog_repo),
             Arc::clone(&self.linkage_repo),
             self.max_book_staleness,
         )
     }
 
     /// The offline point-in-time selection funnel for a build/plan, wired from
-    /// the frozen selection/data-quality/feature config + the book-depth floor
-    /// + the target `ModelSpec`'s resolved feature requirements (R7).
+    /// the frozen selection/data-quality/feature config, PIT catalog liquidity,
+    /// and the target `ModelSpec`'s resolved feature requirements (R7).
     fn offline_pit_selector(
         &self,
         request: &DatasetPlanRequest,
@@ -982,9 +1456,8 @@ impl TrainingDatasetService {
             &self.selection,
             &self.data_quality,
             &self.features,
-            &self.min_selection_depth,
             request.runtime_config_version_id.clone(),
-            request.source_delay_secs,
+            request.knowledge_lag_secs,
             model_requirements,
         )
     }
@@ -1045,11 +1518,32 @@ impl TrainingDatasetService {
             .map(|f| (f.feature_vector_id.clone(), f))
             .collect();
 
+        let selection_ids = recommendation_by_id
+            .values()
+            .map(|recommendation| recommendation.evidence_refs.market_selection_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let selection_members = self
+            .selection_repo
+            .list_members_by_snapshot_ids(&selection_ids)
+            .await?;
+        let selection_by_key = selection_members
+            .into_iter()
+            .map(|member| {
+                (
+                    (member.market_selection_id.clone(), member.market_id.clone()),
+                    member,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
         for attribution in attributions {
             match materialize_live_attribution_example(
                 &attribution,
                 &recommendation_by_id,
                 &feature_by_id,
+                &selection_by_key,
             ) {
                 Some(example) => {
                     market_set.insert(example.market_id.clone());
@@ -1074,7 +1568,7 @@ impl TrainingDatasetService {
             .map(|lot| (lot.order_intent_id.clone(), lot))
             .collect();
         let exit_labelers = exit_decision_labelers();
-        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain);
+        let builder = ConfiguredFeatureBuilder::new(&self.features, &self.domain)?;
         let engine = FactorEngine::new(
             &self.factors,
             &self.features,
@@ -1139,43 +1633,18 @@ impl TrainingDatasetService {
         let entry_mid = input.cross_section.entry_mids[input.market_index];
         let outcome = &input.cross_section.outcomes[input.market_index];
         let factor_values = eligible_factor_values(outcome);
-        let remaining =
-            remaining_shares_at(&LotTerminalSnapshot::from(input.lot), input.sample.as_of);
+        let remaining = remaining_shares_at(
+            &LotTerminalSnapshot::from(input.lot),
+            input.sample.decision_at,
+        );
         if !remaining.is_positive() {
             return Ok(());
         }
-        let micro = input
-            .prefetched
-            .micro
-            .get(&input.sample.token_id)
-            .map_or(&[][..], Vec::as_slice);
-        // Peak-to-`as_of` (strictly past): the lot's lifetime peak persisted at
-        // close would leak future price into an early-tick drawdown feature.
-        let peak_mark = peak_mark_to(micro, input.lot.opened_at, input.sample.as_of);
-        let position_state = position_state_features(LotStateInput {
-            avg_price: input.lot.avg_price.inner(),
-            mark: entry_mid.map(Price::inner),
-            opened_at: input.lot.opened_at,
-            now: input.sample.as_of,
-            max_hold_secs: input.lot.max_hold_secs,
-            peak_mark: peak_mark.map(Price::inner),
-        });
-        let (decision_book, book_fidelity) =
-            decision_book_at(input.pit, &input.sample.token_id, input.sample.as_of, micro).await?;
-        // Govern the exit fee with the same calculator the live exit dispatcher
-        // uses (via reconciliation), converted to an effective bps of the exit
-        // notional so the label matches production net proceeds.
-        let exit_price = entry_mid.unwrap_or(input.lot.avg_price);
-        let fee_bps = self.exit_fee_bps(remaining, exit_price, market, &input.sample.token_id);
-        let label_ctx = ExitDecisionLabelContext {
-            remaining_shares: remaining,
-            avg_price: input.lot.avg_price,
-            fee_bps,
-            terminal: LotTerminalSnapshot::from(input.lot),
-            decision_book,
-        };
+        let evidence = self
+            .resolve_exit_decision_evidence(&input, market, entry_mid, remaining)
+            .await?;
         let forward = forward_window(
-            input.sample.as_of,
+            input.sample.decision_at,
             input.max_horizon_secs,
             input
                 .prefetched
@@ -1187,73 +1656,159 @@ impl TrainingDatasetService {
                 .resolutions
                 .get(&input.sample.market_id)
                 .map_or(&[][..], Vec::as_slice),
-        );
+        )?;
         let labels = build_labels_for(
             &LabelBuildParams {
                 labelers: input.labelers,
                 market,
-                as_of: input.sample.as_of,
+                as_of: input.sample.decision_at,
                 entry_mid,
                 request: input.request,
                 forward: &forward,
-                exit_decision: Some(&label_ctx),
+                exit_decision: Some(&evidence.label_context),
             },
             self.min_exit_depth_usd,
             sink.coverage,
-        );
-        record_exit_fill_fidelity(sink.coverage, book_fidelity);
-        let mut merged_factors = factor_values;
-        merged_factors.extend(position_state_factor_values(&position_state));
+        )?;
+        record_exit_fill_fidelity(sink.coverage, evidence.book_fidelity);
+        let decision_capture = input
+            .cross_section
+            .captures
+            .get(&input.sample.market_id)
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "exit-decision replay omitted capture for market {}",
+                    input.sample.market_id
+                ),
+            })?
+            .evidence();
         sink.market_set.insert(input.sample.market_id.clone());
         sink.examples.push(TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: input.sample.market_id.clone(),
             token_id: input.sample.token_id.clone(),
-            as_of: input.sample.as_of,
+            selected_market: market.clone(),
+            decision_boundary: input.cross_section.boundary.clone(),
             sample_source: TrainingSampleSource::ExitDecision,
             feature_vector: vector.clone(),
-            factor_values: merged_factors,
+            factor_values,
             labels,
-            source_refs: vector.source_refs.clone(),
+            source_refs: vector.evidence_refs(),
+            decision_capture: Some(decision_capture),
             lot_context: Some(LotTrainingContext {
                 order_intent_id: input.sample.order_intent_id.clone(),
                 position_id: input.sample.position_id.clone(),
                 remaining_shares: remaining,
                 avg_price: input.lot.avg_price,
-                peak_mark,
+                peak_mark: evidence.peak_mark,
                 opened_at: input.lot.opened_at,
                 max_hold_secs: input.lot.max_hold_secs,
             }),
-            position_state: Some(position_state),
-            book_fidelity,
+            position_state: Some(evidence.position_state),
+            book_fidelity: evidence.book_fidelity,
         });
         sink.coverage.exit_decision_built += 1;
         Ok(())
     }
 
+    async fn resolve_exit_decision_evidence(
+        &self,
+        input: &ExitDecisionSampleBuild<'_>,
+        market: &SelectedMarket,
+        entry_mid: Option<Price>,
+        remaining: Shares,
+    ) -> QuantResult<ResolvedExitDecisionEvidence> {
+        let micro = input
+            .prefetched
+            .micro
+            .get(&input.sample.token_id)
+            .map_or(&[][..], Vec::as_slice);
+        let boundary = DecisionClock::new(input.request.knowledge_lag_secs)
+            .boundary(input.sample.decision_at)?;
+        // Peak-to-cutoff is strictly historical. The lot's terminal lifetime
+        // peak would leak future price into an early-tick drawdown feature.
+        let peak_mark = peak_mark_to(micro, input.lot.opened_at, &boundary);
+        let position_state = position_state_features(LotStateInput {
+            avg_price: input.lot.avg_price.inner(),
+            mark: entry_mid.map(Price::inner),
+            opened_at: input.lot.opened_at,
+            now: input.sample.decision_at,
+            max_hold_secs: input.lot.max_hold_secs,
+            peak_mark: peak_mark.map(Price::inner),
+        })?;
+        let (decision_book, book_fidelity) =
+            decision_book_at(input.pit, &input.sample.token_id, &boundary, micro).await?;
+        // Quote fees from the actual executable bid used by the label. The lot
+        // cost basis and non-executable mid are never substitutes.
+        let fee_bps = decision_book
+            .as_ref()
+            .and_then(decision_book_quote_price)
+            .map(|price| self.exit_fee_bps(remaining, price, market, &input.sample.token_id))
+            .transpose()?;
+        Ok(ResolvedExitDecisionEvidence {
+            peak_mark,
+            position_state,
+            label_context: ExitDecisionLabelContext {
+                remaining_shares: remaining,
+                avg_price: input.lot.avg_price,
+                fee_bps,
+                terminal: LotTerminalSnapshot::from(input.lot),
+                decision_book,
+            },
+            book_fidelity,
+        })
+    }
+
     /// Effective exit fee in basis points of the exit notional, quoted from the
     /// governed venue fee calculator (same schedule the live exit dispatcher
-    /// uses). Zero notional or no schedule → no fee.
+    /// uses). A missing schedule or invalid notional fails the dataset build;
+    /// only an explicit fee-disabled schedule produces a legitimate zero.
     fn exit_fee_bps(
         &self,
         shares: Shares,
         price: Price,
         market: &SelectedMarket,
         token_id: &TokenId,
-    ) -> Bps {
+    ) -> QuantResult<Bps> {
         let notional = shares.inner() * price.inner();
         if notional <= Decimal::ZERO {
-            return Bps::ZERO;
+            return Err(ResearchError::LabelResolution {
+                detail: format!(
+                    "exit fee quote requires positive notional, got shares={shares} price={price}"
+                ),
+            }
+            .into());
         }
-        let fee_usd = self.fee_calculator.calculate(
-            shares,
-            price,
-            market.category,
-            &market.market_id,
-            token_id,
-        );
-        let bps = (fee_usd.inner() / notional * Decimal::from(10_000)).max(Decimal::ZERO);
-        Bps::new(bps)
+        let quote = self
+            .fee_calculator
+            .quote(&FeeQuoteInput {
+                market_id: market.market_id.clone(),
+                token_id: token_id.clone(),
+                category: market.category,
+                side: Side::Sell,
+                liquidity_role: FeeLiquidityRole::Taker,
+                shares,
+                price,
+                allow_category_fallback: true,
+            })
+            .map_err(|error| ResearchError::LabelResolution {
+                detail: format!(
+                    "exit fee quote failed for market {} token {}: {error}",
+                    market.market_id, token_id
+                ),
+            })?;
+        let bps = quote
+            .fee_usd
+            .inner()
+            .checked_div(notional)
+            .and_then(|fraction| fraction.checked_mul(Decimal::from(10_000)))
+            .ok_or_else(|| ResearchError::LabelResolution {
+                detail: format!(
+                    "exit fee bps conversion overflow for market {} token {}",
+                    market.market_id, token_id
+                ),
+            })?;
+        Ok(Bps::new(bps))
     }
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
@@ -1266,98 +1821,68 @@ impl TrainingDatasetService {
         examples: Vec<TrainingExample>,
         coverage: DatasetCoverage,
     ) -> QuantResult<TrainingDatasetArtifact> {
-        // Hard, money-critical gate: no feature may observe state past its cutoff.
-        assert_no_future_leakage(&examples, plan.request.source_delay_secs)?;
-
-        // Build-time purge precheck (Phase 11.3 P1-8): a `Calibration`-purpose
-        // dataset whose window overlaps any `Built`/`Ready` training dataset
-        // is fail-closed here, *before* paying for schema hashing / Parquet
-        // encoding / artifact-store writes that would only be discovered
-        // wasted at fit time (`ModelCalibrationFitService`/
-        // `BiasTableFitService` already re-check this at fit time —
-        // this is strictly earlier, not a replacement). The model-specific
-        // embargo gap is not checked here: it depends on a target model
-        // version's own training window, which is not yet known for a
-        // dataset that may calibrate any of several model versions later.
-        if plan.request.purpose == DatasetPurpose::Calibration {
-            let window = TimeWindow::new(plan.request.window_start, plan.request.window_end);
-            assert_disjoint_from_all_training_datasets(
-                self.dataset_repo.as_ref(),
-                &window,
-                "calibration dataset build",
-            )
-            .await?;
-        }
+        self.validate_finalization_input(&plan, &examples).await?;
 
         let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
         let factor_schema_hash = ResearchHasher::factor_schema(&engine.factor_set())?;
         let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
-        let mut coverage = coverage;
-        coverage.bias_table_hash = self
-            .bias_table
-            .as_ref()
-            .map(|table| table.content_hash.clone());
-        if !examples.is_empty() {
-            let horizon_secs = plan.request.horizons_secs.first().copied().unwrap_or(0);
-            coverage.matrix_probe = Some(probe_matrix_coverage(
-                &examples,
-                builder.schema(),
-                &ReturnToHorizonLabeler.label_name(),
-                horizon_secs,
-            )?);
-        }
+        let coverage = self
+            .complete_integrity_coverage(&plan.request.model_spec_id, &examples, builder, coverage)
+            .await?;
+        let integrity = dataset_integrity_outcome(&coverage)?;
         let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
-            &plan.request.model_spec_id,
-            plan.request.window_start,
-            plan.request.window_end,
-            plan.request.purpose,
-            &feature_schema_hash,
-            &factor_schema_hash,
-            &label_schema_hash,
+            DatasetHashContract {
+                model_spec_id: &plan.request.model_spec_id,
+                window_start: plan.request.window_start,
+                window_end: plan.request.window_end,
+                purpose: plan.request.purpose,
+                feature_schema_hash: &feature_schema_hash,
+                factor_schema_hash: &factor_schema_hash,
+                label_schema_hash: &label_schema_hash,
+            },
             &examples,
         )?;
 
-        let parquet_bytes = DatasetParquetCodec::encode(&examples)?;
-        let key = ArtifactKey::new(
-            ArtifactNamespace::Dataset,
-            plan.training_dataset_id.as_uuid().to_string(),
-            "parquet",
-        )?;
-        let parquet_uri = self.artifact_store.put(key, &parquet_bytes).await?;
+        let persisted = self
+            .persist_dataset_artifact(
+                &plan,
+                &examples,
+                DatasetSchemaHashes {
+                    feature: feature_schema_hash.clone(),
+                    factor: factor_schema_hash.clone(),
+                    label: label_schema_hash.clone(),
+                },
+                dataset_hash.clone(),
+            )
+            .await?;
 
-        let status = if coverage.built_examples == 0 {
-            TrainingDatasetStatus::Failed
-        } else if coverage.labels_available == 0 {
-            TrainingDatasetStatus::InsufficientLabels
-        } else {
-            TrainingDatasetStatus::Built
-        };
+        let sample_count_i64 =
+            i64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("dataset sample count exceeds Postgres bigint: {error}"),
+            })?;
         self.dataset_repo
-            .create(NewTrainingDataset {
-                training_dataset_id: plan.training_dataset_id.clone(),
-                model_spec_id: plan.request.model_spec_id.clone(),
-                window_start: plan.request.window_start,
-                window_end: plan.request.window_end,
-                status,
-                purpose: plan.request.purpose,
-                feature_schema_hash: feature_schema_hash.clone(),
-                factor_schema_hash: factor_schema_hash.clone(),
-                label_schema_hash: label_schema_hash.clone(),
-                dataset_hash: dataset_hash.clone(),
-                parquet_uri: parquet_uri.clone(),
-                sample_count: i64::try_from(examples.len()).unwrap_or(i64::MAX),
-                source_delay_secs: i64::try_from(plan.request.source_delay_secs)
-                    .unwrap_or(i64::MAX),
-                sample_interval_secs: i64::try_from(plan.request.sample_interval_secs)
-                    .unwrap_or(i64::MAX),
-                horizons_secs: TrainingHorizonsSecs(plan.request.horizons_secs.clone()),
-                coverage_json: coverage.clone(),
-                runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
-            })
+            .complete_build(
+                &plan.training_dataset_id,
+                CompleteTrainingDatasetBuild {
+                    status: integrity.status,
+                    feature_schema_hash: feature_schema_hash.clone(),
+                    factor_schema_hash: factor_schema_hash.clone(),
+                    label_schema_hash: label_schema_hash.clone(),
+                    dataset_hash: dataset_hash.clone(),
+                    manifest_hash: persisted.manifest_hash,
+                    manifest_json: persisted.manifest.clone(),
+                    artifact_bytes_hash: persisted.artifact_bytes_hash.clone(),
+                    parquet_uri: persisted.parquet_uri.clone(),
+                    sample_count: sample_count_i64,
+                    coverage_json: coverage.clone(),
+                    failure_detail: integrity.failure_detail,
+                },
+            )
             .await
             .map_err(QuantError::from)?;
 
         Ok(TrainingDatasetArtifact {
+            format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: plan.training_dataset_id,
             model_spec_id: plan.request.model_spec_id,
             window_start: plan.request.window_start,
@@ -1367,10 +1892,233 @@ impl TrainingDatasetService {
             factor_schema_hash,
             label_schema_hash,
             dataset_hash,
-            parquet_uri,
+            manifest: persisted.manifest,
+            artifact_bytes_hash: persisted.artifact_bytes_hash,
+            parquet_uri: persisted.parquet_uri,
             coverage,
         })
     }
+
+    async fn validate_finalization_input(
+        &self,
+        plan: &DatasetPlan,
+        examples: &[TrainingExample],
+    ) -> QuantResult<()> {
+        assert_no_future_leakage(examples)?;
+        // Reject overlapping calibration windows before artifact I/O. Fit-time
+        // services repeat this check; model-specific embargo remains a publish
+        // concern because this dataset is not yet bound to one model version.
+        if plan.request.purpose == DatasetPurpose::Calibration {
+            let window = TimeWindow::new(plan.request.window_start, plan.request.window_end);
+            assert_disjoint_from_all_training_datasets(
+                self.dataset_repo.as_ref(),
+                &window,
+                "calibration dataset build",
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn complete_integrity_coverage(
+        &self,
+        model_spec_id: &ModelSpecId,
+        examples: &[TrainingExample],
+        builder: &ConfiguredFeatureBuilder,
+        coverage: DatasetCoverage,
+    ) -> QuantResult<DatasetCoverage> {
+        let model_spec = self
+            .model_registry
+            .find_model_spec_by_id(model_spec_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_model_spec",
+                id: model_spec_id.to_string(),
+            })?;
+        model_spec
+            .training_contract
+            .validate()
+            .map_err(|detail| ResearchError::DatasetBuild {
+                detail: format!(
+                    "model spec {} has invalid training contract: {detail}",
+                    model_spec.model_spec_id
+                ),
+            })?;
+        let target_label = LabelName::new(model_spec.training_contract.target_label_name.clone());
+        self.complete_coverage(
+            examples,
+            builder,
+            &model_spec.input_contract,
+            &target_label,
+            model_spec.training_contract.target_label_horizon_secs,
+            coverage,
+        )
+    }
+
+    fn complete_coverage(
+        &self,
+        examples: &[TrainingExample],
+        builder: &ConfiguredFeatureBuilder,
+        input_contract: &ModelInputContract,
+        target_label: &LabelName,
+        target_horizon_secs: u64,
+        mut coverage: DatasetCoverage,
+    ) -> QuantResult<DatasetCoverage> {
+        coverage.bias_table_hash = self
+            .bias_table
+            .as_ref()
+            .map(|table| table.content_hash.clone());
+        coverage.feature_state_counts = dataset_feature_state_counts(examples);
+        coverage.matrix_probe = Some(probe_matrix_coverage(
+            examples,
+            builder.schema(),
+            input_contract,
+            target_label,
+            target_horizon_secs,
+        )?);
+        Ok(coverage)
+    }
+
+    async fn persist_dataset_artifact(
+        &self,
+        plan: &DatasetPlan,
+        examples: &[TrainingExample],
+        schema_hashes: DatasetSchemaHashes,
+        dataset_hash: ContentHash,
+    ) -> QuantResult<PersistedDatasetArtifact> {
+        let sample_count =
+            u64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("dataset sample count conversion failed: {error}"),
+            })?;
+        let manifest = DatasetManifest {
+            format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            training_dataset_id: plan.training_dataset_id.clone(),
+            model_spec_id: plan.request.model_spec_id.clone(),
+            runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
+            window_start: plan.request.window_start,
+            window_end: plan.request.window_end,
+            purpose: plan.request.purpose,
+            knowledge_lag_secs: plan.request.knowledge_lag_secs,
+            sample_interval_secs: plan.request.sample_interval_secs,
+            horizons_secs: plan.request.horizons_secs.clone(),
+            feature_schema_hash: schema_hashes.feature,
+            factor_schema_hash: schema_hashes.factor,
+            label_schema_hash: schema_hashes.label,
+            semantic_dataset_hash: dataset_hash,
+            source_fingerprint: dataset_source_fingerprint(examples)?,
+            sample_count,
+        };
+        let manifest_hash = dataset_manifest_hash(&manifest)?;
+        let parquet_bytes = DatasetParquetCodec::encode(examples, &manifest)?;
+        let artifact_bytes_hash =
+            ContentHash::parse(CanonicalDigest::prefixed_bytes(&parquet_bytes))?;
+        let key = ArtifactKey::new(
+            ArtifactNamespace::Dataset,
+            plan.training_dataset_id.as_uuid().to_string(),
+            "parquet",
+        )?;
+        let parquet_uri = self.artifact_store.put(key, &parquet_bytes).await?;
+        let persisted_bytes = self.artifact_store.get(&parquet_uri).await?;
+        let persisted_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&persisted_bytes))?;
+        if persisted_hash != artifact_bytes_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "dataset artifact byte hash changed after persistence: encoded {artifact_bytes_hash}, persisted {persisted_hash}"
+                ),
+            }
+            .into());
+        }
+        let decoded = DatasetParquetCodec::decode_with_manifest(&persisted_bytes)?;
+        if decoded.manifest != manifest
+            || dataset_manifest_hash(&decoded.manifest)? != manifest_hash
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: "dataset manifest changed during Parquet persistence".to_owned(),
+            }
+            .into());
+        }
+        Ok(PersistedDatasetArtifact {
+            manifest,
+            manifest_hash,
+            artifact_bytes_hash,
+            parquet_uri,
+        })
+    }
+}
+
+struct DatasetIntegrityOutcome {
+    status: TrainingDatasetStatus,
+    failure_detail: Option<String>,
+}
+
+fn dataset_integrity_outcome(coverage: &DatasetCoverage) -> QuantResult<DatasetIntegrityOutcome> {
+    let probe = coverage
+        .matrix_probe
+        .as_ref()
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "deterministic integrity gate did not produce a matrix probe".to_owned(),
+        })?;
+    if coverage.built_examples == 0 {
+        return Ok(DatasetIntegrityOutcome {
+            status: TrainingDatasetStatus::Failed,
+            failure_detail: Some(
+                "deterministic integrity gate rejected dataset: no materialized examples"
+                    .to_owned(),
+            ),
+        });
+    }
+    if probe.label_rows == 0 {
+        return Ok(DatasetIntegrityOutcome {
+            status: TrainingDatasetStatus::InsufficientLabels,
+            failure_detail: None,
+        });
+    }
+    if probe.accepted_rows == 0 {
+        return Ok(DatasetIntegrityOutcome {
+            status: TrainingDatasetStatus::Failed,
+            failure_detail: Some(format!(
+                "deterministic integrity gate rejected every target-labelled row: accepted={}, rejected={}, target={}/{}",
+                probe.accepted_rows,
+                probe.rejected_rows,
+                probe.label_name,
+                probe.label_horizon_secs,
+            )),
+        });
+    }
+    Ok(DatasetIntegrityOutcome {
+        status: TrainingDatasetStatus::Ready,
+        failure_detail: None,
+    })
+}
+
+fn dataset_feature_state_counts(examples: &[TrainingExample]) -> DatasetFeatureStateCounts {
+    let mut counts = DatasetFeatureStateCounts::default();
+    for cell in examples
+        .iter()
+        .flat_map(|example| example.feature_vector.iter_cells().map(|(_, cell)| cell))
+    {
+        match cell.state {
+            FeatureCellState::Observed => counts.observed += 1,
+            FeatureCellState::Substituted => counts.substituted += 1,
+            FeatureCellState::Missing => counts.missing += 1,
+            FeatureCellState::NotApplicable => counts.not_applicable += 1,
+        }
+    }
+    counts
+}
+
+struct DatasetSchemaHashes {
+    feature: ContentHash,
+    factor: ContentHash,
+    label: ContentHash,
+}
+
+struct PersistedDatasetArtifact {
+    manifest: DatasetManifest,
+    manifest_hash: ContentHash,
+    artifact_bytes_hash: ContentHash,
+    parquet_uri: ArtifactUri,
 }
 
 /// Build every label (labeler × horizon) for one example, accounting coverage.
@@ -1380,7 +2128,7 @@ fn build_labels_for(
     params: &LabelBuildParams<'_>,
     min_exit_depth_usd: Usd,
     coverage: &mut DatasetCoverage,
-) -> Vec<TrainingLabel> {
+) -> QuantResult<Vec<TrainingLabel>> {
     let mut labels = Vec::new();
     for labeler in params.labelers {
         let horizons: Vec<u64> = if labeler.is_horizon_dependent() {
@@ -1393,7 +2141,7 @@ fn build_labels_for(
                 market_id: &params.market.market_id,
                 token_id: &params.market.primary_token_id,
                 yes_token_id: &params.market.primary_token_id,
-                as_of: params.as_of,
+                decision_at: params.as_of,
                 entry_mid: params.entry_mid,
                 horizon_secs,
                 min_exit_depth_usd,
@@ -1407,10 +2155,21 @@ fn build_labels_for(
                 }
                 LabelBuildOutput::NotMature { .. } => coverage.labels_not_mature += 1,
                 LabelBuildOutput::Unavailable { .. } => coverage.labels_unavailable += 1,
+                LabelBuildOutput::Invalid { detail } => {
+                    return Err(ResearchError::LabelResolution {
+                        detail: format!(
+                            "{} for market {} at {}: {detail}",
+                            labeler.label_name(),
+                            params.market.market_id,
+                            params.as_of
+                        ),
+                    }
+                    .into());
+                }
             }
         }
     }
-    labels
+    Ok(labels)
 }
 
 /// Accumulated examples + distinct markets from the historical spine, merged
@@ -1432,7 +2191,7 @@ struct HistoricalSpineOutput {
 
 /// Borrowed inputs for the historical PIT loop (async/inline callers).
 struct HistoricalSpineParams<'a> {
-    pit: &'a dyn PitQueryEngine,
+    pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
     sink: &'a dyn JobProgressSink,
     cancel: &'a CancellationToken,
@@ -1443,7 +2202,6 @@ struct HistoricalSpineParams<'a> {
     data_quality: &'a DataQualityConfig,
     domain: &'a DomainConfig,
     selection: &'a SelectionConfig,
-    min_selection_depth: &'a DecimalString,
     /// Target `ModelSpec`'s resolved feature requirements (R7).
     model_requirements: ModelFeatureRequirements,
     labelers: &'a [Box<dyn Labeler>],
@@ -1457,7 +2215,7 @@ struct HistoricalSpineParams<'a> {
 /// closure (every field is `Send + 'static`; `Arc` shares the PIT engine,
 /// prefetched facts, progress sink, and labelers with the async parent).
 struct HistoricalSpineInputs {
-    pit: Arc<dyn PitQueryEngine>,
+    pit: Arc<dyn PointInTimeSnapshotSource>,
     prefetched: Arc<Prefetched>,
     sink: Arc<dyn JobProgressSink>,
     cancel: CancellationToken,
@@ -1468,7 +2226,6 @@ struct HistoricalSpineInputs {
     data_quality: DataQualityConfig,
     domain: DomainConfig,
     selection: SelectionConfig,
-    min_selection_depth: DecimalString,
     /// Target `ModelSpec`'s resolved feature requirements (R7).
     model_requirements: ModelFeatureRequirements,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
@@ -1501,7 +2258,6 @@ fn run_historical_spine_blocking(
             data_quality: &inputs.data_quality,
             domain: &inputs.domain,
             selection: &inputs.selection,
-            min_selection_depth: &inputs.min_selection_depth,
             model_requirements: inputs.model_requirements,
             labelers: &inputs.labelers,
             min_exit_depth_usd: inputs.min_exit_depth_usd,
@@ -1521,7 +2277,7 @@ async fn run_historical_spine(
     params: HistoricalSpineParams<'_>,
     mut coverage: DatasetCoverage,
 ) -> QuantResult<HistoricalSpineOutput> {
-    let builder = ConfiguredFeatureBuilder::new(params.features, params.domain);
+    let builder = ConfiguredFeatureBuilder::new(params.features, params.domain)?;
     let engine = FactorEngine::new(
         params.factors,
         params.features,
@@ -1539,9 +2295,8 @@ async fn run_historical_spine(
         params.selection,
         params.data_quality,
         params.features,
-        params.min_selection_depth,
         params.request.runtime_config_version_id.clone(),
-        params.request.source_delay_secs,
+        params.request.knowledge_lag_secs,
         params.model_requirements.clone(),
     );
     let mut examples: Vec<TrainingExample> = Vec::new();
@@ -1565,15 +2320,16 @@ async fn run_historical_spine(
             processed_sections,
             total_sections,
         ));
-        let replay_group = pit_selected_replay_group(
-            &pit_selector,
+        let replay_group = pit_selected_replay_group(PitSelectionReplayParams {
+            pit_selector: &pit_selector,
             as_of,
-            &group,
-            params.pit,
-            params.prefetched,
-            params.domain,
-            &mut coverage,
-        )
+            group: &group,
+            pit: params.pit,
+            prefetched: params.prefetched,
+            domain: params.domain,
+            knowledge_lag_secs: params.request.knowledge_lag_secs,
+            coverage: &mut coverage,
+        })
         .await?;
         if replay_group.is_empty() {
             continue;
@@ -1585,9 +2341,9 @@ async fn run_historical_spine(
             &CrossSectionRequest {
                 pit: params.pit,
                 prefetched: params.prefetched,
-                as_of,
+                decision_at: as_of,
                 group: &replay_group,
-                source_delay: params.context.source_delay,
+                knowledge_lag: params.context.knowledge_lag,
                 lookback: params.context.lookback,
             },
         )
@@ -1610,7 +2366,7 @@ async fn run_historical_spine(
                 examples: &mut examples,
                 market_set: &mut market_set,
             },
-        );
+        )?;
     }
     Ok(HistoricalSpineOutput {
         examples,
@@ -1622,40 +2378,48 @@ async fn run_historical_spine(
 
 /// Replay the point-in-time selection funnel over one `as_of` cross-section,
 /// folding exclusions into `coverage` and returning the surviving samples.
-async fn pit_selected_replay_group(
-    pit_selector: &OfflinePitSelector,
+struct PitSelectionReplayParams<'a> {
+    pit_selector: &'a OfflinePitSelector,
     as_of: DateTime<Utc>,
-    group: &[&SamplePlan],
-    pit: &dyn PitQueryEngine,
-    prefetched: &Prefetched,
-    domain: &DomainConfig,
-    coverage: &mut DatasetCoverage,
+    group: &'a [&'a SamplePlan],
+    pit: &'a dyn PointInTimeSnapshotSource,
+    prefetched: &'a Prefetched,
+    domain: &'a DomainConfig,
+    knowledge_lag_secs: u64,
+    coverage: &'a mut DatasetCoverage,
+}
+
+async fn pit_selected_replay_group(
+    params: PitSelectionReplayParams<'_>,
 ) -> QuantResult<Vec<ReplaySample>> {
-    let market_infos: Vec<&MarketInfo> = group
+    let market_ids: Vec<MarketId> = params
+        .group
         .iter()
-        .filter_map(|sample| {
-            prefetched
-                .markets_by_id
-                .get(&sample.market_id)
-                .map(AsRef::as_ref)
-        })
+        .map(|sample| sample.market_id.clone())
         .collect();
     // Zero-I/O: replayed from the same batch-prefetched linkage +
     // domain-observation window `build_domain_slice_inputs` already uses for
     // this build's actual feature computation (Phase 11.2.2 §3.8 parity).
-    let domain_source = PrefetchedDomainAvailabilitySource::new(prefetched, domain);
-    let selection = pit_selector
-        .select_at(as_of, &market_infos, pit, &domain_source)
+    let domain_source = PrefetchedDomainAvailabilitySource::new(params.prefetched, params.domain);
+    let boundary = replay_boundary(
+        params.as_of,
+        params.knowledge_lag_secs,
+        params.domain.crypto.availability_lag_secs,
+    )?;
+    let selection = params
+        .pit_selector
+        .select_at(&boundary, &market_ids, params.pit, &domain_source)
         .await?;
-    coverage.pit_selection_candidates += market_infos.len() as u64;
-    coverage.pit_selection_included += selection.included.len() as u64;
-    coverage.pit_selection_excluded += selection.exclusion_summary;
+    params.coverage.pit_selection_candidates += market_ids.len() as u64;
+    params.coverage.pit_selection_included += selection.included.len() as u64;
+    params.coverage.pit_selection_excluded += selection.exclusion_summary;
     let kept: HashSet<MarketId> = selection
         .included
         .iter()
         .map(|market| market.market_id.clone())
         .collect();
-    Ok(group
+    Ok(params
+        .group
         .iter()
         .filter(|sample| kept.contains(&sample.market_id))
         .map(|sample| ReplaySample {
@@ -1673,7 +2437,7 @@ fn append_historical_examples(
     labelers: &[Box<dyn Labeler>],
     min_exit_depth_usd: Usd,
     sink: &mut ExampleBuildSink<'_>,
-) {
+) -> QuantResult<()> {
     for (index, vector) in input.cross_section.vectors.iter().enumerate() {
         let market = &input.cross_section.markets[index];
         let entry_mid = input.cross_section.entry_mids[index];
@@ -1689,7 +2453,7 @@ fn append_historical_examples(
             }
         };
         let forward = forward_window(
-            input.cross_section.as_of,
+            input.cross_section.boundary.decision_at(),
             input.max_horizon_secs,
             input
                 .prefetched
@@ -1701,12 +2465,12 @@ fn append_historical_examples(
                 .resolutions
                 .get(&market.market_id)
                 .map_or(&[][..], Vec::as_slice),
-        );
+        )?;
         let labels = build_labels_for(
             &LabelBuildParams {
                 labelers,
                 market,
-                as_of: input.cross_section.as_of,
+                as_of: input.cross_section.boundary.decision_at(),
                 entry_mid,
                 request: input.request,
                 forward: &forward,
@@ -1714,60 +2478,48 @@ fn append_historical_examples(
             },
             min_exit_depth_usd,
             sink.coverage,
-        );
+        )?;
+        let decision_capture = input
+            .cross_section
+            .captures
+            .get(&market.market_id)
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "historical replay omitted capture for market {}",
+                    market.market_id
+                ),
+            })?
+            .evidence();
         sink.market_set.insert(market.market_id.clone());
         sink.examples.push(TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: market.market_id.clone(),
             token_id: market.primary_token_id.clone(),
-            as_of: input.cross_section.as_of,
+            selected_market: market.clone(),
+            decision_boundary: input.cross_section.boundary.clone(),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: vector.clone(),
             factor_values,
             labels,
-            source_refs: vector.source_refs.clone(),
+            source_refs: vector.evidence_refs(),
+            decision_capture: Some(decision_capture),
             lot_context: None,
             position_state: None,
             book_fidelity: None,
         });
     }
+    Ok(())
 }
 
 fn materialize_live_attribution_example(
     attribution: &RecommendationAttributionInfo,
     recommendations: &HashMap<RecommendationId, RecommendationInfo>,
     features: &HashMap<FeatureVectorId, FeatureVectorInfo>,
+    selections: &HashMap<(MarketSelectionId, MarketId), MarketSelectionMemberInfo>,
 ) -> Option<TrainingExample> {
-    let Some(recommendation) = recommendations.get(&attribution.recommendation_id) else {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            "live attribution sample dropped: recommendation not found",
-        );
-        return None;
-    };
-    if recommendation.status.excluded_from_attribution() {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            "live attribution sample dropped: recommendation revoked",
-        );
-        return None;
-    }
-    let Some(feature_info) = features.get(&recommendation.evidence_refs.feature_vector_id) else {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-            "live attribution sample dropped: frozen feature vector not found",
-        );
-        return None;
-    };
-    let Some(feature_vector) = frozen_feature_vector(feature_info) else {
-        tracing::warn!(
-            recommendation_id = %attribution.recommendation_id,
-            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
-            "live attribution sample dropped: frozen feature vector payload is invalid",
-        );
-        return None;
-    };
+    let bindings = live_attribution_bindings(attribution, recommendations, features, selections)?;
+    let evidence = frozen_live_feature_evidence(bindings.recommendation, bindings.feature_info)?;
+    let recommendation = bindings.recommendation;
     let Some(factor_values) = frozen_factor_values(recommendation) else {
         tracing::warn!(
             recommendation_id = %attribution.recommendation_id,
@@ -1781,16 +2533,171 @@ fn materialize_live_attribution_example(
         example_id: TrainingExampleId::from_v7(),
         market_id: recommendation.market_id.clone(),
         token_id: recommendation.token_id.clone(),
-        as_of: feature_vector.as_of,
+        selected_market: selected_market_from_member(bindings.selection_member),
+        decision_boundary: evidence.decision_boundary,
         sample_source: TrainingSampleSource::LiveAttribution,
-        source_refs: feature_vector.source_refs.clone(),
-        feature_vector,
+        source_refs: evidence.feature_vector.evidence_refs(),
+        decision_capture: Some(evidence.decision_capture),
+        feature_vector: evidence.feature_vector,
         factor_values,
         labels,
         lot_context: None,
         position_state: None,
         book_fidelity: None,
     })
+}
+
+struct LiveAttributionBindings<'a> {
+    recommendation: &'a RecommendationInfo,
+    feature_info: &'a FeatureVectorInfo,
+    selection_member: &'a MarketSelectionMemberInfo,
+}
+
+fn live_attribution_bindings<'a>(
+    attribution: &RecommendationAttributionInfo,
+    recommendations: &'a HashMap<RecommendationId, RecommendationInfo>,
+    features: &'a HashMap<FeatureVectorId, FeatureVectorInfo>,
+    selections: &'a HashMap<(MarketSelectionId, MarketId), MarketSelectionMemberInfo>,
+) -> Option<LiveAttributionBindings<'a>> {
+    let recommendation = recommendations
+        .get(&attribution.recommendation_id)
+        .or_else(|| {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                "live attribution sample dropped: recommendation not found",
+            );
+            None
+        })?;
+    if recommendation.status.excluded_from_attribution() {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            "live attribution sample dropped: recommendation revoked",
+        );
+        return None;
+    }
+    let feature_info = features
+        .get(&recommendation.evidence_refs.feature_vector_id)
+        .or_else(|| {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+                "live attribution sample dropped: frozen feature vector not found",
+            );
+            None
+        })?;
+    let selection_key = (
+        recommendation.evidence_refs.market_selection_id.clone(),
+        recommendation.market_id.clone(),
+    );
+    let selection_member = selections.get(&selection_key).or_else(|| {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            market_selection_id = %recommendation.evidence_refs.market_selection_id,
+            market_id = %recommendation.market_id,
+            "live attribution sample dropped: frozen selection member not found",
+        );
+        None
+    })?;
+    if selection_member.primary_token_id != recommendation.token_id {
+        tracing::warn!(
+            recommendation_id = %attribution.recommendation_id,
+            selection_token_id = %selection_member.primary_token_id,
+            recommendation_token_id = %recommendation.token_id,
+            "live attribution sample dropped: selection token binding mismatch",
+        );
+        return None;
+    }
+    Some(LiveAttributionBindings {
+        recommendation,
+        feature_info,
+        selection_member,
+    })
+}
+
+struct FrozenLiveFeatureEvidence {
+    feature_vector: FeatureVector,
+    decision_boundary: DecisionBoundary,
+    decision_capture: DecisionCaptureEvidence,
+}
+
+fn frozen_live_feature_evidence(
+    recommendation: &RecommendationInfo,
+    feature_info: &FeatureVectorInfo,
+) -> Option<FrozenLiveFeatureEvidence> {
+    let feature_vector = frozen_feature_vector(feature_info).or_else(|| {
+        tracing::warn!(
+            recommendation_id = %recommendation.recommendation_id,
+            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+            "live attribution sample dropped: frozen feature vector payload is invalid",
+        );
+        None
+    })?;
+    let decision_boundary = feature_info.decision_boundary.clone().or_else(|| {
+        tracing::warn!(
+            recommendation_id = %recommendation.recommendation_id,
+            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+            "live attribution sample dropped: pre-v10 feature vector has no decision boundary",
+        );
+        None
+    })?;
+    let decision_capture_json = feature_info.decision_capture.clone().or_else(|| {
+        tracing::warn!(
+            recommendation_id = %recommendation.recommendation_id,
+            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+            "live attribution sample dropped: pre-v10 feature vector has no decision capture",
+        );
+        None
+    })?;
+    let decision_capture = serde_json::from_value::<DecisionCaptureEvidence>(decision_capture_json)
+        .map_err(|error| {
+            tracing::warn!(
+                recommendation_id = %recommendation.recommendation_id,
+                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+                %error,
+                "live attribution sample dropped: decision capture payload is invalid",
+            );
+        })
+        .ok()?;
+    if !valid_live_feature_evidence(feature_info, &decision_boundary, &decision_capture) {
+        tracing::warn!(
+            recommendation_id = %recommendation.recommendation_id,
+            feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+            "live attribution sample dropped: decision boundary or capture commitment is invalid",
+        );
+        return None;
+    }
+    Some(FrozenLiveFeatureEvidence {
+        feature_vector,
+        decision_boundary,
+        decision_capture,
+    })
+}
+
+fn valid_live_feature_evidence(
+    feature_info: &FeatureVectorInfo,
+    boundary: &DecisionBoundary,
+    capture: &DecisionCaptureEvidence,
+) -> bool {
+    let capture_hash_matches = feature_info
+        .decision_capture_hash
+        .as_ref()
+        .is_some_and(|expected| ResearchHasher::canonical(capture).ok().as_ref() == Some(expected));
+    capture_hash_matches
+        && boundary.validate().is_ok()
+        && boundary.decision_at() == feature_info.decision_at
+}
+
+fn selected_market_from_member(member: &MarketSelectionMemberInfo) -> SelectedMarket {
+    SelectedMarket {
+        market_id: member.market_id.clone(),
+        event_id: member.event_id.clone(),
+        category: member.category,
+        primary_token_id: member.primary_token_id.clone(),
+        secondary_token_id: member.secondary_token_id.clone(),
+        liquidity_usd: member.liquidity_usd,
+        volume_24h_usd: member.volume_24h_usd,
+        source_refs: Vec::new(),
+    }
 }
 
 fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
@@ -1800,23 +2707,14 @@ fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
         .get("domain")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let substitutions = info
-        .payload
-        .get("substitutions")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
     Some(FeatureVector {
         market_id: info.market_id.clone(),
         token_id: info.token_id.clone(),
-        as_of: info.as_of,
+        decision_at: info.decision_at,
         generic_schema_version: info.feature_schema_version,
-        generic: serde_json::from_value::<BTreeMap<FeatureName, FeatureValue>>(generic).ok()?,
+        generic: serde_json::from_value::<BTreeMap<FeatureName, FeatureCell>>(generic).ok()?,
         domain: serde_json::from_value::<Option<DomainFeatureSlice>>(domain).ok()?,
-        substitutions: serde_json::from_value::<Vec<SubstitutionAudit>>(substitutions).ok()?,
         data_quality: info.data_quality,
-        staleness_ms: u64::try_from(info.staleness_ms.max(0)).ok()?,
-        source_refs: serde_json::from_value::<Vec<EvidenceSourceRef>>(info.source_refs.clone())
-            .ok()?,
     })
 }
 
@@ -1976,7 +2874,7 @@ fn planned_historical_samples(plan: &DatasetPlan) -> u64 {
 fn group_samples(samples: &[SamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&SamplePlan>> {
     let mut groups: BTreeMap<DateTime<Utc>, Vec<&SamplePlan>> = BTreeMap::new();
     for sample in samples {
-        groups.entry(sample.as_of).or_default().push(sample);
+        groups.entry(sample.decision_at).or_default().push(sample);
     }
     groups
 }
@@ -1984,18 +2882,25 @@ fn group_samples(samples: &[SamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&SampleP
 fn group_lot_samples(samples: &[LotSamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&LotSamplePlan>> {
     let mut groups: BTreeMap<DateTime<Utc>, Vec<&LotSamplePlan>> = BTreeMap::new();
     for sample in samples {
-        groups.entry(sample.as_of).or_default().push(sample);
+        groups.entry(sample.decision_at).or_default().push(sample);
     }
     groups
 }
 
+fn decision_book_quote_price(book: &DecisionBook) -> Option<Price> {
+    match book {
+        DecisionBook::L2 { bids } => bids.first().map(|level| level.price_decimal()),
+        DecisionBook::Microstructure { best_bid, .. } => Some(*best_bid),
+    }
+}
+
 async fn decision_book_at(
-    pit: &dyn PitQueryEngine,
+    pit: &dyn PointInTimeSnapshotSource,
     token_id: &TokenId,
-    as_of: DateTime<Utc>,
+    boundary: &quant_pivot_models::domain::DecisionBoundary,
     micro: &[BookMicrostructureRow],
 ) -> QuantResult<(Option<DecisionBook>, Option<BookFidelity>)> {
-    if let Some(snapshot) = pit.book_at(token_id, as_of).await?
+    if let Some(snapshot) = pit.book_at_boundary(token_id, boundary).await?
         && !snapshot.bids.is_empty()
     {
         return Ok((
@@ -2005,11 +2910,11 @@ async fn decision_book_at(
             Some(BookFidelity::L2),
         ));
     }
-    // No L2 depth at the decision instant: fall back to the latest microstructure
-    // bucket at or before `as_of` (best bid + aggregate depth), tagged degraded so
+    // No L2 depth at the source cutoff: fall back to the latest visible
+    // microstructure bucket (best bid + aggregate depth), tagged degraded so
     // the sell quality gate can bound the fallback ratio. Under-estimates slippage
     // (single-price walk) — acceptable for a coverage-recovering degraded row.
-    if let Some((best_bid, depth)) = microstructure_fallback(micro, as_of) {
+    if let Some((best_bid, depth)) = microstructure_fallback(micro, boundary) {
         return Ok((
             Some(DecisionBook::Microstructure { best_bid, depth }),
             Some(BookFidelity::MicrostructureFallback),
@@ -2018,20 +2923,24 @@ async fn decision_book_at(
     Ok((None, None))
 }
 
-/// Peak mark observed over `[opened_at, as_of]` from the microstructure series
-/// (per-bucket best-bid high). PIT-safe: never reads a bucket past `as_of`, so
-/// the derived drawdown feature cannot leak a future peak. `None` when no bucket
-/// covers the range (drawdown then degrades to zero, not a leaked value).
+/// Peak mark observed from the microstructure series between lot open and the
+/// source cutoff, using only buckets available by decision time. `None` remains
+/// explicit missing position-state evidence.
 fn peak_mark_to(
     micro: &[BookMicrostructureRow],
     opened_at: DateTime<Utc>,
-    as_of: DateTime<Utc>,
+    boundary: &quant_pivot_models::domain::DecisionBoundary,
 ) -> Option<Price> {
     let start = opened_at.timestamp_millis();
-    let end = as_of.timestamp_millis();
+    let end = boundary
+        .cutoff_for(DecisionSource::Microstructure)
+        .timestamp_millis();
+    let decision_ms = boundary.decision_at().timestamp_millis();
     micro
         .iter()
-        .filter(|row| row.bucket_time >= start && row.bucket_time <= end)
+        .filter(|row| {
+            row.bucket_time >= start && row.bucket_time <= end && row.available_at <= decision_ms
+        })
         .filter_map(|row| {
             row.best_bid_high
                 .or(row.best_bid_close)
@@ -2041,17 +2950,20 @@ fn peak_mark_to(
         .max()
 }
 
-/// Best bid + aggregate share depth from the latest microstructure bucket at or
-/// before `as_of`. PIT-safe: never reads a future bucket. Share depth is the
-/// top-of-book USD depth divided by the best bid.
+/// Best bid + aggregate share depth from the latest microstructure bucket that
+/// is both effective before its source cutoff and available by decision time.
+/// Share depth is the top-of-book USD depth divided by the best bid.
 fn microstructure_fallback(
     micro: &[BookMicrostructureRow],
-    as_of: DateTime<Utc>,
+    boundary: &quant_pivot_models::domain::DecisionBoundary,
 ) -> Option<(Price, Shares)> {
-    let as_of_ms = as_of.timestamp_millis();
+    let cutoff_ms = boundary
+        .cutoff_for(DecisionSource::Microstructure)
+        .timestamp_millis();
+    let decision_ms = boundary.decision_at().timestamp_millis();
     let row = micro
         .iter()
-        .filter(|row| row.bucket_time <= as_of_ms)
+        .filter(|row| row.bucket_time <= cutoff_ms && row.available_at <= decision_ms)
         .max_by_key(|row| row.bucket_time)?;
     let best_bid = row
         .best_bid_close
@@ -2082,7 +2994,7 @@ struct CrossSectionAppendInput<'a> {
 /// The post-spine tail shared by both build paths: point-in-time source,
 /// prefetched facts, replay context, and progress sink.
 struct BuildTail<'a> {
-    pit: &'a dyn PitQueryEngine,
+    pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
     context: &'a ReplayContext,
     sink: &'a dyn JobProgressSink,
@@ -2100,7 +3012,7 @@ struct LabelBuildParams<'a> {
 
 struct ExitDecisionAppendInput<'a> {
     plan: &'a DatasetPlan,
-    pit: &'a dyn PitQueryEngine,
+    pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
     context: &'a ReplayContext,
 }
@@ -2109,7 +3021,7 @@ struct LotCrossSectionMaterialize<'a> {
     builder: &'a ConfiguredFeatureBuilder,
     engine: &'a FactorEngine,
     replay_config: &'a ReplayConfig,
-    pit: &'a dyn PitQueryEngine,
+    pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
     as_of: DateTime<Utc>,
     group: &'a [&'a LotSamplePlan],
@@ -2123,9 +3035,16 @@ struct ExitDecisionSampleBuild<'a> {
     market_index: usize,
     request: &'a DatasetPlanRequest,
     prefetched: &'a Prefetched,
-    pit: &'a dyn PitQueryEngine,
+    pit: &'a dyn PointInTimeSnapshotSource,
     max_horizon_secs: u64,
     labelers: &'a [Box<dyn Labeler>],
+}
+
+struct ResolvedExitDecisionEvidence {
+    peak_mark: Option<Price>,
+    position_state: PositionStateFeatures,
+    label_context: ExitDecisionLabelContext,
+    book_fidelity: Option<BookFidelity>,
 }
 
 struct ExampleBuildSink<'a> {
@@ -2137,25 +3056,28 @@ struct ExampleBuildSink<'a> {
 /// Derived replay parameters for one dataset build (shared across cross-sections).
 #[derive(Clone, Copy)]
 struct ReplayContext {
-    source_delay: Duration,
+    knowledge_lag: Duration,
     lookback: Duration,
     max_horizon_secs: u64,
 }
 
 impl ReplayContext {
-    /// Derive the source delay, feature lookback, and max forward horizon.
-    fn new(plan: &DatasetPlan, features: &FeaturesConfig) -> Self {
-        Self {
-            source_delay: Duration::from_secs(plan.request.source_delay_secs),
+    /// Derive the knowledge lag, feature lookback, and max forward horizon.
+    fn new(plan: &DatasetPlan, features: &FeaturesConfig) -> QuantResult<Self> {
+        let max_horizon_secs = plan
+            .request
+            .horizons_secs
+            .iter()
+            .copied()
+            .max()
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "at least one label horizon is required".to_owned(),
+            })?;
+        Ok(Self {
+            knowledge_lag: Duration::from_secs(plan.request.knowledge_lag_secs),
             lookback: Duration::from_secs(features.max_lookback_secs()),
-            max_horizon_secs: plan
-                .request
-                .horizons_secs
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(0),
-        }
+            max_horizon_secs,
+        })
     }
 
     /// The prefetch window spec for this build's sample set.
@@ -2176,7 +3098,7 @@ impl ReplayContext {
                 }))
                 .collect(),
             lookback: self.lookback,
-            source_delay: self.source_delay,
+            knowledge_lag: self.knowledge_lag,
             max_horizon_secs: self.max_horizon_secs,
             domain: domain.clone(),
         }
@@ -2220,9 +3142,9 @@ async fn materialize_lot_cross_section(
         &CrossSectionRequest {
             pit: input.pit,
             prefetched: input.prefetched,
-            as_of: input.as_of,
+            decision_at: input.as_of,
             group: &replay_group,
-            source_delay: input.context.source_delay,
+            knowledge_lag: input.context.knowledge_lag,
             lookback: input.context.lookback,
         },
     )
@@ -2247,5 +3169,204 @@ fn record_exit_fill_fidelity(coverage: &mut DatasetCoverage, book_fidelity: Opti
         coverage.exit_fill_l2_rows += 1;
     } else if book_fidelity.is_some() {
         coverage.exit_fill_fallback_rows += 1;
+    }
+}
+
+#[cfg(test)]
+mod keep_rate_tests {
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::DecisionSource,
+        enums::quant::DatasetPurpose,
+        types::{ModelSpecId, RuntimeConfigVersionId, SchemaVersion, default_sample_sources},
+    };
+
+    use super::{DatasetPlanRequest, KeepRateEstimate, KeepRateGrid};
+
+    fn request() -> DatasetPlanRequest {
+        let window_start = Utc.timestamp_opt(1_000, 0).single().expect("start");
+        DatasetPlanRequest {
+            model_spec_id: ModelSpecId::from_v7(),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            window_start,
+            window_end: window_start + Duration::seconds(100),
+            sample_interval_secs: 10,
+            horizons_secs: vec![60],
+            knowledge_lag_secs: 10,
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: default_sample_sources(),
+            training_dataset_id: None,
+            purpose: DatasetPurpose::Training,
+        }
+    }
+
+    #[test]
+    fn keep_rate_uses_checked_integer_rounding() {
+        assert_eq!(
+            KeepRateEstimate {
+                included: 1,
+                trials: 2,
+            }
+            .scale(1)
+            .expect("scale"),
+            1,
+            "halfway estimates round to the nearest eligible row"
+        );
+        assert_eq!(
+            KeepRateEstimate {
+                included: 2,
+                trials: 3,
+            }
+            .scale(10)
+            .expect("scale"),
+            7
+        );
+        let rate = KeepRateEstimate {
+            included: 1,
+            trials: 2,
+        }
+        .rate()
+        .expect("rate");
+        assert!((rate - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn keep_rate_rejects_impossible_counts() {
+        assert!(
+            KeepRateEstimate {
+                included: 0,
+                trials: 0,
+            }
+            .scale(10)
+            .is_err()
+        );
+        assert!(
+            KeepRateEstimate {
+                included: 3,
+                trials: 2,
+            }
+            .rate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn keep_rate_grid_uses_integer_midpoints_and_one_boundary_derivation() {
+        let grid = KeepRateGrid::new(&request(), 4, 30).expect("grid");
+        let expected_offsets = [12, 37, 62, 87];
+        for (index, expected_offset) in expected_offsets.into_iter().enumerate() {
+            let index = u32::try_from(index).expect("index");
+            let boundary = grid.boundary(index).expect("boundary");
+            assert_eq!(
+                boundary.decision_at(),
+                grid.window_start + Duration::seconds(expected_offset)
+            );
+            assert_eq!(
+                boundary.knowledge_cutoff(),
+                boundary.decision_at() - Duration::seconds(10)
+            );
+            assert_eq!(
+                boundary.cutoff_for(DecisionSource::DomainCrypto),
+                boundary.decision_at() - Duration::seconds(30)
+            );
+        }
+        assert!(grid.boundary(4).is_err());
+        assert!(KeepRateGrid::new(&request(), 0, 30).is_err());
+    }
+}
+
+#[cfg(test)]
+mod decision_book_tests {
+    use std::sync::Arc;
+
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        clickhouse::{BookMicrostructureRow, ChPrice, ChSchemaVersion, ChUsd},
+        domain::{DecisionClock, market::book::BookLevel},
+        types::{MarketId, Price, Shares, TokenId},
+    };
+    use rust_decimal::Decimal;
+
+    use super::{DecisionBook, decision_book_quote_price, microstructure_fallback, peak_mark_to};
+
+    #[test]
+    fn fee_quote_price_comes_from_executable_decision_bid() {
+        let book = DecisionBook::L2 {
+            bids: Arc::from([
+                BookLevel::from_decimal_unchecked(
+                    Price::new(Decimal::new(55, 2)),
+                    Shares::new(Decimal::from(100)),
+                ),
+                BookLevel::from_decimal_unchecked(
+                    Price::new(Decimal::new(50, 2)),
+                    Shares::new(Decimal::from(100)),
+                ),
+            ]),
+        };
+        assert_eq!(
+            decision_book_quote_price(&book),
+            Some(Price::new(Decimal::new(55, 2)))
+        );
+    }
+
+    #[test]
+    fn microstructure_fallback_honors_effective_and_available_cutoffs() {
+        let decision_at = Utc.timestamp_opt(1_000, 0).single().expect("decision time");
+        let boundary = DecisionClock::new(10)
+            .boundary(decision_at)
+            .expect("decision boundary");
+        let rows = vec![
+            micro_row(985_000, 999_000, Decimal::new(4, 1)),
+            micro_row(995_000, 995_000, Decimal::new(6, 1)),
+            micro_row(980_000, 1_001_000, Decimal::new(7, 1)),
+        ];
+
+        let (price, _) = microstructure_fallback(&rows, &boundary).expect("visible fallback");
+        assert_eq!(price, Price::new(Decimal::new(4, 1)));
+        assert_eq!(
+            peak_mark_to(
+                &rows,
+                Utc.timestamp_opt(970, 0).single().expect("opened at"),
+                &boundary,
+            ),
+            Some(Price::new(Decimal::new(4, 1)))
+        );
+    }
+
+    fn micro_row(bucket_time: i64, available_at: i64, price: Decimal) -> BookMicrostructureRow {
+        let price = Price::new(price);
+        BookMicrostructureRow {
+            token_id: TokenId::new("yes"),
+            market_id: Some(MarketId::new("0xmarket")),
+            bucket_time,
+            best_bid_open: Some(ChPrice::from(price)),
+            best_bid_high: Some(ChPrice::from(price)),
+            best_bid_low: Some(ChPrice::from(price)),
+            best_bid_close: Some(ChPrice::from(price)),
+            best_ask_open: None,
+            best_ask_high: None,
+            best_ask_low: None,
+            best_ask_close: None,
+            spread_bps_min: None,
+            spread_bps_avg: None,
+            spread_bps_max: None,
+            mid_price_open: Some(ChPrice::from(price)),
+            mid_price_close: Some(ChPrice::from(price)),
+            top1_depth_usd_avg: Some(ChUsd::from(Decimal::from(500))),
+            top5_depth_usd_avg: None,
+            top20_depth_usd_avg: None,
+            imbalance_avg: None,
+            update_count: 1,
+            snapshot_count: 1,
+            delta_count: 0,
+            delete_count: 0,
+            crossed_count: 0,
+            invalid_level_count: 0,
+            gap_count: 0,
+            last_trade_count: 0,
+            max_book_age_ms: 0,
+            schema_version: ChSchemaVersion::FIRST,
+            available_at,
+        }
     }
 }

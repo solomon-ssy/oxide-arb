@@ -1,7 +1,7 @@
 //! Canonical book snapshot replay handle for report evidence.
 //!
-//! Live report generation captures `BookSnapshotSource::Live`; historical /
-//! backtest paths may capture `ClickHouse` tie-breaker coordinates.
+//! Reports and replay both resolve the durable `ClickHouse` fact ledger and
+//! therefore share the same exact tie-breaker coordinates.
 
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
@@ -14,12 +14,7 @@ use crate::types::{ContentHash, TokenId};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BookSnapshotSource {
-    /// Live `BookStore` snapshot at feature resolve.
-    Live {
-        book_version: u64,
-        event_time_ms: u64,
-    },
-    /// Historical replay via `ClickHouse` `book_snapshots` fact.
+    /// Durable `ClickHouse` `book_snapshots` fact.
     ClickHouse {
         event_time_ms: i64,
         ingestion_time_ms: i64,
@@ -48,14 +43,6 @@ impl BookSnapshotRef {
 impl Display for BookSnapshotRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.source {
-            BookSnapshotSource::Live {
-                book_version,
-                event_time_ms,
-            } => write!(
-                f,
-                "book:live:{}:{}:{}@{}",
-                self.token_id, book_version, event_time_ms, self.content_hash
-            ),
             BookSnapshotSource::ClickHouse {
                 event_time_ms,
                 ingestion_time_ms,
@@ -84,31 +71,6 @@ impl FromStr for BookSnapshotRef {
         let rest = body
             .strip_prefix("book:")
             .ok_or(BookSnapshotRefParseError)?;
-        if let Some(live) = rest.strip_prefix("live:") {
-            let mut parts = live.split(':');
-            let token_id = TokenId::new(parts.next().ok_or(BookSnapshotRefParseError)?);
-            let book_version: u64 = parts
-                .next()
-                .ok_or(BookSnapshotRefParseError)?
-                .parse()
-                .map_err(|_| BookSnapshotRefParseError)?;
-            let event_time_ms: u64 = parts
-                .next()
-                .ok_or(BookSnapshotRefParseError)?
-                .parse()
-                .map_err(|_| BookSnapshotRefParseError)?;
-            if parts.next().is_some() {
-                return Err(BookSnapshotRefParseError);
-            }
-            return Ok(Self {
-                token_id,
-                source: BookSnapshotSource::Live {
-                    book_version,
-                    event_time_ms,
-                },
-                content_hash,
-            });
-        }
         if let Some(ch) = rest.strip_prefix("ch:") {
             let mut parts = ch.split(':');
             let token_id = TokenId::new(parts.next().ok_or(BookSnapshotRefParseError)?);

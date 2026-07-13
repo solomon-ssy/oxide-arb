@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS quant_trade_tape (
     schema_version        UInt32,
     event_date            Date MATERIALIZED toDate(event_time)
 )
-ENGINE = ReplacingMergeTree(ingestion_time)
+ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
 ORDER BY (market_id, token_id, participant_role, event_time, trade_id, participant_address)
 TTL event_date + INTERVAL 365 DAY DELETE

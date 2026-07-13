@@ -23,6 +23,7 @@ pub trait ModelTrainingPort: Send + Sync {
     /// promptly ([`quant_pivot_error::research::ResearchError::Cancelled`]).
     async fn train(
         &self,
+        model_version_id: ModelVersionId,
         request: TrainModelRequest,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,

@@ -90,14 +90,16 @@ fn normalize_v1_decoded(
     };
     let side = if is_buy { Side::Buy } else { Side::Sell };
     build_legs(
-        contract,
-        fetched,
-        TokenId::new(token_raw.to_string()),
-        side,
-        collateral_raw,
-        shares_raw,
-        decoded.maker,
-        decoded.taker,
+        FillAmounts {
+            contract,
+            fetched,
+            token_id: TokenId::new(token_raw.to_string()),
+            side,
+            collateral_raw,
+            shares_raw,
+            maker: decoded.maker,
+            taker: decoded.taker,
+        },
         market_for_token,
     )
 }
@@ -127,30 +129,45 @@ fn normalize_v2_decoded(
     };
     let side = if is_buy { Side::Buy } else { Side::Sell };
     build_legs(
-        contract,
-        fetched,
-        TokenId::new(decoded.token_id.to_string()),
-        side,
-        collateral_raw,
-        shares_raw,
-        decoded.maker,
-        decoded.taker,
+        FillAmounts {
+            contract,
+            fetched,
+            token_id: TokenId::new(decoded.token_id.to_string()),
+            side,
+            collateral_raw,
+            shares_raw,
+            maker: decoded.maker,
+            taker: decoded.taker,
+        },
         market_for_token,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_legs(
+struct FillAmounts<'a> {
     contract: ExchangeContract,
-    fetched: &FetchedLog,
+    fetched: &'a FetchedLog,
     token_id: TokenId,
     side: Side,
     collateral_raw: U256,
     shares_raw: U256,
     maker: Address,
     taker: Address,
+}
+
+fn build_legs(
+    fill: FillAmounts<'_>,
     market_for_token: impl Fn(&TokenId) -> Option<MarketId>,
 ) -> Result<NormalizedFillLegs, DecodeRejectReason> {
+    let FillAmounts {
+        contract,
+        fetched,
+        token_id,
+        side,
+        collateral_raw,
+        shares_raw,
+        maker,
+        taker,
+    } = fill;
     let market_id = market_for_token(&token_id).ok_or(DecodeRejectReason::UnknownToken)?;
     let event_time = event_time_from_block_timestamp(fetched.block_timestamp)?;
     let (notional, price, size_shares) = amounts_from_raw(collateral_raw, shares_raw)?;
@@ -180,6 +197,7 @@ fn build_legs(
         market_id: market_id.clone(),
         token_id: token_id.clone(),
         event_time,
+        available_at: None,
         participant_address: maker.to_checksum(None),
         participant_role: TradeParticipantRole::Maker,
         side: Some(side),
@@ -197,6 +215,7 @@ fn build_legs(
             market_id,
             token_id,
             event_time,
+            available_at: None,
             participant_address: taker.to_checksum(None),
             participant_role: TradeParticipantRole::Taker,
             side: Some(opposing_side(side)),

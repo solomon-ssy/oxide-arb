@@ -12,9 +12,9 @@ use quant_pivot_models::{
     domain::{
         BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest,
         CpcvBacktestJobParams, FitBiasTableRequest, FitModelCalibratorRequest, JobSubmitContext,
-        ModelCalibrationFitJobParams, NewResearchJob, Paginated, ResearchJobError, ResearchJobInfo,
-        ResearchJobListQuery, ResearchJobPort, ResearchJobView, RunBacktestRequest,
-        RunCpcvBacktestRequest, TrainModelRequest,
+        ModelCalibrationFitJobParams, ModelTrainJobParams, NewResearchJob, Paginated,
+        ResearchJobError, ResearchJobInfo, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
+        RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
@@ -24,19 +24,27 @@ use quant_pivot_models::{
 };
 
 use crate::app::research_job::ResearchJobEngine;
+use quant_pivot_repository::traits::TrainingDatasetRepository;
+use std::sync::Arc;
 
 /// Core implementation of [`ResearchJobPort`] — the HTTP enqueue/cancel/retry surface.
 pub struct CoreResearchJobPort {
     engine: ResearchJobEngine,
+    training_datasets: Arc<dyn TrainingDatasetRepository>,
     max_recovery_attempts: i32,
 }
 
 impl CoreResearchJobPort {
     /// Wire the port from a shared engine + the recovery-attempt cap.
     #[must_use]
-    pub const fn new(engine: ResearchJobEngine, max_recovery_attempts: i32) -> Self {
+    pub const fn new(
+        engine: ResearchJobEngine,
+        training_datasets: Arc<dyn TrainingDatasetRepository>,
+        max_recovery_attempts: i32,
+    ) -> Self {
         Self {
             engine,
+            training_datasets,
             max_recovery_attempts,
         }
     }
@@ -113,15 +121,24 @@ impl ResearchJobPort for CoreResearchJobPort {
 
     async fn enqueue_model_train(
         &self,
-        mut request: TrainModelRequest,
+        request: TrainModelRequest,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
-        if request.model_version_id.is_none() {
-            request.model_version_id = Some(ModelVersionId::from_v7());
-        }
-        let model_spec_id = Some(request.model_spec_id.clone());
-        let runtime_config_version_id = Some(request.runtime_config_version_id.clone());
-        let params = to_params(&request)?;
+        let dataset = self
+            .training_datasets
+            .find_by_id(&request.training_dataset_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "training_dataset",
+                id: request.training_dataset_id.to_string(),
+            })?;
+        let model_spec_id = Some(dataset.model_spec_id.clone());
+        let runtime_config_version_id = Some(dataset.runtime_config_version_id.clone());
+        let params = to_params(&ModelTrainJobParams {
+            model_version_id: ModelVersionId::from_v7(),
+            request,
+        })?;
         let job = self.new_job(
             ResearchJobKind::ModelTrain,
             params,
@@ -263,6 +280,13 @@ impl ResearchJobPort for CoreResearchJobPort {
         if info.status.is_terminal() {
             // Idempotent no-op: already terminal.
             return Ok(ResearchJobView::from(info));
+        }
+        if info.kind == ResearchJobKind::FeatureParity && info.status == ResearchJobStatus::Queued {
+            return Err(QuantError::from(StorageError::state_conflict(
+                entity::QUANT_RESEARCH_JOB,
+                Some(job_id),
+                "queued feature parity jobs are safety-critical and cannot be cancelled",
+            )));
         }
         let error = ResearchJobError::new(ResearchJobErrorCode::Cancelled, &reason);
         // Queued → terminal-cancel atomically; running → cooperative token signal.

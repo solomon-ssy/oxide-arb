@@ -84,10 +84,8 @@ pub enum TaskId {
     TickEventsWriter,
     BookL2ReplayWriter,
     BookSnapshotWriter,
-    BookDecisionContextWriter,
     BookMicrostructure1sWriter,
     MarketResolutionWriter,
-    FeatureEventsWriter,
     FactorEventsWriter,
     SignalCandidateEventsWriter,
     RecommendationEventsWriter,
@@ -116,6 +114,8 @@ pub enum TaskId {
     /// Leases + executes durable research jobs (dataset build / model train /
     /// backtest) off the HTTP hot path, with crash recovery.
     ResearchJobWorker,
+    /// Idempotently enqueues the frozen daily 24-hour full parity replay.
+    FeatureParityScheduler,
 }
 
 impl TaskId {
@@ -159,10 +159,8 @@ impl TaskId {
             | Self::TickEventsWriter
             | Self::BookL2ReplayWriter
             | Self::BookSnapshotWriter
-            | Self::BookDecisionContextWriter
             | Self::BookMicrostructure1sWriter
             | Self::MarketResolutionWriter
-            | Self::FeatureEventsWriter
             | Self::FactorEventsWriter
             | Self::SignalCandidateEventsWriter
             | Self::RecommendationEventsWriter
@@ -173,7 +171,7 @@ impl TaskId {
             | Self::PositionEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
-            Self::ResearchJobWorker => TaskKind::ResearchJob,
+            Self::ResearchJobWorker | Self::FeatureParityScheduler => TaskKind::ResearchJob,
         }
     }
 

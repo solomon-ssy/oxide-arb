@@ -21,8 +21,8 @@ pub mod position_state;
 pub mod trainer;
 
 pub use position_state::{
-    LotStateInput, PositionStateFeatures, is_position_state_factor, position_state_factor_values,
-    position_state_features, position_state_signed, position_state_signed_contribution,
+    LotStateInput, PositionStateFeatures, is_position_state_factor, position_state_features,
+    position_state_signed, position_state_signed_contribution,
 };
 pub use trainer::{SellScorerTrainer, TrainSellScorerRequest};
 
@@ -137,6 +137,9 @@ impl WeightedSellScorerRuntime {
         }
 
         for (name, signed) in position_state_signed(&input.position_state) {
+            let Some(signed) = signed else {
+                continue;
+            };
             let Some(weight) = self.weights.get(&name) else {
                 continue;
             };
@@ -144,8 +147,8 @@ impl WeightedSellScorerRuntime {
                 continue;
             }
             net += *weight * signed;
-            // Position-state is derived deterministically from the ledger, so it
-            // carries full confidence.
+            // Only an observed position-state value carries confidence; missing
+            // mark/peak evidence was skipped above rather than encoded as zero.
             confidence_mass += *weight;
             confidence_weighted += *weight;
         }
@@ -175,14 +178,14 @@ impl SellScorerRuntime for WeightedSellScorerRuntime {
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.artifact.required_features.clone()
+        self.artifact.required_features()
     }
 
     fn score(&self, input: &SellScoreInput) -> QuantResult<SellScore> {
         let (net, confidence) = self.net_and_confidence(input);
         let spec = &self.artifact.output_spec;
         let exit_alpha = (spec.max_exit_alpha_bps * net).round_dp(RESEARCH_DECIMAL_SCALE);
-        let p_exit_better = logistic_probability(spec.p_exit_gain * net);
+        let p_exit_better = logistic_probability(spec.p_exit_gain * net)?;
         let net_pos = net.max(Decimal::ZERO);
         let recommended = (spec.default_sell_pct
             + (Decimal::ONE - spec.default_sell_pct) * net_pos)
@@ -274,23 +277,33 @@ pub fn sell_signal_fires(score: &SellScore, policy: &SellSignalPolicy) -> bool {
 /// The signed `[-1, 1]` position-state contributions keyed by pseudo-factor name.
 /// All three lean positive (toward exit) as their magnitude grows; the trained
 /// weights (possibly zero) decide how much each matters.
-fn logistic_probability(z: Decimal) -> Probability {
-    let z = z.to_f64().unwrap_or(0.0);
+fn logistic_probability(z: Decimal) -> QuantResult<Probability> {
+    let z = z
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ResearchError::Inference {
+            detail: "sell scorer logistic input is not representable as finite f64".to_owned(),
+        })?;
     let squashed = 1.0 / (1.0 + (-z).exp());
     let quantized = Decimal::from_f64(squashed)
-        .unwrap_or_else(|| Decimal::new(5, 1))
+        .ok_or_else(|| ResearchError::Inference {
+            detail: "sell scorer logistic output is not representable as Decimal".to_owned(),
+        })?
         .round_dp(RESEARCH_DECIMAL_SCALE);
-    Probability::new(quantized.clamp(Decimal::ZERO, Decimal::ONE))
+    Ok(Probability::new(
+        quantized.clamp(Decimal::ZERO, Decimal::ONE),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         PositionStateFeatures, SellScoreInput, SellScorerRuntime, WeightedSellScorerRuntime,
+        logistic_probability,
     };
     use quant_pivot_models::{
         enums::{factor::FactorFamily, quant::FactorDirection},
-        types::{ContentHash, FactorDefinitionId, ModelVersionId, Probability},
+        types::{ContentHash, FactorDefinitionId, ModelInputContract, ModelVersionId, Probability},
     };
     use rust_decimal_macros::dec;
 
@@ -299,6 +312,7 @@ mod tests {
         model::{
             artifact::{
                 FactorWeight, ModelArtifactHeader, SellScorerArtifact, SellScorerOutputSpec,
+                model_input_contract_hash,
             },
             runtime::ModelFamily,
         },
@@ -310,6 +324,9 @@ mod tests {
     }
 
     fn artifact() -> SellScorerArtifact {
+        let input_contract = ModelInputContract::single_required("book.mid");
+        let input_contract_hash =
+            model_input_contract_hash(&input_contract).expect("input contract hash");
         SellScorerArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
@@ -330,7 +347,10 @@ mod tests {
             prediction_horizon_secs: 86_400,
             output_spec: SellScorerOutputSpec::conservative(),
             label_schema_hash: hash("cc"),
-            required_features: Vec::new(),
+            training_dataset_hash: hash("dd"),
+            training_input_hash: hash("ee"),
+            input_contract,
+            input_contract_hash,
             objective_report: None,
         }
     }
@@ -362,9 +382,9 @@ mod tests {
                     FactorDirection::Positive,
                 )],
                 position_state: PositionStateFeatures {
-                    unrealized_pnl_pct: dec!(0.2),
+                    unrealized_pnl_pct: Some(dec!(0.2)),
                     time_in_trade_ratio: dec!(0.5),
-                    peak_mark_drawdown: dec!(0.0),
+                    peak_mark_drawdown: Some(dec!(0.0)),
                 },
             })
             .expect("score");
@@ -384,15 +404,21 @@ mod tests {
                     FactorDirection::Negative,
                 )],
                 position_state: PositionStateFeatures {
-                    unrealized_pnl_pct: dec!(-0.2),
+                    unrealized_pnl_pct: Some(dec!(-0.2)),
                     time_in_trade_ratio: dec!(0.0),
-                    peak_mark_drawdown: dec!(0.0),
+                    peak_mark_drawdown: Some(dec!(0.0)),
                 },
             })
             .expect("score");
         assert!(score.net < dec!(0), "net should be negative: {}", score.net);
         assert!(score.exit_alpha_bps.inner() < dec!(0));
         assert!(score.p_exit_better.inner() < dec!(0.5));
+    }
+
+    #[test]
+    fn logistic_probability_preserves_neutral_baseline() {
+        let probability = logistic_probability(dec!(0)).expect("finite logistic input");
+        assert_eq!(probability.inner(), dec!(0.5));
     }
 
     #[test]

@@ -20,7 +20,6 @@ use quant_pivot_research::{
     model::MarketInferenceContext,
     selection::SelectedMarket,
 };
-use rust_decimal::Decimal;
 
 /// Project one market's scoring context, or `None` when it cannot be scored.
 ///
@@ -34,30 +33,28 @@ pub fn build_market_inference_context(
     vector: &FeatureVector,
     selected: &SelectedMarket,
 ) -> Option<MarketInferenceContext> {
-    let yes_price = yes_price(vector)?;
+    let yes_price = executable_ask(vector, &book::BEST_ASK)?;
+    let no_price = selected
+        .secondary_token_id
+        .as_ref()
+        .and_then(|_| executable_ask(vector, &book::SECONDARY_BEST_ASK));
     Some(MarketInferenceContext {
         secondary_token_id: selected.secondary_token_id.clone(),
         yes_price,
-        no_price: None,
+        no_price,
         liquidity_usd: selected
             .liquidity_usd
             .or_else(|| usd_feature(vector, &book::VISIBLE_LIQUIDITY_USD)),
         data_quality: vector.data_quality,
         time_to_resolution_secs: count_feature(vector, &market::TIME_TO_RESOLUTION_SECS),
-        substitutions: vector.substitutions.clone(),
+        substitution_reasons: vector.substitution_reasons(),
     })
 }
 
-/// The YES executable reference price: the mid, else the bid/ask midpoint.
-fn yes_price(vector: &FeatureVector) -> Option<Price> {
-    if let Some(mid) = probability_feature(vector, &book::MID) {
-        return Some(Price::new(mid.inner()));
-    }
-    let bid = probability_feature(vector, &book::BEST_BID)?;
-    let ask = probability_feature(vector, &book::BEST_ASK)?;
-    Some(Price::new(
-        ((bid.inner() + ask.inner()) / Decimal::from(2)).clamp(Decimal::ZERO, Decimal::ONE),
-    ))
+/// Executable buy reference for one outcome: its actual best ask only.
+fn executable_ask(vector: &FeatureVector, name: &FeatureName) -> Option<Price> {
+    let value = probability_feature(vector, name)?.inner();
+    (value > rust_decimal::Decimal::ZERO).then(|| Price::new(value))
 }
 
 /// Read a `[0, 1]` probability-valued feature.
@@ -81,5 +78,114 @@ fn count_feature(vector: &FeatureVector, name: &FeatureName) -> Option<u64> {
     match vector.value(name) {
         Some(FeatureValue::Count(value)) => Some(*value),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        enums::{common::MarketCategory, quant::DataQualityStatus},
+        types::{EventId, MarketId, Price, Probability, SchemaVersion, TokenId},
+    };
+    use quant_pivot_research::{
+        features::{FeatureCell, FeatureStaleness, FeatureValue, FeatureVector, names::book},
+        selection::SelectedMarket,
+    };
+    use rust_decimal_macros::dec;
+
+    use super::build_market_inference_context;
+
+    fn price_cell(value: rust_decimal::Decimal) -> FeatureCell {
+        FeatureCell::observed(
+            FeatureValue::Probability(Probability::new(value)),
+            None,
+            FeatureStaleness::Unknown,
+        )
+    }
+
+    fn vector(
+        yes_ask: rust_decimal::Decimal,
+        no_ask: Option<rust_decimal::Decimal>,
+    ) -> FeatureVector {
+        let mut generic = BTreeMap::from([
+            (book::BEST_ASK, price_cell(yes_ask)),
+            (book::MID, price_cell(dec!(0.50))),
+        ]);
+        if let Some(no_ask) = no_ask {
+            generic.insert(book::SECONDARY_BEST_ASK, price_cell(no_ask));
+        }
+        FeatureVector {
+            market_id: MarketId::new("market"),
+            token_id: Some(TokenId::new("yes")),
+            decision_at: Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap(),
+            generic_schema_version: SchemaVersion::new(6),
+            generic,
+            domain: None,
+            data_quality: DataQualityStatus::Fresh,
+        }
+    }
+
+    fn market(secondary_token_id: Option<TokenId>) -> SelectedMarket {
+        SelectedMarket {
+            market_id: MarketId::new("market"),
+            event_id: EventId::new("event"),
+            category: MarketCategory::Sports,
+            primary_token_id: TokenId::new("yes"),
+            secondary_token_id,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn context_uses_exact_primary_and_secondary_executable_asks() {
+        let context = build_market_inference_context(
+            &vector(dec!(0.61), Some(dec!(0.44))),
+            &market(Some(TokenId::new("no"))),
+        )
+        .expect("primary ask is executable");
+
+        assert_eq!(context.yes_price.inner(), dec!(0.61));
+        assert_eq!(context.no_price.map(Price::inner), Some(dec!(0.44)));
+        assert_ne!(
+            context.yes_price.inner(),
+            dec!(0.50),
+            "mid is not executable"
+        );
+        assert_ne!(
+            context.no_price.map(Price::inner),
+            Some(dec!(0.39)),
+            "NO ask is never synthesized as one minus YES ask"
+        );
+    }
+
+    #[test]
+    fn missing_or_unbound_secondary_ask_never_becomes_a_no_price() {
+        let missing = build_market_inference_context(
+            &vector(dec!(0.61), None),
+            &market(Some(TokenId::new("no"))),
+        )
+        .expect("YES remains scoreable");
+        assert!(missing.no_price.is_none());
+
+        let unbound =
+            build_market_inference_context(&vector(dec!(0.61), Some(dec!(0.44))), &market(None))
+                .expect("YES remains scoreable");
+        assert!(unbound.no_price.is_none());
+    }
+
+    #[test]
+    fn absent_or_zero_primary_ask_rejects_the_runtime_row() {
+        assert!(
+            build_market_inference_context(&vector(dec!(0), Some(dec!(0.44))), &market(None))
+                .is_none()
+        );
+        let mut missing = vector(dec!(0.61), None);
+        missing.generic.remove(&book::BEST_ASK);
+        assert!(build_market_inference_context(&missing, &market(None)).is_none());
     }
 }

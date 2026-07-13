@@ -3,7 +3,11 @@
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    report::ReportError,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{NewOperationLog, RecommendationReportInfo, ReportLifecycleEvent},
     enums::{
@@ -21,12 +25,14 @@ use quant_pivot_repository::traits::{
 use tokio::sync::Mutex;
 
 use crate::{
-    execution::IntentInvalidationHook, governance::RuntimeModeHandle,
+    execution::IntentInvalidationHook,
+    governance::RuntimeModeHandle,
     observability::metrics_hub::MetricsHub,
+    service::feature_integrity::{FeatureParityGatePort, FeatureParityRunCoordinator},
 };
 
 use super::{
-    builder::{ReportBuilder, report_as_of},
+    builder::{ReportBuilder, report_decision_at},
     publisher::ReportPublisher,
     types::{BuildReportRequest, ComposedReport, ReportTrigger},
 };
@@ -44,7 +50,7 @@ pub struct AdHocReportRequest {
     pub request_id: String,
     pub trigger_time: DateTime<Utc>,
     pub top_n: Option<u32>,
-    pub source_delay_secs: Option<u64>,
+    pub knowledge_lag_secs: Option<u64>,
 }
 
 /// Dependencies for [`ReportLifecycleService`].
@@ -56,6 +62,8 @@ pub struct ReportLifecycleDeps {
     pub publisher: Arc<ReportPublisher>,
     pub runtime_mode: RuntimeModeHandle,
     pub metrics: Arc<MetricsHub>,
+    pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
+    pub feature_parity_runs: Arc<FeatureParityRunCoordinator>,
 }
 
 /// End-to-end report lifecycle entry point.
@@ -67,6 +75,8 @@ pub struct ReportLifecycleService {
     publisher: Arc<ReportPublisher>,
     runtime_mode: RuntimeModeHandle,
     metrics: Arc<MetricsHub>,
+    feature_parity_gate: Arc<dyn FeatureParityGatePort>,
+    feature_parity_runs: Arc<FeatureParityRunCoordinator>,
     run_lock: Mutex<()>,
     /// Cascade hook: on revoke / expire, the active order intents derived from
     /// the report are invalidated and their capital released. Set once at boot
@@ -86,6 +96,8 @@ impl ReportLifecycleService {
             publisher: deps.publisher,
             runtime_mode: deps.runtime_mode,
             metrics: deps.metrics,
+            feature_parity_gate: deps.feature_parity_gate,
+            feature_parity_runs: deps.feature_parity_runs,
             run_lock: Mutex::new(()),
             intent_invalidation: OnceLock::new(),
         }
@@ -98,26 +110,23 @@ impl ReportLifecycleService {
 
     /// Cascade-invalidate the active intents derived from a terminated report.
     ///
-    /// Best-effort: a failure is logged, not propagated — the approval-time
-    /// re-check and the expiry sweep are the fail-closed backstops.
+    /// Fail closed for report revocation: parity containment is not complete
+    /// until every pre-submission intent has been invalidated and its capital
+    /// released. The parity latch remains open when this returns an error.
     async fn cascade_intent_invalidation(
         &self,
         report_id: &RecommendationReportId,
         reason: ApprovalInvalidation,
         now: DateTime<Utc>,
-    ) {
+    ) -> QuantResult<()> {
         let Some(hook) = self.intent_invalidation.get() else {
-            return;
+            return Ok(());
         };
-        match hook.invalidate_for_report(report_id, reason, now).await {
-            Ok(count) if count > 0 => {
-                tracing::info!(%report_id, count, reason = reason.as_str(), "cascaded intent invalidation");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%report_id, %error, "intent cascade invalidation failed");
-            }
+        let count = hook.invalidate_for_report(report_id, reason, now).await?;
+        if count > 0 {
+            tracing::info!(%report_id, count, reason = reason.as_str(), "cascaded intent invalidation");
         }
+        Ok(())
     }
 
     /// Cascade-invalidate the active intents derived from one expired
@@ -158,7 +167,7 @@ impl ReportLifecycleService {
             trigger,
             trigger_time: request.trigger_time,
             top_n_override: None,
-            source_delay_secs_override: None,
+            knowledge_lag_secs_override: None,
         })
         .await
     }
@@ -175,7 +184,7 @@ impl ReportLifecycleService {
             trigger,
             trigger_time: request.trigger_time,
             top_n_override: request.top_n,
-            source_delay_secs_override: request.source_delay_secs,
+            knowledge_lag_secs_override: request.knowledge_lag_secs,
         })
         .await
     }
@@ -203,8 +212,69 @@ impl ReportLifecycleService {
             ApprovalInvalidation::ReportRevoked,
             revoked_at,
         )
-        .await;
+        .await?;
         Ok(report)
+    }
+
+    /// Idempotently contain one report affected by a deterministic parity
+    /// incident.
+    ///
+    /// A terminal report no longer admits new entry, but its pre-submission
+    /// intents may still require release. Therefore terminal report states skip
+    /// the impossible revoke transition while the intent cascade still runs.
+    /// Only the exact terminal-state race is accepted; not-found, database, and
+    /// unrelated transition failures continue to fail containment closed.
+    pub(crate) async fn contain_parity_incident(
+        &self,
+        report_id: &RecommendationReportId,
+        reason: &str,
+        occurred_at: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        let current = self
+            .report_repo
+            .find_by_id(report_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
+            })?;
+
+        if !is_parity_contained_report_status(current.status) {
+            match self
+                .report_repo
+                .revoke(
+                    report_id,
+                    reason,
+                    occurred_at,
+                    lifecycle_operation_log("parity_containment", report_id, reason),
+                )
+                .await
+            {
+                Ok(revoked) => self.publisher.publish_revoked(&revoked),
+                Err(error) if is_report_revoke_transition_conflict(&error, report_id) => {
+                    let latest =
+                        self.report_repo
+                            .find_by_id(report_id)
+                            .await?
+                            .ok_or_else(|| {
+                                StorageError::not_found(
+                                    entity::QUANT_RECOMMENDATION_REPORT,
+                                    report_id,
+                                )
+                            })?;
+                    if !is_parity_contained_report_status(latest.status) {
+                        return Err(error.into());
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        self.cascade_intent_invalidation(
+            report_id,
+            ApprovalInvalidation::ReportRevoked,
+            occurred_at,
+        )
+        .await
     }
 
     /// Expire every recommendation whose data-driven `valid_until` has elapsed
@@ -229,7 +299,13 @@ impl ReportLifecycleService {
                 .await
             {
                 Ok(recommendation) => {
-                    expired = expired.saturating_add(1);
+                    expired =
+                        expired
+                            .checked_add(1)
+                            .ok_or_else(|| ReportError::NumericOverflow {
+                                field: "report.expired_recommendation_count",
+                                detail: "expiry sweep count exceeds u32".to_owned(),
+                            })?;
                     self.cascade_recommendation_invalidation(
                         &recommendation_id,
                         ApprovalInvalidation::RecommendationExpired,
@@ -258,7 +334,12 @@ impl ReportLifecycleService {
         let mut rolled = 0_u32;
         for report_id in due {
             if self.try_roll_up_report(&report_id, now).await {
-                rolled = rolled.saturating_add(1);
+                rolled = rolled
+                    .checked_add(1)
+                    .ok_or_else(|| ReportError::NumericOverflow {
+                        field: "report.expired_report_count",
+                        detail: "expiry sweep count exceeds u32".to_owned(),
+                    })?;
             }
         }
         Ok(rolled)
@@ -298,29 +379,38 @@ impl ReportLifecycleService {
         let trigger_time = request.trigger_time;
         let trigger_key = request.trigger.key(request.trigger_time);
         if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
+            self.feature_parity_runs
+                .ensure_report_sample_committed(&existing)
+                .await?;
             return Ok(existing);
         }
         let _run_guard = self.run_lock.lock().await;
         if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
+            self.feature_parity_runs
+                .ensure_report_sample_committed(&existing)
+                .await?;
             return Ok(existing);
         }
+        self.feature_parity_gate
+            .ensure_clear("new report generation")
+            .await?;
 
         // Ephemeral start/fail signals correlate by `trigger_key` (no row yet).
         let runtime_mode = self.runtime_mode.current();
-        let as_of = report_as_of(self.runtime_config_repo.as_ref(), &request).await?;
+        let decision_at = report_decision_at(self.runtime_config_repo.as_ref(), &request).await?;
 
         self.publisher
             .publish_ephemeral(ReportLifecycleEvent::started(
                 trigger_key.clone(),
                 ReportKind::TopN,
                 runtime_mode,
-                as_of,
+                decision_at,
             ));
 
-        let composed = match self.builder.build(request).await {
+        let mut composed = match self.builder.build(request).await {
             Ok(composed) => composed,
             Err(error) => {
-                self.publish_failed(&trigger_key, runtime_mode, as_of, &error);
+                self.publish_failed(&trigger_key, runtime_mode, decision_at, &error);
                 return Err(error);
             }
         };
@@ -332,7 +422,7 @@ impl ReportLifecycleService {
                     trigger_key.clone(),
                     ReportKind::TopN,
                     runtime_mode,
-                    as_of,
+                    decision_at,
                     empty_reason,
                 ));
             self.metrics.report_skipped_empty_total.inc();
@@ -341,6 +431,16 @@ impl ReportLifecycleService {
             }
             .into());
         }
+        let sampled_feature_parity = self
+            .feature_parity_runs
+            .build_report_sample(&composed.transaction.report)
+            .await?;
+        composed.transaction.sampled_feature_parity = Some(sampled_feature_parity);
+        composed.transaction.feature_parity_state_id = Some(
+            self.feature_parity_gate
+                .commit_state_id("report commit")
+                .await?,
+        );
         match self
             .report_repo
             .create_report(composed.transaction.clone())
@@ -352,10 +452,13 @@ impl ReportLifecycleService {
             }
             Err(error) => {
                 if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
+                    self.feature_parity_runs
+                        .ensure_report_sample_committed(&existing)
+                        .await?;
                     return Ok(existing);
                 }
                 let error: QuantError = error.into();
-                self.publish_failed(&trigger_key, runtime_mode, as_of, &error);
+                self.publish_failed(&trigger_key, runtime_mode, decision_at, &error);
                 Err(error)
             }
         }
@@ -460,5 +563,92 @@ fn lifecycle_operation_log(
         after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
+    }
+}
+
+const fn is_parity_contained_report_status(status: RecommendationReportStatus) -> bool {
+    matches!(
+        status,
+        RecommendationReportStatus::Failed
+            | RecommendationReportStatus::Revoked
+            | RecommendationReportStatus::Expired
+    )
+}
+
+fn is_report_revoke_transition_conflict(
+    error: &StorageError,
+    report_id: &RecommendationReportId,
+) -> bool {
+    let expected_id = report_id.to_string();
+    matches!(
+        error,
+        StorageError::IllegalTransition {
+            entity: error_entity,
+            id: Some(error_id),
+            to,
+            ..
+        } if *error_entity == entity::QUANT_RECOMMENDATION_REPORT
+            && error_id == &expected_id
+            && to == RecommendationReportStatus::Revoked.as_str()
+    )
+}
+
+#[cfg(test)]
+mod parity_containment_tests {
+    use super::*;
+
+    #[test]
+    fn only_terminal_report_states_skip_parity_revoke() {
+        for status in [
+            RecommendationReportStatus::Failed,
+            RecommendationReportStatus::Revoked,
+            RecommendationReportStatus::Expired,
+        ] {
+            assert!(is_parity_contained_report_status(status));
+        }
+        for status in [
+            RecommendationReportStatus::Building,
+            RecommendationReportStatus::Published,
+            RecommendationReportStatus::PublishedEmpty,
+        ] {
+            assert!(!is_parity_contained_report_status(status));
+        }
+    }
+
+    #[test]
+    fn only_exact_report_revoke_transition_conflict_is_retry_classified() {
+        let report_id = RecommendationReportId::from_v7();
+        let exact = StorageError::illegal_transition(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            Some(&report_id),
+            RecommendationReportStatus::Expired.as_str(),
+            RecommendationReportStatus::Revoked.as_str(),
+        );
+        assert!(is_report_revoke_transition_conflict(&exact, &report_id));
+
+        let unrelated_report = StorageError::illegal_transition(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            Some(&RecommendationReportId::from_v7()),
+            RecommendationReportStatus::Expired.as_str(),
+            RecommendationReportStatus::Revoked.as_str(),
+        );
+        assert!(!is_report_revoke_transition_conflict(
+            &unrelated_report,
+            &report_id
+        ));
+        let unrelated_entity = StorageError::illegal_transition(
+            entity::QUANT_RECOMMENDATION,
+            Some(&report_id),
+            "attributed",
+            "revoked",
+        );
+        assert!(!is_report_revoke_transition_conflict(
+            &unrelated_entity,
+            &report_id
+        ));
+        assert!(!is_report_revoke_transition_conflict(
+            &StorageError::Connection("database unavailable".to_owned()),
+            &report_id
+        ));
     }
 }

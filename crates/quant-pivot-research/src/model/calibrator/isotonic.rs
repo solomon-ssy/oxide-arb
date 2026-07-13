@@ -7,7 +7,7 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{enums::quant::CalibrationMethod, types::Probability};
 use rust_decimal::Decimal;
 
-use crate::stats::pava_non_decreasing_grouped;
+use crate::{model::apply_mapping, stats::pava_non_decreasing_grouped};
 
 use super::{IsotonicKnot, MonotoneMapping, ProbabilityCalibrator};
 
@@ -106,8 +106,8 @@ impl ProbabilityCalibrator for IsotonicCalibrator {
         Ok(MonotoneMapping::Isotonic { knots })
     }
 
-    fn calibrate(&self, mapping: &MonotoneMapping, score: Decimal) -> Probability {
-        super::apply_mapping(mapping, score)
+    fn calibrate(&self, mapping: &MonotoneMapping, score: Decimal) -> QuantResult<Probability> {
+        apply_mapping(mapping, score)
     }
 }
 
@@ -117,30 +117,46 @@ impl ProbabilityCalibrator for IsotonicCalibrator {
 ///
 /// The calibrated probability at `score` linearly interpolates between the two
 /// bracketing knots; outside the fitted range it clamps to the nearest knot's
-/// probability. Empty knots yield `0` (never fabricated).
-#[must_use]
-pub fn interpolate(knots: &[IsotonicKnot], score: Decimal) -> Decimal {
+/// probability.
+///
+/// # Errors
+///
+/// Rejects an empty or structurally invalid fitted mapping. A malformed
+/// artifact must never become a calibrated probability of zero.
+pub fn interpolate(knots: &[IsotonicKnot], score: Decimal) -> QuantResult<Decimal> {
     let Some(first) = knots.first() else {
-        return Decimal::ZERO;
+        return Err(ResearchError::Inference {
+            detail: "isotonic calibration mapping has no fitted knots".to_owned(),
+        }
+        .into());
     };
     if score <= first.score {
-        return first.probability;
+        return Ok(first.probability);
     }
     let last = knots[knots.len() - 1];
     if score >= last.score {
-        return last.probability;
+        return Ok(last.probability);
     }
     for window in knots.windows(2) {
         let (lo, hi) = (window[0], window[1]);
         if score >= lo.score && score <= hi.score {
             if hi.score == lo.score {
-                return lo.probability;
+                return Err(ResearchError::Inference {
+                    detail: format!(
+                        "isotonic calibration mapping contains duplicate score knot {}",
+                        lo.score
+                    ),
+                }
+                .into());
             }
             let t = (score - lo.score) / (hi.score - lo.score);
-            return lo.probability + t * (hi.probability - lo.probability);
+            return Ok(lo.probability + t * (hi.probability - lo.probability));
         }
     }
-    last.probability
+    Err(ResearchError::Inference {
+        detail: format!("isotonic calibration mapping has no interval containing score {score}"),
+    }
+    .into())
 }
 
 #[cfg(test)]
@@ -199,8 +215,12 @@ mod tests {
             assert!(window[0].score < window[1].score);
             assert!(window[0].probability <= window[1].probability);
         }
-        let low = calibrator.calibrate(&mapping, dec!(0.01));
-        let high = calibrator.calibrate(&mapping, dec!(0.99));
+        let low = calibrator
+            .calibrate(&mapping, dec!(0.01))
+            .expect("calibrate low");
+        let high = calibrator
+            .calibrate(&mapping, dec!(0.99))
+            .expect("calibrate high");
         assert!(low.inner() <= high.inner());
     }
 
@@ -258,9 +278,15 @@ mod tests {
         // and the score=0.7 knot (p=1). Linear interpolation (scikit-learn
         // `predict` semantics) must land strictly between them, not repeat
         // one endpoint's value as a step function would.
-        let at_tie = calibrator.calibrate(&mapping, dec!(0.5));
-        let at_next = calibrator.calibrate(&mapping, dec!(0.7));
-        let mid = calibrator.calibrate(&mapping, dec!(0.6));
+        let at_tie = calibrator
+            .calibrate(&mapping, dec!(0.5))
+            .expect("calibrate tie");
+        let at_next = calibrator
+            .calibrate(&mapping, dec!(0.7))
+            .expect("calibrate next");
+        let mid = calibrator
+            .calibrate(&mapping, dec!(0.6))
+            .expect("calibrate midpoint");
         assert!(mid.inner() > at_tie.inner());
         assert!(mid.inner() < at_next.inner());
         assert_eq!(mid.inner(), (at_tie.inner() + at_next.inner()) / dec!(2));
@@ -271,10 +297,18 @@ mod tests {
         let calibrator = IsotonicCalibrator::new(10);
         let (scores, outcomes) = tied_scores_dataset();
         let mapping = calibrator.fit(&scores, &outcomes).expect("fit");
-        let below = calibrator.calibrate(&mapping, dec!(-5));
-        let above = calibrator.calibrate(&mapping, dec!(5));
-        let first = calibrator.calibrate(&mapping, dec!(0.1));
-        let last = calibrator.calibrate(&mapping, dec!(1.0));
+        let below = calibrator
+            .calibrate(&mapping, dec!(-5))
+            .expect("calibrate below");
+        let above = calibrator
+            .calibrate(&mapping, dec!(5))
+            .expect("calibrate above");
+        let first = calibrator
+            .calibrate(&mapping, dec!(0.1))
+            .expect("calibrate first");
+        let last = calibrator
+            .calibrate(&mapping, dec!(1.0))
+            .expect("calibrate last");
         assert_eq!(below, first);
         assert_eq!(above, last);
     }

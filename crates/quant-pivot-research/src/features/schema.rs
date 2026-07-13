@@ -1,4 +1,4 @@
-//! Governed feature schema: the eight-element [`FeatureSpec`] and the versioned
+//! Governed feature schema: [`FeatureSpec`] and the versioned
 //! [`FeatureSchema`] registry built from runtime config.
 //!
 //! The schema is the single declaration of every feature the plane can produce:
@@ -10,13 +10,9 @@
 
 use std::{collections::HashMap, ops::RangeInclusive};
 
-use linkme::distributed_slice;
-use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    runtime_config::{
-        FeatureFamily, FeaturesConfig,
-        validation::{FEATURES_CONFIG_VALIDATORS, FeaturesConfigValidator},
-    },
+    runtime_config::{FeatureFamily, FeaturesConfig},
     types::SchemaVersion,
 };
 use rust_decimal::Decimal;
@@ -66,7 +62,8 @@ pub enum FeatureUnit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "source")]
 pub enum SourceRequirement {
-    /// A published L2 order book for the market's token.
+    /// A published L2 order book for the feature's primary or secondary
+    /// outcome token.
     PublishedL2Book,
     /// Gamma market / event metadata.
     GammaMetadata,
@@ -77,6 +74,8 @@ pub enum SourceRequirement {
     NegRiskSiblingLegs,
     /// A window of persisted full-market trade-tape participant facts.
     TradeTapeWindow,
+    /// One resolved revision from the append-only market-linkage ledger.
+    ResolvedLinkage,
     /// A resolved market linkage plus a PIT window of external domain
     /// observations (`quant_domain_observation`) for the linked instrument.
     DomainObservationWindow,
@@ -95,6 +94,7 @@ impl SourceRequirement {
             Self::GammaMetadata => EvidenceSourceKind::GammaMetadata,
             Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
             Self::TradeTapeWindow => EvidenceSourceKind::TradeTape,
+            Self::ResolvedLinkage => EvidenceSourceKind::Linkage,
             Self::DomainObservationWindow => EvidenceSourceKind::DomainExternal,
         }
     }
@@ -104,12 +104,18 @@ impl SourceRequirement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PitRule {
-    /// The book version must be published at or before `as_of`.
-    BookVersionAtOrBeforeAsOf,
-    /// The fact must be published at or before `as_of - source_delay`.
-    FactBeforeAsOfMinusDelay,
-    /// Gamma metadata visible as of `as_of`.
-    MetadataAtAsOf,
+    /// The book version must be effective at or before its source cutoff and
+    /// available no later than the decision time.
+    BookVersionAtOrBeforeSourceCutoff,
+    /// The fact must be effective at or before its already-derived source
+    /// cutoff. The feature plane must never subtract knowledge lag again.
+    FactAtOrBeforeSourceCutoff,
+    /// The catalog version must be effective at or before its source cutoff and
+    /// available no later than the decision time.
+    MetadataVersionAtOrBeforeSourceCutoff,
+    /// The linkage revision must be effective at or before its source cutoff
+    /// and inserted no later than the decision time.
+    LinkageVersionAtOrBeforeSourceCutoff,
 }
 
 /// The staleness bound applied to a feature's freshest input.
@@ -149,6 +155,8 @@ pub enum NullPolicy {
 pub struct FeatureSpec {
     /// Stable feature name.
     pub name: FeatureName,
+    /// Revision of the executable computation semantics for this feature.
+    pub compute_revision: u32,
     /// Feature family (governs config gating + builder ownership).
     pub family: FeatureFamily,
     /// Dimensional kind of the produced value.
@@ -165,14 +173,12 @@ pub struct FeatureSpec {
     pub point_in_time_rule: PitRule,
     /// Staleness bound on the freshest input.
     pub staleness_policy: StalenessRule,
-    /// When true, a missing value rejects the market regardless of null policy.
-    pub critical: bool,
 }
 
 /// Fluent builder for a [`FeatureSpec`] with safe defaults.
 ///
 /// Defaults: unit [`FeatureUnit::None`], no valid range, [`NullPolicy::Penalize`],
-/// non-critical. Source / PIT / staleness are required up front because they are
+/// Source / PIT / staleness are required up front because they are
 /// the load-bearing correctness metadata.
 #[must_use]
 struct FeatureSpecBuilder {
@@ -191,6 +197,7 @@ impl FeatureSpecBuilder {
         Self {
             spec: FeatureSpec {
                 name,
+                compute_revision: 1,
                 family,
                 value_kind,
                 unit: FeatureUnit::None,
@@ -199,7 +206,6 @@ impl FeatureSpecBuilder {
                 source_requirement,
                 point_in_time_rule,
                 staleness_policy,
-                critical: false,
             },
         }
     }
@@ -219,12 +225,6 @@ impl FeatureSpecBuilder {
     /// Set the null policy.
     const fn null_policy(mut self, policy: NullPolicy) -> Self {
         self.spec.null_policy = policy;
-        self
-    }
-
-    /// Mark the feature critical (missing ⇒ reject market).
-    const fn critical(mut self) -> Self {
-        self.spec.critical = true;
         self
     }
 
@@ -257,18 +257,21 @@ pub struct FeatureSchema {
 
 impl FeatureSchema {
     /// Assemble a schema from a version and its specs, building the name index.
-    #[must_use]
-    pub fn new(version: SchemaVersion, specs: Vec<FeatureSpec>) -> Self {
-        let by_name = specs
-            .iter()
-            .enumerate()
-            .map(|(idx, spec)| (spec.name.clone(), idx))
-            .collect();
-        Self {
+    pub fn new(version: SchemaVersion, specs: Vec<FeatureSpec>) -> QuantResult<Self> {
+        let mut by_name = HashMap::with_capacity(specs.len());
+        for (idx, spec) in specs.iter().enumerate() {
+            if by_name.insert(spec.name.clone(), idx).is_some() {
+                return Err(ResearchError::Determinism {
+                    detail: format!("duplicate feature name `{}`", spec.name),
+                }
+                .into());
+            }
+        }
+        Ok(Self {
             version,
             specs,
             by_name,
-        }
+        })
     }
 
     /// Build the active schema from frozen feature config.
@@ -276,8 +279,7 @@ impl FeatureSchema {
     /// Enables only the configured families and expands windowed families using
     /// the configured bar / momentum / volatility windows and depth levels. The
     /// schema version is taken from `config.feature_schema_version`.
-    #[must_use]
-    pub fn build(config: &FeaturesConfig) -> Self {
+    pub fn build(config: &FeaturesConfig) -> QuantResult<Self> {
         let mut specs = Vec::new();
         for family in &config.enabled_feature_families {
             match family {
@@ -391,7 +393,7 @@ impl FeatureSchema {
         self.specs.iter().any(|spec| {
             matches!(
                 spec.source_requirement,
-                SourceRequirement::DomainObservationWindow
+                SourceRequirement::DomainObservationWindow | SourceRequirement::ResolvedLinkage
             )
         })
     }
@@ -418,7 +420,7 @@ const fn spec(
 fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::MarketMetadata as F;
     use FeatureValueKind::{Bool, Category, Count};
-    use PitRule::MetadataAtAsOf as Pit;
+    use PitRule::MetadataVersionAtOrBeforeSourceCutoff as Pit;
     use SourceRequirement::GammaMetadata as Src;
     use StalenessRule::None as Fresh;
 
@@ -447,12 +449,6 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
             .build(),
     );
     out.push(
-        spec(market_names::OUTCOME_COUNT, F, Count, Src, Pit, Fresh)
-            .unit(FeatureUnit::Count)
-            .null_policy(NullPolicy::RejectMarket)
-            .build(),
-    );
-    out.push(
         spec(market_names::NEG_RISK, F, Bool, Src, Pit, Fresh)
             .null_policy(NullPolicy::NeutralValue(Decimal::ZERO))
             .build(),
@@ -471,30 +467,35 @@ const fn book_spec(name: FeatureName, kind: FeatureValueKind) -> FeatureSpecBuil
         FeatureFamily::PriceBook,
         kind,
         SourceRequirement::PublishedL2Book,
-        PitRule::BookVersionAtOrBeforeAsOf,
+        PitRule::BookVersionAtOrBeforeSourceCutoff,
         StalenessRule::MaxBookAge,
     )
 }
 
-/// A critical `[0, 1]` price feature.
+/// A `[0, 1]` price feature whose intrinsic null policy rejects the market.
 fn price_spec(name: FeatureName) -> FeatureSpec {
     book_spec(name, FeatureValueKind::Probability)
         .unit(FeatureUnit::Probability)
         .range(Decimal::ZERO, Decimal::ONE)
         .null_policy(NullPolicy::RejectMarket)
-        .critical()
         .build()
 }
 
 fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     out.push(price_spec(book::BEST_BID));
     out.push(price_spec(book::BEST_ASK));
+    out.push(
+        book_spec(book::SECONDARY_BEST_ASK, FeatureValueKind::Probability)
+            .unit(FeatureUnit::Probability)
+            .range(Decimal::ZERO, Decimal::ONE)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+    );
     out.push(price_spec(book::MID));
     out.push(
         book_spec(book::SPREAD_BPS, FeatureValueKind::Bps)
             .unit(FeatureUnit::Bps)
             .null_policy(NullPolicy::RejectMarket)
-            .critical()
             .build(),
     );
     out.push(
@@ -545,7 +546,7 @@ fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::TimeSeries as F;
     use FeatureValueKind::Decimal as Dec;
-    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
     use SourceRequirement::MicrostructureWindow as Src;
     use StalenessRule::MaxFeatureBucketAge as Stale;
 
@@ -626,7 +627,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::TimeSeries as F;
     use FeatureValueKind::Decimal as Dec;
-    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
     use SourceRequirement::MicrostructureWindow as Src;
     use StalenessRule::MaxFeatureBucketAge as Stale;
 
@@ -664,7 +665,7 @@ fn momentum_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::Microstructure as F;
     use FeatureValueKind::{Decimal as Dec, Probability};
-    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
     use SourceRequirement::MicrostructureWindow as Src;
     use StalenessRule::MaxFeatureBucketAge as Stale;
 
@@ -709,7 +710,9 @@ fn structural_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::Structural as F;
     use FeatureValueKind::Decimal as Dec;
     use NullPolicy::Penalize;
-    use PitRule::{BookVersionAtOrBeforeAsOf as BookPit, FactBeforeAsOfMinusDelay as WindowPit};
+    use PitRule::{
+        BookVersionAtOrBeforeSourceCutoff as BookPit, FactAtOrBeforeSourceCutoff as WindowPit,
+    };
     use SourceRequirement::{MicrostructureWindow, PublishedL2Book};
     use StalenessRule::{MaxBookAge, MaxFeatureBucketAge};
 
@@ -776,7 +779,7 @@ fn trade_tape_structural_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::Structural as F;
     use FeatureValueKind::{Count, Decimal as Dec, Usd};
     use NullPolicy::Penalize;
-    use PitRule::FactBeforeAsOfMinusDelay as WindowPit;
+    use PitRule::FactAtOrBeforeSourceCutoff as WindowPit;
     use SourceRequirement::TradeTapeWindow;
     use StalenessRule::MaxTradeTapeAge;
 
@@ -841,7 +844,7 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::Structural as F;
     use FeatureValueKind::{Count, Decimal as Dec};
     use NullPolicy::Optional;
-    use PitRule::BookVersionAtOrBeforeAsOf as BookPit;
+    use PitRule::BookVersionAtOrBeforeSourceCutoff as BookPit;
     use SourceRequirement::NegRiskSiblingLegs;
     use StalenessRule::MaxBookAge;
 
@@ -901,17 +904,18 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
 
 /// Crypto external-vertical (domain-slice) feature specs (Phase 11.2.2).
 ///
-/// Every spec requires a resolved market linkage plus a PIT window of external
-/// domain observations. All are `Optional`: a market whose category maps to no
-/// vertical simply carries no domain slice (the specs then structurally do not
-/// apply), and a linked market with a source gap keeps an explicit
-/// present-but-missing value — never a fabricated zero, never market rejection.
+/// Every spec requires a resolved PIT linkage. Observation-derived specs also
+/// require a PIT window of external domain facts; subject-derived specs cite
+/// the linkage revision itself. All are `Optional`: a market whose category
+/// maps to no vertical simply carries no domain slice, and a linked market with
+/// a source gap keeps an explicit present-but-missing value — never a
+/// fabricated zero, never market rejection.
 fn domain_specs(out: &mut Vec<FeatureSpec>) {
     use FeatureFamily::Domain as F;
     use FeatureValueKind::{Bps, Count, Decimal as Dec};
     use NullPolicy::Optional;
-    use PitRule::FactBeforeAsOfMinusDelay as Pit;
-    use SourceRequirement::DomainObservationWindow as Src;
+    use PitRule::FactAtOrBeforeSourceCutoff as Pit;
+    use SourceRequirement::{DomainObservationWindow as Src, ResolvedLinkage};
     use StalenessRule::{MaxDomainObservationAge, None as Fresh};
 
     out.push(
@@ -961,8 +965,8 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
             domain_crypto_names::TIME_TO_OBSERVATION,
             F,
             Count,
-            Src,
-            Pit,
+            ResolvedLinkage,
+            PitRule::LinkageVersionAtOrBeforeSourceCutoff,
             Fresh,
         )
         .unit(FeatureUnit::Seconds)
@@ -984,75 +988,61 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
     );
 }
 
-/// Validate `features.required_features` against the active [`FeatureSchema`].
-///
-/// Registered into models' [`FEATURES_CONFIG_VALIDATORS`] at link time so
-/// [`validate_runtime_config`](quant_pivot_models::runtime_config::validate_runtime_config)
-/// performs schema membership checks in the same pass as structural invariants.
-pub fn validate_required_features(features: &FeaturesConfig, report: &mut ConfigValidationReport) {
-    let schema = FeatureSchema::build(features);
-    for feature_ref in &features.required_features {
-        let label = feature_ref.name.trim();
-        if label.is_empty() {
-            continue;
-        }
-        let name = FeatureName::from(feature_ref);
-        if !schema.contains(&name) {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "features.required_features",
-                detail: format!("unknown feature `{label}` for the active schema"),
-            });
-        }
-    }
-}
-
-fn validate_required_features_hook(features: &FeaturesConfig, report: &mut ConfigValidationReport) {
-    validate_required_features(features, report);
-}
-
-#[allow(unsafe_code)]
-#[distributed_slice(FEATURES_CONFIG_VALIDATORS)]
-static REGISTER_REQUIRED_FEATURES: FeaturesConfigValidator = validate_required_features_hook;
-
 #[cfg(test)]
-mod validation_tests {
-    use super::validate_required_features;
-    use quant_pivot_error::config_validation::ConfigValidationReport;
-    use quant_pivot_models::runtime_config::{
-        FeatureNameRef, RuntimeConfig, validate_runtime_config,
+mod contract_tests {
+    use super::{
+        FeatureSchema, FeatureSpecBuilder, FeatureUnit, NullPolicy, PitRule, SourceRequirement,
+        StalenessRule,
+    };
+    use crate::features::{FeatureName, FeatureSpec, FeatureValueKind, names::book};
+    use quant_pivot_models::{
+        runtime_config::{FeatureFamily, FeaturesConfig},
+        types::SchemaVersion,
     };
 
-    #[test]
-    fn default_runtime_config_passes_full_validation() {
-        let report = validate_runtime_config(&RuntimeConfig::default());
-        assert!(!report.has_errors());
+    fn sample_spec() -> FeatureSpec {
+        FeatureSpecBuilder::new(
+            FeatureName::from_static("test.duplicate"),
+            FeatureFamily::MarketMetadata,
+            FeatureValueKind::Decimal,
+            SourceRequirement::GammaMetadata,
+            PitRule::MetadataVersionAtOrBeforeSourceCutoff,
+            StalenessRule::None,
+        )
+        .build()
     }
 
     #[test]
-    fn unknown_required_feature_is_rejected() {
-        let mut config = RuntimeConfig::default();
-        config.features.required_features = vec![FeatureNameRef::new("book.not_a_feature")];
-        let report = validate_runtime_config(&config);
-        assert!(report.has_errors());
+    fn duplicate_feature_names_fail_construction() {
+        let error = FeatureSchema::new(SchemaVersion::new(6), vec![sample_spec(), sample_spec()])
+            .expect_err("duplicate name must fail");
+        assert!(error.to_string().contains("duplicate feature name"));
     }
 
     #[test]
-    fn known_required_feature_is_accepted() {
-        let mut config = RuntimeConfig::default();
-        config
-            .features
-            .required_features
-            .push(FeatureNameRef::new("book.spread_bps"));
-        let report = validate_runtime_config(&config);
-        assert!(!report.has_errors());
+    fn compute_revision_participates_in_equality() {
+        let first = sample_spec();
+        let mut second = first.clone();
+        second.compute_revision += 1;
+        assert_ne!(first, second);
     }
 
     #[test]
-    fn validate_required_features_can_be_called_directly() {
-        let mut config = RuntimeConfig::default();
-        config.features.required_features = vec![FeatureNameRef::new("book.not_a_feature")];
-        let mut report = ConfigValidationReport::default();
-        validate_required_features(&config.features, &mut report);
-        assert!(report.has_errors());
+    fn secondary_executable_ask_contract_is_explicit_and_non_substituting() {
+        let schema = FeatureSchema::build(&FeaturesConfig::default()).expect("schema");
+        let spec = schema
+            .by_name(&book::SECONDARY_BEST_ASK)
+            .expect("secondary ask feature");
+
+        assert_eq!(spec.compute_revision, 1);
+        assert_eq!(spec.value_kind, FeatureValueKind::Probability);
+        assert_eq!(spec.unit, FeatureUnit::Probability);
+        assert_eq!(spec.null_policy, NullPolicy::Penalize);
+        assert_eq!(spec.source_requirement, SourceRequirement::PublishedL2Book);
+        assert_eq!(
+            spec.point_in_time_rule,
+            PitRule::BookVersionAtOrBeforeSourceCutoff
+        );
+        assert_eq!(spec.staleness_policy, StalenessRule::MaxBookAge);
     }
 }

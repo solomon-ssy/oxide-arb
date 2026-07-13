@@ -49,7 +49,8 @@ async fn trade_tape_coverage_returns_ok_envelope() {
     let res = harness::call(&env.state, req).await;
     assert_eq!(res.status, StatusCode::OK);
     let body = res.json();
-    assert!(body["data"]["pit_as_of"].is_string());
+    assert!(body["data"]["decision_at"].is_string());
+    assert!(body["data"]["knowledge_cutoff"].is_string());
     assert!(body["data"]["source_health"].is_array());
 }
 
@@ -64,6 +65,7 @@ async fn participant_concentration_returns_ok_envelope() {
     let res = harness::call(&env.state, req).await;
     assert_eq!(res.status, StatusCode::OK);
     let body = res.json();
-    assert!(body["data"]["pit_cutoff"].is_string());
+    assert!(body["data"]["decision_at"].is_string());
+    assert!(body["data"]["knowledge_cutoff"].is_string());
     assert!(body["data"]["markets"].is_array());
 }

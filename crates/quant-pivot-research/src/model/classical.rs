@@ -15,13 +15,15 @@
 //! transform the model was fit on, and a shared time-ordered holdout produces an
 //! out-of-sample validation objective.
 
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-use quant_pivot_models::enums::quant::ModelSerializationFormat;
-use rust_decimal::{
-    Decimal,
-    prelude::{FromPrimitive, ToPrimitive},
+use quant_pivot_models::{
+    enums::quant::ModelSerializationFormat,
+    hashing::CanonicalDigest,
+    types::ContentHash,
+    types::{ModelInputContract, ModelInputRequiredness, ModelInputSpec},
 };
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::{Deserialize, Serialize};
 use smartcore::{
     ensemble::{
@@ -39,13 +41,16 @@ use smartcore::{
 
 use crate::{
     model::{
-        artifact::{ClassicalModelMetrics, FeatureImportance, PreprocessingArtifact},
+        artifact::{
+            ClassicalModelMetrics, FeatureImportance, FittedInputTransform,
+            model_input_contract_hash,
+        },
         runtime::ClassicalKind,
         trainer::{ValidationReport, ValidationSpec},
     },
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
-    training::TrainingMatrix,
+    training::{TrainingMatrix, training_input_hash},
     validation::{DefaultPurgedSplitter, PurgeConfig, PurgedSplitter, TimelineGroup},
 };
 
@@ -157,8 +162,18 @@ pub struct ClassicalTrainOutput {
     pub serialization_format: ModelSerializationFormat,
     /// Serialized estimator bytes (content-addressed + stored by the core).
     pub model_bytes: Vec<u8>,
-    /// Frozen standardization preprocessing.
-    pub preprocessing: PreprocessingArtifact,
+    /// BLAKE3 hash of the exact serialized estimator bytes.
+    pub model_bytes_hash: ContentHash,
+    /// Frozen shared training/serving input transform.
+    pub input_transform: FittedInputTransform,
+    /// Exact ordered raw-input contract owned by the model specification.
+    pub input_contract: ModelInputContract,
+    /// Canonical hash of [`Self::input_contract`].
+    pub input_contract_hash: ContentHash,
+    /// Complete fitted transform hash.
+    pub input_transform_hash: ContentHash,
+    /// Exact estimator-ready rows plus aligned label vector hash.
+    pub training_input_hash: ContentHash,
     /// Training metrics + feature importances.
     pub metrics: ClassicalModelMetrics,
 }
@@ -223,20 +238,40 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
     }
 
     fn train(&self, matrix: &TrainingMatrix) -> QuantResult<ClassicalTrainOutput> {
-        let (rows, cols) = validate_matrix(matrix)?;
-        let (standardized, preprocessing) = standardize(matrix);
+        let rows = validate_matrix(matrix)?;
+        let input_contract = ModelInputContract {
+            inputs: matrix
+                .columns
+                .iter()
+                .map(|column| ModelInputSpec {
+                    feature_name: column.feature.as_str().to_owned(),
+                    requiredness: if column.required {
+                        ModelInputRequiredness::Required
+                    } else {
+                        ModelInputRequiredness::Optional
+                    },
+                })
+                .collect(),
+        };
+        let input_contract_hash = model_input_contract_hash(&input_contract)?;
+        let (input_transform, standardized) = FittedInputTransform::fit(matrix)?;
+        let cols = input_transform.encoded_columns.len();
+        let input_transform_hash = input_transform.transform_hash()?;
         let x = dense_matrix(&standardized)?;
         let y: Vec<f64> = matrix.labels.to_vec();
+        let training_input_hash = training_input_hash(&standardized, &matrix.labels)?;
         let model = fit_kind(self.kind, &self.params, &x, &y)?;
 
         let predictions = model.predict(&x)?;
-        let importances = ablation_importances(&model, &standardized, &predictions, matrix);
-        let validation_objective = rank_ic_f64(&predictions, &y);
+        let importances =
+            ablation_importances(&model, &standardized, &predictions, &input_transform)?;
+        let validation_objective = rank_ic_f64(&predictions, &y)?;
 
         let model_bytes =
             bincode::serialize(&model).map_err(|error| ResearchError::Serialization {
                 detail: format!("bincode serialize classical model: {error}"),
             })?;
+        let model_bytes_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&model_bytes))?;
 
         Ok(ClassicalTrainOutput {
             kind: self.kind,
@@ -244,10 +279,19 @@ impl ClassicalModelAdapter for SmartcoreAdapter {
             crate_version: CLASSICAL_CRATE_VERSION.to_owned(),
             serialization_format: ModelSerializationFormat::Bincode,
             model_bytes,
-            preprocessing,
+            model_bytes_hash,
+            input_transform,
+            input_contract,
+            input_contract_hash,
+            input_transform_hash,
+            training_input_hash,
             metrics: ClassicalModelMetrics {
-                train_samples: rows as u64,
-                feature_count: u32::try_from(cols).unwrap_or(u32::MAX),
+                train_samples: u64::try_from(rows).map_err(|error| ResearchError::MatrixBuild {
+                    detail: format!("classical training row count does not fit u64: {error}"),
+                })?,
+                feature_count: u32::try_from(cols).map_err(|error| ResearchError::MatrixBuild {
+                    detail: format!("encoded feature width does not fit u32: {error}"),
+                })?,
                 validation_objective: validation_objective.round_dp(RESEARCH_DECIMAL_SCALE),
                 feature_importances: importances,
             },
@@ -305,8 +349,62 @@ impl SmartcoreModel {
             Self::Logistic {
                 coefficients,
                 intercept,
-            } => Ok(logistic_proba(coefficients, *intercept, x)),
+            } => logistic_proba(coefficients, *intercept, x),
         }
+    }
+
+    /// Whether the serialized estimator union matches the governed artifact kind.
+    pub(crate) const fn matches_kind(&self, kind: ClassicalKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::RandomForest(_), ClassicalKind::RandomForest)
+                | (Self::ExtraTrees(_), ClassicalKind::ExtraTrees)
+                | (Self::Ridge(_), ClassicalKind::Ridge)
+                | (Self::Lasso(_), ClassicalKind::Lasso)
+                | (Self::ElasticNet(_), ClassicalKind::ElasticNet)
+                | (Self::Logistic { .. }, ClassicalKind::LogisticRegression)
+        )
+    }
+
+    /// Validate estimator compatibility with the declared encoded width.
+    pub(crate) fn validate_width(&self, width: usize) -> QuantResult<()> {
+        if width == 0 {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "classical estimator input width must be positive".to_owned(),
+            }
+            .into());
+        }
+        if let Self::Logistic {
+            coefficients,
+            intercept,
+        } = self
+        {
+            if coefficients.len() != width || !intercept.is_finite() {
+                return Err(ResearchError::InvalidModelArtifact {
+                    detail: format!(
+                        "logistic estimator width/finite mismatch: coefficients={}, transform={width}",
+                        coefficients.len()
+                    ),
+                }
+                .into());
+            }
+            if coefficients.iter().any(|weight| !weight.is_finite()) {
+                return Err(ResearchError::InvalidModelArtifact {
+                    detail: "logistic estimator contains a non-finite coefficient".to_owned(),
+                }
+                .into());
+            }
+        }
+        let probe = dense_matrix(&[vec![0.0; width]])?;
+        let predictions = self.predict(&probe)?;
+        if predictions.len() != 1 || predictions.iter().any(|value| !value.is_finite()) {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "classical estimator failed the declared-width finite prediction probe"
+                    .to_owned(),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -387,23 +485,35 @@ fn rolling_validation(
     matrix: &TrainingMatrix,
     validation: ValidationSpec,
 ) -> QuantResult<ValidationReport> {
-    let rows = matrix.features.nrows();
-    if matrix.row_as_of.len() != rows || matrix.row_label_horizon_end.len() != rows {
+    let rows = matrix.row_count();
+    if matrix.row_decision_at.len() != rows || matrix.row_label_horizon_end.len() != rows {
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "classical TrainingMatrix timeline metadata length mismatch: \
                  rows={rows} as_of={} horizon={}",
-                matrix.row_as_of.len(),
+                matrix.row_decision_at.len(),
                 matrix.row_label_horizon_end.len()
             ),
         }
         .into());
     }
-    let folds = validation.folds.max(2) as usize;
-    let boundaries: Vec<usize> = (0..=folds).map(|k| rows * k / folds).collect();
+    let folds = usize::try_from(validation.folds.max(2)).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("classical fold count does not fit usize: {error}"),
+        }
+    })?;
+    let boundaries = (0..=folds)
+        .map(|k| {
+            rows.checked_mul(k)
+                .map(|product| product / folds)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "classical fold boundary arithmetic overflow".to_owned(),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let timeline: Vec<TimelineGroup> = (0..rows)
         .map(|idx| TimelineGroup {
-            as_of: matrix.row_as_of[idx],
+            decision_at: matrix.row_decision_at[idx],
             label_horizon_end: matrix.row_label_horizon_end[idx],
         })
         .collect();
@@ -420,7 +530,7 @@ fn rolling_validation(
             continue;
         }
         let test_indices: Vec<usize> = (val_start..val_end).collect();
-        let purged = splitter.split(&timeline, &test_indices, &purge);
+        let purged = splitter.split(&timeline, &test_indices, &purge)?;
         // Walk-forward: never train on rows at or after the validation block.
         let train_indices: Vec<usize> = purged
             .train_indices
@@ -431,30 +541,43 @@ fn rolling_validation(
             continue;
         }
         let train = select_rows(matrix, &train_indices);
-        let (std_train, preprocessing) = standardize(&train);
+        let (input_transform, std_train) = FittedInputTransform::fit(&train)?;
         let x_train = dense_matrix(&std_train)?;
         let model = fit_kind(kind, params, &x_train, &train.labels.to_vec())?;
 
-        let std_val = standardize_with(matrix, &preprocessing, val_start, val_end);
+        let std_val = input_transform.apply_rows(&matrix.cells[val_start..val_end])?;
         let x_val = dense_matrix(&std_val)?;
         let predictions = model.predict(&x_val)?;
         let labels: Vec<f64> = (val_start..val_end).map(|i| matrix.labels[i]).collect();
-        fold_objectives.push(rank_ic_f64(&predictions, &labels).round_dp(RESEARCH_DECIMAL_SCALE));
+        fold_objectives.push(rank_ic_f64(&predictions, &labels)?.round_dp(RESEARCH_DECIMAL_SCALE));
     }
 
-    let mean_objective = if fold_objectives.is_empty() {
-        Decimal::ZERO
-    } else {
-        (fold_objectives.iter().sum::<Decimal>() / Decimal::from(fold_objectives.len() as u64))
-            .round_dp(RESEARCH_DECIMAL_SCALE)
-    };
+    if fold_objectives.is_empty() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "classical rolling validation produced no evaluable folds after PIT purge/embargo (rows={rows}, requested_folds={folds})"
+            ),
+        }
+        .into());
+    }
+    let evaluated_folds = u64::try_from(fold_objectives.len()).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("classical evaluated fold count does not fit u64: {error}"),
+        }
+    })?;
+    let mean_objective = (fold_objectives.iter().sum::<Decimal>() / Decimal::from(evaluated_folds))
+        .round_dp(RESEARCH_DECIMAL_SCALE);
+    let sample_count =
+        u64::try_from(rows).map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!("classical validation sample count does not fit u64: {error}"),
+        })?;
     Ok(ValidationReport {
         held_out_objective: mean_objective,
         held_out_components: None,
         held_out_diagnostics: None,
         fold_objectives,
         fold_components: Vec::new(),
-        sample_count: rows as u64,
+        sample_count,
         dropped_singleton_groups: 0,
         dropped_singleton_rows: 0,
         // Classical adapters do not run coordinate_search; DSR N is trial-grid only.
@@ -464,55 +587,24 @@ fn rolling_validation(
 
 /// Select an arbitrary set of row indices into a new training matrix.
 fn select_rows(matrix: &TrainingMatrix, indices: &[usize]) -> TrainingMatrix {
-    let cols = matrix.features.ncols();
-    let mut features = Array2::<f64>::zeros((indices.len(), cols));
     let mut labels = Array1::<f64>::zeros(indices.len());
-    let mut row_as_of = Vec::with_capacity(indices.len());
+    let mut cells = Vec::with_capacity(indices.len());
+    let mut row_decision_at = Vec::with_capacity(indices.len());
     let mut row_label_horizon_end = Vec::with_capacity(indices.len());
     for (dst, &src) in indices.iter().enumerate() {
-        features.row_mut(dst).assign(&matrix.features.row(src));
+        cells.push(matrix.cells[src].clone());
         labels[dst] = matrix.labels[src];
-        row_as_of.push(matrix.row_as_of[src]);
+        row_decision_at.push(matrix.row_decision_at[src]);
         row_label_horizon_end.push(matrix.row_label_horizon_end[src]);
     }
     TrainingMatrix {
-        features,
+        cells,
         labels,
-        feature_names: matrix.feature_names.clone(),
+        columns: matrix.columns.clone(),
         rejected_rows: 0,
-        row_as_of,
+        row_decision_at,
         row_label_horizon_end,
     }
-}
-
-/// Standardize rows `[start, end)` of `matrix` using a frozen preprocessing
-/// transform (the train-fold means/stds), so the validation fold never leaks.
-fn standardize_with(
-    matrix: &TrainingMatrix,
-    preprocessing: &PreprocessingArtifact,
-    start: usize,
-    end: usize,
-) -> Vec<Vec<f64>> {
-    // `means` / `stds` are built per column in `standardize`, so they are exactly
-    // `cols` long and safe to index. (Direct indexing also avoids `smartcore`'s
-    // in-scope `Array::get`, which shadows `Vec::get`.)
-    let cols = matrix.features.ncols();
-    (start..end)
-        .map(|r| {
-            (0..cols)
-                .map(|c| {
-                    let mean = preprocessing.means[c].to_f64().unwrap_or(0.0);
-                    let std_raw = preprocessing.stds[c].to_f64().unwrap_or(1.0);
-                    let std = if std_raw.abs() > f64::EPSILON {
-                        std_raw
-                    } else {
-                        1.0
-                    };
-                    (matrix.features[[r, c]] - mean) / std
-                })
-                .collect()
-        })
-        .collect()
 }
 
 /// Map a `smartcore` regressor prediction `Result` into our error domain.
@@ -526,22 +618,37 @@ fn regressor_predict(result: Result<Vec<f64>, smartcore::error::Failed>) -> Quan
 }
 
 /// Per-row binary logistic probability `σ(wᵀx + b)` over a standardized matrix.
-fn logistic_proba(coefficients: &[f64], intercept: f64, x: &DenseMatrix<f64>) -> Vec<f64> {
+fn logistic_proba(
+    coefficients: &[f64],
+    intercept: f64,
+    x: &DenseMatrix<f64>,
+) -> QuantResult<Vec<f64>> {
     let (rows, cols) = x.shape();
-    (0..rows)
+    if coefficients.len() != cols || !intercept.is_finite() {
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: format!(
+                "logistic coefficient width {} does not match matrix width {cols}",
+                coefficients.len()
+            ),
+        }
+        .into());
+    }
+    let predictions = (0..rows)
         .map(|r| {
             let mut z = intercept;
-            for c in 0..cols {
-                let w = if c < coefficients.len() {
-                    coefficients[c]
-                } else {
-                    0.0
-                };
-                z = (*x.get((r, c))).mul_add(w, z);
+            for (c, coefficient) in coefficients.iter().enumerate() {
+                z = (*x.get((r, c))).mul_add(*coefficient, z);
             }
             sigmoid(z)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if predictions.iter().any(|value| !value.is_finite()) {
+        return Err(ResearchError::Inference {
+            detail: "logistic inference produced a non-finite probability".to_owned(),
+        }
+        .into());
+    }
+    Ok(predictions)
 }
 
 /// Numerically stable logistic sigmoid.
@@ -555,9 +662,9 @@ fn sigmoid(z: f64) -> f64 {
 }
 
 /// Validate the matrix shape, returning `(rows, cols)`.
-fn validate_matrix(matrix: &TrainingMatrix) -> QuantResult<(usize, usize)> {
-    let rows = matrix.features.nrows();
-    let cols = matrix.features.ncols();
+fn validate_matrix(matrix: &TrainingMatrix) -> QuantResult<usize> {
+    let rows = matrix.row_count();
+    let cols = matrix.input_count();
     if rows < 2 || cols == 0 {
         return Err(ResearchError::MatrixBuild {
             detail: format!(
@@ -566,7 +673,7 @@ fn validate_matrix(matrix: &TrainingMatrix) -> QuantResult<(usize, usize)> {
         }
         .into());
     }
-    Ok((rows, cols))
+    Ok(rows)
 }
 
 /// Map a `smartcore` fit `Result` into our error domain.
@@ -596,41 +703,6 @@ fn extract_logistic(model: &Logistic) -> QuantResult<(Vec<f64>, f64)> {
     Ok((weights, intercept))
 }
 
-/// Standardize each column to zero mean / unit variance; zero-variance columns
-/// are left centered (std treated as 1). Returns the standardized rows + the
-/// recorded transform.
-fn standardize(matrix: &TrainingMatrix) -> (Vec<Vec<f64>>, PreprocessingArtifact) {
-    let rows = matrix.features.nrows();
-    let cols = matrix.features.ncols();
-    let row_count = count_f64(rows);
-    let mut means = vec![0.0_f64; cols];
-    let mut stds = vec![1.0_f64; cols];
-
-    for c in 0..cols {
-        let column = matrix.features.column(c);
-        let mean = column.sum() / row_count;
-        let var = column.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / row_count;
-        let std = var.sqrt();
-        means[c] = mean;
-        stds[c] = if std > f64::EPSILON { std } else { 1.0 };
-    }
-
-    let standardized: Vec<Vec<f64>> = (0..rows)
-        .map(|r| {
-            (0..cols)
-                .map(|c| (matrix.features[[r, c]] - means[c]) / stds[c])
-                .collect()
-        })
-        .collect();
-
-    let preprocessing = PreprocessingArtifact {
-        feature_names: matrix.feature_names.clone(),
-        means: means.iter().map(|m| decimal(*m)).collect(),
-        stds: stds.iter().map(|s| decimal(*s)).collect(),
-    };
-    (standardized, preprocessing)
-}
-
 /// Build a `smartcore` dense matrix from standardized rows.
 fn dense_matrix(rows: &[Vec<f64>]) -> QuantResult<DenseMatrix<f64>> {
     DenseMatrix::from_2d_vec(&rows.to_vec()).map_err(|error| {
@@ -648,9 +720,9 @@ fn ablation_importances(
     model: &SmartcoreModel,
     standardized: &[Vec<f64>],
     baseline: &[f64],
-    matrix: &TrainingMatrix,
-) -> Vec<FeatureImportance> {
-    let cols = matrix.feature_names.len();
+    input_transform: &FittedInputTransform,
+) -> QuantResult<Vec<FeatureImportance>> {
+    let cols = input_transform.encoded_columns.len();
     let mut importances = Vec::with_capacity(cols);
     for c in 0..cols {
         let ablated: Vec<Vec<f64>> = standardized
@@ -663,52 +735,71 @@ fn ablation_importances(
                 row
             })
             .collect();
-        let importance = dense_matrix(&ablated)
-            .and_then(|x| model.predict(&x))
-            .map_or(0.0, |preds| {
-                let total: f64 = baseline
-                    .iter()
-                    .zip(&preds)
-                    .map(|(b, p)| (b - p).abs())
-                    .sum();
-                total / count_f64(baseline.len().max(1))
-            });
+        let x = dense_matrix(&ablated)?;
+        let predictions = model.predict(&x)?;
+        let total: f64 = baseline
+            .iter()
+            .zip(&predictions)
+            .map(|(base, predicted)| (base - predicted).abs())
+            .sum();
+        let importance = total / count_f64(baseline.len().max(1))?;
         importances.push(FeatureImportance {
-            feature: matrix.feature_names[c].clone(),
-            importance: decimal(importance).round_dp(RESEARCH_DECIMAL_SCALE),
+            feature: input_transform.encoded_columns[c].name.clone(),
+            importance: decimal(importance, "feature importance")?.round_dp(RESEARCH_DECIMAL_SCALE),
         });
     }
-    importances
+    Ok(importances)
 }
 
 /// Spearman rank IC over `f64` series (delegates to the Decimal stats).
-fn rank_ic_f64(predicted: &[f64], labels: &[f64]) -> Decimal {
-    let p: Vec<Decimal> = predicted.iter().map(|v| decimal(*v)).collect();
-    let l: Vec<Decimal> = labels.iter().map(|v| decimal(*v)).collect();
-    stats::spearman(&p, &l)
+fn rank_ic_f64(predicted: &[f64], labels: &[f64]) -> QuantResult<Decimal> {
+    let p = predicted
+        .iter()
+        .map(|value| decimal(*value, "prediction"))
+        .collect::<QuantResult<Vec<_>>>()?;
+    let l = labels
+        .iter()
+        .map(|value| decimal(*value, "label"))
+        .collect::<QuantResult<Vec<_>>>()?;
+    Ok(stats::spearman(&p, &l))
 }
 
-/// Convert an `f64` to `Decimal` (training-matrix boundary).
-fn decimal(value: f64) -> Decimal {
-    Decimal::from_f64(value).unwrap_or(Decimal::ZERO)
+/// Convert a finite `f64` to `Decimal` without fabricating a fallback.
+fn decimal(value: f64, field: &str) -> QuantResult<Decimal> {
+    if !value.is_finite() {
+        return Err(ResearchError::MatrixBuild {
+            detail: format!("{field} is not finite"),
+        }
+        .into());
+    }
+    Decimal::from_f64(value).ok_or_else(|| {
+        ResearchError::MatrixBuild {
+            detail: format!("{field} cannot be represented as Decimal"),
+        }
+        .into()
+    })
 }
 
 /// Lossless-enough count → `f64` (saturating at `u32::MAX`; sample counts never
 /// approach that), avoiding a `usize as f64` precision-loss cast.
-fn count_f64(n: usize) -> f64 {
-    f64::from(u32::try_from(n).unwrap_or(u32::MAX))
+fn count_f64(n: usize) -> QuantResult<f64> {
+    let count = u32::try_from(n).map_err(|error| ResearchError::MatrixBuild {
+        detail: format!("row count does not fit the exact f64 conversion boundary: {error}"),
+    })?;
+    Ok(f64::from(count))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ClassicalAdapterRegistry, SmartcoreModel};
     use chrono::TimeZone;
-    use ndarray::{Array1, Array2};
+    use ndarray::Array1;
+    use rust_decimal_macros::dec;
 
     use crate::{
-        features::FeatureName,
+        features::{FeatureName, FeatureUnit, FeatureValueKind},
         model::{classical::dense_matrix, runtime::ClassicalKind, trainer::ValidationSpec},
-        training::TrainingMatrix,
+        training::{FeatureColumnSpec, ModelInputCell, TrainingMatrix},
     };
 
     /// Fixture epoch offset for row `i` (test matrices are tiny; index always fits).
@@ -726,23 +817,38 @@ mod tests {
     /// A linearly separable matrix: label = 1 when feature-0 is high.
     fn training_matrix() -> TrainingMatrix {
         let rows = 60usize;
-        let mut features = Array2::<f64>::zeros((rows, 2));
         let mut labels = Array1::<f64>::zeros(rows);
+        let mut cells = Vec::with_capacity(rows);
         for i in 0..rows {
             let high = i % 2 == 0;
-            features[[i, 0]] = if high { 0.9 } else { 0.1 };
-            features[[i, 1]] = f64::from(u8::try_from(i % 5).unwrap_or(0)) / 5.0;
+            let f0 = if high { dec!(0.9) } else { dec!(0.1) };
+            let f1 = rust_decimal::Decimal::from(i % 5) / rust_decimal::Decimal::from(5);
+            cells.push(vec![
+                ModelInputCell::Observed(f0),
+                ModelInputCell::Observed(f1),
+            ]);
             labels[i] = if high { 1.0 } else { 0.0 };
         }
         TrainingMatrix {
-            features,
+            cells,
             labels,
-            feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
+            columns: vec![
+                FeatureColumnSpec {
+                    feature: FeatureName::new("f0"),
+                    unit: FeatureUnit::Ratio,
+                    value_kind: FeatureValueKind::Decimal,
+                    required: true,
+                },
+                FeatureColumnSpec {
+                    feature: FeatureName::new("f1"),
+                    unit: FeatureUnit::Ratio,
+                    value_kind: FeatureValueKind::Decimal,
+                    required: true,
+                },
+            ],
             rejected_rows: 0,
-            row_as_of: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
-            row_label_horizon_end: (0..rows)
-                .map(|i| fixture_ts(fixture_row_secs(i) + 60))
-                .collect(),
+            row_decision_at: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+            row_label_horizon_end: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
         }
     }
 
@@ -765,19 +871,34 @@ mod tests {
         // Long label horizons so expanding-prefix CV would leak; purged CV must
         // still produce a finite held-out objective (or skip thin folds).
         let rows = 40usize;
-        let mut features = Array2::<f64>::zeros((rows, 2));
         let mut labels = Array1::<f64>::zeros(rows);
+        let mut cells = Vec::with_capacity(rows);
         for i in 0..rows {
-            features[[i, 0]] = f64::from(u8::try_from(i % 7).unwrap_or(0));
-            features[[i, 1]] = f64::from(u8::try_from(i % 3).unwrap_or(0));
+            cells.push(vec![
+                ModelInputCell::Observed(rust_decimal::Decimal::from(i % 7)),
+                ModelInputCell::Observed(rust_decimal::Decimal::from(i % 3)),
+            ]);
             labels[i] = if i % 2 == 0 { 1.0 } else { 0.0 };
         }
         let matrix = TrainingMatrix {
-            features,
+            cells,
             labels,
-            feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
+            columns: vec![
+                FeatureColumnSpec {
+                    feature: FeatureName::new("f0"),
+                    unit: FeatureUnit::Count,
+                    value_kind: FeatureValueKind::Count,
+                    required: true,
+                },
+                FeatureColumnSpec {
+                    feature: FeatureName::new("f1"),
+                    unit: FeatureUnit::Count,
+                    value_kind: FeatureValueKind::Count,
+                    required: true,
+                },
+            ],
             rejected_rows: 0,
-            row_as_of: (0..rows)
+            row_decision_at: (0..rows)
                 .map(|i| fixture_ts(fixture_row_secs(i) * 60))
                 .collect(),
             row_label_horizon_end: (0..rows)
@@ -796,6 +917,27 @@ mod tests {
         .expect("purged rolling validation");
         assert_eq!(report.sample_count, 40);
         assert_eq!(report.coord_search_effective_n, 0);
+    }
+
+    #[test]
+    fn rolling_validation_rejects_when_purge_leaves_no_evaluable_fold() {
+        use super::rolling_validation;
+        use crate::model::{classical::ClassicalParams, runtime::ClassicalKind};
+
+        let mut matrix = training_matrix();
+        let terminal = fixture_ts(1_000_000);
+        matrix.row_label_horizon_end.fill(terminal);
+        let error = rolling_validation(
+            ClassicalKind::Ridge,
+            &ClassicalParams::defaults_for(ClassicalKind::Ridge),
+            &matrix,
+            ValidationSpec {
+                folds: 4,
+                ..ValidationSpec::default()
+            },
+        )
+        .expect_err("an empty validation fold set must fail closed");
+        assert!(error.to_string().contains("no evaluable folds"));
     }
 
     /// Every supported kind trains, validates out-of-sample, serializes, and

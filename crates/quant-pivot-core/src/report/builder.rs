@@ -3,10 +3,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::{Duration, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        ModelVersionInfo, PointInTimeDataSource, RuntimeConfigVersionInfo,
+        DecisionBoundary, DecisionClock, DecisionSource, ModelVersionInfo,
+        RuntimeConfigVersionInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
     enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
@@ -22,7 +23,7 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::PortfolioCaps,
-    features::{MarketDecisionCapture, PitView},
+    features::MarketDecisionCapture,
     model::{
         CalibrationArtifactLoader, ResolvedCalibration, SignalCandidate,
         load_hash_verified_artifact,
@@ -41,7 +42,7 @@ use rust_decimal::Decimal;
 
 use crate::{
     governance::{RuntimeModeHandle, resolve_return_model_calibration},
-    prefetch::market_candidates::MarketCandidateProvider,
+    prefetch::market_candidates::{DecisionSnapshotSource, MarketCandidateProvider},
     service::{
         account::AccountProviderFactory,
         equity::{DrawdownProvider, ReportEquitySnapshot},
@@ -80,7 +81,6 @@ pub struct ReportBuilderDeps {
     pub account_provider_factory: Arc<AccountProviderFactory>,
     pub drawdown_provider: Arc<dyn DrawdownProvider>,
     pub composer: Arc<dyn RecommendationComposer>,
-    pub pit_source: Arc<dyn PointInTimeDataSource>,
     pub quant_fact_read_repo: Arc<dyn QuantFactReadRepository>,
     pub correlation_estimator: Arc<dyn CorrelationEstimator>,
     pub runtime_mode: RuntimeModeHandle,
@@ -95,8 +95,7 @@ pub struct DefaultReportBuilder {
 struct BuildContext {
     version: RuntimeConfigVersionInfo,
     config: RuntimeConfig,
-    source_delay_secs: u64,
-    as_of: chrono::DateTime<Utc>,
+    boundary: DecisionBoundary,
     top_n: u32,
     active: ActiveModelRequirements,
     return_model_calibrated: bool,
@@ -168,9 +167,9 @@ impl DefaultReportBuilder {
         self.deps
             .readiness_gate
             .ensure_degraded_empty_allowed(&context.config)?;
-        let selection = self.build_selection(&context).await?;
+        let (selection, decision_snapshot) = self.build_selection(&context).await?;
         let account = self
-            .account_snapshot(context.as_of, &context.config)
+            .account_snapshot(context.boundary.decision_at(), &context.config)
             .await?;
         let mut equity = self
             .deps
@@ -189,7 +188,9 @@ impl DefaultReportBuilder {
             return Ok(report);
         }
 
-        let features = self.build_features(&context, &selection).await?;
+        let features = self
+            .build_features(&context, &selection, decision_snapshot.as_ref())
+            .await?;
         let model_outcome = match self
             .run_model_stage(&request, &context, &selection, &account, &equity, &features)
             .await?
@@ -226,11 +227,14 @@ impl DefaultReportBuilder {
                         plan.plan_row.optimizer_meta_json.status,
                     ),
                     candidate_count: model_outcome.emitted,
-                    rejected_count: u32::try_from(plan.rejected.len()).unwrap_or(u32::MAX),
+                    rejected_count: count_u32(
+                        plan.rejected.len(),
+                        "report.planner_rejected_count",
+                    )?,
                     warnings: Vec::new(),
                 },
                 model_run_id: Some(model_outcome.model_run_id.clone()),
-                market_selection_count: market_selection_count(&selection.included),
+                market_selection_count: market_selection_count(&selection.included)?,
                 captures: artifacts.captures,
                 feature_vector_by_market: feature_vector_by_market(&features),
                 data_quality_snapshot: artifacts.data_quality_snapshot,
@@ -310,10 +314,13 @@ impl DefaultReportBuilder {
                 warnings: vec!["operational phase is not Operational".to_owned()],
             },
             model_run_id: None,
-            market_selection_count: market_selection_count(&selection.included),
+            market_selection_count: market_selection_count(&selection.included)?,
             captures: HashMap::new(),
             feature_vector_by_market: HashMap::new(),
-            data_quality_snapshot: empty_data_quality_snapshot(context, context.as_of),
+            data_quality_snapshot: empty_data_quality_snapshot(
+                context,
+                context.boundary.decision_at(),
+            ),
             portfolio_plan: None,
             planner_rejected: &[],
         })
@@ -340,14 +347,20 @@ impl DefaultReportBuilder {
             empty: EmptyReportContext {
                 reason: EmptyReportReason::EmptySelection,
                 candidate_count: 0,
-                rejected_count: u32::try_from(selection.excluded.len()).unwrap_or(u32::MAX),
+                rejected_count: count_u32(
+                    selection.excluded.len(),
+                    "report.selection_rejected_count",
+                )?,
                 warnings: Vec::new(),
             },
             model_run_id: None,
-            market_selection_count: market_selection_count(&selection.included),
+            market_selection_count: market_selection_count(&selection.included)?,
             captures: HashMap::new(),
             feature_vector_by_market: HashMap::new(),
-            data_quality_snapshot: empty_data_quality_snapshot(context, context.as_of),
+            data_quality_snapshot: empty_data_quality_snapshot(
+                context,
+                context.boundary.decision_at(),
+            ),
             portfolio_plan: None,
             planner_rejected: &[],
         })
@@ -370,11 +383,14 @@ impl DefaultReportBuilder {
             empty: EmptyReportContext {
                 reason: EmptyReportReason::InsufficientDataQuality,
                 candidate_count: 0,
-                rejected_count: u32::try_from(stage.features.rejected.len()).unwrap_or(u32::MAX),
+                rejected_count: count_u32(
+                    stage.features.rejected.len(),
+                    "report.feature_rejected_count",
+                )?,
                 warnings: vec!["feature pipeline accepted zero markets".to_owned()],
             },
             model_run_id: None,
-            market_selection_count: market_selection_count(&stage.selection.included),
+            market_selection_count: market_selection_count(&stage.selection.included)?,
             captures: stage.features.captures.clone(),
             feature_vector_by_market: feature_vector_by_market(stage.features),
             data_quality_snapshot: stage.features.data_quality_snapshot.clone(),
@@ -406,7 +422,7 @@ impl DefaultReportBuilder {
                 warnings: vec!["active model emitted no positive candidate".to_owned()],
             },
             model_run_id: Some(model_outcome.model_run_id.clone()),
-            market_selection_count: market_selection_count(&stage.selection.included),
+            market_selection_count: market_selection_count(&stage.selection.included)?,
             captures: artifacts.captures,
             feature_vector_by_market: feature_vector_by_market(stage.features),
             data_quality_snapshot: artifacts.data_quality_snapshot,
@@ -436,8 +452,18 @@ impl DefaultReportBuilder {
 
     async fn prepare_context(&self, request: &BuildReportRequest) -> QuantResult<BuildContext> {
         let (version, config) = self.load_config(request).await?;
-        let source_delay_secs = resolve_source_delay(request, &config)?;
-        let as_of = request.trigger_time - checked_source_delay(source_delay_secs)?;
+        let knowledge_lag_secs = resolve_knowledge_lag(request, &config)?;
+        let boundary = DecisionClock::new(knowledge_lag_secs)
+            .boundary(request.trigger_time)?
+            .with_source_cutoff(DecisionSource::Catalog, 0)?
+            .with_source_cutoff(DecisionSource::Book, 0)?
+            .with_source_cutoff(DecisionSource::Microstructure, 0)?
+            .with_source_cutoff(DecisionSource::TradeTape, 0)?
+            .with_source_cutoff(DecisionSource::Linkage, 0)?
+            .with_source_cutoff(
+                DecisionSource::DomainCrypto,
+                config.domain.crypto.availability_lag_secs,
+            )?;
         let top_n = resolve_top_n(request, &config)?;
         let active = self
             .deps
@@ -447,7 +473,7 @@ impl DefaultReportBuilder {
                 factors: &config.factors,
                 domain: &config.domain,
                 model: &config.model,
-                as_of,
+                decision_at: boundary.decision_at(),
             })
             .await?;
         let (return_model_calibrated, resolved_calibration) =
@@ -456,8 +482,7 @@ impl DefaultReportBuilder {
         Ok(BuildContext {
             version,
             config,
-            source_delay_secs,
-            as_of,
+            boundary,
             top_n,
             active,
             return_model_calibrated,
@@ -486,53 +511,53 @@ impl DefaultReportBuilder {
     async fn build_selection(
         &self,
         context: &BuildContext,
-    ) -> QuantResult<MarketSelectionSnapshot> {
-        let candidates = self
+    ) -> QuantResult<(MarketSelectionSnapshot, Arc<DecisionSnapshotSource>)> {
+        let batch = self
             .deps
             .candidate_provider
-            .candidates(context.as_of, &context.config.domain)
+            .candidates(&context.boundary, &context.config.domain)
             .await?;
         let selection = self
             .deps
             .market_selector
             .build_snapshot(
                 MarketSelectionBuildRequest {
-                    as_of: context.as_of,
+                    decision_at: context.boundary.decision_at(),
                     runtime_config_version_id: context.version.runtime_config_version_id.clone(),
                     selection: context.config.selection.clone(),
                     data_quality: context.config.data_quality.clone(),
                     features: context.config.features.clone(),
                     model_requirements: context.active.model_requirements.clone(),
-                    source_delay_secs: context.source_delay_secs,
+                    knowledge_lag_secs: context.boundary.knowledge_lag_secs(),
                 },
-                candidates.clone(),
+                batch.candidates.clone(),
             )
             .await?;
-        let selection_model = map_snapshot_to_model(&selection, &candidates)?;
+        let selection_model = map_snapshot_to_model(&selection, &batch.candidates)?;
         self.deps
             .market_selection_repo
             .create_snapshot(selection_model.snapshot, selection_model.members)
             .await?;
-        Ok(selection)
+        Ok((selection, batch.snapshot_source))
     }
 
     async fn build_features(
         &self,
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
+        decision_snapshot: &DecisionSnapshotSource,
     ) -> QuantResult<FeaturePipelineResult> {
         self.deps
             .feature_pipeline
             .run(FeaturePipelineRequest {
                 included: &selection.included,
-                as_of: context.as_of,
+                boundary: context.boundary.clone(),
                 runtime_config_version_id: context.version.runtime_config_version_id.clone(),
                 features: &context.config.features,
                 domain: &context.config.domain,
                 data_quality: &context.config.data_quality,
                 model_requirements: &context.active.model_requirements,
-                source_delay_secs: context.source_delay_secs,
-                pit: PitView::Live(self.deps.pit_source.as_ref()),
+                pit: decision_snapshot,
                 liquidity_cap_usd: liquidity_score_cap(&context.config)?,
             })
             .await
@@ -544,6 +569,14 @@ impl DefaultReportBuilder {
         selection: &MarketSelectionSnapshot,
         features: &FeaturePipelineResult,
     ) -> QuantResult<ModelRunOutcome> {
+        let feature_evidence =
+            features
+                .feature_evidence
+                .as_ref()
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "model_runner",
+                    detail: "no feature vector passed the data-quality gate".to_owned(),
+                })?;
         let feature_vector_ids = features
             .persisted
             .iter()
@@ -557,12 +590,13 @@ impl DefaultReportBuilder {
                 selection: &selection.included,
                 feature_vectors: &features.accepted,
                 feature_vector_ids: &feature_vector_ids,
+                feature_evidence,
                 features: &context.config.features,
                 factors: &context.config.factors,
                 domain: &context.config.domain,
                 model: &context.config.model,
-                top_n: bounded_usize(context.top_n),
-                as_of: context.as_of,
+                top_n: bounded_usize(context.top_n)?,
+                boundary: context.boundary.clone(),
             })
             .await
     }
@@ -589,7 +623,7 @@ impl DefaultReportBuilder {
             portfolio_plan_id: PortfolioPlanId::from_v7(),
             model_run_id: model_outcome.model_run_id.clone(),
             market_selection_id: selection.market_selection_id.clone(),
-            as_of: context.as_of,
+            decision_at: context.boundary.decision_at(),
             candidates: plan_candidates,
             account,
             drawdown_state,
@@ -609,7 +643,7 @@ impl DefaultReportBuilder {
             entry_max_slippage_bps: Bps::new(Decimal::from(
                 context.config.execution.entry_order_policy.max_slippage_bps,
             )),
-            top_n: bounded_usize(context.top_n),
+            top_n: bounded_usize(context.top_n)?,
         })
     }
 
@@ -641,8 +675,9 @@ impl DefaultReportBuilder {
         let lookback_secs = i64::from(correlation.lookback_days)
             .checked_mul(86_400)
             .ok_or_else(|| QuantError::config("correlation.lookback_days too large"))?;
-        let from_ms = (context.as_of - Duration::seconds(lookback_secs)).timestamp_millis();
-        let to_ms = context.as_of.timestamp_millis();
+        let from_ms = (context.boundary.knowledge_cutoff() - Duration::seconds(lookback_secs))
+            .timestamp_millis();
+        let to_ms = context.boundary.knowledge_cutoff().timestamp_millis();
         let token_ids = selection
             .included
             .iter()
@@ -651,7 +686,13 @@ impl DefaultReportBuilder {
         let rows = self
             .deps
             .quant_fact_read_repo
-            .mid_price_series(token_ids, from_ms, to_ms, CORRELATION_BUCKET_SECS)
+            .mid_price_series(
+                token_ids,
+                from_ms,
+                to_ms,
+                context.boundary.decision_at().timestamp_millis(),
+                CORRELATION_BUCKET_SECS,
+            )
             .await?;
 
         let mut by_token: HashMap<String, std::collections::BTreeMap<i64, Decimal>> =
@@ -700,8 +741,9 @@ impl DefaultReportBuilder {
             trigger: &input.request.trigger,
             trigger_key: input.request.trigger.key(input.request.trigger_time),
             trigger_time: input.request.trigger_time,
-            source_delay_secs: input.context.source_delay_secs,
-            as_of: input.context.as_of,
+            knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
+            decision_at: input.context.boundary.decision_at(),
+            published_at: Utc::now(),
             runtime_config_version_id: input.context.version.runtime_config_version_id.clone(),
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
@@ -718,9 +760,11 @@ impl DefaultReportBuilder {
             data_quality_snapshot: input.features.data_quality_snapshot.clone(),
             model_run_id: Some(input.model_outcome.model_run_id),
             candidate_count: input.model_outcome.emitted,
-            feature_rejected_count: u32::try_from(input.features.rejected.len())
-                .unwrap_or(u32::MAX),
-            market_selection_count: market_selection_count(&input.selection.included),
+            feature_rejected_count: count_u32(
+                input.features.rejected.len(),
+                "report.feature_rejected_count",
+            )?,
+            market_selection_count: market_selection_count(&input.selection.included)?,
             empty: None,
             top_n: input.context.top_n,
             return_model_calibrated: input.context.return_model_calibrated,
@@ -755,23 +799,25 @@ impl DefaultReportBuilder {
     }
 
     fn compose_empty(&self, input: EmptyComposeInput<'_>) -> QuantResult<ComposedReport> {
-        let portfolio_plan = input.portfolio_plan.unwrap_or_else(|| {
-            empty_plan_for_report(
+        let portfolio_plan = match input.portfolio_plan {
+            Some(portfolio_plan) => portfolio_plan,
+            None => empty_plan_for_report(
                 input.model_run_id.clone(),
                 input.market_selection_id.clone(),
-                input.context.as_of,
+                input.context.boundary.decision_at(),
                 input.account,
                 &input.context.config,
                 input.empty.reason,
                 input.empty.rejected_count,
-            )
-        });
+            )?,
+        };
         self.deps.composer.compose(ComposeReportInput {
             trigger: &input.request.trigger,
             trigger_key: input.request.trigger.key(input.request.trigger_time),
             trigger_time: input.request.trigger_time,
-            source_delay_secs: input.context.source_delay_secs,
-            as_of: input.context.as_of,
+            knowledge_lag_secs: input.context.boundary.knowledge_lag_secs(),
+            decision_at: input.context.boundary.decision_at(),
+            published_at: Utc::now(),
             runtime_config_version_id: input.context.version.runtime_config_version_id.clone(),
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
@@ -817,10 +863,9 @@ fn aligned_series(
     let Some(series) = series.filter(|series| !series.is_empty()) else {
         return Vec::new();
     };
-    let mut last = *series
-        .values()
-        .next()
-        .expect("non-empty series has a first value");
+    let Some(mut last) = series.values().next().copied() else {
+        return Vec::new();
+    };
     let mut out = Vec::with_capacity(grid.len());
     for bucket in grid {
         if let Some(value) = series.get(bucket) {
@@ -857,17 +902,17 @@ fn resolve_top_n(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantR
     Ok(top_n)
 }
 
-fn checked_source_delay(source_delay_secs: u64) -> QuantResult<Duration> {
-    let seconds = i64::try_from(source_delay_secs)
-        .map_err(|error| QuantError::config(format!("source_delay_secs too large: {error}")))?;
-    Ok(Duration::seconds(seconds))
+fn bounded_usize(value: u32) -> QuantResult<usize> {
+    usize::try_from(value).map_err(|error| {
+        ReportError::NumericOverflow {
+            field: "reports.top_n",
+            detail: error.to_string(),
+        }
+        .into()
+    })
 }
 
-fn bounded_usize(value: u32) -> usize {
-    usize::try_from(value).unwrap_or(usize::MAX)
-}
-
-fn resolve_source_delay(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantResult<u64> {
+fn resolve_knowledge_lag(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantResult<u64> {
     match &request.trigger {
         ReportTrigger::Scheduled { schedule_id } => {
             let schedule = config
@@ -883,22 +928,22 @@ fn resolve_source_delay(request: &BuildReportRequest, config: &RuntimeConfig) ->
                     "report schedule {schedule_id} is disabled"
                 )));
             }
-            Ok(schedule.source_delay_secs)
+            Ok(schedule.knowledge_lag_secs)
         }
         ReportTrigger::AdHoc { .. } => {
             if !config.reports.ad_hoc_report_enabled {
                 return Err(QuantError::config("ad-hoc report generation is disabled"));
             }
-            request.source_delay_secs_override.ok_or_else(|| {
+            request.knowledge_lag_secs_override.ok_or_else(|| {
                 QuantError::config(
-                    "ad-hoc report requires an explicit source_delay_secs (no configured default)",
+                    "ad-hoc report requires an explicit knowledge_lag_secs (no configured default)",
                 )
             })
         }
     }
 }
 
-pub(super) async fn report_as_of(
+pub(super) async fn report_decision_at(
     runtime_config_repo: &dyn RuntimeConfigVersionRepository,
     request: &BuildReportRequest,
 ) -> QuantResult<chrono::DateTime<Utc>> {
@@ -907,8 +952,10 @@ pub(super) async fn report_as_of(
         .await?
         .ok_or_else(|| QuantError::config("no active runtime config version"))?;
     let config = RuntimeConfig::from_json(&version.config_json)?;
-    let source_delay_secs = resolve_source_delay(request, &config)?;
-    Ok(request.trigger_time - checked_source_delay(source_delay_secs)?)
+    let knowledge_lag_secs = resolve_knowledge_lag(request, &config)?;
+    DecisionClock::new(knowledge_lag_secs)
+        .boundary(request.trigger_time)
+        .map(|boundary| boundary.decision_at())
 }
 
 fn plan_candidates<'a>(
@@ -932,17 +979,26 @@ fn plan_candidates<'a>(
         .collect()
 }
 
-fn market_selection_count(selected: &[SelectedMarket]) -> u32 {
-    u32::try_from(selected.len()).unwrap_or(u32::MAX)
+fn market_selection_count(selected: &[SelectedMarket]) -> QuantResult<u32> {
+    count_u32(selected.len(), "report.market_selection_count")
+}
+
+fn count_u32(count: usize, field: &'static str) -> QuantResult<u32> {
+    u32::try_from(count)
+        .map_err(|error| ReportError::NumericOverflow {
+            field,
+            detail: error.to_string(),
+        })
+        .map_err(Into::into)
 }
 
 fn empty_data_quality_snapshot(
     context: &BuildContext,
-    as_of: chrono::DateTime<Utc>,
+    decision_at: chrono::DateTime<Utc>,
 ) -> NewReportDataQualitySnapshot {
     NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
-        as_of,
+        decision_at,
         runtime_config_version_id: context.version.runtime_config_version_id.clone(),
         tokens_json: ReportDataQualityTokens(Vec::new()),
     }

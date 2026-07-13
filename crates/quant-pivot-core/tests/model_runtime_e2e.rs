@@ -14,9 +14,10 @@ use quant_pivot_core::{
     ingest::{book_store::BookStore, market_registry::MarketRegistry},
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
-        metrics_hub::MetricsHub, signal_candidate_fact_writer::SignalCandidateEventWriter,
+        metrics_hub::MetricsHub, model_input_fact_writer::ModelInputEventWriter,
+        serving_evidence::FeatureEvidenceCommitment,
+        signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
-    pit::platform::live_book::LiveBookDataSource,
     prefetch::feature_window::FeatureWindowProvider,
     service::{
         factor_pipeline::FactorPipelineService,
@@ -34,24 +35,24 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        NewModelRun, NewModelSpec, NewModelVersion,
-        market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+        DecisionBoundary, DecisionClock, NewModelRun, NewModelSpec, NewModelVersion,
+        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
         model::ModelFamily,
         quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     runtime_config::{
-        DataQualityConfig, DecimalString, DomainConfig, FactorWeights, FactorsConfig,
-        FeaturesConfig, ModelConfig, ModelVersionRef,
+        DataQualityConfig, DecimalString, DomainConfig, FactorCrossSectionConfig, FactorWeights,
+        FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef,
     },
     types::{
-        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelRunId,
-        ModelSpecId, ModelVersionId, Price, RuntimeConfigVersionId, SchemaVersion, Shares, TokenId,
-        Usd,
+        ContentHash, DomainInstrumentKey, EventId, FeatureVectorId, MarketId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, Price,
+        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -68,13 +69,13 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
-    factors::FactorEngine,
-    features::{FeatureSchema, FeatureVector, PitView},
+    factors::{FactorEngine, FrozenReferenceQuantiles},
+    features::{FeatureSchema, FeatureVector},
     hashing::ResearchHasher,
     model::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact,
         ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
-        WeightedFactorModelArtifact,
+        WeightedFactorModelArtifact, model_input_contract_hash,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -86,6 +87,7 @@ use quant_pivot_test_support::{
     report_pipeline_harness::{EmptyBasisAlertRepo, EmptyLinkageRepo},
     trade_tape_fixtures::live_trade_tape_block_cursor_repo,
 };
+use quant_pivot_test_support::{fact_sink::DiscardFactWriter, pit::InMemoryDecisionSnapshotSource};
 use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
 
@@ -114,6 +116,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -123,6 +126,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -133,6 +137,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -152,6 +157,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
@@ -161,6 +167,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
         Ok(None)
     }
@@ -170,6 +177,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -177,7 +185,8 @@ impl QuantFactReadRepository for EmptyFactRead {
     async fn resolution_at(
         &self,
         _market_id: &MarketId,
-        _as_of_ms: i64,
+        _source_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         Ok(None)
     }
@@ -187,6 +196,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -196,6 +206,8 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_keys: Vec<DomainInstrumentKey>,
         _from_ms: i64,
         _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -205,6 +217,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         _instrument_key: &DomainInstrumentKey,
         _metric: &str,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         Ok(None)
     }
@@ -213,6 +226,7 @@ impl QuantFactReadRepository for EmptyFactRead {
         &self,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
     }
@@ -253,9 +267,26 @@ fn registry_market() -> MarketRegistryInfo {
         fee_schedule: None,
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,
-        created_at: Utc::now() - ChronoDuration::days(2),
+        created_at: Some(Utc::now() - ChronoDuration::days(2)),
         updated_at: Utc::now(),
     }
+}
+
+fn register_runtime_event(registry: &MarketRegistry, market_ids: Vec<MarketId>) {
+    registry.register_event(EventRegistryInfo {
+        event_id: EventId::new(EVENT_ID),
+        title: "Model E2E".to_owned(),
+        slug: "model-e2e".to_owned(),
+        series_slug: None,
+        status: EventStatus::Active,
+        market_ids,
+        categories: CategorySet::from(MarketCategory::Sports),
+        tags: vec![MarketCategory::Sports.as_str().to_owned()],
+        neg_risk: false,
+        end_date: Some(Utc::now() + ChronoDuration::days(2)),
+        created_at: Utc::now() - ChronoDuration::days(2),
+        updated_at: Utc::now(),
+    });
 }
 
 async fn seed_catalog(db: &DatabaseConnection) {
@@ -307,13 +338,7 @@ fn selected_market() -> SelectedMarket {
 }
 
 fn noop_feature_writer() -> Arc<FeatureEventWriter> {
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("model-e2e-feature").capacity(64),
-        |_| Box::pin(async { Ok(()) }),
-        prometheus::IntCounter::new("model_e2e_feat_drops", "d").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    Arc::new(FeatureEventWriter::new(Arc::new(writer)))
+    Arc::new(FeatureEventWriter::new(Arc::new(DiscardFactWriter::new())))
 }
 
 fn noop_factor_writer() -> Arc<FactorEventWriter> {
@@ -336,11 +361,27 @@ fn noop_signal_writer() -> Arc<SignalCandidateEventWriter> {
     Arc::new(SignalCandidateEventWriter::new(Arc::new(writer)))
 }
 
+fn noop_model_input_writer() -> Arc<ModelInputEventWriter> {
+    Arc::new(ModelInputEventWriter::new(
+        Arc::new(DiscardFactWriter::new()),
+        Arc::new(DiscardFactWriter::new()),
+    ))
+}
+
 /// Build + persist feature vectors for the seeded market via the live book.
-async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<FeatureVectorId>) {
+async fn build_features(
+    db: &DatabaseConnection,
+) -> (
+    Vec<FeatureVector>,
+    Vec<FeatureVectorId>,
+    FeatureEvidenceCommitment,
+    DecisionBoundary,
+) {
     let registry = Arc::new(MarketRegistry::new());
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-    registry.register_market(registry_market());
+    let market = registry_market();
+    register_runtime_event(&registry, vec![market.market_id.clone()]);
+    registry.register_market(market);
     book_store.apply_snapshot(
         &TokenId::new(YES_TOKEN),
         Arc::from([BookLevel::from_decimal_unchecked(
@@ -351,10 +392,11 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
             Price::new(Decimal::new(53, 2)),
             Shares::new(Decimal::from(140)),
         )]),
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        u64::try_from(Utc::now().timestamp_millis())
+            .expect("test book timestamp must be non-negative"),
         None,
     );
-    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
+    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
@@ -371,16 +413,18 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
     let features = FeaturesConfig::default();
     let domain = DomainConfig::default();
     let included = vec![selected_market()];
+    let boundary = DecisionClock::new(0)
+        .boundary(Utc::now())
+        .expect("decision boundary");
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
-            as_of: Utc::now(),
+            boundary: boundary.clone(),
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
-            source_delay_secs: 0,
-            pit: PitView::Live(&live_pit),
+            pit: &live_pit,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
@@ -393,7 +437,12 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
         .iter()
         .map(|info| info.feature_vector_id.clone())
         .collect();
-    (result.accepted, ids)
+    (
+        result.accepted,
+        ids,
+        result.feature_evidence.expect("durable feature evidence"),
+        boundary,
+    )
 }
 
 /// Peer markets forming a real cross-section alongside the primary market, so
@@ -452,7 +501,7 @@ fn peer_registry_market(index: usize) -> MarketRegistryInfo {
         fee_schedule: None,
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,
-        created_at: Utc::now() - ChronoDuration::days(2),
+        created_at: Some(Utc::now() - ChronoDuration::days(2)),
         updated_at: Utc::now(),
     }
 }
@@ -536,12 +585,22 @@ async fn build_cross_section_features(
     Vec<FeatureVector>,
     Vec<FeatureVectorId>,
     Vec<SelectedMarket>,
+    FeatureEvidenceCommitment,
+    DecisionBoundary,
 ) {
     let registry = Arc::new(MarketRegistry::new());
     let book_store = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-    let ts_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-
-    registry.register_market(registry_market());
+    let ts_ms = u64::try_from(Utc::now().timestamp_millis())
+        .expect("test book timestamp must be non-negative");
+    let primary = registry_market();
+    let peers = (0..PEER_COUNT)
+        .map(peer_registry_market)
+        .collect::<Vec<_>>();
+    let market_ids = std::iter::once(primary.market_id.clone())
+        .chain(peers.iter().map(|market| market.market_id.clone()))
+        .collect();
+    register_runtime_event(&registry, market_ids);
+    registry.register_market(primary);
     apply_book(
         &book_store,
         YES_TOKEN,
@@ -551,8 +610,8 @@ async fn build_cross_section_features(
         140,
         ts_ms,
     );
-    for index in 0..PEER_COUNT {
-        registry.register_market(peer_registry_market(index));
+    for (index, peer) in peers.into_iter().enumerate() {
+        registry.register_market(peer);
         let step = i64::try_from(index).expect("index fits i64");
         // Dispersed prices / depths so the cross-section carries real variance.
         apply_book(
@@ -565,7 +624,7 @@ async fn build_cross_section_features(
             ts_ms,
         );
     }
-    let live_pit = LiveBookDataSource::new(Arc::clone(&book_store), Arc::clone(&registry));
+    let live_pit = InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref());
 
     let feature_repo = Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>;
     let pipeline = FeaturePipelineService::new(FeaturePipelineDeps {
@@ -584,16 +643,18 @@ async fn build_cross_section_features(
     let included: Vec<SelectedMarket> = std::iter::once(selected_market())
         .chain((0..PEER_COUNT).map(peer_selected_market))
         .collect();
+    let boundary = DecisionClock::new(0)
+        .boundary(Utc::now())
+        .expect("decision boundary");
     let result = pipeline
         .run(FeaturePipelineRequest {
             included: &included,
-            as_of: Utc::now(),
+            boundary: boundary.clone(),
             features: &features,
             domain: &domain,
             data_quality: &DataQualityConfig::default(),
             model_requirements: &ModelFeatureRequirements::default(),
-            source_delay_secs: 0,
-            pit: PitView::Live(&live_pit),
+            pit: &live_pit,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
@@ -615,7 +676,13 @@ async fn build_cross_section_features(
         .iter()
         .map(|vector| selected_for(&vector.market_id))
         .collect();
-    (result.accepted, ids, selection)
+    (
+        result.accepted,
+        ids,
+        selection,
+        result.feature_evidence.expect("durable feature evidence"),
+        boundary,
+    )
 }
 
 /// Author a weighted artifact bound to the active schema, weighting every enabled
@@ -645,22 +712,31 @@ async fn publish_weighted_model(
 
     let model_version_id = ModelVersionId::from_v7();
     let feature_schema_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(features)).expect("feature hash");
+        ResearchHasher::feature_schema(&FeatureSchema::build(features).expect("feature schema"))
+            .expect("feature hash");
     let factor_schema_hash = engine.factor_schema_hash().expect("factor hash");
+    let input_contract = ModelInputContract::single_required("book.mid");
+    let input_contract_hash =
+        model_input_contract_hash(&input_contract).expect("input contract hash");
 
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
-            factor_schema_hash,
+            factor_schema_hash: factor_schema_hash.clone(),
         },
+        training_dataset_hash: factor_schema_hash.clone(),
+        training_input_hash: factor_schema_hash,
+        input_contract,
+        input_contract_hash,
         weights,
         prediction_horizon_secs: 86_400,
         multipliers: ScoreMultiplierSpec::conservative(),
         substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
         return_model: ReturnModelSpec::heuristic_default(),
-        required_features: Vec::new(),
+        factor_cross_section: FactorCrossSectionConfig::default(),
+        frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
         objective_report: None,
         category_scope: None,
     }));
@@ -683,7 +759,8 @@ async fn publish_weighted_model(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -844,6 +921,7 @@ fn build_runner(
         )),
         factor_pipeline,
         signal_writer: noop_signal_writer(),
+        model_input_writer: noop_model_input_writer(),
         alerts: Arc::new(CountingAlertSink { critical }),
         weight_overlay,
         bias_table,
@@ -878,7 +956,7 @@ async fn online_loop_selection_to_signal_candidates() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids) = build_features(&db).await;
+    let (vectors, ids, evidence, boundary) = build_features(&db).await;
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
@@ -900,12 +978,13 @@ async fn online_loop_selection_to_signal_candidates() {
             selection: &selection,
             feature_vectors: &vectors,
             feature_vector_ids: &ids,
+            feature_evidence: &evidence,
             features: &features,
             factors: &factors,
             domain: &DomainConfig::default(),
             model: &model_config(&active, None),
             top_n: 10,
-            as_of: Utc::now(),
+            boundary,
         })
         .await
         .expect("inference round");
@@ -951,7 +1030,7 @@ async fn inference_degradation_shadow_failure_keeps_active() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids) = build_features(&db).await;
+    let (vectors, ids, evidence, boundary) = build_features(&db).await;
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
@@ -976,12 +1055,13 @@ async fn inference_degradation_shadow_failure_keeps_active() {
             selection: &selection,
             feature_vectors: &vectors,
             feature_vector_ids: &ids,
+            feature_evidence: &evidence,
             features: &features,
             factors: &factors,
             domain: &DomainConfig::default(),
             model: &model_config(&active, Some(&missing_shadow)),
             top_n: 10,
-            as_of: Utc::now(),
+            boundary,
         })
         .await
         .expect("active round survives shadow failure");
@@ -1009,7 +1089,8 @@ struct OverlayRoundInput<'a> {
     selection: &'a [SelectedMarket],
     vectors: &'a [FeatureVector],
     ids: &'a [FeatureVectorId],
-    as_of: chrono::DateTime<Utc>,
+    evidence: &'a FeatureEvidenceCommitment,
+    boundary: DecisionBoundary,
     skew: usize,
 }
 
@@ -1023,7 +1104,8 @@ async fn run_overlay_round(input: OverlayRoundInput<'_>) -> ModelRunOutcome {
         selection,
         vectors,
         ids,
-        as_of,
+        evidence,
+        boundary,
         skew,
     } = input;
     overlay.reload(
@@ -1037,12 +1119,13 @@ async fn run_overlay_round(input: OverlayRoundInput<'_>) -> ModelRunOutcome {
             selection,
             feature_vectors: vectors,
             feature_vector_ids: ids,
+            feature_evidence: evidence,
             features,
             factors: base_factors,
             domain: &DomainConfig::default(),
             model,
             top_n: 10,
-            as_of,
+            boundary,
         })
         .await
         .expect("overlay round")
@@ -1060,7 +1143,7 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
     // A real multi-market cross-section: the overlay reweights *scored*
     // cross-sectional factors, so shadow scores must shift when weights change
     // (a single-market cross-section would leave them all indeterminate).
-    let (vectors, ids, selection) = build_cross_section_features(&db).await;
+    let (vectors, ids, selection, evidence, boundary) = build_cross_section_features(&db).await;
 
     let store = artifact_store();
     let published = publish_weighted_model(&db, &store, &base_factors, &features).await;
@@ -1077,8 +1160,6 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
     );
 
     let model = model_config(&published, Some(&candidate.to_string()));
-    let as_of = Utc::now();
-
     let first = run_overlay_round(OverlayRoundInput {
         runner: &runner,
         overlay: &overlay,
@@ -1088,7 +1169,8 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
         selection: &selection,
         vectors: &vectors,
         ids: &ids,
-        as_of,
+        evidence: &evidence,
+        boundary: boundary.clone(),
         skew: 0,
     })
     .await;
@@ -1101,7 +1183,8 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
         selection: &selection,
         vectors: &vectors,
         ids: &ids,
-        as_of,
+        evidence: &evidence,
+        boundary,
         skew: 1,
     })
     .await;
@@ -1158,7 +1241,7 @@ async fn inference_rejects_retired_active_model() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
-    let (vectors, ids) = build_features(&db).await;
+    let (vectors, ids, evidence, boundary) = build_features(&db).await;
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
@@ -1184,12 +1267,13 @@ async fn inference_rejects_retired_active_model() {
             selection: &selection,
             feature_vectors: &vectors,
             feature_vector_ids: &ids,
+            feature_evidence: &evidence,
             features: &features,
             factors: &factors,
             domain: &DomainConfig::default(),
             model: &model_config(&active, None),
             top_n: 10,
-            as_of: Utc::now(),
+            boundary,
         })
         .await;
     assert!(result.is_err(), "retired active model must fail load");

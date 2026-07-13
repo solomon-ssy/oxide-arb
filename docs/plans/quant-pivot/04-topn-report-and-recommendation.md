@@ -757,7 +757,7 @@ pub enum ScheduleCadence {
 ```rust
 let trigger_time = Utc::now(); // 或 scheduler 提供的 fire instant
 let config = deps.runtime_config.current();
-let as_of = trigger_time - Duration::from_secs(schedule.source_delay_secs);
+let as_of = trigger_time - Duration::from_secs(schedule.knowledge_lag_secs);
 let request = GenerateReportRequest {
     schedule_id: schedule.schedule_id.clone(),
     trigger_time,

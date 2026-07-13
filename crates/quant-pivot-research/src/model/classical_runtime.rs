@@ -15,42 +15,59 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{ModelSerializationFormat, OutcomeSide},
+    hashing::CanonicalDigest,
     types::{
         ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
+        Usd,
     },
 };
-use rust_decimal::{
-    Decimal,
-    prelude::{FromPrimitive, ToPrimitive},
-};
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use smartcore::linalg::basic::matrix::DenseMatrix;
 
 use crate::{
-    features::{FeatureName, FeatureValue, feature_scalar, finite_f64},
+    features::{FeatureCell, FeatureCellState, FeatureName},
     model::{
-        artifact::ClassicalModelArtifact,
+        artifact::{ClassicalModelArtifact, ClassicalOutputSemantics},
         classical::{CLASSICAL_CRATE_VERSION, SmartcoreModel},
         runtime::{
             InferenceMatrix, InferenceMatrixRow, MarketInferenceContext, ModelFamily,
-            ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
+            ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics,
+            ModelRuntimeOutput, QuantModelRuntime,
         },
-        signal::{ModelExplanation, SignalCandidate},
+        signal::{ModelExplanation, SignalCandidate, SignalWarning},
     },
     precision::RESEARCH_DECIMAL_SCALE,
+    training::model_input_cell,
 };
 
-/// Heuristic max expected return (bps) at full conviction (classical models do
-/// not carry a calibrated return curve; provenance is heuristic).
-const MAX_EXPECTED_RETURN_BPS: i64 = 300;
-/// Heuristic max downside (bps) at zero conviction.
-const MAX_DOWNSIDE_BPS: i64 = 500;
+/// A long binary outcome token can lose at most its full cost basis.
+const MAX_LONG_DOWNSIDE_BPS: i64 = 10_000;
 
 /// A loaded classical model runtime.
 pub struct ClassicalRuntime {
     artifact: ClassicalModelArtifact,
     model: SmartcoreModel,
-    means: Vec<f64>,
-    stds: Vec<f64>,
+}
+
+struct TransformedInferenceRow {
+    encoded_values: Vec<f64>,
+    input_audit: Vec<ModelInputAuditRow>,
+}
+
+struct ClassicalEconomicProjection {
+    outcome_side: OutcomeSide,
+    token_id: TokenId,
+    entry_price_ref: Price,
+    expected_return_bps: Decimal,
+    raw_prediction: Decimal,
+}
+
+struct ClassicalCandidateScores {
+    composite_score: Probability,
+    confidence: Probability,
+    liquidity_score: Probability,
+    data_quality_score: Probability,
+    suggested_horizon_secs: u64,
 }
 
 impl ClassicalRuntime {
@@ -62,6 +79,18 @@ impl ClassicalRuntime {
     /// Returns [`ResearchError::RuntimeUnavailable`] on a crate-version mismatch
     /// and [`ResearchError::Serialization`] on a decode failure.
     pub fn load(artifact: ClassicalModelArtifact, model_bytes: &[u8]) -> QuantResult<Self> {
+        artifact.validate()?;
+        if artifact.crate_name != crate::model::classical::CLASSICAL_CRATE_NAME {
+            return Err(ResearchError::RuntimeUnavailable {
+                family: artifact.kind.to_string(),
+                detail: format!(
+                    "classical crate name mismatch: artifact `{}`, runtime `{}`",
+                    artifact.crate_name,
+                    crate::model::classical::CLASSICAL_CRATE_NAME
+                ),
+            }
+            .into());
+        }
         if artifact.crate_version != CLASSICAL_CRATE_VERSION {
             return Err(ResearchError::RuntimeUnavailable {
                 family: artifact.kind.to_string(),
@@ -81,113 +110,310 @@ impl ClassicalRuntime {
             }
             .into());
         }
+        let actual_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(model_bytes))?;
+        if actual_hash != artifact.serialized_model_hash {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "classical estimator bytes hash mismatch: expected {}, got {}",
+                    artifact.serialized_model_hash, actual_hash
+                ),
+            }
+            .into());
+        }
         let model: SmartcoreModel =
             bincode::deserialize(model_bytes).map_err(|error| ResearchError::Serialization {
                 detail: format!("bincode deserialize classical model: {error}"),
             })?;
-        let means = artifact
-            .preprocessing
-            .means
+        if !model.matches_kind(artifact.kind) {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "serialized estimator variant does not match artifact kind {}",
+                    artifact.kind
+                ),
+            }
+            .into());
+        }
+        model.validate_width(artifact.input_transform.encoded_columns.len())?;
+        Ok(Self { artifact, model })
+    }
+
+    /// Apply the exact frozen training transform to one inference row.
+    fn transformed_row(
+        &self,
+        row: &InferenceMatrixRow,
+        names: &[FeatureName],
+    ) -> QuantResult<TransformedInferenceRow> {
+        if row.features.len() != names.len() {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "classical row width {} does not match raw input-name width {}",
+                    row.features.len(),
+                    names.len()
+                ),
+            }
+            .into());
+        }
+        if self.artifact.input_transform.inputs.len() != names.len() {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: format!(
+                    "classical transform raw input width {} does not match artifact name width {}",
+                    self.artifact.input_transform.inputs.len(),
+                    names.len()
+                ),
+            }
+            .into());
+        }
+        let cells = self
+            .artifact
+            .input_transform
+            .inputs
             .iter()
-            .map(|m| m.to_f64().unwrap_or(0.0))
-            .collect();
-        let stds = artifact
-            .preprocessing
-            .stds
-            .iter()
-            .map(|s| {
-                let v = s.to_f64().unwrap_or(1.0);
-                if v.abs() > f64::EPSILON { v } else { 1.0 }
+            .zip(names)
+            .zip(&row.features)
+            .map(|((input, name), cell)| {
+                if &input.feature != name {
+                    return Err(ResearchError::InvalidModelArtifact {
+                        detail: format!(
+                            "classical transform input `{}` is misaligned with ordered raw input `{name}`",
+                            input.feature
+                        ),
+                    }
+                    .into());
+                }
+                model_input_cell(Some(cell), name, input.value_kind)
             })
-            .collect();
-        Ok(Self {
-            artifact,
-            model,
-            means,
-            stds,
+            .collect::<QuantResult<Vec<_>>>()?;
+        let encoded_values = self.artifact.input_transform.apply_cells(&cells)?;
+        let input_audit = self.project_input_audit(row, names, &encoded_values)?;
+        Ok(TransformedInferenceRow {
+            encoded_values,
+            input_audit,
         })
     }
 
-    /// Standardize one inference row into the artifact's column order.
-    fn standardized_row(&self, row: &InferenceMatrixRow, names: &[FeatureName]) -> Vec<f64> {
+    fn project_input_audit(
+        &self,
+        row: &InferenceMatrixRow,
+        names: &[FeatureName],
+        encoded_values: &[f64],
+    ) -> QuantResult<Vec<ModelInputAuditRow>> {
+        if encoded_values.len() != self.artifact.input_transform.encoded_columns.len() {
+            return Err(ResearchError::Inference {
+                detail: format!(
+                    "classical audit width mismatch: transform emitted {}, contract declares {}",
+                    encoded_values.len(),
+                    self.artifact.input_transform.encoded_columns.len()
+                ),
+            }
+            .into());
+        }
+        let input_contract_hash = self.artifact.input_contract_hash.clone();
+        let transform_hash = self.artifact.input_transform_hash.clone();
+        let training_input_hash = self.artifact.training_input_hash.clone();
         self.artifact
-            .preprocessing
-            .feature_names
+            .input_transform
+            .encoded_columns
             .iter()
-            .enumerate()
-            .map(|(idx, feature)| {
-                let raw = names
+            .zip(encoded_values)
+            .map(|(column, value)| {
+                if !value.is_finite() {
+                    return Err(ResearchError::Inference {
+                        detail: format!(
+                            "encoded column `{}` produced a non-finite audit value",
+                            column.name
+                        ),
+                    }
+                    .into());
+                }
+                let source_index = names
                     .iter()
-                    .position(|n| n == feature)
-                    .and_then(|pos| row.features.get(pos))
-                    .and_then(feature_scalar_f64)
-                    .unwrap_or_else(|| self.means.get(idx).copied().unwrap_or(0.0));
-                let mean = self.means.get(idx).copied().unwrap_or(0.0);
-                let std = self.stds.get(idx).copied().unwrap_or(1.0);
-                (raw - mean) / std
+                    .position(|name| name == &column.source_feature)
+                    .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                        detail: format!(
+                            "encoded column `{}` references absent raw input `{}`",
+                            column.name, column.source_feature
+                        ),
+                    })?;
+                let cell =
+                    row.features
+                        .get(source_index)
+                        .ok_or_else(|| ResearchError::Inference {
+                            detail: format!(
+                                "raw input `{}` index {source_index} is absent from inference row",
+                                column.source_feature
+                            ),
+                        })?;
+                let (raw_state, raw_value) = classical_raw_evidence(cell)?;
+                Ok(ModelInputAuditRow {
+                    model_version_id: self.artifact.header.model_version_id.clone(),
+                    model_family: self.artifact.header.model_family,
+                    market_id: row.market_id.clone(),
+                    raw_input_name: column.source_feature.to_string(),
+                    raw_state,
+                    raw_value,
+                    encoded_column: column.name.to_string(),
+                    encoded_value_bits: Some(value.to_bits()),
+                    input_contract_hash: input_contract_hash.clone(),
+                    transform_hash: transform_hash.clone(),
+                    training_input_hash: training_input_hash.clone(),
+                })
             })
             .collect()
     }
 
-    /// Build a sided candidate from a predicted yes-probability.
+    /// Build a shadow-only sided candidate from the artifact's frozen output
+    /// semantics. No classical estimator output is interpreted by convention.
     fn candidate(
+        &self,
         prediction: f64,
         row: &InferenceMatrixRow,
         model_run_id: &ModelRunId,
-        as_of: DateTime<Utc>,
-    ) -> Option<SignalCandidate> {
-        let p_hat = prediction.clamp(0.0, 1.0);
-        let net = p_hat - 0.5;
-        if net.abs() < f64::EPSILON {
-            return None;
-        }
-        let outcome_side = if net >= 0.0 {
-            OutcomeSide::Yes
-        } else {
-            OutcomeSide::No
+        decision_at: DateTime<Utc>,
+    ) -> QuantResult<Option<SignalCandidate>> {
+        let raw_prediction = f64_to_decimal(prediction)?;
+        let Some(projection) = self.project_economics(raw_prediction, row)? else {
+            return Ok(None);
         };
-        let (token_id, entry_price_ref) = resolve_entry(row, outcome_side)?;
-        let conviction = (net.abs() * 2.0).clamp(0.0, 1.0);
-        let conviction_dp = f64_to_decimal(conviction);
-        let composite_score = Probability::new(conviction_dp);
-        let confidence = composite_score;
-        let expected_return_bps = (conviction_dp * Decimal::from(MAX_EXPECTED_RETURN_BPS))
-            .round_dp(RESEARCH_DECIMAL_SCALE);
-        let downside_bps = ((Decimal::ONE - conviction_dp) * Decimal::from(MAX_DOWNSIDE_BPS))
-            .round_dp(RESEARCH_DECIMAL_SCALE);
+        let context = &row.context;
+        let Some(scores) = self.candidate_scores(&projection, context)? else {
+            return Ok(None);
+        };
+        let semantics = match self.artifact.output_semantics {
+            ClassicalOutputSemantics::ForwardReturnBps => "forward_return_bps",
+            ClassicalOutputSemantics::SettlementProbability => "settlement_probability",
+        };
 
-        Some(SignalCandidate {
+        Ok(Some(SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
             model_run_id: model_run_id.clone(),
             market_id: row.market_id.clone(),
-            token_id,
-            outcome_side,
-            composite_score,
-            confidence,
-            expected_return_bps,
-            downside_bps,
-            // Classical ML has no bound `ProbabilityCalibrator` (Phase 11.3
-            // scope is the weighted-factor family only); `ModelArtifact::Classical`
-            // is unconditionally `return_model_is_calibrated() == false`, so
-            // this path is already fenced off from every production execution
-            // gate the same way `HeuristicReturnModel` is.
+            token_id: projection.token_id,
+            outcome_side: projection.outcome_side,
+            composite_score: scores.composite_score,
+            confidence: scores.confidence,
+            expected_return_bps: projection.expected_return_bps,
+            downside_bps: Decimal::from(MAX_LONG_DOWNSIDE_BPS),
+            // Classical is explicitly ShadowOnly until 11.9 binds an
+            // independently validated probability/return/downside calibration.
             win_probability: None,
-            entry_price_ref,
-            suggested_horizon_secs: 0,
+            entry_price_ref: projection.entry_price_ref,
+            suggested_horizon_secs: scores.suggested_horizon_secs,
             factor_breakdown: Vec::new(),
             model_explanation: ModelExplanation {
-                headline: format!("classical buy {outcome_side}: yes_prob {p_hat:.4}"),
+                headline: format!(
+                    "classical shadow buy {}: {semantics} raw {}, projected edge {} bps",
+                    projection.outcome_side,
+                    projection.raw_prediction,
+                    projection.expected_return_bps
+                ),
                 top_positive: Vec::new(),
                 top_negative: Vec::new(),
             },
-            rejection_warnings: Vec::new(),
+            rejection_warnings: candidate_warnings(context),
             rank_before_portfolio: 0,
-            liquidity_score: Probability::ZERO,
-            data_quality_score: Probability::ZERO,
+            liquidity_score: scores.liquidity_score,
+            data_quality_score: scores.data_quality_score,
             model_score_percentile: Probability::ZERO,
-            as_of,
-        })
+            decision_at,
+        }))
     }
+
+    fn candidate_scores(
+        &self,
+        projection: &ClassicalEconomicProjection,
+        context: &MarketInferenceContext,
+    ) -> QuantResult<Option<ClassicalCandidateScores>> {
+        let data_quality_score = clamp_unit(
+            self.artifact
+                .multipliers
+                .data_quality
+                .multiplier_for(context.data_quality),
+        );
+        let liquidity_score = clamp_unit(
+            self.artifact
+                .multipliers
+                .liquidity
+                .multiplier_for(context.liquidity_usd.map(Usd::inner)),
+        );
+        let horizon_multiplier = self.artifact.multipliers.horizon.multiplier_for(
+            context.time_to_resolution_secs,
+            self.artifact.prediction_horizon_secs,
+        );
+        let edge_strength = bounded_edge_strength(projection.expected_return_bps)?;
+        let composite_score = clamp_unit(checked_product(
+            "classical composite score",
+            &[
+                edge_strength,
+                data_quality_score.inner(),
+                liquidity_score.inner(),
+                horizon_multiplier,
+            ],
+        )?);
+        let substitution_penalty =
+            context
+                .substitution_reasons
+                .iter()
+                .try_fold(Decimal::ONE, |acc, reason| {
+                    checked_mul(
+                        "classical substitution confidence",
+                        acc,
+                        self.artifact
+                            .substitution_confidence_rules
+                            .multiplier_for(*reason),
+                    )
+                })?;
+        let confidence = clamp_unit(checked_mul(
+            "classical confidence",
+            data_quality_score.inner(),
+            substitution_penalty,
+        )?);
+        let suggested_horizon_secs = context
+            .time_to_resolution_secs
+            .map_or(self.artifact.prediction_horizon_secs, |remaining| {
+                remaining.min(self.artifact.prediction_horizon_secs)
+            });
+        Ok(
+            (suggested_horizon_secs > 0).then_some(ClassicalCandidateScores {
+                composite_score,
+                confidence,
+                liquidity_score,
+                data_quality_score,
+                suggested_horizon_secs,
+            }),
+        )
+    }
+
+    fn project_economics(
+        &self,
+        raw_prediction: Decimal,
+        row: &InferenceMatrixRow,
+    ) -> QuantResult<Option<ClassicalEconomicProjection>> {
+        match self.artifact.output_semantics {
+            ClassicalOutputSemantics::ForwardReturnBps => {
+                project_forward_return(raw_prediction, row)
+            }
+            ClassicalOutputSemantics::SettlementProbability => {
+                project_settlement_probability(raw_prediction, row)
+            }
+        }
+    }
+}
+
+fn candidate_warnings(context: &MarketInferenceContext) -> Vec<SignalWarning> {
+    let mut warnings = vec![SignalWarning::Other(
+        "shadow_only: classical output has no independent probability-to-return/downside calibration"
+            .to_owned(),
+    )];
+    if context.liquidity_usd.is_none() {
+        warnings.push(SignalWarning::ThinLiquidity);
+    }
+    if !context.substitution_reasons.is_empty() {
+        warnings.push(SignalWarning::Other(format!(
+            "{} governed input substitutions applied",
+            context.substitution_reasons.len()
+        )));
+    }
+    warnings
 }
 
 #[async_trait]
@@ -205,13 +431,20 @@ impl QuantModelRuntime for ClassicalRuntime {
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.artifact.preprocessing.feature_names.clone()
+        self.artifact.required_features()
+    }
+
+    fn input_features(&self) -> Vec<FeatureName> {
+        self.artifact.input_features()
     }
 
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
         let started = Instant::now();
         let matrix = expect_feature_matrix(input)?;
-        let markets_scored = u32::try_from(matrix.rows.len()).unwrap_or(u32::MAX);
+        let markets_scored =
+            u32::try_from(matrix.rows.len()).map_err(|error| ResearchError::Inference {
+                detail: format!("classical market count does not fit u32: {error}"),
+            })?;
 
         if matrix.rows.is_empty() {
             return Ok(ModelRuntimeOutput {
@@ -221,29 +454,39 @@ impl QuantModelRuntime for ClassicalRuntime {
                     candidates_emitted: 0,
                     inference_duration_ms: 0,
                 },
-                warnings: Vec::new(),
+                input_audit: Vec::new(),
             });
         }
 
-        let rows: Vec<Vec<f64>> = matrix
+        let expected_names = self.artifact.input_features();
+        if matrix.feature_names != expected_names {
+            return Err(ResearchError::Inference {
+                detail: "classical raw input contract/order does not match its artifact".to_owned(),
+            }
+            .into());
+        }
+        let transformed = matrix
             .rows
             .iter()
-            .map(|row| self.standardized_row(row, &matrix.feature_names))
-            .collect();
+            .map(|row| self.transformed_row(row, &matrix.feature_names))
+            .collect::<QuantResult<Vec<_>>>()?;
+        let rows = transformed
+            .iter()
+            .map(|row| row.encoded_values.clone())
+            .collect::<Vec<_>>();
         let dense = DenseMatrix::from_2d_vec(&rows).map_err(|error| ResearchError::Inference {
             detail: format!("classical dense matrix build failed: {error}"),
         })?;
         let predictions = self.model.predict(&dense)?;
 
-        let model_run_id = synthetic_run_id(&matrix);
-        let mut candidates: Vec<SignalCandidate> = matrix
-            .rows
-            .iter()
-            .zip(predictions)
-            .filter_map(|(row, prediction)| {
-                Self::candidate(prediction, row, &model_run_id, matrix.as_of)
-            })
-            .collect();
+        let mut candidates = Vec::new();
+        for (row, prediction) in matrix.rows.iter().zip(predictions) {
+            if let Some(candidate) =
+                self.candidate(prediction, row, &matrix.model_run_id, matrix.decision_at)?
+            {
+                candidates.push(candidate);
+            }
+        }
         candidates.sort_by(|a, b| {
             b.composite_score
                 .inner()
@@ -251,28 +494,273 @@ impl QuantModelRuntime for ClassicalRuntime {
                 .then_with(|| a.market_id.as_str().cmp(b.market_id.as_str()))
         });
         for (index, candidate) in candidates.iter_mut().enumerate() {
-            candidate.rank_before_portfolio = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            candidate.rank_before_portfolio =
+                u32::try_from(index + 1).map_err(|error| ResearchError::Inference {
+                    detail: format!("classical candidate rank does not fit u32: {error}"),
+                })?;
         }
 
-        let candidates_emitted = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+        let candidates_emitted =
+            u32::try_from(candidates.len()).map_err(|error| ResearchError::Inference {
+                detail: format!("classical candidate count does not fit u32: {error}"),
+            })?;
+        let inference_duration_ms =
+            u64::try_from(started.elapsed().as_millis()).map_err(|error| {
+                ResearchError::Inference {
+                    detail: format!("classical inference duration does not fit u64: {error}"),
+                }
+            })?;
         Ok(ModelRuntimeOutput {
             candidates,
             runtime_metrics: ModelRuntimeMetrics {
                 markets_scored,
                 candidates_emitted,
-                inference_duration_ms: u64::try_from(started.elapsed().as_millis())
-                    .unwrap_or(u64::MAX),
+                inference_duration_ms,
             },
-            warnings: Vec::new(),
+            input_audit: transformed
+                .into_iter()
+                .flat_map(|row| row.input_audit)
+                .collect(),
         })
     }
 }
 
-/// The classical path is fed a [`FactorInferenceTable`]'s `model_run_id`-less
-/// matrix; reuse a stable per-batch id derived from `as_of` is unnecessary, so a
-/// fresh id is minted (candidates carry it for audit only).
-fn synthetic_run_id(_matrix: &InferenceMatrix) -> ModelRunId {
-    ModelRunId::from_v7()
+fn classical_raw_evidence(
+    cell: &FeatureCell,
+) -> QuantResult<(ModelInputAuditState, Option<String>)> {
+    let state = match cell.state {
+        FeatureCellState::Observed => ModelInputAuditState::Observed,
+        FeatureCellState::Substituted => ModelInputAuditState::Substituted,
+        FeatureCellState::Missing => ModelInputAuditState::Missing,
+        FeatureCellState::NotApplicable => ModelInputAuditState::NotApplicable,
+    };
+    let raw_value = cell
+        .value()
+        .map(|value| {
+            serde_json::to_string(value).map_err(|error| ResearchError::Serialization {
+                detail: format!("serialize classical raw model input: {error}"),
+            })
+        })
+        .transpose()?;
+    Ok((state, raw_value))
+}
+
+fn project_forward_return(
+    raw_return_bps: Decimal,
+    row: &InferenceMatrixRow,
+) -> QuantResult<Option<ClassicalEconomicProjection>> {
+    let yes_entry = row.context.yes_price.inner();
+    if yes_entry <= Decimal::ZERO || yes_entry > Decimal::ONE {
+        return Err(inference_error(format!(
+            "classical YES entry price must be within (0, 1], got {yes_entry}"
+        )));
+    }
+    let growth = checked_add(
+        "classical forward-return growth",
+        Decimal::ONE,
+        checked_div(
+            "classical forward-return bps conversion",
+            raw_return_bps,
+            Decimal::from(MAX_LONG_DOWNSIDE_BPS),
+        )?,
+    )?;
+    let yes_exit = checked_mul("classical projected YES exit", yes_entry, growth)?
+        .clamp(Decimal::ZERO, Decimal::ONE);
+    let yes_return_bps = return_bps(yes_entry, yes_exit)?;
+    let yes = positive_projection(
+        OutcomeSide::Yes,
+        row.token_id.clone(),
+        row.context.yes_price,
+        yes_return_bps,
+        raw_return_bps,
+    );
+
+    let no = if let Some((token_id, entry_price)) = resolve_entry(row, OutcomeSide::No) {
+        let no_exit = checked_sub("classical projected NO exit", Decimal::ONE, yes_exit)?;
+        let no_return_bps = return_bps(entry_price.inner(), no_exit)?;
+        positive_projection(
+            OutcomeSide::No,
+            token_id,
+            entry_price,
+            no_return_bps,
+            raw_return_bps,
+        )
+    } else {
+        None
+    };
+    Ok(stronger_projection(yes, no))
+}
+
+fn project_settlement_probability(
+    yes_probability: Decimal,
+    row: &InferenceMatrixRow,
+) -> QuantResult<Option<ClassicalEconomicProjection>> {
+    if !(Decimal::ZERO..=Decimal::ONE).contains(&yes_probability) {
+        return Err(inference_error(format!(
+            "logistic classical prediction must be within [0, 1], got {yes_probability}"
+        )));
+    }
+    let yes = expected_settlement_projection(
+        OutcomeSide::Yes,
+        row.token_id.clone(),
+        row.context.yes_price,
+        yes_probability,
+        yes_probability,
+    )?;
+    let no = resolve_entry(row, OutcomeSide::No)
+        .map(|(token_id, entry_price)| {
+            let no_probability = checked_sub(
+                "classical NO settlement probability",
+                Decimal::ONE,
+                yes_probability,
+            )?;
+            expected_settlement_projection(
+                OutcomeSide::No,
+                token_id,
+                entry_price,
+                no_probability,
+                yes_probability,
+            )
+        })
+        .transpose()?
+        .flatten();
+    Ok(stronger_projection(yes, no))
+}
+
+fn expected_settlement_projection(
+    outcome_side: OutcomeSide,
+    token_id: TokenId,
+    entry_price: Price,
+    win_probability: Decimal,
+    raw_prediction: Decimal,
+) -> QuantResult<Option<ClassicalEconomicProjection>> {
+    let price = entry_price.inner();
+    if price <= Decimal::ZERO || price > Decimal::ONE {
+        return Err(inference_error(format!(
+            "classical {outcome_side} entry price must be within (0, 1], got {price}"
+        )));
+    }
+    let gross_multiple = checked_div(
+        "classical settlement expected gross multiple",
+        win_probability,
+        price,
+    )?;
+    let expected_return_bps = checked_mul(
+        "classical settlement expected return",
+        checked_sub(
+            "classical settlement net multiple",
+            gross_multiple,
+            Decimal::ONE,
+        )?,
+        Decimal::from(MAX_LONG_DOWNSIDE_BPS),
+    )?
+    .round_dp(RESEARCH_DECIMAL_SCALE);
+    Ok(positive_projection(
+        outcome_side,
+        token_id,
+        entry_price,
+        expected_return_bps,
+        raw_prediction,
+    ))
+}
+
+fn positive_projection(
+    outcome_side: OutcomeSide,
+    token_id: TokenId,
+    entry_price_ref: Price,
+    expected_return_bps: Decimal,
+    raw_prediction: Decimal,
+) -> Option<ClassicalEconomicProjection> {
+    (expected_return_bps > Decimal::ZERO).then_some(ClassicalEconomicProjection {
+        outcome_side,
+        token_id,
+        entry_price_ref,
+        expected_return_bps: expected_return_bps.round_dp(RESEARCH_DECIMAL_SCALE),
+        raw_prediction,
+    })
+}
+
+fn stronger_projection(
+    yes: Option<ClassicalEconomicProjection>,
+    no: Option<ClassicalEconomicProjection>,
+) -> Option<ClassicalEconomicProjection> {
+    match (yes, no) {
+        (Some(yes), Some(no)) if no.expected_return_bps > yes.expected_return_bps => Some(no),
+        (Some(yes), _) => Some(yes),
+        (None, no) => no,
+    }
+}
+
+fn return_bps(entry: Decimal, exit: Decimal) -> QuantResult<Decimal> {
+    if entry <= Decimal::ZERO {
+        return Err(inference_error(
+            "classical return projection requires a positive entry price",
+        ));
+    }
+    let change = checked_sub("classical projected price change", exit, entry)?;
+    let fraction = checked_div("classical projected return fraction", change, entry)?;
+    checked_mul(
+        "classical projected return bps",
+        fraction,
+        Decimal::from(MAX_LONG_DOWNSIDE_BPS),
+    )
+    .map(|value| value.round_dp(RESEARCH_DECIMAL_SCALE))
+}
+
+fn bounded_edge_strength(expected_return_bps: Decimal) -> QuantResult<Decimal> {
+    if expected_return_bps <= Decimal::ZERO {
+        return Err(inference_error(
+            "classical candidate requires a positive projected return",
+        ));
+    }
+    let denominator = checked_add(
+        "classical edge-strength denominator",
+        expected_return_bps,
+        Decimal::from(MAX_LONG_DOWNSIDE_BPS),
+    )?;
+    checked_div(
+        "classical bounded edge strength",
+        expected_return_bps,
+        denominator,
+    )
+}
+
+fn checked_product(label: &str, values: &[Decimal]) -> QuantResult<Decimal> {
+    values
+        .iter()
+        .try_fold(Decimal::ONE, |acc, value| checked_mul(label, acc, *value))
+}
+
+fn checked_add(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
+    left.checked_add(right)
+        .ok_or_else(|| inference_error(format!("{label} overflow")))
+}
+
+fn checked_sub(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
+    left.checked_sub(right)
+        .ok_or_else(|| inference_error(format!("{label} overflow")))
+}
+
+fn checked_mul(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
+    left.checked_mul(right)
+        .ok_or_else(|| inference_error(format!("{label} overflow")))
+}
+
+fn checked_div(label: &str, numerator: Decimal, denominator: Decimal) -> QuantResult<Decimal> {
+    numerator
+        .checked_div(denominator)
+        .ok_or_else(|| inference_error(format!("{label} is undefined or overflowed")))
+}
+
+fn inference_error(detail: impl Into<String>) -> quant_pivot_error::QuantError {
+    ResearchError::Inference {
+        detail: detail.into(),
+    }
+    .into()
+}
+
+fn clamp_unit(value: Decimal) -> Probability {
+    Probability::new(value.clamp(Decimal::ZERO, Decimal::ONE))
 }
 
 /// Resolve the target token + entry price for the chosen outcome.
@@ -282,17 +770,10 @@ fn resolve_entry(row: &InferenceMatrixRow, outcome_side: OutcomeSide) -> Option<
         OutcomeSide::Yes => Some((row.token_id.clone(), context.yes_price)),
         OutcomeSide::No => {
             let token = context.secondary_token_id.clone()?;
-            let price = context
-                .no_price
-                .unwrap_or_else(|| complement(context.yes_price));
+            let price = context.no_price?;
             Some((token, price))
         }
     }
-}
-
-/// Binary complement price `1 - p`, clamped to `[0, 1]`.
-fn complement(price: Price) -> Price {
-    Price::new((Decimal::ONE - price.inner()).clamp(Decimal::ZERO, Decimal::ONE))
 }
 
 /// Extract the feature matrix input, rejecting a factor-table (weighted only).
@@ -306,28 +787,36 @@ fn expect_feature_matrix(input: ModelRuntimeInput) -> QuantResult<InferenceMatri
     }
 }
 
-/// Project a [`FeatureValue`] to a finite `f64` via the shared
-/// [`feature_scalar`] projection — the identical rule
-/// `training::matrix` uses, so training and serving can never silently
-/// diverge on which `FeatureValue` variants are numeric.
-fn feature_scalar_f64(value: &FeatureValue) -> Option<f64> {
-    feature_scalar(value).and_then(finite_f64)
-}
-
 /// Convert an `f64` to a research-scale `Decimal`.
-fn f64_to_decimal(value: f64) -> Decimal {
+fn f64_to_decimal(value: f64) -> QuantResult<Decimal> {
+    if !value.is_finite() {
+        return Err(ResearchError::Inference {
+            detail: "classical prediction is not finite".to_owned(),
+        }
+        .into());
+    }
     Decimal::from_f64(value)
-        .unwrap_or(Decimal::ZERO)
-        .round_dp(RESEARCH_DECIMAL_SCALE)
+        .map(|value| value.round_dp(RESEARCH_DECIMAL_SCALE))
+        .ok_or_else(|| {
+            ResearchError::Inference {
+                detail: "classical prediction cannot be represented as Decimal".to_owned(),
+            }
+            .into()
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ClassicalRuntime;
+    use super::{ClassicalRuntime, project_settlement_probability};
     use crate::{
-        features::{FeatureName, FeatureValue},
+        features::{
+            FeatureCell, FeatureName, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
+        },
         model::{
-            artifact::{ClassicalModelArtifact, ModelArtifactHeader},
+            artifact::{
+                ClassicalModelArtifact, ClassicalOutputSemantics, ModelArtifactHeader,
+                ScoreMultiplierSpec, SubstitutionConfidenceRules, model_input_contract_hash,
+            },
             classical::{
                 CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry,
                 ClassicalTrainOutput,
@@ -337,14 +826,15 @@ mod tests {
                 ModelFamily, ModelRuntimeInput, QuantModelRuntime,
             },
         },
-        training::TrainingMatrix,
+        training::{FeatureColumnSpec, ModelInputCell, TrainingMatrix},
     };
     use chrono::{DateTime, TimeZone, Utc};
-    use ndarray::{Array1, Array2};
+    use ndarray::Array1;
     use quant_pivot_models::{
         enums::quant::{DataQualityStatus, OutcomeSide},
         types::{
-            ArtifactUri, ContentHash, MarketId, ModelArtifactId, ModelVersionId, Price, TokenId,
+            ArtifactUri, ContentHash, MarketId, ModelArtifactId, ModelInputRequiredness,
+            ModelInputSpec, ModelRunId, ModelVersionId, Price, TokenId,
         },
     };
     use rust_decimal::Decimal;
@@ -373,20 +863,38 @@ mod tests {
     /// A linearly separable matrix: label = 1 when feature-0 is high.
     fn training_matrix() -> TrainingMatrix {
         let rows = 40usize;
-        let mut features = Array2::<f64>::zeros((rows, 2));
         let mut labels = Array1::<f64>::zeros(rows);
+        let mut cells = Vec::with_capacity(rows);
         for i in 0..rows {
             let high = i % 2 == 0;
-            features[[i, 0]] = if high { 0.9 } else { 0.1 };
-            features[[i, 1]] = f64::from(u8::try_from(i % 5).unwrap_or(0)) / 5.0;
+            cells.push(vec![
+                ModelInputCell::Observed(if high { dec!(0.9) } else { dec!(0.1) }),
+                ModelInputCell::Observed(
+                    Decimal::from(u64::try_from(i % 5).expect("small remainder"))
+                        / Decimal::from(5),
+                ),
+            ]);
             labels[i] = if high { 1.0 } else { 0.0 };
         }
         TrainingMatrix {
-            features,
+            cells,
             labels,
-            feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
+            columns: vec![
+                FeatureColumnSpec {
+                    feature: FeatureName::new("f0"),
+                    unit: FeatureUnit::Ratio,
+                    value_kind: FeatureValueKind::Decimal,
+                    required: true,
+                },
+                FeatureColumnSpec {
+                    feature: FeatureName::new("f1"),
+                    unit: FeatureUnit::Ratio,
+                    value_kind: FeatureValueKind::Decimal,
+                    required: true,
+                },
+            ],
             rejected_rows: 0,
-            row_as_of: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
+            row_decision_at: (0..rows).map(|i| fixture_ts(fixture_row_secs(i))).collect(),
             row_label_horizon_end: (0..rows)
                 .map(|i| fixture_ts(fixture_row_secs(i) + 60))
                 .collect(),
@@ -407,9 +915,18 @@ mod tests {
             crate_version: output.crate_version.clone(),
             label_schema_hash: hash("lab"),
             training_dataset_hash: hash("ds"),
+            prediction_horizon_secs: 3_600,
+            output_semantics: ClassicalOutputSemantics::ForwardReturnBps,
+            multipliers: ScoreMultiplierSpec::conservative(),
+            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+            input_contract: output.input_contract.clone(),
+            input_contract_hash: output.input_contract_hash.clone(),
+            input_transform_hash: output.input_transform_hash.clone(),
+            training_input_hash: output.training_input_hash.clone(),
             serialized_model_uri: ArtifactUri::parse("file:///tmp/model.bin").expect("uri"),
+            serialized_model_hash: output.model_bytes_hash.clone(),
             serialization_format: output.serialization_format,
-            preprocessing: output.preprocessing.clone(),
+            input_transform: output.input_transform.clone(),
             metrics: output.metrics.clone(),
         }
     }
@@ -419,19 +936,51 @@ mod tests {
             market_id: MarketId::new("0xm"),
             token_id: TokenId::new("yes"),
             features: vec![
-                FeatureValue::Decimal(feature0),
-                FeatureValue::Decimal(dec!(0.4)),
+                FeatureCell::observed(
+                    FeatureValue::Decimal(feature0),
+                    None,
+                    FeatureStaleness::Unknown,
+                ),
+                FeatureCell::observed(
+                    FeatureValue::Decimal(dec!(0.4)),
+                    None,
+                    FeatureStaleness::Unknown,
+                ),
             ],
             context: MarketInferenceContext {
                 secondary_token_id: Some(TokenId::new("no")),
                 yes_price: Price::new(dec!(0.5)),
-                no_price: None,
+                no_price: Some(Price::new(dec!(0.52))),
                 liquidity_usd: None,
                 data_quality: DataQualityStatus::Fresh,
                 time_to_resolution_secs: Some(3_600),
-                substitutions: Vec::new(),
+                substitution_reasons: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn classical_no_projection_requires_the_exact_secondary_ask() {
+        let mut row = inference_row(dec!(0.1));
+        row.context.no_price = None;
+        let missing =
+            project_settlement_probability(dec!(0.1), &row).expect("valid settlement probability");
+        assert!(
+            missing.is_none(),
+            "a bearish prediction must be rejected when the NO ask is missing"
+        );
+
+        row.context.no_price = Some(Price::new(dec!(0.57)));
+        let no = project_settlement_probability(dec!(0.1), &row)
+            .expect("valid settlement probability")
+            .expect("quoted NO side has positive edge");
+        assert_eq!(no.outcome_side, OutcomeSide::No);
+        assert_eq!(no.entry_price_ref.inner(), dec!(0.57));
+        assert_ne!(
+            no.entry_price_ref.inner(),
+            Decimal::ONE - row.context.yes_price.inner(),
+            "the executable NO price is never synthesized from the YES quote"
+        );
     }
 
     #[tokio::test]
@@ -450,7 +999,8 @@ mod tests {
         );
 
         let matrix = InferenceMatrix {
-            as_of: Utc::now(),
+            model_run_id: ModelRunId::from_v7(),
+            decision_at: Utc::now(),
             feature_names: vec![FeatureName::new("f0"), FeatureName::new("f1")],
             rows: vec![inference_row(dec!(0.9)), inference_row(dec!(0.1))],
         };
@@ -458,12 +1008,60 @@ mod tests {
             .infer_batch(ModelRuntimeInput::FeatureMatrix(matrix))
             .await
             .expect("infer");
+        let expected_bits = [
+            vec![
+                ModelInputCell::Observed(dec!(0.9)),
+                ModelInputCell::Observed(dec!(0.4)),
+            ],
+            vec![
+                ModelInputCell::Observed(dec!(0.1)),
+                ModelInputCell::Observed(dec!(0.4)),
+            ],
+        ]
+        .iter()
+        .flat_map(|cells| {
+            output
+                .input_transform
+                .apply_cells(cells)
+                .expect("fixture transform")
+                .into_iter()
+                .map(f64::to_bits)
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            out.input_audit
+                .iter()
+                .map(|row| row.encoded_value_bits.expect("classical encoded bits"))
+                .collect::<Vec<_>>(),
+            expected_bits,
+            "serving evidence must preserve the exact estimator input bytes"
+        );
+        assert!(out.input_audit.iter().all(|row| {
+            let state_matches = row.raw_state == crate::model::ModelInputAuditState::Observed;
+            let contract_matches = row.input_contract_hash == output.input_contract_hash;
+            let transform_matches = row.transform_hash == output.input_transform_hash;
+            let training_input_matches = row.training_input_hash == output.training_input_hash;
+            state_matches
+                && row.raw_value.is_some()
+                && contract_matches
+                && transform_matches
+                && training_input_matches
+        }));
         // The high-feature row should resolve to a buy-Yes candidate.
         let bull = out
             .candidates
             .iter()
             .find(|c| c.outcome_side == OutcomeSide::Yes);
         assert!(bull.is_some(), "high feature ⇒ buy-Yes candidate");
+        let bull = bull.expect("bull candidate");
+        assert!(bull.expected_return_bps > Decimal::ZERO);
+        assert_eq!(bull.downside_bps, dec!(10000));
+        assert_eq!(bull.suggested_horizon_secs, 3_600);
+        assert!(bull.liquidity_score.inner() > Decimal::ZERO);
+        assert_eq!(bull.data_quality_score.inner(), Decimal::ONE);
+        assert!(bull.rejection_warnings.iter().any(|warning| {
+            matches!(warning, crate::model::SignalWarning::Other(detail) if detail.starts_with("shadow_only:"))
+        }));
     }
 
     #[tokio::test]
@@ -482,5 +1080,63 @@ mod tests {
         tampered.crate_version = "9.9".to_owned();
         let err = ClassicalRuntime::load(tampered, &output.model_bytes);
         assert!(err.is_err(), "crate version mismatch must be rejected");
+    }
+
+    #[test]
+    fn classical_artifact_freezes_the_typed_contract_and_rejects_drift() {
+        let output = ClassicalAdapterRegistry::adapter_for(ClassicalKind::RandomForest)
+            .train(&training_matrix())
+            .expect("train");
+        assert_eq!(
+            output.input_contract.inputs,
+            vec![
+                ModelInputSpec::required("f0"),
+                ModelInputSpec::required("f1")
+            ]
+        );
+        assert_eq!(
+            output.input_contract_hash,
+            model_input_contract_hash(&output.input_contract).expect("typed contract hash")
+        );
+
+        let mut stale_hash = artifact(&output);
+        stale_hash.input_contract.inputs[0].requiredness = ModelInputRequiredness::Optional;
+        assert!(
+            ClassicalRuntime::load(stale_hash, &output.model_bytes).is_err(),
+            "requiredness drift without a new canonical hash must fail closed"
+        );
+
+        let mut swapped = artifact(&output);
+        swapped.input_contract.inputs.swap(0, 1);
+        swapped.input_contract_hash =
+            model_input_contract_hash(&swapped.input_contract).expect("swapped contract hash");
+        assert!(
+            ClassicalRuntime::load(swapped, &output.model_bytes).is_err(),
+            "an internally hashed contract still cannot diverge from the fitted transform"
+        );
+
+        let mut malformed = artifact(&output);
+        malformed
+            .input_contract
+            .inputs
+            .push(malformed.input_contract.inputs[0].clone());
+        assert!(
+            ClassicalRuntime::load(malformed, &output.model_bytes).is_err(),
+            "duplicate raw inputs must fail closed"
+        );
+
+        let mut zero_horizon = artifact(&output);
+        zero_horizon.prediction_horizon_secs = 0;
+        assert!(
+            ClassicalRuntime::load(zero_horizon, &output.model_bytes).is_err(),
+            "zero classical horizon must fail closed"
+        );
+
+        let mut wrong_semantics = artifact(&output);
+        wrong_semantics.output_semantics = ClassicalOutputSemantics::SettlementProbability;
+        assert!(
+            ClassicalRuntime::load(wrong_semantics, &output.model_bytes).is_err(),
+            "regressor artifact cannot masquerade as a settlement probability"
+        );
     }
 }

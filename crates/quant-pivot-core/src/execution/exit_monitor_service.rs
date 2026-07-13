@@ -18,7 +18,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{OrderIntentInfo, PositionInfo, RecommendationInfo, market::book::BookSnapshot},
     enums::execution::ExitState,
@@ -176,7 +176,13 @@ impl ExitMonitorService {
         }
 
         let snapshot = self.deps.book_store.load(&lot.token_id);
-        let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(0);
+        let now_ms = u64::try_from(now.timestamp_millis()).map_err(|error| {
+            ExecutionError::TimeConversion {
+                field: "exit_monitor.now_ms",
+                value: now.timestamp_millis().to_string(),
+                detail: error.to_string(),
+            }
+        })?;
 
         // The recommendation supplies the venue neg-risk signing context (and the
         // re-inference thesis context); a missing one is non-fatal.
@@ -187,7 +193,7 @@ impl ExitMonitorService {
             |rec| rec.entry_plan.max_book_age_ms,
         );
         let (mark_price, book_fresh, market_abnormal) =
-            classify_book(snapshot.as_deref(), now_ms, max_book_age_ms);
+            classify_book(snapshot.as_deref(), now_ms, max_book_age_ms)?;
 
         let neg_risk = recommendation.is_some_and(|rec| rec.market_context.neg_risk);
 
@@ -365,16 +371,23 @@ fn classify_book(
     snapshot: Option<&BookSnapshot>,
     now_ms: u64,
     max_book_age_ms: u64,
-) -> (Option<Price>, bool, bool) {
+) -> QuantResult<(Option<Price>, bool, bool)> {
     let Some(snapshot) = snapshot else {
-        return (None, false, false);
+        return Ok((None, false, false));
     };
-    let fresh = now_ms.saturating_sub(snapshot.timestamp_ms) <= max_book_age_ms;
+    let age_ms = now_ms.checked_sub(snapshot.timestamp_ms).ok_or_else(|| {
+        ExecutionError::TimeConversion {
+            field: "exit_monitor.book.timestamp_ms",
+            value: snapshot.timestamp_ms.to_string(),
+            detail: format!("snapshot is after decision time {now_ms}"),
+        }
+    })?;
+    let fresh = age_ms <= max_book_age_ms;
     let bid = snapshot.best_bid();
     let ask = snapshot.best_ask();
     let crossed = matches!((bid, ask), (Some(b), Some(a)) if b >= a);
     let abnormal = bid.is_none() || crossed;
-    (bid, fresh, abnormal)
+    Ok((bid, fresh, abnormal))
 }
 
 /// The larger of an existing peak and the current mark (either may be absent).
@@ -413,9 +426,18 @@ mod tests {
             now_ms - 4_000,
             1,
         );
-        let (_, fresh_at_5s, _) = classify_book(Some(&snapshot), now_ms, 5_000);
-        let (_, fresh_at_3s, _) = classify_book(Some(&snapshot), now_ms, 3_000);
+        let (_, fresh_at_5s, _) =
+            classify_book(Some(&snapshot), now_ms, 5_000).expect("classification");
+        let (_, fresh_at_3s, _) =
+            classify_book(Some(&snapshot), now_ms, 3_000).expect("classification");
         assert!(fresh_at_5s);
         assert!(!fresh_at_3s);
+    }
+
+    #[test]
+    fn classify_book_rejects_future_snapshot() {
+        let now_ms = 1_000_000_u64;
+        let snapshot = BookSnapshot::new(Arc::from([]), Arc::from([]), now_ms + 1, 1);
+        assert!(classify_book(Some(&snapshot), now_ms, 5_000).is_err());
     }
 }

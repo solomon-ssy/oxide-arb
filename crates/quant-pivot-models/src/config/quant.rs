@@ -40,6 +40,8 @@ pub struct ResearchJobsConfig {
     /// 11.5) — the second-heaviest kind after dataset builds (rayon-parallel
     /// internally, so a low cap of `1` keeps host CPU predictable).
     pub cpcv_backtest_concurrency: usize,
+    /// Per-kind cap for deterministic feature-parity replay.
+    pub feature_parity_concurrency: usize,
     /// Lease time-to-live: a lease not renewed within this window is reclaimable.
     pub lease_ttl_secs: i64,
     /// How often a running job renews its lease + emits a liveness heartbeat.
@@ -76,6 +78,7 @@ impl Default for ResearchJobsConfig {
             bias_table_fit_concurrency: 1,
             model_calibration_fit_concurrency: 1,
             cpcv_backtest_concurrency: 1,
+            feature_parity_concurrency: 1,
             lease_ttl_secs: 90,
             heartbeat_secs: 30,
             poll_secs: 3,
@@ -100,6 +103,7 @@ impl ResearchJobsConfig {
             ResearchJobKind::BiasTableFit => self.bias_table_fit_concurrency,
             ResearchJobKind::ModelCalibrationFit => self.model_calibration_fit_concurrency,
             ResearchJobKind::CpcvBacktest => self.cpcv_backtest_concurrency,
+            ResearchJobKind::FeatureParity => self.feature_parity_concurrency,
         }
     }
 }

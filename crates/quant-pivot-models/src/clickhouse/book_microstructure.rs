@@ -38,6 +38,8 @@ pub struct BookMicrostructureRow {
     pub last_trade_count: u64,
     pub max_book_age_ms: u64,
     pub schema_version: ChSchemaVersion,
+    /// Latest ingestion time of any observation contributing to the bucket.
+    pub available_at: i64,
 }
 
 /// Coarse mid-price bucket for correlation estimation: the last

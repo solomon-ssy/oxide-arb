@@ -107,6 +107,18 @@ impl OrderId {
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MarketSelectionId(Arc<Uuid>);
 
+/// One committed Gamma catalog synchronization batch.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CatalogSyncBatchId(Arc<Uuid>);
+
+/// Immutable event-catalog version observed in one sync batch.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EventCatalogVersionId(Arc<Uuid>);
+
+/// Immutable market-catalog version observed in one sync batch.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MarketCatalogVersionId(Arc<Uuid>);
+
 /// Point-in-time feature vector snapshot identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FeatureVectorId(Arc<Uuid>);
@@ -114,6 +126,20 @@ pub struct FeatureVectorId(Arc<Uuid>);
 /// Governed factor definition identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FactorDefinitionId(Arc<Uuid>);
+
+impl FactorDefinitionId {
+    /// Project a canonical factor-definition digest into the UUID primary-key
+    /// domain. The namespace is permanent: changing it would break immutable
+    /// revision identity and artifact references.
+    #[must_use]
+    pub fn from_definition_hash(definition_hash: &crate::types::ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x7c9e_6a55_3f1b_4d2a_8e0f_1c2d_3e4f_5a6b);
+        Self::new(Uuid::new_v5(
+            &NAMESPACE,
+            definition_hash.as_str().as_bytes(),
+        ))
+    }
+}
 
 /// Persisted factor value identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
@@ -190,6 +216,30 @@ pub struct BasisAlertId(Arc<Uuid>);
 /// Durable research job identifier (async dataset build / model train / backtest).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResearchJobId(Arc<Uuid>);
+
+/// One deterministic online/offline feature-parity replay run.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeatureParityRunId(Arc<Uuid>);
+
+/// One stage-level comparison evidence row in `ClickHouse`.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeatureParityEventId(Arc<Uuid>);
+
+impl FeatureParityEventId {
+    /// Project a canonical evidence identity into an idempotent event id.
+    ///
+    /// Retrying a parity attempt for the same run/evidence key must replace the
+    /// prior `ClickHouse` row rather than append a second logical comparison.
+    #[must_use]
+    pub fn from_evidence_hash(evidence_hash: &crate::types::ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6f5d_35d2_946a_4dc5_8eed_9b67_83b8_79ec);
+        Self::new(Uuid::new_v5(&NAMESPACE, evidence_hash.as_str().as_bytes()))
+    }
+}
+
+/// One append-only transition of the governed feature-parity latch.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FeatureParityStateId(Arc<Uuid>);
 
 /// Model-governance audit row identifier (publish / retire / rollback / promote).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

@@ -32,8 +32,8 @@ use quant_pivot_models::{
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        EntryOrderSpec, ExecutionOrderId, OrderIntentId, Price, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId,
+        EntryOrderSpec, ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
     },
 };
 use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
@@ -50,6 +50,7 @@ use crate::{
         execution_fact_writer::ExecutionEventWriter,
         ledger_fact_projection::project_execution_event,
     },
+    service::feature_integrity::FeatureParityGatePort,
 };
 
 /// Collaborators for the core execution dispatcher.
@@ -64,6 +65,10 @@ pub struct ExecutionDispatcherDeps {
     pub execution_events: Arc<ExecutionEventWriter>,
     /// Fans out `quant.intent` lifecycle events as the venue truth settles.
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
+    /// Checked before claim, then captured as an exact clear generation and
+    /// revalidated under the parity advisory lock inside the write-ahead
+    /// transaction so a newly opened latch cannot race entry.
+    pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
 }
 
 /// Production [`ExecutionSubmitPort`]: the single bridge from an admitted intent
@@ -86,6 +91,10 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         intent_id: &OrderIntentId,
     ) -> QuantResult<ExecutionOrderInfo> {
         let now = Utc::now();
+        self.deps
+            .feature_parity_gate
+            .ensure_clear("entry submission pre-claim")
+            .await?;
 
         // 1. Pre-check: friendly, non-mutating submittability gate.
         let intent = self
@@ -116,8 +125,24 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
 
         // 3–7. Admission gate, write-ahead, venue call, and ledger settle.
         let recommendation = self.evaluate_admission(intent_id, &intent, now).await?;
-        self.venue_submit_and_settle(intent_id, &intent, &recommendation, prior_status, now)
+        let feature_parity_state_id = match self
+            .deps
+            .feature_parity_gate
+            .commit_state_id("entry submission commit")
             .await
+        {
+            Ok(state_id) => state_id,
+            Err(error) => return Err(self.revert_and(intent_id, error).await),
+        };
+        self.venue_submit_and_settle(
+            intent_id,
+            &intent,
+            &recommendation,
+            prior_status,
+            &feature_parity_state_id,
+            now,
+        )
+        .await
     }
 }
 
@@ -177,14 +202,15 @@ impl CoreExecutionDispatcher {
         intent: &OrderIntentInfo,
         recommendation: &RecommendationInfo,
         prior_status: OrderIntentStatus,
+        feature_parity_state_id: &FeatureParityStateId,
         now: DateTime<Utc>,
     ) -> QuantResult<ExecutionOrderInfo> {
         let spec = intent.entry_order_json.clone();
-        let new_order = build_new_execution_order(intent, recommendation, &spec);
+        let new_order = build_new_execution_order(intent, recommendation, &spec)?;
         let execution_order = match self
             .deps
             .submission
-            .create_entry_order_and_lock_capital(new_order)
+            .create_entry_order_and_lock_capital(new_order, feature_parity_state_id)
             .await
         {
             Ok(order) => order,
@@ -297,12 +323,26 @@ pub(crate) const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
     }
 }
 
-pub(crate) fn gtd_expiration_at(order_type: &OrderType) -> Option<DateTime<Utc>> {
+pub(crate) fn gtd_expiration_at(
+    order_type: &OrderType,
+) -> Result<Option<DateTime<Utc>>, ExecutionError> {
     match order_type {
         OrderType::Gtd { expiration } => {
-            DateTime::from_timestamp(i64::try_from(*expiration).unwrap_or(i64::MAX), 0)
+            let seconds =
+                i64::try_from(*expiration).map_err(|error| ExecutionError::TimeConversion {
+                    field: "order_type.gtd.expiration",
+                    value: expiration.to_string(),
+                    detail: error.to_string(),
+                })?;
+            DateTime::from_timestamp(seconds, 0)
+                .map(Some)
+                .ok_or_else(|| ExecutionError::TimeConversion {
+                    field: "order_type.gtd.expiration",
+                    value: expiration.to_string(),
+                    detail: "timestamp is outside the chrono range".to_owned(),
+                })
         }
-        OrderType::Fok | OrderType::Gtc => None,
+        OrderType::Fok | OrderType::Gtc => Ok(None),
     }
 }
 
@@ -311,8 +351,8 @@ fn build_new_execution_order(
     intent: &OrderIntentInfo,
     recommendation: &RecommendationInfo,
     spec: &EntryOrderSpec,
-) -> NewExecutionOrder {
-    NewExecutionOrder {
+) -> Result<NewExecutionOrder, ExecutionError> {
+    Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
         order_intent_id: intent.order_intent_id.clone(),
         order_phase: ExecutionOrderPhase::Entry,
@@ -329,9 +369,9 @@ fn build_new_execution_order(
         submitted_at: None,
         filled_at: None,
         cancelled_at: None,
-        gtd_expiration_at: gtd_expiration_at(&spec.order_type),
+        gtd_expiration_at: gtd_expiration_at(&spec.order_type)?,
         error_message: None,
-    }
+    })
 }
 
 fn build_venue_order(recommendation: &RecommendationInfo, spec: &EntryOrderSpec) -> VenueOrder {
@@ -541,5 +581,22 @@ fn submission_storage_failure(intent_id: &OrderIntentId, error: StorageError) ->
             not_submittable(format!("{entity} already exists: {key}"))
         }
         other => other.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::enums::common::OrderType;
+
+    use super::gtd_expiration_at;
+
+    #[test]
+    fn gtd_expiration_rejects_unrepresentable_timestamp() {
+        assert!(
+            gtd_expiration_at(&OrderType::Gtd {
+                expiration: u64::MAX,
+            })
+            .is_err()
+        );
     }
 }

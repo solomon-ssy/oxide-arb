@@ -18,8 +18,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, CapitalAllocationRepository, ExecutionOrderRepository,
-    ExecutionSubmissionRepository, MarketRepository, ModelRegistryRepository,
-    OperationLogRepository, OrderIntentRepository, PositionRepository,
+    ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
+    ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
     RuntimeConfigVersionRepository, SettlementRedeemRepository,
 };
@@ -97,22 +97,7 @@ impl ExecutionBundle {
         let infra = deps.infra;
         let repos = &infra.repos;
 
-        // Stateful venue-health breaker — auto-trips the kill-switch (latched).
-        let breaker_config = deps
-            .governance
-            .runtime_config
-            .current()
-            .execution
-            .breaker
-            .clone();
-        let operation_log: Arc<dyn OperationLogRepository> =
-            Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>;
-        let breaker = Arc::new(ExecutionBreaker::new(
-            breaker_config,
-            Arc::clone(&deps.governance.kill_switch),
-            operation_log,
-            Arc::clone(&infra.metrics),
-        ));
+        let breaker = build_execution_breaker(deps)?;
 
         // Exit-monitor health seam (05.6): owned by the governance bundle so it
         // is shared with the mode preflight; published by the worker, read by
@@ -147,6 +132,11 @@ impl ExecutionBundle {
                 metrics: Arc::clone(&infra.metrics),
                 execution_events: Arc::clone(&infra.execution_event_writer),
                 intent_lifecycle: Arc::clone(&deps.intent_lifecycle),
+                feature_parity_gate: Arc::new(
+                    crate::service::feature_integrity::RepositoryFeatureParityGate::new(
+                        Arc::clone(&repos.feature_parity) as Arc<dyn FeatureParityRepository>,
+                    ),
+                ),
             }));
 
         // Reconciliation engine (05.5): venue reader + fixed-order evidence
@@ -209,6 +199,24 @@ impl ExecutionBundle {
             dispatch_wake: DispatchWake::new(),
         })
     }
+}
+
+fn build_execution_breaker(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Arc<ExecutionBreaker>> {
+    let breaker_config = deps
+        .governance
+        .runtime_config
+        .current()
+        .execution
+        .breaker
+        .clone();
+    let operation_log =
+        Arc::clone(&deps.infra.repos.operation_log) as Arc<dyn OperationLogRepository>;
+    Ok(Arc::new(ExecutionBreaker::new(
+        breaker_config,
+        Arc::clone(&deps.governance.kill_switch),
+        operation_log,
+        Arc::clone(&deps.infra.metrics),
+    )?))
 }
 
 fn build_settlement_redeem_service(
@@ -349,7 +357,6 @@ fn build_exit_monitor(
             as Arc<dyn RuntimeConfigVersionRepository>,
         recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
         pit_source: Arc::clone(&wiring.data.pit_source),
-        market_registry: Arc::clone(&wiring.data.market_registry),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
     });
     // 06.0 thesis-invalidation re-inference (invalidation-first).
@@ -370,7 +377,6 @@ fn build_exit_monitor(
             config: Arc::clone(&wiring.governance.runtime_config),
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             pit_source: Arc::clone(&wiring.data.pit_source),
-            market_registry: Arc::clone(&wiring.data.market_registry),
             window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
         });
     let opportunistic: Arc<dyn ExitSignalEvaluator> = Arc::new(

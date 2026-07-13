@@ -9,16 +9,21 @@
 //!
 //! # Bitemporal axes
 //!
-//! - **Knowledge axis** — [`MarketLinkage::metadata_hash`]: the canonical hash
-//!   of the Gamma metadata snapshot the record was derived from. A metadata
-//!   revision triggers re-resolution; point-in-time reads never see a linkage
-//!   derived from future metadata.
-//! - **Ruleset axis** — [`MarketLinkage::resolver_version`]: the frozen
-//!   deterministic ruleset (asset aliases, symbol/feed bindings, templates)
-//!   that produced the record, so growing the ruleset never rewrites history.
+//! - **Effective axis** — [`MarketLinkage::effective_at`]: when the resolved
+//!   outcome became true in source time. It must not exceed the linkage source
+//!   cutoff for a decision.
+//! - **Availability axis** — [`MarketLinkage::available_at`]: when this ledger
+//!   revision became knowable to the system. It must not exceed the decision
+//!   time, which prevents a late-arriving backdated correction from leaking
+//!   into historical replay.
+//!
+//! [`MarketLinkage::metadata_hash`] and [`MarketLinkage::resolver_version`]
+//! bind the exact metadata snapshot and deterministic ruleset that produced a
+//! revision; they are provenance dimensions, not substitutes for either time
+//! axis.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::hashing::CanonicalDigestError;
+use quant_pivot_error::{QuantResult, governance::GovernanceError, hashing::CanonicalDigestError};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -318,26 +323,25 @@ pub struct MarketLinkage {
     /// The frozen ruleset version that produced this record.
     pub resolver_version: ResolverVersion,
     /// Canonical hash of the Gamma metadata snapshot this record was derived
-    /// from (the bitemporal knowledge axis).
+    /// from (immutable provenance, distinct from the two time axes).
     pub metadata_hash: ContentHash,
     /// Content address over the full outcome (idempotent-write key).
     pub content_hash: ContentHash,
-    /// When the resolver derived this record (PIT visibility instant).
-    pub derived_at: DateTime<Utc>,
-    /// Ledger insertion instant — the tie-break for [`crate::domain::linkage_valid_at`]
-    /// when two revisions share `derived_at` exactly, matching the Postgres
-    /// repository's `(derived_at, created_at, linkage_id)` ordering byte for
-    /// byte. On a freshly-constructed (not-yet-persisted) record this is an
-    /// inert placeholder — the database assigns the authoritative value on
-    /// insert ([`NewMarketLinkage`] does not carry this column at all — see
-    /// [`Self::to_new`]) — so only a value reloaded through
-    /// [`MarketLinkageInfo::into_domain`] participates in a real tie-break.
-    pub created_at: DateTime<Utc>,
+    /// Source-effective instant of this resolver outcome. A PIT reader may use
+    /// the row only when this is at or before the frozen linkage cutoff.
+    pub effective_at: DateTime<Utc>,
+    /// System-availability instant assigned by the append-only ledger. A PIT
+    /// reader may use the row only when this is at or before `decision_at`.
+    /// It is also the second stable ordering key when two revisions share an
+    /// effective instant. This field exists only on a database-rehydrated
+    /// ledger record; pre-append derivations use [`MarketLinkageDerivation`]
+    /// and cannot supply it.
+    pub available_at: DateTime<Utc>,
 }
 
 /// Canonical projection hashed into [`MarketLinkage::content_hash`].
 ///
-/// Excludes the surrogate id and `derived_at` so re-running the same resolver
+/// Excludes the surrogate id and effective/availability clocks so re-running the same resolver
 /// over the same metadata is a no-op (idempotent append).
 #[derive(Serialize)]
 struct LinkageHashInput<'a> {
@@ -465,43 +469,113 @@ pub struct NewMarketLinkage {
     pub override_actor: Option<String>,
 }
 
-impl MarketLinkage {
-    /// Project this record into a `quant_market_linkage` insert payload.
+/// Complete resolver output before the database assigns system availability.
+///
+/// Deliberately has no `available_at`/`created_at`: those clocks are facts of
+/// durable append, not values a resolver may guess. The domain family is also
+/// derived from the outcome, so it cannot disagree with a resolved subject.
+#[derive(Debug, Clone)]
+pub struct MarketLinkageDerivation {
+    pub market_id: MarketId,
+    pub outcome: LinkageOutcome,
+    pub confidence: Probability,
+    pub resolver_tier: ResolverTier,
+    pub resolver_version: ResolverVersion,
+    pub metadata_hash: ContentHash,
+    pub effective_at: DateTime<Utc>,
+}
+
+impl NewMarketLinkage {
+    /// Build the append payload directly from one resolver derivation.
     ///
-    /// The derived status and denormalized instrument key are computed here so
-    /// no writer can persist a row that disagrees with its own outcome.
-    /// `override_reason` / `override_actor` are projected from the same
-    /// `binding.override_context` that is also serialized inside `outcome` —
-    /// one source of truth, two representations (queryable columns +
-    /// complete audit document).
+    /// This is intentionally distinct from [`MarketLinkage`]: an append
+    /// payload has a source-effective clock but cannot know the database-owned
+    /// availability clock yet. Only a row reloaded as [`MarketLinkageInfo`] can
+    /// become a PIT-readable [`MarketLinkage`], so callers cannot populate
+    /// `available_at` with a placeholder.
+    ///
+    /// Status, content address, denormalized instrument, and override audit
+    /// columns are all projected here from the same outcome.
     ///
     /// # Errors
     ///
-    /// Propagates outcome-payload serialization failures.
-    pub fn to_new(&self) -> Result<NewMarketLinkage, serde_json::Error> {
-        let override_context = self
-            .binding()
-            .and_then(|binding| binding.override_context.as_ref());
-        Ok(NewMarketLinkage {
-            linkage_id: self.linkage_id.clone(),
-            market_id: self.market_id.clone(),
-            domain_family: self.domain_family,
-            status: self.status(),
-            resolver_tier: self.resolver_tier,
-            resolver_version: self.resolver_version,
-            confidence: self.confidence,
-            outcome: serde_json::to_value(&self.outcome)?,
-            instrument_key: self.binding().map(|binding| binding.instrument_key.clone()),
-            metadata_hash: self.metadata_hash.clone(),
-            content_hash: self.content_hash.clone(),
-            derived_at: self.derived_at,
-            override_reason: override_context.map(|ctx| ctx.reason.clone()),
-            override_actor: override_context.map(|ctx| ctx.actor.clone()),
+    /// Returns typed hashing or governance serialization failures; no partial
+    /// payload is produced.
+    pub fn from_derivation(derivation: MarketLinkageDerivation) -> QuantResult<Self> {
+        let MarketLinkageDerivation {
+            market_id,
+            outcome,
+            confidence,
+            resolver_tier,
+            resolver_version,
+            metadata_hash,
+            effective_at,
+        } = derivation;
+        let domain_family = match &outcome {
+            LinkageOutcome::Resolved(binding) => binding.subject.family(),
+            // The linkage resolver currently owns only the crypto vertical;
+            // unresolved outcomes have no subject from which to derive it.
+            LinkageOutcome::Unresolved { .. } => DomainFamily::Crypto,
+        };
+        let status = match (&outcome, resolver_tier) {
+            (LinkageOutcome::Unresolved { .. }, _) => LinkageStatus::Unresolved,
+            (LinkageOutcome::Resolved(_), ResolverTier::Override) => LinkageStatus::Overridden,
+            (LinkageOutcome::Resolved(_), _) => LinkageStatus::Resolved,
+        };
+        let binding = match &outcome {
+            LinkageOutcome::Resolved(binding) => Some(binding),
+            LinkageOutcome::Unresolved { .. } => None,
+        };
+        let content_hash = MarketLinkage::compute_content_hash(
+            &market_id,
+            domain_family,
+            &outcome,
+            resolver_tier,
+            resolver_version,
+            &metadata_hash,
+        )?;
+        let override_context = binding.and_then(|binding| binding.override_context.as_ref());
+        let instrument_key = binding.map(|binding| binding.instrument_key.clone());
+        let override_reason = override_context.map(|context| context.reason.clone());
+        let override_actor = override_context.map(|context| context.actor.clone());
+        let outcome = serde_json::to_value(outcome).map_err(|error| {
+            GovernanceError::LinkagePayloadSerialization {
+                detail: error.to_string(),
+            }
+        })?;
+
+        Ok(Self {
+            linkage_id: MarketLinkageId::from_v7(),
+            market_id,
+            domain_family,
+            status,
+            resolver_tier,
+            resolver_version,
+            confidence,
+            outcome,
+            instrument_key,
+            metadata_hash,
+            content_hash,
+            derived_at: effective_at,
+            override_reason,
+            override_actor,
         })
     }
 }
 
 impl MarketLinkageInfo {
+    /// Source-effective clock used by PIT visibility checks.
+    #[must_use]
+    pub const fn effective_at(&self) -> DateTime<Utc> {
+        self.derived_at
+    }
+
+    /// System-availability clock used by PIT visibility checks.
+    #[must_use]
+    pub const fn available_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+
     /// Decode the ledger row back into the domain record.
     ///
     /// # Errors
@@ -518,8 +592,8 @@ impl MarketLinkageInfo {
             resolver_version: self.resolver_version,
             metadata_hash: self.metadata_hash,
             content_hash: self.content_hash,
-            derived_at: self.derived_at,
-            created_at: self.created_at,
+            effective_at: self.derived_at,
+            available_at: self.created_at,
         })
     }
 }
@@ -527,8 +601,9 @@ impl MarketLinkageInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        CryptoSubject, GroundingProof, GroundingSpan, LinkageOutcome, MarketLinkage, MarketSubject,
-        PriceComparator, ResolutionOracle, ResolvedBinding,
+        CryptoSubject, GroundingProof, GroundingSpan, LinkageOutcome, MarketLinkage,
+        MarketLinkageDerivation, MarketSubject, NewMarketLinkage, PriceComparator,
+        ResolutionOracle, ResolvedBinding,
     };
     use crate::{
         domain::{GroundingField, GroundingKind},
@@ -592,8 +667,8 @@ mod tests {
             resolver_version: ResolverVersion::FIRST,
             metadata_hash,
             content_hash,
-            derived_at: Utc::now(),
-            created_at: Utc::now(),
+            effective_at: Utc::now(),
+            available_at: Utc::now(),
         }
     }
 
@@ -620,6 +695,29 @@ mod tests {
         );
         assert_eq!(unresolved.status(), LinkageStatus::Unresolved);
         assert!(unresolved.binding().is_none());
+    }
+
+    #[test]
+    fn append_derivation_cannot_fabricate_system_availability() {
+        let effective_at = Utc::now();
+        let pending = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
+            market_id: MarketId::new("0xpending"),
+            outcome: LinkageOutcome::Resolved(sample_binding()),
+            confidence: Probability::ONE,
+            resolver_tier: ResolverTier::Tier0Slug,
+            resolver_version: ResolverVersion::FIRST,
+            metadata_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            effective_at,
+        })
+        .expect("derivation");
+
+        assert_eq!(pending.derived_at, effective_at);
+        let payload = serde_json::to_value(pending).expect("serialize append payload");
+        assert!(payload.get("available_at").is_none());
+        assert!(
+            payload.get("created_at").is_none(),
+            "database-owned availability must not exist before append"
+        );
     }
 
     #[test]

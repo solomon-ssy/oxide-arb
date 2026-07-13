@@ -9,7 +9,8 @@
 //! and [`BacktestService`](crate::service::backtest::BacktestService) consume it,
 //! so their PIT semantics can never drift.
 //!
-//! Features are bounded by `as_of - source_delay`; forward label/settlement
+//! Features are bounded by the frozen [`DecisionBoundary`] source cutoffs;
+//! forward label/settlement
 //! windows look strictly after `as_of`. There is **no** live `BookStore` here —
 //! the offline plane is structurally barred from the live source.
 
@@ -20,33 +21,32 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice, ChUsd,
         MarketResolutionRow, TradeTapeRow,
     },
-    domain::market::registry::{CatalogMarketLeg, MarketInfo, NegRiskLegSet},
-    domain::{DomainObservation, MarketLinkage, TradeTapePrint},
-    enums::{domain::DomainFamily, market::MarketStatus},
+    domain::{
+        CatalogWindowInfo, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
+        MarketLinkage, MarketRegistryInfo, TradeTapePrint,
+    },
+    enums::domain::DomainFamily,
     runtime_config::DomainConfig,
-    types::{DomainInstrumentKey, EventId, MarketId, TokenId},
+    types::{DomainInstrumentKey, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{
-    EventRepository, MarketLinkageRepository, MarketRepository, QuantFactReadRepository,
+    CatalogVersionRepository, MarketLinkageRepository, QuantFactReadRepository,
 };
 use quant_pivot_research::{
     features::{MarketWindowSnapshot, MicrostructureBucket, TradeTapeWindowSnapshot},
-    pit::{BookSnapshotAt, MarketContextAt, MaterializedPitEngine},
+    pit::{BookSnapshotAt, MaterializedPitEngine},
     selection::SelectedMarket,
     training::{ForwardSample, ForwardWindow, MarketResolution as ResearchMarketResolution},
 };
 
 use crate::pit::platform::ch_historical::snapshot_from_row;
-use quant_pivot_research::{
-    domain::{crypto_lookback_secs, oracle_instrument},
-    pit::TradeTapePitParams,
-};
+use quant_pivot_research::domain::{crypto_lookback_secs, oracle_instrument};
 
 /// One `(market, token)` instant the replay will resolve point-in-time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ pub struct WindowSpec {
     /// Maximum trailing feature lookback.
     pub lookback: Duration,
     /// Source visibility delay applied to features.
-    pub source_delay: Duration,
+    pub knowledge_lag: Duration,
     /// Maximum forward label horizon (forward facts are read this far past `window_end`).
     pub max_horizon_secs: u64,
     /// Frozen domain-plane configuration (drives linkage + observation prefetch).
@@ -85,10 +85,8 @@ pub struct Prefetched {
     pub trade_tape: HashMap<MarketId, Vec<TradeTapeRow>>,
     /// Settlement resolutions per market.
     pub resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
-    /// Market catalog metadata.
-    pub markets_by_id: HashMap<MarketId, Arc<MarketInfo>>,
-    /// Per-event neg-risk leg enumeration (expected vs resolved), keyed by event.
-    pub neg_risk_leg_sets: HashMap<EventId, NegRiskLegSet>,
+    /// Every immutable market/event revision required by the replay window.
+    pub catalog: CatalogWindowInfo,
     /// External domain observations per instrument, ascending (Phase 11.2.2).
     pub domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
     /// Frozen linkage ledger records per market covering the window (any
@@ -112,8 +110,7 @@ pub struct HistoricalWindow {
 /// point-in-time lookup from memory.
 pub struct HistoricalWindowLoader {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
+    catalog_repo: Arc<dyn CatalogVersionRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     max_book_staleness: Duration,
 }
@@ -124,15 +121,13 @@ impl HistoricalWindowLoader {
     #[must_use]
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
-        market_repo: Arc<dyn MarketRepository>,
-        event_repo: Arc<dyn EventRepository>,
+        catalog_repo: Arc<dyn CatalogVersionRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         max_book_staleness: Duration,
     ) -> Self {
         Self {
             fact_read,
-            market_repo,
-            event_repo,
+            catalog_repo,
             linkage_repo,
             max_book_staleness,
         }
@@ -142,7 +137,7 @@ impl HistoricalWindowLoader {
     pub async fn load(&self, spec: &WindowSpec) -> QuantResult<HistoricalWindow> {
         let prefetched = self.prefetch(spec).await?;
         let (pit, book_decode_failures) =
-            build_materialized_pit(&prefetched, self.max_book_staleness);
+            build_materialized_pit(&prefetched, self.max_book_staleness)?;
         Ok(HistoricalWindow {
             prefetched,
             pit,
@@ -154,82 +149,87 @@ impl HistoricalWindowLoader {
     /// materializing the in-memory PIT engine (used when a caller supplies its
     /// own point-in-time source, e.g. leakage-probe integration tests).
     pub async fn prefetch(&self, spec: &WindowSpec) -> QuantResult<Prefetched> {
-        let mut tokens: Vec<TokenId> = Vec::new();
-        let mut markets: Vec<MarketId> = Vec::new();
-        let mut seen_tokens: HashSet<TokenId> = HashSet::new();
-        let mut seen_markets: HashSet<MarketId> = HashSet::new();
-        for sample in &spec.samples {
-            if seen_tokens.insert(sample.token_id.clone()) {
-                tokens.push(sample.token_id.clone());
-            }
-            if seen_markets.insert(sample.market_id.clone()) {
-                markets.push(sample.market_id.clone());
-            }
-        }
+        let WindowSubjects {
+            tokens,
+            markets,
+            seen_tokens,
+        } = window_subjects(&spec.samples);
 
-        // Load sample market infos first, then — for neg-risk markets — expand to
-        // the full set of event YES legs so the offline structural full-leg
-        // aggregates resolve from the same books the online plane sees (Phase
-        // 11.2.1 train-serve parity). Sibling leg BOOKS are prefetched; sibling
-        // micro/resolutions are not needed by the structural plane.
-        let sample_infos = self
-            .market_repo
-            .find_by_ids(&markets)
+        let end_boundary = window_end_boundary(spec)?;
+        let catalog = self
+            .catalog_repo
+            .window_through(&markets, &end_boundary)
             .await
             .map_err(QuantError::from)?;
-        let mut markets_by_id: HashMap<MarketId, Arc<MarketInfo>> = sample_infos
-            .iter()
-            .map(|info| (info.market_id.clone(), Arc::clone(info)))
-            .collect();
+        let catalog_markets = decode_catalog_markets(&catalog)?;
+
+        // Expand books to both binary outcome tokens named by every catalog
+        // revision. The model context uses the exact PIT best ask for whichever
+        // side it recommends; a NO quote is never synthesized as `1 - YES`.
         let mut book_tokens: Vec<TokenId> = tokens.clone();
         let mut seen_book_tokens: HashSet<TokenId> = seen_tokens.clone();
-        for info in &sample_infos {
-            if !info.neg_risk {
-                continue;
+        for market in &catalog_markets {
+            if seen_book_tokens.insert(market.token_yes.clone()) {
+                book_tokens.push(market.token_yes.clone());
             }
-            let siblings = self
-                .market_repo
-                .find_by_event(info.event_id.as_str())
-                .await
-                .map_err(QuantError::from)?;
-            for sibling in siblings {
-                if seen_book_tokens.insert(sibling.yes_token_id.clone()) {
-                    book_tokens.push(sibling.yes_token_id.clone());
-                }
-                markets_by_id
-                    .entry(sibling.market_id.clone())
-                    .or_insert(sibling);
+            if seen_book_tokens.insert(market.token_no.clone()) {
+                book_tokens.push(market.token_no.clone());
             }
         }
 
-        let book_from = (spec.window_start - to_chrono(self.max_book_staleness)).timestamp_millis();
-        let book_to = spec.window_end.timestamp_millis();
-        let micro_from =
-            (spec.window_start - to_chrono(spec.lookback) - to_chrono(spec.source_delay))
-                .timestamp_millis();
-        let micro_to = (spec.window_end
-            + ChronoDuration::seconds(i64::try_from(spec.max_horizon_secs).unwrap_or(i64::MAX)))
+        // The earliest sample resolves its book at
+        // `window_start - knowledge_lag`. Prefetch one full staleness window
+        // before that already-governed cutoff; starting at merely
+        // `window_start - max_book_staleness` drops valid rows whenever lag is
+        // non-zero and creates an offline-only missing book.
+        let book_from = book_prefetch_start(
+            spec.window_start,
+            spec.knowledge_lag,
+            self.max_book_staleness,
+        )?
         .timestamp_millis();
+        let book_to = spec.window_end.timestamp_millis();
+        let lookback_start = checked_sub_duration(
+            spec.window_start,
+            spec.lookback,
+            "historical feature lookback",
+        )?;
+        let micro_from = checked_sub_duration(
+            lookback_start,
+            spec.knowledge_lag,
+            "historical knowledge lag",
+        )?
+        .timestamp_millis();
+        let horizon_secs = i64::try_from(spec.max_horizon_secs).map_err(|error| {
+            QuantError::config(format!("historical max horizon does not fit i64: {error}"))
+        })?;
+        let micro_to = spec
+            .window_end
+            .checked_add_signed(ChronoDuration::seconds(horizon_secs))
+            .ok_or_else(|| {
+                QuantError::config("historical forward window end is outside chrono range")
+            })?
+            .timestamp_millis();
         let resolution_to = micro_to;
 
         let book_rows = self
             .fact_read
-            .book_snapshots_between(book_tokens, book_from, book_to)
+            .book_snapshots_between(book_tokens, book_from, book_to, book_to)
             .await
             .map_err(QuantError::from)?;
         let micro_rows = self
             .fact_read
-            .microstructure_window(tokens.clone(), micro_from, micro_to)
+            .microstructure_window(tokens.clone(), micro_from, micro_to, micro_to)
             .await
             .map_err(QuantError::from)?;
         let trade_rows = self
             .fact_read
-            .trade_tape_window_by_market(markets.clone(), micro_from, micro_to)
+            .trade_tape_window_by_market(markets.clone(), micro_from, micro_to, micro_to)
             .await
             .map_err(QuantError::from)?;
         let resolution_rows = self
             .fact_read
-            .resolutions_between(markets.clone(), 0, resolution_to)
+            .resolutions_between(markets.clone(), 0, resolution_to, resolution_to)
             .await
             .map_err(QuantError::from)?;
 
@@ -247,19 +247,16 @@ impl HistoricalWindowLoader {
                 .push(row);
         }
 
-        let neg_risk_leg_sets =
-            build_neg_risk_leg_sets(self.event_repo.as_ref(), &sample_infos, &markets_by_id)
-                .await?;
-        let (linkages, domain_observations) =
-            self.prefetch_domain(spec, &markets, &markets_by_id).await?;
+        let (linkages, domain_observations) = self
+            .prefetch_domain(spec, &end_boundary, &markets, &catalog_markets)
+            .await?;
 
         Ok(Prefetched {
             books,
             micro,
             trade_tape,
             resolutions,
-            markets_by_id,
-            neg_risk_leg_sets,
+            catalog,
             domain_observations,
             linkages,
         })
@@ -270,34 +267,27 @@ impl HistoricalWindowLoader {
     ///
     /// The observation range covers the widest domain lookback before
     /// `window_start` through `window_end` (domain features never look
-    /// forward); the linkage ledger is bounded by `derived_at <= window_end`
-    /// so per-`as_of` bitemporal selection happens in memory.
+    /// forward); the linkage ledger is bounded by the same end boundary used
+    /// for the catalog snapshot, on both effective and availability axes, so
+    /// each sample can apply its own bitemporal boundary in memory.
     async fn prefetch_domain(
         &self,
         spec: &WindowSpec,
+        end_boundary: &DecisionBoundary,
         sample_markets: &[MarketId],
-        markets_by_id: &HashMap<MarketId, Arc<MarketInfo>>,
+        catalog_markets: &[MarketRegistryInfo],
     ) -> QuantResult<(
         HashMap<MarketId, Vec<MarketLinkage>>,
         HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
     )> {
-        let mapped_markets: Vec<MarketId> = sample_markets
-            .iter()
-            .filter(|market_id| {
-                markets_by_id.get(*market_id).is_some_and(|info| {
-                    DomainFamily::for_category(info.fee_category())
-                        .is_some_and(|family| spec.domain.family_enabled(family))
-                })
-            })
-            .cloned()
-            .collect();
+        let mapped_markets = mapped_domain_markets(spec, sample_markets, catalog_markets);
         if mapped_markets.is_empty() {
             return Ok((HashMap::new(), HashMap::new()));
         }
 
         let ledger_rows = self
             .linkage_repo
-            .ledger_for_markets(&mapped_markets, spec.window_end)
+            .ledger_for_markets(&mapped_markets, end_boundary)
             .await
             .map_err(QuantError::from)?;
         let mut linkages: HashMap<MarketId, Vec<MarketLinkage>> = HashMap::new();
@@ -322,36 +312,89 @@ impl HistoricalWindowLoader {
             return Ok((linkages, HashMap::new()));
         }
 
-        let lookback_secs = i64::try_from(crypto_lookback_secs(&spec.domain)).unwrap_or(i64::MAX);
-        let delay_secs = i64::try_from(spec.domain.crypto.source_delay_secs).unwrap_or(i64::MAX);
-        let from_ms = (spec.window_start
-            - ChronoDuration::seconds(lookback_secs)
-            - ChronoDuration::seconds(delay_secs))
-        .timestamp_millis();
-        let to_ms = spec.window_end.timestamp_millis();
+        let start_boundary = replay_boundary(
+            spec.window_start,
+            spec.knowledge_lag.as_secs(),
+            spec.domain.crypto.availability_lag_secs,
+        )?;
+        let domain_from = checked_sub_duration(
+            start_boundary.cutoff_for(DecisionSource::DomainCrypto),
+            Duration::from_secs(crypto_lookback_secs(&spec.domain)),
+            "domain observation lookback",
+        )?;
+        let domain_cutoff = end_boundary.cutoff_for(DecisionSource::DomainCrypto);
+        let from_ms = domain_from.timestamp_millis();
+        let to_ms = domain_cutoff
+            .timestamp_millis()
+            .checked_add(1)
+            .ok_or_else(|| QuantError::config("domain observation cutoff overflowed i64"))?;
         let rows = self
             .fact_read
-            .domain_observations_between(instruments.into_iter().collect(), from_ms, to_ms)
+            .domain_observations_between(
+                instruments.into_iter().collect(),
+                from_ms,
+                to_ms,
+                domain_cutoff.timestamp_millis(),
+                end_boundary.decision_at().timestamp_millis(),
+            )
             .await
             .map_err(QuantError::from)?;
         let mut domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>> =
             HashMap::new();
         for row in rows {
-            // An unreadable persisted label means this build cannot interpret
-            // the row — fail closed by skipping (the feature side then reports
-            // DomainSourceUnavailable, never a fabricated value).
-            if let Some(observation) = DomainObservation::from_clickhouse_row(&row) {
-                domain_observations
-                    .entry(observation.instrument_key.clone())
-                    .or_default()
-                    .push(observation);
+            let observation = DomainObservation::from_clickhouse_row(&row).ok_or_else(|| {
+                ResearchError::PitResolution {
+                    detail: format!(
+                        "domain observation {} / {} at {} cannot be decoded",
+                        row.instrument_key, row.metric, row.event_time
+                    ),
+                }
+            })?;
+            if observation.observed_at < domain_from
+                || observation.observed_at > domain_cutoff
+                || observation.publish_time > domain_cutoff
+                || observation
+                    .available_at
+                    .is_none_or(|available_at| available_at > end_boundary.decision_at())
+            {
+                return Err(ResearchError::PitResolution {
+                    detail: format!(
+                        "domain observation {} at {} (published {}) is outside PIT prefetch window [{domain_from}, {domain_cutoff}]",
+                        observation.instrument_key,
+                        observation.observed_at,
+                        observation.publish_time
+                    ),
+                }
+                .into());
             }
+            domain_observations
+                .entry(observation.instrument_key.clone())
+                .or_default()
+                .push(observation);
         }
         for series in domain_observations.values_mut() {
             series.sort_by_key(|observation| observation.observed_at);
         }
         Ok((linkages, domain_observations))
     }
+}
+
+fn mapped_domain_markets(
+    spec: &WindowSpec,
+    sample_markets: &[MarketId],
+    catalog_markets: &[MarketRegistryInfo],
+) -> Vec<MarketId> {
+    sample_markets
+        .iter()
+        .filter(|market_id| {
+            catalog_markets.iter().any(|market| {
+                &market.market_id == *market_id
+                    && DomainFamily::for_category(market.fee_category())
+                        .is_some_and(|family| spec.domain.family_enabled(family))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn group_micro_rows(
@@ -372,58 +415,54 @@ fn group_trade_tape_rows(rows: Vec<TradeTapeRow>) -> HashMap<MarketId, Vec<Trade
     grouped
 }
 
-/// Enumerate neg-risk leg sets for every event touched by the sample window.
-///
-/// Uses the persisted Gamma catalog snapshot (`EventInfo.catalog_market_ids`) —
-/// the same source as online [`MarketRegistry::neg_risk_leg_set`] — so
-/// `expected_legs` semantics match the live plane (Phase 11.2.1 train-serve parity).
-async fn build_neg_risk_leg_sets(
-    event_repo: &dyn EventRepository,
-    sample_infos: &[Arc<MarketInfo>],
-    markets_by_id: &HashMap<MarketId, Arc<MarketInfo>>,
-) -> QuantResult<HashMap<EventId, NegRiskLegSet>> {
-    let mut neg_risk_events: HashSet<EventId> = sample_infos
-        .iter()
-        .filter(|info| info.neg_risk)
-        .map(|info| info.event_id.clone())
-        .collect();
-    for info in markets_by_id.values().filter(|info| info.neg_risk) {
-        neg_risk_events.insert(info.event_id.clone());
+fn window_end_boundary(spec: &WindowSpec) -> QuantResult<DecisionBoundary> {
+    if spec.knowledge_lag.subsec_nanos() != 0 {
+        return Err(QuantError::config(
+            "historical knowledge lag must be expressed in whole seconds",
+        ));
     }
-    let event_ids: Vec<EventId> = neg_risk_events.into_iter().collect();
-    let events = event_repo
-        .find_by_ids(&event_ids)
-        .await
-        .map_err(QuantError::from)?;
-    let events_by_id: HashMap<EventId, _> = events
-        .into_iter()
-        .map(|event| (event.event_id.clone(), event))
-        .collect();
+    replay_boundary(
+        spec.window_end,
+        spec.knowledge_lag.as_secs(),
+        spec.domain.crypto.availability_lag_secs,
+    )
+}
 
-    let mut neg_risk_leg_sets = HashMap::new();
-    for event_id in event_ids {
-        let Some(event) = events_by_id.get(&event_id) else {
-            neg_risk_leg_sets.insert(event_id, NegRiskLegSet::empty());
-            continue;
-        };
-        if !event.neg_risk {
-            continue;
-        }
-        let catalog = event.catalog_market_ids.as_slice();
-        let leg_set = NegRiskLegSet::from_catalog(catalog, |market_id| {
-            markets_by_id.get(market_id).map(|info| {
-                if info.neg_risk {
-                    CatalogMarketLeg::NegRisk {
-                        yes_token_id: info.yes_token_id.clone(),
-                    }
-                } else {
-                    CatalogMarketLeg::NonNegRisk
+/// Construct the sole frozen boundary for one offline replay decision.
+///
+/// Every reader consumes one of these recorded cutoffs. No downstream window
+/// helper is permitted to subtract lag again.
+pub fn replay_boundary(
+    decision_at: DateTime<Utc>,
+    knowledge_lag_secs: u64,
+    domain_crypto_lag_secs: u64,
+) -> QuantResult<DecisionBoundary> {
+    DecisionClock::new(knowledge_lag_secs)
+        .boundary(decision_at)?
+        .with_source_cutoff(DecisionSource::Catalog, 0)?
+        .with_source_cutoff(DecisionSource::Book, 0)?
+        .with_source_cutoff(DecisionSource::Microstructure, 0)?
+        .with_source_cutoff(DecisionSource::TradeTape, 0)?
+        .with_source_cutoff(DecisionSource::Linkage, 0)?
+        .with_source_cutoff(DecisionSource::DomainCrypto, domain_crypto_lag_secs)
+}
+
+fn decode_catalog_markets(catalog: &CatalogWindowInfo) -> QuantResult<Vec<MarketRegistryInfo>> {
+    catalog
+        .market_versions
+        .iter()
+        .map(|version| {
+            serde_json::from_value(version.payload.clone()).map_err(|error| {
+                ResearchError::PitResolution {
+                    detail: format!(
+                        "market catalog version {} payload is invalid: {error}",
+                        version.market_catalog_version_id
+                    ),
                 }
+                .into()
             })
-        });
-        neg_risk_leg_sets.insert(event_id, leg_set);
-    }
-    Ok(neg_risk_leg_sets)
+        })
+        .collect()
 }
 
 /// Build the in-memory PIT engine from the prefetched window, returning the
@@ -431,179 +470,194 @@ async fn build_neg_risk_leg_sets(
 fn build_materialized_pit(
     prefetched: &Prefetched,
     max_staleness: Duration,
-) -> (MaterializedPitEngine, u64) {
-    let placeholder = epoch();
+) -> QuantResult<(MaterializedPitEngine, u64)> {
     let mut book_decode_failures = 0_u64;
     let mut books: HashMap<TokenId, Vec<BookSnapshotAt>> = HashMap::new();
     for (token, rows) in &prefetched.books {
-        let series: Vec<BookSnapshotAt> = rows
-            .iter()
-            .filter_map(|row| {
-                let (snapshot, status) = snapshot_from_row(row.clone(), placeholder);
-                if status.counts_as_failure() {
-                    book_decode_failures += 1;
-                }
-                snapshot
-            })
-            .collect();
+        let mut series = Vec::with_capacity(rows.len());
+        for row in rows {
+            let source_cutoff = timestamp_millis(row.event_time, "book event_time")?;
+            let decision_at = timestamp_millis(row.ingestion_time, "book ingestion_time")?;
+            let (snapshot, status) = snapshot_from_row(row.clone(), source_cutoff, decision_at);
+            if status.counts_as_failure() {
+                book_decode_failures += 1;
+            }
+            if let Some(snapshot) = snapshot {
+                series.push(snapshot);
+            }
+        }
         books.insert(token.clone(), series);
     }
 
-    let mut markets: HashMap<MarketId, Vec<MarketContextAt>> = HashMap::new();
-    for (market_id, info) in &prefetched.markets_by_id {
-        let mut series = vec![market_context_entry(
-            info,
-            info.created_at,
-            MarketStatus::Active,
-        )];
-        if let Some(latest) = prefetched.resolutions.get(market_id).and_then(|rows| {
-            rows.iter()
-                .max_by_key(|row| (row.resolved_at, row.observed_at))
-        }) {
-            series.push(market_context_entry(
-                info,
-                ms(latest.resolved_at),
-                MarketStatus::Settled,
-            ));
-        }
-        markets.insert(market_id.clone(), series);
-    }
-
-    (
-        MaterializedPitEngine::new(books, markets, to_chrono(max_staleness)),
+    Ok((
+        MaterializedPitEngine::new(
+            books,
+            prefetched.catalog.clone(),
+            chrono_duration(max_staleness, "training.max_book_staleness_ms")?,
+        )?,
         book_decode_failures,
-    )
+    ))
 }
 
-/// One market-context series entry observed at `observed_at` with `status`.
-fn market_context_entry(
-    info: &MarketInfo,
-    observed_at: DateTime<Utc>,
-    status: MarketStatus,
-) -> MarketContextAt {
-    MarketContextAt {
-        market_id: info.market_id.clone(),
-        as_of: observed_at,
-        observed_at,
-        status,
-        neg_risk: info.neg_risk,
-        end_date: info.end_date,
-        created_at: info.created_at,
-        outcome_count: 2,
+struct WindowSubjects {
+    tokens: Vec<TokenId>,
+    markets: Vec<MarketId>,
+    seen_tokens: HashSet<TokenId>,
+}
+
+fn window_subjects(samples: &[ReplaySample]) -> WindowSubjects {
+    let mut tokens = Vec::new();
+    let mut markets = Vec::new();
+    let mut seen_tokens = HashSet::new();
+    let mut seen_markets = HashSet::new();
+    for sample in samples {
+        if seen_tokens.insert(sample.token_id.clone()) {
+            tokens.push(sample.token_id.clone());
+        }
+        if seen_markets.insert(sample.market_id.clone()) {
+            markets.push(sample.market_id.clone());
+        }
+    }
+    WindowSubjects {
+        tokens,
+        markets,
+        seen_tokens,
     }
 }
 
 /// Project a market catalog row into a selection entry (primary = YES token).
 ///
-/// `liquidity_usd` is left `None`: the offline plane has no live selection
-/// snapshot, so liquidity is sourced from the resolved feature vector instead
-/// (mirroring the online context projection's fallback).
+/// Liquidity and volume come from the exact PIT catalog version. The offline
+/// plane never substitutes a live selection snapshot or re-derives these fields
+/// from a different evidence source.
 #[must_use]
-pub fn selected_market(info: &MarketInfo) -> SelectedMarket {
+pub fn selected_market(info: &MarketRegistryInfo) -> SelectedMarket {
     SelectedMarket {
         market_id: info.market_id.clone(),
         event_id: info.event_id.clone(),
         category: info.fee_category(),
-        primary_token_id: info.yes_token_id.clone(),
-        secondary_token_id: Some(info.no_token_id.clone()),
-        liquidity_usd: None,
-        volume_24h_usd: None,
+        primary_token_id: info.token_yes.clone(),
+        secondary_token_id: Some(info.token_no.clone()),
+        liquidity_usd: info.liquidity_usd,
+        volume_24h_usd: info.volume_24h,
         source_refs: Vec::new(),
     }
 }
 
 /// Build the trailing PIT feature window for one `(token, as_of)`.
-#[must_use]
 pub fn feature_window(
     token_id: TokenId,
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
+    boundary: &DecisionBoundary,
     lookback: Duration,
     rows: &[BookMicrostructureRow],
-) -> MarketWindowSnapshot {
-    let cutoff = as_of - to_chrono(source_delay);
-    let start = cutoff - to_chrono(lookback);
-    let buckets = rows
-        .iter()
-        .filter_map(|row| {
-            let at = ms(row.bucket_time);
-            (at >= start && at <= cutoff).then(|| bucket_from_row(row, at))
-        })
-        .collect();
-    MarketWindowSnapshot {
-        token_id,
-        as_of,
-        source_delay,
-        buckets,
+) -> QuantResult<MarketWindowSnapshot> {
+    let cutoff = boundary.cutoff_for(DecisionSource::Microstructure);
+    let start = checked_sub_duration(cutoff, lookback, "feature window lookback")?;
+    let mut buckets = Vec::new();
+    for row in rows {
+        let at = timestamp_millis(row.bucket_time, "microstructure bucket_time")?;
+        let available_at = timestamp_millis(row.available_at, "microstructure available_at")?;
+        if at >= start && at <= cutoff && available_at <= boundary.decision_at() {
+            buckets.push(bucket_from_row(row, at, available_at));
+        }
     }
+    Ok(MarketWindowSnapshot {
+        token_id,
+        decision_at: boundary.decision_at(),
+        knowledge_cutoff: cutoff,
+        buckets,
+    })
 }
 
 /// Build the trailing PIT trade-tape window for one `(market, as_of)`.
-#[must_use]
 pub fn trade_tape_window(
     market_id: MarketId,
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
+    boundary: &DecisionBoundary,
     lookback: Duration,
     rows: &[TradeTapeRow],
-) -> TradeTapeWindowSnapshot {
-    let pit = TradeTapePitParams {
-        trigger_time: as_of,
-        source_delay,
-        lookback,
-    };
-    let start = pit.cutoff() - to_chrono(lookback);
-    let cutoff = pit.cutoff();
-    let prints = rows
-        .iter()
-        .filter_map(|row| {
-            let at = ms(row.event_time);
-            (at >= start && at < cutoff).then(|| TradeTapePrint::from_clickhouse_row(row, at))
-        })
-        .collect();
-    TradeTapeWindowSnapshot::available(market_id, as_of, source_delay, prints)
+) -> QuantResult<TradeTapeWindowSnapshot> {
+    let cutoff = boundary.cutoff_for(DecisionSource::TradeTape);
+    let start = checked_sub_duration(cutoff, lookback, "trade-tape window lookback")?;
+    let mut prints = Vec::new();
+    for row in rows {
+        let at = timestamp_millis(row.event_time, "trade-tape event_time")?;
+        let available_at = timestamp_millis(row.ingestion_time, "trade-tape ingestion_time")?;
+        if at >= start && at < cutoff && available_at <= boundary.decision_at() {
+            prints.push(TradeTapePrint::from_clickhouse_row_at(
+                row,
+                at,
+                available_at,
+            ));
+        }
+    }
+    Ok(TradeTapeWindowSnapshot::available(
+        market_id,
+        boundary.decision_at(),
+        cutoff,
+        prints,
+    ))
 }
 
 /// Build the strictly-forward label/settlement window for one `(token, as_of)`.
-#[must_use]
 pub fn forward_window(
     as_of: DateTime<Utc>,
     max_horizon_secs: u64,
     rows: &[BookMicrostructureRow],
     resolutions: &[MarketResolutionRow],
-) -> ForwardWindow {
-    let data_available_until = rows.last().map_or(as_of, |row| ms(row.bucket_time));
-    let cap = as_of + ChronoDuration::seconds(i64::try_from(max_horizon_secs).unwrap_or(i64::MAX));
-    let samples = rows
-        .iter()
-        .filter_map(|row| {
-            let at = ms(row.bucket_time);
-            (at > as_of && at <= cap).then(|| forward_sample(row, at))
-        })
-        .collect();
+) -> QuantResult<ForwardWindow> {
+    let data_available_until = rows
+        .last()
+        .map(|row| timestamp_millis(row.bucket_time, "forward bucket_time"))
+        .transpose()?
+        .unwrap_or(as_of);
+    let horizon_secs = i64::try_from(max_horizon_secs).map_err(|error| {
+        QuantError::config(format!("forward horizon does not fit i64 seconds: {error}"))
+    })?;
+    let cap = as_of
+        .checked_add_signed(ChronoDuration::seconds(horizon_secs))
+        .ok_or_else(|| QuantError::config("forward horizon end is outside chrono range"))?;
+    let mut samples = Vec::new();
+    for row in rows {
+        let at = timestamp_millis(row.bucket_time, "forward bucket_time")?;
+        if at > as_of && at <= cap {
+            samples.push(forward_sample(row, at));
+        }
+    }
     // Settlement is independent of microstructure maturity: any resolution strictly
     // after `as_of` is visible to the settlement labeler.
-    let resolution = resolutions
-        .iter()
-        .filter(|row| ms(row.resolved_at) > as_of)
-        .max_by_key(|row| (row.resolved_at, row.observed_at))
-        .map(|row| ResearchMarketResolution {
+    let mut decoded_resolutions = Vec::with_capacity(resolutions.len());
+    for row in resolutions {
+        let resolved_at = timestamp_millis(row.resolved_at, "resolution resolved_at")?;
+        let observed_at = timestamp_millis(row.observed_at, "resolution observed_at")?;
+        if resolved_at > as_of {
+            decoded_resolutions.push((row, resolved_at, observed_at));
+        }
+    }
+    let resolution = decoded_resolutions
+        .into_iter()
+        .max_by_key(|(_, resolved_at, observed_at)| (*resolved_at, *observed_at))
+        .map(|(row, resolved_at, observed_at)| ResearchMarketResolution {
             winning_token_id: row.winning_token_id.clone(),
-            resolved_at: ms(row.resolved_at),
-            observed_at: ms(row.observed_at),
+            resolved_at,
+            observed_at,
         });
-    ForwardWindow {
+    Ok(ForwardWindow {
         anchor: as_of,
         data_available_until,
         samples,
         resolution,
-    }
+    })
 }
 
 /// Decode a microstructure row into a compute-domain bucket.
-fn bucket_from_row(row: &BookMicrostructureRow, at: DateTime<Utc>) -> MicrostructureBucket {
+fn bucket_from_row(
+    row: &BookMicrostructureRow,
+    at: DateTime<Utc>,
+    available_at: DateTime<Utc>,
+) -> MicrostructureBucket {
     MicrostructureBucket {
         bucket_time: at,
+        available_at,
         mid_close: row.mid_price_close.map(ChPrice::to_price),
         spread_bps_avg: row.spread_bps_avg.map(ChBps::to_bps),
         top1_depth_usd_avg: row.top1_depth_usd_avg.map(ChUsd::to_usd),
@@ -629,22 +683,82 @@ fn forward_sample(row: &BookMicrostructureRow, at: DateTime<Utc>) -> ForwardSamp
     }
 }
 
-/// Convert a `std::time::Duration` into a saturating `chrono::Duration`.
-#[must_use]
-pub fn to_chrono(duration: Duration) -> ChronoDuration {
-    ChronoDuration::from_std(duration).unwrap_or_else(|_| ChronoDuration::zero())
+fn chrono_duration(duration: Duration, field: &'static str) -> QuantResult<ChronoDuration> {
+    ChronoDuration::from_std(duration)
+        .map_err(|error| QuantError::config(format!("{field} is outside chrono range: {error}")))
 }
 
-/// Convert epoch milliseconds to a UTC instant (epoch fallback on overflow).
-#[must_use]
-pub fn ms(timestamp_ms: i64) -> DateTime<Utc> {
+fn checked_sub_duration(
+    value: DateTime<Utc>,
+    duration: Duration,
+    field: &'static str,
+) -> QuantResult<DateTime<Utc>> {
+    value
+        .checked_sub_signed(chrono_duration(duration, field)?)
+        .ok_or_else(|| QuantError::config(format!("{field} start is outside chrono range")))
+}
+
+fn book_prefetch_start(
+    window_start: DateTime<Utc>,
+    knowledge_lag: Duration,
+    max_book_staleness: Duration,
+) -> QuantResult<DateTime<Utc>> {
+    let coverage = knowledge_lag
+        .checked_add(max_book_staleness)
+        .ok_or_else(|| QuantError::config("historical book prefetch duration overflow"))?;
+    checked_sub_duration(
+        window_start,
+        coverage,
+        "historical book knowledge-lag and staleness coverage",
+    )
+}
+
+fn timestamp_millis(timestamp_ms: i64, field: &'static str) -> QuantResult<DateTime<Utc>> {
     Utc.timestamp_millis_opt(timestamp_ms)
         .single()
-        .unwrap_or_else(epoch)
+        .ok_or_else(|| {
+            ResearchError::PitResolution {
+                detail: format!("{field} {timestamp_ms} is outside chrono range"),
+            }
+            .into()
+        })
 }
 
-/// The Unix epoch instant, used as an overflow/placeholder fallback.
-#[must_use]
-pub fn epoch() -> DateTime<Utc> {
-    DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now)
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+
+    use super::book_prefetch_start;
+
+    #[test]
+    fn book_prefetch_covers_non_zero_lag_before_the_earliest_cutoff() {
+        let window_start = Utc
+            .with_ymd_and_hms(2026, 7, 12, 12, 0, 0)
+            .single()
+            .expect("timestamp");
+
+        let from = book_prefetch_start(
+            window_start,
+            Duration::from_mins(2),
+            Duration::from_secs(10),
+        )
+        .expect("prefetch start");
+
+        assert_eq!(from, window_start - ChronoDuration::seconds(130));
+    }
+
+    #[test]
+    fn book_prefetch_zero_lag_preserves_the_staleness_window() {
+        let window_start = Utc
+            .with_ymd_and_hms(2026, 7, 12, 12, 0, 0)
+            .single()
+            .expect("timestamp");
+
+        let from = book_prefetch_start(window_start, Duration::ZERO, Duration::from_secs(10))
+            .expect("prefetch start");
+
+        assert_eq!(from, window_start - ChronoDuration::seconds(10));
+    }
 }

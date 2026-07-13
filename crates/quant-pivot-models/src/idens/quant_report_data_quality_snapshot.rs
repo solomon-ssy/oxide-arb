@@ -21,7 +21,7 @@ use crate::{
 pub enum QuantReportDataQualitySnapshot {
     Table,
     ReportDataQualitySnapshotId,
-    AsOf,
+    DecisionAt,
     RuntimeConfigVersionId,
     TokensJson,
     CreatedAt,
@@ -35,7 +35,7 @@ pub fn table() -> TableCreateStatement {
             QuantReportDataQualitySnapshot::ReportDataQualitySnapshotId,
         ))
         .col(
-            ColumnDef::new(QuantReportDataQualitySnapshot::AsOf)
+            ColumnDef::new(QuantReportDataQualitySnapshot::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
@@ -68,13 +68,13 @@ pub fn table() -> TableCreateStatement {
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![IndexSpec::sea_query(
-        "idx_quant_report_dq_snapshot_as_of",
+        "idx_quant_report_dq_snapshot_decision_at",
         quant_report_data_quality_snapshot_table_name,
         IndexBuildMode::Transactional,
         Index::create()
-            .name("idx_quant_report_dq_snapshot_as_of")
+            .name("idx_quant_report_dq_snapshot_decision_at")
             .table(QuantReportDataQualitySnapshot::Table)
-            .col((QuantReportDataQualitySnapshot::AsOf, IndexOrder::Desc))
+            .col((QuantReportDataQualitySnapshot::DecisionAt, IndexOrder::Desc))
             .to_owned(),
         "report DQ snapshots by PIT timestamp",
     )]

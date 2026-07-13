@@ -1,9 +1,9 @@
 //! Unified, source-agnostic point-in-time inputs for feature builders.
 //!
-//! Live ([`PointInTimeDataSource`](quant_pivot_models::domain::PointInTimeDataSource))
-//! and historical ([`PitQueryEngine`](crate::pit::PitQueryEngine)) sources both
-//! normalize into [`ResolvedBook`] / [`ResolvedMarketContext`], so one builder
-//! definition produces byte-identical features online and offline. Windowed
+//! Serving and replay sources both normalize into [`ResolvedBook`] /
+//! [`ResolvedMarketContext`] through
+//! [`PointInTimeSnapshotSource`](crate::pit::PointInTimeSnapshotSource), so one
+//! builder definition produces byte-identical features online and offline. Windowed
 //! time-series / microstructure features read a [`MarketWindowSnapshot`] that the
 //! orchestrator pre-fetches per round (never a database query in the build loop).
 
@@ -11,10 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use quant_pivot_error::research::ResearchError;
 use quant_pivot_models::{
     domain::TradeTapePrint,
     domain::market::{
-        book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
+        book::{BookLevel, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
         registry::MarketRegistryInfo,
     },
     enums::market::MarketStatus,
@@ -24,24 +25,15 @@ use rust_decimal::Decimal;
 
 use crate::pit::{BookSnapshotAt, MarketContextAt};
 
-/// Convert epoch milliseconds to a UTC instant, falling back to `default` on
-/// overflow (never panics).
-fn millis_to_utc(timestamp_ms: u64, default: DateTime<Utc>) -> DateTime<Utc> {
-    i64::try_from(timestamp_ms)
-        .ok()
-        .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
-        .unwrap_or(default)
-}
-
 /// A pre-fetched, point-in-time-bounded trade-tape window for one market.
 #[derive(Debug, Clone)]
 pub struct TradeTapeWindowSnapshot {
     /// Market the window describes (YES+NO token fills aggregated).
     pub market_id: MarketId,
-    /// Decision time the window was resolved as of.
-    pub as_of: DateTime<Utc>,
-    /// Source visibility delay applied to the trade tape.
-    pub source_delay: Duration,
+    /// Decision time associated with this immutable window.
+    pub decision_at: DateTime<Utc>,
+    /// Already-derived source knowledge cutoff.
+    pub knowledge_cutoff: DateTime<Utc>,
     /// Whether the trade-tape source was queried and considered available.
     pub source_available: bool,
     /// Participant rows ascending by event time, all before the PIT cutoff.
@@ -50,11 +42,15 @@ pub struct TradeTapeWindowSnapshot {
 
 impl TradeTapeWindowSnapshot {
     #[must_use]
-    pub const fn empty(market_id: MarketId, as_of: DateTime<Utc>, source_delay: Duration) -> Self {
+    pub const fn empty(
+        market_id: MarketId,
+        decision_at: DateTime<Utc>,
+        knowledge_cutoff: DateTime<Utc>,
+    ) -> Self {
         Self {
             market_id,
-            as_of,
-            source_delay,
+            decision_at,
+            knowledge_cutoff,
             source_available: false,
             prints: Vec::new(),
         }
@@ -63,28 +59,35 @@ impl TradeTapeWindowSnapshot {
     #[must_use]
     pub const fn available(
         market_id: MarketId,
-        as_of: DateTime<Utc>,
-        source_delay: Duration,
+        decision_at: DateTime<Utc>,
+        knowledge_cutoff: DateTime<Utc>,
         prints: Vec<TradeTapePrint>,
     ) -> Self {
         Self {
             market_id,
-            as_of,
-            source_delay,
+            decision_at,
+            knowledge_cutoff,
             source_available: true,
             prints,
         }
     }
 
     #[must_use]
-    pub fn cutoff(&self) -> DateTime<Utc> {
-        self.as_of
-            - ChronoDuration::from_std(self.source_delay).unwrap_or_else(|_| ChronoDuration::zero())
+    pub const fn cutoff(&self) -> DateTime<Utc> {
+        self.knowledge_cutoff
     }
 
     #[must_use]
     pub fn freshest_trade_time(&self) -> Option<DateTime<Utc>> {
         self.prints.last().map(|print| print.event_time)
+    }
+
+    #[must_use]
+    pub fn latest_available_at(&self) -> Option<DateTime<Utc>> {
+        self.prints
+            .iter()
+            .filter_map(|print| print.available_at)
+            .max()
     }
 
     #[must_use]
@@ -102,8 +105,9 @@ impl TradeTapeWindowSnapshot {
     #[must_use]
     pub fn prints_in(&self, window: Duration) -> Vec<&TradeTapePrint> {
         let cutoff = self.cutoff();
-        let start =
-            cutoff - ChronoDuration::from_std(window).unwrap_or_else(|_| ChronoDuration::zero());
+        let Some(start) = window_start(cutoff, window) else {
+            return Vec::new();
+        };
         self.prints
             .iter()
             .filter(|print| print.event_time >= start && print.event_time < cutoff)
@@ -125,24 +129,15 @@ pub struct ResolvedBook {
     pub timestamp_ms: u64,
     /// Monotonic publish version of the underlying snapshot.
     pub version: u64,
-    /// When the datum was observed (`<= as_of`).
-    pub observed_at: DateTime<Utc>,
+    /// Stable source sequence of the persisted snapshot.
+    pub sequence: u64,
+    /// Source-effective timestamp of the snapshot (`<= source_cutoff`).
+    pub effective_at: DateTime<Utc>,
+    /// Time at which the snapshot became visible (`<= decision_at`).
+    pub available_at: DateTime<Utc>,
 }
 
 impl ResolvedBook {
-    /// Build from a live published snapshot.
-    #[must_use]
-    pub fn from_live(token_id: &TokenId, snapshot: &BookSnapshot, as_of: DateTime<Utc>) -> Self {
-        Self {
-            token_id: token_id.clone(),
-            bids: Arc::clone(&snapshot.bids),
-            asks: Arc::clone(&snapshot.asks),
-            timestamp_ms: snapshot.timestamp_ms,
-            version: snapshot.version,
-            observed_at: millis_to_utc(snapshot.timestamp_ms, as_of),
-        }
-    }
-
     /// Best (highest) bid price.
     #[must_use]
     pub fn best_bid(&self) -> Option<Price> {
@@ -242,20 +237,52 @@ impl ResolvedBook {
     }
 }
 
-impl From<BookSnapshotAt> for ResolvedBook {
-    fn from(snapshot: BookSnapshotAt) -> Self {
-        // `observed_at` is derived from `timestamp_ms` with the exact same rule
-        // as `from_live`, so an identical book produces an identical `book.age_ms`
-        // (and feature hash) online and offline.
-        let observed_at = millis_to_utc(snapshot.timestamp_ms, snapshot.as_of);
-        Self {
+impl TryFrom<BookSnapshotAt> for ResolvedBook {
+    type Error = ResearchError;
+
+    fn try_from(snapshot: BookSnapshotAt) -> Result<Self, Self::Error> {
+        let timestamp_ms =
+            i64::try_from(snapshot.timestamp_ms).map_err(|error| ResearchError::PitResolution {
+                detail: format!(
+                    "book {} timestamp does not fit i64 milliseconds: {error}",
+                    snapshot.token_id
+                ),
+            })?;
+        let effective_at = Utc
+            .timestamp_millis_opt(timestamp_ms)
+            .single()
+            .ok_or_else(|| ResearchError::PitResolution {
+                detail: format!(
+                    "book {} timestamp {} is outside chrono range",
+                    snapshot.token_id, snapshot.timestamp_ms
+                ),
+            })?;
+        if effective_at > snapshot.source_cutoff {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "book {} effective time {effective_at} is after source cutoff {}",
+                    snapshot.token_id, snapshot.source_cutoff
+                ),
+            });
+        }
+        if snapshot.available_at > snapshot.decision_at {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "book {} availability {} is after decision time {}",
+                    snapshot.token_id, snapshot.available_at, snapshot.decision_at
+                ),
+            });
+        }
+        Ok(Self {
             token_id: snapshot.token_id,
             bids: snapshot.bids,
             asks: snapshot.asks,
             timestamp_ms: snapshot.timestamp_ms,
             version: snapshot.version,
-            observed_at,
-        }
+            sequence: snapshot.sequence,
+            effective_at,
+            available_at: snapshot.available_at,
+        })
     }
 }
 
@@ -273,18 +300,18 @@ fn side_depth_usd(levels: &[BookLevel], take: usize) -> Usd {
 pub struct ResolvedMarketContext {
     /// Market the context describes.
     pub market_id: MarketId,
-    /// When the datum was observed (`<= as_of`).
-    pub observed_at: DateTime<Utc>,
+    /// Source-effective time of the catalog revision.
+    pub effective_at: DateTime<Utc>,
+    /// Time at which the revision became visible to the system.
+    pub available_at: DateTime<Utc>,
     /// Lifecycle status.
     pub status: MarketStatus,
     /// Whether the market is a neg-risk market.
     pub neg_risk: bool,
     /// Scheduled resolution time, when known.
     pub end_date: Option<DateTime<Utc>>,
-    /// Catalog creation time (event-age proxy).
-    pub created_at: DateTime<Utc>,
-    /// Number of outcome tokens.
-    pub outcome_count: u32,
+    /// Upstream catalog creation time, when the source supplied one.
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 impl ResolvedMarketContext {
@@ -293,12 +320,12 @@ impl ResolvedMarketContext {
     pub fn from_live(info: &MarketRegistryInfo) -> Self {
         Self {
             market_id: info.market_id.clone(),
-            observed_at: info.updated_at,
+            effective_at: info.updated_at,
+            available_at: info.updated_at,
             status: info.status,
             neg_risk: info.neg_risk,
             end_date: info.end_date,
             created_at: info.created_at,
-            outcome_count: u32::try_from(info.tokens.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -307,12 +334,12 @@ impl From<MarketContextAt> for ResolvedMarketContext {
     fn from(context: MarketContextAt) -> Self {
         Self {
             market_id: context.market_id,
-            observed_at: context.observed_at,
+            effective_at: context.effective_at,
+            available_at: context.available_at,
             status: context.status,
             neg_risk: context.neg_risk,
             end_date: context.end_date,
             created_at: context.created_at,
-            outcome_count: context.outcome_count,
         }
     }
 }
@@ -323,8 +350,10 @@ impl From<MarketContextAt> for ResolvedMarketContext {
 /// builders distinguish "no quote" from a real zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicrostructureBucket {
-    /// Bucket start time (`<= as_of - source_delay`).
+    /// Bucket start time (`<=` the frozen microstructure source cutoff).
     pub bucket_time: DateTime<Utc>,
+    /// Latest ingestion time of facts contributing to this bucket.
+    pub available_at: DateTime<Utc>,
     /// Closing mid price in the bucket.
     pub mid_close: Option<Price>,
     /// Average spread in basis points.
@@ -350,16 +379,16 @@ pub struct MicrostructureBucket {
 }
 
 /// A pre-fetched, point-in-time-bounded window of microstructure buckets for one
-/// token, ascending by `bucket_time`. Every bucket satisfies the PIT cutoff
-/// `bucket_time <= as_of - source_delay`.
+/// token, ascending by `bucket_time`. Every bucket satisfies the frozen
+/// microstructure source cutoff.
 #[derive(Debug, Clone)]
 pub struct MarketWindowSnapshot {
     /// Token the window describes.
     pub token_id: TokenId,
-    /// Decision time the window was resolved as of.
-    pub as_of: DateTime<Utc>,
-    /// Source visibility delay applied to the window.
-    pub source_delay: Duration,
+    /// Decision time associated with this immutable window.
+    pub decision_at: DateTime<Utc>,
+    /// Already-derived source knowledge cutoff.
+    pub knowledge_cutoff: DateTime<Utc>,
     /// Buckets ascending by time, all at or before the PIT cutoff.
     pub buckets: Vec<MicrostructureBucket>,
 }
@@ -367,20 +396,23 @@ pub struct MarketWindowSnapshot {
 impl MarketWindowSnapshot {
     /// An empty window (no history available).
     #[must_use]
-    pub const fn empty(token_id: TokenId, as_of: DateTime<Utc>, source_delay: Duration) -> Self {
+    pub const fn empty(
+        token_id: TokenId,
+        decision_at: DateTime<Utc>,
+        knowledge_cutoff: DateTime<Utc>,
+    ) -> Self {
         Self {
             token_id,
-            as_of,
-            source_delay,
+            decision_at,
+            knowledge_cutoff,
             buckets: Vec::new(),
         }
     }
 
     /// The PIT cutoff: facts at or after this instant are invisible.
     #[must_use]
-    pub fn cutoff(&self) -> DateTime<Utc> {
-        self.as_of
-            - ChronoDuration::from_std(self.source_delay).unwrap_or_else(|_| ChronoDuration::zero())
+    pub const fn cutoff(&self) -> DateTime<Utc> {
+        self.knowledge_cutoff
     }
 
     /// Whether the window has any buckets.
@@ -399,13 +431,19 @@ impl MarketWindowSnapshot {
         self.buckets.last().map(|bucket| bucket.bucket_time)
     }
 
+    #[must_use]
+    pub fn latest_available_at(&self) -> Option<DateTime<Utc>> {
+        self.buckets.iter().map(|bucket| bucket.available_at).max()
+    }
+
     /// Buckets whose `bucket_time` falls within the trailing `window` ending at
     /// the PIT cutoff, ascending.
     #[must_use]
     pub fn buckets_in(&self, window: Duration) -> Vec<&MicrostructureBucket> {
         let cutoff = self.cutoff();
-        let start =
-            cutoff - ChronoDuration::from_std(window).unwrap_or_else(|_| ChronoDuration::zero());
+        let Some(start) = window_start(cutoff, window) else {
+            return Vec::new();
+        };
         self.buckets
             .iter()
             .filter(|bucket| bucket.bucket_time >= start && bucket.bucket_time <= cutoff)
@@ -432,4 +470,9 @@ impl MarketWindowSnapshot {
             .filter_map(|bucket| bucket.mid_close.map(|mid| (bucket.bucket_time, mid)))
             .collect()
     }
+}
+
+fn window_start(cutoff: DateTime<Utc>, window: Duration) -> Option<DateTime<Utc>> {
+    let seconds = i64::try_from(window.as_secs()).ok()?;
+    cutoff.checked_sub_signed(ChronoDuration::seconds(seconds))
 }

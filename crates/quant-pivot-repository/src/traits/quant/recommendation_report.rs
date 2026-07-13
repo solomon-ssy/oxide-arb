@@ -3,10 +3,10 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         NewOperationLog, NewReportTransaction, Paginated, QuantReportListQuery,
-        RecommendationReportInfo,
+        RecommendationReportInfo, ReportDataQualitySnapshotInfo,
     },
     enums::quant::ReportKind,
-    types::RecommendationReportId,
+    types::{ModelRunId, RecommendationReportId},
 };
 
 #[async_trait::async_trait]
@@ -24,6 +24,29 @@ pub trait RecommendationReportRepository: Send + Sync {
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 
+    /// Report produced by an exact serving run. The schema enforces at most one
+    /// report per non-null run id.
+    async fn find_by_model_run_id(
+        &self,
+        model_run_id: &ModelRunId,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Every committed report whose decision lies in `[from, to)`, including
+    /// reports later revoked or expired. Runtime full parity audits what was
+    /// served, not only what remains actionable.
+    async fn list_committed_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RecommendationReportInfo>, StorageError>;
+
+    /// Exact DQ snapshot bound by a report header. Its token rows freeze the
+    /// immutable feature-vector ids for report-scoped pre-inference replay.
+    async fn find_data_quality_snapshot(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<ReportDataQualitySnapshotInfo>, StorageError>;
+
     /// Paginated, filtered listing ordered by `published_at` then `created_at`
     /// (most recent first).
     async fn page(
@@ -40,6 +63,14 @@ pub trait RecommendationReportRepository: Send + Sync {
         &self,
         trigger_key: &str,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Risk-bearing reports whose decision lies in `[from, to)`, used by
+    /// deterministic parity containment when row-level evidence is unavailable.
+    async fn find_actionable_ids_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RecommendationReportId>, StorageError>;
 
     /// Ids of `published` / `published_empty` reports whose roll-up
     /// `valid_until` deadline (`max(recommendation.valid_until)`) is at or before

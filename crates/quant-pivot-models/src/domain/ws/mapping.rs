@@ -124,10 +124,6 @@ mod tests {
             MaterializationRunStatus::Failed
         );
         assert_eq!(
-            MaterializationRunStatus::from(TrainingDatasetStatus::Built),
-            MaterializationRunStatus::Completed
-        );
-        assert_eq!(
             MaterializationRunStatus::from(TrainingDatasetStatus::Building),
             MaterializationRunStatus::Running
         );

@@ -69,7 +69,7 @@ where
 
 fn book_snapshot_ref() -> BookSnapshotRef {
     BookSnapshotRef::from_str(&format!(
-        "book:live:token-abc:1:1700000000@blake3:{}",
+        "book:ch:token-abc:1700000000:1700000000:1:1@blake3:{}",
         "0".repeat(64)
     ))
     .expect("valid book snapshot ref")
@@ -92,7 +92,7 @@ fn base_report(
     let mut info = report_fixtures::report(id, ReportKind::TopN, status);
     "scheduled:daily-topn:2023-11-14T22:13:20Z".clone_into(&mut info.trigger_key);
     info.trigger_time = at(1_700_000_000);
-    info.as_of = at(1_699_999_880);
+    info.decision_at = at(1_699_999_880);
     info.runtime_config_version_id = ref_id("snapshot-runtime-config");
     info.model_version_id = ref_id("snapshot-model-version");
     info.market_selection_id = ref_id("snapshot-market-selection");

@@ -40,8 +40,14 @@ pub mod entity {
     pub const QUANT_TRAINING_DATASET: &str = "quant_training_dataset";
     /// `quant_calibration_artifact`.
     pub const QUANT_CALIBRATION_ARTIFACT: &str = "quant_calibration_artifact";
+    /// `quant_domain_source_cursor`.
+    pub const QUANT_DOMAIN_SOURCE_CURSOR: &str = "quant_domain_source_cursor";
     /// `quant_research_job`.
     pub const QUANT_RESEARCH_JOB: &str = "quant_research_job";
+    /// `quant_feature_parity_run`.
+    pub const QUANT_FEATURE_PARITY_RUN: &str = "quant_feature_parity_run";
+    /// `quant_feature_parity_state`.
+    pub const QUANT_FEATURE_PARITY_STATE: &str = "quant_feature_parity_state";
     /// `quant_model_spec`.
     pub const QUANT_MODEL_SPEC: &str = "quant_model_spec";
     /// `quant_model_version`.

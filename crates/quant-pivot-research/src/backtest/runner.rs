@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::DataQualityStatus,
     types::{
@@ -31,9 +31,11 @@ use crate::{
         PnlSimulation, PortfolioCaps, SampleOutcome, metrics, simulator,
     },
     hashing::ResearchHasher,
-    model::runtime::{MarketInferenceContext, ModelRuntimeOutput, ModelRuntimeWarning},
+    model::runtime::{MarketInferenceContext, ModelInputAuditState, ModelRuntimeOutput},
     portfolio::{
-        allocator::{Allocation, AllocationInput, CandidateMeta, PortfolioAllocator},
+        allocator::{
+            Allocation, AllocationInput, AllocationOutput, CandidateMeta, PortfolioAllocator,
+        },
         optimizer::backtest_optimizer,
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -85,7 +87,7 @@ struct RunAccumulator {
 impl Backtester for PortfolioReplayBacktester {
     async fn run(&self, inputs: BacktestInputs<'_>) -> QuantResult<BacktestRunResult> {
         let mut ticks = inputs.ticks;
-        ticks.sort_by_key(|tick| tick.as_of);
+        ticks.sort_by_key(|tick| tick.decision_at);
 
         let mut acc = RunAccumulator::default();
         for tick in &ticks {
@@ -128,11 +130,7 @@ fn process_tick(
     acc: &mut RunAccumulator,
 ) -> QuantResult<()> {
     acc.total_emitted += output.candidates.len() as u64;
-    acc.missing_feature_count += output
-        .warnings
-        .iter()
-        .filter(|w| matches!(w, ModelRuntimeWarning::MissingFactor { .. }))
-        .count() as u64;
+    record_missing_input_count(acc, output)?;
 
     let meta: BTreeMap<&str, &BacktestMarketMeta> = tick
         .market_meta
@@ -154,24 +152,7 @@ fn process_tick(
         .map(|(market_id, context)| (market_id.as_str(), context))
         .collect();
 
-    let candidate_metas = backtest_candidate_metas(output, &meta, caps);
-    // Per-tick independent allocation (no inventory carry): `initial_exposures`
-    // is always empty, correlation clustering is off (deterministic per-tick
-    // replay), and every candidate is eligible (no TopN truncation in backtest);
-    // cross-tick netting is the production planner's job.
-    let top_n = candidate_metas.len();
-    let allocation = allocator.allocate(&AllocationInput {
-        candidates: candidate_metas,
-        caps,
-        initial_exposures: &ExposureBreakdown::default(),
-        available_usd: caps.total_budget_usd,
-        // Backtest has no live venue account to reconcile against; the
-        // configured budget itself is the capital base (mirrors
-        // `available_usd` above).
-        capital_base_usd: caps.total_budget_usd,
-        correlation: None,
-        top_n,
-    })?;
+    let allocation = allocate_tick(output, allocator, caps, &meta)?;
     let alloc_by_id: BTreeMap<String, &Allocation> = allocation
         .allocations
         .iter()
@@ -210,7 +191,7 @@ fn process_tick(
         tick_allocated += allocated_usd.inner();
         let market_context = context.get(candidate.market_id.as_str());
         acc.samples.push(SampleOutcome {
-            as_of: tick.as_of,
+            decision_at: tick.decision_at,
             market_id: candidate.market_id.clone(),
             token_id: candidate.token_id.clone(),
             category: market.category,
@@ -228,12 +209,13 @@ fn process_tick(
             liquidity_usd: market_context.and_then(|c| c.liquidity_usd),
             time_to_resolution_secs: market_context.and_then(|c| c.time_to_resolution_secs),
             prediction_horizon_secs: candidate.suggested_horizon_secs,
-            substitutions: market_context.map_or_else(Vec::new, |c| c.substitutions.clone()),
+            substitution_reasons: market_context
+                .map_or_else(Vec::new, |c| c.substitution_reasons.clone()),
         });
     }
     acc.realized_pnl += tick_pnl;
     acc.pnl_curve.push(PnlCurvePoint {
-        as_of: tick.as_of,
+        decision_at: tick.decision_at,
         cumulative_realized_pnl_usd: acc.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
     });
     // A tick with no allocation contributes no return observation (never a
@@ -242,6 +224,57 @@ fn process_tick(
     if tick_allocated > Decimal::ZERO {
         acc.tick_returns.push(tick_pnl / tick_allocated);
     }
+    Ok(())
+}
+
+fn allocate_tick(
+    output: &ModelRuntimeOutput,
+    allocator: &dyn PortfolioAllocator,
+    caps: &PortfolioCaps,
+    meta: &BTreeMap<&str, &BacktestMarketMeta>,
+) -> QuantResult<AllocationOutput> {
+    let candidate_metas = backtest_candidate_metas(output, meta, caps);
+    // Per-tick independent allocation (no inventory carry): `initial_exposures`
+    // is always empty, correlation clustering is off, and every candidate is
+    // eligible. Cross-tick netting is the production planner's job.
+    let top_n = candidate_metas.len();
+    allocator.allocate(&AllocationInput {
+        candidates: candidate_metas,
+        caps,
+        initial_exposures: &ExposureBreakdown::default(),
+        available_usd: caps.total_budget_usd,
+        // Historical replay has no venue account. The governed test budget is
+        // both available capital and capital base.
+        capital_base_usd: caps.total_budget_usd,
+        correlation: None,
+        top_n,
+    })
+}
+
+fn record_missing_input_count(
+    acc: &mut RunAccumulator,
+    output: &ModelRuntimeOutput,
+) -> QuantResult<()> {
+    let missing_input_count = output
+        .input_audit
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.raw_state,
+                ModelInputAuditState::Missing | ModelInputAuditState::MissingInput
+            )
+        })
+        .count();
+    acc.missing_feature_count = acc
+        .missing_feature_count
+        .checked_add(u64::try_from(missing_input_count).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("missing model-input count does not fit u64: {error}"),
+            }
+        })?)
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "missing model-input count overflowed u64".to_owned(),
+        })?;
     Ok(())
 }
 
@@ -316,7 +349,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     let turnover = metrics::turnover(m.tick_weights);
     let liquidity_feasibility = metrics::liquidity_feasibility(m.samples);
     let category_breakdown = metrics::category_breakdown(m.samples);
-    let tail_loss = metrics::tail_loss(m.samples, tail_quantile());
+    let tail_loss = metrics::tail_loss(m.samples, tail_quantile())?;
 
     let gross_return = if m.total_allocated > Decimal::ZERO {
         (m.realized_pnl / m.total_allocated).round_dp(RESEARCH_DECIMAL_SCALE)
@@ -412,9 +445,10 @@ mod tests {
             factor::FactorFamily,
             quant::{DataQualityStatus, FactorDirection},
         },
+        runtime_config::FactorCrossSectionConfig,
         types::{
-            BacktestReportId, ContentHash, FactorDefinitionId, MarketId, ModelRunId,
-            ModelVersionId, Price, Probability, RuntimeConfigVersionId, TokenId, Usd,
+            BacktestReportId, ContentHash, FactorDefinitionId, MarketId, ModelInputContract,
+            ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, TokenId, Usd,
         },
     };
     use rust_decimal_macros::dec;
@@ -430,6 +464,7 @@ mod tests {
             artifact::{
                 FactorWeight, ModelArtifactHeader, ScoreMultiplierSpec,
                 SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+                model_input_contract_hash,
             },
             runtime::{
                 FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
@@ -444,6 +479,9 @@ mod tests {
     }
 
     fn runtime() -> WeightedFactorRuntime {
+        let input_contract = ModelInputContract::single_required("book.mid");
+        let input_contract_hash =
+            model_input_contract_hash(&input_contract).expect("input contract hash");
         WeightedFactorRuntime::new(
             WeightedFactorModelArtifact {
                 header: ModelArtifactHeader {
@@ -452,6 +490,10 @@ mod tests {
                     feature_schema_hash: hash("aa"),
                     factor_schema_hash: hash("bb"),
                 },
+                training_dataset_hash: hash("cc"),
+                training_input_hash: hash("dd"),
+                input_contract,
+                input_contract_hash,
                 weights: vec![FactorWeight {
                     factor: MOMENTUM_ROC,
                     weight: dec!(1),
@@ -460,7 +502,8 @@ mod tests {
                 multipliers: ScoreMultiplierSpec::conservative(),
                 substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
                 return_model: ReturnModelSpec::heuristic_default(),
-                required_features: Vec::new(),
+                factor_cross_section: FactorCrossSectionConfig::default(),
+                frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
                 objective_report: None,
                 category_scope: None,
             },
@@ -496,11 +539,11 @@ mod tests {
             context: MarketInferenceContext {
                 secondary_token_id: Some(TokenId::new("no")),
                 yes_price: Price::new(dec!(0.5)),
-                no_price: None,
+                no_price: Some(Price::new(dec!(0.52))),
                 liquidity_usd: Some(Usd::new(dec!(50000))),
                 data_quality: DataQualityStatus::Fresh,
                 time_to_resolution_secs: Some(86_400),
-                substitutions: Vec::new(),
+                substitution_reasons: Vec::new(),
             },
         }
     }
@@ -523,10 +566,10 @@ mod tests {
             },
         ];
         BacktestTick {
-            as_of,
+            decision_at: as_of,
             model_input: ModelRuntimeInput::FactorTable(FactorInferenceTable {
                 model_run_id: model_run_id.clone(),
-                as_of,
+                decision_at: as_of,
                 rows: vec![row("0xbull", true), row("0xbear", false)],
             }),
             outcomes: vec![

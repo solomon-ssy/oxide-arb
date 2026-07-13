@@ -1,36 +1,38 @@
-//! Fire-and-forget `ClickHouse` sink for long-format feature events.
+//! Durable `ClickHouse` sink for long-format serving feature evidence.
 //!
-//! This is a dumb, non-blocking sink: it owns the buffered [`AsyncWriter`] for
-//! the `quant_feature_event` stream and nothing else. Row projection (which is
-//! schema-governed and clock-injected) lives in the research feature writer, so
-//! this type never needs the schema or the wall clock.
+//! Serving evidence is business-critical audit state: callers await the
+//! `ClickHouse` insert acknowledgement and receive a canonical commitment for
+//! the exact batch. It must never pass through the telemetry-class
+//! `AsyncWriter`, whose full-channel and terminal flush semantics permit drops.
 
 use std::sync::Arc;
 
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::clickhouse::QuantFeatureEventRow;
-use quant_pivot_storage::write::AsyncWriter;
+use quant_pivot_repository::traits::FactWriter;
 
-/// Enqueues already-projected feature-event rows into the analytics stream.
+use super::serving_evidence::{FeatureEvidenceCommitment, feature_commitment};
+
+/// Durably persists already-projected feature-event rows.
 pub struct FeatureEventWriter {
-    writer: Arc<AsyncWriter<QuantFeatureEventRow>>,
+    sink: Arc<dyn FactWriter<QuantFeatureEventRow>>,
 }
 
 impl FeatureEventWriter {
-    /// Build a writer over a pre-wired async fact stream.
+    /// Build a writer over an acknowledged fact sink.
     #[must_use]
-    pub const fn new(writer: Arc<AsyncWriter<QuantFeatureEventRow>>) -> Self {
-        Self { writer }
+    pub const fn new(sink: Arc<dyn FactWriter<QuantFeatureEventRow>>) -> Self {
+        Self { sink }
     }
 
-    /// Enqueue one feature-event row (non-blocking).
-    pub fn write(&self, row: QuantFeatureEventRow) {
-        self.writer.write(row);
-    }
-
-    /// Enqueue a batch of already-projected feature-event rows.
-    pub fn write_batch(&self, rows: Vec<QuantFeatureEventRow>) {
-        for row in rows {
-            self.writer.write(row);
-        }
+    /// Persist a complete projected batch and return its producer-side
+    /// commitment only after `ClickHouse` acknowledges every row.
+    pub async fn write_batch(
+        &self,
+        rows: Vec<QuantFeatureEventRow>,
+    ) -> QuantResult<FeatureEvidenceCommitment> {
+        let commitment = feature_commitment(&rows)?;
+        self.sink.write_batch(rows).await?;
+        Ok(commitment)
     }
 }

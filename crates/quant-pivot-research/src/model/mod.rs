@@ -21,7 +21,6 @@ pub mod objective;
 #[cfg(feature = "optimize")]
 pub mod optimize;
 pub mod overlay;
-pub mod rank_scores;
 pub mod reliability;
 pub mod routing;
 pub mod runtime;
@@ -32,11 +31,13 @@ pub mod trainer;
 pub mod weighted;
 
 pub use artifact::{
-    CalibratedReturnModel, ClassicalModelArtifact, ClassicalModelMetrics, DataQualityMultipliers,
-    FactorWeight, FeatureImportance, HeuristicReturnModel, HorizonMultipliers,
-    LiquidityMultipliers, LiquidityTier, ModelArtifact, ModelArtifactHeader, PreprocessingArtifact,
+    CalibratedReturnModel, ClassicalModelArtifact, ClassicalModelMetrics, ClassicalOutputSemantics,
+    DataQualityMultipliers, EncodedColumn, EncodedColumnKind, EncodedColumnName, FactorWeight,
+    FeatureImportance, FittedInputColumn, FittedInputTransform, HeuristicReturnModel,
+    HorizonMultipliers, LiquidityMultipliers, LiquidityTier, ModelArtifact, ModelArtifactHeader,
     ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact, SellScorerOutputSpec,
     SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
+    model_input_contract_hash,
 };
 pub use calibration::{
     CalibrationReport, CalibrationResult, CalibrationSample, StratumFit,
@@ -46,6 +47,7 @@ pub use calibration::{
 pub use calibrator::{
     CalibrationArtifactLoader, IsotonicKnot, MonotoneMapping, ProbabilityCalibrator,
     ResolvedCalibration, apply_mapping, isotonic::IsotonicCalibrator, platt::PlattCalibrator,
+    validate_mapping,
 };
 pub use category_scope::{infer_training_category_scope, validate_category_scope_weights};
 #[cfg(feature = "ml-classical")]
@@ -65,29 +67,29 @@ pub use favorite_longshot::{
 };
 pub use objective::{ObjectiveComponentReport, RankingDiagnostics, TrainingObjectiveSpec};
 pub use overlay::{WeightOverlay, WeightSource};
-pub use rank_scores::{RankScores, attach as attach_rank_scores};
 pub use reliability::{ReliabilityBin, ReliabilityReport, ReliabilitySample, compute_reliability};
 pub use routing::{
     ModelRouting, generic_model_version_id, resolve_model_route, version_id_for_category,
 };
 pub use runtime::{
     ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
-    MarketInferenceContext, ModelFamily, ModelFamilyParseError, ModelRuntimeFactory,
-    ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, ModelRuntimeWarning,
-    QuantModelRuntime,
+    MarketInferenceContext, ModelFamily, ModelFamilyParseError, ModelInputAuditRow,
+    ModelInputAuditState, ModelRuntimeFactory, ModelRuntimeInput, ModelRuntimeMetrics,
+    ModelRuntimeOutput, QuantModelRuntime,
 };
 pub use score_percentile::annotate;
 pub use sell_scorer::{
     LotStateInput, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
     SellScorerTrainer, SellSignalPolicy, TrainSellScorerRequest, WeightedSellScorerRuntime,
-    position_state_factor_values, position_state_features, sell_signal_fires, sell_signal_target,
+    position_state_features, position_state_signed, sell_signal_fires, sell_signal_target,
 };
 pub use signal::{
-    FactorContribution, ModelExplanation, SignalCandidate, SignalWarning, signal_candidate_event,
-    signal_candidate_events,
+    FactorContribution, ModelExplanation, SignalCandidate, SignalWarning,
+    canonical_business_prediction_hash, signal_candidate_event, signal_candidate_events,
 };
 pub use trainer::{
     LabelSelector, ModelTrainer, TrainModelRequest, TrainedModelArtifact, ValidationReport,
-    ValidationSpec, WeightedFactorTrainer,
+    ValidationSpec, WeightedFactorTrainer, fit_frozen_reference_quantiles,
+    weighted_training_input_hash,
 };
 pub use weighted::WeightedFactorRuntime;

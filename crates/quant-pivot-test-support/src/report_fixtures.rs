@@ -7,36 +7,109 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use rust_decimal_macros::dec;
 
 use quant_pivot_models::enums::market::MarketStatus;
 use quant_pivot_models::{
-    domain::{RecommendationInfo, RecommendationReportInfo},
+    domain::{
+        FeatureParityJobParams, NewFeatureParityRun, NewRecommendationReport,
+        NewReportFeatureParity, NewResearchJob, RecommendationInfo, RecommendationReportInfo,
+        RunFullFeatureParityRequest,
+    },
     enums::{
         common::MarketCategory,
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         quant::{
             AccountSource, BindingConstraint, EntryTriggerKind, ExitSettlementMode,
-            FactorDirection, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
-            ReportTriggerKind, SizingBetStructure, SizingModelKind,
+            FactorDirection, FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason,
+            OutcomeSide, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
+            RedeemPolicy, ReportKind, ReportTriggerKind, ResearchJobKind, ResearchJobStatus,
+            SizingBetStructure, SizingModelKind,
         },
     },
     types::{
         AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
         DataQualitySummary, EligibilitySummary, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FeatureVectorId, MarketContext,
-        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope,
-        RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
+        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId,
+        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId,
+        Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary,
+        ResearchJobId, RiskEnvelope, RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan,
+        TokenId, Usd,
     },
 };
 use std::str::FromStr;
 
 fn content_hash() -> ContentHash {
     ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")
+}
+
+/// Build the mandatory sampled-parity run/job committed atomically with a
+/// fixture report.
+///
+/// Production code uses `FeatureParityRunCoordinator`; this
+/// helper mirrors only the repository contract so persistence tests cannot
+/// bypass the Phase 11.6 invariant.
+#[must_use]
+pub fn sampled_parity(report: &NewRecommendationReport) -> NewReportFeatureParity {
+    let run_id = FeatureParityRunId::from_v7();
+    let window_end = report.decision_at + Duration::milliseconds(1);
+    let reason = format!(
+        "fixture sampled replay for report {}",
+        report.recommendation_report_id
+    );
+    let request = RunFullFeatureParityRequest {
+        window_start: Some(report.decision_at),
+        window_end: Some(window_end),
+        reason: reason.clone(),
+    };
+    let run = NewFeatureParityRun {
+        run_id: run_id.clone(),
+        kind: FeatureParityRunKind::Sampled,
+        status: FeatureParityRunStatus::Queued,
+        window_start: report.decision_at,
+        window_end,
+        report_id: Some(report.recommendation_report_id.clone()),
+        model_version_id: Some(report.model_version_id.clone()),
+        training_dataset_id: None,
+        triggered_by: "test:fixture".to_owned(),
+        requested_by: None,
+        acting_role: "test".to_owned(),
+        reason,
+        total_count: 0,
+        compared_count: 0,
+        matched_count: 0,
+        mismatched_count: 0,
+        pending_materialization_count: 0,
+        feature_contract_hash: Some(content_hash()),
+        transform_hash: None,
+        failure_code: None,
+        failure_detail: None,
+        started_at: None,
+        pending_since: None,
+        containment_completed_at: None,
+        finished_at: None,
+    };
+    let params = FeatureParityJobParams {
+        parity_run_id: run_id,
+        materialization_timeout_secs: 600,
+        request,
+    };
+    let job = NewResearchJob {
+        job_id: ResearchJobId::from_v7(),
+        kind: ResearchJobKind::FeatureParity,
+        status: ResearchJobStatus::Queued,
+        model_spec_id: None,
+        runtime_config_version_id: Some(report.runtime_config_version_id.clone()),
+        params_json: serde_json::to_value(params).expect("fixture parity params"),
+        requested_by: None,
+        acting_role: "test".to_owned(),
+        parent_job_id: None,
+        recovery_attempt: 0,
+        max_recovery_attempts: 0,
+    };
+    NewReportFeatureParity { run, job }
 }
 
 /// A report header fixture with the given id / kind / status.
@@ -52,11 +125,12 @@ pub fn report(
         trigger_kind: ReportTriggerKind::Scheduled,
         trigger_key: "scheduled:daily-topn:2023-11-14T22:13:20Z".to_owned(),
         trigger_time: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-        source_delay_secs: 120,
-        as_of: Utc.timestamp_opt(1_699_999_880, 0).unwrap(),
+        knowledge_lag_secs: 120,
+        decision_at: Utc.timestamp_opt(1_699_999_880, 0).unwrap(),
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        model_run_id: None,
         model_version_id: ModelVersionId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
         portfolio_plan_id: PortfolioPlanId::from_v7(),
@@ -281,7 +355,7 @@ const fn market_context() -> MarketContext {
 
 fn book_snapshot_ref() -> BookSnapshotRef {
     BookSnapshotRef::from_str(&format!(
-        "book:live:token-abc:1:1700000000@blake3:{}",
+        "book:ch:token-abc:1700000000:1700000000:1:1@blake3:{}",
         "0".repeat(64)
     ))
     .expect("valid book snapshot ref")

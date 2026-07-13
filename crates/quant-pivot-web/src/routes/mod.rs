@@ -35,6 +35,7 @@ pub mod data_quality;
 pub mod domain_sources;
 pub mod execution_orders;
 pub mod factor_governance;
+pub mod feature_integrity;
 pub mod health;
 pub mod market_linkages;
 pub mod markets;
@@ -100,6 +101,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(structural_monitor::route_specs());
     specs.extend(model_governance::route_specs());
     specs.extend(factor_governance::route_specs());
+    specs.extend(feature_integrity::route_specs());
     specs.extend(quant_reports::route_specs());
     specs.extend(quant_recommendations::route_specs());
     specs.extend(account::route_specs());
@@ -178,4 +180,32 @@ pub fn configure(cfg: &mut ServiceConfig) {
                         .service(protected),
                 ),
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protected_route_specs;
+
+    #[test]
+    fn feature_integrity_routes_are_in_the_protected_manifest() {
+        let paths = protected_route_specs()
+            .into_iter()
+            .filter_map(|spec| {
+                spec.path
+                    .starts_with("/research/feature-integrity/")
+                    .then_some(spec.path)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            [
+                "/research/feature-integrity/summary",
+                "/research/feature-integrity/runs",
+                "/research/feature-integrity/events",
+                "/research/feature-integrity/runs/full",
+                "/research/feature-integrity/latch/acknowledge",
+            ]
+        );
+    }
 }

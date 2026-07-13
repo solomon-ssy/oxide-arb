@@ -3,8 +3,9 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderView, Paginated, ReconciliationListQuery, ReconciliationView,
-        ResolveReconciliationCommand, ResolveReconciliationRequest, ResolveReconciliationResponse,
+        ExecutionOrderView, Paginated, ReconciliationInfo, ReconciliationListQuery,
+        ReconciliationView, ResolveReconciliationCommand, ResolveReconciliationRequest,
+        ResolveReconciliationResponse,
     },
     enums::{
         operation_log::OperationCategory,
@@ -127,9 +128,7 @@ async fn resolve(
     }))
 }
 
-fn canonical_reconciliation_hash(
-    info: &quant_pivot_models::domain::ReconciliationInfo,
-) -> Result<String, WebError> {
+fn canonical_reconciliation_hash(info: &ReconciliationInfo) -> Result<String, WebError> {
     CanonicalDigest::content_hash_json(&ReconciliationView::from(info.clone()))
         .map(|hash| hash.as_str().to_owned())
         .map_err(|error| {

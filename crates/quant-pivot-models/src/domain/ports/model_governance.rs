@@ -11,9 +11,9 @@ use quant_pivot_error::QuantResult;
 use crate::{
     domain::{
         BindCalibrationRequest, BindPublishPathSetRequest, GatePreviewIntent, ModelVersionInfo,
-        QualityGateReportView, TrainingDatasetInfo,
+        QualityGateReportView,
     },
-    types::{BacktestReportId, ModelVersionId, TrainingDatasetId},
+    types::{BacktestReportId, ModelVersionId},
 };
 
 /// Who initiated a governance action. Recorded for audit provenance.
@@ -63,16 +63,7 @@ pub struct RetireModelCommand {
     pub reason: String,
 }
 
-/// Request to promote a `Built` training dataset to `Ready`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromoteDatasetRequest {
-    /// The dataset to promote.
-    pub training_dataset_id: TrainingDatasetId,
-    /// Operator reason (audited).
-    pub reason: String,
-}
-
-/// Governance orchestration boundary (publish / rollback / dataset promotion),
+/// Governance orchestration boundary (publish / rollback),
 /// implemented in `quant-pivot-core` and injected into `AppContext`.
 #[async_trait]
 pub trait ModelGovernancePort: Send + Sync {
@@ -85,9 +76,10 @@ pub trait ModelGovernancePort: Send + Sync {
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo>;
 
-    /// Roll back a published version: retire it and restore its predecessor
-    /// (still published), writing a governance audit row. Returns the restored
-    /// predecessor.
+    /// Roll back a published version only after fresh full frozen parity,
+    /// clear-latch generation, current publish-quality/calibration gates, and
+    /// artifact validation. Atomically retires the exact current and restores
+    /// its audited retired predecessor, then writes the permit-bound audit.
     async fn rollback(
         &self,
         command: RollbackModelCommand,
@@ -101,14 +93,6 @@ pub trait ModelGovernancePort: Send + Sync {
         command: RetireModelCommand,
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo>;
-
-    /// Promote a `Built` dataset to `Ready` after a `DatasetReady` gate pass.
-    /// An `InsufficientLabels` dataset can never be promoted (repo `Conflict`).
-    async fn promote_dataset_ready(
-        &self,
-        request: PromoteDatasetRequest,
-        actor: GovernanceActor,
-    ) -> QuantResult<TrainingDatasetInfo>;
 
     /// Evaluate the quality gate for a version as a read-only dry-run — the same
     /// evaluator `publish` uses, but with no persistence and no state change.

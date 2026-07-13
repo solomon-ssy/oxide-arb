@@ -11,13 +11,15 @@ use std::sync::Arc;
 use quant_pivot_core::governance::{
     FactorGovernanceDeps, FactorGovernanceService, ModelSpecDeps, ModelSpecService,
 };
+use quant_pivot_core::runtime_config::RuntimeConfigStore;
+use quant_pivot_models::types::{ModelInputContract, ModelTrainingContract};
 use quant_pivot_models::{
     domain::{
         CreateModelSpecCommand, FactorGovernancePort, GovernanceActor, ModelSpecPort,
         PublishFactorsBatchCommand, RegisterFactorDefinitionsCommand,
     },
     enums::{model::ModelFamily, quant::PublicationStatus},
-    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig},
+    runtime_config::{DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
     types::SchemaVersion,
 };
 use quant_pivot_repository::{
@@ -41,6 +43,7 @@ async fn model_spec_service_authors_draft_spec() {
         Arc::new(PgModelRegistryRepository::new(pool.connection().clone()));
     let service = ModelSpecService::new(ModelSpecDeps {
         model_registry: Arc::clone(&registry),
+        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
     });
 
     let created = service
@@ -49,10 +52,11 @@ async fn model_spec_service_authors_draft_spec() {
                 name: "buy-weighted-baseline".to_owned(),
                 model_family: ModelFamily::WeightedFactor,
                 prediction_horizon_secs: 86_400,
-                feature_schema_version: SchemaVersion::FIRST,
+                feature_schema_version: SchemaVersion::new(6),
                 label_schema_version: SchemaVersion::FIRST,
                 spec_json: serde_json::json!({ "notes": "day-1 cold-start ranker" }),
-                feature_requirements: serde_json::json!({}),
+                input_contract: ModelInputContract::single_required("book.mid"),
+                training_contract: ModelTrainingContract::settlement_default(),
                 reason: "bootstrap the first model spec".to_owned(),
             },
             actor(),

@@ -4,31 +4,145 @@ use crate::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
     enums::clickhouse::{
         ChCapitalAllocationState, ChExecutionSide, ChExitSignalEvaluatorKind, ChExitSignalVerdict,
-        ChFactorDirection, ChFactorValueState, ChFeatureSourceKind, ChFeatureValueKind,
-        ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState, ChQuantLedgerEventKind,
-        ChRecommendationAttributionOutcome, ChRecommendationStatus,
+        ChFactorDirection, ChFactorValueState, ChFeatureCellState, ChFeatureSourceKind,
+        ChFeatureValueKind, ChNormalizationSource, ChOutcomeSide, ChPositionLedgerState,
+        ChQuantLedgerEventKind, ChRecommendationAttributionOutcome, ChRecommendationStatus,
     },
     types::{
-        CapitalAllocationId, ExecutionOrderId, MarketId, ModelRunId, ModelVersionId, OrderId,
-        OrderIntentId, PositionId, RecommendationId, RecommendationReportId, SignalCandidateId,
-        TokenId,
+        CapitalAllocationId, ExecutionOrderId, FeatureParityEventId, FeatureParityRunId,
+        FeatureVectorId, MarketId, ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId,
+        RecommendationId, RecommendationReportId, RuntimeConfigVersionId, SignalCandidateId,
+        TokenId, TrainingDatasetId,
     },
 };
 use serde::{Deserialize, Serialize};
 
-/// Feature value fact emitted by PIT feature builders.
+/// Complete stateful feature-cell evidence emitted by PIT feature builders.
+///
+/// One row exists for every cell of every persisted feature vector, including
+/// vectors rejected by model-required input checks. Missing and structurally
+/// not-applicable cells remain explicit. `raw_value` is the exact typed value
+/// text and is `None` only for states that carry no value.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantFeatureEventRow {
     pub event_time: i64,
-    pub as_of: i64,
+    pub feature_vector_id: FeatureVectorId,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub decision_at: i64,
+    pub knowledge_cutoff: i64,
+    pub per_source_cutoffs_json: String,
     pub market_id: MarketId,
-    pub token_id: TokenId,
+    pub token_id: Option<TokenId>,
     pub feature_schema_version: u32,
+    pub feature_schema_hash: String,
+    pub feature_hash: String,
+    /// Hash of the exact persisted decision capture bound to this vector.
+    pub decision_capture_hash: String,
     pub feature_name: String,
-    pub feature_value: ChDecimal64,
+    pub cell_state: ChFeatureCellState,
+    pub raw_value: Option<String>,
     pub value_kind: ChFeatureValueKind,
+    /// Source required by the governed feature specification.
     pub source_kind: ChFeatureSourceKind,
-    pub staleness_ms: u64,
+    /// Actual evidence source, when the cell carries a source reference.
+    pub evidence_source_kind: Option<ChFeatureSourceKind>,
+    pub evidence_reference: Option<String>,
+    pub evidence_effective_at: Option<i64>,
+    /// Source availability time. `None` means the resolver did not provide it;
+    /// decision/persistence timestamps must never be substituted here.
+    pub evidence_available_at: Option<i64>,
+    pub reason: Option<String>,
+    pub staleness_ms: Option<u64>,
+    pub data_quality: String,
+    /// Canonical hash of every audit field above (excluding transport-only
+    /// `ingestion_time` and the fingerprint itself).
+    pub audit_fingerprint: String,
+    pub ingestion_time: i64,
+}
+
+/// Exact model-input evidence persisted for every serving decision.
+///
+/// `encoded_value_bits` stores the IEEE-754 payload without decimal/text
+/// round-tripping, making byte-level training/serving comparisons possible. It
+/// is `None` only for a weighted factor whose explicit state has no normalized
+/// score; no numeric sentinel is written.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct QuantModelInputEventRow {
+    pub event_time: i64,
+    pub decision_at: i64,
+    pub knowledge_cutoff: i64,
+    pub model_run_id: ModelRunId,
+    pub model_version_id: ModelVersionId,
+    pub recommendation_report_id: Option<RecommendationReportId>,
+    pub market_id: MarketId,
+    pub feature_vector_id: FeatureVectorId,
+    pub model_family: String,
+    pub raw_input_name: String,
+    pub raw_state: String,
+    pub raw_value: Option<String>,
+    pub encoded_column: String,
+    pub encoded_value_bits: Option<u64>,
+    pub input_contract_hash: String,
+    pub transform_hash: String,
+    pub training_input_hash: String,
+    pub audit_fingerprint: String,
+    pub ingestion_time: i64,
+}
+
+/// Durable completion barrier for one serving model run.
+///
+/// A row is written only after the exact feature-cell and model-input batches
+/// named by the commitments have been acknowledged by `ClickHouse`. The model
+/// run may transition to `Succeeded` only after this marker is acknowledged.
+/// Replay therefore reasons about this run-scoped marker instead of an
+/// unrelated global ingestion watermark.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct QuantServingEvidenceCompletionRow {
+    pub event_time: i64,
+    pub format_version: u32,
+    pub model_run_id: ModelRunId,
+    pub decision_at: i64,
+    pub knowledge_cutoff: i64,
+    pub feature_vector_ids_json: String,
+    pub expected_feature_row_count: u64,
+    pub feature_rows_hash: String,
+    pub expected_model_input_row_count: u64,
+    pub model_input_rows_hash: String,
+    pub completion_hash: String,
+    pub ingestion_time: i64,
+}
+
+/// Row-level deterministic online/replay comparison evidence.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct QuantFeatureParityEventRow {
+    pub event_time: i64,
+    pub parity_event_id: FeatureParityEventId,
+    pub parity_run_id: FeatureParityRunId,
+    pub decision_at: i64,
+    pub stage: String,
+    pub status: String,
+    pub report_id: Option<RecommendationReportId>,
+    pub model_run_id: Option<ModelRunId>,
+    pub model_version_id: Option<ModelVersionId>,
+    pub training_dataset_id: Option<TrainingDatasetId>,
+    pub market_id: Option<MarketId>,
+    pub feature_name: Option<String>,
+    pub reason: Option<String>,
+    pub online_state: Option<String>,
+    pub replay_state: Option<String>,
+    pub online_value: Option<String>,
+    pub replay_value: Option<String>,
+    pub online_effective_at: Option<i64>,
+    pub online_available_at: Option<i64>,
+    pub online_cutoff: Option<i64>,
+    pub replay_effective_at: Option<i64>,
+    pub replay_available_at: Option<i64>,
+    pub replay_cutoff: Option<i64>,
+    pub feature_contract_hash: String,
+    pub transform_hash: String,
+    pub online_fingerprint: String,
+    pub replay_fingerprint: String,
+    pub detail_json: String,
     pub ingestion_time: i64,
 }
 
@@ -42,7 +156,7 @@ pub struct QuantFeatureEventRow {
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct QuantFactorEventRow {
     pub event_time: i64,
-    pub as_of: i64,
+    pub decision_at: i64,
     pub market_id: MarketId,
     pub factor_name: String,
     pub factor_family: String,

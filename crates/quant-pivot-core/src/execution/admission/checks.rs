@@ -204,7 +204,13 @@ impl AdmissionCheck for BookFreshnessCheck {
         let Some(book) = &input.book else {
             return AdmissionCheckTrace::deny(self.id(), "no book snapshot for token");
         };
-        let age_ms = input.now_ms.saturating_sub(book.timestamp_ms);
+        let Some(age_ms) = input.now_ms.checked_sub(book.timestamp_ms) else {
+            return AdmissionCheckTrace::deny(
+                self.id(),
+                "book snapshot timestamp is after admission decision time",
+            )
+            .with_actual(book.timestamp_ms.to_string());
+        };
         let max = input.recommendation.entry_plan.max_book_age_ms;
         if age_ms > max {
             return AdmissionCheckTrace::defer(self.id(), "book snapshot stale")

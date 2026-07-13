@@ -11,8 +11,8 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        BacktestReportId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId, Probability,
-        RuntimeConfigVersionId, SchemaVersion,
+        BacktestReportId, ContentHash, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, RuntimeConfigVersionId, SchemaVersion,
     },
 };
 use quant_pivot_repository::{
@@ -64,7 +64,8 @@ async fn seed_model_version(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await

@@ -1,27 +1,28 @@
-//! Streaming historical point-in-time source backed by `ClickHouse` facts +
-//! `Postgres` market metadata.
+//! Durable point-in-time source backed by `ClickHouse` facts and the append-only
+//! Postgres catalog ledger.
 //!
-//! The `as_of`-bounded counterpart to [`LiveBookDataSource`](super::live_book::LiveBookDataSource):
-//! it resolves the freshest book snapshot published at or before `as_of` (within
-//! `max_book_staleness`) and derives the market's point-in-time status from the
-//! authoritative settlement ledger. Used by the 3.6 backtester for streaming
-//! replay; the offline dataset builder batch-prefetches and serves from
-//! [`MaterializedPitEngine`](quant_pivot_research::pit::MaterializedPitEngine)
-//! instead, so its build loop never queries a database.
+//! This is the single production resolver for report serving, exit re-scoring,
+//! dataset planning, and replay. It returns the freshest fact visible at the
+//! already-frozen source cutoff; feature-specific staleness policy is evaluated
+//! by the shared feature builder, never hidden inside this storage adapter.
 
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{DateTime, TimeZone, Utc};
-use quant_pivot_error::{QuantResult, research::PitResolutionStorageError};
+use chrono::{DateTime, Utc};
+use quant_pivot_error::{
+    QuantResult,
+    research::{PitResolutionStorageError, ResearchError},
+};
 use quant_pivot_models::{
     clickhouse::BookSnapshotRow,
-    domain::{MarketInfo, market::book::BookLevel},
-    enums::market::MarketStatus,
+    domain::{DecisionBoundary, DecisionSource, market::book::BookLevel},
     types::{MarketId, Price, Shares, TokenId},
 };
-use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
-use quant_pivot_research::pit::{BookSnapshotAt, MarketContextAt, PitQueryEngine};
+use quant_pivot_repository::traits::{CatalogVersionRepository, QuantFactReadRepository};
+use quant_pivot_research::pit::{
+    BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot, resolve_catalog_snapshot,
+};
 use rust_decimal::Decimal;
 
 /// Outcome of decoding persisted book level JSON.
@@ -35,13 +36,18 @@ pub enum BookDecodeStatus {
     MalformedJson,
     /// JSON parsed but every level pair failed validation.
     InvalidLevel,
+    /// Persisted event time cannot be represented as a non-negative epoch.
+    InvalidTimestamp,
 }
 
 impl BookDecodeStatus {
     /// Whether this status should increment dataset `book_decode_failures`.
     #[must_use]
     pub const fn counts_as_failure(self) -> bool {
-        matches!(self, Self::MalformedJson | Self::InvalidLevel)
+        matches!(
+            self,
+            Self::MalformedJson | Self::InvalidLevel | Self::InvalidTimestamp
+        )
     }
 
     /// Merge two decode statuses, preferring the more severe failure.
@@ -49,6 +55,7 @@ impl BookDecodeStatus {
     pub const fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::MalformedJson, _) | (_, Self::MalformedJson) => Self::MalformedJson,
+            (Self::InvalidTimestamp, _) | (_, Self::InvalidTimestamp) => Self::InvalidTimestamp,
             (Self::InvalidLevel, _) | (_, Self::InvalidLevel) => Self::InvalidLevel,
             (Self::Empty, Self::Empty) => Self::Empty,
             _ => Self::Ok,
@@ -56,112 +63,139 @@ impl BookDecodeStatus {
     }
 }
 
-/// Resolves historical book / market state with no look-ahead.
-pub struct ChHistoricalPitSource {
+/// Resolves durable book and catalog state with no look-ahead.
+pub struct DurablePitSource {
     fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    max_book_staleness: Duration,
+    catalog_repo: Arc<dyn CatalogVersionRepository>,
 }
 
-impl ChHistoricalPitSource {
-    /// Build a historical PIT source.
+impl DurablePitSource {
+    /// Build the production PIT source.
     #[must_use]
     pub fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
-        market_repo: Arc<dyn MarketRepository>,
-        max_book_staleness: Duration,
+        catalog_repo: Arc<dyn CatalogVersionRepository>,
     ) -> Self {
         Self {
             fact_read,
-            market_repo,
-            max_book_staleness,
+            catalog_repo,
         }
-    }
-
-    /// Maximum book staleness, in milliseconds, as a saturating `i64`.
-    fn max_staleness_ms(&self) -> i64 {
-        i64::try_from(self.max_book_staleness.as_millis()).unwrap_or(i64::MAX)
     }
 }
 
 #[async_trait]
-impl PitQueryEngine for ChHistoricalPitSource {
-    async fn book_at(
+impl PointInTimeSnapshotSource for DurablePitSource {
+    async fn book_at_boundary(
         &self,
         token_id: &TokenId,
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
     ) -> QuantResult<Option<BookSnapshotAt>> {
-        let cutoff_ms = as_of.timestamp_millis();
+        let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
         let Some(row) = self
             .fact_read
-            .book_snapshot_at(token_id, cutoff_ms)
+            .book_snapshot_at(
+                token_id,
+                source_cutoff.timestamp_millis(),
+                boundary.decision_at().timestamp_millis(),
+            )
             .await
             .map_err(PitResolutionStorageError::from)?
         else {
             return Ok(None);
         };
-        if cutoff_ms.saturating_sub(row.event_time) > self.max_staleness_ms() {
-            return Ok(None);
-        }
-        Ok(snapshot_from_row(row, as_of).0)
+        decode_book_row(row, source_cutoff, boundary.decision_at())
     }
 
-    async fn market_at(
+    async fn books_at_boundary(
+        &self,
+        token_ids: &[TokenId],
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<std::collections::HashMap<TokenId, BookSnapshotAt>> {
+        let cutoff = boundary.cutoff_for(DecisionSource::Book);
+        let rows = self
+            .fact_read
+            .book_snapshots_at(
+                token_ids.to_vec(),
+                cutoff.timestamp_millis(),
+                boundary.decision_at().timestamp_millis(),
+            )
+            .await
+            .map_err(PitResolutionStorageError::from)?;
+        let mut books = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            if let Some(book) = decode_book_row(row, cutoff, boundary.decision_at())? {
+                books.insert(book.token_id.clone(), book);
+            }
+        }
+        Ok(books)
+    }
+
+    async fn market_snapshot_at(
         &self,
         market_id: &MarketId,
-        as_of: DateTime<Utc>,
-    ) -> QuantResult<Option<MarketContextAt>> {
-        let Some(info) = self
-            .market_repo
-            .find_by_id(market_id)
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<Option<ResolvedMarketSnapshot>> {
+        self.catalog_repo
+            .snapshot_at(market_id, boundary)
             .await
             .map_err(PitResolutionStorageError::from)?
-        else {
-            return Ok(None);
-        };
-        self.market_at_from_info(&info, as_of).await
+            .map(|snapshot| resolve_catalog_snapshot(snapshot, boundary))
+            .transpose()
     }
 
-    async fn market_at_from_info(
+    async fn market_snapshots_at_boundary(
         &self,
-        info: &MarketInfo,
-        as_of: DateTime<Utc>,
-    ) -> QuantResult<Option<MarketContextAt>> {
-        if info.created_at > as_of {
-            // The market did not exist at the decision time.
-            return Ok(None);
-        }
-        let resolved = self
-            .fact_read
-            .resolution_at(&info.market_id, as_of.timestamp_millis())
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<Vec<ResolvedMarketSnapshot>> {
+        self.catalog_repo
+            .snapshots_at_boundary(boundary)
             .await
             .map_err(PitResolutionStorageError::from)?
-            .is_some();
-        Ok(Some(market_context(info, as_of, resolved)))
+            .into_iter()
+            .map(|snapshot| resolve_catalog_snapshot(snapshot, boundary))
+            .collect()
     }
 }
 
-/// Derive a point-in-time market context from static metadata + settled status.
-///
-/// Only immutable fields are read from the (mutable) market row; the lifecycle
-/// status comes from the append-only settlement ledger.
-#[must_use]
-pub fn market_context(info: &MarketInfo, as_of: DateTime<Utc>, resolved: bool) -> MarketContextAt {
-    MarketContextAt {
-        market_id: info.market_id.clone(),
-        as_of,
-        observed_at: as_of,
-        status: if resolved {
-            MarketStatus::Settled
-        } else {
-            MarketStatus::Active
-        },
-        neg_risk: info.neg_risk,
-        end_date: info.end_date,
-        created_at: info.created_at,
-        // Polymarket binary markets carry a YES and a NO outcome token.
-        outcome_count: 2,
+fn decode_book_row(
+    row: BookSnapshotRow,
+    source_cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<Option<BookSnapshotAt>> {
+    let token_id = row.token_id.clone();
+    let (snapshot, status) = snapshot_from_row(row, source_cutoff, decision_at);
+    if status.counts_as_failure() {
+        return Err(ResearchError::PitResolution {
+            detail: format!("book snapshot for token {token_id} failed to decode: {status:?}"),
+        }
+        .into());
     }
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
+    let effective_at =
+        DateTime::from_timestamp_millis(i64::try_from(snapshot.timestamp_ms).map_err(|_| {
+            ResearchError::PitResolution {
+                detail: format!(
+                    "book snapshot for token {token_id} has an unrepresentable effective timestamp"
+                ),
+            }
+        })?)
+        .ok_or_else(|| ResearchError::PitResolution {
+            detail: format!(
+                "book snapshot for token {token_id} has an unrepresentable effective timestamp"
+            ),
+        })?;
+    if effective_at > source_cutoff || snapshot.available_at > decision_at {
+        return Err(ResearchError::PitResolution {
+            detail: format!(
+                "book snapshot for token {token_id} is outside boundary: effective {effective_at}, available {}, source cutoff {source_cutoff}, decision {decision_at}",
+                snapshot.available_at,
+            ),
+        }
+        .into());
+    }
+    Ok(Some(snapshot))
 }
 
 /// Build a [`BookSnapshotAt`] from a persisted snapshot row, decoding the level
@@ -172,8 +206,12 @@ pub fn market_context(info: &MarketInfo, as_of: DateTime<Utc>, resolved: bool) -
 #[must_use]
 pub fn snapshot_from_row(
     row: BookSnapshotRow,
-    as_of: DateTime<Utc>,
+    source_cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
 ) -> (Option<BookSnapshotAt>, BookDecodeStatus) {
+    let Ok(timestamp_ms) = u64::try_from(row.event_time) else {
+        return (None, BookDecodeStatus::InvalidTimestamp);
+    };
     let (bids, bid_status) = decode_levels(&row.bids_json);
     let (asks, ask_status) = decode_levels(&row.asks_json);
     let status = bid_status.merge(ask_status);
@@ -183,11 +221,17 @@ pub fn snapshot_from_row(
     (
         Some(BookSnapshotAt {
             token_id: row.token_id,
-            as_of,
+            source_cutoff,
+            decision_at,
             bids,
             asks,
-            timestamp_ms: u64::try_from(row.event_time).unwrap_or(0),
+            timestamp_ms,
             version: row.book_version,
+            sequence: row.sequence,
+            available_at: match DateTime::from_timestamp_millis(row.ingestion_time) {
+                Some(value) => value,
+                None => return (None, BookDecodeStatus::InvalidTimestamp),
+            },
         }),
         status,
     )
@@ -203,31 +247,22 @@ pub fn decode_levels(json: &str) -> (Arc<[BookLevel]>, BookDecodeStatus) {
     if pairs.is_empty() {
         return (Arc::from([]), BookDecodeStatus::Empty);
     }
-    let levels: Vec<BookLevel> = pairs
-        .iter()
-        .filter_map(|(price, size)| {
-            let price = Decimal::from_str(price).ok()?;
-            let size = Decimal::from_str(size).ok()?;
-            BookLevel::try_from_decimal(Price::new(price), Shares::new(size))
-        })
-        .collect();
-    if levels.is_empty() {
-        return (Arc::from([]), BookDecodeStatus::InvalidLevel);
+    let mut levels = Vec::with_capacity(pairs.len());
+    for (price, size) in pairs {
+        let (Ok(price), Ok(size)) = (Decimal::from_str(&price), Decimal::from_str(&size)) else {
+            return (Arc::from([]), BookDecodeStatus::InvalidLevel);
+        };
+        let Some(level) = BookLevel::try_from_decimal(Price::new(price), Shares::new(size)) else {
+            return (Arc::from([]), BookDecodeStatus::InvalidLevel);
+        };
+        levels.push(level);
     }
     (Arc::from(levels), BookDecodeStatus::Ok)
 }
 
-/// Convert epoch milliseconds to a UTC instant, falling back to `default`.
-#[must_use]
-pub fn millis_to_utc(timestamp_ms: i64, default: DateTime<Utc>) -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(timestamp_ms)
-        .single()
-        .unwrap_or(default)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BookDecodeStatus, decode_levels, snapshot_from_row};
+    use super::{BookDecodeStatus, decode_book_row, decode_levels, snapshot_from_row};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         clickhouse::{BookSnapshotRow, ChSchemaVersion},
@@ -273,11 +308,52 @@ mod tests {
     }
 
     #[test]
+    fn decode_levels_rejects_a_partially_invalid_book() {
+        let (levels, status) = decode_levels(r#"[["0.48","100"],["not-a-price","50"]]"#);
+
+        assert!(levels.is_empty());
+        assert_eq!(status, BookDecodeStatus::InvalidLevel);
+        assert!(status.counts_as_failure());
+    }
+
+    #[test]
     fn snapshot_from_row_malformed_bids_yields_none() {
         let row = sample_row("not-json", r#"[["0.52","100"]]"#);
-        let as_of = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
-        let (snapshot, status) = snapshot_from_row(row, as_of);
+        let decision_at = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        let (snapshot, status) = snapshot_from_row(row, decision_at, decision_at);
         assert!(snapshot.is_none());
         assert_eq!(status, BookDecodeStatus::MalformedJson);
+    }
+
+    #[test]
+    fn snapshot_from_row_rejects_one_invalid_level_in_an_otherwise_valid_side() {
+        let row = sample_row(
+            r#"[["0.48","100"],["0.47","invalid-size"]]"#,
+            r#"[["0.52","100"]]"#,
+        );
+        let decision_at = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        let (snapshot, status) = snapshot_from_row(row.clone(), decision_at, decision_at);
+
+        assert!(snapshot.is_none());
+        assert_eq!(status, BookDecodeStatus::InvalidLevel);
+        let error = decode_book_row(row, decision_at, decision_at)
+            .expect_err("durable PIT reads must surface a typed decode error");
+        assert!(error.to_string().contains("InvalidLevel"));
+    }
+
+    #[test]
+    fn decoded_book_must_be_effective_and_available_within_boundary() {
+        let decision_at = Utc
+            .timestamp_millis_opt(1_000_000)
+            .single()
+            .expect("decision time");
+
+        let mut future_effective = sample_row(r#"[["0.48","100"]]"#, r#"[["0.52","100"]]"#);
+        future_effective.event_time += 1;
+        assert!(decode_book_row(future_effective, decision_at, decision_at).is_err());
+
+        let mut future_available = sample_row(r#"[["0.48","100"]]"#, r#"[["0.52","100"]]"#);
+        future_available.ingestion_time += 1;
+        assert!(decode_book_row(future_available, decision_at, decision_at).is_err());
     }
 }

@@ -1,11 +1,11 @@
 //! Factor-plane orchestration: feature vectors → factor engine → partition →
-//! persist (definitions + values) → emit.
+//! validate immutable definitions → persist values → emit.
 //!
 //! Consumes the accepted [`FeatureVector`]s of one online round (paired with
 //! their persisted ids) and a minted `model_run_id`, builds a
 //! [`FactorEngine`] from frozen config, computes the cross-sectional factor
-//! batch, partitions markets by [`FactorEligibility`], persists the governed
-//! definitions (idempotent) and the eligible markets' factor values, and emits
+//! batch, partitions markets by [`FactorEligibility`], validates the governed
+//! revision identities, persists the eligible markets' factor values, and emits
 //! present-only long-format facts. Rejected markets are observable but never
 //! reach persistence, facts, or the downstream model plane.
 //!
@@ -17,7 +17,7 @@
 use crate::{
     governance::BiasTableApplicator, observability::factor_fact_writer::FactorEventWriter,
 };
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
     domain::{FactorValueInfo, NewFactorValue},
@@ -28,12 +28,11 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::{
     factors::{
-        FactorEligibility, FactorEngine, FactorHistory, FactorValueInsertContext,
-        MarketFactorOutcome, factor_definition_id, factor_events,
+        FactorEligibility, FactorEngine, FactorValueInsertContext, FrozenReferenceQuantiles,
+        MarketFactorOutcome, factor_events,
     },
     features::FeatureVector,
 };
-use rust_decimal::Decimal;
 use std::{collections::HashMap, sync::Arc};
 
 /// Frozen inputs for one factor-plane round.
@@ -105,6 +104,23 @@ impl FactorPipelineService {
         &self,
         request: FactorPipelineRequest<'_>,
     ) -> QuantResult<FactorPipelineResult> {
+        self.run_with_references(request, &FrozenReferenceQuantiles::empty())
+            .await
+    }
+
+    /// Run one factor round with the training CDFs frozen in the already-loaded
+    /// weighted-model artifact. Serving must use this entrypoint whenever the
+    /// configured small-cross-section policy is `FrozenReferenceQuantile`.
+    ///
+    /// # Errors
+    ///
+    /// In addition to [`Self::run`] errors, rejects a frozen-reference policy
+    /// without a validated artifact reference collection.
+    pub async fn run_with_references(
+        &self,
+        request: FactorPipelineRequest<'_>,
+        references: &FrozenReferenceQuantiles,
+    ) -> QuantResult<FactorPipelineResult> {
         if request.vectors.len() != request.feature_vector_ids.len() {
             return Err(ReportError::ContractViolation {
                 detail: format!(
@@ -132,23 +148,32 @@ impl FactorPipelineService {
         }
 
         FactorEngine::validate_batch_invariants(request.vectors)?;
+        references.validate()?;
+        if request.factors.cross_section.small_cross_section_policy
+            == SmallCrossSectionPolicy::FrozenReferenceQuantile
+            && references.is_empty()
+        {
+            return Err(ReportError::ContractViolation {
+                detail: "factor pipeline: FrozenReferenceQuantile requires reference CDFs from \
+                         the loaded weighted-model artifact"
+                    .to_owned(),
+            }
+            .into());
+        }
 
         // Definitions are registered out-of-band by the explicit factor-register
         // governance action (not on this money-facing hot path). Fail closed if
         // any enabled definition is not `Published` (05.7).
         self.require_published_definitions(&engine).await?;
 
-        // Pre-fetch the rolling history for the small-cross-section HistoricalQuantile
-        // policy (a no-op empty history under the default Indeterminate policy).
-        let history = self.build_history(&engine, &request).await?;
-
         // Factor compute is pure CPU work; run it on the blocking pool so a large
         // cross-sectional batch never stalls the async runtime. The engine moves
         // in and back out so its registry is reused for definition persistence.
         let config = request.factors.clone();
         let vectors = request.vectors.to_vec();
+        let references = references.clone();
         let (_engine, outcomes) = tokio::task::spawn_blocking(move || {
-            let outcomes = engine.compute_all_batch_with_history(&vectors, &config, &history);
+            let outcomes = engine.compute_all_batch_with_references(&vectors, &config, &references);
             (engine, outcomes)
         })
         .await
@@ -176,7 +201,7 @@ impl FactorPipelineService {
                         model_run_id: request.model_run_id,
                         feature_vector_id,
                         market_id: &outcome.market_id,
-                        as_of: outcome.as_of,
+                        decision_at: outcome.decision_at,
                     };
                     for scored in &outcome.factors {
                         rows.push(scored.value.try_to_new(&ctx)?);
@@ -206,63 +231,16 @@ impl FactorPipelineService {
         })
     }
 
-    /// Build the rolling historical raw-value distribution for the
-    /// `HistoricalQuantile` small-cross-section policy (empty under `Indeterminate`).
-    async fn build_history(
-        &self,
-        engine: &FactorEngine,
-        request: &FactorPipelineRequest<'_>,
-    ) -> QuantResult<FactorHistory> {
-        if request.factors.cross_section.small_cross_section_policy
-            != SmallCrossSectionPolicy::HistoricalQuantile
-        {
-            return Ok(FactorHistory::empty());
-        }
-        let Some(as_of) = request.vectors.first().map(|vector| vector.as_of) else {
-            return Ok(FactorHistory::empty());
-        };
-        let lookback = Duration::seconds(
-            i64::try_from(request.factors.cross_section.historical_lookback_secs)
-                .unwrap_or(i64::MAX),
-        );
-        let specs = engine.factor_set().definitions;
-        let ids: Vec<_> = specs
-            .iter()
-            .map(|spec| factor_definition_id(spec.name.as_str()))
-            .collect();
-        let rows = self
-            .factor_repo
-            .recent_values(&ids, as_of - lookback, as_of)
-            .await
-            .map_err(QuantError::from)?;
-        let mut by_definition: HashMap<FactorDefinitionId, Vec<Decimal>> = HashMap::new();
-        for row in rows {
-            if let Some(raw) = row.raw_value {
-                by_definition
-                    .entry(row.factor_definition_id)
-                    .or_default()
-                    .push(raw);
-            }
-        }
-        let mut history = FactorHistory::empty();
-        for spec in &specs {
-            let id = factor_definition_id(spec.name.as_str());
-            if let Some(values) = by_definition.remove(&id) {
-                history.insert(spec.name.clone(), values);
-            }
-        }
-        Ok(history)
-    }
-
     /// Fail closed when any enabled definition is missing (never registered) or
     /// not `Published`. Definitions are registered out-of-band by the explicit
     /// factor-register governance action, so a fresh system with an unregistered
     /// factor set is a hard block here (never a silent pass).
     async fn require_published_definitions(&self, engine: &FactorEngine) -> QuantResult<()> {
         let specs = engine.factor_set().definitions;
-        let ids: Vec<_> = specs
+        let identities = engine.definition_identities()?;
+        let ids: Vec<_> = identities
             .iter()
-            .map(|spec| factor_definition_id(spec.name.as_str()))
+            .map(|identity| identity.factor_definition_id.clone())
             .collect();
         let rows = self
             .factor_repo
@@ -274,8 +252,8 @@ impl FactorPipelineService {
             .map(|row| (row.factor_definition_id, row.status))
             .collect();
         let mut violations = Vec::new();
-        for spec in &specs {
-            let id = factor_definition_id(spec.name.as_str());
+        for (spec, identity) in specs.iter().zip(identities) {
+            let id = identity.factor_definition_id;
             match status_by_id.get(&id) {
                 Some(PublicationStatus::Published) => {}
                 Some(status) => {

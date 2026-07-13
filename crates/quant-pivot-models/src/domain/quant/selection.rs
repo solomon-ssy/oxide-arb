@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::quant_market_selection::Entity")]
 pub struct MarketSelectionInfo {
     pub market_selection_id: MarketSelectionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub selector_hash: ContentHash,
     pub market_count: i32,
@@ -29,7 +29,7 @@ info_from_model!(
     crate::entities::quant_market_selection::Model,
     {
         market_selection_id,
-        as_of,
+        decision_at,
         runtime_config_version_id,
         selector_hash,
         market_count,
@@ -43,7 +43,7 @@ info_from_model!(
 #[sea_orm(active_model = "crate::entities::quant_market_selection::ActiveModel")]
 pub struct NewMarketSelection {
     pub market_selection_id: MarketSelectionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub selector_hash: ContentHash,
     pub market_count: i32,

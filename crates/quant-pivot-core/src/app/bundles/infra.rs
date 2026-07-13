@@ -9,7 +9,7 @@ use crate::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter,
         fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
         feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
-        position_fact_writer::PositionEventWriter,
+        model_input_fact_writer::ModelInputEventWriter, position_fact_writer::PositionEventWriter,
         recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
@@ -20,8 +20,8 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow,
         QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-        QuantFactorEventRow, QuantFeatureEventRow, QuantPositionEventRow,
-        QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
+        QuantFactorEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+        QuantRecommendationEventRow, QuantServingEvidenceCompletionRow,
         QuantSignalCandidateEventRow, TickEventRow,
     },
     config::DeployConfig,
@@ -61,6 +61,8 @@ pub struct InfraBundle {
     pub feature_event_writer: Arc<FeatureEventWriter>,
     /// Long-format factor-event sink (`quant_factor_event`).
     pub factor_event_writer: Arc<FactorEventWriter>,
+    /// Exact serving input evidence sink (`quant_model_input_event`).
+    pub model_input_event_writer: Arc<ModelInputEventWriter>,
     /// Pre-portfolio signal-candidate sink (`quant_signal_candidate_event`).
     pub signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
     /// Published recommendation sink (`quant_recommendation_event`).
@@ -107,6 +109,7 @@ impl InfraBundle {
             book_fact_writer: analytics.book_fact_writer,
             feature_event_writer: analytics.feature_event_writer,
             factor_event_writer: analytics.factor_event_writer,
+            model_input_event_writer: analytics.model_input_event_writer,
             signal_candidate_event_writer: analytics.signal_candidate_event_writer,
             recommendation_event_writer: analytics.recommendation_event_writer,
             attribution_event_writer: analytics.attribution_event_writer,
@@ -192,6 +195,7 @@ struct AnalyticsWriters {
     book_fact_writer: Arc<BookFactWriter>,
     feature_event_writer: Arc<FeatureEventWriter>,
     factor_event_writer: Arc<FactorEventWriter>,
+    model_input_event_writer: Arc<ModelInputEventWriter>,
     signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
     recommendation_event_writer: Arc<RecommendationEventWriter>,
     attribution_event_writer: Arc<AttributionEventWriter>,
@@ -211,10 +215,10 @@ fn build_analytics_writers(
 ) -> AnalyticsWriters {
     let (book_fact_writer, fact_writer_queue) =
         build_book_fact_writer(ch, ch_write_manager, ingest_lag_tracker, metrics, deploy);
-    let feature_event_writer =
-        build_feature_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let feature_event_writer = build_feature_event_writer(ch, ch_write_manager);
     let factor_event_writer =
         build_factor_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let model_input_event_writer = build_model_input_event_writer(ch, ch_write_manager);
     let signal_candidate_event_writer = build_signal_candidate_event_writer(
         ch,
         ch_write_manager,
@@ -248,6 +252,7 @@ fn build_analytics_writers(
         book_fact_writer,
         feature_event_writer,
         factor_event_writer,
+        model_input_event_writer,
         signal_candidate_event_writer,
         recommendation_event_writer,
         attribution_event_writer,
@@ -366,37 +371,16 @@ fn build_book_fact_writer(
     (writer, queue)
 }
 
-/// Wire the long-format feature-event async writer (`quant_feature_event`).
+/// Wire the acknowledged long-format feature-evidence sink.
 fn build_feature_event_writer(
     ch_pool: &Arc<ClickHousePool>,
     write_manager: &Arc<ChWriteManager>,
-    metrics: &Arc<MetricsHub>,
-    deploy: &DeployConfig,
-    queue: &PendingTaskQueue,
 ) -> Arc<FeatureEventWriter> {
-    let ch = &deploy.db.clickhouse;
-    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
-    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
-    let config = AsyncWriterConfig::new("quant_feature_event")
-        .capacity(capacity)
-        .batch_size(ch.batch_size)
-        .flush_interval(flush_interval);
-    let drops = metrics
-        .async_writer_dropped
-        .with_label_values(&["quant_feature_event"]);
-    let stream = spawn_fact_stream::<QuantFeatureEventRow>(
-        queue,
-        TaskId::FeatureEventsWriter,
-        Arc::new(ChFactWriter::new(
-            Arc::clone(ch_pool),
-            Arc::clone(write_manager),
-            "quant_feature_event",
-        )),
-        drops,
-        metrics.async_writer_observability("quant_feature_event"),
-        config,
-    );
-    Arc::new(FeatureEventWriter::new(stream))
+    Arc::new(FeatureEventWriter::new(Arc::new(ChFactWriter::new(
+        Arc::clone(ch_pool),
+        Arc::clone(write_manager),
+        "quant_feature_event",
+    ))))
 }
 
 /// Wire the long-format factor-event async writer (`quant_factor_event`).
@@ -430,6 +414,25 @@ fn build_factor_event_writer(
         config,
     );
     Arc::new(FactorEventWriter::new(stream))
+}
+
+/// Wire model-input evidence and its run-scoped completion barrier.
+fn build_model_input_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+) -> Arc<ModelInputEventWriter> {
+    Arc::new(ModelInputEventWriter::new(
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_model_input_event",
+        )),
+        Arc::new(ChFactWriter::<QuantServingEvidenceCompletionRow>::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_serving_evidence_completion",
+        )),
+    ))
 }
 
 /// Wire the pre-portfolio signal-candidate async writer

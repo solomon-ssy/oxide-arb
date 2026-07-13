@@ -5,6 +5,7 @@
 //! [`Probability`](quant_pivot_models::types::Probability), so a factor value is
 //! bit-identical across hardware. All other arithmetic is exact `Decimal`.
 
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::enums::factor::FactorIndeterminateReason;
 use rust_decimal::{
     Decimal,
@@ -61,17 +62,31 @@ pub enum NormalizationStats {
 /// The nearest-rank quantile of an ascending slice at percentile `p ∈ [0, 1]`.
 ///
 /// Exact `Decimal` index arithmetic (no float cast), so the winsorize bounds are
-/// deterministic. Returns `Decimal::ZERO` for an empty slice (never called that
-/// way — the fit guards `len >= 2`).
-#[must_use]
-pub(super) fn quantile_value(sorted: &[Decimal], p: Decimal) -> Decimal {
+/// deterministic. Empty input, an out-of-range percentile, or an index
+/// conversion failure is a typed factor-computation error.
+pub(super) fn quantile_value(sorted: &[Decimal], p: Decimal) -> QuantResult<Decimal> {
     let n = sorted.len();
     if n == 0 {
-        return Decimal::ZERO;
+        return Err(ResearchError::FactorComputation {
+            detail: "cannot fit a quantile from an empty distribution".to_owned(),
+        }
+        .into());
+    }
+    if p < Decimal::ZERO || p > Decimal::ONE {
+        return Err(ResearchError::FactorComputation {
+            detail: format!("quantile percentile must be in [0, 1], got {p}"),
+        }
+        .into());
     }
     let span = Decimal::from(n - 1);
-    let index = (p * span).round().to_usize().unwrap_or(0).min(n - 1);
-    sorted[index]
+    let raw_index = (p * span).round();
+    let index = raw_index
+        .to_usize()
+        .ok_or_else(|| ResearchError::FactorComputation {
+            detail: format!("quantile index {raw_index} is not representable as usize"),
+        })?
+        .min(n - 1);
+    Ok(sorted[index])
 }
 
 /// The arithmetic mean of a non-empty slice (exact `Decimal`).
@@ -87,12 +102,11 @@ pub(super) fn mean(values: &[Decimal]) -> Option<Decimal> {
 /// The population standard deviation of a non-empty slice about `mean`.
 ///
 /// The variance is exact `Decimal`; only the `sqrt` crosses into `f64`, and its
-/// result is quantized to [`NORM_SCALE`]. Returns `None` when the slice is empty
-/// or the `sqrt` is non-finite.
-#[must_use]
-pub(super) fn population_std(values: &[Decimal], mean: Decimal) -> Option<Decimal> {
+/// result is quantized to [`NORM_SCALE`]. Returns `Ok(None)` only when the slice
+/// is empty; conversion and non-finite failures are typed errors.
+pub(super) fn population_std(values: &[Decimal], mean: Decimal) -> QuantResult<Option<Decimal>> {
     if values.is_empty() {
-        return None;
+        return Ok(None);
     }
     let count = Decimal::from(values.len());
     let variance = values
@@ -103,9 +117,20 @@ pub(super) fn population_std(values: &[Decimal], mean: Decimal) -> Option<Decima
         })
         .sum::<Decimal>()
         / count;
-    let std = variance.to_f64().map(f64::sqrt)?;
+    let variance_f64 = variance
+        .to_f64()
+        .ok_or_else(|| ResearchError::FactorComputation {
+            detail: format!("normalization variance {variance} is not representable as f64"),
+        })?;
+    let std = variance_f64.sqrt();
     if !std.is_finite() {
-        return None;
+        return Err(ResearchError::FactorComputation {
+            detail: format!("normalization standard deviation is non-finite: {std}"),
+        }
+        .into());
     }
-    Decimal::from_f64(std).map(|value| value.round_dp(NORM_SCALE))
+    let decimal = Decimal::from_f64(std).ok_or_else(|| ResearchError::FactorComputation {
+        detail: format!("normalization standard deviation {std} is not representable as Decimal"),
+    })?;
+    Ok(Some(decimal.round_dp(NORM_SCALE)))
 }

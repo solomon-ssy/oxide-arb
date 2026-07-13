@@ -125,7 +125,8 @@ impl FactorGovernancePort for FactorGovernanceService {
         }
         let mut registered = Vec::new();
         for spec in &engine.factor_set().definitions {
-            let definition = spec.try_to_new(command.features.feature_schema_version)?;
+            let identity = engine.definition_identity(&spec.name)?;
+            let definition = spec.try_to_new(command.features.feature_schema_version, &identity)?;
             let row = self
                 .deps
                 .factor_repo
@@ -143,41 +144,11 @@ impl FactorGovernancePort for FactorGovernanceService {
         _actor: GovernanceActor,
     ) -> QuantResult<Vec<FactorDefinitionInfo>> {
         let _reason = command.reason;
-        // Validate every requested transition up front so a batch either fully
-        // applies or aborts before any mutation (already-published ids are a
-        // no-op, not a failure).
-        let mut to_publish = Vec::new();
-        for id in &command.factor_definition_ids {
-            let current = self.require_definition(id).await?;
-            if current.status == PublicationStatus::Published {
-                continue;
-            }
-            if !current
-                .status
-                .allows_transition_to(PublicationStatus::Published)
-            {
-                return Err(GovernanceError::IllegalTransition {
-                    detail: format!(
-                        "cannot publish factor definition {} from status {}",
-                        current.factor_definition_id,
-                        current.status.as_str()
-                    ),
-                }
-                .into());
-            }
-            to_publish.push(id.clone());
-        }
-        let mut published = Vec::new();
-        for id in &to_publish {
-            let row = self
-                .deps
-                .factor_repo
-                .publish_definition(id)
-                .await
-                .map_err(QuantError::from)?;
-            published.push(row);
-        }
-        Ok(published)
+        self.deps
+            .factor_repo
+            .publish_definitions(&command.factor_definition_ids)
+            .await
+            .map_err(Into::into)
     }
 }
 

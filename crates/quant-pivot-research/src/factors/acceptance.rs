@@ -23,15 +23,19 @@ use quant_pivot_models::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use crate::features::{FeatureName, FeatureValue, FeatureVector, NullReason, generic::stats};
+use crate::features::{
+    FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector, NullReason,
+    generic::stats,
+};
 use crate::model::favorite_longshot::{
     BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable, PriceBiasBin,
     TtrBucketCurve,
 };
 use crate::{
     factors::{
-        CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorHistory,
-        FactorName, FactorObservationMatrix, MarketFactorOutcome, NormalizedFactor, ScoredFactor,
+        CollinearPair, FactorCollinearityAnalyzer, FactorEligibility, FactorEngine, FactorName,
+        FactorObservationMatrix, FrozenReferenceCdf, FrozenReferenceQuantiles, MarketFactorOutcome,
+        NormalizedFactor, ScoredFactor,
         generic::generic_factors,
         names::{MEAN_REVERSION, STRUCT_FAVORITE_LONGSHOT, STRUCT_REVERSAL_AFTER_SHOCK},
         structural::structural_factors,
@@ -65,21 +69,29 @@ fn make_vector(
     staleness_ms: u64,
     as_of: DateTime<Utc>,
 ) -> FeatureVector {
-    let values: BTreeMap<FeatureName, FeatureValue> = values
+    let values: BTreeMap<FeatureName, FeatureCell> = values
         .iter()
-        .map(|(name, value)| (FeatureName::from_static(name), value.clone()))
+        .map(|(name, value)| {
+            (
+                FeatureName::from_static(name),
+                FeatureCell::observed(
+                    value.clone(),
+                    None,
+                    FeatureStaleness::Known {
+                        age_ms: staleness_ms,
+                    },
+                ),
+            )
+        })
         .collect();
     FeatureVector {
         market_id: MarketId::new(market),
         token_id: Some(TokenId::new("token")),
-        as_of,
+        decision_at: as_of,
         generic_schema_version: SchemaVersion::FIRST,
         generic: values,
         domain: None,
-        substitutions: Vec::new(),
         data_quality,
-        staleness_ms,
-        source_refs: Vec::new(),
     }
 }
 
@@ -273,7 +285,7 @@ fn compute_all_batch_rejects_mixed_as_of() {
         0,
         as_of,
     );
-    second.as_of = as_of + chrono::Duration::seconds(1);
+    second.decision_at = as_of + chrono::Duration::seconds(1);
     let error = engine
         .compute_all_batch(&[first, second], &config)
         .expect_err("mixed as_of must fail");
@@ -294,21 +306,23 @@ fn factor_explanation_lists_positive_and_negative_drivers() {
     );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
-    let vector = make_vector(
+    let mut vector = make_vector(
         "0xdq",
-        &[
-            (
-                "book.best_bid",
-                FeatureValue::Probability(Probability::new(Decimal::new(47, 2))),
-            ),
-            (
-                "book.spread_bps",
-                FeatureValue::Missing(NullReason::SourceUnavailable),
-            ),
-        ],
+        &[(
+            "book.best_bid",
+            FeatureValue::Probability(Probability::new(Decimal::new(47, 2))),
+        )],
         DataQualityStatus::Degraded,
         90_000,
         Utc::now(),
+    );
+    vector.generic.insert(
+        FeatureName::from_static("book.spread_bps"),
+        FeatureCell::missing(
+            NullReason::SourceUnavailable,
+            None,
+            FeatureStaleness::Unknown,
+        ),
     );
     let outcome = engine.compute_all(&vector, &config).expect("compute");
     let drivers = &scored(&outcome, "data_quality").value.explanation.drivers;
@@ -622,12 +636,12 @@ fn serial_and_parallel_normalizer_paths_are_bit_identical() {
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
     let vectors = varied_batch(24);
-    let history = FactorHistory::empty();
+    let references = FrozenReferenceQuantiles::empty();
     let serial = engine
-        .compute_all_batch_inner(&vectors, &config, &history, false)
+        .compute_all_batch_inner(&vectors, &config, &references, false)
         .expect("serial path");
     let parallel = engine
-        .compute_all_batch_inner(&vectors, &config, &history, true)
+        .compute_all_batch_inner(&vectors, &config, &references, true)
         .expect("parallel path");
     assert_eq!(serial, parallel, "serial and parallel paths must agree");
 }
@@ -635,7 +649,7 @@ fn serial_and_parallel_normalizer_paths_are_bit_identical() {
 #[test]
 fn online_and_replay_entrypoints_agree_default_policy() {
     // The replay path calls `compute_all_batch` and the online path calls
-    // `compute_all_batch_with_history`; under the default (`Indeterminate`) policy
+    // `compute_all_batch_with_references`; under the default (`Indeterminate`) policy
     // they must produce identical outcomes — the same normalizer serves both.
     let config = factors_config(
         &[FactorFamily::Liquidity, FactorFamily::Momentum],
@@ -649,7 +663,7 @@ fn online_and_replay_entrypoints_agree_default_policy() {
         .compute_all_batch(&vectors, &config)
         .expect("replay path");
     let online = engine
-        .compute_all_batch_with_history(&vectors, &config, &FactorHistory::empty())
+        .compute_all_batch_with_references(&vectors, &config, &FrozenReferenceQuantiles::empty())
         .expect("online path");
     assert_eq!(
         replay, online,
@@ -704,25 +718,28 @@ fn cross_sectional_zscore_mean_zero_std_one_per_as_of() {
 }
 
 #[test]
-fn historical_quantile_scores_small_cross_section() {
-    // A single-market batch is below `min_size`, but under the HistoricalQuantile
-    // policy a pre-fetched rolling distribution normalizes it — the factor is
-    // scored with `source = HistoricalQuantile`, not indeterminate.
+fn frozen_reference_quantile_scores_small_cross_section() {
+    // A single-market batch is below `min_size`, but the model artifact's frozen
+    // training CDF normalizes it without reading mutable online history.
     let mut config = factors_config(
         &[FactorFamily::Liquidity],
         MissingFactorPolicy::ZeroWeight,
         "0.10",
     );
     config.cross_section.min_size = 5;
-    config.cross_section.small_cross_section_policy = SmallCrossSectionPolicy::HistoricalQuantile;
+    config.cross_section.small_cross_section_policy =
+        SmallCrossSectionPolicy::FrozenReferenceQuantile;
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features, &DomainConfig::disabled(), None);
 
-    let mut history = FactorHistory::empty();
-    history.insert(
-        FactorName::from_static("liquidity_depth"),
-        (1..=8).map(|value| Decimal::from(value * 1_000)).collect(),
-    );
+    let references = FrozenReferenceQuantiles::new(vec![
+        FrozenReferenceCdf::fit(
+            FactorName::from_static("liquidity_depth"),
+            (1..=8).map(|value| Decimal::from(value * 1_000)).collect(),
+        )
+        .expect("reference"),
+    ])
+    .expect("references");
 
     let vector = make_vector(
         "0xlonely",
@@ -735,23 +752,23 @@ fn historical_quantile_scores_small_cross_section() {
         Utc::now(),
     );
     let outcomes = engine
-        .compute_all_batch_with_history(std::slice::from_ref(&vector), &config, &history)
-        .expect("historical-quantile compute");
+        .compute_all_batch_with_references(std::slice::from_ref(&vector), &config, &references)
+        .expect("frozen-reference compute");
     let factor = scored(&outcomes[0], "liquidity_depth");
     assert!(
         matches!(
             factor.value.normalization,
             NormalizedFactor::Scored {
-                source: NormalizationSource::HistoricalQuantile,
+                source: NormalizationSource::FrozenReferenceQuantile,
                 ..
             }
         ),
-        "small cross-section must score via history, got {:?}",
+        "small cross-section must score via the frozen artifact reference, got {:?}",
         factor.value.normalization
     );
     assert!(
         factor.contributes,
-        "a historically-scored factor contributes"
+        "a frozen-reference-scored factor contributes"
     );
 }
 
@@ -778,7 +795,8 @@ fn collinearity_analyzer_flags_rho_over_threshold() {
         factors: vec![alpha.clone(), beta.clone(), gamma],
         rows,
     };
-    let report = FactorCollinearityAnalyzer::analyze(&panel, Decimal::new(9, 1));
+    let report = FactorCollinearityAnalyzer::analyze(&panel, Decimal::new(9, 1))
+        .expect("collinearity report");
     assert!(report.is_collinear(), "identical factors must be flagged");
     assert!(
         report
@@ -864,11 +882,11 @@ fn default_momentum_estimators_not_mutually_collinear() {
         rows.push(vec![
             simple,
             stats::rate_of_change(values[0], at_lag),
-            stats::ema_slope_time(&samples, 300),
+            stats::ema_slope_time(&samples, 300).expect("ascending EMA fixture"),
             simple.and_then(|ret| {
                 stats::realized_volatility(&values).and_then(|vol| stats::vol_adjusted(ret, vol))
             }),
-            stats::macd_time(&samples, 300, 900),
+            stats::macd_time(&samples, 300, 900).expect("ascending MACD fixture"),
         ]);
     }
     // Column 0 is the reference simple return; columns 1..=4 are the registered
@@ -891,7 +909,8 @@ fn default_momentum_estimators_not_mutually_collinear() {
         .value
         .parse::<Decimal>()
         .expect("default max_correlation parses");
-    let report = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+    let report = FactorCollinearityAnalyzer::analyze(&panel, threshold)
+        .expect("momentum collinearity report");
 
     // (a) Production orthogonality gate: the four *registered* momentum factors
     //     must be mutually below the tolerance — no two collapse onto one signal.
@@ -1011,7 +1030,8 @@ fn reversal_after_shock_orthogonal_to_mean_reversion() {
         factors: vec![MEAN_REVERSION, STRUCT_REVERSAL_AFTER_SHOCK],
         rows,
     };
-    let report = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+    let report = FactorCollinearityAnalyzer::analyze(&panel, threshold)
+        .expect("reversal collinearity report");
     let rho = report.matrix[0][1].abs();
     assert!(
         rho < threshold,

@@ -10,8 +10,8 @@ use crate::{
 /// Deliberately schema-stable along every extension axis: `family`, `metric`
 /// and `source_id` are `LowCardinality(String)` wire labels (new verticals,
 /// metrics, and sources are pure data), and the instrument key embeds the
-/// venue/interval. PIT reads filter `event_time <= as_of - source_delay` with
-/// the stable `(event_time, ingestion_time)` tie-break.
+/// venue/interval. PIT reads constrain event time by the frozen source cutoff
+/// and ingestion time by `decision_at`, with stable deterministic tie-breaks.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct DomainObservationRow {
     /// [`crate::enums::domain::DomainFamily`] wire label (e.g. `crypto`).

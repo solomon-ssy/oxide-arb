@@ -249,7 +249,10 @@ fn load_boxed<'a>(
 #[cfg(test)]
 mod tests {
     use super::{READ_RESOURCES, builtin_role_policies};
-    use crate::enums::rbac::Operation;
+    use crate::{
+        enums::rbac::{Operation, ResourceType},
+        seed::rbac::{ROLE_RISK_OWNER, ROLE_VIEWER},
+    };
     use std::collections::HashSet;
 
     #[test]
@@ -286,5 +289,27 @@ mod tests {
                 "{resource:?} is in READ_RESOURCES but has no Read operation"
             );
         }
+    }
+
+    #[test]
+    fn feature_integrity_is_readable_and_risk_owner_can_govern() {
+        let policies = builtin_role_policies();
+        let viewer = policies
+            .iter()
+            .find(|(role, _)| *role == ROLE_VIEWER)
+            .map(|(_, permissions)| permissions)
+            .expect("viewer policies");
+        let risk_owner = policies
+            .iter()
+            .find(|(role, _)| *role == ROLE_RISK_OWNER)
+            .map(|(_, permissions)| permissions)
+            .expect("risk-owner policies");
+        let read = (ResourceType::Materialization, Operation::Read);
+        let govern = (ResourceType::Materialization, Operation::Create);
+
+        assert!(viewer.contains(&read));
+        assert!(!viewer.contains(&govern));
+        assert!(risk_owner.contains(&read));
+        assert!(risk_owner.contains(&govern));
     }
 }

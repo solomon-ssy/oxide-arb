@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::types::{FactorBreakdownEntry, MarketId};
 
 use crate::factors::{
-    generic::factor_definition_id,
+    identity::provisional_factor_definition_id,
     normalize::NormalizedFactor,
     value::{
         FactorEligibility, FactorExplanation, FactorName, FactorValue, MarketFactorOutcome,
@@ -40,7 +40,7 @@ pub fn frozen_factor_outcome(
     let factors = breakdown.iter().map(scored_from_entry).collect();
     Some(MarketFactorOutcome {
         market_id,
-        as_of,
+        decision_at: as_of,
         // The recommendation existed, so its entry cross-section was eligible.
         eligibility: FactorEligibility::Eligible,
         factors,
@@ -67,7 +67,7 @@ fn scored_from_entry(entry: &FactorBreakdownEntry) -> ScoredFactor {
     };
     let scored = matches!(normalization, NormalizedFactor::Scored { .. });
     let value = FactorValue {
-        definition_id: factor_definition_id(entry.factor_name.as_str()),
+        definition_id: provisional_factor_definition_id(entry.factor_name.as_str()),
         name: FactorName::new(entry.factor_name.clone()),
         family: entry.family,
         raw_value: entry.raw_value,

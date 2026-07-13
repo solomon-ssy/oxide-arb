@@ -1,7 +1,11 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
-    types::MarketId,
+    domain::{
+        CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo,
+        DecisionBoundary, EventCatalogVersionInfo, MarketCatalogVersionInfo, MarketInfo,
+        MarketPageQuery, NewFailedCatalogSyncBatch, Paginated, UpsertMarket,
+    },
+    types::{EventId, MarketId},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -21,4 +25,76 @@ pub trait MarketRepository: Send + Sync {
         status: &str,
         outcome: Option<&str>,
     ) -> Result<(), StorageError>;
+}
+
+/// Atomic writer and point-in-time reader for the immutable Gamma catalog ledger.
+///
+/// Historical/replay callers must use this repository instead of the mutable
+/// `market` / `event` projections.
+#[async_trait::async_trait]
+pub trait CatalogVersionRepository: Send + Sync {
+    async fn commit(&self, commit: CatalogCommit) -> Result<CatalogSyncBatchInfo, StorageError>;
+
+    /// Persist a terminal failure for an attempt that never reached a durable commit.
+    async fn record_failure(
+        &self,
+        failure: NewFailedCatalogSyncBatch,
+    ) -> Result<CatalogSyncBatchInfo, StorageError>;
+
+    async fn coverage_start(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+
+    /// Commit watermark of the newest complete catalog sync batch.
+    async fn watermark(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+
+    async fn market_at(
+        &self,
+        market_id: &MarketId,
+        boundary: &DecisionBoundary,
+    ) -> Result<Option<MarketCatalogVersionInfo>, StorageError>;
+
+    async fn markets_at(
+        &self,
+        market_ids: &[MarketId],
+        boundary: &DecisionBoundary,
+    ) -> Result<Vec<MarketCatalogVersionInfo>, StorageError>;
+
+    async fn event_at(
+        &self,
+        event_id: &EventId,
+        boundary: &DecisionBoundary,
+    ) -> Result<Option<EventCatalogVersionInfo>, StorageError>;
+
+    async fn event_markets_at(
+        &self,
+        event_id: &EventId,
+        boundary: &DecisionBoundary,
+    ) -> Result<Vec<MarketCatalogVersionInfo>, StorageError>;
+
+    /// Resolve market metadata, its exact event revision, and visible event
+    /// membership from one repeatable-read database snapshot.
+    ///
+    /// Implementations must reject a decision before `coverage_start`; a
+    /// mutable current projection is never an admissible fallback.
+    async fn snapshot_at(
+        &self,
+        market_id: &MarketId,
+        boundary: &DecisionBoundary,
+    ) -> Result<Option<CatalogSnapshotInfo>, StorageError>;
+
+    /// Resolve the complete market candidate set visible at one boundary in a
+    /// single repeatable-read snapshot, including each exact event revision and
+    /// its membership rows.
+    async fn snapshots_at_boundary(
+        &self,
+        boundary: &DecisionBoundary,
+    ) -> Result<Vec<CatalogSnapshotInfo>, StorageError>;
+
+    /// Load every catalog revision needed to resolve `market_ids` and their
+    /// event membership through `end_boundary` without database reads in the
+    /// replay loop.
+    async fn window_through(
+        &self,
+        market_ids: &[MarketId],
+        end_boundary: &DecisionBoundary,
+    ) -> Result<CatalogWindowInfo, StorageError>;
 }

@@ -7,10 +7,12 @@
 pub mod account;
 pub mod catalog_fixtures;
 pub mod execution_pg_seed;
+pub mod fact_sink;
 pub mod factor_governance;
 pub mod governance;
 pub mod mocks;
 pub mod pg;
+pub mod pit;
 pub mod report_fixtures;
 pub mod report_pipeline_harness;
 pub mod report_snapshots;

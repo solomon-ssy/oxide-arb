@@ -118,7 +118,7 @@ fn schedule(schedule_id: &str, cadence: ScheduleCadence) -> ReportScheduleConfig
         schedule_id: schedule_id.to_owned(),
         cadence,
         top_n: 10,
-        source_delay_secs: 0,
+        knowledge_lag_secs: 0,
         enabled: true,
     }
 }
@@ -316,7 +316,7 @@ async fn ad_hoc_run_uses_same_lifecycle_path() {
             request_id: "req-1".to_owned(),
             trigger_time: Utc::now(),
             top_n: None,
-            source_delay_secs: None,
+            knowledge_lag_secs: None,
         })
         .await
         .expect("enqueue ad-hoc");

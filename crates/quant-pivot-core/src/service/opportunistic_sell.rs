@@ -13,14 +13,14 @@
 //! Every evaluation — including shadow — is mirrored to the
 //! `quant_exit_signal_evaluation_event` audit fact for ex-post shadow analysis.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, QuantExitSignalEvaluationEventRow},
-    domain::{OrderIntentInfo, PointInTimeDataSource, PositionInfo},
+    domain::{OrderIntentInfo, PositionInfo},
     enums::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
         quant::QuantRuntimeMode,
@@ -33,13 +33,13 @@ use quant_pivot_research::{
         LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput, SellSignalPolicy,
         position_state_features, sell_signal_fires, sell_signal_target,
     },
+    pit::PointInTimeSnapshotSource,
     selection::ModelFeatureRequirements,
 };
 use rust_decimal::Decimal;
 
 use crate::{
     execution::{ExitSignalContext, ExitSignalEvaluator, ExitSignalVerdict},
-    ingest::market_registry::MarketRegistry,
     observability::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
     },
@@ -47,7 +47,8 @@ use crate::{
     runtime_config::RuntimeConfigStore,
     service::model_backed_reinferer::{
         LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok,
-        frozen_exit_outcome, liquidity_score_cap, schema_binding, selected_market_for_lot,
+        frozen_exit_outcome, liquidity_score_cap, runtime_decision_boundary, schema_binding,
+        selected_market_for_lot,
     },
 };
 
@@ -78,8 +79,7 @@ pub struct ModelBackedOpportunisticSellScorerDeps {
     /// Source of the entry recommendation's frozen factor breakdown, replayed as
     /// the exit-side factor plane (reproducing the entry thesis).
     pub recommendations: Arc<dyn RecommendationRepository>,
-    pub pit_source: Arc<dyn PointInTimeDataSource>,
-    pub market_registry: Arc<MarketRegistry>,
+    pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
 }
 
@@ -138,26 +138,33 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
             }
         };
 
-        let Some(market) = selected_market_for_lot(&self.deps.market_registry, lot) else {
+        let boundary = runtime_decision_boundary(&config, now)?;
+        let Some(snapshot) = self
+            .deps
+            .pit_source
+            .market_snapshot_at(&lot.market_id, &boundary)
+            .await?
+        else {
+            tracing::debug!(
+                market_id = %lot.market_id,
+                "opportunistic sell: durable market snapshot is unavailable"
+            );
             return Ok(None);
         };
+        let market = selected_market_for_lot(&snapshot, lot)?;
         let requirements = ModelFeatureRequirements::generic_only(runtime.required_features());
-        let source_delay = Duration::from_secs(config.data_quality.max_feature_bucket_age_secs);
-        let as_of =
-            now - chrono::Duration::from_std(source_delay).unwrap_or(chrono::Duration::zero());
         let Some(liquidity_cap_usd) = liquidity_score_cap(config.as_ref())? else {
             return Ok(None);
         };
         let request = LiveFeatureBuildRequest {
-            pit: &self.deps.pit_source,
+            pit: self.deps.pit_source.as_ref(),
             window_provider: &self.deps.window_provider,
             market: &market,
             features: &config.features,
             domain: &config.domain,
             data_quality: &config.data_quality,
             requirements: &requirements,
-            as_of,
-            source_delay,
+            boundary: &boundary,
             liquidity_cap_usd,
         };
         let Some(vector) = build_live_feature_vector(&request).await? else {
@@ -165,17 +172,18 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         };
         // Reproduce the entry factor thesis from the recommendation's frozen
         // breakdown rather than recompute on a peerless single market.
-        let Some(outcome) = frozen_exit_outcome(
+        let Some(frozen) = frozen_exit_outcome(
             self.deps.recommendations.as_ref(),
             intent,
             vector.market_id.clone(),
-            as_of,
+            boundary.decision_at(),
         )
         .await?
         else {
             return Ok(None);
         };
-        let market_factors = outcome
+        let market_factors = frozen
+            .outcome
             .factors
             .iter()
             .map(|scored| scored.value.clone())
@@ -190,7 +198,7 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
                 .max_hold_secs
                 .unwrap_or(DEFAULT_HOLD_HORIZON_SECS),
             peak_mark: intent.peak_mark_price.map(Price::inner),
-        });
+        })?;
         let score = runtime.score(&SellScoreInput {
             market_factors,
             position_state,

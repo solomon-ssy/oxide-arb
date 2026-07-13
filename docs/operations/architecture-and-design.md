@@ -1,8 +1,8 @@
 # quant-pivot 架构与详细设计
 
-> Last reviewed: 2026-07-01.
+> Last reviewed: 2026-07-11.
 >
-> This document describes the current quant-pivot architecture implemented in this repository. Historical Endgame-phase documents are background only; current source of truth is the active quant-pivot code, runtime-config schema v9, and the operations runbook.
+> This document describes the current quant-pivot architecture implemented in this repository. Historical Endgame-phase documents are background only. The only current contract is runtime-config **v10**, feature schema **v6**, and dataset/model artifact `format_version = 2`; v9/v5/v1 have no compatibility loader. Phase 11.6 W5 is a pending maintenance-window operation, not an already-completed production migration. The executable cutover and recovery procedure is in [the operations runbook §7.5](./runbook.md).
 
 ## 1. 系统目标
 
@@ -22,19 +22,27 @@ quant-pivot 是 Polymarket-only 的量化系统。它的闭环目标不是直接
 
 ```mermaid
 flowchart TD
-    A["Polymarket Gamma metadata"] --> B["MarketRegistry"]
-    C["CLOB L2 WebSocket"] --> D["BookStore"]
-    E["Polymarket Data API"] --> F["Account/Position reads"]
-    B --> G["Selection"]
-    D --> G
-    D --> H["Feature pipeline"]
-    B --> H
-    H --> I["Factor engine"]
-    I --> J["Model runner"]
+    A["Polymarket Gamma metadata"] --> B["Append-only catalog version ledger"]
+    B --> BP["Latest MarketRegistry projection"]
+    C["CLOB L2 WebSocket"] --> D["ClickHouse book facts"]
+    C --> BS["BookStore: dashboard + ingest readiness"]
+    DATA["Polymarket Data API"] --> F["Account/Position reads"]
+    B --> PIT["DecisionBoundary + durable PIT resolver"]
+    D --> PIT
+    PIT --> SNAP["Immutable decision snapshot"]
+    SNAP --> G["Selection"]
+    SNAP --> H["FeatureCell pipeline"]
+    G --> H
+    H --> J["Family-specific model runner"]
+    H --> I["Factor engine: weighted only"]
+    I --> J
+    J --> EV["Serving evidence + completion barrier"]
+    EV --> PAR["Sampled/full deterministic parity"]
+    PAR -->|"mismatch"| LATCH["Revoke + intent cascade + parity latch"]
     F --> K["AccountSnapshot"]
     J --> L["Portfolio planner"]
     K --> L
-    D --> L
+    SNAP --> L
     L --> M["RecommendationReport"]
     M --> N{"Runtime mode"}
     N -->|"report_only"| O["Human reads report"]
@@ -51,8 +59,9 @@ flowchart TD
     X --> Y["Exit monitor"]
     Y --> Z["Exit order or settlement redeem"]
     Z --> AA["Attribution"]
-    AA --> AB["Research/training feedback"]
-    AB --> H
+    AA --> WORM["WORM final attribution"]
+    WORM -.->|"11.9 future; not implemented"| AB["Champion/challenger feedback"]
+    AB -.-> H
 ```
 
 关键设计点：
@@ -62,6 +71,10 @@ flowchart TD
 - execution 是 mode-gated 和 admission-gated 的后续链路；
 - 所有订单状态、资金锁定、reconciliation 和 attribution 都落 Postgres；
 - 市场事实和研究事实主要进入 ClickHouse；
+- selection、feature、capture 从同一 `DecisionBoundary` 与 immutable PIT snapshot 投影；`BookStore` 不得充当历史 replay 来源；
+- 训练/CV/backtest/serving 共用模型输入 transform，serving 证据写入完成前 model run 不得成功；
+- model runner 先验证全部 route 再按 family 分派；configured category route 失败整轮失败，不回退 generic；
+- 确定性 parity mismatch 会撤销报告、级联失效 intent 并打开 latch，报告、publish 和新入场 fail-closed，退出/结算继续；
 - runtime-config 是版本化治理对象，部署凭证不是策略配置。
 
 ## 3. 外部上下文
@@ -158,7 +171,7 @@ flowchart LR
 
 Deploy config 拒绝 unknown fields。所有 mode 都要求 private key 和 funder；可执行 mode 下 proxy/safe 还要求 relayer credentials。
 
-### 5.2 Runtime config v9
+### 5.2 Runtime config v10
 
 Runtime config 管策略和治理：
 
@@ -178,9 +191,10 @@ flowchart TD
 | Section | 职责 |
 |---------|------|
 | `selection` | 市场选择、黑白名单、流动性/到期窗口 |
-| `data_quality` | book age、coverage、fact lag、source delay |
+| `data_quality` | book age、coverage、ingest lag、feature bucket age |
 | `features` | 特征窗口、snapshot、feature pipeline 参数 |
 | `factors` | 因子权重、方向、启用状态 |
+| `domain` | 外部垂直数据源、availability lag 与 PIT linkage |
 | `model` | active model、shadow/published requirement、inference policy |
 | `quality_gate` | 训练/发布质量门槛 |
 | `training` | dataset 和训练调度 |
@@ -188,18 +202,30 @@ flowchart TD
 | `portfolio` | budget、Kelly sizing、constraints、optimizer |
 | `execution` | semi-auto/auto、entry policy、exit monitor、capital、reconciliation、redeem、breaker |
 | `notification` | Telegram/webhook delivery |
+| `research` | 训练目标、CPCV/purge/trial grid 与验证门禁 |
+| `feedback` | 当前 v10 为空的预留 closed object；11.9 首次实现时才随 v11 获得字段 |
+
+v10 只接受 `knowledge_lag_secs`，不接受旧 `source_delay_secs`；`features.feature_schema_version` 必须使用
+当前 v6 契约。11.9 尚未实施，不能提前写入 v11 feedback key。旧 runtime JSON、feature v5、dataset/model
+artifact v1 只能保留审计，不能激活、训练、publish 或 replay。
 
 ## 6. 数据面设计
 
 ### 6.1 Market metadata
 
-Gamma 同步负责发现和更新 Polymarket 市场：
+Gamma 同步负责发现和更新 Polymarket 市场。一次成功 batch 在同一 Postgres transaction 内写入
+`catalog_sync_batch`、append-only `event_catalog_version` / `market_catalog_version` 和 latest projection；commit
+成功后才发布到内存 registry/cache/subscription：
 
 1. 定时 full sync；
 2. 分页拉取 Gamma markets；
 3. 解析 token、outcome、resolution time、category、negRisk 等 metadata；
-4. 写入 MarketRegistry / Postgres；
-5. 生成订阅计划给 CLOB WS。
+4. 以 source effective time + available time 写入不可变 catalog version；
+5. 更新 latest MarketRegistry projection；
+6. transaction commit 后生成订阅计划给 CLOB WS。
+
+历史 selection/replay 只读 version ledger；latest projection 不得冒充历史。首次成功同步建立
+`catalog_coverage_start`，早于覆盖起点的 replay fail-closed，绝不 backdate 当前行。
 
 ### 6.2 BookStore
 
@@ -207,8 +233,11 @@ BookStore 是 L2 order book 的热路径读模型：
 
 - CLOB WS 接收 book snapshot/update；
 - 按 token id 维护 best bid/ask、depth ladder、book timestamp；
-- 提供 lock-free 或低锁读取给 selection、feature、entry/admission、exit monitor；
+- 提供 lock-free 或低锁读取给实时看板、subscription/ingest readiness、entry/admission 和 exit monitor；
 - 对 book age、depth、spread 输出 data quality signal。
+
+报告 selection/feature/capture 与离线 dataset/replay 不从 BookStore 拼历史快照；它们读取同一
+`DecisionBoundary` 下 catalog ledger + ClickHouse facts，并冻结为一份 immutable decision snapshot。
 
 ### 6.3 ClickHouse facts
 
@@ -216,11 +245,23 @@ ClickHouse 存储研究和回放友好的事实：
 
 - book snapshots / top-of-book；
 - data-quality measurements；
-- feature rows；
-- model inference rows；
+- stateful `quant_feature_event`（完整 FeatureCell state/reason/evidence）；
+- `quant_model_input_event`（真实 model run/route、ordered encoded input、transform hashes）；
+- `quant_serving_evidence_completion`（feature/model-input writer ACK barrier）；
+- `quant_feature_parity_event`（sampled/full 的逐阶段 online/replay 证据）；
 - attribution / PnL analytics。
 
 Postgres 是业务系统 of record；ClickHouse 是事实/分析面。不能把 ClickHouse 当作订单状态真相。
+
+### 6.4 Frozen training/serving contract
+
+- `DecisionBoundary.decision_at = trigger_time`；`knowledge_cutoff = decision_at - knowledge_lag` 只在唯一构造器计算一次。
+- 所有事实同时满足 `source_effective_at <= source_cutoff` 与 `available_at/ingestion_time <= decision_at`。
+- Feature schema 当前仅 v6；缺失以 `Observed | Substituted | Missing | NotApplicable` 表达，禁止 stub、silent zero 或 future-time clamp。
+- Dataset lifecycle 为 `Planned → Building → Ready | InsufficientLabels | Failed`、`Ready → Expired`；不存在人工 `Built → Ready`。
+- Parquet dataset 与 model artifact 都只接受 `format_version = 2`。训练、每个 CV fold、backtest 和 serving 共用 fit/apply transform；旧 v1 loader fail-closed。
+- 100% serving 证据在 run success 前通过 completion barrier；确定性抽样和 24h full replay 比较 selection、capture、FeatureCell/DQ、factor、encoded input 与 canonical prediction。
+- 任一确定性 mismatch 自动 revoke 报告、级联失效 intent 并打开 parity latch。后续报告、model publish、新入场阻断；exit、reconciliation、settlement 继续。
 
 ## 7. 账户与资金设计
 
@@ -277,30 +318,40 @@ sequenceDiagram
     participant Trigger as Schedule/AdHoc Trigger
     participant Builder as ReportBuilder
     participant Config as RuntimeConfigStore
+    participant Gate as FeatureParityGate
+    participant PIT as Durable PIT Resolver
     participant Select as MarketSelector
     participant Account as AccountProvider
     participant Feature as FeaturePipeline
     participant Model as ModelRunner
+    participant Evidence as Serving Evidence Writers
     participant Portfolio as PortfolioPlanner
     participant Composer as ReportComposer
     participant Repo as ReportRepository
+    participant Parity as Runtime Parity
     participant Pub as EventPublisher
 
     Trigger->>Builder: build(trigger_kind, trigger_key)
+    Builder->>Gate: ensure_clear(report generation)
+    Gate-->>Builder: clear or fail closed
     Builder->>Config: active config
-    Config-->>Builder: RuntimeConfig v9
-    Builder->>Builder: as_of = trigger_time - source_delay
-    Builder->>Select: candidates(as_of, selection config)
+    Config-->>Builder: RuntimeConfig v10
+    Builder->>Builder: DecisionBoundary(decision_at=trigger_time, knowledge_cutoff once)
+    Builder->>PIT: resolve catalog + book/domain facts at boundary
+    PIT-->>Builder: immutable decision snapshot
+    Builder->>Select: candidates(snapshot, selection config)
     Select-->>Builder: candidate markets/tokens
     alt no candidates
         Builder->>Repo: publish empty report(empty_selection)
     else candidates exist
         Builder->>Account: live account snapshot
         Account-->>Builder: AccountSnapshot
-        Builder->>Feature: feature rows(candidates, as_of)
-        Feature-->>Builder: features + data quality
-        Builder->>Model: infer(features, active model)
-        Model-->>Builder: signals
+        Builder->>Feature: FeatureCell rows(candidates, same snapshot)
+        Feature-->>Evidence: persist full FeatureCell/DQ/provenance batch
+        Builder->>Model: validate all routes + family-specific inference
+        Model-->>Evidence: persist ordered encoded inputs + route/transform hashes
+        Evidence-->>Builder: durable ACKs + completion barrier
+        Model-->>Builder: canonical business signals
         Builder->>Portfolio: size and optimize(signals, account, constraints)
         Portfolio-->>Builder: planned recommendations or rejections
         Builder->>Composer: compose Top-N payloads
@@ -308,6 +359,8 @@ sequenceDiagram
         Builder->>Repo: persist report, recommendations, evidence
     end
     Repo-->>Builder: report id/status
+    Builder->>Parity: deterministic report-bound sampled replay
+    Parity-->>Repo: pass, pending retry, or revoke + intent cascade + latch
     Builder->>Pub: quant.report event
 ```
 
@@ -320,6 +373,9 @@ sequenceDiagram
 - insufficient data quality；
 - no positive signal；
 - portfolio budget exhausted。
+
+Parity latch open/uninitialized、关键 PIT snapshot 缺失、category route 故障或 serving evidence barrier 未完成不是
+“空报告”原因，而是整轮失败；不得用 empty report 掩盖完整性故障。
 
 ### 8.2 Recommendation payload
 
@@ -603,7 +659,9 @@ Postgres 保存业务状态：
 - system runtime state；
 - kill switch；
 - operation logs；
-- market registry；
+- append-only catalog sync/version ledger + latest market/event projection；
+- training dataset lifecycle、model/factor registry 与 immutable revision bindings；
+- feature parity run/state latch、governed acknowledge lineage；
 - reports；
 - recommendations；
 - evidence refs；
@@ -630,6 +688,9 @@ ClickHouse 保存高频事实和研究数据：
 - market data facts；
 - book snapshots；
 - feature materialization；
+- stateful FeatureCell serving evidence；
+- ordered model-input/route/transform evidence；
+- serving completion barrier 与逐阶段 parity evidence；
 - data-quality metrics；
 - training rows；
 - backtest/inference analytics；
@@ -689,6 +750,10 @@ Redis 不存储不可恢复的交易真相。
 - kill switch state changes；
 - breaker trips；
 - account snapshot failures。
+- catalog coverage/watermark age；
+- serving evidence writer ACK/pending age；
+- feature parity run status/counts by low-cardinality stage/feature/reason/family/category；
+- parity latch state and age。
 
 ### 17.2 Logs
 
@@ -706,6 +771,7 @@ Redis 不存储不可恢复的交易真相。
 - `kill_switch_state`；
 - `admission_check_id`；
 - `reconciliation_id`。
+- `model_run_id` / `feature_parity_run_id`（结构化日志字段；Prometheus label 禁止这些高基数 ID）。
 
 不得记录 private key、JWT secret、relayer key、完整 auth header、PII。
 
@@ -723,6 +789,10 @@ Redis 不存储不可恢复的交易真相。
 | Ambiguous venue response | submit result | capital held | wait for reconciliation |
 | Unresolvable recon | recon worker | blocks auto preflight/attribution | manually resolve with evidence |
 | Runtime config bad | activation validation | reject/revert | fix patch or rollback |
+| Catalog coverage/watermark missing | PIT resolver / integrity summary | block replay, dataset build, report | preserve ingest, repair Gamma ledger; never backdate |
+| Serving writer misses deadline | evidence completion / parity pending timeout | fail run, alert, open latch when terminal | repair writer/watermark, run covering full parity |
+| Deterministic parity mismatch | sampled/full replay | revoke report, cascade intent, open latch; block report/publish/entry | safe mode, fix forward, covering full parity, governed ack |
+| Legacy/corrupt dataset or model artifact | format/hash/deep loader validation | reject training/load/publish | rebuild v2 artifact; never activate legacy pointer |
 | Model degraded | quality gate/report | no positive signal/empty | rollback model/factor |
 | Breaker daily loss | breaker | trip kill switch | incident review |
 | Bridge deposit stuck | account mismatch | funds unavailable | check bridge status/support |
@@ -730,23 +800,35 @@ Redis 不存储不可恢复的交易真相。
 
 ## 19. Deployment lifecycle
 
+Phase 11.6 的 v10/v6/v2 生产切换尚未执行。它必须在维护窗口按
+[runbook §7.5](./runbook.md) 留存变更单、全量门禁、migration、parity 与 governed acknowledge 证据；下图是
+目标顺序，不是当前环境已完成声明。
+
 ```mermaid
 flowchart TD
-    A["Provision infra"] --> B["Inject deploy secrets"]
-    B --> C["Start quant-pivot in report_only"]
-    C --> D["Health/account checks"]
-    D --> E["Activate conservative runtime-config"]
-    E --> F["Generate reports"]
-    F --> G["Shadow review"]
-    G --> H["semi_auto"]
-    H --> I["Governed small orders"]
-    I --> J["Reconciliation/attribution review"]
-    J --> K["Enable auto policy"]
-    K --> L["auto_execution with tight caps"]
-    L --> M["Scale caps only after evidence"]
+    A["Pre-cutover full CI + backup + change ticket"] --> B["Kill switch exit_only"]
+    B --> C["Deploy v10 binary + PG/CH migrations"]
+    C --> D["Activate safe v10/v6 config: reports off, all model pointers empty"]
+    D --> E["Verify legacy specs/models/factors retired and datasets expired/failed"]
+    E --> F["Wait for catalog coverage start + advancing watermark"]
+    F --> G["Build Ready Parquet v2 dataset"]
+    G --> H["Train/calibrate/backtest/CPCV new model artifact v2"]
+    H --> I["Subject-bound full parity passed"]
+    I --> J["Risk-owner governed latch acknowledge"]
+    J --> K["Publish model"]
+    K --> L["Ad-hoc canary + sampled/full runtime parity"]
+    L --> M["Enable schedules while still exit_only"]
+    M --> N["Observe full report/parity cycle"]
+    N --> O["Restore new entries"]
+    O --> P["semi_auto / auto_execution with tight caps"]
+    P --> Q["Scale caps only after execution/reconciliation/attribution evidence"]
 ```
 
 Scaling production is a governance decision, not a code toggle. Increase budget/caps only after reports, orders, reconciliation, exits and attribution have worked at smaller size.
+
+任一步失败都回到同一个 **v10 safe state**：`exit_only`、reports off、model pointers empty，并且绝不清除已
+open/uninitialized 的 latch；若 latch 此前已合法 clear，则由 safe controls 阻断，不能用 SQL 伪造状态。继续
+ingest/exit/reconciliation/settlement，修复后前向重建。不得回滚 v9/v5/v1 或重新激活已退役 artifact。
 
 ## 20. 设计边界与当前限制
 
@@ -755,9 +837,10 @@ Scaling production is a governance decision, not a code toggle. Increase budget/
 3. Report sizing 使用真实账户；没有配置预算模拟 fallback。
 4. 当前 order intent kind 是 buy entry；exit order 由 execution/exit subsystem 管理。
 5. 手动在 Polymarket UI 下单不会自动生成系统内 `OrderIntent`。
-6. runtime-config v9 拒绝 unknown fields；旧 schema 不能激活。
+6. runtime-config 只接受 v10，feature schema 只接受当前 v6，dataset/model artifact loader 只接受 v2；旧 schema/format 不能激活或读取。
 7. `auto_execution` 仍受 admission、kill switch、capital 和 breaker 限制。
 8. ClickHouse 是 analytics plane，不是订单 truth。
+9. Phase 11.6 W5 maintenance/safe-mode 切换仍待真实环境执行；代码与文档就绪不等于 production Phase Exit。
 
 ## 21. 设计验收清单
 
@@ -767,6 +850,10 @@ Scaling production is a governance decision, not a code toggle. Increase budget/
 - account truth credential-gated；
 - deploy config 与 runtime-config 分离；
 - runtime-config versioned and auditable；
+- runtime v10 / feature v6 / dataset+model artifact v2 single-version contract；
+- DecisionBoundary 双时间 PIT 与 frozen train/serve transform；
+- serving evidence completion barrier + deterministic parity latch；
+- W5 安全切换失败时只前向恢复到 v10 safe state；
 - mode transition preflight；
 - kill switch fail-closed；
 - admission before every venue submit；

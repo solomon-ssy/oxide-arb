@@ -28,20 +28,22 @@ use rust_decimal::Decimal;
 
 use crate::{
     factors::{
+        FactorDefinitionIdentity, factor_definition_identity,
         normalize::{
             CrossSectionalNormalizer, NormalizedFactor, RawFactorColumn, indeterminate_present,
             resolve_normalizer,
         },
+        reference::FrozenReferenceQuantiles,
         registry::FactorRegistry,
         value::{
             FactorDefinitionSpec, FactorEligibility, FactorExplanation, FactorName, FactorSet,
             FactorValue, MarketFactorOutcome, RawFactor, RawFactorEligibility, ScoredFactor,
         },
     },
-    features::FeatureVector,
+    features::{FeatureSchema, FeatureVector},
     hashing::ResearchHasher,
     model::FavoriteLongshotBiasTable,
-    parallel::{par_map_with_index, par_try_map},
+    parallel::{par_map_with_index, par_try_map, par_try_map_with_index},
 };
 
 /// Batch size at or above which the engine spreads its stages across the `rayon`
@@ -52,34 +54,6 @@ const PARALLEL_MIN_MARKETS: usize = 16;
 /// One enabled factor: its governed spec paired with the computer that produces
 /// it. Built once per round by [`FactorRegistry`].
 type FactorEntry = (FactorDefinitionSpec, Arc<dyn FactorComputer>);
-
-/// Historical raw factor values, keyed by factor name.
-///
-/// Backs the [`SmallCrossSectionPolicy::HistoricalQuantile`] fallback; empty by
-/// default (the [`SmallCrossSectionPolicy::Indeterminate`] policy needs none).
-#[derive(Debug, Clone, Default)]
-pub struct FactorHistory {
-    by_factor: BTreeMap<FactorName, Vec<Decimal>>,
-}
-
-impl FactorHistory {
-    /// An empty history (the default `Indeterminate` policy path).
-    #[must_use]
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Record a factor's historical raw values (rolling lookback distribution).
-    pub fn insert(&mut self, factor: FactorName, values: Vec<Decimal>) {
-        self.by_factor.insert(factor, values);
-    }
-
-    /// The historical raw values for a factor, if any were pre-fetched.
-    #[must_use]
-    fn values_for(&self, factor: &FactorName) -> Option<&[Decimal]> {
-        self.by_factor.get(factor).map(Vec::as_slice)
-    }
-}
 
 /// Computes one factor's raw value from a feature vector.
 ///
@@ -106,6 +80,7 @@ pub trait FactorComputer: Send + Sync {
 /// that turns raw factors into explainable [`MarketFactorOutcome`]s.
 pub struct FactorEngine {
     registry: FactorRegistry,
+    identities: Result<(ContentHash, BTreeMap<FactorName, FactorDefinitionIdentity>), String>,
 }
 
 impl FactorEngine {
@@ -127,8 +102,29 @@ impl FactorEngine {
         domain: &DomainConfig,
         bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
     ) -> Self {
+        let registry = FactorRegistry::build(factors, features, domain, bias_table);
+        let identities = (|| {
+            let feature_schema = FeatureSchema::build(features)?;
+            let feature_contract_hash = ResearchHasher::feature_schema(&feature_schema)?;
+            let mut by_name = BTreeMap::new();
+            for (spec, _) in registry.factors() {
+                let identity = factor_definition_identity(spec, &feature_contract_hash)?;
+                if by_name.insert(spec.name.clone(), identity).is_some() {
+                    return Err(ResearchError::FactorComputation {
+                        detail: format!(
+                            "duplicate logical factor name in governed registry: {}",
+                            spec.name
+                        ),
+                    }
+                    .into());
+                }
+            }
+            QuantResult::Ok((feature_contract_hash, by_name))
+        })()
+        .map_err(|error| error.to_string());
         Self {
-            registry: FactorRegistry::build(factors, features, domain, bias_table),
+            registry,
+            identities,
         }
     }
 
@@ -136,6 +132,58 @@ impl FactorEngine {
     #[must_use]
     pub const fn registry(&self) -> &FactorRegistry {
         &self.registry
+    }
+
+    /// Canonical feature contract bound into every enabled factor revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns the schema/hash construction failure captured at engine build.
+    pub fn feature_contract_hash(&self) -> QuantResult<ContentHash> {
+        self.identities
+            .as_ref()
+            .map(|(hash, _)| hash.clone())
+            .map_err(|detail| {
+                ResearchError::FactorComputation {
+                    detail: format!("factor definition identity construction failed: {detail}"),
+                }
+                .into()
+            })
+    }
+
+    /// Content-addressed identity of one enabled logical factor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity-construction error or an unknown factor error.
+    pub fn definition_identity(
+        &self,
+        factor: &FactorName,
+    ) -> QuantResult<FactorDefinitionIdentity> {
+        let (_, identities) = self.identities.as_ref().map_err(|detail| {
+            QuantError::from(ResearchError::FactorComputation {
+                detail: format!("factor definition identity construction failed: {detail}"),
+            })
+        })?;
+        identities.get(factor).cloned().ok_or_else(|| {
+            ResearchError::FactorComputation {
+                detail: format!("factor `{factor}` is absent from the governed registry"),
+            }
+            .into()
+        })
+    }
+
+    /// Content-addressed identities of all enabled factors in registry order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identity-construction or registry-consistency error.
+    pub fn definition_identities(&self) -> QuantResult<Vec<FactorDefinitionIdentity>> {
+        self.registry
+            .factors()
+            .iter()
+            .map(|(spec, _)| self.definition_identity(&spec.name))
+            .collect()
     }
 
     /// The governed factor set (for `factor_schema_hash` binding).
@@ -156,7 +204,7 @@ impl FactorEngine {
     /// Compute every enabled factor for a single market.
     ///
     /// Cross-sectional factors see a cross-section of one, so — unless the
-    /// `HistoricalQuantile` policy supplies a distribution — they resolve to
+    /// `FrozenReferenceQuantile` policy supplies a training CDF — they resolve to
     /// [`NormalizedFactor::Indeterminate`], never a fabricated neutral.
     ///
     /// # Errors
@@ -177,22 +225,24 @@ impl FactorEngine {
     }
 
     /// Compute every enabled factor for a batch of markets at one decision time,
-    /// with the default (empty) history — the [`SmallCrossSectionPolicy::Indeterminate`]
-    /// path.
+    /// with no artifact reference — the [`SmallCrossSectionPolicy::Indeterminate`]
+    /// path. Configuring `FrozenReferenceQuantile` without calling
+    /// [`Self::compute_all_batch_with_references`] fails closed per factor.
     ///
     /// # Errors
     ///
-    /// See [`Self::compute_all_batch_with_history`].
+    /// See [`Self::compute_all_batch_with_references`].
     pub fn compute_all_batch(
         &self,
         features: &[FeatureVector],
         config: &FactorsConfig,
     ) -> QuantResult<Vec<MarketFactorOutcome>> {
-        self.compute_all_batch_with_history(features, config, &FactorHistory::empty())
+        self.compute_all_batch_with_references(features, config, &FrozenReferenceQuantiles::empty())
     }
 
-    /// Compute every enabled factor for a batch of markets, using `history` for
-    /// the [`SmallCrossSectionPolicy::HistoricalQuantile`] fallback.
+    /// Compute every enabled factor for a batch of markets, using the loaded
+    /// model artifact's reference CDFs for the
+    /// [`SmallCrossSectionPolicy::FrozenReferenceQuantile`] fallback.
     ///
     /// Cross-sectional normalization is resolved across the batch column; the
     /// confidence floor and `missing_factor_policy` are applied per market to
@@ -204,11 +254,11 @@ impl FactorEngine {
     /// Propagates raw-computation failures, an invalid `min_factor_confidence`,
     /// an unresolvable normalization config, a non-uniform batch `as_of`, or an
     /// empty enabled factor registry.
-    pub fn compute_all_batch_with_history(
+    pub fn compute_all_batch_with_references(
         &self,
         features: &[FeatureVector],
         config: &FactorsConfig,
-        history: &FactorHistory,
+        references: &FrozenReferenceQuantiles,
     ) -> QuantResult<Vec<MarketFactorOutcome>> {
         if self.registry.is_empty() {
             return Err(ResearchError::FactorComputation {
@@ -218,7 +268,7 @@ impl FactorEngine {
         }
         Self::validate_batch_invariants(features)?;
         let parallel = features.len() >= PARALLEL_MIN_MARKETS;
-        self.compute_all_batch_inner(features, config, history, parallel)
+        self.compute_all_batch_inner(features, config, references, parallel)
     }
 
     /// Validate batch preconditions shared by the pipeline and the engine.
@@ -233,13 +283,13 @@ impl FactorEngine {
         if features.len() <= 1 {
             return Ok(());
         }
-        let expected = features[0].as_of;
+        let expected = features[0].decision_at;
         for vector in features.iter().skip(1) {
-            if vector.as_of != expected {
+            if vector.decision_at != expected {
                 return Err(ResearchError::FactorComputation {
                     detail: format!(
                         "batch as_of mismatch: expected {expected}, got {} for market {}",
-                        vector.as_of, vector.market_id
+                        vector.decision_at, vector.market_id
                     ),
                 }
                 .into());
@@ -257,23 +307,37 @@ impl FactorEngine {
         &self,
         features: &[FeatureVector],
         config: &FactorsConfig,
-        history: &FactorHistory,
+        references: &FrozenReferenceQuantiles,
         parallel: bool,
     ) -> QuantResult<Vec<MarketFactorOutcome>> {
         let floor = parse_floor(config)?;
         let policy = config.missing_factor_policy;
         let factors = self.registry.factors();
+        let definition_ids: Vec<FactorDefinitionId> = factors
+            .iter()
+            .map(|(spec, _)| {
+                self.definition_identity(&spec.name)
+                    .map(|identity| identity.factor_definition_id)
+            })
+            .collect::<QuantResult<_>>()?;
         let normalizers = resolve_normalizers(factors, config)?;
+        let min_cross_section_size =
+            usize::try_from(config.cross_section.min_size).map_err(|error| {
+                ResearchError::FactorComputation {
+                    detail: format!("factor cross-section min_size conversion failed: {error}"),
+                }
+            })?;
 
-        let raw_by_market = build_raw_by_market(factors, features, parallel)?;
+        let raw_by_market = build_raw_by_market(factors, &definition_ids, features, parallel)?;
         let norm_grid = build_norm_grid(
             factors,
             &normalizers,
             &raw_by_market,
             &config.cross_section,
-            history,
+            references,
+            min_cross_section_size,
             parallel,
-        );
+        )?;
         Ok(assemble_outcomes(
             features,
             factors,
@@ -306,13 +370,19 @@ fn resolve_normalizers(
 /// Phase A — the raw factor grid, market-major (`raw[market][factor]`).
 fn build_raw_by_market(
     factors: &[FactorEntry],
+    definition_ids: &[FactorDefinitionId],
     features: &[FeatureVector],
     parallel: bool,
 ) -> QuantResult<Vec<Vec<RawFactor>>> {
     let compute_row = |vector: &FeatureVector| -> QuantResult<Vec<RawFactor>> {
         factors
             .iter()
-            .map(|(_, computer)| computer.compute_raw(vector))
+            .zip(definition_ids)
+            .map(|((_, computer), definition_id)| {
+                let mut raw = computer.compute_raw(vector)?;
+                raw.definition_id = definition_id.clone();
+                Ok(raw)
+            })
             .collect()
     };
     if parallel {
@@ -329,10 +399,11 @@ fn build_norm_grid(
     normalizers: &[Box<dyn CrossSectionalNormalizer>],
     raw_by_market: &[Vec<RawFactor>],
     cross_section: &FactorCrossSectionConfig,
-    history: &FactorHistory,
+    references: &FrozenReferenceQuantiles,
+    min_size: usize,
     parallel: bool,
-) -> Vec<Vec<NormalizedFactor>> {
-    let normalize_factor = |index: usize| -> Vec<NormalizedFactor> {
+) -> QuantResult<Vec<Vec<NormalizedFactor>>> {
+    let normalize_factor = |index: usize| -> QuantResult<Vec<NormalizedFactor>> {
         let column = RawFactorColumn {
             factor: factors[index].0.name.clone(),
             values: raw_by_market
@@ -340,10 +411,16 @@ fn build_norm_grid(
                 .map(|row| row[index].raw_value)
                 .collect(),
         };
-        normalize_one_factor(normalizers[index].as_ref(), &column, cross_section, history)
+        normalize_one_factor(
+            normalizers[index].as_ref(),
+            &column,
+            cross_section,
+            references,
+            min_size,
+        )
     };
     if parallel {
-        par_map_with_index(factors, |index, _| normalize_factor(index))
+        par_try_map_with_index(factors, |index, _| normalize_factor(index))
     } else {
         (0..factors.len()).map(normalize_factor).collect()
     }
@@ -355,33 +432,43 @@ fn normalize_one_factor(
     normalizer: &dyn CrossSectionalNormalizer,
     column: &RawFactorColumn,
     cross_section: &FactorCrossSectionConfig,
-    history: &FactorHistory,
-) -> Vec<NormalizedFactor> {
+    references: &FrozenReferenceQuantiles,
+    min_size: usize,
+) -> QuantResult<Vec<NormalizedFactor>> {
     if !normalizer.is_cross_sectional() {
-        let stats = normalizer.fit(column);
-        return normalizer.apply(column, &stats, NormalizationSource::PerMarket);
+        let stats = normalizer.fit(column)?;
+        return Ok(normalizer.apply(column, &stats, NormalizationSource::PerMarket));
     }
-    let min_size = usize::try_from(cross_section.min_size).unwrap_or(usize::MAX);
     if column.present_count() >= min_size {
-        let stats = normalizer.fit(column);
-        return normalizer.apply(column, &stats, NormalizationSource::CrossSection);
+        let stats = normalizer.fit(column)?;
+        return Ok(normalizer.apply(column, &stats, NormalizationSource::CrossSection));
     }
-    match cross_section.small_cross_section_policy {
+    Ok(match cross_section.small_cross_section_policy {
         SmallCrossSectionPolicy::Indeterminate => {
             indeterminate_present(column, FactorIndeterminateReason::CrossSectionTooSmall)
         }
-        SmallCrossSectionPolicy::HistoricalQuantile => match history.values_for(&column.factor) {
-            Some(values) if values.len() >= min_size => {
-                let historical = RawFactorColumn {
-                    factor: column.factor.clone(),
-                    values: values.iter().map(|value| Some(*value)).collect(),
-                };
-                let stats = normalizer.fit(&historical);
-                normalizer.apply(column, &stats, NormalizationSource::HistoricalQuantile)
-            }
-            _ => indeterminate_present(column, FactorIndeterminateReason::NoHistory),
-        },
-    }
+        SmallCrossSectionPolicy::FrozenReferenceQuantile => references
+            .get(&column.factor)
+            .filter(|reference| reference.sorted_values.len() >= min_size)
+            .map_or_else(
+                || indeterminate_present(column, FactorIndeterminateReason::NoFrozenReference),
+                |reference| {
+                    column
+                        .values
+                        .iter()
+                        .map(|value| {
+                            value.map_or(NormalizedFactor::MissingInput, |raw| {
+                                NormalizedFactor::Scored {
+                                    score: reference.percentile(raw),
+                                    source: NormalizationSource::FrozenReferenceQuantile,
+                                    clamp: None,
+                                }
+                            })
+                        })
+                        .collect()
+                },
+            ),
+    })
 }
 
 /// Phase C — assemble one [`MarketFactorOutcome`] per market, preserving order.
@@ -447,7 +534,7 @@ fn assemble_market(
     let eligibility = reject.unwrap_or(FactorEligibility::Eligible);
     MarketFactorOutcome {
         market_id: vector.market_id.clone(),
-        as_of: vector.as_of,
+        decision_at: vector.decision_at,
         eligibility,
         factors: scored,
     }

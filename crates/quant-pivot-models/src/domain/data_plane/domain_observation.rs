@@ -37,6 +37,9 @@ pub struct DomainObservation {
     pub observed_at: DateTime<Utc>,
     /// When the source published the datum (lag bound; `>= observed_at`).
     pub publish_time: DateTime<Utc>,
+    /// Time at which this revision became visible to this system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_at: Option<DateTime<Utc>>,
 }
 
 impl DomainObservation {
@@ -70,6 +73,7 @@ impl DomainObservation {
             value: row.value.to_decimal(),
             observed_at: millis_to_utc(row.event_time)?,
             publish_time: millis_to_utc(row.publish_time)?,
+            available_at: Some(millis_to_utc(row.ingestion_time)?),
         })
     }
 }
@@ -174,6 +178,7 @@ mod tests {
 
     #[test]
     fn observation_roundtrips_clickhouse_row() {
+        let ingestion_time = Utc.with_ymd_and_hms(2026, 7, 1, 12, 1, 2).unwrap();
         let observation = DomainObservation {
             family: DomainFamily::Crypto,
             source_id: DomainSourceId::binance(),
@@ -185,8 +190,9 @@ mod tests {
             value: dec!(104250.12345678),
             observed_at: Utc.with_ymd_and_hms(2026, 7, 1, 12, 1, 0).unwrap(),
             publish_time: Utc.with_ymd_and_hms(2026, 7, 1, 12, 1, 1).unwrap(),
+            available_at: Some(ingestion_time),
         };
-        let row = observation.clone().into_clickhouse_row(Utc::now());
+        let row = observation.clone().into_clickhouse_row(ingestion_time);
         assert_eq!(row.family, "crypto");
         assert_eq!(row.metric, "close");
         let back = DomainObservation::from_clickhouse_row(&row).expect("decode");
@@ -206,6 +212,7 @@ mod tests {
             value: dec!(1),
             observed_at: Utc::now(),
             publish_time: Utc::now(),
+            available_at: None,
         };
         let mut row = observation.into_clickhouse_row(Utc::now());
         "not_a_family".clone_into(&mut row.family);

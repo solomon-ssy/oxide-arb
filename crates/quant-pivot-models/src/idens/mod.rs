@@ -1,8 +1,11 @@
 //! `SeaORM` `DeriveIden` enums for DDL column definitions.
 
 pub mod casbin_rule;
+pub mod catalog_sync_batch;
 pub mod event;
+pub mod event_catalog_version;
 pub mod market;
+pub mod market_catalog_version;
 pub mod menu;
 pub mod operation_log;
 pub mod quant_account_snapshot;
@@ -16,6 +19,8 @@ pub mod quant_equity_snapshot;
 pub mod quant_execution_order;
 pub mod quant_factor_definition;
 pub mod quant_factor_value;
+pub mod quant_feature_parity_run;
+pub mod quant_feature_parity_state;
 pub mod quant_feature_vector;
 pub mod quant_market_linkage;
 pub mod quant_market_selection;

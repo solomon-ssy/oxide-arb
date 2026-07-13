@@ -15,6 +15,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use quant_pivot_error::{
     QuantResult,
+    execution::ExecutionError,
     storage::{StorageError, entity},
 };
 use quant_pivot_models::{
@@ -100,7 +101,7 @@ impl CoreExitDispatcher {
         } = request;
 
         // 1. Write-ahead the Exit order (Submitted) + lot Open->Closing + exit FSM.
-        let new_order = build_exit_order(&lot, &order);
+        let new_order = build_exit_order(&lot, &order)?;
         let execution_order = self
             .deps
             .submission
@@ -189,8 +190,11 @@ impl CoreExitDispatcher {
 }
 
 /// Build the write-ahead Exit execution-order row (`state = Submitted`).
-fn build_exit_order(lot: &PositionInfo, order: &ExitOrderSpec) -> NewExecutionOrder {
-    NewExecutionOrder {
+fn build_exit_order(
+    lot: &PositionInfo,
+    order: &ExitOrderSpec,
+) -> Result<NewExecutionOrder, ExecutionError> {
+    Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
         order_intent_id: lot.order_intent_id.clone(),
         order_phase: ExecutionOrderPhase::Exit,
@@ -207,9 +211,9 @@ fn build_exit_order(lot: &PositionInfo, order: &ExitOrderSpec) -> NewExecutionOr
         submitted_at: None,
         filled_at: None,
         cancelled_at: None,
-        gtd_expiration_at: gtd_expiration_at(&order.order_type),
+        gtd_expiration_at: gtd_expiration_at(&order.order_type)?,
         error_message: None,
-    }
+    })
 }
 
 /// The realized average exit price (venue avg, or the submitted limit fallback).

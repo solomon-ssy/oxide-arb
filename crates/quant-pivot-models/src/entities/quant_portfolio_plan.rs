@@ -14,7 +14,7 @@ pub struct Model {
     pub portfolio_plan_id: PortfolioPlanId,
     pub model_run_id: Option<ModelRunId>,
     pub market_selection_id: MarketSelectionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
     #[sea_orm(column_type = "JsonBinary")]

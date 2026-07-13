@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::{sync::mpsc, task::JoinSet, time::interval};
@@ -31,18 +31,26 @@ use uuid::Uuid;
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
+    clickhouse::QuantFeatureParityEventRow,
     config::ResearchJobsConfig,
     domain::{
         BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        CalibrationArtifactFitPort, CpcvBacktestJobParams, CpcvBacktestPort, JobProgressSink,
-        ModelCalibrationFitJobParams, ModelCalibrationFitPort, ModelTrainingPort, ResearchJobError,
-        ResearchJobInfo, ResearchJobProgress, TrainModelRequest, TrainingDatasetPort,
+        CalibrationArtifactFitPort, CpcvBacktestJobParams, CpcvBacktestPort,
+        FeatureParityExecutionPort, FeatureParityJobParams, JobProgressSink,
+        ModelCalibrationFitJobParams, ModelCalibrationFitPort, ModelTrainJobParams,
+        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress,
+        TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{DatasetCoverage, ResearchJobId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, RuntimeConfigVersionRepository,
+    CalibrationArtifactRepository, FactWriter, RecommendationReportRepository,
+    RuntimeConfigVersionRepository, ServingEvidenceRepository,
+};
+use quant_pivot_repository::{
+    clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
+    traits::FeatureParityRepository,
 };
 
 use super::{
@@ -55,15 +63,19 @@ use super::{
     task_id::TaskId,
     task_registry::AppRunner,
 };
-use crate::service::model_calibration_fit::ModelCalibrationFitService;
+use crate::service::{
+    feature_parity_executor::ReportFeatureParityIncidentResponse,
+    model_calibration_fit::ModelCalibrationFitService,
+};
 
-const ALL_KINDS: [ResearchJobKind; 6] = [
+const ALL_KINDS: [ResearchJobKind; 7] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
     ResearchJobKind::CpcvBacktest,
     ResearchJobKind::BiasTableFit,
     ResearchJobKind::ModelCalibrationFit,
+    ResearchJobKind::FeatureParity,
 ];
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
@@ -85,6 +97,7 @@ struct ResearchJobExecutor {
     cpcv_backtests: Arc<dyn CpcvBacktestPort>,
     bias_tables: Arc<dyn CalibrationArtifactFitPort>,
     model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
+    feature_parity: Arc<dyn FeatureParityExecutionPort>,
 }
 
 /// Synchronous progress sink handed to the offline service: a lock-free channel
@@ -146,12 +159,15 @@ impl ResearchJobExecutor {
                 let view = self.datasets.build(request, progress, cancel).await?;
                 Ok(JobOutcome {
                     result_ref: Some(view.training_dataset_id.as_uuid()),
-                    coverage: Some(view.coverage_json),
+                    coverage: view.coverage_json,
                 })
             }
             ResearchJobKind::ModelTrain => {
-                let request: TrainModelRequest = from_params(&job.params_json)?;
-                let view = self.training.train(request, progress, cancel).await?;
+                let params: ModelTrainJobParams = from_params(&job.params_json)?;
+                let view = self
+                    .training
+                    .train(params.model_version_id, params.request, progress, cancel)
+                    .await?;
                 Ok(JobOutcome {
                     result_ref: Some(view.model_version_id.as_uuid()),
                     coverage: None,
@@ -199,6 +215,17 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
+            ResearchJobKind::FeatureParity => {
+                let params: FeatureParityJobParams = from_params(&job.params_json)?;
+                let view = self
+                    .feature_parity
+                    .execute(params, progress, cancel)
+                    .await?;
+                Ok(JobOutcome {
+                    result_ref: Some(view.parity_run_id.as_uuid()),
+                    coverage: None,
+                })
+            }
         }
     }
 }
@@ -237,6 +264,29 @@ impl AppContext {
                 Arc::clone(&bias_table_repo),
                 Arc::clone(&runtime_config),
             ));
+        let serving_evidence = Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+            &self.infra.ch,
+        ))) as Arc<dyn ServingEvidenceRepository>;
+        let parity_replay = Arc::new(
+            crate::service::durable_feature_parity::DurableFeatureParitySource::new(
+                crate::service::durable_feature_parity::DurableFeatureParityDeps {
+                    model_runs: Arc::clone(&self.research.model_run_repo),
+                    model_registry: Arc::clone(&self.research.model_registry_repo),
+                    runtime_configs: Arc::clone(&runtime_config),
+                    selections: Arc::clone(&self.research.market_selection_repo),
+                    feature_vectors: Arc::clone(&self.research.feature_repo),
+                    factors: Arc::clone(&self.research.factor_repo),
+                    reports: Arc::clone(&self.infra.repos.recommendation_report)
+                        as Arc<dyn RecommendationReportRepository>,
+                    serving_evidence,
+                    fact_read: Arc::clone(&self.research.quant_fact_read),
+                    catalog: Arc::clone(&self.research.catalog_version_repo),
+                    linkages: Arc::clone(&self.research.market_linkage_repo),
+                    calibration_artifacts: Arc::clone(&bias_table_repo),
+                    runtime_factory: Arc::clone(&self.research.model_runtime_factory_builder),
+                },
+            ),
+        );
         let executor = ResearchJobExecutor {
             datasets: Arc::new(CoreTrainingDatasetPort::from_research(
                 &self.research,
@@ -249,12 +299,33 @@ impl AppContext {
             training: Arc::new(CoreModelTrainingPort::from_research(
                 &self.research,
                 Arc::clone(&runtime_config),
-                Arc::clone(&bias_table_repo),
             )),
             backtests: backtest_port as Arc<dyn BacktestPort>,
             cpcv_backtests: cpcv_backtest_port as Arc<dyn CpcvBacktestPort>,
             bias_tables: Arc::clone(&self.research.calibration_artifact_fit),
             model_calibration_fit,
+            feature_parity: Arc::new(
+                crate::service::feature_parity_executor::FeatureParityExecutor::new(
+                    Arc::clone(&self.infra.repos.feature_parity)
+                        as Arc<dyn FeatureParityRepository>,
+                    parity_replay,
+                    Arc::new(ChFactWriter::new(
+                        Arc::clone(&self.infra.ch),
+                        Arc::clone(&self.infra.ch_write_manager),
+                        "quant_feature_parity_event",
+                    )) as Arc<dyn FactWriter<QuantFeatureParityEventRow>>,
+                    Arc::new(ReportFeatureParityIncidentResponse::new(
+                        self.report_lifecycle(),
+                        Arc::clone(&self.infra.repos.recommendation_report)
+                            as Arc<dyn RecommendationReportRepository>,
+                        Arc::clone(&self.governance.alerts),
+                        Arc::clone(&self.infra.metrics),
+                    )),
+                    Arc::clone(&self.infra.metrics),
+                    ChronoDuration::minutes(10),
+                    Duration::from_secs(config.poll_secs.max(1)),
+                ),
+            ) as Arc<dyn FeatureParityExecutionPort>,
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
             run_worker(engine, executor, config, token).await;

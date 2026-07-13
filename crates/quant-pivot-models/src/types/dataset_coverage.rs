@@ -14,14 +14,30 @@ const DATASET_COVERAGE_DECIMAL_SCALE: u32 = 12;
 pub struct MatrixCoverageProbe {
     /// Rows that would enter the dense matrix.
     pub accepted_rows: u64,
-    /// Rows rejected (missing label, critical feature, or non-finite cell).
+    /// Rows rejected because the label or required model input is unusable.
     pub rejected_rows: u64,
+    /// Rows carrying the exact finite target label before input-requiredness
+    /// admission is applied. Zero means the dataset is label-insufficient;
+    /// non-zero with zero accepted rows is an input-integrity failure.
+    #[serde(default)]
+    pub label_rows: u64,
     /// Supervised label used for the probe.
     pub label_name: String,
     /// Horizon of the probed label column.
     pub label_horizon_secs: u64,
-    /// Number of numeric feature columns in the probe spec.
+    /// Pre-fit matrix width: one value/category slot per raw input plus the
+    /// three state indicators for each optional input. Category vocabulary
+    /// expansion is fold-local and therefore intentionally excluded here.
     pub feature_columns: u64,
+}
+
+/// Aggregate semantic states across every persisted feature cell in a dataset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetFeatureStateCounts {
+    pub observed: u64,
+    pub substituted: u64,
+    pub missing: u64,
+    pub not_applicable: u64,
 }
 
 /// Per-sample coverage accounting for a built dataset.
@@ -70,7 +86,10 @@ pub struct DatasetCoverage {
     /// Aggregate point-in-time selection exclusions (by reason bucket).
     #[serde(default)]
     pub pit_selection_excluded: SelectionExclusionSummary,
-    /// Optional training-matrix probe (diagnostic only; does not gate build).
+    /// Full `FeatureCell` state distribution across accepted frozen examples.
+    #[serde(default)]
+    pub feature_state_counts: DatasetFeatureStateCounts,
+    /// Model-owned training-matrix probe used by the deterministic integrity gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix_probe: Option<MatrixCoverageProbe>,
     /// Content hash of the favorite-longshot bias table bound during the build,

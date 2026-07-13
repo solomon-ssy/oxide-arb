@@ -20,7 +20,9 @@ use quant_pivot_models::{
         ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         ModelCalibrationFitPreflightView, NewCalibrationArtifact, query::TimeWindow,
     },
-    enums::quant::{CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide},
+    enums::quant::{
+        CalibrationKind, CalibrationMethod, DatasetPurpose, OutcomeSide, TrainingDatasetStatus,
+    },
     runtime_config::RuntimeConfig,
     types::{CalibrationArtifactId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
 };
@@ -120,9 +122,20 @@ impl ModelCalibrationFitService {
             })
         })?;
         Ok(CalibrationFitPolicy {
-            min_samples_isotonic: usize::try_from(calibration.min_samples_isotonic)
-                .unwrap_or(usize::MAX),
-            embargo_secs: i64::try_from(calibration.embargo_secs).unwrap_or(i64::MAX),
+            min_samples_isotonic: usize::try_from(calibration.min_samples_isotonic).map_err(
+                |error| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "model.calibration.min_samples_isotonic exceeds platform usize: {error}"
+                    ),
+                },
+            )?,
+            embargo_secs: i64::try_from(calibration.embargo_secs).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "model.calibration.embargo_secs does not fit chrono seconds: {error}"
+                    ),
+                }
+            })?,
             ci_confidence,
         })
     }
@@ -148,7 +161,14 @@ impl ModelCalibrationFitService {
                 detail: format!("current runtime config parse failed: {error}"),
             })
         })?;
-        Ok(i64::try_from(config.model.calibration.embargo_secs).unwrap_or(i64::MAX))
+        i64::try_from(config.model.calibration.embargo_secs).map_err(|error| {
+            ResearchError::DatasetBuild {
+                detail: format!(
+                    "model.calibration.embargo_secs does not fit chrono seconds: {error}"
+                ),
+            }
+            .into()
+        })
     }
 
     /// Validate the calibration dataset's purpose/spec-match and its
@@ -200,6 +220,14 @@ impl ModelCalibrationFitService {
                 ),
             }));
         }
+        if calibration_dataset.status != TrainingDatasetStatus::Ready {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration requires a Ready dataset, got {}",
+                    calibration_dataset.status.as_str()
+                ),
+            }));
+        }
         if calibration_dataset.model_spec_id != version.model_spec_id {
             return Err(QuantError::from(ResearchError::DatasetBuild {
                 detail: "calibration dataset model_spec_id does not match the target model version"
@@ -210,7 +238,7 @@ impl ModelCalibrationFitService {
             calibration_dataset.window_start,
             calibration_dataset.window_end,
         );
-        // Purge: disjoint from every Built/Ready training dataset in the system.
+        // Purge: disjoint from every Ready training dataset in the system.
         assert_disjoint_from_all_training_datasets(
             self.training_dataset_repo.as_ref(),
             &calibration_window,
@@ -229,6 +257,14 @@ impl ModelCalibrationFitService {
                         detail: format!("training dataset `{training_dataset_id}` not found"),
                     })
                 })?;
+            if training_dataset.status != TrainingDatasetStatus::Ready {
+                return Err(QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "target model training dataset must remain Ready, got {}",
+                        training_dataset.status.as_str()
+                    ),
+                }));
+            }
             let training_window =
                 TimeWindow::new(training_dataset.window_start, training_dataset.window_end);
             assert_embargoed_after(
@@ -244,7 +280,6 @@ impl ModelCalibrationFitService {
 
 #[async_trait]
 impl ModelCalibrationFitPort for ModelCalibrationFitService {
-    #[allow(clippy::too_many_lines)]
     async fn fit(
         &self,
         params: ModelCalibrationFitJobParams,
@@ -259,108 +294,16 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
         let fit_window = self
             .validate_split(&request.model_version_id, &request, &policy)
             .await?;
-
-        // Reuse the PIT backtest replay engine to harvest (score, outcome, MAE)
-        // triples — the same computation graph the live plane scores, never a
-        // bespoke re-derivation.
-        let backtest = self
-            .backtest_port
-            .backtest_service_for(&runtime_config_version_id)
-            .await?;
-        let (_report, samples) = backtest
-            .run_for_calibration(
-                BacktestInput {
-                    model_version_id: request.model_version_id.clone(),
-                    training_dataset_id: request.calibration_dataset_id.clone(),
-                    runtime_config_version_id: runtime_config_version_id.clone(),
-                    calibrate: false,
-                    backtest_report_id: None,
-                },
+        let samples = self
+            .harvest_calibration_samples(
+                &request,
+                &runtime_config_version_id,
                 Arc::clone(&progress),
                 cancel,
             )
             .await?;
-
-        let min_samples = match request.method {
-            CalibrationMethod::Isotonic => policy.min_samples_isotonic,
-            CalibrationMethod::Platt => 10,
-        };
-        if samples.len() < min_samples {
-            return Err(QuantError::from(ResearchError::DatasetBuild {
-                detail: format!(
-                    "calibration split has {} samples, below the {} floor for method `{}`",
-                    samples.len(),
-                    min_samples,
-                    request.method.as_str()
-                ),
-            }));
-        }
-
-        let scores: Vec<Decimal> = samples.iter().map(|s| s.composite_score.inner()).collect();
-        let outcomes: Vec<bool> = samples.iter().map(sample_won).collect();
-
-        let mapping = match request.method {
-            CalibrationMethod::Isotonic => {
-                IsotonicCalibrator::new(policy.min_samples_isotonic).fit(&scores, &outcomes)?
-            }
-            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
-        };
-
-        let reliability_samples: Vec<ReliabilitySample> = samples
-            .iter()
-            .zip(&outcomes)
-            .map(|(sample, &won)| ReliabilitySample {
-                score: sample.composite_score.inner(),
-                won,
-                max_adverse_excursion_bps: sample.max_adverse_excursion_bps,
-            })
-            .collect();
-        let reliability =
-            compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
-
-        let split_hash = calibration_split_hash(
-            &fit_window,
-            samples.iter().map(|s| (s.market_id.to_string(), s.as_of)),
-        )?;
-
-        let payload = ModelScoreCalibrationPayload {
-            model_version_id: request.model_version_id.clone(),
-            calibration_dataset_id: request.calibration_dataset_id.clone(),
-            mapping,
-            reliability,
-        };
-        let payload_json = serde_json::to_value(&payload).map_err(|error| {
-            QuantError::from(ResearchError::DatasetBuild {
-                detail: format!("calibration payload serialization failed: {error}"),
-            })
-        })?;
-        // Self-contained hash (fit_window + split_hash + the full,
-        // provenance-carrying payload) — recomputable by the loader from the
-        // persisted row alone, symmetric with `market_price_bias`.
-        let content_hash = model_score_content_hash(&fit_window, &split_hash, &payload)?;
-
-        let artifact_id = CalibrationArtifactId::from_v7();
-        let created = self
-            .calibration_repo
-            .create(NewCalibrationArtifact {
-                artifact_id: artifact_id.clone(),
-                kind: CalibrationKind::ModelScore,
-                content_hash,
-                calibration_split_hash: split_hash,
-                fit_window_start: fit_window.from,
-                fit_window_end: fit_window.to,
-                sample_count: i64::try_from(samples.len()).unwrap_or(i64::MAX),
-                payload_json,
-                active: false,
-            })
+        self.fit_and_persist(&request, &policy, &fit_window, &samples)
             .await
-            .map_err(QuantError::from)?;
-
-        let _: CalibrationArtifactInfo = created;
-        Ok(ModelCalibrationFitOutcome {
-            artifact_id: Some(artifact_id),
-            sample_count: u64::try_from(samples.len()).unwrap_or(u64::MAX),
-        })
     }
 
     async fn preflight(
@@ -465,6 +408,137 @@ impl ModelCalibrationFitPort for ModelCalibrationFitService {
             training_window_end,
             required_start,
             messages,
+        })
+    }
+}
+
+impl ModelCalibrationFitService {
+    async fn harvest_calibration_samples(
+        &self,
+        request: &FitModelCalibratorRequest,
+        runtime_config_version_id: &RuntimeConfigVersionId,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<Vec<SampleOutcome>> {
+        // Reuse the PIT backtest replay engine to harvest (score, outcome, MAE)
+        // triples — the same computation graph the live plane scores, never a
+        // bespoke re-derivation.
+        let backtest = self
+            .backtest_port
+            .backtest_service_for(runtime_config_version_id)
+            .await?;
+        let (_report, samples) = backtest
+            .run_for_calibration(
+                BacktestInput {
+                    model_version_id: request.model_version_id.clone(),
+                    training_dataset_id: request.calibration_dataset_id.clone(),
+                    runtime_config_version_id: runtime_config_version_id.clone(),
+                    calibrate: false,
+                    backtest_report_id: None,
+                },
+                progress,
+                cancel,
+            )
+            .await?;
+        Ok(samples)
+    }
+
+    async fn fit_and_persist(
+        &self,
+        request: &FitModelCalibratorRequest,
+        policy: &CalibrationFitPolicy,
+        fit_window: &TimeWindow,
+        samples: &[SampleOutcome],
+    ) -> QuantResult<ModelCalibrationFitOutcome> {
+        let min_samples = match request.method {
+            CalibrationMethod::Isotonic => policy.min_samples_isotonic,
+            CalibrationMethod::Platt => 10,
+        };
+        if samples.len() < min_samples {
+            return Err(QuantError::from(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration split has {} samples, below the {} floor for method `{}`",
+                    samples.len(),
+                    min_samples,
+                    request.method.as_str()
+                ),
+            }));
+        }
+
+        let scores: Vec<Decimal> = samples.iter().map(|s| s.composite_score.inner()).collect();
+        let outcomes: Vec<bool> = samples.iter().map(sample_won).collect();
+
+        let mapping = match request.method {
+            CalibrationMethod::Isotonic => {
+                IsotonicCalibrator::new(policy.min_samples_isotonic).fit(&scores, &outcomes)?
+            }
+            CalibrationMethod::Platt => PlattCalibrator.fit(&scores, &outcomes)?,
+        };
+
+        let reliability_samples: Vec<ReliabilitySample> = samples
+            .iter()
+            .zip(&outcomes)
+            .map(|(sample, &won)| ReliabilitySample {
+                score: sample.composite_score.inner(),
+                won,
+                max_adverse_excursion_bps: sample.max_adverse_excursion_bps,
+            })
+            .collect();
+        let reliability =
+            compute_reliability(&mapping, &reliability_samples, policy.ci_confidence)?;
+
+        let split_hash = calibration_split_hash(
+            fit_window,
+            samples
+                .iter()
+                .map(|s| (s.market_id.to_string(), s.decision_at)),
+        )?;
+
+        let payload = ModelScoreCalibrationPayload {
+            model_version_id: request.model_version_id.clone(),
+            calibration_dataset_id: request.calibration_dataset_id.clone(),
+            mapping,
+            reliability,
+        };
+        let payload_json = serde_json::to_value(&payload).map_err(|error| {
+            QuantError::from(ResearchError::DatasetBuild {
+                detail: format!("calibration payload serialization failed: {error}"),
+            })
+        })?;
+        // Self-contained hash (fit_window + split_hash + the full,
+        // provenance-carrying payload) — recomputable by the loader from the
+        // persisted row alone, symmetric with `market_price_bias`.
+        let content_hash = model_score_content_hash(fit_window, &split_hash, &payload)?;
+
+        let sample_count =
+            i64::try_from(samples.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("calibration sample count exceeds Postgres bigint: {error}"),
+            })?;
+        let outcome_sample_count =
+            u64::try_from(samples.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("calibration sample count exceeds u64: {error}"),
+            })?;
+        let artifact_id = CalibrationArtifactId::from_v7();
+        let created = self
+            .calibration_repo
+            .create(NewCalibrationArtifact {
+                artifact_id: artifact_id.clone(),
+                kind: CalibrationKind::ModelScore,
+                content_hash,
+                calibration_split_hash: split_hash,
+                fit_window_start: fit_window.from,
+                fit_window_end: fit_window.to,
+                sample_count,
+                payload_json,
+                active: false,
+            })
+            .await
+            .map_err(QuantError::from)?;
+
+        let _: CalibrationArtifactInfo = created;
+        Ok(ModelCalibrationFitOutcome {
+            artifact_id: Some(artifact_id),
+            sample_count: outcome_sample_count,
         })
     }
 }

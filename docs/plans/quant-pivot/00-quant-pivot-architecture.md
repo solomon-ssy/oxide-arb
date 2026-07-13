@@ -526,7 +526,7 @@ pub async fn on_report_schedule_fire(
     let request = GenerateReportRequest {
         schedule_id: schedule_id.clone(),
         trigger_time,
-        as_of: trigger_time - Duration::from_secs(schedule.source_delay_secs),
+        as_of: trigger_time - Duration::from_secs(schedule.knowledge_lag_secs),
         runtime_config_version_id: active_config.version_id(),
         mode: deps.mode.load(),
     };
@@ -548,7 +548,7 @@ pub async fn on_report_schedule_fire(
 
 关键点：
 
-- `as_of` 永远不是 wall-clock now，而是扣除 `source_delay` 后的决策时间。
+- `as_of` 永远不是 wall-clock now，而是扣除 `knowledge_lag` 后的决策时间。
 - `runtime_config` 先冻结成版本化 snapshot，再传入整个 pipeline。
 - 报告失败不能让 ingest 退出。
 - 报告成功也不能直接下单；必须进入 mode gate。

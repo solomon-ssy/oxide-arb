@@ -39,6 +39,7 @@ pub fn into_observations(
         value: row.close,
         observed_at,
         publish_time: observed_at,
+        available_at: None,
     }])
 }
 

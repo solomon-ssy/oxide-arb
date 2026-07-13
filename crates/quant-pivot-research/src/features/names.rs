@@ -15,6 +15,8 @@ pub mod book {
     pub const BEST_BID: FeatureName = FeatureName::from_static("book.best_bid");
     /// Top-of-book best ask price.
     pub const BEST_ASK: FeatureName = FeatureName::from_static("book.best_ask");
+    /// Top-of-book best ask for the market's secondary (NO) outcome token.
+    pub const SECONDARY_BEST_ASK: FeatureName = FeatureName::from_static("book.secondary_best_ask");
     /// Mid price `(bid + ask) / 2`.
     pub const MID: FeatureName = FeatureName::from_static("book.mid");
     /// Top-of-book spread in basis points.
@@ -45,8 +47,6 @@ pub mod market {
         FeatureName::from_static("market.time_to_resolution_secs");
     /// Age of the parent event in seconds.
     pub const EVENT_AGE_SECS: FeatureName = FeatureName::from_static("market.event_age_secs");
-    /// Number of outcome tokens.
-    pub const OUTCOME_COUNT: FeatureName = FeatureName::from_static("market.outcome_count");
     /// Negative-risk flag from Gamma metadata.
     pub const NEG_RISK: FeatureName = FeatureName::from_static("market.neg_risk");
     /// Whether the market is active.

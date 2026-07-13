@@ -90,8 +90,8 @@ pub struct PortfolioPlanInput<'a> {
     pub model_run_id: ModelRunId,
     /// Market selection snapshot the candidates came from.
     pub market_selection_id: MarketSelectionId,
-    /// Decision time (the report's frozen `as_of`).
-    pub as_of: DateTime<Utc>,
+    /// Frozen report decision time.
+    pub decision_at: DateTime<Utc>,
     /// Accepted candidates with their allocation metadata.
     pub candidates: Vec<PlanCandidate<'a>>,
     /// Real account capital base + current exposure net.
@@ -259,19 +259,21 @@ fn size_candidates<'a>(
     let mut metas: Vec<CandidateMeta<'a>> = Vec::new();
     let mut sized: SizedLookup<'a> = BTreeMap::new();
     for plan_candidate in candidates {
-        let edge_half_width = calibration.and_then(|resolved| {
+        let edge_half_width = if let Some(resolved) = calibration {
             // The reliability report's buckets partition the *calibrated*
             // probability axis (Phase 11.3 ECE fix), not the raw composite
             // score — look up the bucket via `resolved.calibrate(..)`, the
             // same P(win) the return model itself derives from this score.
             let p_win = resolved
-                .calibrate(plan_candidate.candidate.composite_score.inner())
+                .calibrate(plan_candidate.candidate.composite_score.inner())?
                 .inner();
             resolved.reliability.bin_for(p_win).map(|bin| {
                 let (lo, hi) = (bin.wilson_ci.0.inner(), bin.wilson_ci.1.inner());
                 ((hi - lo) / Decimal::from(2)).max(Decimal::ZERO)
             })
-        });
+        } else {
+            None
+        };
         let correlation = correlation_shrink
             .get(plan_candidate.candidate.market_id.as_str())
             .copied();
@@ -616,7 +618,7 @@ fn build_plan_row(
         portfolio_plan_id: input.portfolio_plan_id.clone(),
         model_run_id: Some(input.model_run_id.clone()),
         market_selection_id: input.market_selection_id.clone(),
-        as_of: input.as_of,
+        decision_at: input.decision_at,
         budget_usd: total_budget,
         allocated_usd: allocated_total,
         risk_budget_json: risk_budget,

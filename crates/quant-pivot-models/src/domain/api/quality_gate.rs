@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::BacktestReportId;
 
-/// Which lifecycle transition a preview evaluates. Excludes `DatasetReady`
-/// (that gates a dataset promotion, not a model version).
+/// Which model lifecycle transition a preview evaluates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GatePreviewIntent {

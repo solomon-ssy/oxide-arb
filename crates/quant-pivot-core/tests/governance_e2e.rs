@@ -6,7 +6,10 @@
 //! restoration, runtime-config pointer sync, and the `InsufficientLabels`
 //! promotion block.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -15,63 +18,82 @@ use quant_pivot_core::governance::{
     ModelScoreCalibrationPayload, model_score_content_hash,
 };
 use quant_pivot_core::runtime_config::RuntimeConfigStore;
+use quant_pivot_core::service::{
+    feature_integrity::FeatureParityGatePort,
+    frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
+};
 use quant_pivot_error::control::ControlError;
-use quant_pivot_models::domain::TimeWindow;
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_models::domain::{DecisionClock, TimeWindow};
 use quant_pivot_models::enums::quant::DatasetPurpose;
+use quant_pivot_models::runtime_config::FactorCrossSectionConfig;
+use quant_pivot_models::types::{
+    DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, EventId, MarketId, ModelInputContract,
+    ModelTrainingContract, TrainingExampleId,
+};
 use quant_pivot_models::{
+    clickhouse::QuantFeatureParityEventRow,
     domain::{
-        BindCalibrationRequest, GovernanceActor, ModelGovernancePort, NewBacktestPathSet,
-        NewBacktestReport, NewCalibrationArtifact, NewModelRun, NewModelSpec, NewModelVersion,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
-        NewTrainingDataset, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
-        RollbackModelCommand, RuntimeConfigPort,
+        BindCalibrationRequest, CompleteTrainingDatasetBuild, GovernanceActor, ModelGovernancePort,
+        NewBacktestPathSet, NewBacktestReport, NewCalibrationArtifact, NewModelRun, NewModelSpec,
+        NewModelVersion, NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
+        NewTrainingDatasetPlan, PublishModelCommand, RetireModelCommand, RollbackModelCommand,
+        RuntimeConfigPort,
     },
     enums::{
         common::MarketCategory,
         model::ModelFamily,
         quant::{
-            CalibrationKind, DownsideSource, ModelRunKind, ModelRunStatus, PublicationStatus,
-            TrainingDatasetStatus,
+            CalibrationKind, DownsideSource, FeatureParityLatchState, FeatureParityRunKind,
+            ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
         },
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
     runtime_config::{ModelVersionRef, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
     types::{
-        BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash, DatasetCoverage,
-        ModelRunId, ModelSpecId, ModelVersionId, Probability, RuntimeConfigActivationId,
-        RuntimeConfigVersionId, SchemaVersion, ShadowComparisonId, TrainingDatasetId,
-        TrainingHorizonsSecs,
+        ArtifactUri, BacktestPathSetId, BacktestReportId, CalibrationArtifactId, ContentHash,
+        DatasetCoverage, FeatureParityStateId, ModelRunId, ModelSpecId, ModelVersionId,
+        Probability, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        ShadowComparisonId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
+        default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgBacktestPathSetRepository, PgBacktestReportRepository, PgCalibrationArtifactRepository,
-        PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
+        PgFeatureParityRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
         PgTrainingDatasetRepository,
     },
     traits::{
         BacktestPathSetRepository, BacktestReportRepository, CalibrationArtifactRepository,
-        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
-        RuntimeConfigVersionRepository, ShadowComparisonRepository, TrainingDatasetRepository,
+        FeatureParityLatchActor, FeatureParityRepository, ModelGovernanceAuditRepository,
+        ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
+        ShadowComparisonRepository, TrainingDatasetRepository,
     },
 };
-use quant_pivot_research::training::TrainingExample;
+use quant_pivot_research::factors::FrozenReferenceQuantiles;
+use quant_pivot_research::selection::SelectedMarket;
+use quant_pivot_research::training::{LabelName, TrainingExample};
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     backtest::{ExpectedVsRealized, PnlSimulation},
     factors::names::LIQUIDITY_DEPTH,
     gates::{DefaultModelQualityGate, ModelQualityGate},
     model::{
-        CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, ModelArtifact,
-        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SellScorerArtifact,
-        SellScorerOutputSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+        CalibratedReturnModel, CalibrationArtifactLoader, FactorWeight, LabelSelector,
+        ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
+        SellScorerArtifact, SellScorerOutputSpec, SubstitutionConfidenceRules,
+        WeightedFactorModelArtifact, model_input_contract_hash, weighted_training_input_hash,
     },
     model::{MonotoneMapping, ReliabilityReport},
-    training::DatasetParquetCodec,
+    training::{
+        DatasetHashContract, DatasetParquetCodec, TrainingDatasetArtifact, dataset_manifest_hash,
+        dataset_source_fingerprint,
+    },
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{fact_sink::DiscardFactWriter, pg::setup_pg};
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
@@ -79,12 +101,89 @@ use sea_orm::DatabaseConnection;
 struct GovernanceHarness {
     service: ModelGovernanceService,
     store: Arc<RuntimeConfigStore>,
+    runtime_apply: Arc<TestRuntimeConfigApply>,
     artifact_store: Arc<dyn ArtifactStore>,
 }
 
 /// Minimal [`RuntimeConfigPort`] for integration tests (store swap only).
 struct TestRuntimeConfigApply {
     store: Arc<RuntimeConfigStore>,
+    fault_mode: AtomicU8,
+}
+
+impl TestRuntimeConfigApply {
+    fn fail_next_apply(&self) {
+        self.fault_mode.store(1, Ordering::SeqCst);
+    }
+
+    fn partially_apply_target_then_fail_recovery(&self) {
+        self.fault_mode.store(2, Ordering::SeqCst);
+    }
+}
+
+struct ClearFeatureParityGate {
+    parity: Arc<dyn FeatureParityRepository>,
+}
+
+#[async_trait]
+impl FeatureParityGatePort for ClearFeatureParityGate {
+    async fn ensure_clear(&self, _action: &'static str) -> QuantResult<()> {
+        if self
+            .parity
+            .current_state()
+            .await?
+            .is_some_and(|state| state.state == FeatureParityLatchState::Clear)
+        {
+            return Ok(());
+        }
+        let recovery = self
+            .parity
+            .latest_run(FeatureParityRunKind::Full)
+            .await?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::Determinism {
+                    detail: "test publish gate has no full parity recovery run".to_owned(),
+                })
+            })?;
+        self.parity
+            .acknowledge_latch(
+                &recovery.run_id,
+                FeatureParityLatchActor {
+                    actor: Some("governance-it".to_owned()),
+                    acting_role: "risk_owner".to_owned(),
+                    reason: "integration-test governed bootstrap".to_owned(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn commit_state_id(&self, action: &'static str) -> QuantResult<FeatureParityStateId> {
+        self.ensure_clear(action).await?;
+        self.parity
+            .current_state()
+            .await?
+            .map(|state| state.state_id)
+            .ok_or_else(|| {
+                ResearchError::Determinism {
+                    detail: "test parity gate has no durable clear generation".to_owned(),
+                }
+                .into()
+            })
+    }
+
+    async fn trip_integrity_failure(
+        &self,
+        source_run_id: &quant_pivot_models::types::FeatureParityRunId,
+        _action: &'static str,
+        reason: String,
+    ) -> QuantResult<quant_pivot_models::types::FeatureParityRunId> {
+        self.parity
+            .record_integrity_failure_and_open_latch(source_run_id, reason)
+            .await
+            .map(|(run, _state)| run.run_id)
+            .map_err(QuantError::from)
+    }
 }
 
 #[async_trait]
@@ -98,6 +197,28 @@ impl RuntimeConfigPort for TestRuntimeConfigApply {
     }
 
     async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
+        match self.fault_mode.load(Ordering::SeqCst) {
+            1 => {
+                self.fault_mode.store(0, Ordering::SeqCst);
+                return Err(ControlError::Precondition(
+                    "injected runtime pointer apply failure".to_owned(),
+                ));
+            }
+            2 => {
+                self.store.replace(config);
+                self.fault_mode.store(3, Ordering::SeqCst);
+                return Err(ControlError::Precondition(
+                    "injected partial runtime pointer apply failure".to_owned(),
+                ));
+            }
+            3 => {
+                self.fault_mode.store(0, Ordering::SeqCst);
+                return Err(ControlError::Precondition(
+                    "injected rollback recovery apply failure".to_owned(),
+                ));
+            }
+            _ => {}
+        }
         self.store.replace(config);
         Ok(())
     }
@@ -124,21 +245,36 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         ))));
 
     let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
-    let apply: Arc<dyn RuntimeConfigPort> = Arc::new(TestRuntimeConfigApply {
+    let runtime_apply = Arc::new(TestRuntimeConfigApply {
         store: Arc::clone(&store),
+        fault_mode: AtomicU8::new(0),
     });
+    let apply: Arc<dyn RuntimeConfigPort> = runtime_apply.clone();
     let calibration_repo: Arc<dyn CalibrationArtifactRepository> =
         Arc::new(PgCalibrationArtifactRepository::new(db.clone()));
     let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
         CoreCalibrationArtifactLoader::new(Arc::clone(&calibration_repo)),
     );
+    let model_registry_repo: Arc<dyn ModelRegistryRepository> =
+        Arc::new(PgModelRegistryRepository::new(db.clone()));
+    let dataset_repo: Arc<dyn TrainingDatasetRepository> =
+        Arc::new(PgTrainingDatasetRepository::new(db.clone()));
+    let parity_repo: Arc<dyn FeatureParityRepository> =
+        Arc::new(PgFeatureParityRepository::new(db.clone()));
+    let frozen_model_parity = Arc::new(FrozenModelParityService::new(FrozenModelParityDeps {
+        dataset_repo: Arc::clone(&dataset_repo),
+        model_registry_repo: Arc::clone(&model_registry_repo),
+        parity_repo: Arc::clone(&parity_repo),
+        artifact_store: Arc::clone(&artifact_store),
+        evidence_writer: Arc::new(DiscardFactWriter::<QuantFeatureParityEventRow>::new()),
+    }));
     let service = ModelGovernanceService::new(ModelGovernanceDeps {
-        model_registry_repo: Arc::new(PgModelRegistryRepository::new(db.clone())),
+        model_registry_repo,
         backtest_report_repo: Arc::new(PgBacktestReportRepository::new(db.clone())),
         backtest_path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
         shadow_comparison_repo: Arc::new(PgShadowComparisonRepository::new(db.clone())),
         governance_audit_repo: Arc::new(PgModelGovernanceAuditRepository::new(db.clone())),
-        dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+        dataset_repo,
         artifact_store: Arc::clone(&artifact_store),
         calibration_repo,
         calibration_loader,
@@ -146,10 +282,15 @@ async fn harness(db: &DatabaseConnection) -> GovernanceHarness {
         runtime_config: Arc::clone(&store),
         runtime_config_apply: apply,
         runtime_config_repo,
+        feature_parity_gate: Arc::new(ClearFeatureParityGate {
+            parity: parity_repo,
+        }),
+        frozen_model_parity,
     });
     GovernanceHarness {
         service,
         store,
+        runtime_apply,
         artifact_store,
     }
 }
@@ -223,7 +364,8 @@ async fn seed_spec(db: &DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -261,6 +403,184 @@ fn healthy_sell_coverage() -> DatasetCoverage {
     }
 }
 
+fn healthy_training_examples(as_of: chrono::DateTime<Utc>) -> Vec<TrainingExample> {
+    use quant_pivot_models::{
+        enums::{factor::FactorFamily, quant::FactorDirection},
+        types::{FactorDefinitionId, MarketId, TokenId, TrainingExampleId},
+    };
+    use quant_pivot_research::factors::{FactorExplanation, FactorValue, NormalizedFactor};
+
+    [dec!(0.25), dec!(0.75)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, score)| {
+            let market_id = MarketId::new(format!("0xhealthy{index}"));
+            let token_id = TokenId::new("yes");
+            let mut example = leaking_training_example();
+            example.example_id = TrainingExampleId::from_v7();
+            example.market_id = market_id.clone();
+            example.token_id = token_id.clone();
+            example.selected_market.market_id = market_id.clone();
+            example.selected_market.primary_token_id = token_id.clone();
+            example.feature_vector.market_id = market_id;
+            example.feature_vector.token_id = Some(token_id);
+            example.feature_vector.decision_at = as_of;
+            example.decision_boundary = DecisionClock::new(0)
+                .boundary(as_of)
+                .expect("healthy decision boundary");
+            example.factor_values = vec![FactorValue {
+                definition_id: FactorDefinitionId::from_v7(),
+                name: LIQUIDITY_DEPTH,
+                family: FactorFamily::Liquidity,
+                raw_value: Some(score),
+                normalization: NormalizedFactor::cross_section(Probability::new(score)),
+                direction: FactorDirection::Positive,
+                confidence: Probability::new(dec!(1)),
+                explanation: FactorExplanation {
+                    headline: "healthy fixture".to_owned(),
+                    drivers: Vec::new(),
+                },
+                input_feature_refs: Vec::new(),
+            }];
+            example.labels[0].value = score;
+            example.labels[0].matured_at = as_of + ChronoDuration::seconds(1);
+            example.source_refs.clear();
+            example
+        })
+        .collect()
+}
+
+struct FrozenDatasetFixture {
+    id: TrainingDatasetId,
+    window_start: chrono::DateTime<Utc>,
+    window_end: chrono::DateTime<Utc>,
+    feature_schema_hash: ContentHash,
+    factor_schema_hash: ContentHash,
+    label_schema_hash: ContentHash,
+    dataset_hash: ContentHash,
+    manifest_hash: ContentHash,
+    manifest: DatasetManifest,
+    artifact_bytes_hash: ContentHash,
+    parquet_uri: ArtifactUri,
+    sample_count: i64,
+}
+
+async fn build_frozen_dataset_fixture(
+    artifact_store: &Arc<dyn ArtifactStore>,
+    spec: &ModelSpecId,
+    rc_id: &RuntimeConfigVersionId,
+) -> FrozenDatasetFixture {
+    let id = TrainingDatasetId::from_v7();
+    let window_start = Utc::now() - ChronoDuration::hours(2);
+    let window_end = window_start + ChronoDuration::hours(1);
+    let examples = healthy_training_examples(window_start + ChronoDuration::minutes(1));
+    let sample_count = i64::try_from(examples.len()).expect("sample count");
+    let feature_schema_hash = content_hash(u32::from('f'));
+    let factor_schema_hash = content_hash(u32::from('g'));
+    let label_schema_hash = content_hash(u32::from('l'));
+    let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
+        DatasetHashContract {
+            model_spec_id: spec,
+            window_start,
+            window_end,
+            purpose: DatasetPurpose::Training,
+            feature_schema_hash: &feature_schema_hash,
+            factor_schema_hash: &factor_schema_hash,
+            label_schema_hash: &label_schema_hash,
+        },
+        &examples,
+    )
+    .expect("semantic dataset hash");
+    let manifest = DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: id.clone(),
+        model_spec_id: spec.clone(),
+        runtime_config_version_id: rc_id.clone(),
+        window_start,
+        window_end,
+        purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: 10,
+        sample_interval_secs: 3_600,
+        horizons_secs: vec![3_600],
+        feature_schema_hash: feature_schema_hash.clone(),
+        factor_schema_hash: factor_schema_hash.clone(),
+        label_schema_hash: label_schema_hash.clone(),
+        semantic_dataset_hash: dataset_hash.clone(),
+        source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
+        sample_count: u64::try_from(sample_count).expect("manifest sample count"),
+    };
+    // Real Parquet so publish-time leakage rescan (#9) can decode bytes.
+    let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode parquet");
+    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+    let artifact_bytes_hash =
+        ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes)).expect("bytes hash");
+    let key = ArtifactKey::new(
+        ArtifactNamespace::Dataset,
+        id.as_uuid().simple().to_string(),
+        "parquet",
+    )
+    .expect("key");
+    let parquet_uri = artifact_store
+        .put(key, &bytes)
+        .await
+        .expect("store parquet");
+
+    FrozenDatasetFixture {
+        id,
+        window_start,
+        window_end,
+        feature_schema_hash,
+        factor_schema_hash,
+        label_schema_hash,
+        dataset_hash,
+        manifest_hash,
+        manifest,
+        artifact_bytes_hash,
+        parquet_uri,
+        sample_count,
+    }
+}
+
+async fn complete_seeded_dataset(
+    dataset_repo: &PgTrainingDatasetRepository,
+    fixture: FrozenDatasetFixture,
+    status: TrainingDatasetStatus,
+    coverage_json: DatasetCoverage,
+) -> TrainingDatasetId {
+    let terminal_status = if status == TrainingDatasetStatus::Expired {
+        TrainingDatasetStatus::Ready
+    } else {
+        status
+    };
+    dataset_repo
+        .complete_build(
+            &fixture.id,
+            CompleteTrainingDatasetBuild {
+                status: terminal_status,
+                feature_schema_hash: fixture.feature_schema_hash,
+                factor_schema_hash: fixture.factor_schema_hash,
+                label_schema_hash: fixture.label_schema_hash,
+                dataset_hash: fixture.dataset_hash,
+                manifest_hash: fixture.manifest_hash,
+                manifest_json: fixture.manifest,
+                artifact_bytes_hash: fixture.artifact_bytes_hash,
+                parquet_uri: fixture.parquet_uri,
+                sample_count: fixture.sample_count,
+                coverage_json,
+                failure_detail: None,
+            },
+        )
+        .await
+        .expect("complete dataset");
+    if status == TrainingDatasetStatus::Expired {
+        dataset_repo
+            .expire(&fixture.id)
+            .await
+            .expect("expire dataset");
+    }
+    fixture.id
+}
+
 async fn seed_dataset(
     db: &DatabaseConnection,
     artifact_store: &Arc<dyn ArtifactStore>,
@@ -270,39 +590,46 @@ async fn seed_dataset(
     coverage_json: DatasetCoverage,
     dataset_hash_seed: char,
 ) -> TrainingDatasetId {
-    let id = TrainingDatasetId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::hours(2);
-    // Real Parquet so publish-time leakage rescan (#9) can decode bytes.
-    let bytes = DatasetParquetCodec::encode(&[]).expect("encode empty parquet");
-    let hex = id.as_uuid().simple().to_string();
-    let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
-    let parquet_uri = artifact_store
-        .put(key, &bytes)
-        .await
-        .expect("store parquet");
-    PgTrainingDatasetRepository::new(db.clone())
-        .create(NewTrainingDataset {
-            training_dataset_id: id.clone(),
+    let _ = dataset_hash_seed;
+    let fixture = build_frozen_dataset_fixture(artifact_store, spec, rc_id).await;
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    dataset_repo
+        .create_plan(NewTrainingDatasetPlan {
+            training_dataset_id: fixture.id.clone(),
             model_spec_id: spec.clone(),
-            window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            status,
+            window_start: fixture.window_start,
+            window_end: fixture.window_end,
             purpose: DatasetPurpose::Training,
-            feature_schema_hash: content_hash(u32::from('f')),
-            factor_schema_hash: content_hash(u32::from('g')),
-            label_schema_hash: content_hash(u32::from('l')),
-            dataset_hash: content_hash(u32::from(dataset_hash_seed)),
-            parquet_uri,
-            sample_count: 990,
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             sample_interval_secs: 3_600,
             horizons_secs: TrainingHorizonsSecs(vec![3600]),
-            coverage_json,
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             runtime_config_version_id: rc_id.clone(),
         })
         .await
-        .expect("dataset");
-    id
+        .expect("dataset plan");
+    if status != TrainingDatasetStatus::Planned {
+        dataset_repo
+            .start_build(&fixture.id)
+            .await
+            .expect("start dataset build");
+    }
+    match status {
+        TrainingDatasetStatus::Ready
+        | TrainingDatasetStatus::InsufficientLabels
+        | TrainingDatasetStatus::Expired => {
+            return complete_seeded_dataset(&dataset_repo, fixture, status, coverage_json).await;
+        }
+        TrainingDatasetStatus::Failed => {
+            dataset_repo
+                .fail_build(&fixture.id, "seeded dataset failure".to_owned())
+                .await
+                .expect("fail dataset");
+        }
+        TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => {}
+    }
+    fixture.id
 }
 
 async fn seed_version(
@@ -324,7 +651,52 @@ async fn seed_version(
                     downside_source: DownsideSource::MfeMae,
                 })
             });
-    let artifact_hash = store_weighted_artifact(artifact_store, &id, seed, return_model).await;
+    let (training_dataset_hash, training_input_hash) = match dataset.as_ref() {
+        Some(dataset_id) => {
+            let dataset_info = PgTrainingDatasetRepository::new(db.clone())
+                .find_by_id(dataset_id)
+                .await
+                .expect("dataset lookup")
+                .expect("dataset row");
+            let materialization = dataset_info
+                .materialization()
+                .expect("dataset materialization");
+            let bytes = artifact_store
+                .get(materialization.parquet_uri)
+                .await
+                .expect("dataset bytes");
+            let examples =
+                quant_pivot_core::service::training_dataset::verify_frozen_dataset_artifact(
+                    &dataset_info,
+                    &bytes,
+                )
+                .expect("frozen dataset integrity");
+            let cross_section = FactorCrossSectionConfig::default();
+            let references = FrozenReferenceQuantiles::empty();
+            let input_hash = weighted_training_input_hash(
+                &examples,
+                &LabelSelector {
+                    name: LabelName::new("settlement_outcome"),
+                    horizon_secs: 0,
+                },
+                &[LIQUIDITY_DEPTH],
+                &references,
+                Some(&cross_section),
+            )
+            .expect("weighted training input hash");
+            (materialization.dataset_hash.clone(), input_hash)
+        }
+        None => (content_hash(u32::from('d')), content_hash(u32::from('i'))),
+    };
+    let artifact_hash = store_weighted_artifact(
+        artifact_store,
+        &id,
+        seed,
+        return_model,
+        training_dataset_hash,
+        training_input_hash,
+    )
+    .await;
     PgModelRegistryRepository::new(db.clone())
         .create_model_version(NewModelVersion {
             model_version_id: id.clone(),
@@ -350,7 +722,12 @@ async fn store_weighted_artifact(
     model_version_id: &ModelVersionId,
     seed: char,
     return_model: ReturnModelSpec,
+    training_dataset_hash: ContentHash,
+    training_input_hash: ContentHash,
 ) -> ContentHash {
+    let input_contract = ModelInputContract::single_required("book.mid");
+    let input_contract_hash =
+        model_input_contract_hash(&input_contract).expect("input contract hash");
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
@@ -358,6 +735,10 @@ async fn store_weighted_artifact(
             feature_schema_hash: content_hash(u32::from('f')),
             factor_schema_hash: content_hash(u32::from('g')),
         },
+        training_dataset_hash,
+        training_input_hash,
+        input_contract,
+        input_contract_hash,
         weights: vec![FactorWeight {
             factor: LIQUIDITY_DEPTH,
             weight: dec!(1),
@@ -366,7 +747,8 @@ async fn store_weighted_artifact(
         multipliers: ScoreMultiplierSpec::conservative(),
         substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
         return_model,
-        required_features: Vec::new(),
+        factor_cross_section: FactorCrossSectionConfig::default(),
+        frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
         objective_report: None,
         category_scope: None,
     }));
@@ -393,7 +775,8 @@ async fn seed_sell_spec(db: &DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -412,6 +795,44 @@ async fn seed_sell_version(
     dataset: Option<TrainingDatasetId>,
 ) -> ModelVersionId {
     let id = ModelVersionId::from_v7();
+    let (training_dataset_hash, training_input_hash) = match dataset.as_ref() {
+        Some(dataset_id) => {
+            let dataset_info = PgTrainingDatasetRepository::new(db.clone())
+                .find_by_id(dataset_id)
+                .await
+                .expect("dataset lookup")
+                .expect("dataset row");
+            let materialization = dataset_info
+                .materialization()
+                .expect("dataset materialization");
+            let bytes = artifact_store
+                .get(materialization.parquet_uri)
+                .await
+                .expect("dataset bytes");
+            let examples =
+                quant_pivot_core::service::training_dataset::verify_frozen_dataset_artifact(
+                    &dataset_info,
+                    &bytes,
+                )
+                .expect("frozen dataset integrity");
+            let input_hash = weighted_training_input_hash(
+                &examples,
+                &LabelSelector {
+                    name: LabelName::new("settlement_outcome"),
+                    horizon_secs: 0,
+                },
+                &[LIQUIDITY_DEPTH],
+                &FrozenReferenceQuantiles::empty(),
+                None,
+            )
+            .expect("sell training input hash");
+            (materialization.dataset_hash.clone(), input_hash)
+        }
+        None => (content_hash(u32::from('d')), content_hash(u32::from('i'))),
+    };
+    let input_contract = ModelInputContract::single_required("book.mid");
+    let input_contract_hash =
+        model_input_contract_hash(&input_contract).expect("input contract hash");
     let artifact = ModelArtifact::SellScorer(Box::new(SellScorerArtifact {
         header: ModelArtifactHeader {
             model_version_id: id.clone(),
@@ -426,7 +847,10 @@ async fn seed_sell_version(
         prediction_horizon_secs: 86_400,
         output_spec: SellScorerOutputSpec::conservative(),
         label_schema_hash: content_hash(u32::from('l')),
-        required_features: Vec::new(),
+        training_dataset_hash,
+        training_input_hash,
+        input_contract,
+        input_contract_hash,
         objective_report: None,
     }));
     artifact.validate().expect("sell artifact valid");
@@ -584,7 +1008,7 @@ async fn seed_shadow_window(
             shadow_comparison_id: ShadowComparisonId::from_v7(),
             active_model_version_id: active.clone(),
             shadow_model_version_id: shadow.clone(),
-            as_of: now - ChronoDuration::hours(hours_ago),
+            decision_at: now - ChronoDuration::hours(hours_ago),
             topn_overlap: Probability::new(overlap),
             rank_delta_json: serde_json::json!({}),
             score_delta_json: serde_json::json!({}),
@@ -1117,9 +1541,41 @@ async fn assert_rollback_restored_predecessor(
         .list_by_version(rolled_back)
         .await
         .expect("audits");
+    let rollback_audit = audits
+        .iter()
+        .find(|audit| audit.reason == rollback_reason)
+        .expect("the rollback reason is audited");
     assert!(
-        audits.iter().any(|audit| audit.reason == rollback_reason),
-        "the rollback reason is audited"
+        rollback_audit.quality_gate_passed,
+        "rollback must audit a freshly passed publish gate"
+    );
+    assert_eq!(
+        rollback_audit.rollback_target_version_id.as_ref(),
+        Some(predecessor)
+    );
+    assert!(
+        rollback_audit
+            .detail_json
+            .get("feature_parity_run_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "rollback audit must bind the exact subject full-parity permit"
+    );
+    assert!(
+        rollback_audit
+            .detail_json
+            .get("feature_parity_state_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "rollback audit must bind the exact clear-latch generation"
+    );
+    assert_eq!(
+        predecessor_row
+            .quality_gate_report
+            .get("passed")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "rollback target must persist its current publish gate report"
     );
 }
 
@@ -1220,6 +1676,469 @@ async fn rollback_retains_previous_and_writes_reason() {
         "rollback restores the predecessor"
     );
     assert_rollback_restored_predecessor(&db, &harness.store, &v2, &v1, "v2 regressed").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn rollback_broken_pointer_preflight_leaves_registry_untouched() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let predecessor = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: 'b',
+            version_seed: 'b',
+            version_number: 1,
+            backtest_seed: 'b',
+            shadow_seed: 'b',
+            publish_reason: "publish preflight target",
+        },
+    )
+    .await;
+    let current = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: 'c',
+            version_seed: 'c',
+            version_number: 2,
+            backtest_seed: 'c',
+            shadow_seed: 'c',
+            publish_reason: "publish preflight current",
+        },
+    )
+    .await;
+    let mut broken_live = (*harness.store.current()).clone();
+    broken_live.model.active_model_version_id = Some(ModelVersionRef {
+        id: predecessor.to_string(),
+    });
+    harness.store.replace(broken_live);
+
+    let error = harness
+        .service
+        .rollback(
+            RollbackModelCommand {
+                model_version_id: current.clone(),
+                reason: "must reject broken pointer preflight".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect_err("broken live/durable ownership must fail before status CAS");
+    assert!(
+        error
+            .to_string()
+            .contains("live runtime config does not point")
+    );
+
+    let registry = PgModelRegistryRepository::new(db.clone());
+    assert_eq!(
+        registry
+            .find_model_version_by_id(&current)
+            .await
+            .expect("current lookup")
+            .expect("current row")
+            .publication_status,
+        PublicationStatus::Published
+    );
+    assert_eq!(
+        registry
+            .find_model_version_by_id(&predecessor)
+            .await
+            .expect("target lookup")
+            .expect("target row")
+            .publication_status,
+        PublicationStatus::Retired
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn rollback_pointer_apply_failure_compensates_config_and_registry_atomically() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let predecessor = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '7',
+            version_seed: '7',
+            version_number: 1,
+            backtest_seed: '7',
+            shadow_seed: '7',
+            publish_reason: "publish pointer-failure target",
+        },
+    )
+    .await;
+    let current = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '8',
+            version_seed: '8',
+            version_number: 2,
+            backtest_seed: '8',
+            shadow_seed: '8',
+            publish_reason: "publish pointer-failure current",
+        },
+    )
+    .await;
+    harness.runtime_apply.fail_next_apply();
+
+    let error = harness
+        .service
+        .rollback(
+            RollbackModelCommand {
+                model_version_id: current.clone(),
+                reason: "inject pointer apply failure".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect_err("failed live pointer apply must surface to the operator");
+    assert!(error.to_string().contains("outcome=compensated"));
+
+    let registry = PgModelRegistryRepository::new(db.clone());
+    assert_single_active_published(&registry, &spec, &predecessor, &current, &harness.store).await;
+    let durable = PgRuntimeConfigVersionRepository::new(db.clone())
+        .load_current()
+        .await
+        .expect("durable runtime config")
+        .expect("active runtime config");
+    let durable_config = RuntimeConfig::from_json(&durable.config_json).expect("typed config");
+    assert_eq!(
+        durable_config
+            .model
+            .active_model_version_id
+            .as_ref()
+            .map(|reference| reference.id.as_str()),
+        Some(current.to_string().as_str()),
+        "restart must load the same compensated current model as the live store"
+    );
+    let audits = PgModelGovernanceAuditRepository::new(db.clone())
+        .list_by_version(&current)
+        .await
+        .expect("rollback audit");
+    let compensated = audits
+        .iter()
+        .find(|audit| audit.reason == "inject pointer apply failure")
+        .expect("compensated rollback audit");
+    assert!(compensated.quality_gate_passed);
+    assert_eq!(
+        compensated
+            .detail_json
+            .get("outcome")
+            .and_then(serde_json::Value::as_str),
+        Some("compensated")
+    );
+    assert_eq!(
+        compensated
+            .detail_json
+            .get("live_reverted")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn rollback_partial_live_apply_failure_opens_global_safety_latch() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let predecessor = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '9',
+            version_seed: '9',
+            version_number: 1,
+            backtest_seed: '9',
+            shadow_seed: '9',
+            publish_reason: "publish partial-failure target",
+        },
+    )
+    .await;
+    let current = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: 'a',
+            version_seed: 'a',
+            version_number: 2,
+            backtest_seed: 'a',
+            shadow_seed: 'a',
+            publish_reason: "publish partial-failure current",
+        },
+    )
+    .await;
+    harness
+        .runtime_apply
+        .partially_apply_target_then_fail_recovery();
+
+    let error = harness
+        .service
+        .rollback(
+            RollbackModelCommand {
+                model_version_id: current.clone(),
+                reason: "inject partial pointer failure".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect_err("partial apply plus failed recovery must fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("outcome=compensated_durable_live_fail_closed")
+    );
+
+    assert_partial_rollback_failure_state(&db, &harness, &predecessor, &current).await;
+}
+
+async fn assert_partial_rollback_failure_state(
+    db: &DatabaseConnection,
+    harness: &GovernanceHarness,
+    predecessor: &ModelVersionId,
+    current: &ModelVersionId,
+) {
+    let registry = PgModelRegistryRepository::new(db.clone());
+    assert_eq!(
+        registry
+            .find_model_version_by_id(predecessor)
+            .await
+            .expect("predecessor lookup")
+            .expect("predecessor row")
+            .publication_status,
+        PublicationStatus::Retired
+    );
+    assert_eq!(
+        registry
+            .find_model_version_by_id(current)
+            .await
+            .expect("current lookup")
+            .expect("current row")
+            .publication_status,
+        PublicationStatus::Published
+    );
+    assert_eq!(
+        harness
+            .store
+            .current()
+            .model
+            .active_model_version_id
+            .as_ref()
+            .map(|reference| reference.id.as_str()),
+        Some(predecessor.to_string().as_str()),
+        "the injected partial live state remains observable for the fail-closed assertion"
+    );
+    let durable = PgRuntimeConfigVersionRepository::new(db.clone())
+        .load_current()
+        .await
+        .expect("durable runtime config")
+        .expect("active runtime config");
+    let durable_config = RuntimeConfig::from_json(&durable.config_json).expect("typed config");
+    assert_eq!(
+        durable_config
+            .model
+            .active_model_version_id
+            .as_ref()
+            .map(|reference| reference.id.as_str()),
+        Some(current.to_string().as_str()),
+        "durable config and model registry are compensated together"
+    );
+    let latch = PgFeatureParityRepository::new(db.clone())
+        .current_state()
+        .await
+        .expect("latch read")
+        .expect("safety latch state");
+    assert_eq!(latch.state, FeatureParityLatchState::Open);
+    assert!(latch.cause_run_id.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn concurrent_rollbacks_commit_exactly_one_complete_switch() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let predecessor = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '5',
+            version_seed: 'e',
+            version_number: 1,
+            backtest_seed: '5',
+            shadow_seed: 'e',
+            publish_reason: "publish concurrent rollback target",
+        },
+    )
+    .await;
+    let current = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '6',
+            version_seed: 'f',
+            version_number: 2,
+            backtest_seed: '6',
+            shadow_seed: 'f',
+            publish_reason: "publish concurrent rollback current",
+        },
+    )
+    .await;
+
+    let left = harness.service.rollback(
+        RollbackModelCommand {
+            model_version_id: current.clone(),
+            reason: "concurrent rollback left".to_owned(),
+        },
+        GovernanceActor::system(),
+    );
+    let right = harness.service.rollback(
+        RollbackModelCommand {
+            model_version_id: current.clone(),
+            reason: "concurrent rollback right".to_owned(),
+        },
+        GovernanceActor::system(),
+    );
+    let (left_result, right_result) = tokio::join!(left, right);
+    assert_eq!(
+        usize::from(left_result.is_ok()) + usize::from(right_result.is_ok()),
+        1,
+        "the spec/current compare-and-swap must admit exactly one rollback"
+    );
+
+    let registry = PgModelRegistryRepository::new(db.clone());
+    assert_single_active_published(&registry, &spec, &current, &predecessor, &harness.store).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn rollback_quality_gate_failure_persists_report_without_half_switching() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let v1 = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '3',
+            version_seed: 'c',
+            version_number: 1,
+            backtest_seed: '3',
+            shadow_seed: 'c',
+            publish_reason: "publish rollback target",
+        },
+    )
+    .await;
+    let v2 = seed_and_publish_version(
+        &harness,
+        &db,
+        &spec,
+        &rc_id,
+        PublishableVersionSeeds {
+            dataset_seed: '4',
+            version_seed: 'd',
+            version_number: 2,
+            backtest_seed: '4',
+            shadow_seed: 'd',
+            publish_reason: "publish current",
+        },
+    )
+    .await;
+    let registry = PgModelRegistryRepository::new(db.clone());
+    registry
+        .set_publish_path_set_id(&v1, None)
+        .await
+        .expect("invalidate retired target's current CPCV binding");
+
+    let error = harness
+        .service
+        .rollback(
+            RollbackModelCommand {
+                model_version_id: v2.clone(),
+                reason: "must not bypass current quality".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect_err("rollback must run today's publish gate");
+    assert!(matches!(
+        error,
+        QuantError::Governance(
+            quant_pivot_error::governance::GovernanceError::QualityGateFailed { .. }
+        )
+    ));
+
+    let current = registry
+        .find_model_version_by_id(&v2)
+        .await
+        .expect("current lookup")
+        .expect("current row");
+    let target = registry
+        .find_model_version_by_id(&v1)
+        .await
+        .expect("target lookup")
+        .expect("target row");
+    assert_eq!(current.publication_status, PublicationStatus::Published);
+    assert_eq!(target.publication_status, PublicationStatus::Retired);
+    assert_eq!(
+        target
+            .quality_gate_report
+            .get("passed")
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "failed rollback gate report remains durable for operator diagnosis"
+    );
+    assert_eq!(
+        harness
+            .store
+            .current()
+            .model
+            .active_model_version_id
+            .as_ref()
+            .map(|reference| reference.id.as_str()),
+        Some(v2.to_string().as_str()),
+        "runtime pointer must remain on the exact published current"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1500,42 +2419,6 @@ async fn bind_calibration_creates_candidate_version_with_calibrated_return_model
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-async fn dataset_insufficient_labels_cannot_promote_ready() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
-    let spec = seed_spec(&db).await;
-    let harness = harness(&db).await;
-    // Terminal InsufficientLabels dataset (even with healthy coverage on paper).
-    let dataset = seed_dataset(
-        &db,
-        &harness.artifact_store,
-        &spec,
-        &rc_id,
-        TrainingDatasetStatus::InsufficientLabels,
-        healthy_coverage(),
-        '1',
-    )
-    .await;
-
-    let result = harness
-        .service
-        .promote_dataset_ready(
-            PromoteDatasetRequest {
-                training_dataset_id: dataset,
-                reason: "promote".to_owned(),
-            },
-            GovernanceActor::system(),
-        )
-        .await;
-    assert!(
-        result.is_err(),
-        "an InsufficientLabels dataset can never be promoted to Ready"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
 async fn publish_rescans_leakage_not_default_findings() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -1609,19 +2492,26 @@ fn leaking_training_example() -> TrainingExample {
         example_id: TrainingExampleId::from_v7(),
         market_id: MarketId::new("0xleak"),
         token_id: TokenId::new("yes"),
-        as_of,
+        selected_market: SelectedMarket {
+            market_id: MarketId::new("0xleak"),
+            event_id: EventId::new("event:leak"),
+            category: MarketCategory::Sports,
+            primary_token_id: TokenId::new("yes"),
+            secondary_token_id: None,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        },
+        decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
         sample_source: TrainingSampleSource::HistoricalPit,
         feature_vector: FeatureVector {
             market_id: MarketId::new("0xleak"),
             token_id: Some(TokenId::new("yes")),
-            as_of,
+            decision_at: as_of,
             generic_schema_version: SchemaVersion::FIRST,
             generic: BTreeMap::new(),
             domain: None,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         },
         factor_values: Vec::new(),
         labels: vec![TrainingLabel {
@@ -1634,8 +2524,10 @@ fn leaking_training_example() -> TrainingExample {
         source_refs: vec![EvidenceSourceRef {
             source_kind: EvidenceSourceKind::Derived,
             reference: "future-leak".to_owned(),
-            observed_at: as_of + ChronoDuration::seconds(60),
+            effective_at: as_of + ChronoDuration::seconds(60),
+            available_at: Some(as_of),
         }],
+        decision_capture: None,
         lot_context: None,
         position_state: None,
         book_fidelity: None,
@@ -1649,32 +2541,97 @@ async fn seed_leaking_dataset(
     spec: &ModelSpecId,
     rc_id: &RuntimeConfigVersionId,
 ) -> TrainingDatasetId {
-    let bytes = DatasetParquetCodec::encode(&[leaking_training_example()]).expect("encode");
     let dataset_id = TrainingDatasetId::from_v7();
+    let window_start = Utc::now() - ChronoDuration::hours(2);
+    let window_end = window_start + ChronoDuration::hours(1);
+    let first = leaking_training_example();
+    let mut second = first.clone();
+    second.example_id = TrainingExampleId::from_v7();
+    second.market_id = MarketId::new("0xleak2");
+    second.selected_market.market_id = second.market_id.clone();
+    second.feature_vector.market_id = second.market_id.clone();
+    let examples = vec![first, second];
+    let sample_count = i64::try_from(examples.len()).expect("leaking sample count");
+    let feature_schema_hash = content_hash(u32::from('f'));
+    let factor_schema_hash = content_hash(u32::from('g'));
+    let label_schema_hash = content_hash(u32::from('l'));
+    let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
+        DatasetHashContract {
+            model_spec_id: spec,
+            window_start,
+            window_end,
+            purpose: DatasetPurpose::Training,
+            feature_schema_hash: &feature_schema_hash,
+            factor_schema_hash: &factor_schema_hash,
+            label_schema_hash: &label_schema_hash,
+        },
+        &examples,
+    )
+    .expect("semantic dataset hash");
+    let manifest = DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: dataset_id.clone(),
+        model_spec_id: spec.clone(),
+        runtime_config_version_id: rc_id.clone(),
+        window_start,
+        window_end,
+        purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: 0,
+        sample_interval_secs: 3_600,
+        horizons_secs: vec![0],
+        feature_schema_hash: feature_schema_hash.clone(),
+        factor_schema_hash: factor_schema_hash.clone(),
+        label_schema_hash: label_schema_hash.clone(),
+        semantic_dataset_hash: dataset_hash.clone(),
+        source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
+        sample_count: u64::try_from(sample_count).expect("manifest sample count"),
+    };
+    let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode");
+    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+    let artifact_bytes_hash =
+        ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes)).expect("bytes hash");
     let hex = dataset_id.as_uuid().simple().to_string();
     let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
     let parquet_uri = artifact_store.put(key, &bytes).await.expect("store");
-    let window_start = Utc::now() - ChronoDuration::hours(2);
-    PgTrainingDatasetRepository::new(db.clone())
-        .create(NewTrainingDataset {
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    dataset_repo
+        .create_plan(NewTrainingDatasetPlan {
             training_dataset_id: dataset_id.clone(),
             model_spec_id: spec.clone(),
             window_start,
-            window_end: window_start + ChronoDuration::hours(1),
-            status: TrainingDatasetStatus::Ready,
+            window_end,
             purpose: DatasetPurpose::Training,
-            feature_schema_hash: content_hash(u32::from('f')),
-            factor_schema_hash: content_hash(u32::from('g')),
-            label_schema_hash: content_hash(u32::from('l')),
-            dataset_hash: content_hash(u32::from('z')),
-            parquet_uri,
-            sample_count: 1,
-            source_delay_secs: 0,
+            knowledge_lag_secs: 0,
             sample_interval_secs: 3_600,
             horizons_secs: TrainingHorizonsSecs(vec![0]),
-            coverage_json: healthy_coverage(),
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
             runtime_config_version_id: rc_id.clone(),
         })
+        .await
+        .expect("dataset plan");
+    dataset_repo
+        .start_build(&dataset_id)
+        .await
+        .expect("start dataset");
+    dataset_repo
+        .complete_build(
+            &dataset_id,
+            CompleteTrainingDatasetBuild {
+                status: TrainingDatasetStatus::Ready,
+                feature_schema_hash,
+                factor_schema_hash,
+                label_schema_hash,
+                dataset_hash,
+                manifest_hash,
+                manifest_json: manifest,
+                artifact_bytes_hash,
+                parquet_uri,
+                sample_count,
+                coverage_json: healthy_coverage(),
+                failure_detail: None,
+            },
+        )
         .await
         .expect("dataset");
     dataset_id

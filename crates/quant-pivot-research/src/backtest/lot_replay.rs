@@ -70,8 +70,8 @@ pub struct LotDecisionSequence {
 pub struct LotOutcome {
     /// The lot this outcome replays.
     pub position_id: PositionId,
-    /// First decision `as_of` (timeline / DSR period anchor).
-    pub as_of: chrono::DateTime<chrono::Utc>,
+    /// First decision time (timeline / DSR period anchor).
+    pub decision_at: chrono::DateTime<chrono::Utc>,
     /// This lot's contribution to the reconstructed path's return series (a
     /// fractional return): the sum over every on-path incremental scale-out of
     /// `(sold_shares / historical_remaining) × (frozen hold_vs_exit_alpha_bps / 10_000)`.
@@ -199,7 +199,7 @@ fn replay_lot(
 
     Ok(LotOutcome {
         position_id: sequence.position_id.clone(),
-        as_of: first_as_of,
+        decision_at: first_as_of,
         return_value,
         cumulative_exit_pct: (simulated_sold / denominator)
             .min(Decimal::ONE)
@@ -240,7 +240,7 @@ fn replay_denominator(
         }
         .into());
     }
-    Ok((first.as_of, denominator))
+    Ok((first.decision_at(), denominator))
 }
 
 enum OnPathStep {
@@ -272,7 +272,8 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} decision at {} is missing lot_context; rebuild the ExitDecision dataset",
-                args.sequence.position_id, args.decision.as_of
+                args.sequence.position_id,
+                args.decision.decision_at()
             ),
         }
         .into());
@@ -285,7 +286,8 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "lot {} decision at {} is missing position_state; rebuild the ExitDecision dataset",
-                args.sequence.position_id, args.decision.as_of
+                args.sequence.position_id,
+                args.decision.decision_at()
             ),
         }
         .into());
@@ -295,7 +297,7 @@ fn score_on_path_decision(args: &OnPathDecisionArgs<'_>) -> QuantResult<OnPathSt
             detail: format!(
                 "lot {} decision at {} has no label `{}` @ horizon {}s",
                 args.sequence.position_id,
-                args.decision.as_of,
+                args.decision.decision_at(),
                 args.label.name,
                 args.label.horizon_secs
             ),
@@ -381,7 +383,7 @@ pub fn replay_lot_null_baseline(
     match baseline {
         SellNullBaseline::AlwaysHold => Ok(LotOutcome {
             position_id: sequence.position_id.clone(),
-            as_of: first.as_of,
+            decision_at: first.decision_at(),
             return_value: Decimal::ZERO,
             cumulative_exit_pct: Decimal::ZERO,
             rank_pairs: Vec::new(),
@@ -392,14 +394,17 @@ pub fn replay_lot_null_baseline(
                 return Err(ResearchError::ValidationMethodology {
                     detail: format!(
                         "lot {} first decision at {} has no label `{}` @ horizon {}s",
-                        sequence.position_id, first.as_of, label.name, label.horizon_secs
+                        sequence.position_id,
+                        first.decision_at(),
+                        label.name,
+                        label.horizon_secs
                     ),
                 }
                 .into());
             };
             Ok(LotOutcome {
                 position_id: sequence.position_id.clone(),
-                as_of: first.as_of,
+                decision_at: first.decision_at(),
                 return_value: realized / Decimal::from(10_000),
                 cumulative_exit_pct: Decimal::ONE,
                 rank_pairs: vec![(realized, realized)],
@@ -432,14 +437,15 @@ mod tests {
         features::FeatureVector,
         model::{
             LabelSelector, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
-            SellSignalPolicy, position_state_factor_values,
+            SellSignalPolicy, position_state_signed,
         },
         training::{HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel},
     };
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
-        enums::quant::DataQualityStatus,
+        domain::DecisionClock,
+        enums::{common::MarketCategory, quant::DataQualityStatus},
         types::{
             Bps, ContentHash, MarketId, ModelVersionId, OrderIntentId, PositionId, Price,
             Probability, SchemaVersion, Shares, TokenId, TrainingExampleId, TrainingSampleSource,
@@ -455,9 +461,9 @@ mod tests {
 
     fn position_state() -> PositionStateFeatures {
         PositionStateFeatures {
-            unrealized_pnl_pct: dec!(0),
+            unrealized_pnl_pct: Some(dec!(0)),
             time_in_trade_ratio: dec!(0.1),
-            peak_mark_drawdown: dec!(0),
+            peak_mark_drawdown: Some(dec!(0)),
         }
     }
 
@@ -468,19 +474,21 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: market_id.clone(),
             token_id: token_id.clone(),
-            as_of,
+            selected_market: crate::training::fixtures::selected_market(
+                &market_id,
+                &token_id,
+                MarketCategory::Sports,
+            ),
+            decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
             sample_source: TrainingSampleSource::ExitDecision,
             feature_vector: FeatureVector {
                 market_id,
                 token_id: Some(token_id),
-                as_of,
+                decision_at: as_of,
                 generic_schema_version: SchemaVersion::FIRST,
                 generic: BTreeMap::new(),
                 domain: None,
-                substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
-                staleness_ms: 0,
-                source_refs: Vec::new(),
             },
             factor_values: Vec::new(),
             labels: vec![TrainingLabel {
@@ -491,6 +499,7 @@ mod tests {
                 matured_at: as_of,
             }],
             source_refs: Vec::new(),
+            decision_capture: None,
             lot_context: Some(LotTrainingContext {
                 order_intent_id: OrderIntentId::from_v7(),
                 position_id: PositionId::from_v7(),
@@ -690,11 +699,8 @@ mod tests {
     }
 
     #[test]
-    fn position_state_factors_are_covered_by_the_shared_pseudo_factor_helper() {
-        let names: Vec<_> = position_state_factor_values(&position_state())
-            .into_iter()
-            .map(|factor| factor.name)
-            .collect();
-        assert_eq!(names.len(), 3);
+    fn position_state_inputs_are_covered_by_the_shared_pseudo_factor_formula() {
+        let count = position_state_signed(&position_state()).len();
+        assert_eq!(count, 3);
     }
 }

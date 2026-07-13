@@ -33,7 +33,7 @@ pub trait CrossSectionalNormalizer: Send + Sync {
     fn is_cross_sectional(&self) -> bool;
 
     /// Fit frozen statistics over a raw column's present values.
-    fn fit(&self, column: &RawFactorColumn) -> NormalizationStats;
+    fn fit(&self, column: &RawFactorColumn) -> QuantResult<NormalizationStats>;
 
     /// Apply frozen statistics to each market's raw value, tagging the source.
     fn apply(
@@ -61,27 +61,27 @@ impl CrossSectionalNormalizer for WinsorizedZScoreNormalizer {
         true
     }
 
-    fn fit(&self, column: &RawFactorColumn) -> NormalizationStats {
+    fn fit(&self, column: &RawFactorColumn) -> QuantResult<NormalizationStats> {
         let mut present = column.present();
         if present.len() < 2 {
-            return NormalizationStats::Degenerate {
+            return Ok(NormalizationStats::Degenerate {
                 reason: FactorIndeterminateReason::ZeroVariance,
-            };
+            });
         }
         present.sort();
-        let lower = quantile_value(&present, self.winsor_p);
-        let upper = quantile_value(&present, Decimal::ONE - self.winsor_p);
+        let lower = quantile_value(&present, self.winsor_p)?;
+        let upper = quantile_value(&present, Decimal::ONE - self.winsor_p)?;
         let winsorized: Vec<Decimal> = present
             .iter()
             .copied()
             .map(|value| value.clamp(lower, upper))
             .collect();
         let Some(mean_value) = mean(&winsorized) else {
-            return NormalizationStats::Degenerate {
+            return Ok(NormalizationStats::Degenerate {
                 reason: FactorIndeterminateReason::ZeroVariance,
-            };
+            });
         };
-        match population_std(&winsorized, mean_value) {
+        Ok(match population_std(&winsorized, mean_value)? {
             Some(std) if std > Decimal::ZERO => NormalizationStats::WinsorizedZScore {
                 lower,
                 upper,
@@ -92,7 +92,7 @@ impl CrossSectionalNormalizer for WinsorizedZScoreNormalizer {
             _ => NormalizationStats::Degenerate {
                 reason: FactorIndeterminateReason::ZeroVariance,
             },
-        }
+        })
     }
 
     fn apply(
@@ -165,20 +165,20 @@ impl CrossSectionalNormalizer for RankNormalizer {
         true
     }
 
-    fn fit(&self, column: &RawFactorColumn) -> NormalizationStats {
+    fn fit(&self, column: &RawFactorColumn) -> QuantResult<NormalizationStats> {
         let mut sorted = column.present();
         if sorted.len() < 2 {
-            return NormalizationStats::Degenerate {
+            return Ok(NormalizationStats::Degenerate {
                 reason: FactorIndeterminateReason::ZeroVariance,
-            };
+            });
         }
         sorted.sort();
         if sorted.first() == sorted.last() {
-            return NormalizationStats::Degenerate {
+            return Ok(NormalizationStats::Degenerate {
                 reason: FactorIndeterminateReason::ZeroVariance,
-            };
+            });
         }
-        NormalizationStats::Rank { sorted }
+        Ok(NormalizationStats::Rank { sorted })
     }
 
     fn apply(
@@ -248,11 +248,11 @@ impl CrossSectionalNormalizer for MinMaxNormalizer {
         false
     }
 
-    fn fit(&self, _column: &RawFactorColumn) -> NormalizationStats {
-        NormalizationStats::MinMax {
+    fn fit(&self, _column: &RawFactorColumn) -> QuantResult<NormalizationStats> {
+        Ok(NormalizationStats::MinMax {
             lo: self.lo,
             hi: self.hi,
-        }
+        })
     }
 
     fn apply(
@@ -439,7 +439,7 @@ mod tests {
             clamp_sigma: Decimal::from(3),
         };
         let raw = column(&[Some(1), Some(2), Some(3), Some(4), Some(1_000)]);
-        let stats = normalizer.fit(&raw);
+        let stats = normalizer.fit(&raw).expect("fit normalization");
         assert!(matches!(stats, NormalizationStats::WinsorizedZScore { .. }));
         let out = normalizer.apply(&raw, &stats, NormalizationSource::CrossSection);
         assert_eq!(
@@ -466,7 +466,7 @@ mod tests {
             clamp_sigma: Decimal::from(3),
         };
         let raw = column(&[Some(5), Some(5), Some(5), Some(5)]);
-        let stats = normalizer.fit(&raw);
+        let stats = normalizer.fit(&raw).expect("fit normalization");
         assert!(matches!(
             stats,
             NormalizationStats::Degenerate {
@@ -486,7 +486,7 @@ mod tests {
     fn rank_orders_into_unit_interval() {
         let normalizer = RankNormalizer;
         let raw = column(&[Some(10), Some(30), Some(20), None]);
-        let stats = normalizer.fit(&raw);
+        let stats = normalizer.fit(&raw).expect("fit normalization");
         let out = normalizer.apply(&raw, &stats, NormalizationSource::CrossSection);
         assert_eq!(score(&out[0]), Decimal::ZERO, "smallest → 0");
         assert_eq!(score(&out[1]), Decimal::ONE, "largest → 1");
@@ -504,7 +504,7 @@ mod tests {
             factor: FactorName::from_static("dq"),
             values: vec![Some(Decimal::new(5, 1)), Some(Decimal::from(5))],
         };
-        let stats = normalizer.fit(&raw);
+        let stats = normalizer.fit(&raw).expect("fit normalization");
         let out = normalizer.apply(&raw, &stats, NormalizationSource::PerMarket);
         assert_eq!(score(&out[0]), Decimal::new(5, 1));
         match &out[1] {

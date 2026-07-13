@@ -11,7 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{ModelVersionInfo, OrderIntentInfo, PointInTimeDataSource, PositionInfo},
+    domain::{
+        DecisionBoundary, DecisionClock, DecisionSource, ModelVersionInfo, OrderIntentInfo,
+        PositionInfo,
+    },
     enums::quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig,
@@ -27,20 +30,20 @@ use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome, frozen_factor_outcome},
     features::{
         ConfiguredFeatureBuilder, FeatureSchema, FeatureSourceWindows, FeatureVector,
-        MarketWindowSnapshot, PitView, TradeTapeWindowSnapshot, merged_required_features,
+        MarketWindowSnapshot, TradeTapeWindowSnapshot,
     },
     hashing::ResearchHasher,
     model::{
         ActiveSchemaBinding, ModelRuntimeFactoryBuilder, ModelRuntimeOutput, QuantModelRuntime,
         SignalCandidate, WeightOverlay,
     },
+    pit::{PointInTimeSnapshotSource, ResolvedMarketSnapshot},
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use rust_decimal::Decimal;
 
 use crate::{
     governance::{WeightOverlayApplicator, quality_gate_load::quality_gate_passed_ok},
-    ingest::market_registry::MarketRegistry,
     prefetch::feature_window::FeatureWindowProvider,
     projection::inference_batch::build_runtime_input,
     service::signal_reinference::{ExitSignalReinferer, FreshSignal},
@@ -55,8 +58,7 @@ pub struct ModelBackedExitSignalReinfererDeps {
     /// Source of the entry recommendation's frozen factor breakdown, replayed as
     /// the exit-side factor plane (reproducing the entry thesis).
     pub recommendations: Arc<dyn RecommendationRepository>,
-    pub pit_source: Arc<dyn PointInTimeDataSource>,
-    pub market_registry: Arc<MarketRegistry>,
+    pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
 }
 
@@ -140,14 +142,6 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             return Ok(None);
         };
 
-        let Some(market) = selected_market_for_lot(&self.deps.market_registry, lot) else {
-            tracing::debug!(
-                market_id = %lot.market_id,
-                "exit signal re-inference: market not in registry"
-            );
-            return Ok(None);
-        };
-
         let Some(version) = self.load_model_version(&intent.model_version_id).await? else {
             return Ok(None);
         };
@@ -156,24 +150,32 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
         };
 
         let requirements = ModelFeatureRequirements::generic_only(runtime.required_features());
-        // Exit re-inference has no schedule/request source delay; fall back the
-        // live feature `as_of` by the maximum tolerated feature-bucket age so the
-        // window end lands on the freshest guaranteed-settled fact boundary.
-        let source_delay = Duration::from_secs(config.data_quality.max_feature_bucket_age_secs);
-        let as_of = now - source_delay;
+        let boundary = runtime_decision_boundary(&config, now)?;
+        let Some(snapshot) = self
+            .deps
+            .pit_source
+            .market_snapshot_at(&lot.market_id, &boundary)
+            .await?
+        else {
+            tracing::debug!(
+                market_id = %lot.market_id,
+                "exit signal re-inference: durable market snapshot is unavailable"
+            );
+            return Ok(None);
+        };
+        let market = selected_market_for_lot(&snapshot, lot)?;
         let Some(liquidity_cap_usd) = liquidity_score_cap(&config)? else {
             return Ok(None);
         };
         let request = LiveFeatureBuildRequest {
-            pit: &self.deps.pit_source,
+            pit: self.deps.pit_source.as_ref(),
             window_provider: &self.deps.window_provider,
             market: &market,
             features: &config.features,
             domain: &config.domain,
             data_quality: &config.data_quality,
             requirements: &requirements,
-            as_of,
-            source_delay,
+            boundary: &boundary,
             liquidity_cap_usd,
         };
         let Some(vector) = build_live_feature_vector(&request).await? else {
@@ -183,18 +185,26 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
         // Reproduce the entry factor thesis: replay the recommendation's frozen
         // cross-sectional breakdown rather than recompute on a peerless single
         // market (which would be all-indeterminate post-11.1).
-        let Some(outcome) = frozen_exit_outcome(
+        let Some(frozen) = frozen_exit_outcome(
             self.deps.recommendations.as_ref(),
             intent,
             vector.market_id.clone(),
-            as_of,
+            boundary.decision_at(),
         )
         .await?
         else {
             return Ok(None);
         };
 
-        let output = infer_lot(runtime.as_ref(), &market, &vector, &outcome, as_of).await?;
+        let output = infer_lot(
+            runtime.as_ref(),
+            &frozen.source_model_run_id,
+            &market,
+            &vector,
+            &frozen.outcome,
+            boundary.decision_at(),
+        )
+        .await?;
         let Some(candidate) = find_lot_candidate(&output.candidates, lot) else {
             tracing::debug!(
                 market_id = %lot.market_id,
@@ -211,29 +221,28 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
 /// Inputs to build one lot's live feature vector for exit-side re-scoring.
 /// Shared by thesis-invalidation re-inference and the opportunistic Sell scorer.
 pub(crate) struct LiveFeatureBuildRequest<'a> {
-    pub pit: &'a Arc<dyn PointInTimeDataSource>,
+    pub pit: &'a dyn PointInTimeSnapshotSource,
     pub window_provider: &'a FeatureWindowProvider,
     pub market: &'a SelectedMarket,
     pub features: &'a FeaturesConfig,
     pub domain: &'a DomainConfig,
     pub data_quality: &'a DataQualityConfig,
     pub requirements: &'a ModelFeatureRequirements,
-    pub as_of: DateTime<Utc>,
-    pub source_delay: Duration,
+    pub boundary: &'a DecisionBoundary,
     pub liquidity_cap_usd: Usd,
 }
 
 async fn infer_lot(
     runtime: &dyn QuantModelRuntime,
+    model_run_id: &ModelRunId,
     market: &SelectedMarket,
     vector: &FeatureVector,
     outcome: &MarketFactorOutcome,
     as_of: DateTime<Utc>,
 ) -> QuantResult<ModelRuntimeOutput> {
-    let model_run_id = ModelRunId::from_v7();
     let input = build_runtime_input(
         runtime,
-        &model_run_id,
+        model_run_id,
         as_of,
         std::slice::from_ref(market),
         std::slice::from_ref(vector),
@@ -257,7 +266,7 @@ pub(crate) async fn frozen_exit_outcome(
     intent: &OrderIntentInfo,
     market_id: MarketId,
     as_of: DateTime<Utc>,
-) -> QuantResult<Option<MarketFactorOutcome>> {
+) -> QuantResult<Option<FrozenExitOutcome>> {
     let Some(recommendation) = recommendations
         .find_by_id(&intent.recommendation_id)
         .await
@@ -277,7 +286,16 @@ pub(crate) async fn frozen_exit_outcome(
         );
         return Ok(None);
     };
-    Ok(Some(outcome))
+    Ok(Some(FrozenExitOutcome {
+        outcome,
+        source_model_run_id: recommendation.evidence_refs.model_run_id,
+    }))
+}
+
+/// Entry-thesis factor evidence and its real persisted serving-run identity.
+pub(crate) struct FrozenExitOutcome {
+    pub outcome: MarketFactorOutcome,
+    pub source_model_run_id: ModelRunId,
 }
 
 /// Resolve the runtime-config snapshot frozen on the intent.
@@ -321,7 +339,7 @@ pub(crate) fn schema_binding(
     bias_table_hash: Option<ContentHash>,
 ) -> QuantResult<ActiveSchemaBinding> {
     Ok(ActiveSchemaBinding {
-        feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(features))?,
+        feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(features)?)?,
         factor_schema_hash: FactorEngine::new(factors, features, domain, None)
             .factor_schema_hash()?,
         bias_table_hash,
@@ -353,24 +371,44 @@ fn resolve_overlay(
 }
 
 /// Project a position lot into a [`SelectedMarket`] for feature / model scoring.
-#[must_use]
 pub fn selected_market_for_lot(
-    registry: &MarketRegistry,
+    snapshot: &ResolvedMarketSnapshot,
     lot: &PositionInfo,
-) -> Option<SelectedMarket> {
-    let entry = registry.get_market(&lot.market_id)?;
+) -> QuantResult<SelectedMarket> {
+    if snapshot.boundary.decision_at() < lot.opened_at {
+        return Err(QuantError::config(format!(
+            "exit snapshot decision {} predates lot open {}",
+            snapshot.boundary.decision_at(),
+            lot.opened_at
+        )));
+    }
+    let entry = snapshot.market.as_ref();
     let yes = entry.token_yes.clone();
     let no = entry.token_no.clone();
     let (primary_token_id, secondary_token_id) = match lot.side {
         OutcomeSide::Yes => (yes, Some(no)),
         OutcomeSide::No => (no, Some(yes)),
     };
-    Some(SelectedMarket {
+    if primary_token_id != lot.token_id {
+        return Err(QuantError::config(format!(
+            "lot token {} does not match {:?} token {} in durable market snapshot",
+            lot.token_id, lot.side, primary_token_id
+        )));
+    }
+    if lot
+        .event_id
+        .as_ref()
+        .is_some_and(|event_id| event_id != &snapshot.event.event_id)
+        || !entry.categories.contains(lot.category)
+    {
+        return Err(QuantError::config(format!(
+            "lot market identity does not match durable snapshot for {}",
+            lot.market_id
+        )));
+    }
+    Ok(SelectedMarket {
         market_id: lot.market_id.clone(),
-        event_id: lot
-            .event_id
-            .clone()
-            .unwrap_or_else(|| entry.event_id.clone()),
+        event_id: snapshot.event.event_id.clone(),
         category: lot.category,
         primary_token_id,
         secondary_token_id,
@@ -383,13 +421,13 @@ pub fn selected_market_for_lot(
 pub(crate) async fn build_live_feature_vector(
     request: &LiveFeatureBuildRequest<'_>,
 ) -> QuantResult<Option<FeatureVector>> {
-    let builder = ConfiguredFeatureBuilder::new(request.features, request.domain);
+    let builder = ConfiguredFeatureBuilder::new(request.features, request.domain)?;
+    let boundary = request.boundary;
     let window = load_window(
         request.window_provider,
         &builder,
         request.market,
-        request.as_of,
-        request.source_delay,
+        boundary,
         request.features,
     )
     .await?;
@@ -397,19 +435,16 @@ pub(crate) async fn build_live_feature_vector(
         request.window_provider,
         &builder,
         request.market,
-        request.as_of,
-        request.source_delay,
+        boundary,
         request.features,
     )
     .await?;
 
-    let pit_view = PitView::Live(request.pit.as_ref());
-    let sibling = pit_view.neg_risk_leg_set(&request.market.event_id);
     let bundle = builder
         .resolve_inputs(
             request.market,
-            request.as_of,
-            pit_view,
+            boundary,
+            request.pit,
             FeatureSourceWindows {
                 microstructure: &window,
                 trade_tape: &trade_tape,
@@ -418,15 +453,13 @@ pub(crate) async fn build_live_feature_vector(
                 // liquidity context, so it carries no domain slice.
                 domain: None,
             },
-            &sibling,
             request.liquidity_cap_usd,
         )
         .await?;
 
-    let required_set = merged_required_features(&request.requirements.generic, request.features);
-    let mut required: Vec<_> = required_set.into_iter().collect();
-    required.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let vector = builder.compute_vector(&bundle, &required, request.features, request.data_quality);
+    let required = request.requirements.for_category(request.market.category);
+    let vector =
+        builder.compute_vector(&bundle, &required, request.features, request.data_quality)?;
     if vector.data_quality == DataQualityStatus::Insufficient {
         return Ok(None);
     }
@@ -437,21 +470,19 @@ async fn load_window(
     window_provider: &FeatureWindowProvider,
     builder: &ConfiguredFeatureBuilder,
     market: &SelectedMarket,
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
+    boundary: &DecisionBoundary,
     features: &FeaturesConfig,
 ) -> QuantResult<MarketWindowSnapshot> {
     if !builder.schema().needs_window() {
-        return Ok(MarketWindowSnapshot {
-            token_id: market.primary_token_id.clone(),
-            as_of,
-            source_delay,
-            buckets: Vec::new(),
-        });
+        return Ok(MarketWindowSnapshot::empty(
+            market.primary_token_id.clone(),
+            boundary.decision_at(),
+            boundary.cutoff_for(DecisionSource::Microstructure),
+        ));
     }
     let lookback = Duration::from_secs(features.max_microstructure_lookback_secs());
     let mut windows = window_provider
-        .load_windows(std::slice::from_ref(market), as_of, lookback, source_delay)
+        .load_windows(std::slice::from_ref(market), boundary, lookback)
         .await?;
     windows.remove(&market.primary_token_id).ok_or_else(|| {
         QuantError::config(format!(
@@ -465,20 +496,19 @@ async fn load_trade_tape_window(
     window_provider: &FeatureWindowProvider,
     builder: &ConfiguredFeatureBuilder,
     market: &SelectedMarket,
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
+    boundary: &DecisionBoundary,
     features: &FeaturesConfig,
 ) -> QuantResult<TradeTapeWindowSnapshot> {
     if !builder.needs_trade_tape() {
         return Ok(TradeTapeWindowSnapshot::empty(
             market.market_id.clone(),
-            as_of,
-            source_delay,
+            boundary.decision_at(),
+            boundary.cutoff_for(DecisionSource::TradeTape),
         ));
     }
     let lookback = Duration::from_secs(features.structural.trade_tape_window_secs);
     let mut windows = window_provider
-        .load_trade_tape_windows(std::slice::from_ref(market), as_of, lookback, source_delay)
+        .load_trade_tape_windows(std::slice::from_ref(market), boundary, lookback)
         .await?;
     windows.remove(&market.market_id).ok_or_else(|| {
         QuantError::config(format!(
@@ -486,6 +516,23 @@ async fn load_trade_tape_window(
             market.market_id.as_str()
         ))
     })
+}
+
+pub(crate) fn runtime_decision_boundary(
+    config: &RuntimeConfig,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<DecisionBoundary> {
+    let knowledge_lag_secs = config.pit_knowledge_lag_secs().ok_or_else(|| {
+        QuantError::config("enabled report schedules disagree on knowledge_lag_secs")
+    })?;
+    DecisionClock::new(knowledge_lag_secs)
+        .boundary(decision_at)?
+        .with_source_cutoff(DecisionSource::Microstructure, 0)?
+        .with_source_cutoff(DecisionSource::TradeTape, 0)?
+        .with_source_cutoff(
+            DecisionSource::DomainCrypto,
+            config.domain.crypto.availability_lag_secs,
+        )
 }
 
 pub(crate) fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<Usd>> {
@@ -564,25 +611,34 @@ fn parse_config_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use std::sync::Arc;
+
+    use chrono::{Duration as ChronoDuration, Utc};
     use quant_pivot_models::runtime_config::RuntimeConfig;
     use quant_pivot_models::{
-        domain::PositionInfo,
+        domain::{
+            DecisionClock, DecisionSource, PositionInfo,
+            market::registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
+        },
         enums::{
-            common::MarketCategory,
+            common::{CategorySet, MarketCategory, TickSize},
             execution::PositionLedgerState,
+            market::{EventStatus, MarketStatus},
             quant::{AccountSource, OutcomeSide},
         },
         types::{
-            MarketId, ModelRunId, OrderIntentId, PositionId, Price, Probability, Shares,
-            SignalCandidateId, TokenId, Usd,
+            CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId,
+            MarketCatalogVersionId, MarketId, ModelRunId, OrderIntentId, PositionId, Price,
+            Probability, Shares, SignalCandidateId, TokenId, Usd,
         },
     };
     use quant_pivot_research::model::{ModelExplanation, SignalCandidate};
+    use quant_pivot_research::pit::{MarketContextAt, ResolvedMarketSnapshot};
     use rust_decimal_macros::dec;
 
-    use super::{find_lot_candidate, liquidity_score_cap, selected_market_for_lot};
-    use crate::ingest::market_registry::MarketRegistry;
+    use super::{
+        find_lot_candidate, liquidity_score_cap, runtime_decision_boundary, selected_market_for_lot,
+    };
 
     fn candidate(token: &str, side: OutcomeSide) -> SignalCandidate {
         SignalCandidate {
@@ -609,7 +665,7 @@ mod tests {
             liquidity_score: Probability::new(dec!(0.5)),
             data_quality_score: Probability::new(dec!(0.9)),
             model_score_percentile: Probability::new(dec!(0.8)),
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
         }
     }
 
@@ -643,15 +699,8 @@ mod tests {
 
     #[test]
     fn selected_market_uses_lot_outcome_token_as_primary() {
-        use quant_pivot_models::{
-            domain::market::registry::MarketRegistryInfo,
-            enums::common::{CategorySet, TickSize},
-            enums::market::MarketStatus,
-            types::EventId,
-        };
-
-        let registry = MarketRegistry::new();
-        registry.register_market(MarketRegistryInfo {
+        let now = Utc::now();
+        let market = MarketRegistryInfo {
             market_id: MarketId::new("m1"),
             event_id: EventId::new("e1"),
             token_yes: TokenId::new("yes"),
@@ -659,7 +708,7 @@ mod tests {
             question: "q".to_owned(),
             slug: "s".to_owned(),
             description: None,
-            categories: CategorySet::default(),
+            categories: CategorySet::from(MarketCategory::Sports),
             status: MarketStatus::Active,
             outcome: None,
             neg_risk: false,
@@ -674,9 +723,54 @@ mod tests {
             fee_schedule: None,
             end_date: None,
             resolved_at: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        });
+            created_at: Some(now - ChronoDuration::days(1)),
+            updated_at: now,
+        };
+        let event = EventRegistryInfo {
+            event_id: EventId::new("e1"),
+            title: "event".to_owned(),
+            slug: "event".to_owned(),
+            series_slug: None,
+            status: EventStatus::Active,
+            market_ids: vec![MarketId::new("m1")],
+            categories: CategorySet::from(MarketCategory::Sports),
+            tags: Vec::new(),
+            neg_risk: false,
+            end_date: None,
+            created_at: now - ChronoDuration::days(1),
+            updated_at: now,
+        };
+        let boundary = DecisionClock::new(0).boundary(now).expect("boundary");
+        let snapshot = ResolvedMarketSnapshot {
+            boundary,
+            market: Arc::new(market),
+            event: Arc::new(event),
+            context: MarketContextAt {
+                market_id: MarketId::new("m1"),
+                effective_at: now,
+                available_at: now,
+                status: MarketStatus::Active,
+                neg_risk: false,
+                end_date: None,
+                created_at: Some(now - ChronoDuration::days(1)),
+            },
+            neg_risk_leg_set: NegRiskLegSet::empty(),
+            catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),
+            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+            event_catalog_version_id: EventCatalogVersionId::from_v7(),
+            market_content_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+                .expect("hash"),
+            event_content_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+                .expect("hash"),
+            membership_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+                .expect("hash"),
+            market_timestamp_quality: "source".to_owned(),
+            event_timestamp_quality: "source".to_owned(),
+            market_effective_at: now,
+            market_available_at: now,
+            event_effective_at: now,
+            event_available_at: now,
+        };
         let lot = PositionInfo {
             position_id: PositionId::from_v7(),
             order_intent_id: OrderIntentId::from_v7(),
@@ -691,11 +785,11 @@ mod tests {
             cost_usd: Usd::new(dec!(50)),
             realized_pnl_usd: Usd::ZERO,
             source: AccountSource::Polymarket,
-            opened_at: Utc::now(),
-            updated_at: Utc::now(),
+            opened_at: now - ChronoDuration::hours(1),
+            updated_at: now,
             closed_at: None,
         };
-        let selected = selected_market_for_lot(&registry, &lot).expect("market");
+        let selected = selected_market_for_lot(&snapshot, &lot).expect("market");
         assert_eq!(selected.primary_token_id.as_str(), "no");
         assert_eq!(
             selected.secondary_token_id.as_ref().map(TokenId::as_str),
@@ -714,5 +808,29 @@ mod tests {
         // feature → fail-safe None (hold) rather than a guessed magic cap.
         "0".clone_into(&mut config.portfolio.budget.max_single_recommendation_usd.value);
         assert!(liquidity_score_cap(&config).expect("ok").is_none());
+    }
+
+    #[test]
+    fn runtime_boundary_derives_each_cutoff_once_from_decision_time() {
+        let mut config = RuntimeConfig::default();
+        config.reports.schedules[0].knowledge_lag_secs = 10;
+        config.domain.crypto.availability_lag_secs = 30;
+        let decision_at = Utc::now();
+
+        let boundary = runtime_decision_boundary(&config, decision_at).expect("boundary");
+
+        assert_eq!(boundary.decision_at(), decision_at);
+        assert_eq!(
+            boundary.knowledge_cutoff(),
+            decision_at - ChronoDuration::seconds(10)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Microstructure),
+            decision_at - ChronoDuration::seconds(10)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::DomainCrypto),
+            decision_at - ChronoDuration::seconds(30)
+        );
     }
 }

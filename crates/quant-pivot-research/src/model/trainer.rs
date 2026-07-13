@@ -21,20 +21,25 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_models::domain::DecisionBoundary;
 use quant_pivot_models::enums::common::MarketCategory;
-use quant_pivot_models::runtime_config::TrainingOptimizerKind;
-use quant_pivot_models::types::ContentHash;
+use quant_pivot_models::enums::factor::NormalizationSource;
+use quant_pivot_models::runtime_config::{
+    FactorCrossSectionConfig, SmallCrossSectionPolicy, TrainingOptimizerKind,
+};
+use quant_pivot_models::types::{ContentHash, MarketId, ModelInputContract, TokenId};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    factors::FactorName,
-    features::FeatureName,
+    factors::{FactorName, FrozenReferenceCdf, FrozenReferenceQuantiles, NormalizedFactor},
+    hashing::ResearchHasher,
     model::{
         artifact::{
             FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
             SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
+            model_input_contract_hash,
         },
         category_scope::validate_category_scope_weights,
         objective::{
@@ -103,15 +108,16 @@ pub struct ValidationReport {
     /// Ranking diagnostics on the held-out block (weighted LTR path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_out_diagnostics: Option<RankingDiagnostics>,
-    /// Per-block objective values (time-ordered; includes in-sample blocks for
-    /// weighted trainers — diagnostic only, not a pure OOS mean).
+    /// Per-fold out-of-sample objective values in time order. Every entry was
+    /// produced by an estimator and transform fit only on that fold's purged
+    /// training partition.
     pub fold_objectives: Vec<Decimal>,
     /// Per-block component breakdowns (time-ordered).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fold_components: Vec<ObjectiveComponentReport>,
-    /// Total resolved samples kept in cross-section groups (`as_of` with ≥2 rows).
+    /// Total resolved samples kept in cross-section groups (`decision_at` with ≥2 rows).
     pub sample_count: u64,
-    /// Number of `as_of` cross-sections dropped because they had fewer than 2 rows.
+    /// Number of `decision_at` cross-sections dropped because they had fewer than 2 rows.
     #[serde(default)]
     pub dropped_singleton_groups: u64,
     /// Number of sample rows discarded with those singleton cross-sections.
@@ -132,6 +138,8 @@ pub struct ValidationReport {
 pub struct TrainModelRequest {
     /// Frozen, point-in-time training examples (decoded from the dataset Parquet).
     pub examples: Vec<TrainingExample>,
+    /// Semantic hash of the frozen dataset envelope supplying `examples`.
+    pub training_dataset_hash: ContentHash,
     /// Supervised target label.
     pub label: LabelSelector,
     /// Initial weights / candidate factor set (from `FactorsConfig.factor_weights`).
@@ -150,8 +158,11 @@ pub struct TrainModelRequest {
     pub substitution_rules: SubstitutionConfidenceRules,
     /// Return model (heuristic until calibrated by a backtest).
     pub return_model: ReturnModelSpec,
-    /// Features the model requires (selection eligibility).
-    pub required_features: Vec<FeatureName>,
+    /// Exact ordered raw-input contract frozen by the owning model spec.
+    pub input_contract: ModelInputContract,
+    /// Small-cross-section transform policy/minimum fitted together with the
+    /// weighted artifact.
+    pub factor_cross_section: FactorCrossSectionConfig,
     /// When set, this artifact is scoped to one market category (Phase 11.2.2).
     /// `None` means the generic cross-category scorer.
     pub category_scope: Option<MarketCategory>,
@@ -222,16 +233,35 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
         &request.seed_weights,
         &request.objective,
         request.validation,
+        Some(&request.factor_cross_section),
     )?;
 
+    let factors = fit
+        .factor_weights
+        .iter()
+        .map(|weight| weight.factor.clone())
+        .collect::<Vec<_>>();
+    let training_input_hash = weighted_training_input_hash(
+        &request.examples,
+        &request.label,
+        &factors,
+        &fit.frozen_reference_quantiles,
+        Some(&request.factor_cross_section),
+    )?;
+    let input_contract_hash = model_input_contract_hash(&request.input_contract)?;
     let artifact = WeightedFactorModelArtifact {
         header: request.header.clone(),
+        training_dataset_hash: request.training_dataset_hash.clone(),
+        training_input_hash,
+        input_contract: request.input_contract.clone(),
+        input_contract_hash,
         weights: fit.factor_weights,
         prediction_horizon_secs: request.prediction_horizon_secs,
         multipliers: request.multipliers.clone(),
         substitution_confidence_rules: request.substitution_rules.clone(),
         return_model: request.return_model.clone(),
-        required_features: request.required_features.clone(),
+        factor_cross_section: request.factor_cross_section.clone(),
+        frozen_reference_quantiles: fit.frozen_reference_quantiles,
         objective_report: Some(fit.objective_report.clone()),
         category_scope: request.category_scope,
     };
@@ -248,6 +278,195 @@ fn train_weighted(request: &TrainModelRequest) -> QuantResult<TrainedModelArtifa
     })
 }
 
+/// Fit one empirical raw-factor CDF per model input from the supplied training
+/// partition.
+///
+/// The caller decides the partition: CV passes only purged train rows, while
+/// the final model passes the complete frozen training set.
+///
+/// The trainer and the frozen model-parity verifier share this implementation
+/// so a model cannot publish with a reference CDF different from the one its
+/// frozen training rows deterministically imply.
+pub fn fit_frozen_reference_quantiles(
+    examples: &[TrainingExample],
+    label: &LabelSelector,
+    factors: &[FactorName],
+    cross_section: Option<&FactorCrossSectionConfig>,
+) -> QuantResult<FrozenReferenceQuantiles> {
+    let Some(cross_section) = cross_section else {
+        return Ok(FrozenReferenceQuantiles::empty());
+    };
+    if cross_section.small_cross_section_policy == SmallCrossSectionPolicy::Indeterminate {
+        return Ok(FrozenReferenceQuantiles::empty());
+    }
+    let min_size = usize::try_from(cross_section.min_size).map_err(|error| {
+        QuantError::from(ResearchError::DatasetBuild {
+            detail: format!("factor cross-section min_size conversion failed: {error}"),
+        })
+    })?;
+    let mut references = Vec::with_capacity(factors.len());
+    for factor in factors {
+        let values: Vec<Decimal> = examples
+            .iter()
+            .filter(|example| {
+                example.labels.iter().any(|row| {
+                    (&row.label_name, row.horizon_secs) == (&label.name, label.horizon_secs)
+                })
+            })
+            .filter_map(|example| {
+                example
+                    .factor_values
+                    .iter()
+                    .find(|value| value.name == *factor)
+                    .and_then(|value| value.raw_value)
+            })
+            .collect();
+        if values.len() < min_size {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "factor `{factor}` has {} observed raw training values; frozen reference CDF \
+                     requires at least {min_size}",
+                    values.len()
+                ),
+            }
+            .into());
+        }
+        references.push(FrozenReferenceCdf::fit(factor.clone(), values)?);
+    }
+    FrozenReferenceQuantiles::new(references)
+}
+
+/// Canonical commitment to the exact final weighted estimator input.
+///
+/// The reference transform is applied first, then the same reduced
+/// `(decision interval, allocation key, signed factor columns, label)` groups
+/// consumed by the optimizer are hashed in deterministic order. Dataset
+/// semantic hash remains a separate artifact field and binds all source
+/// evidence/per-source cutoffs, including rows excluded from the estimator.
+pub fn weighted_training_input_hash(
+    examples: &[TrainingExample],
+    label: &LabelSelector,
+    factors: &[FactorName],
+    references: &FrozenReferenceQuantiles,
+    cross_section: Option<&FactorCrossSectionConfig>,
+) -> QuantResult<ContentHash> {
+    let prepared = apply_reference_quantiles(examples, references, cross_section)?;
+    let dataset = TrainingDataset::build(&prepared, label, factors)?;
+    let mut labelled = prepared
+        .iter()
+        .filter(|example| {
+            example.labels.iter().any(|row| {
+                let matches_name = row.label_name == label.name;
+                let matches_horizon = row.horizon_secs == label.horizon_secs;
+                matches_name && matches_horizon
+            })
+        })
+        .collect::<Vec<_>>();
+    labelled.sort_by(|left, right| {
+        left.decision_at()
+            .cmp(&right.decision_at())
+            .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
+            .then_with(|| left.token_id.as_str().cmp(right.token_id.as_str()))
+    });
+    let identities = labelled
+        .into_iter()
+        .map(|example| WeightedInputIdentity {
+            decision_boundary: &example.decision_boundary,
+            market_id: &example.market_id,
+            token_id: &example.token_id,
+        })
+        .collect();
+    ResearchHasher::canonical(&WeightedTrainingInput {
+        identities,
+        groups: &dataset.groups,
+    })
+}
+
+#[derive(Serialize)]
+struct WeightedInputIdentity<'a> {
+    decision_boundary: &'a DecisionBoundary,
+    market_id: &'a MarketId,
+    token_id: &'a TokenId,
+}
+
+#[derive(Serialize)]
+struct WeightedTrainingInput<'a> {
+    identities: Vec<WeightedInputIdentity<'a>>,
+    groups: &'a [CrossSectionGroup],
+}
+
+/// Apply a fitted training reference only to same-time columns below the frozen
+/// minimum cross-section size. Larger columns retain their dataset's ordinary
+/// same-cross-section normalization.
+fn apply_reference_quantiles(
+    examples: &[TrainingExample],
+    references: &FrozenReferenceQuantiles,
+    cross_section: Option<&FactorCrossSectionConfig>,
+) -> QuantResult<Vec<TrainingExample>> {
+    let Some(cross_section) = cross_section else {
+        return Ok(examples.to_vec());
+    };
+    if cross_section.small_cross_section_policy == SmallCrossSectionPolicy::Indeterminate {
+        return Ok(examples.to_vec());
+    }
+    references.validate()?;
+    let min_size = usize::try_from(cross_section.min_size).map_err(|error| {
+        QuantError::from(ResearchError::DatasetBuild {
+            detail: format!("factor cross-section min_size conversion failed: {error}"),
+        })
+    })?;
+    let mut present_counts = std::collections::BTreeMap::new();
+    for example in examples {
+        for factor in &example.factor_values {
+            if factor.raw_value.is_some() {
+                let count = present_counts
+                    .entry((example.decision_at(), factor.name.clone()))
+                    .or_insert(0_usize);
+                *count = count
+                    .checked_add(1)
+                    .ok_or_else(|| ResearchError::DatasetBuild {
+                        detail: format!(
+                            "factor `{}` present-count overflow at decision_at {}",
+                            factor.name,
+                            example.decision_at()
+                        ),
+                    })?;
+            }
+        }
+    }
+
+    let mut prepared = examples.to_vec();
+    for example in &mut prepared {
+        let decision_at = example.decision_at();
+        for factor in &mut example.factor_values {
+            let present = present_counts
+                .get(&(decision_at, factor.name.clone()))
+                .copied()
+                .unwrap_or(0);
+            if present >= min_size {
+                continue;
+            }
+            let Some(raw) = factor.raw_value else {
+                continue;
+            };
+            let reference = references.get(&factor.name).ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "factor `{}` has no frozen reference CDF in this training partition",
+                        factor.name
+                    ),
+                })
+            })?;
+            factor.normalization = NormalizedFactor::Scored {
+                score: reference.percentile(raw),
+                source: NormalizationSource::FrozenReferenceQuantile,
+                clamp: None,
+            };
+        }
+    }
+    Ok(prepared)
+}
+
 /// The outcome of the shared simplex weight fit: the frozen normalized factor
 /// weights plus the training / validation objective reports. Reused by every
 /// weighted family (Buy-side [`WeightedFactorModelArtifact`], Sell-side
@@ -261,6 +480,17 @@ pub(crate) struct FittedWeights {
     pub objective_report: TrainingObjectiveReport,
     /// Held-out validation report.
     pub validation: ValidationReport,
+    /// Final-training-partition reference CDFs frozen into the artifact.
+    pub frozen_reference_quantiles: FrozenReferenceQuantiles,
+}
+
+struct SimplexFitContext<'a> {
+    examples: &'a [TrainingExample],
+    label: &'a LabelSelector,
+    factors: &'a [FactorName],
+    seed: &'a [Decimal],
+    evaluator: &'a ObjectiveEvaluator,
+    factor_cross_section: Option<&'a FactorCrossSectionConfig>,
 }
 
 /// Fit the weight simplex against a supervised label via deterministic LTR
@@ -272,6 +502,7 @@ pub(crate) fn fit_simplex_weights(
     seed_weights: &[FactorWeight],
     objective: &TrainingObjectiveSpec,
     validation: ValidationSpec,
+    factor_cross_section: Option<&FactorCrossSectionConfig>,
 ) -> QuantResult<FittedWeights> {
     if seed_weights.is_empty() {
         return Err(ResearchError::InvalidModelArtifact {
@@ -283,23 +514,19 @@ pub(crate) fn fit_simplex_weights(
 
     // Deterministic factor order: the seed-weight order defines the columns.
     let factors: Vec<FactorName> = seed_weights.iter().map(|w| w.factor.clone()).collect();
-    let dataset = TrainingDataset::build(examples, label, &factors)?;
-    if dataset.groups.is_empty() {
-        return Err(ResearchError::DatasetBuild {
-            detail: "no resolved cross-section groups for training".to_owned(),
-        }
-        .into());
-    }
+    // Build the label/timeline skeleton before fitting any transform. Its group
+    // boundaries are independent of factor scores and define the purged split.
+    let timeline_dataset = TrainingDataset::build(examples, label, &factors)?;
 
     // `folds == 1` (or less): full-window fit — used by CPCV fold training where
     // the outer CPCV already supplies the OOS distribution. `folds >= 2`: purged
     // hold-out CV matching CPCV label-horizon semantics.
     let folds = validation.folds.max(1) as usize;
-    if folds >= 2 && dataset.groups.len() < folds {
+    if folds >= 2 && timeline_dataset.groups.len() < folds {
         return Err(ResearchError::DatasetBuild {
             detail: format!(
                 "insufficient resolved cross-section groups ({}) for {} validation folds",
-                dataset.groups.len(),
+                timeline_dataset.groups.len(),
                 folds
             ),
         }
@@ -314,90 +541,285 @@ pub(crate) fn fit_simplex_weights(
             .collect::<Vec<_>>(),
     );
 
+    let context = SimplexFitContext {
+        examples,
+        label,
+        factors: &factors,
+        seed: &seed,
+        evaluator: &evaluator,
+        factor_cross_section,
+    };
     if folds < 2 {
-        let (grid_weights, coord_search_effective_n) =
-            coordinate_search(&seed, &dataset.groups, &evaluator)?;
-        let grid_report = evaluator.evaluate(&grid_weights, &dataset.groups)?;
-        let (weights, train_report) = refine(
-            &grid_weights,
-            grid_report.objective_value(),
-            &dataset.groups,
-            &evaluator,
-        )?;
-        return Ok(assemble_full_window_weights(
-            &factors,
-            &weights,
-            train_report.rounded(),
-            &evaluator,
-            &dataset,
-            coord_search_effective_n,
-        ));
+        return fit_full_window(&context);
     }
+    let validation_report = fit_purged_validation(&context, &timeline_dataset, validation, folds)?;
+    fit_final_full_window(&context, validation_report)
+}
 
-    let split = TimeSplit::new(dataset.groups.len(), folds);
+fn fit_full_window(context: &SimplexFitContext<'_>) -> QuantResult<FittedWeights> {
+    let references = fit_frozen_reference_quantiles(
+        context.examples,
+        context.label,
+        context.factors,
+        context.factor_cross_section,
+    )?;
+    let prepared =
+        apply_reference_quantiles(context.examples, &references, context.factor_cross_section)?;
+    let dataset = TrainingDataset::build(&prepared, context.label, context.factors)?;
+    let (grid_weights, coord_search_effective_n) =
+        coordinate_search(context.seed, &dataset.groups, context.evaluator)?;
+    let grid_report = context.evaluator.evaluate(&grid_weights, &dataset.groups)?;
+    let (weights, train_report) = refine(
+        &grid_weights,
+        grid_report.objective_value(),
+        &dataset.groups,
+        context.evaluator,
+    )?;
+    assemble_full_window_weights(
+        context.factors,
+        &weights,
+        train_report.rounded(),
+        context.evaluator,
+        &dataset,
+        coord_search_effective_n,
+        references,
+    )
+}
+
+fn fit_purged_validation(
+    context: &SimplexFitContext<'_>,
+    timeline_dataset: &TrainingDataset,
+    validation: ValidationSpec,
+    folds: usize,
+) -> QuantResult<ValidationReport> {
+    let split = TimeSplit::new(timeline_dataset.groups.len(), folds)?;
     let purge = PurgeConfig {
         embargo_pct: validation.embargo_pct,
         min_embargo_secs: validation.min_embargo_secs,
     };
-    let timeline: Vec<TimelineGroup> = dataset
+    let timeline: Vec<TimelineGroup> = timeline_dataset
         .groups
         .iter()
         .map(|group| TimelineGroup {
-            as_of: group.as_of,
+            decision_at: group.decision_at,
             label_horizon_end: group.label_horizon_end,
         })
         .collect();
-    let held_out = split.held_out();
-    let test_indices: Vec<usize> = (held_out.start..held_out.end).collect();
-    let purged = DefaultPurgedSplitter::new().split(&timeline, &test_indices, &purge);
-    if purged.train_indices.is_empty() {
-        return Err(ResearchError::DatasetBuild {
+    let validation_blocks = split.validation_blocks();
+    if validation_blocks.is_empty() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "weighted rolling validation has no out-of-sample blocks".to_owned(),
+        }
+        .into());
+    }
+
+    let mut fold_components = Vec::with_capacity(validation_blocks.len());
+    let mut fold_diagnostics = Vec::with_capacity(validation_blocks.len());
+    let mut coord_search_effective_n = 0_u32;
+    for (fold_index, block) in validation_blocks.iter().enumerate() {
+        let fold = fit_validation_fold(
+            context,
+            timeline_dataset,
+            &timeline,
+            &purge,
+            fold_index,
+            block,
+        )?;
+        coord_search_effective_n = coord_search_effective_n
+            .checked_add(fold.effective_n)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "weighted rolling validation effective trial count overflow".to_owned(),
+            })?;
+        fold_components.push(fold.components);
+        fold_diagnostics.push(fold.diagnostics);
+    }
+
+    let held_out_components =
+        fold_components
+            .last()
+            .cloned()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "weighted rolling validation produced no held-out component report"
+                    .to_owned(),
+            })?;
+    let held_out_diagnostics =
+        fold_diagnostics
+            .last()
+            .cloned()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "weighted rolling validation produced no held-out diagnostics".to_owned(),
+            })?;
+    let held_out_objective = held_out_components.objective_value();
+    let fold_objectives = fold_components
+        .iter()
+        .map(ObjectiveComponentReport::objective_value)
+        .map(|value| value.round_dp(RESEARCH_DECIMAL_SCALE))
+        .collect();
+    Ok(ValidationReport {
+        held_out_objective: held_out_objective.round_dp(RESEARCH_DECIMAL_SCALE),
+        held_out_components: Some(held_out_components),
+        held_out_diagnostics: Some(held_out_diagnostics),
+        fold_objectives,
+        fold_components,
+        sample_count: timeline_dataset.sample_count,
+        dropped_singleton_groups: timeline_dataset.dropped_singleton_groups,
+        dropped_singleton_rows: timeline_dataset.dropped_singleton_rows,
+        coord_search_effective_n,
+    })
+}
+
+struct ValidationFoldResult {
+    components: ObjectiveComponentReport,
+    diagnostics: RankingDiagnostics,
+    effective_n: u32,
+}
+
+fn fit_validation_fold(
+    context: &SimplexFitContext<'_>,
+    timeline_dataset: &TrainingDataset,
+    timeline: &[TimelineGroup],
+    purge: &PurgeConfig,
+    fold_index: usize,
+    block: &TimeBlock,
+) -> QuantResult<ValidationFoldResult> {
+    let test_indices = (block.start..block.end).collect::<Vec<_>>();
+    let purged = DefaultPurgedSplitter::new().split(timeline, &test_indices, purge)?;
+    let train_indices = purged
+        .train_indices
+        .into_iter()
+        .filter(|index| *index < block.start)
+        .collect::<Vec<_>>();
+    if train_indices.is_empty() {
+        return Err(ResearchError::ValidationMethodology {
             detail: format!(
-                "purged trainer CV left zero training groups \
-                 (folds={folds}, purged={}, embargoed={})",
+                "weighted rolling validation fold {} has no PIT-safe training groups after purge/embargo (purged={}, embargoed={})",
+                fold_index + 1,
                 purged.purged_indices.len(),
                 purged.embargoed_indices.len()
             ),
         }
         .into());
     }
-    let train_groups: Vec<CrossSectionGroup> = purged
-        .train_indices
+    let train_decision_at = train_indices
         .iter()
-        .map(|&idx| dataset.groups[idx].clone())
-        .collect();
-
-    // Base optimizer: deterministic coordinate search on the purged train set.
-    let (grid_weights, coord_search_effective_n) =
-        coordinate_search(&seed, &train_groups, &evaluator)?;
-    let grid_report = evaluator.evaluate(&grid_weights, &train_groups)?;
-    let grid_objective = grid_report.objective_value();
-
-    // Optional refinement: argmin (kept only if it strictly improves).
-    let (weights, train_report) = refine(&grid_weights, grid_objective, &train_groups, &evaluator)?;
-    assemble_fitted_weights(AssembleFittedWeights {
-        factors: &factors,
-        weights: &weights,
-        train_components: train_report.rounded(),
-        evaluator: &evaluator,
-        dataset: &dataset,
-        split: &split,
-        folds,
-        coord_search_effective_n,
+        .map(|index| timeline_dataset.groups[*index].decision_at)
+        .collect::<std::collections::BTreeSet<_>>();
+    let reference_examples = context
+        .examples
+        .iter()
+        .filter(|example| train_decision_at.contains(&example.decision_at()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let references = fit_frozen_reference_quantiles(
+        &reference_examples,
+        context.label,
+        context.factors,
+        context.factor_cross_section,
+    )?;
+    let transformed_examples =
+        apply_reference_quantiles(context.examples, &references, context.factor_cross_section)?;
+    let fold_dataset =
+        TrainingDataset::build(&transformed_examples, context.label, context.factors)?;
+    ensure_fold_spine(timeline_dataset, &fold_dataset, fold_index)?;
+    let train_groups = train_indices
+        .iter()
+        .map(|index| fold_dataset.groups[*index].clone())
+        .collect::<Vec<_>>();
+    let validation_groups = &fold_dataset.groups[block.start..block.end];
+    let (grid_weights, effective_n) =
+        coordinate_search(context.seed, &train_groups, context.evaluator)?;
+    let grid_report = context.evaluator.evaluate(&grid_weights, &train_groups)?;
+    let (weights, _) = refine(
+        &grid_weights,
+        grid_report.objective_value(),
+        &train_groups,
+        context.evaluator,
+    )?;
+    Ok(ValidationFoldResult {
+        components: context
+            .evaluator
+            .evaluate(&weights, validation_groups)?
+            .rounded(),
+        diagnostics: context.evaluator.diagnostics(&weights, validation_groups)?,
+        effective_n,
     })
 }
 
-/// Inputs to [`assemble_fitted_weights`] (keeps the call site under the
-/// clippy argument-count budget without losing named fields).
-struct AssembleFittedWeights<'a> {
-    factors: &'a [FactorName],
-    weights: &'a [Decimal],
-    train_components: ObjectiveComponentReport,
-    evaluator: &'a ObjectiveEvaluator,
-    dataset: &'a TrainingDataset,
-    split: &'a TimeSplit,
-    folds: usize,
-    coord_search_effective_n: u32,
+fn ensure_fold_spine(
+    timeline_dataset: &TrainingDataset,
+    fold_dataset: &TrainingDataset,
+    fold_index: usize,
+) -> QuantResult<()> {
+    let changed = fold_dataset.groups.len() != timeline_dataset.groups.len()
+        || fold_dataset
+            .groups
+            .iter()
+            .zip(&timeline_dataset.groups)
+            .any(|(transformed, timeline)| transformed.decision_at != timeline.decision_at);
+    if changed {
+        return Err(ResearchError::Determinism {
+            detail: format!(
+                "weighted fold {} reference transform changed the timeline group spine",
+                fold_index + 1
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn fit_final_full_window(
+    context: &SimplexFitContext<'_>,
+    validation: ValidationReport,
+) -> QuantResult<FittedWeights> {
+    // Refit both the reference CDFs and the estimator on the final full training
+    // partition after CV. Held-out rows may assess the fold transform but cannot
+    // influence it; only this explicit final fit may consume the full dataset.
+    let final_references = fit_frozen_reference_quantiles(
+        context.examples,
+        context.label,
+        context.factors,
+        context.factor_cross_section,
+    )?;
+    let final_examples = apply_reference_quantiles(
+        context.examples,
+        &final_references,
+        context.factor_cross_section,
+    )?;
+    let final_dataset = TrainingDataset::build(&final_examples, context.label, context.factors)?;
+    let (final_grid, final_effective_n) =
+        coordinate_search(context.seed, &final_dataset.groups, context.evaluator)?;
+    let final_grid_report = context
+        .evaluator
+        .evaluate(&final_grid, &final_dataset.groups)?;
+    let (final_weights, final_report) = refine(
+        &final_grid,
+        final_grid_report.objective_value(),
+        &final_dataset.groups,
+        context.evaluator,
+    )?;
+    let mut final_fit = assemble_full_window_weights(
+        context.factors,
+        &final_weights,
+        final_report.rounded(),
+        context.evaluator,
+        &final_dataset,
+        final_effective_n,
+        final_references,
+    )?;
+    final_fit.validation = validation;
+    final_fit
+        .objective_report
+        .summary
+        .push_str("; purged held-out objective=");
+    final_fit.objective_report.summary.push_str(
+        &final_fit
+            .validation
+            .held_out_objective
+            .round_dp(4)
+            .to_string(),
+    );
+    Ok(final_fit)
 }
 
 /// Full-window fit path (`folds < 2`): no hold-out; held-out metrics mirror train.
@@ -408,9 +830,10 @@ fn assemble_full_window_weights(
     evaluator: &ObjectiveEvaluator,
     dataset: &TrainingDataset,
     coord_search_effective_n: u32,
-) -> FittedWeights {
+    frozen_reference_quantiles: FrozenReferenceQuantiles,
+) -> QuantResult<FittedWeights> {
     let train_objective = train_components.objective_value();
-    let diagnostics = evaluator.diagnostics(weights, &dataset.groups);
+    let diagnostics = evaluator.diagnostics(weights, &dataset.groups)?;
     let weights_dp = weights
         .iter()
         .map(|w| w.round_dp(RESEARCH_DECIMAL_SCALE))
@@ -424,7 +847,7 @@ fn assemble_full_window_weights(
             weight: weight.round_dp(RESEARCH_DECIMAL_SCALE),
         })
         .collect();
-    FittedWeights {
+    Ok(FittedWeights {
         factor_weights,
         objective_report: TrainingObjectiveReport {
             objective_value: train_objective.round_dp(RESEARCH_DECIMAL_SCALE),
@@ -432,7 +855,8 @@ fn assemble_full_window_weights(
             components: train_components.clone(),
             diagnostics: Some(diagnostics.clone()),
             summary: format!(
-                "ltr {:?} full-window train={} (CPCV fold / folds=1), {} groups, {} samples",
+                "ltr {:?} full-window train={} (final fit / CPCV fold), {} groups, {} samples \
+                 (TopN pseudo=rank-equal)",
                 evaluator.spec().rank_loss,
                 train_objective.round_dp(4),
                 dataset.groups.len(),
@@ -450,102 +874,7 @@ fn assemble_full_window_weights(
             dropped_singleton_rows: dataset.dropped_singleton_rows,
             coord_search_effective_n,
         },
-    }
-}
-
-/// Freeze weights, evaluate fold/held-out reports, and build the fit outcome.
-fn assemble_fitted_weights(input: AssembleFittedWeights<'_>) -> QuantResult<FittedWeights> {
-    let AssembleFittedWeights {
-        factors,
-        weights,
-        train_components,
-        evaluator,
-        dataset,
-        split,
-        folds,
-        coord_search_effective_n,
-    } = input;
-    let train_objective = train_components.objective_value();
-    // Diagnostics on the contiguous pre-hold-out prefix (audit view); the
-    // optimizer itself only saw the purged train subset.
-    let train_groups = &dataset.groups[..split.train_end];
-    let train_diagnostics = evaluator.diagnostics(weights, train_groups);
-
-    // Per-block diagnostics over every block; the held-out last block is the
-    // true validation objective (the final weights never saw it). Evaluated
-    // serially so a non-finite score fails closed without rayon Result plumbing.
-    let blocks = split.blocks();
-    let mut fold_components = Vec::with_capacity(blocks.len());
-    for block in &blocks {
-        fold_components.push(
-            evaluator
-                .evaluate(weights, &dataset.groups[block.start..block.end])?
-                .rounded(),
-        );
-    }
-    let fold_objectives: Vec<Decimal> = fold_components
-        .iter()
-        .map(ObjectiveComponentReport::objective_value)
-        .collect();
-    let held_out = split.held_out();
-    let held_out_groups = &dataset.groups[held_out.start..held_out.end];
-    let held_out_components = evaluator.evaluate(weights, held_out_groups)?.rounded();
-    let held_out_objective = held_out_components.objective_value();
-    let held_out_diagnostics = evaluator.diagnostics(weights, held_out_groups);
-
-    let weights_dp = weights
-        .iter()
-        .map(|w| w.round_dp(RESEARCH_DECIMAL_SCALE))
-        .collect::<Vec<_>>();
-    let frozen = normalize_simplex(&weights_dp);
-    let factor_weights: Vec<FactorWeight> = factors
-        .iter()
-        .zip(&frozen)
-        .map(|(factor, weight)| FactorWeight {
-            factor: factor.clone(),
-            weight: weight.round_dp(RESEARCH_DECIMAL_SCALE),
-        })
-        .collect();
-
-    let objective_report = TrainingObjectiveReport {
-        objective_value: train_objective.round_dp(RESEARCH_DECIMAL_SCALE),
-        spec: evaluator.spec().clone(),
-        components: train_components,
-        diagnostics: Some(train_diagnostics),
-        summary: format!(
-            "ltr {:?} train={} held_out={} ndcg@{}={} rank_ic={} over {} folds, {} groups, {} samples, \
-             dropped_singleton_groups={}, dropped_singleton_rows={} (TopN pseudo=rank-equal)",
-            evaluator.spec().rank_loss,
-            train_objective.round_dp(4),
-            held_out_objective.round_dp(4),
-            held_out_diagnostics.ndcg_k,
-            held_out_diagnostics.mean_ndcg_at_k.round_dp(4),
-            held_out_diagnostics.mean_rank_ic.round_dp(4),
-            folds,
-            dataset.groups.len(),
-            dataset.sample_count,
-            dataset.dropped_singleton_groups,
-            dataset.dropped_singleton_rows
-        ),
-    };
-
-    Ok(FittedWeights {
-        factor_weights,
-        objective_report,
-        validation: ValidationReport {
-            held_out_objective: held_out_objective.round_dp(RESEARCH_DECIMAL_SCALE),
-            held_out_components: Some(held_out_components),
-            held_out_diagnostics: Some(held_out_diagnostics),
-            fold_objectives: fold_objectives
-                .iter()
-                .map(|v| v.round_dp(RESEARCH_DECIMAL_SCALE))
-                .collect(),
-            fold_components,
-            sample_count: dataset.sample_count,
-            dropped_singleton_groups: dataset.dropped_singleton_groups,
-            dropped_singleton_rows: dataset.dropped_singleton_rows,
-            coord_search_effective_n,
-        },
+        frozen_reference_quantiles,
     })
 }
 
@@ -579,7 +908,13 @@ fn refine(
         ));
     }
 
-    match optimize::refine_weights(grid_weights, train_groups, evaluator) {
+    let refined =
+        optimize::refine_weights(grid_weights, train_groups, evaluator).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("argmin refinement failed: {error}"),
+            }
+        })?;
+    match refined {
         Some(refined) => {
             let refined_report = evaluator.evaluate(&refined, train_groups)?;
             let refined_objective = refined_report.objective_value();
@@ -675,10 +1010,20 @@ fn coordinate_search(
         best[from] -= step;
         best[to] += step;
         best_obj = obj;
-        improving_rounds = improving_rounds.saturating_add(1);
+        improving_rounds = improving_rounds.checked_add(1).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: "weighted coordinate-search trial count overflow".to_owned(),
+            }
+        })?;
     }
     // Seed + each accepted improving round = effective independent trials.
-    Ok((best, improving_rounds.saturating_add(1)))
+    let effective_trials =
+        improving_rounds
+            .checked_add(1)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "weighted coordinate-search effective trial count overflow".to_owned(),
+            })?;
+    Ok((best, effective_trials))
 }
 
 /// Enumerate every feasible weight-shifting move from `best` in the fixed order
@@ -730,7 +1075,7 @@ struct TrainingDataset {
 
 impl TrainingDataset {
     /// Extract signed factor contributions + label per resolved example, sorted
-    /// by `(as_of, market_id, token_id)` for deterministic folding. Examples
+    /// by `(decision_at, market_id, token_id)` for deterministic folding. Examples
     /// without the target label are skipped (never silently zero-filled).
     /// Cross-sections with fewer than two rows are dropped and counted.
     fn build(
@@ -740,8 +1085,8 @@ impl TrainingDataset {
     ) -> QuantResult<Self> {
         let mut sorted: Vec<&TrainingExample> = examples.iter().collect();
         sorted.sort_by(|a, b| {
-            a.as_of
-                .cmp(&b.as_of)
+            a.decision_at()
+                .cmp(&b.decision_at())
                 .then_with(|| a.market_id.as_str().cmp(b.market_id.as_str()))
                 .then_with(|| a.token_id.as_str().cmp(b.token_id.as_str()))
         });
@@ -749,22 +1094,22 @@ impl TrainingDataset {
         let mut groups = Vec::new();
         let mut dropped_singleton_groups = 0_u64;
         let mut dropped_singleton_rows = 0_u64;
-        let mut current_as_of = None;
+        let mut current_decision_at = None;
         let mut current_horizon_end = None;
         let mut current_rows = Vec::new();
         for example in sorted {
-            if current_as_of.is_some_and(|as_of| as_of != example.as_of) {
+            if current_decision_at.is_some_and(|decision_at| decision_at != example.decision_at()) {
                 push_group(
                     &mut groups,
-                    current_as_of,
+                    current_decision_at,
                     current_horizon_end,
                     std::mem::take(&mut current_rows),
                     &mut dropped_singleton_groups,
                     &mut dropped_singleton_rows,
-                );
+                )?;
                 current_horizon_end = None;
             }
-            current_as_of = Some(example.as_of);
+            current_decision_at = Some(example.decision_at());
             let Some(label_row) = example.labels.iter().find(|row| {
                 (&row.label_name, row.horizon_secs) == (&label.name, label.horizon_secs)
             }) else {
@@ -789,24 +1134,31 @@ impl TrainingDataset {
                 label: label_value,
             });
         }
-        if current_as_of.is_some() {
+        if current_decision_at.is_some() {
             push_group(
                 &mut groups,
-                current_as_of,
+                current_decision_at,
                 current_horizon_end,
                 current_rows,
                 &mut dropped_singleton_groups,
                 &mut dropped_singleton_rows,
-            );
+            )?;
         }
-        let sample_count = groups
-            .iter()
-            .map(|group| group.rows.len() as u64)
-            .sum::<u64>();
+        let sample_count = groups.iter().try_fold(0_u64, |total, group| {
+            let row_count =
+                u64::try_from(group.rows.len()).map_err(|error| ResearchError::DatasetBuild {
+                    detail: format!("training group row-count conversion failed: {error}"),
+                })?;
+            total.checked_add(row_count).ok_or_else(|| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: "training sample count overflow".to_owned(),
+                })
+            })
+        })?;
         if groups.is_empty() {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "no as_of cross-section group with ≥2 rows for label `{}`@{}s \
+                    "no decision_at cross-section group with ≥2 rows for label `{}`@{}s \
                      (dropped_singleton_groups={dropped_singleton_groups}, \
                      dropped_singleton_rows={dropped_singleton_rows})",
                     label.name.as_str(),
@@ -826,28 +1178,41 @@ impl TrainingDataset {
 
 fn push_group(
     groups: &mut Vec<CrossSectionGroup>,
-    as_of: Option<DateTime<Utc>>,
+    decision_at: Option<DateTime<Utc>>,
     label_horizon_end: Option<DateTime<Utc>>,
     rows: Vec<SampleRow>,
     dropped_singleton_groups: &mut u64,
     dropped_singleton_rows: &mut u64,
-) {
-    let (Some(as_of), Some(label_horizon_end)) = (as_of, label_horizon_end) else {
-        return;
+) -> QuantResult<()> {
+    let (Some(decision_at), Some(label_horizon_end)) = (decision_at, label_horizon_end) else {
+        return Ok(());
     };
     if rows.len() >= 2 {
         groups.push(CrossSectionGroup {
-            as_of,
+            decision_at,
             label_horizon_end,
             rows,
         });
-        return;
+        return Ok(());
     }
     if rows.is_empty() {
-        return;
+        return Ok(());
     }
-    *dropped_singleton_groups = dropped_singleton_groups.saturating_add(1);
-    *dropped_singleton_rows = dropped_singleton_rows.saturating_add(rows.len() as u64);
+    *dropped_singleton_groups =
+        dropped_singleton_groups
+            .checked_add(1)
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "dropped singleton-group count overflow".to_owned(),
+            })?;
+    let row_count = u64::try_from(rows.len()).map_err(|error| ResearchError::DatasetBuild {
+        detail: format!("singleton row-count conversion failed: {error}"),
+    })?;
+    *dropped_singleton_rows = dropped_singleton_rows
+        .checked_add(row_count)
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "dropped singleton-row count overflow".to_owned(),
+        })?;
+    Ok(())
 }
 
 /// `dir_sign · normalized · confidence` for one factor of one example, or `0`
@@ -855,7 +1220,11 @@ fn push_group(
 pub(crate) fn signed_contribution(example: &TrainingExample, factor: &FactorName) -> Decimal {
     if is_position_state_factor(factor) {
         if let Some(state) = &example.position_state {
-            return position_state_signed_contribution(state, factor);
+            // The dense additive objective uses zero contribution for an
+            // explicitly missing pseudo-factor. The frozen `position_state`
+            // remains missing and never gains confidence; pseudo-factors are
+            // not duplicated into the governed factor-revision ledger.
+            return position_state_signed_contribution(state, factor).unwrap_or(Decimal::ZERO);
         }
         return Decimal::ZERO;
     }
@@ -874,24 +1243,30 @@ pub(crate) fn signed_contribution(example: &TrainingExample, factor: &FactorName
 
 /// A contiguous, time-ordered fold layout for rolling validation.
 struct TimeSplit {
-    train_end: usize,
     boundaries: Vec<usize>,
 }
 
 impl TimeSplit {
-    /// Split `len` time-ordered rows into `folds` contiguous blocks. The last
-    /// block is the held-out validation fold; everything before it trains.
-    fn new(len: usize, folds: usize) -> Self {
+    /// Split `len` time-ordered rows into `folds` contiguous blocks.
+    fn new(len: usize, folds: usize) -> QuantResult<Self> {
         let folds = folds.max(2);
-        let mut boundaries = Vec::with_capacity(folds + 1);
+        let capacity =
+            folds
+                .checked_add(1)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "weighted fold boundary capacity overflow".to_owned(),
+                })?;
+        let mut boundaries = Vec::with_capacity(capacity);
         for k in 0..=folds {
-            boundaries.push(len * k / folds);
+            let boundary = len
+                .checked_mul(k)
+                .map(|product| product / folds)
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "weighted fold boundary arithmetic overflow".to_owned(),
+                })?;
+            boundaries.push(boundary);
         }
-        let train_end = boundaries[folds - 1].max(1).min(len);
-        Self {
-            train_end,
-            boundaries,
-        }
+        Ok(Self { boundaries })
     }
 
     /// Every fold block (diagnostic), skipping empties.
@@ -906,13 +1281,10 @@ impl TimeSplit {
             .collect()
     }
 
-    /// The held-out last block (true validation range).
-    fn held_out(&self) -> TimeBlock {
-        let last = self.boundaries.len() - 1;
-        TimeBlock {
-            start: self.boundaries[last - 1],
-            end: self.boundaries[last],
-        }
+    /// Walk-forward OOS blocks. The first block is never evaluated because no
+    /// strictly earlier train partition exists for it.
+    fn validation_blocks(&self) -> Vec<TimeBlock> {
+        self.blocks().into_iter().skip(1).collect()
     }
 }
 
@@ -927,19 +1299,22 @@ struct TimeBlock {
 mod tests {
     use super::{
         LabelSelector, ModelTrainer, TimeSplit, TrainModelRequest, TrainingDataset,
-        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer,
+        TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer, weighted_training_input_hash,
     };
     use std::collections::BTreeMap;
 
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
+        domain::DecisionClock,
         enums::{
+            common::MarketCategory,
             factor::FactorFamily,
             quant::{DataQualityStatus, FactorDirection},
         },
+        runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
         types::{
-            ContentHash, FactorDefinitionId, MarketId, ModelVersionId, Probability, SchemaVersion,
-            TokenId, TrainingExampleId, TrainingSampleSource,
+            ContentHash, FactorDefinitionId, MarketId, ModelInputContract, ModelVersionId,
+            Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
         },
     };
     use rust_decimal::Decimal;
@@ -947,7 +1322,7 @@ mod tests {
 
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue, NormalizedFactor,
+            FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
             names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         features::FeatureVector,
@@ -981,20 +1356,17 @@ mod tests {
         let fv = FeatureVector {
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: Some(TokenId::new("yes")),
-            as_of: Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000 + (idx / 2), 0).unwrap(),
             generic_schema_version: SchemaVersion::FIRST,
             generic: BTreeMap::new(),
             domain: None,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         };
         let mk = |name: FactorName, score: Decimal| FactorValue {
             definition_id: FactorDefinitionId::from_v7(),
             name,
             family: FactorFamily::Liquidity,
-            raw_value: Some(dec!(1)),
+            raw_value: Some(score),
             normalization: NormalizedFactor::cross_section(Probability::new(score)),
             direction: dir,
             confidence: Probability::new(dec!(1)),
@@ -1009,7 +1381,12 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
-            as_of,
+            selected_market: crate::training::fixtures::selected_market(
+                &MarketId::new(format!("0x{idx}")),
+                &TokenId::new("yes"),
+                MarketCategory::Sports,
+            ),
+            decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: fv,
             factor_values: vec![mk(LIQUIDITY_DEPTH, liq), mk(MOMENTUM_ROC, mom)],
@@ -1021,6 +1398,7 @@ mod tests {
                 matured_at: as_of,
             }],
             source_refs: Vec::new(),
+            decision_capture: None,
             lot_context: None,
             position_state: None,
             book_fidelity: None,
@@ -1030,6 +1408,7 @@ mod tests {
     fn request(examples: Vec<TrainingExample>) -> TrainModelRequest {
         TrainModelRequest {
             examples,
+            training_dataset_hash: hash("cc"),
             label: LabelSelector {
                 name: label_name(),
                 horizon_secs: 0,
@@ -1064,7 +1443,8 @@ mod tests {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            factor_cross_section: FactorCrossSectionConfig::default(),
             category_scope: None,
         }
     }
@@ -1090,6 +1470,7 @@ mod tests {
         let trainer = WeightedFactorTrainer::new();
         // Same request (identical version id + data) ⇒ identical artifact hash.
         let req = request(momentum_dataset());
+        let expected_dataset_hash = req.training_dataset_hash.clone();
         let a = trainer.train(req.clone()).await.expect("train a");
         let b = trainer.train(req).await.expect("train b");
         assert_eq!(
@@ -1100,11 +1481,89 @@ mod tests {
             ModelArtifact::WeightedFactor(art) => {
                 art.validate().expect("valid weights");
                 assert!(art.objective_report.is_some(), "objective report filled");
+                assert_eq!(art.training_dataset_hash, expected_dataset_hash);
+                assert!(!art.training_input_hash.as_str().is_empty());
             }
             ModelArtifact::Classical(_) | ModelArtifact::SellScorer(_) => {
                 panic!("expected weighted artifact")
             }
         }
+    }
+
+    #[test]
+    fn future_validation_block_cannot_change_an_earlier_fold_transform() {
+        let baseline_examples = momentum_dataset();
+        let mut shifted_examples = baseline_examples.clone();
+        let mut group_times = baseline_examples
+            .iter()
+            .map(TrainingExample::decision_at)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        group_times.sort();
+        let future_start = group_times[6];
+        for example in shifted_examples
+            .iter_mut()
+            .filter(|example| example.decision_at() >= future_start)
+        {
+            for (index, factor) in example.factor_values.iter_mut().enumerate() {
+                factor.raw_value = Some(Decimal::from(1_000 + index));
+            }
+        }
+        let mut baseline_request = request(baseline_examples);
+        baseline_request
+            .factor_cross_section
+            .small_cross_section_policy = SmallCrossSectionPolicy::FrozenReferenceQuantile;
+        let mut shifted_request = request(shifted_examples);
+        shifted_request
+            .factor_cross_section
+            .small_cross_section_policy = SmallCrossSectionPolicy::FrozenReferenceQuantile;
+
+        let baseline = train_weighted(&baseline_request).expect("baseline folds");
+        let shifted = train_weighted(&shifted_request).expect("shifted folds");
+        assert_eq!(
+            baseline.validation_metrics.fold_components[0],
+            shifted.validation_metrics.fold_components[0],
+            "future validation rows must not fit an earlier fold reference CDF or estimator"
+        );
+        assert_ne!(
+            baseline.artifact_hash, shifted.artifact_hash,
+            "the explicit final full-window refit must still bind the changed future rows"
+        );
+    }
+
+    #[test]
+    fn weighted_training_input_hash_binds_decision_boundary() {
+        let examples = momentum_dataset();
+        let label = LabelSelector {
+            name: label_name(),
+            horizon_secs: 0,
+        };
+        let factors = vec![LIQUIDITY_DEPTH, MOMENTUM_ROC];
+        let references = FrozenReferenceQuantiles::empty();
+        let cross_section = FactorCrossSectionConfig::default();
+        let original = weighted_training_input_hash(
+            &examples,
+            &label,
+            &factors,
+            &references,
+            Some(&cross_section),
+        )
+        .expect("original input hash");
+        let mut changed = examples;
+        let decision_at = changed[0].decision_at();
+        changed[0].decision_boundary = DecisionClock::new(1)
+            .boundary(decision_at)
+            .expect("changed boundary");
+        let changed = weighted_training_input_hash(
+            &changed,
+            &label,
+            &factors,
+            &references,
+            Some(&cross_section),
+        )
+        .expect("changed input hash");
+        assert_ne!(original, changed);
     }
 
     /// The artifact hash must not depend on `rayon`'s thread count: the parallel
@@ -1168,11 +1627,17 @@ mod tests {
         assert!(diagnostics.group_count > 0);
         assert_eq!(diagnostics.ndcg_k, 20);
         assert!(outcome.validation_metrics.held_out_diagnostics.is_some());
+        assert_eq!(
+            outcome.validation_metrics.fold_objectives.len(),
+            2,
+            "three time blocks must produce two independently fitted walk-forward OOS folds"
+        );
+        assert_eq!(outcome.validation_metrics.fold_components.len(), 2);
     }
 
     #[test]
-    fn time_split_operates_on_atomic_as_of_groups() {
-        // `TrainingDataset::build` collapses each as_of into one group; TimeSplit
+    fn time_split_operates_on_atomic_decision_groups() {
+        // `TrainingDataset::build` collapses each decision_at into one group; TimeSplit
         // indexes groups (not rows), so a cross-section cannot be bisected.
         let examples = momentum_dataset();
         let factors = [LIQUIDITY_DEPTH, MOMENTUM_ROC];
@@ -1185,34 +1650,39 @@ mod tests {
             &factors,
         )
         .expect("dataset");
-        let distinct_as_ofs: std::collections::BTreeSet<_> =
-            examples.iter().map(|example| example.as_of).collect();
+        let distinct_decision_times: std::collections::BTreeSet<_> =
+            examples.iter().map(TrainingExample::decision_at).collect();
         assert_eq!(
             dataset.groups.len(),
-            distinct_as_ofs.len(),
-            "one group per as_of (momentum_dataset has >=2 rows each)"
+            distinct_decision_times.len(),
+            "one group per decision_at (momentum_dataset has >=2 rows each)"
         );
         for group in &dataset.groups {
             assert!(group.rows.len() >= 2);
         }
         assert_eq!(dataset.dropped_singleton_groups, 0);
         assert_eq!(dataset.dropped_singleton_rows, 0);
-        let split = TimeSplit::new(dataset.groups.len(), 3);
+        let split = TimeSplit::new(dataset.groups.len(), 3).expect("time split");
         let covered: usize = split
             .blocks()
             .iter()
             .map(|block| block.end - block.start)
             .sum();
         assert_eq!(covered, dataset.groups.len());
+        assert_eq!(split.validation_blocks().len(), 2);
         assert_eq!(
-            split.held_out().end - split.held_out().start,
-            dataset.groups.len() - split.train_end
+            split
+                .validation_blocks()
+                .last()
+                .expect("held-out block")
+                .end,
+            dataset.groups.len()
         );
     }
 
     #[test]
-    fn singleton_as_of_groups_are_dropped_and_counted() {
-        // Pair even/odd into shared as_of via `idx / 2`. Inject one lone as_of.
+    fn singleton_decision_groups_are_dropped_and_counted() {
+        // Pair even/odd into one decision instant via `idx / 2`. Inject one singleton.
         let mut examples = momentum_dataset();
         examples.push(example(
             100,
@@ -1242,7 +1712,7 @@ mod tests {
 
         // Two-row group: selecting the high-score name yields a large loss.
         let group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 SampleRow {
@@ -1318,15 +1788,15 @@ mod tests {
     /// the trainer CV train set (same semantics as CPCV `PurgedSplitter`).
     #[test]
     fn trainer_cv_respects_label_horizon_purge() {
-        // 6 as_of groups (2 markets each). Held-out fold for folds=3 is the
+        // 6 decision-time groups (2 markets each). Held-out fold for folds=3 is the
         // last 2 groups. Give early groups a matured_at that overlaps the
-        // held-out as_of so purge removes them from train.
+        // held-out decision time so purge removes them from train.
         let mut examples = Vec::new();
         for group_idx in 0..6_i64 {
             let as_of = Utc
                 .timestamp_opt(1_700_000_000 + group_idx * 100, 0)
                 .unwrap();
-            // Groups 0..=3 mature after group 4's as_of → overlap held-out.
+            // Groups 0..=3 mature after group 4's decision_at → overlap held-out.
             let matured_at = if group_idx <= 3 {
                 Utc.timestamp_opt(1_700_000_000 + 450, 0).unwrap()
             } else {
@@ -1341,8 +1811,8 @@ mod tests {
                     FactorDirection::Positive,
                     Decimal::from(market),
                 );
-                ex.as_of = as_of;
-                ex.feature_vector.as_of = as_of;
+                ex.decision_boundary = DecisionClock::new(0).boundary(as_of).expect("boundary");
+                ex.feature_vector.decision_at = as_of;
                 ex.labels[0].matured_at = matured_at;
                 examples.push(ex);
             }
@@ -1377,7 +1847,7 @@ mod tests {
         use crate::model::objective::{CrossSectionGroup, ObjectiveEvaluator, SampleRow};
 
         let groups = vec![CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 SampleRow {
@@ -1449,7 +1919,7 @@ mod optimize_tests {
             })
             .collect();
         vec![CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows,
         }]
@@ -1477,8 +1947,8 @@ mod optimize_tests {
         let groups = synth_group(7, 3, 60);
         let seed = vec![dec!(0.2), dec!(0.3), dec!(0.5)];
         let evaluator = evaluator(dec!(0.01));
-        let a = refine_weights(&seed, &groups, &evaluator);
-        let b = refine_weights(&seed, &groups, &evaluator);
+        let a = refine_weights(&seed, &groups, &evaluator).expect("first refinement");
+        let b = refine_weights(&seed, &groups, &evaluator).expect("second refinement");
         assert_eq!(a, b, "refine_weights must be deterministic");
         assert!(a.is_some(), "refinement produced a candidate");
     }

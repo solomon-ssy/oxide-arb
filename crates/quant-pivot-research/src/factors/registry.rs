@@ -2,9 +2,9 @@
 //!
 //! [`FactorRegistry::build`] selects the generic factors whose family is enabled
 //! by `factors.enabled_factor_families`, resolving each factor's input feature
-//! names against the active feature config. Definition ids are deterministic
-//! (UUID v5 of the factor name), so a factor's identity is stable across runs and
-//! its persisted definition is idempotent.
+//! names against the active feature config. [`crate::factors::FactorEngine`]
+//! binds these specs to the feature-contract hash and derives an immutable,
+//! content-addressed revision identity.
 
 use std::collections::HashSet;
 use std::sync::Arc;

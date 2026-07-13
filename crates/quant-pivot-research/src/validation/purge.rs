@@ -20,18 +20,19 @@
 //! unmodified.
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 /// One atomic, purge/embargo-indivisible split unit.
 ///
-/// A time interval `[as_of, label_horizon_end]` inside which every member
+/// A time interval `[decision_at, label_horizon_end]` inside which every member
 /// row's label is not yet fully resolved. Two groups whose intervals overlap
 /// must never be split across a train/test boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineGroup {
-    /// The group's decision time (e.g. a same-`as_of` cross-section's `as_of`,
+    /// The group's decision time (e.g. a same-decision-time cross-section,
     /// or a lot's first decision instant).
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// The conservative upper bound of every member row's label maturity
     /// (`TrainingLabel::matured_at`, maxed across the group's rows for the
     /// label actually being trained on).
@@ -39,10 +40,10 @@ pub struct TimelineGroup {
 }
 
 impl TimelineGroup {
-    /// Whether this group's `[as_of, label_horizon_end]` interval overlaps `other`'s.
+    /// Whether this group's `[decision_at, label_horizon_end]` interval overlaps `other`'s.
     #[must_use]
     fn overlaps(&self, other: &Self) -> bool {
-        self.as_of <= other.label_horizon_end && other.as_of <= self.label_horizon_end
+        self.decision_at <= other.label_horizon_end && other.decision_at <= self.label_horizon_end
     }
 }
 
@@ -99,12 +100,17 @@ pub trait PurgedSplitter: Send + Sync {
     /// `groups` must be sorted ascending by `as_of` (callers own the sort so
     /// the same sorted slice can be reused across many combinatorial splits).
     /// `test_indices` selects which groups are the test set for this split.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchError::ValidationMethodology`] for an invalid
+    /// timeline/index/config or an embargo duration that cannot be represented.
     fn split(
         &self,
         groups: &[TimelineGroup],
         test_indices: &[usize],
         config: &PurgeConfig,
-    ) -> PurgedSplit;
+    ) -> QuantResult<PurgedSplit>;
 }
 
 /// The production [`PurgedSplitter`]: label-horizon overlap purge + trailing
@@ -126,13 +132,37 @@ impl PurgedSplitter for DefaultPurgedSplitter {
         groups: &[TimelineGroup],
         test_indices: &[usize],
         config: &PurgeConfig,
-    ) -> PurgedSplit {
+    ) -> QuantResult<PurgedSplit> {
+        validate_timeline(groups, config)?;
         let mut test_indices: Vec<usize> = test_indices.to_vec();
         test_indices.sort_unstable();
         test_indices.dedup();
 
-        let embargo_duration = embargo_duration(groups, config);
-        let test_groups: Vec<TimelineGroup> = test_indices.iter().map(|&i| groups[i]).collect();
+        let embargo_duration = embargo_duration(groups, config)?;
+        let test_groups = test_indices
+            .iter()
+            .map(|&index| {
+                groups.get(index).copied().ok_or_else(|| {
+                    methodology(format!(
+                        "purge test index {index} is outside {} timeline groups",
+                        groups.len()
+                    ))
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let embargo_ends = test_groups
+            .iter()
+            .map(|test| {
+                test.label_horizon_end
+                    .checked_add_signed(embargo_duration)
+                    .ok_or_else(|| {
+                        methodology(format!(
+                            "embargo duration overflows test horizon {}",
+                            test.label_horizon_end
+                        ))
+                    })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
 
         let mut train_indices = Vec::new();
         let mut purged_indices = Vec::new();
@@ -145,9 +175,8 @@ impl PurgedSplitter for DefaultPurgedSplitter {
                 purged_indices.push(i);
                 continue;
             }
-            let embargoed = test_groups.iter().any(|test| {
-                group.as_of > test.label_horizon_end
-                    && group.as_of <= test.label_horizon_end + embargo_duration
+            let embargoed = test_groups.iter().zip(&embargo_ends).any(|(test, end)| {
+                group.decision_at > test.label_horizon_end && group.decision_at <= *end
             });
             if embargoed {
                 embargoed_indices.push(i);
@@ -156,34 +185,67 @@ impl PurgedSplitter for DefaultPurgedSplitter {
             train_indices.push(i);
         }
 
-        PurgedSplit {
+        Ok(PurgedSplit {
             train_indices,
             test_indices,
             purged_indices,
             embargoed_indices,
-        }
+        })
     }
 }
 
 /// The embargo window as an absolute [`Duration`]: the larger of
 /// `embargo_pct × span` and `min_embargo_secs`. Zero for fewer than two groups
 /// or a non-positive span when both knobs are zero.
-fn embargo_duration(groups: &[TimelineGroup], config: &PurgeConfig) -> Duration {
-    let floor = Duration::seconds(i64::try_from(config.min_embargo_secs).unwrap_or(i64::MAX));
+fn embargo_duration(groups: &[TimelineGroup], config: &PurgeConfig) -> QuantResult<Duration> {
+    let floor_secs = i64::try_from(config.min_embargo_secs).map_err(|error| {
+        methodology(format!(
+            "min_embargo_secs={} exceeds chrono duration range: {error}",
+            config.min_embargo_secs
+        ))
+    })?;
+    let floor = Duration::seconds(floor_secs);
     let (Some(first), Some(last)) = (groups.first(), groups.last()) else {
-        return floor;
+        return Ok(floor);
     };
-    let span_secs = (last.label_horizon_end - first.as_of).num_seconds();
+    let span_secs = (last.label_horizon_end - first.decision_at).num_seconds();
     if span_secs <= 0 || config.embargo_pct <= Decimal::ZERO {
-        return floor;
+        return Ok(floor);
     }
-    let pct_secs = (Decimal::from(span_secs) * config.embargo_pct)
+    let pct_secs = Decimal::from(span_secs)
+        .checked_mul(config.embargo_pct)
+        .ok_or_else(|| methodology("embargo percentage multiplication overflowed".to_owned()))?
         .round()
         .to_i64()
-        .unwrap_or(0)
-        .max(0);
+        .ok_or_else(|| methodology("embargo duration does not fit i64 seconds".to_owned()))?;
     let pct = Duration::seconds(pct_secs);
-    if pct > floor { pct } else { floor }
+    Ok(if pct > floor { pct } else { floor })
+}
+
+fn validate_timeline(groups: &[TimelineGroup], config: &PurgeConfig) -> QuantResult<()> {
+    if !(Decimal::ZERO..=Decimal::ONE).contains(&config.embargo_pct) {
+        return Err(methodology(format!(
+            "embargo_pct must be in [0, 1], got {}",
+            config.embargo_pct
+        )));
+    }
+    for (index, group) in groups.iter().enumerate() {
+        if group.label_horizon_end < group.decision_at {
+            return Err(methodology(format!(
+                "timeline group {index} label horizon precedes its decision time"
+            )));
+        }
+        if index > 0 && groups[index - 1].decision_at > group.decision_at {
+            return Err(methodology(format!(
+                "timeline groups are not sorted at index {index}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn methodology(detail: String) -> QuantError {
+    ResearchError::ValidationMethodology { detail }.into()
 }
 
 #[cfg(test)]
@@ -200,7 +262,7 @@ mod tests {
             .map(|h| {
                 let as_of = Utc.timestamp_opt(1_700_000_000 + h * 3_600, 0).unwrap();
                 TimelineGroup {
-                    as_of,
+                    decision_at: as_of,
                     label_horizon_end: as_of + chrono::Duration::minutes(90),
                 }
             })
@@ -213,8 +275,9 @@ mod tests {
         // must purge groups 2 and 4 (their intervals overlap group 3's), but
         // must NOT purge group 1 or 5 (no overlap: gap > 90m).
         let groups = overlapping_groups(6);
-        let split =
-            DefaultPurgedSplitter::new().split(&groups, &[3], &PurgeConfig::pct_only(dec!(0)));
+        let split = DefaultPurgedSplitter::new()
+            .split(&groups, &[3], &PurgeConfig::pct_only(dec!(0)))
+            .expect("split");
         assert!(
             split.purged_indices.contains(&2),
             "group 2 overlaps group 3's horizon"
@@ -236,8 +299,9 @@ mod tests {
         // groups, since their `as_of`s never collide. The label-horizon-aware
         // splitter must still purge — this is the #7 regression this module closes.
         let groups = overlapping_groups(6);
-        let split =
-            DefaultPurgedSplitter::new().split(&groups, &[3], &PurgeConfig::pct_only(dec!(0)));
+        let split = DefaultPurgedSplitter::new()
+            .split(&groups, &[3], &PurgeConfig::pct_only(dec!(0)))
+            .expect("split");
         assert!(
             !split.purged_indices.is_empty(),
             "label-horizon-aware purge must remove overlapping neighbors even though \
@@ -253,13 +317,14 @@ mod tests {
             .map(|h| {
                 let as_of = Utc.timestamp_opt(1_700_000_000 + h * 3_600, 0).unwrap();
                 TimelineGroup {
-                    as_of,
+                    decision_at: as_of,
                     label_horizon_end: as_of,
                 }
             })
             .collect();
-        let split =
-            DefaultPurgedSplitter::new().split(&groups, &[50], &PurgeConfig::pct_only(dec!(0.02)));
+        let split = DefaultPurgedSplitter::new()
+            .split(&groups, &[50], &PurgeConfig::pct_only(dec!(0.02)))
+            .expect("split");
         assert!(
             split.embargoed_indices.contains(&51),
             "the group immediately after the test group must be embargoed"
@@ -277,13 +342,14 @@ mod tests {
             .map(|h| {
                 let as_of = Utc.timestamp_opt(1_700_000_000 + h * 3_600, 0).unwrap();
                 TimelineGroup {
-                    as_of,
+                    decision_at: as_of,
                     label_horizon_end: as_of,
                 }
             })
             .collect();
-        let split =
-            DefaultPurgedSplitter::new().split(&groups, &[5], &PurgeConfig::pct_only(dec!(0)));
+        let split = DefaultPurgedSplitter::new()
+            .split(&groups, &[5], &PurgeConfig::pct_only(dec!(0)))
+            .expect("split");
         assert!(split.embargoed_indices.is_empty());
         assert!(split.train_indices.contains(&6));
     }
@@ -297,13 +363,14 @@ mod tests {
             .map(|i| {
                 let start = Utc.timestamp_opt(1_000_000 + i * 1_000, 0).unwrap();
                 TimelineGroup {
-                    as_of: start,
+                    decision_at: start,
                     label_horizon_end: start + chrono::Duration::seconds(500),
                 }
             })
             .collect();
-        let split =
-            DefaultPurgedSplitter::new().split(&groups, &[2], &PurgeConfig::pct_only(dec!(0.1)));
+        let split = DefaultPurgedSplitter::new()
+            .split(&groups, &[2], &PurgeConfig::pct_only(dec!(0.1)))
+            .expect("split");
         assert_eq!(split.test_indices, vec![2]);
         assert!(
             split.train_indices.len()
@@ -317,11 +384,9 @@ mod tests {
     #[test]
     fn every_index_is_partitioned_exactly_once() {
         let groups = overlapping_groups(12);
-        let split = DefaultPurgedSplitter::new().split(
-            &groups,
-            &[4, 5],
-            &PurgeConfig::pct_only(dec!(0.05)),
-        );
+        let split = DefaultPurgedSplitter::new()
+            .split(&groups, &[4, 5], &PurgeConfig::pct_only(dec!(0.05)))
+            .expect("split");
         let mut seen = vec![0_u8; groups.len()];
         for &i in &split.train_indices {
             seen[i] += 1;
@@ -338,6 +403,30 @@ mod tests {
         assert!(
             seen.iter().all(|&count| count == 1),
             "every group must land in exactly one bucket: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn embargo_duration_overflow_is_rejected_instead_of_saturated() {
+        let groups = overlapping_groups(2);
+        let result = DefaultPurgedSplitter::new().split(
+            &groups,
+            &[0],
+            &PurgeConfig {
+                embargo_pct: dec!(0),
+                min_embargo_secs: u64::MAX,
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn out_of_range_test_index_is_rejected_instead_of_panicking() {
+        let groups = overlapping_groups(2);
+        assert!(
+            DefaultPurgedSplitter::new()
+                .split(&groups, &[2], &PurgeConfig::pct_only(dec!(0)))
+                .is_err()
         );
     }
 }

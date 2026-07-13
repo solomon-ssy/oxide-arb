@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{GovernanceActor, ModelSpecInfo},
+    domain::{FeatureContractView, GovernanceActor, ModelSpecInfo},
     enums::model::ModelFamily,
-    types::{ModelSpecId, SchemaVersion},
+    types::{ModelInputContract, ModelSpecId, ModelTrainingContract, SchemaVersion},
 };
 
 /// Service input to author a new `draft` model specification.
@@ -29,11 +29,11 @@ pub struct CreateModelSpecCommand {
     pub label_schema_version: SchemaVersion,
     /// Free-form authoring metadata.
     pub spec_json: serde_json::Value,
-    /// Governed feature-requirements contract (11.2.2 remediation R7):
-    /// deserializes to `quant_pivot_research::selection::ModelFeatureRequirements`.
-    /// Validated by `ModelSpecService::create` before persistence — an
-    /// unparseable value fails the request closed, never silently defaults.
-    pub feature_requirements: serde_json::Value,
+    /// Ordered raw-input contract. It is validated against the governed feature
+    /// schema before persistence and never accepts transform-generated columns.
+    pub input_contract: ModelInputContract,
+    /// Frozen supervised target and CV policy.
+    pub training_contract: ModelTrainingContract,
     /// Operator reason (HTTP op-log only).
     pub reason: String,
 }
@@ -41,6 +41,11 @@ pub struct CreateModelSpecCommand {
 /// Model-spec authoring boundary, implemented in `quant-pivot-core`.
 #[async_trait]
 pub trait ModelSpecPort: Send + Sync {
+    /// Return the active hash-bound raw-feature catalog used to author input
+    /// contracts. Implementations must derive this from the same runtime
+    /// snapshot used by [`Self::create`].
+    async fn feature_contract(&self) -> QuantResult<FeatureContractView>;
+
     /// Mint a new `draft` model specification and return the persisted row.
     async fn create(
         &self,

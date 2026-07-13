@@ -5,8 +5,9 @@
 //! algorithms; the impure orchestration (ClickHouse/Postgres reads, batch
 //! prefetch, persistence) lives in `quant-pivot-core`'s `TrainingDatasetService`.
 //! Every label and feature is point-in-time correct: features are bounded by
-//! `as_of - source_delay`, labels look strictly forward of `as_of`, and the
-//! whole dataset is content-hashed for reproducibility.
+//! the source cutoffs frozen in each `DecisionBoundary`, labels look strictly
+//! forward from `decision_at`, and the whole dataset is content-hashed for
+//! reproducibility.
 
 mod labeler;
 mod leakage;
@@ -18,8 +19,9 @@ mod planner;
 
 pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LiquidityExitLabeler,
-    MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, ReturnToHorizonLabeler,
-    SettlementOutcomeLabeler, label_names, label_names_for_sources,
+    MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, RETURN_TO_HORIZON,
+    ReturnToHorizonLabeler, SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, label_names,
+    label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
@@ -28,11 +30,12 @@ pub use lot_hold_value::{
     LotExitEvent, LotTerminalSnapshot, hold_terminal_proceeds, proceeds_before, remaining_shares_at,
 };
 pub use matrix::{
-    FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
-    matrix_spec_from_schema, probe_matrix_coverage,
+    FeatureColumnSpec, FeatureMatrixSpec, ModelInputCell, TrainingMatrix, build_training_matrix,
+    matrix_spec_from_contract, matrix_spec_from_schema, model_input_cell, probe_matrix_coverage,
+    training_input_hash,
 };
 #[cfg(feature = "dataframe")]
-pub use parquet::DatasetParquetCodec;
+pub use parquet::{DatasetParquetCodec, DecodedDatasetParquet};
 pub use planner::{count_samples, plan_lot_timeline_samples, plan_samples};
 pub use quant_pivot_models::types::{DatasetCoverage, MatrixCoverageProbe};
 
@@ -40,14 +43,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{ExitTrainingLotRow, LotExitEventRow, market::book::BookLevel},
+    domain::{
+        DecisionBoundary, DecisionSource, ExitTrainingLotRow, LotExitEventRow,
+        market::book::BookLevel,
+    },
     enums::quant::DatasetPurpose,
     types::{
-        ArtifactUri, Bps, ContentHash, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
-        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
+        ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
+        ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId, SchemaVersion,
+        Shares, TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
+        default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -56,10 +63,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     execution_sim::BookFidelity,
     factors::FactorValue,
-    features::{EvidenceSourceRef, FeatureVector},
+    features::{DecisionCaptureEvidence, EvidenceSourceRef, FeatureVector},
     hashing::ResearchHasher,
     model::sell_scorer::PositionStateFeatures,
     naming::stable_name,
+    selection::SelectedMarket,
 };
 
 stable_name! {
@@ -84,8 +92,8 @@ pub struct DatasetPlanRequest {
     pub sample_interval_secs: u64,
     /// Forward label horizons, in seconds (one label column per horizon).
     pub horizons_secs: Vec<u64>,
-    /// Source visibility delay applied to features, in seconds.
-    pub source_delay_secs: u64,
+    /// Knowledge lag used once to derive feature source cutoffs, in seconds.
+    pub knowledge_lag_secs: u64,
     /// Feature schema version to materialize against.
     pub feature_schema_version: SchemaVersion,
     /// Which sample sources to materialize.
@@ -112,7 +120,7 @@ pub struct PlanMarket {
     pub end_date: Option<DateTime<Utc>>,
 }
 
-/// One deterministic `(market, token, as_of)` sampling instant.
+/// One deterministic `(market, token, decision_at)` sampling instant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SamplePlan {
     /// Market sampled.
@@ -120,7 +128,7 @@ pub struct SamplePlan {
     /// Primary token sampled.
     pub token_id: TokenId,
     /// Decision time of the sample.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
 }
 
 /// One hold-vs-exit decision instant along a closed lot's timeline (Phase 06.1).
@@ -135,7 +143,7 @@ pub struct LotSamplePlan {
     /// Outcome token held.
     pub token_id: TokenId,
     /// Hold-vs-exit decision time.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// When the lot opened.
     pub opened_at: DateTime<Utc>,
     /// When the lot closed / settled.
@@ -168,7 +176,9 @@ pub enum DecisionBook {
 pub struct ExitDecisionLabelContext {
     pub remaining_shares: Shares,
     pub avg_price: Price,
-    pub fee_bps: Bps,
+    /// Effective venue fee at the executable decision-book bid. `None` means
+    /// no executable quote existed; the label must remain unavailable.
+    pub fee_bps: Option<Bps>,
     pub terminal: LotTerminalSnapshot,
     pub decision_book: Option<DecisionBook>,
 }
@@ -254,6 +264,12 @@ pub enum LabelBuildOutput {
         /// Why the label is unavailable.
         reason: MissingLabelReason,
     },
+    /// The label contract itself is invalid and the dataset build must fail.
+    Invalid {
+        /// Precise invariant violation; never converted into an unavailable
+        /// label count because that would hide a malformed training request.
+        detail: String,
+    },
 }
 
 /// One forward microstructure observation (decoded from `book_microstructure_1s`
@@ -311,9 +327,9 @@ pub struct LabelBuildInput<'a> {
     pub token_id: &'a TokenId,
     /// The market's YES token (settlement keys on this).
     pub yes_token_id: &'a TokenId,
-    /// Decision time the label is anchored at.
-    pub as_of: DateTime<Utc>,
-    /// Entry reference mid price at `as_of` (from the PIT book), if quoted.
+    /// Frozen decision time the label is anchored at.
+    pub decision_at: DateTime<Utc>,
+    /// Entry reference mid price at `decision_at` (from the PIT book), if quoted.
     pub entry_mid: Option<Price>,
     /// Forward horizon, in seconds, the label looks ahead to.
     pub horizon_secs: u64,
@@ -336,8 +352,10 @@ pub struct TrainingExample {
     pub market_id: MarketId,
     /// Outcome token the example describes.
     pub token_id: TokenId,
-    /// Decision time the example was computed as of.
-    pub as_of: DateTime<Utc>,
+    /// Exact selection member used to build the feature/model context.
+    pub selected_market: SelectedMarket,
+    /// Complete immutable decision and source-visibility boundary.
+    pub decision_boundary: DecisionBoundary,
     /// Source pipeline that produced this row.
     pub sample_source: TrainingSampleSource,
     /// The point-in-time feature vector.
@@ -348,6 +366,9 @@ pub struct TrainingExample {
     pub labels: Vec<TrainingLabel>,
     /// Provenance of the inputs, for audit and replay.
     pub source_refs: Vec<EvidenceSourceRef>,
+    /// Exact catalog/book/business capture used to materialize this row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_capture: Option<DecisionCaptureEvidence>,
     /// Lot-scoped replay context (`ExitDecision` rows only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lot_context: Option<LotTrainingContext>,
@@ -359,9 +380,19 @@ pub struct TrainingExample {
     pub book_fidelity: Option<BookFidelity>,
 }
 
+impl TrainingExample {
+    /// Decision instant anchoring features, factors, labels, and CV ordering.
+    #[must_use]
+    pub const fn decision_at(&self) -> DateTime<Utc> {
+        self.decision_boundary.decision_at()
+    }
+}
+
 /// A frozen, content-addressed training dataset artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrainingDatasetArtifact {
+    /// Breaking Parquet/manifest wire format.
+    pub format_version: u32,
     /// Dataset id.
     pub training_dataset_id: TrainingDatasetId,
     /// Model spec the dataset was built for.
@@ -370,7 +401,7 @@ pub struct TrainingDatasetArtifact {
     pub window_start: DateTime<Utc>,
     /// Exclusive window end.
     pub window_end: DateTime<Utc>,
-    /// Materialized examples, ordered by `(market_id, token_id, as_of)`.
+    /// Materialized examples, ordered by `(market_id, token_id, decision_at)`.
     pub examples: Vec<TrainingExample>,
     /// Feature-schema hash the dataset was built against.
     pub feature_schema_hash: ContentHash,
@@ -380,10 +411,266 @@ pub struct TrainingDatasetArtifact {
     pub label_schema_hash: ContentHash,
     /// Content hash over schema hashes + canonical example content.
     pub dataset_hash: ContentHash,
+    /// Frozen manifest embedded in the Parquet artifact.
+    pub manifest: DatasetManifest,
+    /// Exact BLAKE3 hash of the persisted Parquet bytes.
+    pub artifact_bytes_hash: ContentHash,
     /// Location of the materialized parquet bytes.
     pub parquet_uri: ArtifactUri,
     /// Coverage accounting.
     pub coverage: DatasetCoverage,
+}
+
+/// Canonical content hash persisted alongside the Parquet byte hash.
+pub fn dataset_manifest_hash(manifest: &DatasetManifest) -> QuantResult<ContentHash> {
+    ResearchHasher::canonical(manifest)
+}
+
+/// Deterministically fingerprint the provenance assigned to every row.
+pub fn dataset_source_fingerprint(examples: &[TrainingExample]) -> QuantResult<ContentHash> {
+    #[derive(Serialize)]
+    struct RowSources<'a> {
+        market_id: &'a MarketId,
+        token_id: &'a TokenId,
+        boundary: &'a DecisionBoundary,
+        refs: Vec<String>,
+        decision_capture_hash: Option<ContentHash>,
+    }
+
+    let mut rows = Vec::with_capacity(examples.len());
+    for example in examples {
+        let mut refs = example
+            .source_refs
+            .iter()
+            .chain(example.selected_market.source_refs.iter())
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ResearchError::Serialization {
+                detail: format!("dataset source reference serialization failed: {error}"),
+            })?;
+        refs.sort();
+        rows.push(RowSources {
+            market_id: &example.market_id,
+            token_id: &example.token_id,
+            boundary: &example.decision_boundary,
+            refs,
+            decision_capture_hash: example
+                .decision_capture
+                .as_ref()
+                .map(ResearchHasher::canonical)
+                .transpose()?,
+        });
+    }
+    rows.sort_by(|left, right| {
+        (
+            left.market_id.as_str(),
+            left.token_id.as_str(),
+            left.boundary.decision_at(),
+        )
+            .cmp(&(
+                right.market_id.as_str(),
+                right.token_id.as_str(),
+                right.boundary.decision_at(),
+            ))
+    });
+    ResearchHasher::canonical(&rows)
+}
+
+/// Verify the embedded manifest against the decoded immutable rows.
+pub fn verify_dataset_manifest(
+    manifest: &DatasetManifest,
+    examples: &[TrainingExample],
+) -> QuantResult<()> {
+    if manifest.format_version != DATASET_ARTIFACT_FORMAT_VERSION {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "unsupported dataset manifest format {}, expected {}",
+                manifest.format_version, DATASET_ARTIFACT_FORMAT_VERSION
+            ),
+        }
+        .into());
+    }
+    let sample_count =
+        u64::try_from(examples.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("dataset row count conversion failed: {error}"),
+        })?;
+    if manifest.sample_count != sample_count {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "dataset manifest row count mismatch: manifest {}, decoded {sample_count}",
+                manifest.sample_count
+            ),
+        }
+        .into());
+    }
+    for example in examples {
+        validate_example_boundary(example, manifest)?;
+        validate_example_capture(example)?;
+    }
+    let semantic_hash = TrainingDatasetArtifact::compute_dataset_hash(
+        DatasetHashContract {
+            model_spec_id: &manifest.model_spec_id,
+            window_start: manifest.window_start,
+            window_end: manifest.window_end,
+            purpose: manifest.purpose,
+            feature_schema_hash: &manifest.feature_schema_hash,
+            factor_schema_hash: &manifest.factor_schema_hash,
+            label_schema_hash: &manifest.label_schema_hash,
+        },
+        examples,
+    )?;
+    if semantic_hash != manifest.semantic_dataset_hash {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "dataset manifest semantic hash mismatch: manifest {}, decoded {semantic_hash}",
+                manifest.semantic_dataset_hash
+            ),
+        }
+        .into());
+    }
+    let source_fingerprint = dataset_source_fingerprint(examples)?;
+    if source_fingerprint != manifest.source_fingerprint {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "dataset source fingerprint mismatch: manifest {}, decoded {source_fingerprint}",
+                manifest.source_fingerprint
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_example_boundary(
+    example: &TrainingExample,
+    manifest: &DatasetManifest,
+) -> QuantResult<()> {
+    let boundary = &example.decision_boundary;
+    boundary.validate()?;
+    let decision_at = boundary.decision_at();
+    if example.feature_vector.decision_at != decision_at {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "example {} feature decision time {} does not match boundary {decision_at}",
+                example.example_id, example.feature_vector.decision_at
+            ),
+        }
+        .into());
+    }
+    if example.feature_vector.market_id != example.market_id
+        || example.feature_vector.token_id.as_ref() != Some(&example.token_id)
+        || example.selected_market.market_id != example.market_id
+        || example.selected_market.primary_token_id != example.token_id
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "example {} feature-vector market/token binding does not match the row",
+                example.example_id
+            ),
+        }
+        .into());
+    }
+    if !matches!(example.sample_source, TrainingSampleSource::LiveAttribution)
+        && boundary.knowledge_lag_secs() != manifest.knowledge_lag_secs
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "example {} knowledge lag {} does not match manifest {}",
+                example.example_id,
+                boundary.knowledge_lag_secs(),
+                manifest.knowledge_lag_secs
+            ),
+        }
+        .into());
+    }
+    for evidence in example
+        .source_refs
+        .iter()
+        .chain(example.selected_market.source_refs.iter())
+        .chain(
+            example
+                .feature_vector
+                .iter_cells()
+                .filter_map(|(_, cell)| cell.evidence.as_ref()),
+        )
+    {
+        let cutoff = decision_source_for_evidence(evidence.source_kind)
+            .map_or(decision_at, |source| boundary.cutoff_for(source));
+        if evidence.effective_at > cutoff {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "example {} evidence `{}` effective at {} exceeds {:?} cutoff {cutoff}",
+                    example.example_id,
+                    evidence.reference,
+                    evidence.effective_at,
+                    evidence.source_kind
+                ),
+            }
+            .into());
+        }
+        if evidence
+            .available_at
+            .is_some_and(|available_at| available_at > decision_at)
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "example {} evidence `{}` available at {:?} exceeds decision {decision_at}",
+                    example.example_id, evidence.reference, evidence.available_at
+                ),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_example_capture(example: &TrainingExample) -> QuantResult<()> {
+    let capture = example
+        .decision_capture
+        .as_ref()
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: format!("example {} has no v2 decision capture", example.example_id),
+        })?;
+    let snapshot = &capture.snapshot;
+    let boundary = &example.decision_boundary;
+    let catalog_cutoff = boundary.cutoff_for(DecisionSource::Catalog);
+    let book_cutoff = boundary.cutoff_for(DecisionSource::Book);
+    if snapshot.boundary != *boundary
+        || snapshot.market_id != example.market_id
+        || snapshot.token_id != example.token_id
+        || snapshot.event_id != example.selected_market.event_id
+        || snapshot.book_snapshot_ref.token_id != example.token_id
+        || capture.data_quality != example.feature_vector.data_quality
+        || snapshot.catalog.market_effective_at > catalog_cutoff
+        || snapshot.catalog.event_effective_at > catalog_cutoff
+        || snapshot.catalog.market_available_at > boundary.decision_at()
+        || snapshot.catalog.event_available_at > boundary.decision_at()
+        || snapshot.book_effective_at > book_cutoff
+        || snapshot.book_available_at > boundary.decision_at()
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "example {} decision capture violates its boundary/identity/data-quality binding",
+                example.example_id
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+const fn decision_source_for_evidence(
+    source: crate::features::EvidenceSourceKind,
+) -> Option<DecisionSource> {
+    match source {
+        crate::features::EvidenceSourceKind::Book => Some(DecisionSource::Book),
+        crate::features::EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
+        crate::features::EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
+        crate::features::EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
+        crate::features::EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
+        crate::features::EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
+        crate::features::EvidenceSourceKind::Derived => None,
+    }
 }
 
 /// Canonical, surrogate-free projection used to compute `dataset_hash`.
@@ -394,6 +681,7 @@ pub struct TrainingDatasetArtifact {
 /// of a surrogate id does not.
 #[derive(Serialize)]
 struct DatasetHashInput<'a> {
+    format_version: u32,
     model_spec_id: &'a ModelSpecId,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
@@ -414,7 +702,8 @@ struct DatasetHashInput<'a> {
 struct CanonicalExample<'a> {
     market_id: &'a MarketId,
     token_id: &'a TokenId,
-    as_of: DateTime<Utc>,
+    selected_market: &'a SelectedMarket,
+    decision_boundary: &'a DecisionBoundary,
     sample_source: TrainingSampleSource,
     order_intent_id: Option<&'a OrderIntentId>,
     feature_vector: &'a FeatureVector,
@@ -422,26 +711,44 @@ struct CanonicalExample<'a> {
     position_state: Option<&'a PositionStateFeatures>,
     book_fidelity: Option<BookFidelity>,
     labels: &'a [TrainingLabel],
+    decision_capture: Option<&'a DecisionCaptureEvidence>,
+}
+
+/// Governed bindings included in the semantic dataset hash.
+///
+/// This type deliberately excludes storage identity (`training_dataset_id`,
+/// Parquet URI, byte hash) and row surrogate ids. Callers must provide every
+/// model/schema/window binding explicitly before canonical example content can
+/// be hashed.
+#[derive(Clone, Copy)]
+pub struct DatasetHashContract<'a> {
+    /// Owning immutable model specification.
+    pub model_spec_id: &'a ModelSpecId,
+    /// Inclusive dataset decision-window start.
+    pub window_start: DateTime<Utc>,
+    /// Exclusive dataset decision-window end.
+    pub window_end: DateTime<Utc>,
+    /// Governed dataset purpose (training or calibration).
+    pub purpose: DatasetPurpose,
+    /// Frozen governed feature-schema hash.
+    pub feature_schema_hash: &'a ContentHash,
+    /// Frozen factor-definition/schema hash.
+    pub factor_schema_hash: &'a ContentHash,
+    /// Frozen label-schema hash.
+    pub label_schema_hash: &'a ContentHash,
 }
 
 impl TrainingDatasetArtifact {
     /// Compute the content hash over schema bindings + canonical example content.
     ///
-    /// Examples are sorted by `(market_id, token_id, as_of)` so build order never
+    /// Examples are sorted by `(market_id, token_id, decision_at)` so build order never
     /// perturbs the digest.
     ///
     /// # Errors
     ///
     /// Propagates canonical-serialization failures.
-    #[allow(clippy::too_many_arguments)]
     pub fn compute_dataset_hash(
-        model_spec_id: &ModelSpecId,
-        window_start: DateTime<Utc>,
-        window_end: DateTime<Utc>,
-        purpose: DatasetPurpose,
-        feature_schema_hash: &ContentHash,
-        factor_schema_hash: &ContentHash,
-        label_schema_hash: &ContentHash,
+        contract: DatasetHashContract<'_>,
         examples: &[TrainingExample],
     ) -> QuantResult<ContentHash> {
         let mut ordered: Vec<&TrainingExample> = examples.iter().collect();
@@ -453,7 +760,7 @@ impl TrainingDatasetArtifact {
                     .as_ref()
                     .map(|ctx| ctx.order_intent_id.to_string())
                     .unwrap_or_default(),
-                a.as_of,
+                a.decision_at(),
             )
                 .cmp(&(
                     b.market_id.as_str(),
@@ -462,7 +769,7 @@ impl TrainingDatasetArtifact {
                         .as_ref()
                         .map(|ctx| ctx.order_intent_id.to_string())
                         .unwrap_or_default(),
-                    b.as_of,
+                    b.decision_at(),
                 ))
         });
         let canonical = ordered
@@ -470,7 +777,8 @@ impl TrainingDatasetArtifact {
             .map(|e| CanonicalExample {
                 market_id: &e.market_id,
                 token_id: &e.token_id,
-                as_of: e.as_of,
+                selected_market: &e.selected_market,
+                decision_boundary: &e.decision_boundary,
                 sample_source: e.sample_source,
                 order_intent_id: e.lot_context.as_ref().map(|ctx| &ctx.order_intent_id),
                 feature_vector: &e.feature_vector,
@@ -478,16 +786,18 @@ impl TrainingDatasetArtifact {
                 position_state: e.position_state.as_ref(),
                 book_fidelity: e.book_fidelity,
                 labels: &e.labels,
+                decision_capture: e.decision_capture.as_ref(),
             })
             .collect();
         ResearchHasher::canonical(&DatasetHashInput {
-            model_spec_id,
-            window_start,
-            window_end,
-            purpose,
-            feature_schema_hash,
-            factor_schema_hash,
-            label_schema_hash,
+            format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+            model_spec_id: contract.model_spec_id,
+            window_start: contract.window_start,
+            window_end: contract.window_end,
+            purpose: contract.purpose,
+            feature_schema_hash: contract.feature_schema_hash,
+            factor_schema_hash: contract.factor_schema_hash,
+            label_schema_hash: contract.label_schema_hash,
             examples: canonical,
         })
     }
@@ -552,35 +862,62 @@ impl From<&ExitTrainingLotRow> for LotTerminalSnapshot {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::{LabelName, TrainingExample, TrainingLabel};
-    use crate::features::FeatureVector;
+    use crate::features::{
+        CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, FeatureVector,
+    };
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
-        enums::quant::DataQualityStatus,
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
+        domain::{DecisionClock, DecisionSource},
+        enums::{common::MarketCategory, market::MarketStatus, quant::DataQualityStatus},
+        types::{
+            BookSnapshotRef, BookSnapshotSource, Bps, CatalogSyncBatchId, ContentHash,
+            EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketContext, MarketId, Price,
+            Probability, RecommendationIdentity, SchemaVersion, TokenId, TrainingExampleId,
+            TrainingSampleSource, Usd,
+        },
     };
     use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    pub fn selected_market(
+        market_id: &MarketId,
+        token_id: &TokenId,
+        category: MarketCategory,
+    ) -> crate::selection::SelectedMarket {
+        crate::selection::SelectedMarket {
+            market_id: market_id.clone(),
+            event_id: EventId::new(format!("event:{}", market_id.as_str())),
+            category,
+            primary_token_id: token_id.clone(),
+            secondary_token_id: None,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        }
+    }
 
     /// A minimal example with one label of `label_value`, for hash / codec tests.
     pub fn example(market: &str, label_value: i64) -> TrainingExample {
         let as_of: DateTime<Utc> = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
-        TrainingExample {
+        let market_id = MarketId::new(market);
+        let token_id = TokenId::new(format!("{market}-yes"));
+        let mut example = TrainingExample {
             example_id: TrainingExampleId::from_v7(),
-            market_id: MarketId::new(market),
-            token_id: TokenId::new(format!("{market}-yes")),
-            as_of,
+            market_id: market_id.clone(),
+            token_id: token_id.clone(),
+            selected_market: selected_market(&market_id, &token_id, MarketCategory::Sports),
+            decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: FeatureVector {
-                market_id: MarketId::new(market),
-                token_id: Some(TokenId::new(format!("{market}-yes"))),
-                as_of,
+                market_id,
+                token_id: Some(token_id),
+                decision_at: as_of,
                 generic_schema_version: SchemaVersion::FIRST,
                 generic: BTreeMap::new(),
                 domain: None,
-                substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
-                staleness_ms: 0,
-                source_refs: Vec::new(),
             },
             factor_values: Vec::new(),
             labels: vec![TrainingLabel {
@@ -591,18 +928,96 @@ pub(crate) mod fixtures {
                 matured_at: as_of + Duration::seconds(60),
             }],
             source_refs: Vec::new(),
+            decision_capture: None,
             lot_context: None,
             position_state: None,
             book_fidelity: None,
-        }
+        };
+        bind_capture_to_boundary(&mut example);
+        example
+    }
+
+    /// Rebuild the fixture's complete v2 capture after a test changes its
+    /// decision boundary. Every evidence clock is derived from the already
+    /// frozen boundary; no lag is subtracted a second time.
+    pub fn bind_capture_to_boundary(example: &mut TrainingExample) {
+        let boundary = example.decision_boundary.clone();
+        let decision_at = boundary.decision_at();
+        let catalog_effective_at = boundary.cutoff_for(DecisionSource::Catalog);
+        let book_effective_at = boundary.cutoff_for(DecisionSource::Book);
+        let hash = |seed: char| {
+            ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64)))
+                .expect("fixture content hash")
+        };
+        let book_age_ms = u64::try_from((decision_at - book_effective_at).num_milliseconds())
+            .expect("fixture book cutoff is not after decision time");
+        let token_id = example.token_id.clone();
+        example.decision_capture = Some(DecisionCaptureEvidence {
+            snapshot: DecisionSnapshotEvidence {
+                boundary,
+                market_id: example.market_id.clone(),
+                event_id: example.selected_market.event_id.clone(),
+                token_id: token_id.clone(),
+                catalog: CatalogDecisionRef {
+                    catalog_sync_batch_id: CatalogSyncBatchId::new(Uuid::from_u128(1)),
+                    market_catalog_version_id: MarketCatalogVersionId::new(Uuid::from_u128(2)),
+                    event_catalog_version_id: EventCatalogVersionId::new(Uuid::from_u128(3)),
+                    market_content_hash: hash('1'),
+                    event_content_hash: hash('2'),
+                    membership_hash: hash('3'),
+                    market_effective_at: catalog_effective_at,
+                    market_available_at: decision_at,
+                    event_effective_at: catalog_effective_at,
+                    event_available_at: decision_at,
+                    market_timestamp_quality: "source".to_owned(),
+                    event_timestamp_quality: "source".to_owned(),
+                },
+                book_snapshot_ref: BookSnapshotRef {
+                    token_id,
+                    source: BookSnapshotSource::ClickHouse {
+                        event_time_ms: book_effective_at.timestamp_millis(),
+                        ingestion_time_ms: decision_at.timestamp_millis(),
+                        sequence: 1,
+                        book_version: 1,
+                    },
+                    content_hash: hash('4'),
+                },
+                book_effective_at,
+                book_available_at: decision_at,
+            },
+            identity: RecommendationIdentity {
+                category: MarketCategory::Sports,
+                question: "Fixture market?".to_owned(),
+                outcome_name: "Yes".to_owned(),
+            },
+            market_context: MarketContext {
+                best_bid: Some(Price::new(dec!(0.49))),
+                best_ask: Some(Price::new(dec!(0.51))),
+                mid_price: Some(Price::new(dec!(0.50))),
+                spread_bps: Some(Bps::new(dec!(400))),
+                depth_usd: Usd::new(dec!(100)),
+                volume_24h_usd: Some(Usd::new(dec!(1_000))),
+                book_age_ms,
+                time_to_resolution_secs: None,
+                market_status: MarketStatus::Active,
+                neg_risk: false,
+                fee_rate: None,
+            },
+            data_quality: example.feature_vector.data_quality,
+            liquidity_score: Probability::ONE,
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TrainingDatasetArtifact, TrainingExample, fixtures::example};
+    use super::{
+        DatasetHashContract, TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint,
+        fixtures::{bind_capture_to_boundary, example},
+    };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
+        domain::{DecisionClock, DecisionSource},
         enums::quant::DatasetPurpose,
         hashing::CanonicalDigest,
         types::{ContentHash, ModelSpecId},
@@ -628,13 +1043,15 @@ mod tests {
         let (feature, factor, label) = hashes();
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         TrainingDatasetArtifact::compute_dataset_hash(
-            model_spec_id,
-            start,
-            start,
-            purpose,
-            &feature,
-            &factor,
-            &label,
+            DatasetHashContract {
+                model_spec_id,
+                window_start: start,
+                window_end: start,
+                purpose,
+                feature_schema_hash: &feature,
+                factor_schema_hash: &factor,
+                label_schema_hash: &label,
+            },
             examples,
         )
         .expect("dataset hash")
@@ -655,6 +1072,26 @@ mod tests {
         let base = vec![example("aaa", 100)];
         let changed = vec![example("aaa", 101)];
         assert_ne!(dataset_hash(&spec, &base), dataset_hash(&spec, &changed));
+    }
+
+    #[test]
+    fn dataset_hash_and_source_fingerprint_bind_per_source_cutoffs() {
+        let spec = ModelSpecId::from_v7();
+        let base = vec![example("aaa", 100)];
+        let mut changed = base.clone();
+        let decision_at = changed[0].decision_at();
+        changed[0].decision_boundary = DecisionClock::new(0)
+            .boundary(decision_at)
+            .expect("boundary")
+            .with_source_cutoff(DecisionSource::Book, 30)
+            .expect("book cutoff");
+        bind_capture_to_boundary(&mut changed[0]);
+
+        assert_ne!(dataset_hash(&spec, &base), dataset_hash(&spec, &changed));
+        assert_ne!(
+            dataset_source_fingerprint(&base).expect("base fingerprint"),
+            dataset_source_fingerprint(&changed).expect("changed fingerprint")
+        );
     }
 
     #[test]

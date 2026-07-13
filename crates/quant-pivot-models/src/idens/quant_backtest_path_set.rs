@@ -2,7 +2,8 @@ use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+        ColumnDef, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, Index, IndexOrder,
+        Table, TableCreateStatement,
     },
 };
 
@@ -55,8 +56,13 @@ pub enum QuantBacktestPathSet {
     CreatedAt,
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn table() -> TableCreateStatement {
+    let mut stmt = path_set_columns();
+    path_set_apply_foreign_keys(&mut stmt);
+    stmt
+}
+
+fn path_set_columns() -> TableCreateStatement {
     Table::create()
         .table(QuantBacktestPathSet::Table)
         .if_not_exists()
@@ -129,52 +135,71 @@ pub fn table() -> TableCreateStatement {
         .col(timestamp_with_write_default(
             QuantBacktestPathSet::CreatedAt,
         ))
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_backtest_path_set_model_version")
-                .from(
-                    QuantBacktestPathSet::Table,
-                    QuantBacktestPathSet::ModelVersionId,
-                )
-                .to(QuantModelVersion::Table, QuantModelVersion::ModelVersionId)
-                .on_delete(ForeignKeyAction::Restrict),
+        .to_owned()
+}
+
+fn path_set_apply_foreign_keys(stmt: &mut TableCreateStatement) {
+    let mut model_version_fk = model_version_fk();
+    stmt.foreign_key(&mut model_version_fk);
+    let mut model_run_fk = model_run_fk();
+    stmt.foreign_key(&mut model_run_fk);
+    let mut training_dataset_fk = training_dataset_fk();
+    stmt.foreign_key(&mut training_dataset_fk);
+    let mut runtime_config_fk = runtime_config_fk();
+    stmt.foreign_key(&mut runtime_config_fk);
+}
+
+fn model_version_fk() -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name("fk_quant_backtest_path_set_model_version")
+        .from(
+            QuantBacktestPathSet::Table,
+            QuantBacktestPathSet::ModelVersionId,
         )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_backtest_path_set_model_run")
-                .from(
-                    QuantBacktestPathSet::Table,
-                    QuantBacktestPathSet::ModelRunId,
-                )
-                .to(QuantModelRun::Table, QuantModelRun::ModelRunId)
-                .on_delete(ForeignKeyAction::Restrict),
+        .to(QuantModelVersion::Table, QuantModelVersion::ModelVersionId)
+        .on_delete(ForeignKeyAction::Restrict)
+        .to_owned()
+}
+
+fn model_run_fk() -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name("fk_quant_backtest_path_set_model_run")
+        .from(
+            QuantBacktestPathSet::Table,
+            QuantBacktestPathSet::ModelRunId,
         )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_backtest_path_set_training_dataset")
-                .from(
-                    QuantBacktestPathSet::Table,
-                    QuantBacktestPathSet::TrainingDatasetId,
-                )
-                .to(
-                    QuantTrainingDataset::Table,
-                    QuantTrainingDataset::TrainingDatasetId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
+        .to(QuantModelRun::Table, QuantModelRun::ModelRunId)
+        .on_delete(ForeignKeyAction::Restrict)
+        .to_owned()
+}
+
+fn training_dataset_fk() -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name("fk_quant_backtest_path_set_training_dataset")
+        .from(
+            QuantBacktestPathSet::Table,
+            QuantBacktestPathSet::TrainingDatasetId,
         )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_backtest_path_set_runtime_config")
-                .from(
-                    QuantBacktestPathSet::Table,
-                    QuantBacktestPathSet::RuntimeConfigVersionId,
-                )
-                .to(
-                    RuntimeConfigVersion::Table,
-                    RuntimeConfigVersion::RuntimeConfigVersionId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
+        .to(
+            QuantTrainingDataset::Table,
+            QuantTrainingDataset::TrainingDatasetId,
         )
+        .on_delete(ForeignKeyAction::Restrict)
+        .to_owned()
+}
+
+fn runtime_config_fk() -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name("fk_quant_backtest_path_set_runtime_config")
+        .from(
+            QuantBacktestPathSet::Table,
+            QuantBacktestPathSet::RuntimeConfigVersionId,
+        )
+        .to(
+            RuntimeConfigVersion::Table,
+            RuntimeConfigVersion::RuntimeConfigVersionId,
+        )
+        .on_delete(ForeignKeyAction::Restrict)
         .to_owned()
 }
 

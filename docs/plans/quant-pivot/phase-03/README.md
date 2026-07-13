@@ -93,7 +93,7 @@ flowchart TD
 1. **Trait 归属**：所有计算 trait（`MarketSelector` / `FeatureBuilder` /
    `FactorComputer` / `QuantModelRuntime` / `ModelTrainer` / `Backtester` /
    `Labeler` / `ModelQualityGate` / `ArtifactStore` / 历史 `PointInTimeDataSource` /
-   `PitQueryEngine`）与其计算域值类型（强类型 `FeatureVector` / `FactorValue` /
+   `PointInTimeSnapshotSource`）与其计算域值类型（强类型 `FeatureVector` / `FactorValue` /
    `SignalCandidate` / `ModelArtifact` / runtime I/O）全部归属
    `quant-pivot-research`。`quant-pivot-models` 只保留持久化 DTO（`*Info` /
    `New*`）、`enums/quant.rs`、typed IDs；research 依赖 models 做持久化映射。

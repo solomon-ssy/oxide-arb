@@ -1,38 +1,53 @@
 CREATE TABLE IF NOT EXISTS quant_feature_event
 (
     event_time DateTime64(3, 'UTC'),
-    as_of DateTime64(3, 'UTC'),
+    feature_vector_id String,
+    runtime_config_version_id String,
+    decision_at DateTime64(3, 'UTC'),
+    knowledge_cutoff DateTime64(3, 'UTC'),
+    per_source_cutoffs_json String,
     market_id String,
-    token_id String,
+    token_id Nullable(String),
     feature_schema_version UInt32,
+    feature_schema_hash String,
+    feature_hash String,
+    decision_capture_hash String,
     feature_name LowCardinality(String),
-    feature_value Decimal64(8),
+    cell_state Enum8('observed' = 1, 'substituted' = 2, 'missing' = 3, 'not_applicable' = 4),
+    raw_value Nullable(String),
     value_kind Enum8('decimal' = 0, 'probability' = 1, 'bps' = 2, 'usd' = 3, 'count' = 4, 'bool' = 5, 'category' = 6),
-    source_kind Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'trade_tape' = 4, 'derived' = 5),
-    staleness_ms UInt64,
+    source_kind Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'trade_tape' = 4, 'derived' = 5, 'domain_external' = 6, 'linkage' = 7),
+    evidence_source_kind Nullable(Enum8('book' = 1, 'gamma_metadata' = 2, 'clickhouse_fact' = 3, 'trade_tape' = 4, 'derived' = 5, 'domain_external' = 6, 'linkage' = 7)),
+    evidence_reference Nullable(String),
+    evidence_effective_at Nullable(DateTime64(3, 'UTC')),
+    evidence_available_at Nullable(DateTime64(3, 'UTC')),
+    reason LowCardinality(Nullable(String)),
+    staleness_ms Nullable(UInt64),
+    data_quality LowCardinality(String),
+    audit_fingerprint String,
     ingestion_time DateTime64(3, 'UTC')
 )
 ENGINE = MergeTree
-ORDER BY (market_id, feature_name, as_of, ingestion_time);
+ORDER BY (feature_vector_id, feature_name, decision_at, ingestion_time);
 
 CREATE TABLE IF NOT EXISTS quant_factor_event
 (
     event_time DateTime64(3, 'UTC'),
-    as_of DateTime64(3, 'UTC'),
+    decision_at DateTime64(3, 'UTC'),
     market_id String,
     factor_name LowCardinality(String),
     factor_family LowCardinality(String),
     value_state Enum8('scored' = 1, 'missing_input' = 2, 'not_applicable' = 3, 'indeterminate' = 4),
     raw_value Nullable(Decimal64(8)),
     normalized_score Nullable(Decimal64(8)),
-    normalization_source Nullable(Enum8('cross_section' = 1, 'per_market' = 2, 'historical_quantile' = 3)),
+    normalization_source Nullable(Enum8('cross_section' = 1, 'per_market' = 2, 'frozen_reference_quantile' = 3)),
     confidence Decimal64(8),
     direction Enum8('negative' = -1, 'neutral' = 0, 'positive' = 1),
     model_run_id String,
     ingestion_time DateTime64(3, 'UTC')
 )
 ENGINE = MergeTree
-ORDER BY (model_run_id, market_id, factor_name, as_of);
+ORDER BY (model_run_id, market_id, factor_name, decision_at);
 
 CREATE TABLE IF NOT EXISTS quant_signal_candidate_event
 (

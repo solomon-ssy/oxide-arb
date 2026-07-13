@@ -7,13 +7,13 @@
 //! slice); the compute path never reads the opaque payload back — this type
 //! is the single source of truth.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use crate::naming::stable_name;
 use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
-    runtime_config::{FeatureNameRef, FeaturesConfig},
     types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
 };
 use rust_decimal::Decimal;
@@ -76,28 +76,6 @@ impl FeatureName {
     }
 }
 
-impl From<&FeatureNameRef> for FeatureName {
-    fn from(reference: &FeatureNameRef) -> Self {
-        Self::new(&reference.name)
-    }
-}
-
-/// Model-required features merged with config [`FeaturesConfig::required_features`].
-///
-/// Single merge point for the builder null-policy gate and the feature-plane
-/// rejection partition — both must use the same set.
-#[must_use]
-pub fn merged_required_features(
-    model_required: &[FeatureName],
-    config: &FeaturesConfig,
-) -> HashSet<FeatureName> {
-    let mut required: HashSet<FeatureName> = model_required.iter().cloned().collect();
-    for reference in &config.required_features {
-        required.insert(FeatureName::from(reference));
-    }
-    required
-}
-
 /// Why a feature value is absent. Missing values are **never** silently zero —
 /// they carry one of these reasons and flow through the null policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -141,8 +119,11 @@ pub struct EvidenceSourceRef {
     pub source_kind: EvidenceSourceKind,
     /// A source-local reference (fact id, query fingerprint, snapshot key).
     pub reference: String,
-    /// When the underlying datum was observed.
-    pub observed_at: DateTime<Utc>,
+    /// Source-effective time of the underlying datum.
+    pub effective_at: DateTime<Utc>,
+    /// Time at which the datum became visible to this system. `None` is an
+    /// explicit unknown and must never be replaced with an adjacent clock.
+    pub available_at: Option<DateTime<Utc>>,
 }
 
 /// A strongly-typed feature value. No silent `f64`, no untyped JSON on the
@@ -167,84 +148,164 @@ pub enum FeatureValue {
     /// normalization (one-hot / target encoding) owns any numeric encoding —
     /// the raw code must never be fed to a model as an ordinal feature.
     Category(MarketCategory),
-    /// An explicitly-missing value with its reason.
-    Missing(NullReason),
 }
 
 impl FeatureValue {
-    /// Whether this value is [`FeatureValue::Missing`].
+    /// The dimensional kind of this present value.
     #[must_use]
-    pub const fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing(_))
-    }
-
-    /// The dimensional kind of a present value, or `None` when missing.
-    #[must_use]
-    pub const fn kind(&self) -> Option<FeatureValueKind> {
+    pub const fn kind(&self) -> FeatureValueKind {
         match self {
-            Self::Decimal(_) => Some(FeatureValueKind::Decimal),
-            Self::Probability(_) => Some(FeatureValueKind::Probability),
-            Self::Bps(_) => Some(FeatureValueKind::Bps),
-            Self::Usd(_) => Some(FeatureValueKind::Usd),
-            Self::Count(_) => Some(FeatureValueKind::Count),
-            Self::Bool(_) => Some(FeatureValueKind::Bool),
-            Self::Category(_) => Some(FeatureValueKind::Category),
-            Self::Missing(_) => None,
-        }
-    }
-
-    /// The missing reason, when this value is [`FeatureValue::Missing`].
-    #[must_use]
-    pub const fn null_reason(&self) -> Option<NullReason> {
-        match self {
-            Self::Missing(reason) => Some(*reason),
-            _ => None,
+            Self::Decimal(_) => FeatureValueKind::Decimal,
+            Self::Probability(_) => FeatureValueKind::Probability,
+            Self::Bps(_) => FeatureValueKind::Bps,
+            Self::Usd(_) => FeatureValueKind::Usd,
+            Self::Count(_) => FeatureValueKind::Count,
+            Self::Bool(_) => FeatureValueKind::Bool,
+            Self::Category(_) => FeatureValueKind::Category,
         }
     }
 
     /// The numeric projection used by the long-format `quant_feature_event` fact.
     ///
-    /// Missing values return `None` (they are never written as a fact row);
-    /// `Bool` maps to `0`/`1`, `Count` to its integer decimal, and the typed
-    /// numerics to their underlying decimal.
-    #[must_use]
-    pub fn to_fact_decimal(&self) -> Option<Decimal> {
-        match self {
-            Self::Decimal(value) | Self::Bps(value) => Some(*value),
-            Self::Probability(value) => Some(value.inner()),
-            Self::Usd(value) => Some(value.inner()),
-            Self::Count(value) => Some(Decimal::from(*value)),
-            Self::Bool(flag) => Some(if *flag { Decimal::ONE } else { Decimal::ZERO }),
-            Self::Category(category) => Some(Decimal::from(
-                u64::try_from(category.table_index()).unwrap_or_default(),
-            )),
-            Self::Missing(_) => None,
-        }
+    /// Called only for observed/substituted cells. Stateful feature facts still
+    /// write missing/not-applicable cells with an absent `raw_value`; `Bool`
+    /// maps to `0`/`1`, `Count` to its integer decimal, and typed numerics to
+    /// their underlying decimal.
+    pub fn to_fact_decimal(&self) -> QuantResult<Decimal> {
+        Ok(match self {
+            Self::Decimal(value) | Self::Bps(value) => *value,
+            Self::Probability(value) => value.inner(),
+            Self::Usd(value) => value.inner(),
+            Self::Count(value) => Decimal::from(*value),
+            Self::Bool(flag) => {
+                if *flag {
+                    Decimal::ONE
+                } else {
+                    Decimal::ZERO
+                }
+            }
+            Self::Category(category) => {
+                let index = u64::try_from(category.table_index()).map_err(|_| {
+                    ResearchError::Determinism {
+                        detail: format!("category index does not fit u64: {category}"),
+                    }
+                })?;
+                Decimal::from(index)
+            }
+        })
     }
 }
 
-/// An audited neutral-value substitution applied by the null-policy engine.
+/// Semantic state of one feature cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureCellState {
+    /// A value computed from genuine source evidence.
+    Observed,
+    /// A value supplied by an explicit governed substitution policy.
+    Substituted,
+    /// The feature applies, but no usable value was available.
+    Missing,
+    /// The feature does not apply to this market or model row.
+    NotApplicable,
+}
+
+/// Per-cell source freshness. Unknown is distinct from a fresh age of zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum FeatureStaleness {
+    /// Source age is known and non-negative.
+    Known { age_ms: u64 },
+    /// No source timestamp exists for this cell.
+    Unknown,
+}
+
+/// A complete feature value, state, reason, provenance and freshness record.
 ///
-/// Every non-trivial substitution is recorded so persistence and audit can
-/// reconstruct exactly which values were imputed and why — silent imputation is
-/// forbidden. A governed confidence penalty for imputed values is a model-layer
-/// concern and is introduced in 3.4 (see `03.4` doc), not carried here.
+/// Constructors enforce the state/value invariant: observed and substituted
+/// cells carry a value; missing and not-applicable cells never do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubstitutionAudit {
-    /// The substituted feature.
-    pub feature: FeatureName,
-    /// Why the original value was absent.
-    pub reason: NullReason,
-    /// The neutral value that was substituted.
-    pub substituted: FeatureValue,
+pub struct FeatureCell {
+    pub state: FeatureCellState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<FeatureValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<NullReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceSourceRef>,
+    pub staleness: FeatureStaleness,
+}
+
+impl FeatureCell {
+    #[must_use]
+    pub const fn observed(
+        value: FeatureValue,
+        evidence: Option<EvidenceSourceRef>,
+        staleness: FeatureStaleness,
+    ) -> Self {
+        Self {
+            state: FeatureCellState::Observed,
+            value: Some(value),
+            reason: None,
+            evidence,
+            staleness,
+        }
+    }
+
+    #[must_use]
+    pub const fn substituted(
+        value: FeatureValue,
+        reason: NullReason,
+        evidence: Option<EvidenceSourceRef>,
+        staleness: FeatureStaleness,
+    ) -> Self {
+        Self {
+            state: FeatureCellState::Substituted,
+            value: Some(value),
+            reason: Some(reason),
+            evidence,
+            staleness,
+        }
+    }
+
+    #[must_use]
+    pub const fn missing(
+        reason: NullReason,
+        evidence: Option<EvidenceSourceRef>,
+        staleness: FeatureStaleness,
+    ) -> Self {
+        Self {
+            state: FeatureCellState::Missing,
+            value: None,
+            reason: Some(reason),
+            evidence,
+            staleness,
+        }
+    }
+
+    #[must_use]
+    pub const fn not_applicable(reason: NullReason) -> Self {
+        Self {
+            state: FeatureCellState::NotApplicable,
+            value: None,
+            reason: Some(reason),
+            evidence: None,
+            staleness: FeatureStaleness::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn value(&self) -> Option<&FeatureValue> {
+        self.value.as_ref()
+    }
 }
 
 /// The category-mapped external-vertical slice of a [`FeatureVector`].
 ///
-/// Present **only** when the market's category maps to a vertical with a
-/// resolved linkage; individual values inside the slice may still be
-/// [`FeatureValue::Missing`] (present-but-missing is a data gap; an absent
-/// slice is a structural non-applicability — the two are never conflated).
+/// Present whenever the market's category maps to an enabled vertical. An
+/// unresolved linkage or unavailable source is represented by explicit
+/// [`FeatureCellState::Missing`] cells; an absent slice therefore means only
+/// structural non-applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainFeatureSlice {
     /// The vertical this slice belongs to.
@@ -252,7 +313,7 @@ pub struct DomainFeatureSlice {
     /// Domain feature-schema version that produced this slice.
     pub schema_version: SchemaVersion,
     /// Domain feature values keyed by stable name (sorted → canonical).
-    pub values: BTreeMap<FeatureName, FeatureValue>,
+    pub values: BTreeMap<FeatureName, FeatureCell>,
 }
 
 /// An in-memory, point-in-time feature vector for one market: a fixed-width
@@ -271,24 +332,18 @@ pub struct FeatureVector {
     pub market_id: MarketId,
     /// The specific outcome token, when the vector is token-scoped.
     pub token_id: Option<TokenId>,
-    /// Decision time the vector was computed as of.
-    pub as_of: DateTime<Utc>,
+    /// Decision time at which this vector was computed.
+    pub decision_at: DateTime<Utc>,
     /// Generic feature-schema version that produced the generic slice.
     pub generic_schema_version: SchemaVersion,
     /// Generic + structural plane (platform-computable, always present).
-    pub generic: BTreeMap<FeatureName, FeatureValue>,
-    /// Category-mapped external vertical slice; `None` when the category maps
-    /// to no vertical or the vertical is unresolved/unavailable (fail-closed,
-    /// never a fabricated zero row).
+    pub generic: BTreeMap<FeatureName, FeatureCell>,
+    /// Category-mapped external vertical slice; `None` only when the category
+    /// maps to no enabled vertical. Resolution/source gaps remain explicit
+    /// missing cells (fail-closed, never a fabricated zero row).
     pub domain: Option<DomainFeatureSlice>,
-    /// Audited neutral-value substitutions applied during the build.
-    pub substitutions: Vec<SubstitutionAudit>,
     /// Aggregate data-quality classification for the vector.
     pub data_quality: DataQualityStatus,
-    /// Worst-case staleness of the inputs, in milliseconds.
-    pub staleness_ms: u64,
-    /// Provenance of the values, for audit and replay.
-    pub source_refs: Vec<EvidenceSourceRef>,
 }
 
 impl FeatureVector {
@@ -297,7 +352,7 @@ impl FeatureVector {
     /// Names are namespace-disjoint (`domain.<family>.*` vs everything else),
     /// so the two-layer lookup can never shadow.
     #[must_use]
-    pub fn value(&self, name: &FeatureName) -> Option<&FeatureValue> {
+    pub fn cell(&self, name: &FeatureName) -> Option<&FeatureCell> {
         self.generic.get(name).or_else(|| {
             self.domain
                 .as_ref()
@@ -305,16 +360,105 @@ impl FeatureVector {
         })
     }
 
+    /// Look up a present value. Missing and not-applicable cells return `None`.
+    #[must_use]
+    pub fn value(&self, name: &FeatureName) -> Option<&FeatureValue> {
+        self.cell(name).and_then(FeatureCell::value)
+    }
+
     /// Iterate `(name, value)` pairs across both slices (generic first).
-    pub fn iter_values(&self) -> impl Iterator<Item = (&FeatureName, &FeatureValue)> {
+    pub fn iter_cells(&self) -> impl Iterator<Item = (&FeatureName, &FeatureCell)> {
         self.generic
             .iter()
             .chain(self.domain.iter().flat_map(|slice| slice.values.iter()))
+    }
+
+    /// Iterate present values only.
+    pub fn iter_values(&self) -> impl Iterator<Item = (&FeatureName, &FeatureValue)> {
+        self.iter_cells()
+            .filter_map(|(name, cell)| cell.value().map(|value| (name, value)))
     }
 
     /// Total value count across both slices.
     #[must_use]
     pub fn value_count(&self) -> usize {
         self.generic.len() + self.domain.as_ref().map_or(0, |slice| slice.values.len())
+    }
+
+    /// Worst known source age across cells. `None` means every cell has unknown
+    /// freshness; it must never be interpreted as zero.
+    #[must_use]
+    pub fn max_known_staleness_ms(&self) -> Option<u64> {
+        self.iter_cells()
+            .filter_map(|(_, cell)| match cell.staleness {
+                FeatureStaleness::Known { age_ms } => Some(age_ms),
+                FeatureStaleness::Unknown => None,
+            })
+            .max()
+    }
+
+    /// Audited substituted cells, preserving stable feature order.
+    pub fn substituted_cells(&self) -> impl Iterator<Item = (&FeatureName, &FeatureCell)> {
+        self.iter_cells()
+            .filter(|(_, cell)| cell.state == FeatureCellState::Substituted)
+    }
+
+    /// Distinct evidence references projected from cells in stable feature order.
+    #[must_use]
+    pub fn evidence_refs(&self) -> Vec<EvidenceSourceRef> {
+        let mut refs = Vec::new();
+        for evidence in self
+            .iter_cells()
+            .filter_map(|(_, cell)| cell.evidence.as_ref())
+        {
+            if !refs.contains(evidence) {
+                refs.push(evidence.clone());
+            }
+        }
+        refs
+    }
+
+    /// Missing reasons for all substituted cells in stable feature order.
+    #[must_use]
+    pub fn substitution_reasons(&self) -> Vec<NullReason> {
+        self.substituted_cells()
+            .filter_map(|(_, cell)| cell.reason)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FeatureCell, FeatureCellState, FeatureStaleness, FeatureValue, NullReason};
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn feature_cell_states_do_not_fabricate_values() {
+        let observed = FeatureCell::observed(
+            FeatureValue::Decimal(dec!(1.25)),
+            None,
+            FeatureStaleness::Unknown,
+        );
+        let substituted = FeatureCell::substituted(
+            FeatureValue::Decimal(dec!(0.5)),
+            NullReason::SourceUnavailable,
+            None,
+            FeatureStaleness::Unknown,
+        );
+        let missing = FeatureCell::missing(
+            NullReason::SourceUnavailable,
+            None,
+            FeatureStaleness::Unknown,
+        );
+        let not_applicable = FeatureCell::not_applicable(NullReason::NotApplicable);
+
+        assert_eq!(observed.state, FeatureCellState::Observed);
+        assert!(observed.value().is_some());
+        assert_eq!(substituted.state, FeatureCellState::Substituted);
+        assert!(substituted.value().is_some());
+        assert_eq!(missing.state, FeatureCellState::Missing);
+        assert!(missing.value().is_none());
+        assert_eq!(not_applicable.state, FeatureCellState::NotApplicable);
+        assert!(not_applicable.value().is_none());
     }
 }

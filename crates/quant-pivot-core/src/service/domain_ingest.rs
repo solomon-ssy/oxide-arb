@@ -8,7 +8,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::domain::{DomainDataSource, DomainFetchRequest};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     clickhouse::DomainObservationRow,
     config::DomainSourcesConfig,
@@ -19,7 +22,7 @@ use quant_pivot_models::{
     types::{DomainInstrumentKey, DomainSourceId},
 };
 use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
-use quant_pivot_research::linkage::rules;
+use quant_pivot_research::linkage::{AssetRule, rules};
 
 use crate::runtime_config::RuntimeConfigStore;
 
@@ -87,6 +90,7 @@ impl DomainIngestor {
 
         let backfill_days = runtime.domain.crypto.backfill_days;
         let now = Utc::now();
+        let bootstrap_from = now - Duration::days(i64::from(backfill_days.max(1)));
         let batch_size = self.domain_sources.binance.batch_size.max(1);
 
         let mut outcomes = Vec::new();
@@ -97,7 +101,7 @@ impl DomainIngestor {
             };
             for instrument_key in instruments {
                 match self
-                    .scan_instrument(source.as_ref(), instrument_key, backfill_days, now)
+                    .scan_instrument(source.as_ref(), instrument_key, bootstrap_from, now)
                     .await
                 {
                     Ok(outcome) => outcomes.push(outcome),
@@ -107,8 +111,13 @@ impl DomainIngestor {
                             "domain ingest scan failed for this instrument; \
                              other instruments continue this tick"
                         );
-                        self.record_scan_failure(&source_id, instrument_key, &error)
-                            .await;
+                        self.record_scan_failure(
+                            &source_id,
+                            instrument_key,
+                            bootstrap_from,
+                            &error,
+                        )
+                        .await;
                     }
                 }
             }
@@ -141,14 +150,13 @@ impl DomainIngestor {
         &self,
         source: &dyn DomainDataSource,
         instrument_key: &DomainInstrumentKey,
-        backfill_days: u32,
+        bootstrap_from: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> QuantResult<InstrumentScanOutcome> {
         let source_id = source.source_id();
         let cursor = self.cursor_repo.find(&source_id, instrument_key).await?;
-        let bootstrap_from = now - Duration::days(i64::from(backfill_days.max(1)));
         let (from_exclusive, bootstrap, prior_last_event_time) =
-            resume_point(cursor.as_ref(), bootstrap_from);
+            resume_point(cursor.as_ref(), bootstrap_from, now)?;
 
         let observations = source
             .fetch(DomainFetchRequest {
@@ -206,15 +214,36 @@ impl DomainIngestor {
         &self,
         source_id: &DomainSourceId,
         instrument_key: &DomainInstrumentKey,
-        error: &quant_pivot_error::QuantError,
+        bootstrap_from: DateTime<Utc>,
+        error: &QuantError,
     ) {
-        let existing = self
-            .cursor_repo
-            .find(source_id, instrument_key)
-            .await
-            .ok()
-            .flatten();
-        let last_event_time = existing.map_or_else(Utc::now, |row| row.last_event_time);
+        let existing = match self.cursor_repo.find(source_id, instrument_key).await {
+            Ok(existing) => existing,
+            Err(find_error) => {
+                tracing::warn!(
+                    %find_error, %source_id, %instrument_key,
+                    "failed to read domain-ingest cursor while recording scan failure; \
+                     refusing to invent a checkpoint"
+                );
+                return;
+            }
+        };
+        if let Some(row) = existing.as_ref()
+            && DomainCursorStatus::parse(&row.status).is_none()
+        {
+            tracing::error!(
+                status = %row.status, %source_id, %instrument_key,
+                "domain-ingest cursor has an unknown persisted status; \
+                 refusing to overwrite the invalid state"
+            );
+            return;
+        }
+        // A failed initial fetch has not observed any source event. Persist the
+        // configured coverage floor, never `now`, so the retry cannot skip the
+        // entire historical bootstrap window.
+        let last_event_time = existing
+            .as_ref()
+            .map_or(bootstrap_from, |row| row.last_event_time);
         if let Err(persist_error) = self
             .cursor_repo
             .upsert(UpsertDomainSourceCursor {
@@ -243,10 +272,7 @@ pub fn discover_instruments(
 ) -> HashMap<DomainSourceId, Vec<DomainInstrumentKey>> {
     let mut map = HashMap::new();
     if domain_sources.binance.enabled {
-        let keys = rules()
-            .iter()
-            .map(quant_pivot_research::linkage::AssetRule::instrument_key)
-            .collect();
+        let keys = rules().iter().map(AssetRule::instrument_key).collect();
         map.insert(DomainSourceId::binance(), keys);
     }
     if domain_sources.chainlink.enabled {
@@ -269,15 +295,36 @@ pub fn discover_instruments(
 fn resume_point(
     cursor: Option<&DomainSourceCursorInfo>,
     bootstrap_from: DateTime<Utc>,
-) -> (DateTime<Utc>, bool, DateTime<Utc>) {
-    cursor.map_or((bootstrap_from, true, bootstrap_from), |row| {
-        let status =
-            DomainCursorStatus::parse(&row.status).unwrap_or(DomainCursorStatus::Bootstrap);
-        if status == DomainCursorStatus::Bootstrap {
-            (bootstrap_from, true, row.last_event_time)
-        } else {
-            (row.last_event_time, false, row.last_event_time)
+    now: DateTime<Utc>,
+) -> QuantResult<(DateTime<Utc>, bool, DateTime<Utc>)> {
+    let Some(row) = cursor else {
+        return Ok((bootstrap_from, true, bootstrap_from));
+    };
+    if row.last_event_time > now {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            format!(
+                "cursor {}/{} has future last_event_time {} after scan boundary {now}",
+                row.source_id, row.instrument_key, row.last_event_time
+            ),
+        )
+        .into());
+    }
+    let status = DomainCursorStatus::parse(&row.status).ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
+            format!(
+                "cursor {}/{} has unknown status `{}`",
+                row.source_id, row.instrument_key, row.status
+            ),
+        )
+    })?;
+    Ok(match status {
+        DomainCursorStatus::Bootstrap => (bootstrap_from, true, row.last_event_time),
+        DomainCursorStatus::Backfilling | DomainCursorStatus::Error => {
+            (row.last_event_time, true, row.last_event_time)
         }
+        DomainCursorStatus::Live => (row.last_event_time, false, row.last_event_time),
     })
 }
 
@@ -354,7 +401,7 @@ mod tests {
     #[test]
     fn resume_point_bootstraps_without_cursor() {
         let from = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (start, bootstrap, _) = resume_point(None, from);
+        let (start, bootstrap, _) = resume_point(None, from, from).expect("resume point");
         assert_eq!(start, from);
         assert!(bootstrap);
     }
@@ -374,10 +421,63 @@ mod tests {
             created_at: last,
             updated_at: last,
         };
-        let (start, bootstrap, prior) = resume_point(Some(&cursor), last);
+        let (start, bootstrap, prior) =
+            resume_point(Some(&cursor), last, last).expect("resume point");
         assert_eq!(start, last);
         assert!(!bootstrap);
         assert_eq!(prior, last);
+    }
+
+    #[test]
+    fn resume_point_keeps_backfilling_and_error_cursors_in_bootstrap_mode() {
+        let last = Utc.with_ymd_and_hms(2026, 7, 1, 10, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let instrument_key = DomainInstrumentKey::binance_kline(
+            &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+            KlineInterval::OneMinute,
+        );
+        for status in [DomainCursorStatus::Backfilling, DomainCursorStatus::Error] {
+            let cursor = DomainSourceCursorInfo {
+                source_id: DomainSourceId::binance(),
+                instrument_key: instrument_key.clone(),
+                last_event_time: last,
+                status: status.as_str().to_owned(),
+                last_error: None,
+                created_at: last,
+                updated_at: last,
+            };
+            let (start, bootstrap, prior) = resume_point(Some(&cursor), last, now)
+                .expect("backfill/error cursor must resume conservatively");
+            assert_eq!(start, last);
+            assert!(bootstrap);
+            assert_eq!(prior, last);
+        }
+    }
+
+    #[test]
+    fn resume_point_rejects_unknown_status_and_future_checkpoint() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
+        let mut cursor = DomainSourceCursorInfo {
+            source_id: DomainSourceId::binance(),
+            instrument_key: DomainInstrumentKey::binance_kline(
+                &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                KlineInterval::OneMinute,
+            ),
+            last_event_time: now,
+            status: "legacy_unknown".to_owned(),
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let error = resume_point(Some(&cursor), now, now)
+            .expect_err("unknown persisted status must fail closed");
+        assert!(error.to_string().contains("unknown status"));
+
+        cursor.status = DomainCursorStatus::Live.as_str().to_owned();
+        cursor.last_event_time = now + chrono::Duration::seconds(1);
+        let error = resume_point(Some(&cursor), now, now)
+            .expect_err("future persisted checkpoint must fail closed");
+        assert!(error.to_string().contains("future last_event_time"));
     }
 
     #[test]
@@ -395,6 +495,7 @@ mod tests {
             value: dec!(1),
             observed_at: at,
             publish_time: at,
+            available_at: None,
         };
         let deduped = dedup_observations(vec![observation.clone(), observation]);
         assert_eq!(deduped.len(), 1);
@@ -469,6 +570,7 @@ mod isolation_tests {
                 value: dec!(1),
                 observed_at: request.to_inclusive,
                 publish_time: request.to_inclusive,
+                available_at: None,
             }])
         }
     }

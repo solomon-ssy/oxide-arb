@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS book_microstructure_1m (
     last_trade_count      UInt64,
     max_book_age_ms       UInt64,
     schema_version        UInt32,
+    available_at          DateTime64(3, 'UTC') DEFAULT bucket_time,
     bucket_date           Date MATERIALIZED toDate(bucket_time)
 )
 ENGINE = MergeTree()
@@ -36,3 +37,4 @@ PARTITION BY toYYYYMM(bucket_date)
 ORDER BY (token_id, bucket_time)
 TTL bucket_date + INTERVAL 365 DAY DELETE
 SETTINGS index_granularity = 4096
+;

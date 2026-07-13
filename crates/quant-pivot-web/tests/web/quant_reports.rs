@@ -198,6 +198,33 @@ async fn report_detail_recommendations_and_evidence_views() {
     );
     assert!(detail.json()["data"]["summary"].is_object());
 
+    let diagnostics = get(
+        &env,
+        &format!("/api/quant/reports/{report_id}/diagnostics"),
+        &admin,
+    )
+    .await;
+    assert_eq!(diagnostics.status, StatusCode::OK);
+    assert_eq!(
+        diagnostics.json()["data"]["evidence_complete"],
+        json!(false)
+    );
+    assert_eq!(diagnostics.json()["data"]["subject"], json!("model_run"));
+    assert_eq!(
+        diagnostics.json()["data"]["stage_ceiling"],
+        json!("prediction")
+    );
+    assert!(diagnostics.json()["data"]["decision_boundary"].is_object());
+    assert_eq!(
+        diagnostics.json()["data"]["feature_state_counts"],
+        Value::Null
+    );
+    assert_eq!(
+        diagnostics.json()["data"]["feature_cell_count"],
+        Value::Null
+    );
+    assert_eq!(diagnostics.json()["data"]["model_input_count"], Value::Null);
+
     let recs = get(
         &env,
         &format!("/api/quant/reports/{report_id}/recommendations"),
@@ -241,6 +268,9 @@ async fn report_detail_recommendations_and_evidence_views() {
     assert_eq!(evidence.status, StatusCode::OK);
     assert!(evidence.json()["data"]["signal_candidate_id"].is_string());
     assert!(evidence.json()["data"]["model_run_id"].is_string());
+    assert_eq!(evidence.json()["data"]["evidence_complete"], json!(false));
+    assert!(evidence.json()["data"]["feature_cells"].is_array());
+    assert!(evidence.json()["data"]["model_inputs"].is_array());
 }
 
 #[actix_web::test]

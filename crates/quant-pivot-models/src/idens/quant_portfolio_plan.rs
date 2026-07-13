@@ -23,7 +23,7 @@ pub enum QuantPortfolioPlan {
     PortfolioPlanId,
     ModelRunId,
     MarketSelectionId,
-    AsOf,
+    DecisionAt,
     BudgetUsd,
     AllocatedUsd,
     RiskBudgetJson,
@@ -41,7 +41,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_null(QuantPortfolioPlan::ModelRunId))
         .col(column::uuid_fk(QuantPortfolioPlan::MarketSelectionId))
         .col(
-            ColumnDef::new(QuantPortfolioPlan::AsOf)
+            ColumnDef::new(QuantPortfolioPlan::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
@@ -93,13 +93,13 @@ pub fn table() -> TableCreateStatement {
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![IndexSpec::sea_query(
-        "idx_quant_portfolio_plan_as_of",
+        "idx_quant_portfolio_plan_decision_at",
         quant_portfolio_plan_table_name,
         IndexBuildMode::Transactional,
         Index::create()
-            .name("idx_quant_portfolio_plan_as_of")
+            .name("idx_quant_portfolio_plan_decision_at")
             .table(QuantPortfolioPlan::Table)
-            .col((QuantPortfolioPlan::AsOf, IndexOrder::Desc))
+            .col((QuantPortfolioPlan::DecisionAt, IndexOrder::Desc))
             .to_owned(),
         "portfolio plans by PIT timestamp",
     )]

@@ -12,7 +12,7 @@ use quant_pivot_models::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
     },
-    types::{ContentHash, RuntimeConfigVersionId},
+    types::{ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
@@ -54,6 +54,19 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         let info = self.inner.activate_version(activation).await?;
+        self.invalidate_active().await;
+        Ok(info)
+    }
+
+    async fn activate_version_if_current(
+        &self,
+        expected_current_activation_id: Option<&RuntimeConfigActivationId>,
+        activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        let info = self
+            .inner
+            .activate_version_if_current(expected_current_activation_id, activation)
+            .await?;
         self.invalidate_active().await;
         Ok(info)
     }

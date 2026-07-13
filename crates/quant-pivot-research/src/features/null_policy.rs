@@ -2,8 +2,8 @@
 //! out-of-range feature value.
 //!
 //! Silent zero is forbidden. Every absent value resolves to exactly one of three
-//! decisions, derived from the feature's [`NullPolicy`], its `critical` flag,
-//! whether the active model requires it, and the runtime domain/staleness
+//! decisions, derived from the feature's [`NullPolicy`], whether the active
+//! model requires it, and the runtime domain/staleness
 //! policies.
 
 use quant_pivot_models::{
@@ -56,10 +56,10 @@ impl NullPolicyEngine {
         data_quality: &DataQualityConfig,
         is_required: bool,
     ) -> NullDecision {
-        // Required or critical features must be present — with one exception:
+        // Model-required features must be present — with one exception:
         // a stale value under an `AllowDegraded` staleness policy degrades
         // rather than rejects.
-        if is_required || spec.critical {
+        if is_required {
             if reason == NullReason::StaleBeyondPolicy
                 && data_quality.feature_staleness_policy == FeatureStalenessPolicy::AllowDegraded
             {
@@ -100,7 +100,7 @@ fn neutral_value(kind: FeatureValueKind, value: Decimal) -> Option<FeatureValue>
         FeatureValueKind::Probability => Some(FeatureValue::Probability(Probability::new(value))),
         FeatureValueKind::Bps => Some(FeatureValue::Bps(value)),
         FeatureValueKind::Usd => Some(FeatureValue::Usd(value.into())),
-        FeatureValueKind::Count => Some(FeatureValue::Count(value.to_u64().unwrap_or(0))),
+        FeatureValueKind::Count => value.to_u64().map(FeatureValue::Count),
         FeatureValueKind::Bool => Some(FeatureValue::Bool(!value.is_zero())),
         FeatureValueKind::Category => None,
     }

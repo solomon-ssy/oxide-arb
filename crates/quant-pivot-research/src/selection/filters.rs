@@ -18,7 +18,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::MarketCandidate,
+    domain::{MarketCandidate, MarketDataHealth},
     enums::{common::MarketCategory, market::MarketStatus},
     runtime_config::{DataQualityConfig, DecimalString, SelectionConfig},
     types::{Bps, SelectionExclusionSummary, Usd},
@@ -46,9 +46,9 @@ pub struct SelectionThresholds {
     /// Whether near-resolution markets may enter the selection.
     pub allow_near_resolution: bool,
     /// Minimum seconds until resolution.
-    pub min_time_to_resolution_secs: u64,
+    pub min_time_to_resolution_secs: i64,
     /// Maximum seconds until resolution.
-    pub max_time_to_resolution_secs: u64,
+    pub max_time_to_resolution_secs: i64,
     /// Maximum allowed published-book age, in milliseconds.
     pub max_book_age_ms: u64,
     /// Maximum allowed worst-case ingest pipeline lag (enqueue→flush), in ms.
@@ -74,8 +74,18 @@ impl SelectionThresholds {
             min_volume_24h_usd: parse_usd(&selection.min_volume_24h_usd)?,
             max_spread_bps: Decimal::from(selection.max_spread_bps),
             allow_near_resolution: selection.allow_near_resolution,
-            min_time_to_resolution_secs: selection.min_time_to_resolution_secs,
-            max_time_to_resolution_secs: selection.max_time_to_resolution_secs,
+            min_time_to_resolution_secs: i64::try_from(selection.min_time_to_resolution_secs)
+                .map_err(|error| {
+                    QuantError::config(format!(
+                        "selection.min_time_to_resolution_secs is outside chrono range: {error}"
+                    ))
+                })?,
+            max_time_to_resolution_secs: i64::try_from(selection.max_time_to_resolution_secs)
+                .map_err(|error| {
+                    QuantError::config(format!(
+                        "selection.max_time_to_resolution_secs is outside chrono range: {error}"
+                    ))
+                })?,
             max_book_age_ms: data_quality.max_book_age_ms,
             max_ingest_lag_ms: data_quality.max_ingest_lag_ms,
             reject_crossed_books: data_quality.reject_crossed_books,
@@ -99,7 +109,7 @@ pub struct MarketCandidateCtx<'a> {
     /// Pre-resolved config thresholds shared across the round.
     pub thresholds: &'a SelectionThresholds,
     /// Decision time for the round.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Feature availability the active model requires.
     pub model_requirements: &'a ModelFeatureRequirements,
     /// Governed feature schema backing the availability oracle.
@@ -234,18 +244,29 @@ impl SelectionFilter for DataQualityFilter {
         let Some(age) = candidate.book_age_ms else {
             return FilterOutcome::Exclude(ExclusionReason::StaleBook);
         };
-        // Age condemns the book only when the connection is unhealthy.
-        if !candidate.connection_healthy && age > thresholds.max_book_age_ms {
+        // A healthy live connection can legitimately carry a quiet book. A
+        // degraded connection or durable replay has no such live liveness
+        // proof, so the configured age ceiling applies.
+        if candidate.market_data_health != MarketDataHealth::Healthy
+            && age > thresholds.max_book_age_ms
+        {
             return FilterOutcome::Exclude(ExclusionReason::StaleBook);
         }
-        if thresholds.reject_crossed_books && candidate.crossed {
+        if thresholds.reject_crossed_books && candidate.crossed == Some(true) {
             return FilterOutcome::Exclude(ExclusionReason::StaleBook);
         }
-        if thresholds.reject_empty_books && candidate.empty {
+        if thresholds.reject_empty_books && candidate.empty != Some(false) {
             return FilterOutcome::Exclude(ExclusionReason::StaleBook);
         }
-        if candidate.ingest_lag_ms > thresholds.max_ingest_lag_ms {
-            return FilterOutcome::Exclude(ExclusionReason::IngestLagExceeded);
+        match (candidate.market_data_health, candidate.ingest_lag_ms) {
+            (MarketDataHealth::NotApplicable, Some(_))
+            | (MarketDataHealth::Healthy | MarketDataHealth::Unhealthy, None) => {
+                return FilterOutcome::Exclude(ExclusionReason::IngestLagExceeded);
+            }
+            (_, Some(lag)) if lag > thresholds.max_ingest_lag_ms => {
+                return FilterOutcome::Exclude(ExclusionReason::IngestLagExceeded);
+            }
+            (MarketDataHealth::NotApplicable, None) | (_, Some(_)) => {}
         }
         FilterOutcome::Keep
     }
@@ -269,13 +290,11 @@ impl SelectionFilter for ResolutionAmbiguityFilter {
             };
         };
 
-        let secs = (end_date - ctx.as_of).num_seconds();
-        let min = i64::try_from(thresholds.min_time_to_resolution_secs).unwrap_or(i64::MAX);
-        let max = i64::try_from(thresholds.max_time_to_resolution_secs).unwrap_or(i64::MAX);
-        if secs < min && !thresholds.allow_near_resolution {
+        let secs = (end_date - ctx.decision_at).num_seconds();
+        if secs < thresholds.min_time_to_resolution_secs && !thresholds.allow_near_resolution {
             return FilterOutcome::Exclude(ExclusionReason::ResolutionAmbiguous);
         }
-        if secs > max {
+        if secs > thresholds.max_time_to_resolution_secs {
             return FilterOutcome::Exclude(ExclusionReason::ResolutionAmbiguous);
         }
         FilterOutcome::Keep
@@ -368,5 +387,21 @@ pub const fn accumulate_exclusion(
         | ExclusionReason::ResolutionAmbiguous
         | ExclusionReason::SelectionCapExceeded
         | ExclusionReason::ModelFeatureUnavailable { .. } => summary.other_count += 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quant_pivot_models::runtime_config::{DataQualityConfig, SelectionConfig};
+
+    use super::SelectionThresholds;
+
+    #[test]
+    fn resolution_thresholds_reject_values_outside_chrono_range() {
+        let selection = SelectionConfig {
+            max_time_to_resolution_secs: u64::MAX,
+            ..SelectionConfig::default()
+        };
+        assert!(SelectionThresholds::resolve(&selection, &DataQualityConfig::default()).is_err());
     }
 }

@@ -4,6 +4,7 @@
 //! the same ordered sample set, which is what makes `dataset_hash` reproducible.
 
 use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 
 use super::{DatasetPlanRequest, ExitTrainingLotRow, LotSamplePlan, PlanMarket, SamplePlan};
 
@@ -14,9 +15,11 @@ use super::{DatasetPlanRequest, ExitTrainingLotRow, LotSamplePlan, PlanMarket, S
 /// `window_end`. A sample is emitted only while the market is alive at that
 /// instant: `as_of >= created_at` (the market exists) and, when an `end_date` is
 /// known, `as_of < end_date`. The result is ordered by `(market_id, as_of)`.
-#[must_use]
-pub fn plan_samples(request: &DatasetPlanRequest, markets: &[PlanMarket]) -> Vec<SamplePlan> {
-    let interval_secs = i64::try_from(request.sample_interval_secs.max(1)).unwrap_or(i64::MAX);
+pub fn plan_samples(
+    request: &DatasetPlanRequest,
+    markets: &[PlanMarket],
+) -> QuantResult<Vec<SamplePlan>> {
+    let interval_secs = checked_interval_secs(request.sample_interval_secs)?;
     let step = Duration::seconds(interval_secs);
 
     let mut ordered: Vec<&PlanMarket> = markets.iter().collect();
@@ -31,13 +34,13 @@ pub fn plan_samples(request: &DatasetPlanRequest, markets: &[PlanMarket]) -> Vec
                 samples.push(SamplePlan {
                     market_id: market.market_id.clone(),
                     token_id: market.token_id.clone(),
-                    as_of,
+                    decision_at: as_of,
                 });
             }
-            as_of += step;
+            as_of = checked_next_sample(as_of, step)?;
         }
     }
-    samples
+    Ok(samples)
 }
 
 /// Count the deterministic `(market, token, as_of)` samples **without**
@@ -48,9 +51,12 @@ pub fn plan_samples(request: &DatasetPlanRequest, markets: &[PlanMarket]) -> Vec
 /// synchronous `plan` endpoint time out. Iteration stops early once `cap` is
 /// exceeded (the caller flags `hard_cap_exceeded`), bounding pathological
 /// window/interval combinations to `~cap` arithmetic steps.
-#[must_use]
-pub fn count_samples(request: &DatasetPlanRequest, markets: &[PlanMarket], cap: u64) -> u64 {
-    let interval_secs = i64::try_from(request.sample_interval_secs.max(1)).unwrap_or(i64::MAX);
+pub fn count_samples(
+    request: &DatasetPlanRequest,
+    markets: &[PlanMarket],
+    cap: u64,
+) -> QuantResult<u64> {
+    let interval_secs = checked_interval_secs(request.sample_interval_secs)?;
     let step = Duration::seconds(interval_secs);
     let mut total: u64 = 0;
     for market in markets {
@@ -58,15 +64,19 @@ pub fn count_samples(request: &DatasetPlanRequest, markets: &[PlanMarket], cap: 
         while as_of < request.window_end {
             let alive = as_of >= market.created_at && market.end_date.is_none_or(|end| as_of < end);
             if alive {
-                total += 1;
+                total = total
+                    .checked_add(1)
+                    .ok_or_else(|| ResearchError::DatasetPlan {
+                        detail: "planned sample count exceeds u64".to_owned(),
+                    })?;
                 if total > cap {
-                    return total;
+                    return Ok(total);
                 }
             }
-            as_of += step;
+            as_of = checked_next_sample(as_of, step)?;
         }
     }
-    total
+    Ok(total)
 }
 
 /// Generate hold-vs-exit decision instants along each closed lot's life.
@@ -75,13 +85,12 @@ pub fn count_samples(request: &DatasetPlanRequest, markets: &[PlanMarket], cap: 
 /// dataset window have no prefetched book/microstructure facts, so emitting them
 /// would only produce dropped rows. The lot's true `opened_at`/`closed_at` are
 /// still carried on each plan for point-in-time position-state computation.
-#[must_use]
 pub fn plan_lot_timeline_samples(
     interval_secs: u64,
     window_start: DateTime<Utc>,
     lots: &[ExitTrainingLotRow],
-) -> Vec<LotSamplePlan> {
-    let interval_secs = i64::try_from(interval_secs.max(1)).unwrap_or(i64::MAX);
+) -> QuantResult<Vec<LotSamplePlan>> {
+    let interval_secs = checked_interval_secs(interval_secs)?;
     let step = Duration::seconds(interval_secs);
 
     let mut ordered: Vec<&ExitTrainingLotRow> = lots.iter().collect();
@@ -102,14 +111,32 @@ pub fn plan_lot_timeline_samples(
                 position_id: lot.position_id.clone(),
                 market_id: lot.market_id.clone(),
                 token_id: lot.token_id.clone(),
-                as_of,
+                decision_at: as_of,
                 opened_at: lot.opened_at,
                 closed_at: lot.closed_at,
             });
-            as_of += step;
+            as_of = checked_next_sample(as_of, step)?;
         }
     }
-    samples
+    Ok(samples)
+}
+
+fn checked_interval_secs(interval_secs: u64) -> QuantResult<i64> {
+    i64::try_from(interval_secs.max(1)).map_err(|error| {
+        ResearchError::DatasetPlan {
+            detail: format!("sample interval does not fit chrono seconds: {error}"),
+        }
+        .into()
+    })
+}
+
+fn checked_next_sample(at: DateTime<Utc>, step: Duration) -> QuantResult<DateTime<Utc>> {
+    at.checked_add_signed(step).ok_or_else(|| {
+        ResearchError::DatasetPlan {
+            detail: format!("sample timestamp overflows chrono range after {at}"),
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -134,7 +161,7 @@ mod tests {
             window_end: start + Duration::seconds(300),
             sample_interval_secs: interval_secs,
             horizons_secs: vec![60],
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
             sample_sources: default_sample_sources(),
             training_dataset_id: None,
@@ -156,9 +183,9 @@ mod tests {
     fn plan_samples_is_deterministic_and_ordered() {
         let req = request(60);
         let markets = vec![market("zzz", -100, None), market("aaa", -100, None)];
-        let first = plan_samples(&req, &markets);
+        let first = plan_samples(&req, &markets).expect("valid plan");
         let shuffled = vec![market("aaa", -100, None), market("zzz", -100, None)];
-        let second = plan_samples(&req, &shuffled);
+        let second = plan_samples(&req, &shuffled).expect("valid plan");
         assert_eq!(
             first, second,
             "same inputs must yield identical sample sets"
@@ -167,7 +194,7 @@ mod tests {
         assert_eq!(first.len(), 10);
         // Ordered by (market_id, as_of): aaa before zzz.
         assert_eq!(first[0].market_id.as_str(), "aaa");
-        assert!(first[0].as_of < first[1].as_of);
+        assert!(first[0].decision_at < first[1].decision_at);
     }
 
     fn exit_lot(opened_offset: i64, closed_offset: i64) -> ExitTrainingLotRow {
@@ -193,11 +220,11 @@ mod tests {
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         // Lot opened 100s before the window; closes 120s into it.
         let lots = vec![exit_lot(-100, 120)];
-        let samples = plan_lot_timeline_samples(60, start, &lots);
+        let samples = plan_lot_timeline_samples(60, start, &lots).expect("valid lot plan");
         // Ticks start at window_start (0), not opened_at (-100): 0, 60 (< 120).
         assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].as_of, start);
-        assert_eq!(samples[1].as_of, start + Duration::seconds(60));
+        assert_eq!(samples[0].decision_at, start);
+        assert_eq!(samples[1].decision_at, start + Duration::seconds(60));
         // The true lifetime is still carried for position-state computation.
         assert_eq!(samples[0].opened_at, start - Duration::seconds(100));
     }
@@ -206,8 +233,11 @@ mod tests {
     fn count_samples_matches_plan_samples_len() {
         let req = request(60);
         let markets = vec![market("aaa", -100, None), market("m", 120, Some(240))];
-        let expected = plan_samples(&req, &markets).len() as u64;
-        assert_eq!(count_samples(&req, &markets, u64::MAX), expected);
+        let expected = plan_samples(&req, &markets).expect("valid plan").len() as u64;
+        assert_eq!(
+            count_samples(&req, &markets, u64::MAX).expect("valid count"),
+            expected
+        );
     }
 
     #[test]
@@ -215,7 +245,7 @@ mod tests {
         let req = request(60);
         // Single market alive for all 5 window instants; cap of 2 must short-circuit.
         let markets = vec![market("aaa", -100, None)];
-        let counted = count_samples(&req, &markets, 2);
+        let counted = count_samples(&req, &markets, 2).expect("valid count");
         assert!(counted > 2, "count must exceed the cap to flag overflow");
         assert!(
             counted <= 3,
@@ -228,9 +258,25 @@ mod tests {
         let req = request(60);
         // Created at +120s and resolves at +240s ⇒ only instants 120, 180.
         let markets = vec![market("m", 120, Some(240))];
-        let samples = plan_samples(&req, &markets);
+        let samples = plan_samples(&req, &markets).expect("valid plan");
         assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].as_of, req.window_start + Duration::seconds(120));
-        assert_eq!(samples[1].as_of, req.window_start + Duration::seconds(180));
+        assert_eq!(
+            samples[0].decision_at,
+            req.window_start + Duration::seconds(120)
+        );
+        assert_eq!(
+            samples[1].decision_at,
+            req.window_start + Duration::seconds(180)
+        );
+    }
+
+    #[test]
+    fn interval_outside_chrono_range_is_rejected() {
+        let req = request(u64::MAX);
+        let markets = vec![market("m", -100, None)];
+
+        assert!(plan_samples(&req, &markets).is_err());
+        assert!(count_samples(&req, &markets, u64::MAX).is_err());
+        assert!(plan_lot_timeline_samples(u64::MAX, req.window_start, &[]).is_err());
     }
 }

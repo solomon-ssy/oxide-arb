@@ -7,8 +7,8 @@ use quant_pivot_models::{
     domain::{
         AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort, CoreEvent,
         CoreEventPublisher, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
-        ExecutionRecoveryPort, ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort,
-        MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
+        ExecutionRecoveryPort, ExecutionSubmitPort, FactorGovernancePort, FeatureIntegrityPort,
+        KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
         MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
         ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
         OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
@@ -82,6 +82,8 @@ pub struct AppState {
     /// Durable async research-job engine (dataset build / model train / backtest
     /// / bias-table fit): enqueue + task-center list/get/cancel/retry.
     pub research_jobs: Arc<dyn ResearchJobPort>,
+    /// Deterministic feature replay evidence and governed parity latch.
+    pub feature_integrity: Arc<dyn FeatureIntegrityPort>,
     /// Favorite-longshot bias-table fit enqueue + unified calibration-artifact
     /// read/activate, any kind (Phase 11.2.1, unified under Phase 11.3 §3.4).
     pub calibration_artifacts: Arc<dyn CalibrationArtifactFitPort>,

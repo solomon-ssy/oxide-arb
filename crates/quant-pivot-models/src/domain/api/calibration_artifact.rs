@@ -40,7 +40,7 @@ crate::half_open_window_request!(FitBiasTableRequest);
 
 /// Inbound body for `POST /research/calibration-artifacts/fit-model-calibrator`.
 ///
-/// `calibration_dataset_id` must reference a `Built`/`Ready`
+/// `calibration_dataset_id` must reference a `Ready`
 /// `purpose = calibration` `TrainingDataset` whose window is disjoint and
 /// embargoed relative to `model_version_id`'s own training-dataset window
 /// (enforced server-side, fail-closed — Phase 11.3 §4).
@@ -103,7 +103,7 @@ pub struct ModelCalibrationFitPreflightQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelCalibrationFitPreflightView {
     /// Whether the calibration dataset's window is disjoint from every
-    /// `Built`/`Ready` training dataset in the system (purge).
+    /// `Ready` training dataset in the system (purge).
     pub disjoint_ok: bool,
     /// Whether the calibration dataset starts at/after the target model's own
     /// training-dataset window end plus the governed embargo gap. `true` when

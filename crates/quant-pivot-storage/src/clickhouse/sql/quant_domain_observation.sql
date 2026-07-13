@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS quant_domain_observation (
     schema_version        UInt32,
     event_date            Date MATERIALIZED toDate(event_time)
 )
-ENGINE = ReplacingMergeTree(ingestion_time)
+ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
 ORDER BY (instrument_key, metric, event_time)
 TTL event_date + INTERVAL 730 DAY DELETE

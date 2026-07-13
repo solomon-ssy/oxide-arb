@@ -446,6 +446,7 @@ impl BookFactWriter {
             event_type,
             delete_count,
             bucket_ms(now_ms, 1_000),
+            now_ms,
         );
         if event_type == ChBookEventType::Snapshot {
             self.microstructure_1s.write(second_observation);
@@ -537,6 +538,7 @@ fn merge_microstructure_row(current: &mut BookMicrostructureRow, next: BookMicro
     let prior_count = current.update_count;
     let next_count = next.update_count;
     current.market_id = next.market_id;
+    current.available_at = current.available_at.max(next.available_at);
 
     // Best-bid / best-ask OHLC: open untouched (first), close = latest.
     current.best_bid_high = opt_max(
@@ -660,6 +662,7 @@ fn microstructure_row(
     event_type: ChBookEventType,
     delete_count: u64,
     bucket_time: i64,
+    available_at: i64,
 ) -> BookMicrostructureRow {
     let best_bid = snapshot.best_bid();
     let best_ask = snapshot.best_ask();
@@ -695,10 +698,13 @@ fn microstructure_row(
         invalid_level_count: 0,
         gap_count: 0,
         last_trade_count: 0,
-        max_book_age_ms: u64::try_from(Utc::now().timestamp_millis())
-            .unwrap_or(0)
-            .saturating_sub(snapshot.timestamp_ms),
+        max_book_age_ms: u64::try_from(available_at).map_or(u64::MAX, |available_at| {
+            available_at
+                .checked_sub(snapshot.timestamp_ms)
+                .unwrap_or(u64::MAX)
+        }),
         schema_version: ChSchemaVersion::FIRST,
+        available_at,
     }
 }
 

@@ -12,6 +12,7 @@ use crate::features::{
     resolved::MarketWindowSnapshot,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     runtime_config::FeatureFamily,
     types::{Bps, Price, Usd},
@@ -27,16 +28,17 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
         FeatureFamily::TimeSeries
     }
 
-    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
+    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> QuantResult<Vec<RawFeature>> {
         let window = ctx.window;
         let evidence = EvidenceSourceRef {
             source_kind: EvidenceSourceKind::ClickHouseFact,
             reference: window.token_id.as_str().to_owned(),
             // Anchor provenance on the freshest fact actually available so the
             // fact-lag staleness check measures the true age (not the cutoff).
-            observed_at: window
+            effective_at: window
                 .freshest_bucket_time()
                 .unwrap_or_else(|| window.cutoff()),
+            available_at: window.latest_available_at(),
         };
         let mut out = Vec::new();
 
@@ -69,7 +71,7 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
         for secs in &momentum.slope_windows_secs {
             out.push(decimal_or_missing(
                 format!("ts.ema_slope_{secs}s"),
-                stats::ema_slope_time(&mids_ts(window, *secs), momentum.ema_fast_secs),
+                stats::ema_slope_time(&mids_ts(window, *secs), momentum.ema_fast_secs)?,
                 &evidence,
             ));
         }
@@ -93,23 +95,23 @@ impl FeatureGroupBuilder for TimeSeriesFeatureBuilder {
                 &mids_ts(window, momentum.ema_slow_secs),
                 momentum.ema_fast_secs,
                 momentum.ema_slow_secs,
-            ),
+            )?,
             &evidence,
         ));
 
-        let largest = ctx
+        let reversal = ctx
             .config
             .bar_windows_secs
             .iter()
             .copied()
             .max()
-            .unwrap_or(0);
+            .and_then(|largest| stats::mean_reversion(&mids(window, largest)));
         out.push(decimal_or_missing(
             "ts.price_reversal".to_owned(),
-            stats::mean_reversion(&mids(window, largest)),
+            reversal,
             &evidence,
         ));
-        out
+        Ok(out)
     }
 }
 

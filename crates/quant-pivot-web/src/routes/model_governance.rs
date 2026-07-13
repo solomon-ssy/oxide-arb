@@ -117,7 +117,7 @@ pub async fn publish(
     Ok(WebResponse::ok(view))
 }
 
-/// `POST /api/research/models/{id}/rollback` — retire published version, restore predecessor.
+/// `POST /api/research/models/{id}/rollback` — re-gate and atomically restore the audited predecessor.
 pub async fn rollback(
     state: web::Data<AppState>,
     id: web::Path<ModelVersionId>,

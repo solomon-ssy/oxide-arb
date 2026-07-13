@@ -8,7 +8,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::factors::FactorEngine;
 
-/// Upsert every enabled factor definition as `Draft` **without** publishing.
+/// Register every enabled factor-definition revision as `Draft` **without** publishing.
 ///
 /// Mirrors the production `POST /research/factors/register` bootstrap step so
 /// tests can exercise the "registered but not yet Published" gate state.
@@ -24,7 +24,8 @@ pub async fn register_all_factor_definitions(
 ) -> QuantResult<()> {
     let engine = FactorEngine::new(factors, features, domain, None);
     for spec in &engine.factor_set().definitions {
-        let definition = spec.try_to_new(features.feature_schema_version)?;
+        let identity = engine.definition_identity(&spec.name)?;
+        let definition = spec.try_to_new(features.feature_schema_version, &identity)?;
         factor_repo
             .create_definition(definition)
             .await
@@ -33,7 +34,7 @@ pub async fn register_all_factor_definitions(
     Ok(())
 }
 
-/// Upsert every enabled factor definition and publish it so the factor plane gate passes.
+/// Register every enabled factor definition and publish it so the factor plane gate passes.
 ///
 /// Test / local bootstrap helper — production requires explicit operator publish.
 ///
@@ -48,7 +49,8 @@ pub async fn publish_all_factor_definitions(
 ) -> QuantResult<()> {
     let engine = FactorEngine::new(factors, features, domain, None);
     for spec in &engine.factor_set().definitions {
-        let definition = spec.try_to_new(features.feature_schema_version)?;
+        let identity = engine.definition_identity(&spec.name)?;
+        let definition = spec.try_to_new(features.feature_schema_version, &identity)?;
         let row = factor_repo
             .create_definition(definition)
             .await

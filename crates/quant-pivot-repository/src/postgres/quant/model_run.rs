@@ -6,10 +6,13 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{ModelRunInfo, NewModelRun},
     entities::quant_model_run,
-    enums::quant::{ModelRunErrorCode, ModelRunStatus},
+    enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{ContentHash, ModelRunId, ModelVersionId},
 };
-use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder,
+};
 
 /// Postgres-backed model-run repository: create a `Running` run, then finalize it
 /// to a terminal state through the guarded [`Self::succeed`] / [`Self::fail`]
@@ -71,6 +74,24 @@ impl ModelRunRepository for PgModelRunRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn list_succeeded_live_between(
+        &self,
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<ModelRunInfo>, StorageError> {
+        quant_model_run::Entity::find()
+            .filter(quant_model_run::Column::RunKind.eq(ModelRunKind::LiveInference))
+            .filter(quant_model_run::Column::Status.eq(ModelRunStatus::Succeeded))
+            .filter(quant_model_run::Column::WindowStart.gte(from))
+            .filter(quant_model_run::Column::WindowStart.lt(until))
+            .order_by_asc(quant_model_run::Column::WindowStart)
+            .order_by_asc(quant_model_run::Column::ModelRunId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
     async fn succeed(

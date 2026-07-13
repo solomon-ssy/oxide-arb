@@ -3,9 +3,13 @@
 use crate::{
     postgres::{
         error,
+        governance::runtime_config,
+        quant::feature_parity,
         query::{paginate_into_model, paginate_mapped},
     },
-    traits::ModelRegistryRepository,
+    traits::{
+        CompensateRollbackModelVersionCommit, ModelRegistryRepository, RollbackModelVersionCommit,
+    },
 };
 use chrono::Utc;
 use quant_pivot_error::storage::{StorageError, entity};
@@ -14,9 +18,13 @@ use quant_pivot_models::{
         ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery, NewModelSpec,
         NewModelVersion, PageWindow, Paginated,
     },
-    entities::{quant_model_spec, quant_model_version},
-    enums::quant::PublicationStatus,
-    types::{BacktestPathSetId, ModelSpecId, ModelVersionId},
+    entities::{quant_feature_parity_run, quant_model_spec, quant_model_version},
+    enums::quant::{FeatureParityRunKind, FeatureParityRunStatus, PublicationStatus},
+    hashing::CanonicalDigest,
+    types::{
+        BacktestPathSetId, ContentHash, FeatureParityRunId, FeatureParityStateId, ModelSpecId,
+        ModelVersionId, TrainingDatasetId,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
@@ -69,6 +77,24 @@ async fn require_version_info(
 #[async_trait::async_trait]
 impl ModelRegistryRepository for PgModelRegistryRepository {
     async fn create_model_spec(&self, spec: NewModelSpec) -> Result<ModelSpecInfo, StorageError> {
+        spec.input_contract
+            .validate()
+            .map_err(|detail| StorageError::InvariantViolation {
+                entity: Some(entity::QUANT_MODEL_SPEC),
+                detail: format!("invalid input_contract: {detail}"),
+            })?;
+        if spec.input_contract.inputs.is_empty() {
+            return Err(StorageError::InvariantViolation {
+                entity: Some(entity::QUANT_MODEL_SPEC),
+                detail: "input_contract must contain at least one raw feature".to_owned(),
+            });
+        }
+        spec.training_contract
+            .validate()
+            .map_err(|detail| StorageError::InvariantViolation {
+                entity: Some(entity::QUANT_MODEL_SPEC),
+                detail: format!("invalid training_contract: {detail}"),
+            })?;
         let name = spec.name.clone();
         quant_model_spec::Entity::insert(spec.into_active_model())
             .exec_with_returning(&self.db)
@@ -116,7 +142,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?;
-        version.version = max_version.flatten().unwrap_or(0).saturating_add(1);
+        version.version = next_model_version(max_version.flatten())?;
         let duplicate_key = format!("{}:v{}", version.model_spec_id, version.version);
         let model_version_id = version.model_version_id.clone();
         quant_model_version::Entity::insert(version.into_active_model())
@@ -141,7 +167,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .one(&self.db)
             .await
             .map_err(StorageError::from)?;
-        Ok(max_version.flatten().unwrap_or(0).saturating_add(1))
+        next_model_version(max_version.flatten())
     }
 
     async fn find_model_version_by_id(
@@ -227,18 +253,6 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .map_err(StorageError::from)
     }
 
-    async fn publish_model_version(
-        &self,
-        model_version_id: &ModelVersionId,
-    ) -> Result<ModelVersionInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let info =
-            update_model_version_status(&txn, model_version_id, PublicationStatus::Published)
-                .await?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
-    }
-
     async fn retire_model_version(
         &self,
         model_version_id: &ModelVersionId,
@@ -254,6 +268,8 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         model_spec_id: &ModelSpecId,
         model_version_id: &ModelVersionId,
+        feature_parity_state_id: &FeatureParityStateId,
+        feature_parity_run_id: &FeatureParityRunId,
     ) -> Result<
         (
             ModelVersionInfo,
@@ -263,6 +279,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         StorageError,
     > {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        feature_parity::verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
         // Serialize concurrent publishes for the same spec.
         let Some(_spec) = quant_model_spec::Entity::find_by_id(model_spec_id.clone())
             .lock_exclusive()
@@ -272,6 +289,39 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         else {
             return Err(error::not_found(entity::QUANT_MODEL_SPEC, model_spec_id));
         };
+        let Some(target) = quant_model_version::Entity::find_by_id(model_version_id.clone())
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(error::not_found(
+                entity::QUANT_MODEL_VERSION,
+                model_version_id,
+            ));
+        };
+        if target.model_spec_id != *model_spec_id {
+            return Err(StorageError::state_conflict(
+                entity::QUANT_MODEL_VERSION,
+                Some(model_version_id),
+                "model version does not belong to the locked model spec",
+            ));
+        }
+        let training_dataset_id = target.training_dataset_id.as_ref().ok_or_else(|| {
+            StorageError::state_conflict(
+                entity::QUANT_MODEL_VERSION,
+                Some(model_version_id),
+                "model publish requires an exact training dataset binding",
+            )
+        })?;
+        verify_frozen_model_parity_permit(
+            &txn,
+            feature_parity_run_id,
+            model_version_id,
+            training_dataset_id,
+            target.created_at,
+        )
+        .await?;
 
         let predecessors = select_version_with_family()
             .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
@@ -315,16 +365,75 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         Ok(info)
     }
 
-    async fn restore_model_version(
+    async fn rollback_to_retired_predecessor(
         &self,
-        model_version_id: &ModelVersionId,
-    ) -> Result<ModelVersionInfo, StorageError> {
+        commit: RollbackModelVersionCommit<'_>,
+    ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let info =
-            update_model_version_status(&txn, model_version_id, PublicationStatus::Published)
-                .await?;
+        feature_parity::verify_clear_latch_generation(&txn, commit.feature_parity_state_id).await?;
+        let (current, target) = lock_model_switch_subject(
+            &txn,
+            ModelSwitchSubject {
+                spec: commit.model_spec_id,
+                current: commit.expected_current_model_version_id,
+                target: commit.target_model_version_id,
+            },
+        )
+        .await?;
+        verify_locked_rollback_subject(&txn, commit, &current, &target).await?;
+
+        let retired = update_model_version_status(
+            &txn,
+            commit.expected_current_model_version_id,
+            PublicationStatus::Retired,
+        )
+        .await?;
+        let restored = update_model_version_status(
+            &txn,
+            commit.target_model_version_id,
+            PublicationStatus::Published,
+        )
+        .await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
+        Ok((retired, restored))
+    }
+
+    async fn compensate_failed_rollback(
+        &self,
+        commit: CompensateRollbackModelVersionCommit<'_>,
+    ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let (original_current, failed_target) = lock_model_switch_subject(
+            &txn,
+            ModelSwitchSubject {
+                spec: commit.model_spec_id,
+                current: commit.original_current_model_version_id,
+                target: commit.failed_target_model_version_id,
+            },
+        )
+        .await?;
+        verify_rollback_compensation(&txn, &commit, &original_current, &failed_target).await?;
+        runtime_config::append_activation_if_current(
+            &txn,
+            Some(commit.expected_runtime_config_activation_id),
+            commit.runtime_config_compensation,
+        )
+        .await?;
+
+        let retired_target = update_model_version_status(
+            &txn,
+            commit.failed_target_model_version_id,
+            PublicationStatus::Retired,
+        )
+        .await?;
+        let restored_current = update_model_version_status(
+            &txn,
+            commit.original_current_model_version_id,
+            PublicationStatus::Published,
+        )
+        .await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok((restored_current, retired_target))
     }
 
     async fn set_quality_gate_report(
@@ -378,6 +487,411 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
     }
 }
 
+fn next_model_version(current: Option<i32>) -> Result<i32, StorageError> {
+    current.unwrap_or(0).checked_add(1).ok_or_else(|| {
+        error::invariant_violation(
+            Some(entity::QUANT_MODEL_VERSION),
+            "model version sequence exhausted i32 capacity",
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ModelSwitchSubject<'a> {
+    spec: &'a ModelSpecId,
+    current: &'a ModelVersionId,
+    target: &'a ModelVersionId,
+}
+
+async fn lock_model_switch_subject(
+    txn: &sea_orm::DatabaseTransaction,
+    subject: ModelSwitchSubject<'_>,
+) -> Result<(quant_model_version::Model, quant_model_version::Model), StorageError> {
+    let Some(_spec) = quant_model_spec::Entity::find_by_id(subject.spec.clone())
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        return Err(error::not_found(entity::QUANT_MODEL_SPEC, subject.spec));
+    };
+
+    // The spec lock serializes every publish/rollback for this scope. Lock both
+    // concrete versions before validating either status so a stale request can
+    // never expose one half of the switch.
+    let Some(current) = quant_model_version::Entity::find_by_id(subject.current.clone())
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        return Err(error::not_found(
+            entity::QUANT_MODEL_VERSION,
+            subject.current,
+        ));
+    };
+    let Some(target) = quant_model_version::Entity::find_by_id(subject.target.clone())
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        return Err(error::not_found(
+            entity::QUANT_MODEL_VERSION,
+            subject.target,
+        ));
+    };
+    Ok((current, target))
+}
+
+async fn verify_locked_rollback_subject(
+    txn: &sea_orm::DatabaseTransaction,
+    commit: RollbackModelVersionCommit<'_>,
+    current: &quant_model_version::Model,
+    target: &quant_model_version::Model,
+) -> Result<(), StorageError> {
+    let published_ids = quant_model_version::Entity::find()
+        .filter(quant_model_version::Column::ModelSpecId.eq(commit.model_spec_id.clone()))
+        .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
+        .select_only()
+        .column(quant_model_version::Column::ModelVersionId)
+        .into_tuple::<ModelVersionId>()
+        .all(txn)
+        .await
+        .map_err(StorageError::from)?;
+    validate_rollback_transition(RollbackTransitionState {
+        expected_spec_id: commit.model_spec_id,
+        expected_current_id: commit.expected_current_model_version_id,
+        current_spec_id: &current.model_spec_id,
+        current_status: current.publication_status,
+        target_id: commit.target_model_version_id,
+        target_spec_id: &target.model_spec_id,
+        target_status: target.publication_status,
+        published_ids: &published_ids,
+    })?;
+    verify_locked_rollback_artifact(commit, target)?;
+    let training_dataset_id = target.training_dataset_id.as_ref().ok_or_else(|| {
+        StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(commit.target_model_version_id),
+            "model rollback requires an exact training dataset binding",
+        )
+    })?;
+    verify_frozen_model_parity_permit(
+        txn,
+        commit.feature_parity_run_id,
+        commit.target_model_version_id,
+        training_dataset_id,
+        target.created_at,
+    )
+    .await
+}
+
+async fn verify_rollback_compensation(
+    txn: &sea_orm::DatabaseTransaction,
+    commit: &CompensateRollbackModelVersionCommit<'_>,
+    original_current: &quant_model_version::Model,
+    failed_target: &quant_model_version::Model,
+) -> Result<(), StorageError> {
+    let published_ids = quant_model_version::Entity::find()
+        .filter(quant_model_version::Column::ModelSpecId.eq(commit.model_spec_id.clone()))
+        .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
+        .select_only()
+        .column(quant_model_version::Column::ModelVersionId)
+        .into_tuple::<ModelVersionId>()
+        .all(txn)
+        .await
+        .map_err(StorageError::from)?;
+    validate_rollback_compensation_state(RollbackCompensationState {
+        expected_spec_id: commit.model_spec_id,
+        original_current_id: commit.original_current_model_version_id,
+        original_current_spec_id: &original_current.model_spec_id,
+        original_current_status: original_current.publication_status,
+        original_current_retired_at: original_current.retired_at,
+        expected_current_retired_at: commit.expected_current_retired_at,
+        failed_target_id: commit.failed_target_model_version_id,
+        failed_target_spec_id: &failed_target.model_spec_id,
+        failed_target_status: failed_target.publication_status,
+        failed_target_published_at: failed_target.published_at,
+        expected_target_published_at: commit.expected_target_published_at,
+        published_ids: &published_ids,
+    })?;
+
+    if &failed_target.artifact_hash != commit.expected_target_artifact_hash
+        || failed_target.publish_path_set_id.as_ref() != commit.expected_target_publish_path_set_id
+    {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(commit.failed_target_model_version_id),
+            "failed rollback target evidence changed before compensation",
+        ));
+    }
+    verify_persisted_rollback_gate_report(
+        commit.failed_target_model_version_id,
+        &failed_target.quality_gate_report,
+        commit.quality_gate_payload_hash,
+    )?;
+    let training_dataset_id = failed_target.training_dataset_id.as_ref().ok_or_else(|| {
+        StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(commit.failed_target_model_version_id),
+            "failed rollback target lost its training dataset binding",
+        )
+    })?;
+    verify_frozen_model_parity_permit(
+        txn,
+        commit.feature_parity_run_id,
+        commit.failed_target_model_version_id,
+        training_dataset_id,
+        failed_target.created_at,
+    )
+    .await
+}
+
+fn verify_locked_rollback_artifact(
+    commit: RollbackModelVersionCommit<'_>,
+    target: &quant_model_version::Model,
+) -> Result<(), StorageError> {
+    if &target.artifact_hash != commit.expected_target_artifact_hash {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(commit.target_model_version_id),
+            format!(
+                "rollback artifact changed after validation: expected {}, found {}",
+                commit.expected_target_artifact_hash, target.artifact_hash
+            ),
+        ));
+    }
+    if target.publish_path_set_id.as_ref() != commit.expected_target_publish_path_set_id {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(commit.target_model_version_id),
+            "rollback publish path-set binding changed after quality-gate evaluation",
+        ));
+    }
+    verify_persisted_rollback_gate_report(
+        commit.target_model_version_id,
+        &target.quality_gate_report,
+        commit.quality_gate_payload_hash,
+    )
+}
+
+fn verify_persisted_rollback_gate_report(
+    target_id: &ModelVersionId,
+    report: &serde_json::Value,
+    expected_payload_hash: &ContentHash,
+) -> Result<(), StorageError> {
+    let passed = report.get("passed").and_then(serde_json::Value::as_bool);
+    let intent = report.get("intent").and_then(serde_json::Value::as_str);
+    let subject_kind = report
+        .pointer("/subject/kind")
+        .and_then(serde_json::Value::as_str);
+    let subject_id = report
+        .pointer("/subject/id")
+        .and_then(serde_json::Value::as_str);
+    let persisted_payload_hash = CanonicalDigest::content_hash_json(report).map_err(|error| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_MODEL_VERSION),
+            format!("persisted rollback gate report is not canonical-hashable: {error}"),
+        )
+    })?;
+    let expected_subject_id = target_id.to_string();
+    if passed != Some(true)
+        || intent != Some("publish")
+        || subject_kind != Some("model_version")
+        || subject_id != Some(expected_subject_id.as_str())
+        || &persisted_payload_hash != expected_payload_hash
+    {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(target_id),
+            format!(
+                "rollback target has no exact canonical passed publish gate payload {expected_payload_hash}; persisted hash={persisted_payload_hash}, passed={passed:?}, intent={intent:?}, subject_kind={subject_kind:?}, subject_id={subject_id:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_frozen_model_parity_permit(
+    txn: &sea_orm::DatabaseTransaction,
+    run_id: &FeatureParityRunId,
+    model_version_id: &ModelVersionId,
+    training_dataset_id: &TrainingDatasetId,
+    model_created_at: chrono::DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let run = quant_feature_parity_run::Entity::find_by_id(run_id.clone())
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(entity::QUANT_FEATURE_PARITY_RUN, run_id))?;
+    let valid = run.kind == FeatureParityRunKind::Full
+        && run.status == FeatureParityRunStatus::Passed
+        && run.report_id.is_none()
+        && run.model_version_id.as_ref() == Some(model_version_id)
+        && run.training_dataset_id.as_ref() == Some(training_dataset_id)
+        && run.total_count > 0
+        && run.compared_count == run.total_count
+        && run.matched_count == run.total_count
+        && run.mismatched_count == 0
+        && run.pending_materialization_count == 0
+        && run.feature_contract_hash.is_some()
+        && run.transform_hash.is_some()
+        && run
+            .finished_at
+            .is_some_and(|finished_at| finished_at >= model_created_at);
+    if !valid {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_FEATURE_PARITY_RUN,
+            Some(run_id),
+            format!(
+                "full parity run is not a complete permit for model {model_version_id} and dataset {training_dataset_id}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the rollback compare-and-swap state before either status is
+/// mutated. Kept independent of `SeaORM` so stale-current, cross-spec and
+/// half-switched states have fast deterministic unit coverage.
+#[derive(Clone, Copy)]
+struct RollbackTransitionState<'a> {
+    expected_spec_id: &'a ModelSpecId,
+    expected_current_id: &'a ModelVersionId,
+    current_spec_id: &'a ModelSpecId,
+    current_status: PublicationStatus,
+    target_id: &'a ModelVersionId,
+    target_spec_id: &'a ModelSpecId,
+    target_status: PublicationStatus,
+    published_ids: &'a [ModelVersionId],
+}
+
+#[derive(Clone, Copy)]
+struct RollbackCompensationState<'a> {
+    expected_spec_id: &'a ModelSpecId,
+    original_current_id: &'a ModelVersionId,
+    original_current_spec_id: &'a ModelSpecId,
+    original_current_status: PublicationStatus,
+    original_current_retired_at: Option<chrono::DateTime<Utc>>,
+    expected_current_retired_at: Option<chrono::DateTime<Utc>>,
+    failed_target_id: &'a ModelVersionId,
+    failed_target_spec_id: &'a ModelSpecId,
+    failed_target_status: PublicationStatus,
+    failed_target_published_at: Option<chrono::DateTime<Utc>>,
+    expected_target_published_at: Option<chrono::DateTime<Utc>>,
+    published_ids: &'a [ModelVersionId],
+}
+
+fn validate_rollback_transition(state: RollbackTransitionState<'_>) -> Result<(), StorageError> {
+    let RollbackTransitionState {
+        expected_spec_id,
+        expected_current_id,
+        current_spec_id,
+        current_status,
+        target_id,
+        target_spec_id,
+        target_status,
+        published_ids,
+    } = state;
+    if expected_current_id == target_id {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(target_id),
+            "rollback current and target model versions must differ",
+        ));
+    }
+    if current_spec_id != expected_spec_id || target_spec_id != expected_spec_id {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(target_id),
+            "rollback current and target must both belong to the locked model spec",
+        ));
+    }
+    if current_status != PublicationStatus::Published {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(expected_current_id),
+            format!(
+                "expected rollback current to be published, found {}",
+                current_status.as_str()
+            ),
+        ));
+    }
+    if target_status != PublicationStatus::Retired {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(target_id),
+            format!(
+                "expected rollback target to be retired, found {}",
+                target_status.as_str()
+            ),
+        ));
+    }
+    if published_ids != [expected_current_id.clone()] {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_SPEC,
+            Some(expected_spec_id),
+            format!(
+                "rollback compare-and-swap expected sole published version {expected_current_id}, found [{}]",
+                published_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rollback_compensation_state(
+    state: RollbackCompensationState<'_>,
+) -> Result<(), StorageError> {
+    if state.original_current_spec_id != state.expected_spec_id
+        || state.failed_target_spec_id != state.expected_spec_id
+    {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_VERSION,
+            Some(state.failed_target_id),
+            "rollback compensation subjects no longer belong to the locked spec",
+        ));
+    }
+    if state.original_current_status != PublicationStatus::Retired
+        || state.failed_target_status != PublicationStatus::Published
+    {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_SPEC,
+            Some(state.expected_spec_id),
+            format!(
+                "rollback compensation expected current {} retired and target {} published, found {} and {}",
+                state.original_current_id,
+                state.failed_target_id,
+                state.original_current_status.as_str(),
+                state.failed_target_status.as_str()
+            ),
+        ));
+    }
+    if state.original_current_retired_at != state.expected_current_retired_at
+        || state.failed_target_published_at != state.expected_target_published_at
+    {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_SPEC,
+            Some(state.expected_spec_id),
+            "rollback compensation timestamps are stale; a later model switch intervened",
+        ));
+    }
+    if state.published_ids != [state.failed_target_id.clone()] {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_MODEL_SPEC,
+            Some(state.expected_spec_id),
+            "rollback compensation target is not the spec's sole published version",
+        ));
+    }
+    Ok(())
+}
+
 /// Transition a version's publication status under an existing connection/txn.
 /// Always `SELECT … FOR UPDATE`s the version row before mutating.
 async fn update_model_version_status(
@@ -422,4 +936,180 @@ async fn update_model_version_status(
     }
     active.update(db).await.map_err(StorageError::from)?;
     require_version_info(db, model_version_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_version_sequence_is_checked() {
+        assert_eq!(next_model_version(None).expect("initial version"), 1);
+        assert_eq!(next_model_version(Some(41)).expect("next version"), 42);
+        let error = next_model_version(Some(i32::MAX)).expect_err("overflow must fail closed");
+        assert!(error.to_string().contains("sequence exhausted"));
+    }
+
+    struct RollbackFixture {
+        spec: ModelSpecId,
+        current: ModelVersionId,
+        target: ModelVersionId,
+    }
+
+    impl RollbackFixture {
+        fn new() -> Self {
+            Self {
+                spec: ModelSpecId::from_v7(),
+                current: ModelVersionId::from_v7(),
+                target: ModelVersionId::from_v7(),
+            }
+        }
+
+        fn state<'a>(
+            &'a self,
+            current_spec_id: &'a ModelSpecId,
+            current_status: PublicationStatus,
+            target_spec_id: &'a ModelSpecId,
+            target_status: PublicationStatus,
+            published_ids: &'a [ModelVersionId],
+        ) -> RollbackTransitionState<'a> {
+            RollbackTransitionState {
+                expected_spec_id: &self.spec,
+                expected_current_id: &self.current,
+                current_spec_id,
+                current_status,
+                target_id: &self.target,
+                target_spec_id,
+                target_status,
+                published_ids,
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_compare_and_swap_accepts_exact_published_current_and_retired_target() {
+        let fixture = RollbackFixture::new();
+        validate_rollback_transition(fixture.state(
+            &fixture.spec,
+            PublicationStatus::Published,
+            &fixture.spec,
+            PublicationStatus::Retired,
+            std::slice::from_ref(&fixture.current),
+        ))
+        .expect("exact rollback state is valid");
+    }
+
+    #[test]
+    fn rollback_compare_and_swap_rejects_stale_cross_spec_and_half_switched_states() {
+        let fixture = RollbackFixture::new();
+        let other_spec = ModelSpecId::from_v7();
+
+        let stale_current = validate_rollback_transition(fixture.state(
+            &fixture.spec,
+            PublicationStatus::Published,
+            &fixture.spec,
+            PublicationStatus::Retired,
+            std::slice::from_ref(&fixture.target),
+        ))
+        .expect_err("stale current must fail closed");
+        assert!(stale_current.to_string().contains("sole published version"));
+
+        let cross_spec = validate_rollback_transition(fixture.state(
+            &fixture.spec,
+            PublicationStatus::Published,
+            &other_spec,
+            PublicationStatus::Retired,
+            std::slice::from_ref(&fixture.current),
+        ))
+        .expect_err("cross-spec target must fail closed");
+        assert!(cross_spec.to_string().contains("locked model spec"));
+
+        let already_restored = validate_rollback_transition(fixture.state(
+            &fixture.spec,
+            PublicationStatus::Retired,
+            &fixture.spec,
+            PublicationStatus::Published,
+            std::slice::from_ref(&fixture.target),
+        ))
+        .expect_err("half-switched state must fail closed");
+        assert!(
+            already_restored
+                .to_string()
+                .contains("current to be published")
+        );
+    }
+
+    #[test]
+    fn rollback_commit_requires_exact_persisted_passed_gate_report() {
+        let target_id = ModelVersionId::from_v7();
+        let report = serde_json::json!({
+            "subject": {
+                "kind": "model_version",
+                "id": target_id.to_string(),
+            },
+            "intent": "publish",
+            "passed": true,
+            // This embedded decision hash is deliberately unrelated to the
+            // commit permit, which hashes the exact persisted JSON payload.
+            "report_hash": format!("blake3:{}", "a".repeat(64)),
+        });
+        let expected = CanonicalDigest::content_hash_json(&report).expect("payload hash");
+        verify_persisted_rollback_gate_report(&target_id, &report, &expected)
+            .expect("exact passed report is a valid commit permit");
+
+        let mut failed_report = report.clone();
+        failed_report["passed"] = serde_json::Value::Bool(false);
+        let failed_hash =
+            CanonicalDigest::content_hash_json(&failed_report).expect("failed payload hash");
+        let failed =
+            verify_persisted_rollback_gate_report(&target_id, &failed_report, &failed_hash)
+                .expect_err("failed quality report must block rollback commit");
+        assert!(failed.to_string().contains("canonical passed publish gate"));
+
+        let mut stale_report = report;
+        stale_report["report_hash"] =
+            serde_json::Value::String(format!("blake3:{}", "b".repeat(64)));
+        let stale = verify_persisted_rollback_gate_report(&target_id, &stale_report, &expected)
+            .expect_err("stale gate report must block rollback commit");
+        assert!(stale.to_string().contains("canonical passed publish gate"));
+    }
+
+    #[test]
+    fn rollback_compensation_requires_exact_just_switched_timestamps() {
+        let fixture = RollbackFixture::new();
+        let retired_at = Utc::now();
+        let published_at = retired_at + chrono::Duration::milliseconds(1);
+        validate_rollback_compensation_state(RollbackCompensationState {
+            expected_spec_id: &fixture.spec,
+            original_current_id: &fixture.current,
+            original_current_spec_id: &fixture.spec,
+            original_current_status: PublicationStatus::Retired,
+            original_current_retired_at: Some(retired_at),
+            expected_current_retired_at: Some(retired_at),
+            failed_target_id: &fixture.target,
+            failed_target_spec_id: &fixture.spec,
+            failed_target_status: PublicationStatus::Published,
+            failed_target_published_at: Some(published_at),
+            expected_target_published_at: Some(published_at),
+            published_ids: std::slice::from_ref(&fixture.target),
+        })
+        .expect("exact just-switched state may be compensated");
+
+        let stale = validate_rollback_compensation_state(RollbackCompensationState {
+            expected_spec_id: &fixture.spec,
+            original_current_id: &fixture.current,
+            original_current_spec_id: &fixture.spec,
+            original_current_status: PublicationStatus::Retired,
+            original_current_retired_at: Some(retired_at),
+            expected_current_retired_at: Some(retired_at - chrono::Duration::seconds(1)),
+            failed_target_id: &fixture.target,
+            failed_target_spec_id: &fixture.spec,
+            failed_target_status: PublicationStatus::Published,
+            failed_target_published_at: Some(published_at),
+            expected_target_published_at: Some(published_at),
+            published_ids: std::slice::from_ref(&fixture.target),
+        })
+        .expect_err("a later switch must make compensation stale");
+        assert!(stale.to_string().contains("timestamps are stale"));
+    }
 }

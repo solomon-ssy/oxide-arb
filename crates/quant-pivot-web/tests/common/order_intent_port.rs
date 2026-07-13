@@ -10,7 +10,9 @@ use quant_pivot_core::{
     governance::{CoreCalibrationArtifactLoader, KillSwitchHandle, RuntimeModeHandle},
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
+    service::feature_integrity::FeatureParityGatePort,
 };
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
@@ -27,6 +29,15 @@ use quant_pivot_repository::{
 };
 use quant_pivot_research::{artifact::LocalArtifactStore, model::CalibrationArtifactLoader};
 use sea_orm::DatabaseConnection;
+
+struct ClearFeatureParityGate;
+
+#[async_trait::async_trait]
+impl FeatureParityGatePort for ClearFeatureParityGate {
+    async fn ensure_clear(&self, _operation: &'static str) -> QuantResult<()> {
+        Ok(())
+    }
+}
 
 /// Assemble a real [`CoreOrderIntentService`] over the test Postgres connection.
 ///
@@ -68,5 +79,6 @@ pub fn build_order_intent_service(
         )
             as Arc<dyn CalibrationArtifactRepository>))
             as Arc<dyn CalibrationArtifactLoader>,
+        feature_parity_gate: Arc::new(ClearFeatureParityGate),
     }))
 }

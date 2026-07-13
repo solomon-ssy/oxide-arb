@@ -333,7 +333,10 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
             let Some(cell) = cell else {
                 continue;
             };
-            let key = (value.as_of.timestamp_millis(), value.market_id.to_string());
+            let key = (
+                value.decision_at.timestamp_millis(),
+                value.market_id.to_string(),
+            );
             let row = observations
                 .entry(key)
                 .or_insert_with(|| vec![None; factor_names.len()]);
@@ -358,7 +361,7 @@ impl ResearchCatalogPort for CoreResearchCatalogPort {
         } else {
             panel
         };
-        let report = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+        let report = FactorCollinearityAnalyzer::analyze(&panel, threshold)?;
 
         Ok(FactorCollinearityView {
             factors: panel

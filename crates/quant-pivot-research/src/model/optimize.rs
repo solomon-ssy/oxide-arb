@@ -38,17 +38,16 @@ const SIMPLEX_DELTA: f64 = 0.75;
 const LN_FLOOR: f64 = 1e-6;
 
 /// Refine `grid_weights` with Nelder–Mead. Returns the refined simplex weights
-/// (Decimal, rounded + renormalized), or `None` when the solver fails or the
-/// problem is degenerate (`< 2` weights).
-#[must_use]
+/// (Decimal, rounded + renormalized), or `None` when the problem is degenerate
+/// (`< 2` weights). Solver and numeric-boundary failures are returned explicitly.
 pub(crate) fn refine_weights(
     grid_weights: &[Decimal],
     groups: &[CrossSectionGroup],
     evaluator: &ObjectiveEvaluator,
-) -> Option<Vec<Decimal>> {
+) -> Result<Option<Vec<Decimal>>, Error> {
     let n = grid_weights.len();
     if n < 2 || groups.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let problem = WeightObjective {
@@ -59,7 +58,7 @@ pub(crate) fn refine_weights(
     // Seed unconstrained params via inverse-softmax (log) of the grid weights.
     let mut seed = Vec::with_capacity(n);
     for weight in grid_weights {
-        seed.push(decimal_to_f64(*weight).ok()?.max(LN_FLOOR).ln());
+        seed.push(decimal_to_f64(*weight)?.max(LN_FLOOR).ln());
     }
 
     // Deterministic initial simplex: the seed plus one perturbation per axis.
@@ -74,11 +73,13 @@ pub(crate) fn refine_weights(
     let solver = NelderMead::new(simplex);
     let result = Executor::new(problem, solver)
         .configure(|state| state.max_iters(MAX_ITERS))
-        .run()
-        .ok()?;
+        .run()?;
 
-    let best = result.state().get_best_param()?.clone();
-    Some(softmax_to_simplex_decimal(&best))
+    let best = result
+        .state()
+        .get_best_param()
+        .ok_or_else(|| Error::msg("optimizer returned no best parameter"))?;
+    Ok(Some(softmax_to_simplex_decimal(best)?))
 }
 
 /// The Nelder–Mead cost: negative LTR objective over the softmax-projected
@@ -93,7 +94,7 @@ impl CostFunction for WeightObjective {
     type Output = f64;
 
     fn cost(&self, param: &Self::Param) -> Result<f64, Error> {
-        let weights = softmax_to_simplex_decimal(param);
+        let weights = softmax_to_simplex_decimal(param)?;
         let objective = self
             .evaluator
             .evaluate(&weights, &self.groups)
@@ -105,27 +106,44 @@ impl CostFunction for WeightObjective {
 
 /// Softmax an unconstrained `f64` vector onto the weight simplex, then quantize
 /// to `Decimal` at the research scale and renormalize (so the sum is exactly 1).
-fn softmax_to_simplex_decimal(param: &[f64]) -> Vec<Decimal> {
+fn softmax_to_simplex_decimal(param: &[f64]) -> Result<Vec<Decimal>, Error> {
+    if param.is_empty() || param.iter().any(|value| !value.is_finite()) {
+        return Err(Error::msg(
+            "optimizer softmax requires a non-empty finite parameter vector",
+        ));
+    }
     let max = param.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let exps: Vec<f64> = param.iter().map(|x| (x - max).exp()).collect();
     let sum: f64 = exps.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(Error::msg(format!(
+            "optimizer softmax normalization is invalid: {sum}"
+        )));
+    }
     let raw: Vec<Decimal> = exps
         .iter()
-        .map(|e| {
-            let w = if sum > 0.0 { e / sum } else { 0.0 };
+        .map(|e| -> Result<Decimal, Error> {
+            let w = e / sum;
+            if !w.is_finite() {
+                return Err(Error::msg(format!(
+                    "optimizer softmax emitted non-finite weight {w}"
+                )));
+            }
             Decimal::from_f64(w)
-                .unwrap_or(Decimal::ZERO)
-                .round_dp(RESEARCH_DECIMAL_SCALE)
+                .map(|value| value.round_dp(RESEARCH_DECIMAL_SCALE))
+                .ok_or_else(|| Error::msg(format!("optimizer weight {w} does not fit Decimal")))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let total: Decimal = raw.iter().map(|w| (*w).max(Decimal::ZERO)).sum();
     if total.is_zero() {
-        let uniform = Decimal::ONE / Decimal::from(raw.len() as u64);
-        return vec![uniform; raw.len()];
+        return Err(Error::msg(
+            "optimizer softmax weights quantized to an all-zero simplex",
+        ));
     }
-    raw.iter()
+    Ok(raw
+        .iter()
         .map(|w| (*w).max(Decimal::ZERO) / total)
-        .collect()
+        .collect())
 }
 
 /// Convert a `Decimal` to `f64` (optimizer boundary only). Fail-closed: never

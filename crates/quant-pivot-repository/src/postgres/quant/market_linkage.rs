@@ -1,10 +1,12 @@
 //! Postgres-backed market-linkage ledger repository (append-only, bitemporal).
 
 use crate::traits::MarketLinkageRepository;
-use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{MarketLinkageInfo, MarketLinkageListQuery, NewMarketLinkage, PageWindow, Paginated},
+    domain::{
+        DecisionBoundary, DecisionSource, MarketLinkageInfo, MarketLinkageListQuery,
+        NewMarketLinkage, PageWindow, Paginated,
+    },
     entities::quant_market_linkage,
     types::{MarketId, MarketLinkageId},
 };
@@ -72,11 +74,15 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
     async fn valid_at(
         &self,
         market_id: &MarketId,
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
         quant_market_linkage::Entity::find()
             .filter(quant_market_linkage::Column::MarketId.eq(market_id.clone()))
-            .filter(quant_market_linkage::Column::DerivedAt.lte(as_of))
+            .filter(
+                quant_market_linkage::Column::DerivedAt
+                    .lte(boundary.cutoff_for(DecisionSource::Linkage)),
+            )
+            .filter(quant_market_linkage::Column::CreatedAt.lte(boundary.decision_at()))
             .order_by_desc(quant_market_linkage::Column::DerivedAt)
             .order_by_desc(quant_market_linkage::Column::CreatedAt)
             .order_by_desc(quant_market_linkage::Column::LinkageId)
@@ -89,17 +95,21 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
     async fn valid_at_for_markets(
         &self,
         market_ids: &[MarketId],
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // Same reduce-in-memory strategy as `latest_for_markets`, but with the
-        // `derived_at <= as_of` PIT filter `valid_at` applies per-market —
-        // this is the batch form of `valid_at`, not of `latest_for_markets`.
+        // Apply the same effective <= source_cutoff and available <= decision_at
+        // constraints as `valid_at`; this is its batch form, not a filtered
+        // `latest_for_markets` read.
         let rows = quant_market_linkage::Entity::find()
             .filter(quant_market_linkage::Column::MarketId.is_in(market_ids.to_vec()))
-            .filter(quant_market_linkage::Column::DerivedAt.lte(as_of))
+            .filter(
+                quant_market_linkage::Column::DerivedAt
+                    .lte(boundary.cutoff_for(DecisionSource::Linkage)),
+            )
+            .filter(quant_market_linkage::Column::CreatedAt.lte(boundary.decision_at()))
             .order_by_asc(quant_market_linkage::Column::MarketId)
             .order_by_desc(quant_market_linkage::Column::DerivedAt)
             .order_by_desc(quant_market_linkage::Column::CreatedAt)
@@ -135,17 +145,22 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
     async fn ledger_for_markets(
         &self,
         market_ids: &[MarketId],
-        derived_before: DateTime<Utc>,
+        end_boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         if market_ids.is_empty() {
             return Ok(Vec::new());
         }
         quant_market_linkage::Entity::find()
             .filter(quant_market_linkage::Column::MarketId.is_in(market_ids.to_vec()))
-            .filter(quant_market_linkage::Column::DerivedAt.lte(derived_before))
+            .filter(
+                quant_market_linkage::Column::DerivedAt
+                    .lte(end_boundary.cutoff_for(DecisionSource::Linkage)),
+            )
+            .filter(quant_market_linkage::Column::CreatedAt.lte(end_boundary.decision_at()))
             .order_by_asc(quant_market_linkage::Column::MarketId)
             .order_by_asc(quant_market_linkage::Column::DerivedAt)
             .order_by_asc(quant_market_linkage::Column::CreatedAt)
+            .order_by_asc(quant_market_linkage::Column::LinkageId)
             .all(&self.db)
             .await
             .map_err(StorageError::from)

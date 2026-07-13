@@ -10,10 +10,10 @@
 
 use crate::{
     features::{
-        FeatureBuildInput, FeatureBuilder, FeatureVector, PitView,
+        FeatureBuildInput, FeatureBuilder, FeatureVector,
         decision_capture::{
-            ResolvedMarketBundle, empty_book, market_decision_capture_from_resolved,
-            stub_market_context,
+            ResolvedMarketBundle, book_snapshot_ref_from_resolved,
+            market_decision_capture_from_resolved,
         },
         domain::{
             CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceInputs,
@@ -29,17 +29,18 @@ use crate::{
         },
         schema::{FeatureSchema, FeatureSpec, StalenessRule},
         value::{
-            DomainFeatureSlice, EvidenceSourceRef, FeatureName, FeatureValue, NullReason,
-            SubstitutionAudit, merged_required_features,
+            DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureName, FeatureStaleness,
+            FeatureValue, NullReason,
         },
     },
+    pit::PointInTimeSnapshotSource,
     selection::SelectedMarket,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{NegRiskLeg, market::registry::NegRiskLegSet},
+    domain::{DecisionBoundary, DecisionSource, NegRiskLeg},
     enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeatureFamily, FeaturesConfig},
     types::{BookSnapshotRef, MarketId, SchemaVersion, TokenId, Usd},
@@ -81,11 +82,29 @@ impl RawFeature {
             evidence: None,
         }
     }
+
+    /// A missing value whose source snapshot exists and remains auditable.
+    ///
+    /// This distinguishes an unavailable source from an available-but-unquoted
+    /// book side. The latter retains its exact snapshot identity and staleness
+    /// even though it carries no numeric value.
+    #[must_use]
+    pub const fn missing_with_evidence(
+        name: FeatureName,
+        reason: NullReason,
+        evidence: EvidenceSourceRef,
+    ) -> Self {
+        Self {
+            name,
+            value: Err(reason),
+            evidence: Some(evidence),
+        }
+    }
 }
 
 /// One neg-risk sibling leg resolved point-in-time at the SAME `as_of` as the
 /// primary market (Phase 11.2.1). Online and offline both resolve through
-/// [`PitView::resolve_book`], so the structural full-leg aggregates are
+/// [`PointInTimeSnapshotSource::book_at_boundary`], so the structural full-leg aggregates are
 /// byte-identical across backends.
 pub struct ResolvedLeg {
     /// The sibling market that owns this YES leg.
@@ -99,11 +118,13 @@ pub struct ResolvedLeg {
 /// Everything a group builder needs to compute its features, all borrowed.
 pub struct FeatureComputeCtx<'a> {
     /// Decision time.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// The selected market's category (drives domain routing).
     pub category: MarketCategory,
     /// Primary-token book resolved at `as_of`, when available.
     pub book: Option<&'a ResolvedBook>,
+    /// Secondary/NO-token book resolved under the same boundary, when quoted.
+    pub secondary_book: Option<&'a ResolvedBook>,
     /// Market metadata resolved at `as_of`, when available.
     pub market: Option<&'a ResolvedMarketContext>,
     /// Pre-fetched windowed microstructure history for the primary token.
@@ -123,6 +144,8 @@ pub struct FeatureComputeCtx<'a> {
     pub data_quality: &'a DataQualityConfig,
     /// Book replay handle frozen at resolve (when a book was captured).
     pub book_snapshot_ref: Option<&'a BookSnapshotRef>,
+    /// Exact replay handle for the secondary/NO-token book.
+    pub secondary_book_snapshot_ref: Option<&'a BookSnapshotRef>,
 }
 
 /// A pure feature-group computation (no I/O, no clock, no mutable state).
@@ -131,7 +154,7 @@ pub trait FeatureGroupBuilder: Send + Sync {
     fn family(&self) -> FeatureFamily;
 
     /// Compute the group's raw features for one market.
-    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature>;
+    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> QuantResult<Vec<RawFeature>>;
 }
 
 /// Source-agnostic, PIT-resolved inputs for one market's feature build.
@@ -142,9 +165,13 @@ pub struct ResolvedInputs<'a> {
     /// The selected market (frozen selection snapshot).
     pub market: &'a SelectedMarket,
     /// Decision time the inputs were resolved as of.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Primary-token book resolved at `as_of`, when available.
     pub book: Option<ResolvedBook>,
+    /// Secondary/NO-token book resolved at the same source cutoff, when quoted.
+    pub secondary_book: Option<ResolvedBook>,
+    /// Content-addressed replay handle for `secondary_book`.
+    pub secondary_book_snapshot_ref: Option<BookSnapshotRef>,
     /// Market metadata resolved at `as_of`, when available.
     pub market_ctx: Option<ResolvedMarketContext>,
     /// Pre-fetched, PIT-bounded microstructure window for the primary token.
@@ -234,6 +261,62 @@ impl FeatureSourceNeeds {
     }
 }
 
+async fn resolve_secondary_book(
+    pit: &dyn PointInTimeSnapshotSource,
+    market: &SelectedMarket,
+    boundary: &DecisionBoundary,
+) -> QuantResult<(Option<ResolvedBook>, Option<BookSnapshotRef>)> {
+    let book = match market.secondary_token_id.as_ref() {
+        Some(token_id) => pit
+            .book_at_boundary(token_id, boundary)
+            .await?
+            .map(ResolvedBook::try_from)
+            .transpose()?,
+        None => None,
+    };
+    let snapshot_ref = book
+        .as_ref()
+        .map(book_snapshot_ref_from_resolved)
+        .transpose()?;
+    Ok((book, snapshot_ref))
+}
+
+async fn resolve_selected_catalog_snapshot(
+    pit: &dyn PointInTimeSnapshotSource,
+    market: &SelectedMarket,
+    boundary: &DecisionBoundary,
+) -> QuantResult<crate::pit::ResolvedMarketSnapshot> {
+    let catalog_cutoff = boundary.cutoff_for(DecisionSource::Catalog);
+    let snapshot = pit
+        .market_snapshot_at(&market.market_id, boundary)
+        .await?
+        .ok_or_else(|| ResearchError::PitResolution {
+            detail: format!(
+                "no market catalog version for {} at source cutoff {catalog_cutoff}",
+                market.market_id
+            ),
+        })?;
+    if snapshot.boundary != *boundary {
+        return Err(ResearchError::PitResolution {
+            detail: format!(
+                "market {} snapshot boundary differs from the decision boundary",
+                market.market_id
+            ),
+        }
+        .into());
+    }
+    if snapshot.event.event_id != market.event_id {
+        return Err(ResearchError::PitResolution {
+            detail: format!(
+                "market {} snapshot event {} does not match selection event {}",
+                market.market_id, snapshot.event.event_id, market.event_id
+            ),
+        }
+        .into());
+    }
+    Ok(snapshot)
+}
+
 impl ConfiguredFeatureBuilder {
     /// Build the standard pipeline for the given feature config.
     ///
@@ -242,9 +325,8 @@ impl ConfiguredFeatureBuilder {
     /// PIT gating flags are resolved once here from the schema's source
     /// requirements, so the build loop never issues a book/metadata lookup no
     /// enabled feature consumes.
-    #[must_use]
-    pub fn new(config: &FeaturesConfig, domain_config: &DomainConfig) -> Self {
-        let schema = FeatureSchema::build(config);
+    pub fn new(config: &FeaturesConfig, domain_config: &DomainConfig) -> QuantResult<Self> {
+        let schema = FeatureSchema::build(config)?;
         let mut groups: Vec<Box<dyn FeatureGroupBuilder>> = Vec::new();
         let mut domain_builders: Vec<Box<dyn DomainFeatureBuilder>> = Vec::new();
         for family in &config.enabled_feature_families {
@@ -266,13 +348,13 @@ impl ConfiguredFeatureBuilder {
             }
         }
         let source_needs = FeatureSourceNeeds::from_schema(&schema);
-        Self {
+        Ok(Self {
             schema,
             groups,
             domain_builders,
             domain_config: domain_config.clone(),
             source_needs,
-        }
+        })
     }
 
     /// The governed schema this builder produces.
@@ -301,31 +383,41 @@ impl ConfiguredFeatureBuilder {
     ///
     /// # Errors
     ///
-    /// Propagates the PIT view's resolution errors (historical engine queries).
+    /// Propagates durable snapshot resolution errors.
     pub async fn resolve_inputs<'a>(
         &self,
         market: &'a SelectedMarket,
-        as_of: DateTime<Utc>,
-        pit: PitView<'a>,
+        boundary: &DecisionBoundary,
+        pit: &'a dyn PointInTimeSnapshotSource,
         windows: FeatureSourceWindows<'a>,
-        sibling: &NegRiskLegSet,
         liquidity_cap_usd: Usd,
     ) -> QuantResult<ResolvedMarketBundle<'a>> {
+        let book_cutoff = boundary.cutoff_for(DecisionSource::Book);
         let capture_book = pit
-            .resolve_book(&market.primary_token_id, as_of)
+            .book_at_boundary(&market.primary_token_id, boundary)
             .await?
-            .unwrap_or_else(|| empty_book(market.primary_token_id.clone(), as_of));
-        let capture_market = pit
-            .resolve_market(&market.market_id, as_of)
-            .await?
-            .unwrap_or_else(|| stub_market_context(market.market_id.clone(), as_of));
-        let registry = pit.resolve_registry(&market.market_id, as_of)?;
+            .map(ResolvedBook::try_from)
+            .transpose()?
+            .ok_or_else(|| ResearchError::PitResolution {
+                detail: format!(
+                    "no order book for token {} at source cutoff {book_cutoff}",
+                    market.primary_token_id
+                ),
+            })?;
+        let (secondary_book, secondary_book_snapshot_ref) =
+            resolve_secondary_book(pit, market, boundary).await?;
+        let snapshot = resolve_selected_catalog_snapshot(pit, market, boundary).await?;
+        let catalog = crate::features::CatalogDecisionRef::from(&snapshot);
+        let capture_market = ResolvedMarketContext::from(snapshot.context);
+        let registry = snapshot.market;
+        let snapshot_sibling = snapshot.neg_risk_leg_set;
         let capture = market_decision_capture_from_resolved(
-            as_of,
+            boundary,
             market,
             capture_book,
             capture_market,
-            registry.as_deref(),
+            Some(registry.as_ref()),
+            catalog,
             liquidity_cap_usd,
         )?;
         let book = if self.source_needs.book() {
@@ -339,16 +431,20 @@ impl ConfiguredFeatureBuilder {
             None
         };
         let sibling_leg_total = if self.source_needs.sibling_legs() {
-            sibling.expected_legs
+            snapshot_sibling.expected_legs
         } else {
             0
         };
-        let sibling_legs = self.resolve_sibling_legs(pit, as_of, &sibling.legs).await?;
+        let sibling_legs = self
+            .resolve_sibling_legs(pit, boundary, &snapshot_sibling.legs)
+            .await?;
         Ok(ResolvedMarketBundle {
             inputs: ResolvedInputs {
                 market,
-                as_of,
+                decision_at: boundary.decision_at(),
                 book,
+                secondary_book,
+                secondary_book_snapshot_ref,
                 market_ctx,
                 window: windows.microstructure,
                 trade_tape: windows.trade_tape,
@@ -372,8 +468,8 @@ impl ConfiguredFeatureBuilder {
     /// as `Indeterminate { LegBookMissing }` — never a silent zero.
     async fn resolve_sibling_legs(
         &self,
-        pit: PitView<'_>,
-        as_of: DateTime<Utc>,
+        pit: &dyn PointInTimeSnapshotSource,
+        boundary: &DecisionBoundary,
         legs: &[NegRiskLeg],
     ) -> QuantResult<Vec<ResolvedLeg>> {
         if !self.source_needs.sibling_legs() || legs.is_empty() {
@@ -381,7 +477,12 @@ impl ConfiguredFeatureBuilder {
         }
         let mut resolved = Vec::with_capacity(legs.len());
         for leg in legs {
-            if let Some(book) = pit.resolve_book(&leg.yes_token_id, as_of).await? {
+            if let Some(book) = pit
+                .book_at_boundary(&leg.yes_token_id, boundary)
+                .await?
+                .map(ResolvedBook::try_from)
+                .transpose()?
+            {
                 resolved.push(ResolvedLeg {
                     market_id: leg.market_id.clone(),
                     token_id: leg.yes_token_id.clone(),
@@ -393,19 +494,19 @@ impl ConfiguredFeatureBuilder {
     }
 
     /// Compute the canonical [`FeatureVector`] from resolved inputs (pure).
-    #[must_use]
     pub fn compute_vector(
         &self,
         bundle: &ResolvedMarketBundle<'_>,
         required_features: &[FeatureName],
         config: &FeaturesConfig,
         data_quality: &DataQualityConfig,
-    ) -> FeatureVector {
+    ) -> QuantResult<FeatureVector> {
         let resolved = &bundle.inputs;
         let ctx = FeatureComputeCtx {
-            as_of: resolved.as_of,
+            decision_at: resolved.decision_at,
             category: resolved.market.category,
             book: resolved.book.as_ref(),
+            secondary_book: resolved.secondary_book.as_ref(),
             market: resolved.market_ctx.as_ref(),
             window: resolved.window,
             trade_tape: resolved.trade_tape,
@@ -414,24 +515,39 @@ impl ConfiguredFeatureBuilder {
             config,
             data_quality,
             book_snapshot_ref: Some(&bundle.capture.book_snapshot_ref),
+            secondary_book_snapshot_ref: resolved.secondary_book_snapshot_ref.as_ref(),
         };
 
         // Collect every generic group's raw features into a name-keyed map.
         let mut raw: BTreeMap<FeatureName, RawFeature> = BTreeMap::new();
         for group in &self.groups {
-            for feature in group.compute(&ctx) {
-                raw.insert(feature.name.clone(), feature);
+            for feature in group.compute(&ctx)? {
+                let name = feature.name.clone();
+                if self.schema.by_name(&name).is_none() {
+                    return Err(ResearchError::SchemaHashMismatch {
+                        detail: format!(
+                            "feature builder emitted `{name}` outside the active schema"
+                        ),
+                    }
+                    .into());
+                }
+                if raw.insert(name.clone(), feature).is_some() {
+                    return Err(ResearchError::Determinism {
+                        detail: format!("feature builders emitted duplicate raw feature `{name}`"),
+                    }
+                    .into());
+                }
             }
         }
 
-        let required = merged_required_features(required_features, config);
-        let mut assembly = self.assemble(&raw, &required, data_quality, resolved.as_of);
-        let domain = self.compute_domain_slice(resolved, &required, data_quality, &mut assembly);
+        let required: HashSet<FeatureName> = required_features.iter().cloned().collect();
+        let mut assembly = self.assemble(&raw, &required, data_quality, resolved.decision_at)?;
+        let domain = self.compute_domain_slice(resolved, &required, data_quality, &mut assembly)?;
 
-        let book_age_ms = book_age_ms(resolved.as_of, resolved.book.as_ref());
-        let feature_bucket_age_ms = feature_bucket_age_ms(resolved.as_of, resolved.window);
-        let trade_tape_age_ms = trade_tape_age_ms(resolved.as_of, resolved.trade_tape);
-        let domain_age_ms = domain_age_ms(resolved.as_of, resolved.domain);
+        let book_age_ms = book_age_ms(resolved.decision_at, resolved.book.as_ref())?;
+        let feature_bucket_age_ms = feature_bucket_age_ms(resolved.decision_at, resolved.window)?;
+        let trade_tape_age_ms = trade_tape_age_ms(resolved.decision_at, resolved.trade_tape)?;
+        let domain_age_ms = domain_age_ms(resolved.decision_at, resolved.domain)?;
         let data_quality_status = classify(
             assembly.rejected,
             assembly.degraded,
@@ -442,49 +558,73 @@ impl ConfiguredFeatureBuilder {
                 domain: domain_age_ms,
             },
             data_quality,
-        );
+        )?;
 
-        FeatureVector {
+        Ok(FeatureVector {
             market_id: resolved.market.market_id.clone(),
             token_id: Some(resolved.market.primary_token_id.clone()),
-            as_of: resolved.as_of,
+            decision_at: resolved.decision_at,
             generic_schema_version: self.schema.version(),
-            generic: assembly.values,
+            generic: assembly.cells,
             domain,
-            substitutions: assembly.substitutions,
             data_quality: data_quality_status,
-            staleness_ms: book_age_ms
-                .max(feature_bucket_age_ms)
-                .max(trade_tape_age_ms)
-                .max(domain_age_ms),
-            source_refs: assembly.evidence,
-        }
+        })
     }
 
-    /// Build the optional domain slice for a category-mapped, linkage-resolved
-    /// market (pure; inputs were prefetched by the pipeline).
+    /// Build the domain slice for a category-mapped market (pure; inputs were
+    /// prefetched by the pipeline).
     ///
-    /// Returns `None` when the vector structurally carries no domain slice:
-    /// no domain inputs (category maps to no vertical, family disabled, or
-    /// linkage unresolved) or no registered builder for the family. When the
-    /// slice applies, its values flow through the same governed null-policy /
-    /// valid-range / staleness machinery as the generic slice, and its
-    /// substitutions and evidence merge into the vector-level audit trail.
+    /// Returns `None` only when the category maps to no enabled vertical. A
+    /// mapped market without a resolved linkage receives an explicit slice of
+    /// `Missing(LinkageUnresolved)` cells, preserving `Missing` vs
+    /// `NotApplicable` for the shared model-input transform and serving facts.
     fn compute_domain_slice(
         &self,
         resolved: &ResolvedInputs<'_>,
         required: &HashSet<FeatureName>,
         data_quality: &DataQualityConfig,
         assembly: &mut Assembly,
-    ) -> Option<DomainFeatureSlice> {
-        let inputs = resolved.domain?;
-        let builder = self
+    ) -> QuantResult<Option<DomainFeatureSlice>> {
+        let Some(family) = DomainFamily::for_category(resolved.market.category)
+            .filter(|family| self.domain_config.family_enabled(*family))
+        else {
+            return Ok(None);
+        };
+        if self.schema.domain_specs().next().is_none() {
+            return Ok(None);
+        }
+        let Some(inputs) = resolved.domain else {
+            return Ok(Some(self.missing_domain_slice(
+                family,
+                required,
+                data_quality,
+                assembly,
+                NullReason::LinkageUnresolved,
+            )));
+        };
+        if inputs.family != family {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "domain slice family {:?} does not match category {:?} family {family:?}",
+                    inputs.family, resolved.market.category
+                ),
+            }
+            .into());
+        }
+        let Some(builder) = self
             .domain_builders
             .iter()
-            .find(|builder| builder.family() == inputs.family)?;
+            .find(|builder| builder.family() == inputs.family)
+        else {
+            return Err(ResearchError::Determinism {
+                detail: format!("no domain feature builder registered for family {family:?}"),
+            }
+            .into());
+        };
         let ctx = DomainComputeCtx {
-            as_of: resolved.as_of,
+            decision_at: resolved.decision_at,
             binding: &inputs.binding,
+            linkage_evidence: &inputs.linkage_evidence,
             primary: &inputs.primary,
             oracle: inputs.oracle.as_ref(),
             crypto: &self.domain_config.crypto,
@@ -498,44 +638,86 @@ impl ConfiguredFeatureBuilder {
         for spec in self.schema.domain_specs() {
             let is_required = required.contains(&spec.name);
             let raw_feature = raw.get(&spec.name);
-            match resolve_value(raw_feature, spec, resolved.as_of, data_quality) {
+            match resolve_value(raw_feature, spec, resolved.decision_at, data_quality)? {
                 Resolved::Present {
                     value,
-                    evidence: ev,
+                    evidence,
+                    staleness,
                 } => {
-                    if let Some(ev) = ev {
-                        push_unique(&mut assembly.evidence, ev);
-                    }
-                    values.insert(spec.name.clone(), value);
+                    values.insert(
+                        spec.name.clone(),
+                        FeatureCell::observed(value, evidence, staleness),
+                    );
                 }
-                Resolved::Absent(reason) => {
-                    match NullPolicyEngine::decide(spec, reason, data_quality, is_required) {
-                        NullDecision::Reject(reason) => {
-                            assembly.rejected = true;
-                            values.insert(spec.name.clone(), FeatureValue::Missing(reason));
-                        }
-                        NullDecision::Substitute { value } => {
-                            assembly.substitutions.push(SubstitutionAudit {
-                                feature: spec.name.clone(),
-                                reason,
-                                substituted: value.clone(),
-                            });
-                            values.insert(spec.name.clone(), value);
-                        }
-                        NullDecision::KeepMissing { reason, degrade } => {
-                            assembly.degraded |= degrade;
-                            values.insert(spec.name.clone(), FeatureValue::Missing(reason));
-                        }
+                Resolved::Absent {
+                    reason,
+                    evidence,
+                    staleness,
+                } => match NullPolicyEngine::decide(spec, reason, data_quality, is_required) {
+                    NullDecision::Reject(reason) => {
+                        assembly.rejected = true;
+                        values.insert(spec.name.clone(), missing_cell(reason, evidence, staleness));
                     }
-                }
+                    NullDecision::Substitute { value } => {
+                        values.insert(
+                            spec.name.clone(),
+                            FeatureCell::substituted(value, reason, evidence, staleness),
+                        );
+                    }
+                    NullDecision::KeepMissing { reason, degrade } => {
+                        assembly.degraded |= degrade;
+                        values.insert(spec.name.clone(), missing_cell(reason, evidence, staleness));
+                    }
+                },
             }
         }
 
-        Some(DomainFeatureSlice {
+        Ok(Some(DomainFeatureSlice {
             family: inputs.family,
             schema_version: self.schema.version(),
             values,
-        })
+        }))
+    }
+
+    fn missing_domain_slice(
+        &self,
+        family: DomainFamily,
+        required: &HashSet<FeatureName>,
+        data_quality: &DataQualityConfig,
+        assembly: &mut Assembly,
+        reason: NullReason,
+    ) -> DomainFeatureSlice {
+        let mut values = BTreeMap::new();
+        for spec in self.schema.domain_specs() {
+            let is_required = required.contains(&spec.name);
+            match NullPolicyEngine::decide(spec, reason, data_quality, is_required) {
+                NullDecision::Reject(reason) => {
+                    assembly.rejected = true;
+                    values.insert(
+                        spec.name.clone(),
+                        missing_cell(reason, None, FeatureStaleness::Unknown),
+                    );
+                }
+                NullDecision::Substitute { value } => {
+                    values.insert(
+                        spec.name.clone(),
+                        FeatureCell::substituted(value, reason, None, FeatureStaleness::Unknown),
+                    );
+                }
+                NullDecision::KeepMissing { reason, degrade } => {
+                    assembly.degraded |= degrade;
+                    values.insert(
+                        spec.name.clone(),
+                        missing_cell(reason, None, FeatureStaleness::Unknown),
+                    );
+                }
+            }
+        }
+        DomainFeatureSlice {
+            family,
+            schema_version: self.schema.version(),
+            values,
+        }
     }
 
     /// Compute vectors for a batch of resolved inputs, in parallel, preserving
@@ -543,14 +725,13 @@ impl ConfiguredFeatureBuilder {
     ///
     /// `compute_vector` is pure and deterministic (statistical values are
     /// quantized), so parallel evaluation is order-independent and reproducible.
-    #[must_use]
     pub fn build_batch(
         &self,
         bundles: &[ResolvedMarketBundle<'_>],
         required_features: &[FeatureName],
         config: &FeaturesConfig,
         data_quality: &DataQualityConfig,
-    ) -> Vec<FeatureVector> {
+    ) -> QuantResult<Vec<FeatureVector>> {
         bundles
             .par_iter()
             .map(|bundle| self.compute_vector(bundle, required_features, config, data_quality))
@@ -560,9 +741,7 @@ impl ConfiguredFeatureBuilder {
 
 /// The intermediate accumulation while assembling a vector.
 struct Assembly {
-    values: BTreeMap<FeatureName, FeatureValue>,
-    substitutions: Vec<SubstitutionAudit>,
-    evidence: Vec<EvidenceSourceRef>,
+    cells: BTreeMap<FeatureName, FeatureCell>,
     rejected: bool,
     degraded: bool,
 }
@@ -577,23 +756,22 @@ impl FeatureBuilder for ConfiguredFeatureBuilder {
         let bundle = self
             .resolve_inputs(
                 input.market,
-                input.as_of,
+                input.boundary,
                 input.pit,
                 FeatureSourceWindows {
                     microstructure: input.window,
                     trade_tape: input.trade_tape,
                     domain: input.domain,
                 },
-                input.sibling,
                 Usd::ZERO,
             )
             .await?;
-        Ok(self.compute_vector(
+        self.compute_vector(
             &bundle,
             input.required_features,
             input.config,
             input.data_quality,
-        ))
+        )
     }
 }
 
@@ -605,10 +783,8 @@ impl ConfiguredFeatureBuilder {
         required: &HashSet<FeatureName>,
         data_quality: &DataQualityConfig,
         as_of: DateTime<Utc>,
-    ) -> Assembly {
-        let mut values = BTreeMap::new();
-        let mut substitutions = Vec::new();
-        let mut evidence = Vec::new();
+    ) -> QuantResult<Assembly> {
+        let mut cells = BTreeMap::new();
         let mut rejected = false;
         let mut degraded = false;
 
@@ -620,48 +796,47 @@ impl ConfiguredFeatureBuilder {
             }
             let is_required = required.contains(&spec.name);
             let raw_feature = raw.get(&spec.name);
-            let resolved = resolve_value(raw_feature, spec, as_of, data_quality);
+            let resolved = resolve_value(raw_feature, spec, as_of, data_quality)?;
 
             match resolved {
                 Resolved::Present {
                     value,
-                    evidence: ev,
+                    evidence,
+                    staleness,
                 } => {
-                    if let Some(ev) = ev {
-                        push_unique(&mut evidence, ev);
-                    }
-                    values.insert(spec.name.clone(), value);
+                    cells.insert(
+                        spec.name.clone(),
+                        FeatureCell::observed(value, evidence, staleness),
+                    );
                 }
-                Resolved::Absent(reason) => {
-                    match NullPolicyEngine::decide(spec, reason, data_quality, is_required) {
-                        NullDecision::Reject(reason) => {
-                            rejected = true;
-                            values.insert(spec.name.clone(), FeatureValue::Missing(reason));
-                        }
-                        NullDecision::Substitute { value } => {
-                            substitutions.push(SubstitutionAudit {
-                                feature: spec.name.clone(),
-                                reason,
-                                substituted: value.clone(),
-                            });
-                            values.insert(spec.name.clone(), value);
-                        }
-                        NullDecision::KeepMissing { reason, degrade } => {
-                            degraded |= degrade;
-                            values.insert(spec.name.clone(), FeatureValue::Missing(reason));
-                        }
+                Resolved::Absent {
+                    reason,
+                    evidence,
+                    staleness,
+                } => match NullPolicyEngine::decide(spec, reason, data_quality, is_required) {
+                    NullDecision::Reject(reason) => {
+                        rejected = true;
+                        cells.insert(spec.name.clone(), missing_cell(reason, evidence, staleness));
                     }
-                }
+                    NullDecision::Substitute { value } => {
+                        cells.insert(
+                            spec.name.clone(),
+                            FeatureCell::substituted(value, reason, evidence, staleness),
+                        );
+                    }
+                    NullDecision::KeepMissing { reason, degrade } => {
+                        degraded |= degrade;
+                        cells.insert(spec.name.clone(), missing_cell(reason, evidence, staleness));
+                    }
+                },
             }
         }
 
-        Assembly {
-            values,
-            substitutions,
-            evidence,
+        Ok(Assembly {
+            cells,
             rejected,
             degraded,
-        }
+        })
     }
 }
 
@@ -670,8 +845,13 @@ enum Resolved {
     Present {
         value: FeatureValue,
         evidence: Option<EvidenceSourceRef>,
+        staleness: FeatureStaleness,
     },
-    Absent(NullReason),
+    Absent {
+        reason: NullReason,
+        evidence: Option<EvidenceSourceRef>,
+        staleness: FeatureStaleness,
+    },
 }
 
 /// Validate a raw feature against its spec's valid range and staleness policy.
@@ -680,36 +860,84 @@ fn resolve_value(
     spec: &FeatureSpec,
     as_of: DateTime<Utc>,
     data_quality: &DataQualityConfig,
-) -> Resolved {
+) -> QuantResult<Resolved> {
     let Some(raw) = raw else {
-        return Resolved::Absent(NullReason::SourceUnavailable);
+        return Ok(Resolved::Absent {
+            reason: NullReason::SourceUnavailable,
+            evidence: None,
+            staleness: FeatureStaleness::Unknown,
+        });
     };
-    match &raw.value {
-        Err(reason) | Ok(FeatureValue::Missing(reason)) => Resolved::Absent(*reason),
+    let staleness = feature_staleness(as_of, raw.evidence.as_ref())?;
+    Ok(match &raw.value {
+        Err(reason) => Resolved::Absent {
+            reason: *reason,
+            evidence: raw.evidence.clone(),
+            staleness,
+        },
         Ok(value) => {
-            if !in_range(spec, value) {
-                return Resolved::Absent(NullReason::OutOfValidRange);
+            if !in_range(spec, value)? {
+                return Ok(Resolved::Absent {
+                    reason: NullReason::OutOfValidRange,
+                    evidence: raw.evidence.clone(),
+                    staleness,
+                });
             }
             // Per-feature staleness: a present value whose freshest input is
             // older than the spec's bound becomes stale and flows through the
             // null policy (it is never silently used as if fresh).
-            if staleness_breach(spec, raw.evidence.as_ref(), as_of, data_quality) {
-                return Resolved::Absent(NullReason::StaleBeyondPolicy);
+            if staleness_breach(spec, staleness, data_quality)? {
+                return Ok(Resolved::Absent {
+                    reason: NullReason::StaleBeyondPolicy,
+                    evidence: raw.evidence.clone(),
+                    staleness,
+                });
             }
             Resolved::Present {
                 value: value.clone(),
                 evidence: raw.evidence.clone(),
+                staleness,
             }
         }
+    })
+}
+
+fn missing_cell(
+    reason: NullReason,
+    evidence: Option<EvidenceSourceRef>,
+    staleness: FeatureStaleness,
+) -> FeatureCell {
+    if reason == NullReason::NotApplicable {
+        FeatureCell::not_applicable(reason)
+    } else {
+        FeatureCell::missing(reason, evidence, staleness)
     }
 }
 
+fn feature_staleness(
+    as_of: DateTime<Utc>,
+    evidence: Option<&EvidenceSourceRef>,
+) -> QuantResult<FeatureStaleness> {
+    let Some(evidence) = evidence else {
+        return Ok(FeatureStaleness::Unknown);
+    };
+    let delta = as_of.signed_duration_since(evidence.effective_at);
+    let age_ms =
+        u64::try_from(delta.num_milliseconds()).map_err(|_| ResearchError::PitResolution {
+            detail: format!(
+                "feature evidence time {} is after decision time {as_of}",
+                evidence.effective_at
+            ),
+        })?;
+    Ok(FeatureStaleness::Known { age_ms })
+}
+
 /// Whether a present value satisfies the spec's valid range (no clamping).
-fn in_range(spec: &FeatureSpec, value: &FeatureValue) -> bool {
-    match (&spec.valid_range, value.to_fact_decimal()) {
-        (Some(range), Some(decimal)) => range.contains(&decimal),
-        _ => true,
-    }
+fn in_range(spec: &FeatureSpec, value: &FeatureValue) -> QuantResult<bool> {
+    Ok(match &spec.valid_range {
+        Some(range) => range.contains(&value.to_fact_decimal()?),
+        None => true,
+    })
 }
 
 /// Whether a present value's freshest input violates the spec's staleness bound.
@@ -721,48 +949,44 @@ fn in_range(spec: &FeatureSpec, value: &FeatureValue) -> bool {
 /// absence is handled elsewhere).
 fn staleness_breach(
     spec: &FeatureSpec,
-    evidence: Option<&EvidenceSourceRef>,
-    as_of: DateTime<Utc>,
+    staleness: FeatureStaleness,
     data_quality: &DataQualityConfig,
-) -> bool {
-    let bound_ms = match spec.staleness_policy {
-        StalenessRule::None => return false,
-        StalenessRule::MaxBookAge => data_quality.max_book_age_ms,
-        StalenessRule::MaxFeatureBucketAge => data_quality
-            .max_feature_bucket_age_secs
-            .saturating_mul(1_000),
-        StalenessRule::MaxTradeTapeAge => {
-            data_quality.max_trade_tape_age_secs.saturating_mul(1_000)
-        }
-        StalenessRule::MaxDomainObservationAge => data_quality
-            .max_domain_observation_age_secs
-            .saturating_mul(1_000),
+) -> QuantResult<bool> {
+    let Some(bound_ms) = staleness_bound_ms(spec.staleness_policy, data_quality)? else {
+        return Ok(false);
     };
     if bound_ms == 0 {
-        return false;
+        return Ok(false);
     }
-    let Some(evidence) = evidence else {
-        return false;
+    Ok(matches!(
+        staleness,
+        FeatureStaleness::Known { age_ms } if age_ms > bound_ms
+    ))
+}
+
+fn staleness_bound_ms(
+    policy: StalenessRule,
+    data_quality: &DataQualityConfig,
+) -> QuantResult<Option<u64>> {
+    let seconds = match policy {
+        StalenessRule::None => return Ok(None),
+        StalenessRule::MaxBookAge => return Ok(Some(data_quality.max_book_age_ms)),
+        StalenessRule::MaxFeatureBucketAge => data_quality.max_feature_bucket_age_secs,
+        StalenessRule::MaxTradeTapeAge => data_quality.max_trade_tape_age_secs,
+        StalenessRule::MaxDomainObservationAge => data_quality.max_domain_observation_age_secs,
     };
-    let age_ms = age_ms(as_of, evidence.observed_at);
-    age_ms > bound_ms
+    seconds.checked_mul(1_000).map(Some).ok_or_else(|| {
+        ResearchError::SchemaHashMismatch {
+            detail: format!("staleness bound {seconds}s overflows milliseconds"),
+        }
+        .into()
+    })
 }
 
-/// Non-negative age in milliseconds of `observed_at` relative to `as_of`.
-fn age_ms(as_of: DateTime<Utc>, observed_at: DateTime<Utc>) -> u64 {
-    u64::try_from((as_of - observed_at).num_milliseconds()).unwrap_or(0)
-}
-
-/// Append an evidence ref unless an identical one is already present.
-fn push_unique(evidence: &mut Vec<EvidenceSourceRef>, candidate: EvidenceSourceRef) {
-    if !evidence.contains(&candidate) {
-        evidence.push(candidate);
-    }
-}
-
-/// Book age in milliseconds at `as_of` (zero when no book was resolved).
-fn book_age_ms(as_of: DateTime<Utc>, book: Option<&ResolvedBook>) -> u64 {
-    book.map_or(0, |book| age_ms(as_of, book.observed_at))
+/// Book age in milliseconds at `as_of`; unknown is never encoded as zero.
+fn book_age_ms(as_of: DateTime<Utc>, book: Option<&ResolvedBook>) -> QuantResult<Option<u64>> {
+    book.map(|book| known_age_ms(as_of, book.effective_at))
+        .transpose()
 }
 
 /// Freshest materialized feature-bucket age in milliseconds at `as_of`: age of
@@ -770,82 +994,112 @@ fn book_age_ms(as_of: DateTime<Utc>, book: Option<&ResolvedBook>) -> u64 {
 ///
 /// Point-in-time correct: a window with no buckets contributes no age (its
 /// absence is handled by the null policy, not here).
-fn feature_bucket_age_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> u64 {
+fn feature_bucket_age_ms(
+    as_of: DateTime<Utc>,
+    window: &MarketWindowSnapshot,
+) -> QuantResult<Option<u64>> {
     window
         .freshest_bucket_time()
-        .map_or(0, |bucket_time| age_ms(as_of, bucket_time))
+        .map(|bucket_time| known_age_ms(as_of, bucket_time))
+        .transpose()
 }
 
 /// Freshest trade-tape print age in milliseconds at `as_of`.
-fn trade_tape_age_ms(as_of: DateTime<Utc>, trade_tape: &TradeTapeWindowSnapshot) -> u64 {
+fn trade_tape_age_ms(
+    as_of: DateTime<Utc>,
+    trade_tape: &TradeTapeWindowSnapshot,
+) -> QuantResult<Option<u64>> {
     trade_tape
         .freshest_trade_time()
-        .map_or(0, |trade_time| age_ms(as_of, trade_time))
+        .map(|trade_time| known_age_ms(as_of, trade_time))
+        .transpose()
 }
 
 /// Freshest domain-observation age in milliseconds at `as_of` (zero for
 /// markets that carry no domain slice — absence is structural, not staleness).
-fn domain_age_ms(as_of: DateTime<Utc>, domain: Option<&DomainSliceInputs>) -> u64 {
+fn domain_age_ms(
+    as_of: DateTime<Utc>,
+    domain: Option<&DomainSliceInputs>,
+) -> QuantResult<Option<u64>> {
     domain
         .and_then(|inputs| inputs.primary.freshest_time())
-        .map_or(0, |observed_at| age_ms(as_of, observed_at))
+        .map(|observed_at| known_age_ms(as_of, observed_at))
+        .transpose()
+}
+
+fn known_age_ms(as_of: DateTime<Utc>, observed_at: DateTime<Utc>) -> QuantResult<u64> {
+    u64::try_from(as_of.signed_duration_since(observed_at).num_milliseconds()).map_err(|_| {
+        ResearchError::PitResolution {
+            detail: format!(
+                "freshness observation time {observed_at} is after decision time {as_of}"
+            ),
+        }
+        .into()
+    })
 }
 
 /// Per-source freshness ages feeding the aggregate classification.
 #[derive(Copy, Clone)]
 struct FreshnessAges {
-    book: u64,
-    feature_bucket: u64,
-    trade_tape: u64,
-    domain: u64,
+    book: Option<u64>,
+    feature_bucket: Option<u64>,
+    trade_tape: Option<u64>,
+    domain: Option<u64>,
 }
 
 /// Classify the vector's aggregate data quality across freshness dimensions:
 /// book age, feature-bucket age, trade-tape age, and domain-observation age.
-const fn classify(
+fn classify(
     rejected: bool,
     degraded: bool,
     ages: FreshnessAges,
     data_quality: &DataQualityConfig,
-) -> DataQualityStatus {
+) -> QuantResult<DataQualityStatus> {
     if rejected {
-        return DataQualityStatus::Insufficient;
+        return Ok(DataQualityStatus::Insufficient);
     }
     let book_bound = data_quality.max_book_age_ms;
-    let bucket_bound = data_quality
-        .max_feature_bucket_age_secs
-        .saturating_mul(1_000);
-    let tape_bound = data_quality.max_trade_tape_age_secs.saturating_mul(1_000);
-    let domain_bound = data_quality
-        .max_domain_observation_age_secs
-        .saturating_mul(1_000);
+    let bucket_bound = staleness_bound_ms(StalenessRule::MaxFeatureBucketAge, data_quality)?
+        .ok_or_else(|| ResearchError::SchemaHashMismatch {
+            detail: "feature-bucket staleness policy has no bound".to_owned(),
+        })?;
+    let tape_bound =
+        staleness_bound_ms(StalenessRule::MaxTradeTapeAge, data_quality)?.ok_or_else(|| {
+            ResearchError::SchemaHashMismatch {
+                detail: "trade-tape staleness policy has no bound".to_owned(),
+            }
+        })?;
+    let domain_bound = staleness_bound_ms(StalenessRule::MaxDomainObservationAge, data_quality)?
+        .ok_or_else(|| ResearchError::SchemaHashMismatch {
+            detail: "domain-observation staleness policy has no bound".to_owned(),
+        })?;
     if exceeds(ages.book, book_bound)
         || exceeds(ages.feature_bucket, bucket_bound)
         || exceeds(ages.trade_tape, tape_bound)
         || exceeds(ages.domain, domain_bound)
     {
-        return DataQualityStatus::Stale;
+        return Ok(DataQualityStatus::Stale);
     }
     if degraded {
-        return DataQualityStatus::Degraded;
+        return Ok(DataQualityStatus::Degraded);
     }
     if within_half(ages.book, book_bound)
         && within_half(ages.feature_bucket, bucket_bound)
         && within_half(ages.trade_tape, tape_bound)
         && within_half(ages.domain, domain_bound)
     {
-        DataQualityStatus::Fresh
+        Ok(DataQualityStatus::Fresh)
     } else {
-        DataQualityStatus::Acceptable
+        Ok(DataQualityStatus::Acceptable)
     }
 }
 
 /// Whether `age` exceeds a non-zero `bound` (a zero bound is unbounded).
-const fn exceeds(age: u64, bound: u64) -> bool {
-    bound > 0 && age > bound
+const fn exceeds(age: Option<u64>, bound: u64) -> bool {
+    matches!(age, Some(age) if bound > 0 && age > bound)
 }
 
 /// Whether `age` is within half of a non-zero `bound` (a zero bound is satisfied).
-const fn within_half(age: u64, bound: u64) -> bool {
-    bound == 0 || age <= bound / 2
+const fn within_half(age: Option<u64>, bound: u64) -> bool {
+    matches!(age, Some(age) if bound == 0 || age <= bound / 2)
 }

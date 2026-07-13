@@ -5,22 +5,21 @@
 //! Mirrors the crate boundary the single-path [`BacktestService`](crate::service::backtest::BacktestService)
 //! and [`ModelTrainerService`](crate::service::model_training::ModelTrainerService)
 //! already establish: this service does the **impure** work (dataset load,
-//! Parquet decode, PIT rematerialization of both training examples and
-//! backtest ticks over the identical window — done exactly **once**, then
-//! reused across every CPCV fold and every trial), and delegates every
+//! Parquet decode plus exact frozen-input tick assembly — done exactly **once**,
+//! then reused across every CPCV fold and every trial), and delegates every
 //! **pure** algorithm (purge/embargo, φ-path reconstruction, DSR/PSR/MinTRL,
 //! CSCV/PBO) to [`quant_pivot_research::validation`]. No live `BookStore` is
-//! ever touched (the window is batch-prefetched from `ClickHouse`, exactly
-//! like the single-path replay).
+//! ever touched and no current feature/factor code replaces frozen rows.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
-    time::Duration as StdDuration,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+#[cfg(feature = "ml-classical")]
+use quant_pivot_research::model::{ClassicalKind, ClassicalModelArtifact, ClassicalParams};
 use rayon::prelude::*;
 use tokio::{runtime::Handle, task};
 use tokio_util::sync::CancellationToken;
@@ -29,16 +28,14 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storag
 use quant_pivot_models::{
     domain::{JobProgressSink, ResearchJobProgress, TrainingDatasetInfo},
     enums::{common::MarketCategory, quant::TrainingDatasetStatus},
-    runtime_config::{PortfolioConfig, sections::FactorsConfig},
+    runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
-        BacktestPathSetId, BacktestReportId, ContentHash, ModelRunId, ModelVersionId, PositionId,
-        RuntimeConfigVersionId, TrainingDatasetId, TrainingSampleSource,
+        BacktestPathSetId, BacktestReportId, ContentHash, ModelInputContract, ModelRunId,
+        ModelVersionId, PositionId, RuntimeConfigVersionId, TrainingDatasetId,
+        TrainingSampleSource,
     },
 };
-use quant_pivot_repository::traits::{
-    EventRepository, MarketLinkageRepository, MarketRepository, QuantFactReadRepository,
-    TrainingDatasetRepository,
-};
+use quant_pivot_repository::traits::TrainingDatasetRepository;
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
@@ -48,17 +45,20 @@ use quant_pivot_research::{
         calendarize_lot_returns, mean_calendar_return, replay_lot_null_baseline, sharpe_ratio,
     },
     factors::{FactorName, names as factor_names},
-    features::FeatureName,
+    features::{FeatureName, FeatureSchema},
+    hashing::ResearchHasher,
     model::{
-        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelFamily, ModelTrainer,
-        QuantModelRuntime, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
-        SellScorerTrainer, SellSignalPolicy, SubstitutionConfidenceRules, TrainModelRequest,
-        TrainSellScorerRequest, TrainingObjectiveSpec, ValidationSpec, WeightedFactorRuntime,
-        WeightedFactorTrainer, WeightedSellScorerRuntime,
+        FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader, ModelFamily,
+        ModelRuntimeInput, ModelRuntimeOutput, ModelTrainer, QuantModelRuntime, ReturnModelSpec,
+        ScoreMultiplierSpec, SellScorerOutputSpec, SellScorerRuntime, SellScorerTrainer,
+        SellSignalPolicy, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
+        TrainingObjectiveSpec, ValidationSpec, WeightedFactorRuntime, WeightedFactorTrainer,
+        WeightedSellScorerRuntime,
     },
     precision::RESEARCH_DECIMAL_SCALE,
+    selection::ModelFeatureRequirements,
     stats,
-    training::{DatasetParquetCodec, TrainingExample},
+    training::{TrainingExample, TrainingLabel},
     validation::{
         BacktestPath, BacktestPathSet, CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
         DefaultCombinatorialPurgedBacktester, DsrInput, DsrReport, FoldModelSource, FoldRuntime,
@@ -69,17 +69,11 @@ use quant_pivot_research::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use crate::{
-    prefetch::historical_window::{HistoricalWindowLoader, WindowSpec},
-    service::{
-        backtest::materialize_ticks,
-        dataset_replay::{
-            RematerializeInputs, ReplaySchedule, max_horizon, rematerialize_exit_decision_examples,
-            rematerialize_training_examples,
-        },
-        historical_replay::ReplayConfig,
-        model_training::weighted_seed_weights,
-    },
+use crate::service::{
+    backtest::frozen_ticks,
+    historical_replay::ReplayConfig,
+    model_training::weighted_seed_weights,
+    training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
 
 /// Coarse CPCV job progress budget (units of work for `ResearchJobProgress`).
@@ -110,10 +104,6 @@ struct ProgressPhase {
 pub struct CpcvBacktestServiceDeps {
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
-    pub fact_read: Arc<dyn QuantFactReadRepository>,
-    pub market_repo: Arc<dyn MarketRepository>,
-    pub event_repo: Arc<dyn EventRepository>,
-    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
 }
 
 /// Governed methodology configuration (`research.validation.*`, Phase 11.5 §6).
@@ -143,6 +133,8 @@ pub struct CpcvBacktestConfig {
 
 /// A CPCV/trial-grid request resolved by the admin port.
 pub struct CpcvBacktestInput {
+    /// Real persisted CPCV run id carried into every runtime input.
+    pub model_run_id: ModelRunId,
     pub training_dataset_id: TrainingDatasetId,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub label: LabelSelector,
@@ -154,6 +146,8 @@ pub struct CpcvBacktestInput {
     pub model_family: ModelFamily,
     pub prediction_horizon_secs: u64,
     pub category_scope: Option<MarketCategory>,
+    /// Ordered raw inputs frozen on the dataset's owning model spec.
+    pub input_contract: ModelInputContract,
     /// Pre-assigned path-set id (async job engine); minted when absent.
     pub path_set_id: Option<BacktestPathSetId>,
     /// Audit-only: production `coordinate_search` effective trials (persisted
@@ -189,28 +183,29 @@ pub struct CpcvBacktestService {
     config: CpcvBacktestConfig,
     caps: PortfolioCaps,
     replay: ReplayConfig,
-    max_book_staleness: StdDuration,
 }
 
 impl CpcvBacktestService {
     /// Assemble the service from deps + the frozen replay/portfolio config
     /// (the same `portfolio: &PortfolioConfig` convention
     /// [`crate::service::backtest::BacktestService::new`] uses).
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error when any frozen portfolio cap is not a
+    /// valid decimal; invalid caps never become a zero budget/cap.
     pub fn new(
         deps: CpcvBacktestServiceDeps,
         config: CpcvBacktestConfig,
         portfolio: &PortfolioConfig,
         replay: ReplayConfig,
-        max_book_staleness: StdDuration,
-    ) -> Self {
-        Self {
+    ) -> QuantResult<Self> {
+        Ok(Self {
             deps,
             config,
-            caps: PortfolioCaps::from(portfolio),
+            caps: PortfolioCaps::try_from(portfolio)?,
             replay,
-            max_book_staleness,
-        }
+        })
     }
 
     /// Run CPCV + the governed trial grid, producing the full Phase 11.5
@@ -225,6 +220,7 @@ impl CpcvBacktestService {
         cancel: &CancellationToken,
     ) -> QuantResult<CpcvBacktestOutcome> {
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        let sample_interval_secs = validated_sample_interval_secs(&dataset)?;
         let (fold_template, replay_template) = self
             .prepare_templates(&dataset, &input, progress, cancel)
             .await?;
@@ -244,12 +240,7 @@ impl CpcvBacktestService {
         {
             // Collapse coincident lots into an activity-only series (never
             // zero-pad empty wall-clock buckets) before DSR/PBO.
-            calendarize_sell_path_set(
-                &mut path_set,
-                &groups,
-                template,
-                u64::try_from(dataset.sample_interval_secs.max(1)).unwrap_or(1),
-            )?;
+            calendarize_sell_path_set(&mut path_set, &groups, template, sample_interval_secs)?;
         }
 
         progress.report(ResearchJobProgress::with_total(
@@ -262,7 +253,7 @@ impl CpcvBacktestService {
                 &fold_template,
                 &replay_template,
                 &groups,
-                u64::try_from(dataset.sample_interval_secs.max(1)).unwrap_or(1),
+                sample_interval_secs,
             )
             .await?;
 
@@ -274,7 +265,9 @@ impl CpcvBacktestService {
         let (dsr, pbo) =
             compute_dsr_and_pbo(&dataset, &path_set, &matrix, trial_grid_count, &self.config)?;
         let min_track_record_length = representative_path(&path_set)
-            .and_then(|path| min_trl_for_path(&dataset, path, &self.config.dsr_significance));
+            .map(|path| min_trl_for_path(&dataset, path, &self.config.dsr_significance))
+            .transpose()?
+            .flatten();
         // Bailey DSR N/V must describe the same trial population: the governed
         // trial grid that produced `matrix` (and thus V). Coord-search is
         // audit-only and must not inflate N without a matching Sharpe column.
@@ -305,6 +298,11 @@ impl CpcvBacktestService {
         progress: &dyn JobProgressSink,
         cancel: &CancellationToken,
     ) -> QuantResult<(Arc<FoldTemplate>, Arc<ReplayTemplate>)> {
+        let materialization = require_dataset_materialization(dataset)?;
+        self.validate_cpcv_input_contract(
+            &input.input_contract,
+            materialization.feature_schema_hash,
+        )?;
         progress.report(ResearchJobProgress::with_total(
             "load",
             CpcvProgress::LOAD.start,
@@ -313,32 +311,21 @@ impl CpcvBacktestService {
         let parquet_examples = self.decode_examples(dataset).await?;
 
         if input.model_family.is_exit_scorer() {
-            return self
-                .prepare_sell_templates(dataset, input, parquet_examples, progress)
-                .await;
+            return self.prepare_sell_templates(dataset, input, parquet_examples, progress);
         }
 
         progress.report(ResearchJobProgress::with_total(
-            "materialize_examples",
+            "verify_frozen_examples",
             CpcvProgress::MATERIALIZE_EXAMPLES.start,
             CpcvProgress::TOTAL,
         ));
-        let examples = rematerialize_training_examples(&RematerializeInputs {
-            dataset,
-            parquet_examples: &parquet_examples,
-            fact_read: Arc::clone(&self.deps.fact_read),
-            market_repo: Arc::clone(&self.deps.market_repo),
-            event_repo: Arc::clone(&self.deps.event_repo),
-            linkage_repo: Arc::clone(&self.deps.linkage_repo),
-            replay: &self.replay,
-            max_book_staleness: self.max_book_staleness,
-        })
-        .await?;
+        let examples = parquet_examples.clone();
 
         let groups: Arc<[TimelineGroup]> = build_timeline_groups(&examples, &input.label)?.into();
         // Fail before the expensive CPCV fold loop when the timeline cannot
         // support CSCV/PBO (T < block_count).
-        if groups.len() < self.config.pbo.block_count as usize {
+        let pbo_block_count = validated_pbo_block_count(self.config.pbo.block_count)?;
+        if groups.len() < pbo_block_count {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
                     "CPCV timeline has {} groups but research.validation.pbo.block_count={} \
@@ -352,34 +339,38 @@ impl CpcvBacktestService {
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
             model_family: input.model_family,
-            feature_schema_hash: dataset.feature_schema_hash.clone(),
-            factor_schema_hash: dataset.factor_schema_hash.clone(),
+            feature_schema_hash: materialization.feature_schema_hash.clone(),
+            factor_schema_hash: materialization.factor_schema_hash.clone(),
         };
-        let probe_required_features = self.probe_required_features(input.model_family);
-
         progress.report(ResearchJobProgress::with_total(
-            "materialize_ticks",
+            "frozen_input_ticks",
             CpcvProgress::MATERIALIZE_TICKS.start,
             CpcvProgress::TOTAL,
         ));
-        let ticks = self
-            .materialize_full_window_ticks(
-                dataset,
-                &parquet_examples,
-                &header_template,
-                &probe_required_features,
-                progress,
-                cancel,
-            )
-            .await?;
+        let probe_runtime = ProbeRuntime {
+            model_family: header_template.model_family,
+            feature_schema_hash: header_template.feature_schema_hash.clone(),
+            input_contract: input.input_contract.clone(),
+        };
+        let ticks = frozen_ticks(
+            &parquet_examples,
+            &probe_runtime,
+            &input.model_run_id,
+            cancel,
+            progress,
+        )?;
         let Some(ticks) = ticks else {
             return Err(ResearchError::Cancelled {
                 detail: "cpcv backtest cancelled during tick materialization".to_owned(),
             }
             .into());
         };
-        let ticks_by_as_of: Arc<BTreeMap<DateTime<Utc>, BacktestTick>> =
-            Arc::new(ticks.into_iter().map(|tick| (tick.as_of, tick)).collect());
+        let ticks_by_as_of: Arc<BTreeMap<DateTime<Utc>, BacktestTick>> = Arc::new(
+            ticks
+                .into_iter()
+                .map(|tick| (tick.decision_at, tick))
+                .collect(),
+        );
         let handle = Handle::current();
         let replay_template = Arc::new(ReplayTemplate::Portfolio(PortfolioReplayTemplate {
             ticks_by_as_of,
@@ -395,15 +386,64 @@ impl CpcvBacktestService {
             }
             .into());
         }
+        #[cfg(feature = "ml-classical")]
+        let fold_template =
+            self.build_fold_template(dataset, input, examples, header_template, groups, handle)?;
+        #[cfg(not(feature = "ml-classical"))]
         let fold_template =
             self.build_fold_template(dataset, input, examples, header_template, groups, handle);
         Ok((fold_template, replay_template))
+    }
+
+    fn validate_cpcv_input_contract(
+        &self,
+        input_contract: &ModelInputContract,
+        frozen_feature_schema_hash: &ContentHash,
+    ) -> QuantResult<()> {
+        input_contract.validate().map_err(|detail| {
+            QuantError::from(ResearchError::ValidationMethodology {
+                detail: format!("invalid CPCV model input contract: {detail}"),
+            })
+        })?;
+        if input_contract.inputs.is_empty() {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "CPCV model input contract must contain at least one raw feature"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let feature_schema = FeatureSchema::build(&self.replay.features)?;
+        let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
+        if &feature_schema_hash != frozen_feature_schema_hash {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV feature schema {feature_schema_hash} differs from frozen dataset \
+                     {frozen_feature_schema_hash}"
+                ),
+            }
+            .into());
+        }
+        if let Some(unknown) = input_contract
+            .inputs
+            .iter()
+            .find(|raw| !feature_schema.contains(&FeatureName::new(raw.feature_name.clone())))
+        {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "CPCV input contract references unknown feature `{}`",
+                    unknown.feature_name
+                ),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Build the family-specific [`FoldTemplate`] shared across CPCV folds and trials.
     ///
     /// Classical availability is gated in [`Self::prepare_templates`] so this
     /// helper stays a pure constructor (no `Result`) under both feature sets.
+    #[cfg(feature = "ml-classical")]
     fn build_fold_template(
         &self,
         dataset: &TrainingDatasetInfo,
@@ -412,20 +452,49 @@ impl CpcvBacktestService {
         header_template: ModelArtifactHeader,
         groups: Arc<[TimelineGroup]>,
         handle: Handle,
-    ) -> Arc<FoldTemplate> {
-        #[cfg(feature = "ml-classical")]
+    ) -> QuantResult<Arc<FoldTemplate>> {
         if let Some(kind) = input.model_family.classical_kind() {
-            return Arc::new(FoldTemplate::Classical(self.classical_fold_template(
-                dataset,
-                &examples,
-                &input.label,
+            let materialization = require_dataset_materialization(dataset)?;
+            return Ok(Arc::new(FoldTemplate::Classical(ClassicalFoldTemplate {
+                examples: examples.into(),
+                label: input.label.clone(),
+                input_contract: Arc::new(input.input_contract.clone()),
                 header_template,
                 kind,
+                schema: Arc::new(FeatureSchema::build(&self.replay.features)?),
+                label_schema_hash: materialization.label_schema_hash.clone(),
+                training_dataset_hash: materialization.dataset_hash.clone(),
+                prediction_horizon_secs: input.prediction_horizon_secs,
                 groups,
-            )));
+            })));
         }
-        #[cfg(not(feature = "ml-classical"))]
-        let _ = dataset;
+        let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
+        Ok(Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
+            examples: examples.into(),
+            label: input.label.clone(),
+            seed_weights,
+            header_template,
+            base_objective: self.config.objective.clone(),
+            prediction_horizon_secs: input.prediction_horizon_secs,
+            factor_cross_section: self.config.factors.cross_section.clone(),
+            category_scope: input.category_scope,
+            input_contract: Arc::new(input.input_contract.clone()),
+            groups,
+            purge: self.config.purge,
+            handle,
+        })))
+    }
+
+    #[cfg(not(feature = "ml-classical"))]
+    fn build_fold_template(
+        &self,
+        _dataset: &TrainingDatasetInfo,
+        input: &CpcvBacktestInput,
+        examples: Vec<TrainingExample>,
+        header_template: ModelArtifactHeader,
+        groups: Arc<[TimelineGroup]>,
+        handle: Handle,
+    ) -> Arc<FoldTemplate> {
         let seed_weights = weighted_seed_weights(&self.config.factors, &examples);
         Arc::new(FoldTemplate::WeightedFactor(FoldTrainTemplate {
             examples: examples.into(),
@@ -434,7 +503,9 @@ impl CpcvBacktestService {
             header_template,
             base_objective: self.config.objective.clone(),
             prediction_horizon_secs: input.prediction_horizon_secs,
+            factor_cross_section: self.config.factors.cross_section.clone(),
             category_scope: input.category_scope,
+            input_contract: Arc::new(input.input_contract.clone()),
             groups,
             purge: self.config.purge,
             handle,
@@ -445,13 +516,14 @@ impl CpcvBacktestService {
     /// templates: lot-grouped timeline (§3.2), lot-decision sequences shared
     /// by training and replay, no ticks (Sell replay never touches the
     /// cross-sectional allocator).
-    async fn prepare_sell_templates(
+    fn prepare_sell_templates(
         &self,
         dataset: &TrainingDatasetInfo,
         input: &CpcvBacktestInput,
         parquet_examples: Vec<TrainingExample>,
         progress: &dyn JobProgressSink,
     ) -> QuantResult<(Arc<FoldTemplate>, Arc<ReplayTemplate>)> {
+        let materialization = require_dataset_materialization(dataset)?;
         if input.model_family != ModelFamily::HoldVsExitWeighted {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -463,21 +535,11 @@ impl CpcvBacktestService {
         }
 
         progress.report(ResearchJobProgress::with_total(
-            "materialize_exit_decisions",
+            "verify_frozen_exit_decisions",
             CpcvProgress::MATERIALIZE_EXAMPLES.start,
             CpcvProgress::TOTAL,
         ));
-        let examples = rematerialize_exit_decision_examples(&RematerializeInputs {
-            dataset,
-            parquet_examples: &parquet_examples,
-            fact_read: Arc::clone(&self.deps.fact_read),
-            market_repo: Arc::clone(&self.deps.market_repo),
-            event_repo: Arc::clone(&self.deps.event_repo),
-            linkage_repo: Arc::clone(&self.deps.linkage_repo),
-            replay: &self.replay,
-            max_book_staleness: self.max_book_staleness,
-        })
-        .await?;
+        let examples = parquet_examples;
         validate_sell_examples(&examples, &input.label)?;
 
         let (groups, sequences) = build_lot_timeline_groups(&examples, &input.label)?;
@@ -485,12 +547,12 @@ impl CpcvBacktestService {
         // lots may collapse into one observation; empty wall-clock buckets are
         // never invented). Gate on that effective observation count — not raw
         // lot count and not zero-padded calendar span.
-        let period_secs = u64::try_from(dataset.sample_interval_secs.max(1)).unwrap_or(1);
+        let period_secs = validated_sample_interval_secs(dataset)?;
         let probe_outcomes: Vec<LotOutcome> = groups
             .iter()
             .map(|group| LotOutcome {
                 position_id: PositionId::from_v7(),
-                as_of: group.as_of,
+                decision_at: group.decision_at,
                 return_value: Decimal::ZERO,
                 cumulative_exit_pct: Decimal::ZERO,
                 rank_pairs: Vec::new(),
@@ -498,7 +560,8 @@ impl CpcvBacktestService {
             })
             .collect();
         let active_obs = active_observation_count(&probe_outcomes, period_secs);
-        if active_obs < self.config.pbo.block_count as usize {
+        let pbo_block_count = validated_pbo_block_count(self.config.pbo.block_count)?;
+        if active_obs < pbo_block_count {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
                     "Sell CPCV activity-only series has {active_obs} observation(s) from {} lots \
@@ -514,12 +577,12 @@ impl CpcvBacktestService {
         }
         let groups: Arc<[TimelineGroup]> = groups.into();
         let sequences: Arc<[LotDecisionSequence]> = sequences.into();
-        let seed_weights = sell_seed_weights(&examples);
+        let seed_weights = sell_seed_weights(&examples)?;
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
             model_family: input.model_family,
-            feature_schema_hash: dataset.feature_schema_hash.clone(),
-            factor_schema_hash: dataset.factor_schema_hash.clone(),
+            feature_schema_hash: materialization.feature_schema_hash.clone(),
+            factor_schema_hash: materialization.factor_schema_hash.clone(),
         };
         let fold_template = Arc::new(FoldTemplate::Sell(SellFoldTemplate {
             sequences: Arc::clone(&sequences),
@@ -528,7 +591,8 @@ impl CpcvBacktestService {
             header_template,
             base_objective: self.config.objective.clone(),
             prediction_horizon_secs: input.prediction_horizon_secs,
-            label_schema_hash: dataset.label_schema_hash.clone(),
+            label_schema_hash: materialization.label_schema_hash.clone(),
+            input_contract: Arc::new(input.input_contract.clone()),
             groups: Arc::clone(&groups),
             purge: self.config.purge,
         }));
@@ -538,45 +602,6 @@ impl CpcvBacktestService {
             label: input.label.clone(),
         }));
         Ok((fold_template, replay_template))
-    }
-
-    /// The feature list a classical-family probe/fold reads (the governed
-    /// [`quant_pivot_research::features::FeatureSchema`]'s full column set);
-    /// empty for `WeightedFactor` (its factor table shape needs no
-    /// `required_features` hint).
-    fn probe_required_features(
-        &self,
-        model_family: ModelFamily,
-    ) -> Vec<quant_pivot_research::features::FeatureName> {
-        if model_family.is_classical() {
-            quant_pivot_research::features::FeatureSchema::build(&self.replay.features).names()
-        } else {
-            Vec::new()
-        }
-    }
-
-    #[cfg(feature = "ml-classical")]
-    fn classical_fold_template(
-        &self,
-        dataset: &TrainingDatasetInfo,
-        examples: &[TrainingExample],
-        label: &LabelSelector,
-        header_template: ModelArtifactHeader,
-        kind: quant_pivot_research::model::ClassicalKind,
-        groups: Arc<[TimelineGroup]>,
-    ) -> ClassicalFoldTemplate {
-        ClassicalFoldTemplate {
-            examples: examples.to_vec().into(),
-            label: label.clone(),
-            header_template,
-            kind,
-            schema: Arc::new(quant_pivot_research::features::FeatureSchema::build(
-                &self.replay.features,
-            )),
-            label_schema_hash: dataset.label_schema_hash.clone(),
-            training_dataset_hash: dataset.dataset_hash.clone(),
-            groups,
-        }
     }
 
     /// Run the CPCV fold sweep on a blocking thread (rayon-parallel across
@@ -625,7 +650,10 @@ impl CpcvBacktestService {
         sample_interval_secs: u64,
     ) -> QuantResult<(TrialPerformanceMatrix, u32)> {
         let trials = self.config.trials.generate(&self.config.objective)?;
-        let trial_count = u32::try_from(trials.len()).unwrap_or(u32::MAX);
+        let trial_count =
+            u32::try_from(trials.len()).map_err(|error| ResearchError::ValidationMethodology {
+                detail: format!("governed trial count does not fit u32: {error}"),
+            })?;
         let fold_template = Arc::clone(fold_template);
         let replay_template = Arc::clone(replay_template);
         let groups = Arc::clone(groups);
@@ -647,64 +675,6 @@ impl CpcvBacktestService {
         Ok((matrix, trial_count))
     }
 
-    async fn materialize_full_window_ticks(
-        &self,
-        dataset: &TrainingDatasetInfo,
-        parquet_examples: &[TrainingExample],
-        header_template: &ModelArtifactHeader,
-        required_features: &[quant_pivot_research::features::FeatureName],
-        progress: &dyn JobProgressSink,
-        cancel: &CancellationToken,
-    ) -> QuantResult<Option<Vec<BacktestTick>>> {
-        // A "shape probe" runtime: `materialize_ticks`/`build_runtime_input` only
-        // consult `model.model_family()` / `required_features()` to decide the
-        // tick's input shape — no inference happens here. Every fold and trial
-        // later builds and scores its *own* freshly trained runtime; this
-        // probe is never scored.
-        let probe_runtime = ProbeRuntime {
-            model_family: header_template.model_family,
-            feature_schema_hash: header_template.feature_schema_hash.clone(),
-            required_features: required_features.to_vec(),
-        };
-
-        let schedule = ReplaySchedule::from_examples(parquet_examples);
-        let source_delay =
-            StdDuration::from_secs(u64::try_from(dataset.source_delay_secs).unwrap_or(0));
-        let lookback = StdDuration::from_secs(self.replay.features.max_lookback_secs());
-        let max_horizon_secs = max_horizon(dataset);
-        let loader = HistoricalWindowLoader::new(
-            Arc::clone(&self.deps.fact_read),
-            Arc::clone(&self.deps.market_repo),
-            Arc::clone(&self.deps.event_repo),
-            Arc::clone(&self.deps.linkage_repo),
-            self.max_book_staleness,
-        );
-        let window = loader
-            .load(&WindowSpec {
-                window_start: dataset.window_start,
-                window_end: dataset.window_end,
-                samples: schedule.sample_set.clone(),
-                lookback,
-                source_delay,
-                max_horizon_secs,
-                domain: self.replay.domain.clone(),
-            })
-            .await?;
-        let model_run_id = ModelRunId::from_v7();
-        materialize_ticks(
-            &window,
-            &schedule,
-            &self.replay,
-            &probe_runtime,
-            &model_run_id,
-            source_delay,
-            lookback,
-            cancel,
-            progress,
-        )
-        .await
-    }
-
     async fn load_ready_dataset(
         &self,
         training_dataset_id: &TrainingDatasetId,
@@ -718,13 +688,10 @@ impl CpcvBacktestService {
                 entity: "training_dataset",
                 id: training_dataset_id.to_string(),
             })?;
-        if !matches!(
-            dataset.status,
-            TrainingDatasetStatus::Built | TrainingDatasetStatus::Ready
-        ) {
+        if dataset.status != TrainingDatasetStatus::Ready {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "cpcv backtest requires a Built/Ready dataset, got {}",
+                    "cpcv backtest requires a Ready dataset, got {}",
                     dataset.status.as_str()
                 ),
             }
@@ -737,20 +704,54 @@ impl CpcvBacktestService {
         &self,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<Vec<TrainingExample>> {
-        let bytes = self.deps.artifact_store.get(&dataset.parquet_uri).await?;
-        DatasetParquetCodec::decode(&bytes)
+        let materialization = require_dataset_materialization(dataset)?;
+        let bytes = self
+            .deps
+            .artifact_store
+            .get(materialization.parquet_uri)
+            .await?;
+        verify_frozen_dataset_artifact(dataset, &bytes)
     }
+}
+
+fn validated_sample_interval_secs(dataset: &TrainingDatasetInfo) -> QuantResult<u64> {
+    let value = u64::try_from(dataset.sample_interval_secs).map_err(|error| {
+        ResearchError::DatasetBuild {
+            detail: format!("dataset sample_interval_secs is invalid: {error}"),
+        }
+    })?;
+    if value == 0 {
+        return Err(ResearchError::DatasetBuild {
+            detail: "dataset sample_interval_secs must be positive".to_owned(),
+        }
+        .into());
+    }
+    Ok(value)
+}
+
+fn validated_pbo_block_count(block_count: u32) -> QuantResult<usize> {
+    usize::try_from(block_count).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("pbo.block_count does not fit usize: {error}"),
+        }
+        .into()
+    })
+}
+
+fn validated_period_length(dataset: &TrainingDatasetInfo) -> QuantResult<ChronoDuration> {
+    validated_sample_interval_secs(dataset)?;
+    Ok(ChronoDuration::seconds(dataset.sample_interval_secs))
 }
 
 /// A minimal, never-scored [`QuantModelRuntime`] used only to determine
 /// [`quant_pivot_research::model::ModelRuntimeInput`]'s shape during tick
-/// materialization (`build_runtime_input` consults `model_family()` /
-/// `required_features()` only — no inference). Every real CPCV fold and
+/// materialization (`build_runtime_input` consults the family and typed input
+/// contract projections only — no inference). Every real CPCV fold and
 /// trial builds and scores its own freshly trained runtime instead.
 struct ProbeRuntime {
     model_family: ModelFamily,
     feature_schema_hash: ContentHash,
-    required_features: Vec<FeatureName>,
+    input_contract: ModelInputContract,
 }
 
 #[async_trait]
@@ -768,13 +769,18 @@ impl QuantModelRuntime for ProbeRuntime {
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.required_features.clone()
+        ModelFeatureRequirements::from_input_contract(&self.input_contract).generic
     }
 
-    async fn infer_batch(
-        &self,
-        _input: quant_pivot_research::model::ModelRuntimeInput,
-    ) -> QuantResult<quant_pivot_research::model::ModelRuntimeOutput> {
+    fn input_features(&self) -> Vec<FeatureName> {
+        self.input_contract
+            .inputs
+            .iter()
+            .map(|input| FeatureName::new(input.feature_name.clone()))
+            .collect()
+    }
+
+    async fn infer_batch(&self, _input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
         unreachable!("ProbeRuntime is never scored, only used to determine tick input shape")
     }
 }
@@ -797,7 +803,7 @@ fn build_timeline_groups(
 ) -> QuantResult<Vec<TimelineGroup>> {
     let mut by_as_of: BTreeMap<DateTime<Utc>, DateTime<Utc>> = BTreeMap::new();
     for example in examples {
-        let matching_label = |row: &&quant_pivot_research::training::TrainingLabel| {
+        let matching_label = |row: &&TrainingLabel| {
             let name_matches = row.label_name == label.name;
             let horizon_matches = row.horizon_secs == label.horizon_secs;
             name_matches && horizon_matches
@@ -812,7 +818,7 @@ fn build_timeline_groups(
             continue;
         };
         by_as_of
-            .entry(example.as_of)
+            .entry(example.decision_at())
             .and_modify(|end| *end = (*end).max(matured_at))
             .or_insert(matured_at);
     }
@@ -827,8 +833,8 @@ fn build_timeline_groups(
     }
     Ok(by_as_of
         .into_iter()
-        .map(|(as_of, label_horizon_end)| TimelineGroup {
-            as_of,
+        .map(|(decision_at, label_horizon_end)| TimelineGroup {
+            decision_at,
             label_horizon_end,
         })
         .collect())
@@ -890,7 +896,7 @@ fn build_lot_timeline_groups(
         by_position
             .entry(ctx.position_id.to_string())
             .and_modify(|(_, group, decisions)| {
-                group.as_of = group.as_of.min(example.as_of);
+                group.decision_at = group.decision_at.min(example.decision_at());
                 group.label_horizon_end = group.label_horizon_end.max(matured_at);
                 decisions.push(example.clone());
             })
@@ -898,7 +904,7 @@ fn build_lot_timeline_groups(
                 (
                     ctx.position_id.clone(),
                     TimelineGroup {
-                        as_of: example.as_of,
+                        decision_at: example.decision_at(),
                         label_horizon_end: matured_at,
                     },
                     vec![example.clone()],
@@ -916,12 +922,12 @@ fn build_lot_timeline_groups(
     }
     let mut ordered: Vec<(PositionId, TimelineGroup, Vec<TrainingExample>)> =
         by_position.into_values().collect();
-    ordered.sort_by_key(|(_, group, _)| group.as_of);
+    ordered.sort_by_key(|(_, group, _)| group.decision_at);
 
     let mut groups = Vec::with_capacity(ordered.len());
     let mut sequences = Vec::with_capacity(ordered.len());
     for (position_id, group, mut decisions) in ordered {
-        decisions.sort_by_key(|example| example.as_of);
+        decisions.sort_by_key(TrainingExample::decision_at);
         groups.push(group);
         sequences.push(LotDecisionSequence {
             position_id,
@@ -978,7 +984,7 @@ fn validate_sell_examples(examples: &[TrainingExample], label: &LabelSelector) -
 /// [`weighted_seed_weights`] (Buy-side): Sell has no governed
 /// `factors.factor_weights` config section, and must additionally seed the
 /// position-state pseudo-factors those config-driven weights never cover.
-fn sell_seed_weights(examples: &[TrainingExample]) -> Vec<FactorWeight> {
+fn sell_seed_weights(examples: &[TrainingExample]) -> QuantResult<Vec<FactorWeight>> {
     let mut names: BTreeSet<String> = BTreeSet::new();
     for example in examples {
         for factor in &example.factor_values {
@@ -992,15 +998,24 @@ fn sell_seed_weights(examples: &[TrainingExample]) -> Vec<FactorWeight> {
     ] {
         names.insert(pseudo.as_str().to_owned());
     }
-    let count = names.len().max(1);
-    let weight = Decimal::ONE / Decimal::from(count as u64);
-    names
+    let count =
+        u64::try_from(names.len()).map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!("Sell factor count does not fit u64: {error}"),
+        })?;
+    if count == 0 {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "Sell factor set must not be empty".to_owned(),
+        }
+        .into());
+    }
+    let weight = Decimal::ONE / Decimal::from(count);
+    Ok(names
         .into_iter()
         .map(|name| FactorWeight {
             factor: FactorName::new(name),
             weight,
         })
-        .collect()
+        .collect())
 }
 
 /// Everything a [`FoldModelSource`] needs to train a `WeightedFactor` fold.
@@ -1018,7 +1033,9 @@ struct FoldTrainTemplate {
     /// against; a trial-grid trial overrides this per trial (never per fold).
     base_objective: TrainingObjectiveSpec,
     prediction_horizon_secs: u64,
+    factor_cross_section: FactorCrossSectionConfig,
     category_scope: Option<MarketCategory>,
+    input_contract: Arc<ModelInputContract>,
     groups: Arc<[TimelineGroup]>,
     /// Same purge/embargo as the outer CPCV run (trainer nested CV).
     purge: PurgeConfig,
@@ -1037,6 +1054,7 @@ struct SellFoldTemplate {
     base_objective: TrainingObjectiveSpec,
     prediction_horizon_secs: u64,
     label_schema_hash: ContentHash,
+    input_contract: Arc<ModelInputContract>,
     groups: Arc<[TimelineGroup]>,
     /// Same purge/embargo as the outer CPCV run (trainer nested CV).
     purge: PurgeConfig,
@@ -1183,20 +1201,22 @@ impl FoldModelSource for WeightedFactorFoldSource<'_> {
         let allowed_as_of: HashSet<DateTime<Utc>> = filter
             .group_indices
             .iter()
-            .map(|&idx| self.template.groups[idx].as_of)
+            .map(|&idx| self.template.groups[idx].decision_at)
             .collect();
         let fold_examples: Vec<TrainingExample> = self
             .template
             .examples
             .iter()
-            .filter(|example| allowed_as_of.contains(&example.as_of))
+            .filter(|example| allowed_as_of.contains(&example.decision_at()))
             .cloned()
             .collect();
+        let training_dataset_hash = ResearchHasher::canonical(&fold_examples)?;
 
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
         let request = TrainModelRequest {
             examples: fold_examples,
+            training_dataset_hash,
             label: self.template.label.clone(),
             seed_weights: self.template.seed_weights.clone(),
             objective: self.objective.clone(),
@@ -1212,7 +1232,8 @@ impl FoldModelSource for WeightedFactorFoldSource<'_> {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
+            input_contract: self.template.input_contract.as_ref().clone(),
+            factor_cross_section: self.template.factor_cross_section.clone(),
             category_scope: self.template.category_scope,
         };
         let trained = self
@@ -1253,11 +1274,13 @@ impl FoldModelSource for SellFoldSource<'_> {
             }
             .into());
         }
+        let training_dataset_hash = ResearchHasher::canonical(&fold_examples)?;
 
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
         let request = TrainSellScorerRequest {
             examples: fold_examples,
+            training_dataset_hash,
             label: self.template.label.clone(),
             seed_weights: self.template.seed_weights.clone(),
             objective: self.objective.clone(),
@@ -1270,7 +1293,7 @@ impl FoldModelSource for SellFoldSource<'_> {
             prediction_horizon_secs: self.template.prediction_horizon_secs,
             output_spec: SellScorerOutputSpec::conservative(),
             label_schema_hash: self.template.label_schema_hash.clone(),
-            required_features: Vec::new(),
+            input_contract: self.template.input_contract.as_ref().clone(),
         };
         let trained = SellScorerTrainer::new().train_sell_scorer(&request)?;
         let ModelArtifact::SellScorer(sell_artifact) = trained.artifact else {
@@ -1293,11 +1316,13 @@ impl FoldModelSource for SellFoldSource<'_> {
 struct ClassicalFoldTemplate {
     examples: Arc<[TrainingExample]>,
     label: LabelSelector,
+    input_contract: Arc<ModelInputContract>,
     header_template: ModelArtifactHeader,
-    kind: quant_pivot_research::model::ClassicalKind,
-    schema: Arc<quant_pivot_research::features::FeatureSchema>,
+    kind: ClassicalKind,
+    schema: Arc<FeatureSchema>,
     label_schema_hash: ContentHash,
     training_dataset_hash: ContentHash,
+    prediction_horizon_secs: u64,
     groups: Arc<[TimelineGroup]>,
 }
 
@@ -1310,7 +1335,7 @@ struct ClassicalFoldTemplate {
 #[cfg(feature = "ml-classical")]
 struct ClassicalFoldSource<'a> {
     template: &'a ClassicalFoldTemplate,
-    params_override: Option<&'a quant_pivot_research::model::classical::ClassicalParams>,
+    params_override: Option<&'a ClassicalParams>,
 }
 
 #[cfg(feature = "ml-classical")]
@@ -1322,13 +1347,13 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
         let allowed_as_of: HashSet<DateTime<Utc>> = filter
             .group_indices
             .iter()
-            .map(|&idx| self.template.groups[idx].as_of)
+            .map(|&idx| self.template.groups[idx].decision_at)
             .collect();
         let fold_examples: Vec<TrainingExample> = self
             .template
             .examples
             .iter()
-            .filter(|example| allowed_as_of.contains(&example.as_of))
+            .filter(|example| allowed_as_of.contains(&example.decision_at()))
             .cloned()
             .collect();
 
@@ -1336,16 +1361,29 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
             &fold_examples,
             &self.template.label,
             &self.template.schema,
+            &self.template.input_contract,
         )?;
         let adapter = self.params_override.map_or_else(
             || ClassicalAdapterRegistry::adapter_for(self.template.kind),
             |params| ClassicalAdapterRegistry::adapter_with_params(self.template.kind, *params),
         );
         let output = adapter.train(&matrix)?;
+        if output.input_contract != *self.template.input_contract {
+            return Err(ResearchError::ValidationMethodology {
+                detail: "classical fold input contract differs from its owning model spec"
+                    .to_owned(),
+            }
+            .into());
+        }
 
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
-        let artifact = quant_pivot_research::model::artifact::ClassicalModelArtifact {
+        let output_semantics = crate::service::model_training::classical_output_semantics(
+            self.template.kind,
+            &self.template.label,
+            self.template.prediction_horizon_secs,
+        )?;
+        let artifact = ClassicalModelArtifact {
             header,
             artifact_id: ModelArtifactId::from_v7(),
             kind: self.template.kind,
@@ -1353,6 +1391,14 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
             crate_version: output.crate_version.clone(),
             label_schema_hash: self.template.label_schema_hash.clone(),
             training_dataset_hash: self.template.training_dataset_hash.clone(),
+            prediction_horizon_secs: self.template.prediction_horizon_secs,
+            output_semantics,
+            multipliers: ScoreMultiplierSpec::conservative(),
+            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+            input_contract: output.input_contract.clone(),
+            input_contract_hash: output.input_contract_hash.clone(),
+            input_transform_hash: output.input_transform_hash.clone(),
+            training_input_hash: output.training_input_hash.clone(),
             // Ephemeral validation fold: never persisted to the artifact
             // store, so this URI is never dereferenced — `ClassicalRuntime::load`
             // takes the estimator bytes directly, below.
@@ -1361,8 +1407,9 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
                     detail: format!("ephemeral fold artifact URI failed to parse: {error}"),
                 },
             )?,
+            serialized_model_hash: output.model_bytes_hash.clone(),
             serialization_format: output.serialization_format,
-            preprocessing: output.preprocessing.clone(),
+            input_transform: output.input_transform.clone(),
             metrics: output.metrics.clone(),
         };
         let runtime = ClassicalRuntime::load(artifact, &output.model_bytes)?;
@@ -1415,18 +1462,18 @@ fn evaluate_portfolio_groups(
         .filter_map(|&idx| {
             template
                 .ticks_by_as_of
-                .get(&template.groups[idx].as_of)
+                .get(&template.groups[idx].decision_at)
                 .cloned()
         })
         .collect();
-    ticks.sort_by_key(|tick| tick.as_of);
+    ticks.sort_by_key(|tick| tick.decision_at);
 
     let request = BacktestRequest {
         backtest_report_id: BacktestReportId::from_v7(),
         model_version_id: model.model_version_id(),
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-        window_start: ticks.first().map_or_else(Utc::now, |tick| tick.as_of),
-        window_end: ticks.last().map_or_else(Utc::now, |tick| tick.as_of),
+        window_start: ticks.first().map_or_else(Utc::now, |tick| tick.decision_at),
+        window_end: ticks.last().map_or_else(Utc::now, |tick| tick.decision_at),
     };
     let result = template
         .handle
@@ -1439,7 +1486,7 @@ fn evaluate_portfolio_groups(
 
     let mut by_as_of: BTreeMap<DateTime<Utc>, TickAccumulator> = BTreeMap::new();
     for sample in &result.sample_outcomes {
-        let entry = by_as_of.entry(sample.as_of).or_default();
+        let entry = by_as_of.entry(sample.decision_at).or_default();
         entry.allocated += sample.allocated_usd.inner();
         entry.pnl +=
             sample.allocated_usd.inner() * sample.realized_return_bps / Decimal::from(10_000);
@@ -1449,7 +1496,7 @@ fn evaluate_portfolio_groups(
 
     let mut evaluations = Vec::with_capacity(filter.group_indices.len());
     for &group_index in &filter.group_indices {
-        let as_of = template.groups[group_index].as_of;
+        let as_of = template.groups[group_index].decision_at;
         let Some(accumulator) = by_as_of.get(&as_of) else {
             return Err(ResearchError::ValidationMethodology {
                 detail: format!(
@@ -1486,7 +1533,7 @@ fn evaluate_portfolio_groups(
 /// reconstruction ([`calendarize_sell_path_set`]).
 fn evaluate_sell_groups(
     template: &SellReplayTemplate,
-    model: &dyn quant_pivot_research::model::SellScorerRuntime,
+    model: &dyn SellScorerRuntime,
     filter: &GroupRowFilter,
 ) -> QuantResult<Vec<GroupEvaluation>> {
     let mut lots = Vec::with_capacity(filter.group_indices.len());
@@ -1552,7 +1599,13 @@ fn run_trial_grid(
         template: replay_template,
     };
     let calendarize_sell = matches!(replay_template, ReplayTemplate::Sell(_));
-    let period_secs = sample_interval_secs.max(1);
+    if sample_interval_secs == 0 {
+        return Err(ResearchError::ValidationMethodology {
+            detail: "trial-grid sample_interval_secs must be positive".to_owned(),
+        }
+        .into());
+    }
+    let period_secs = sample_interval_secs;
 
     let columns: Vec<QuantResult<Vec<Decimal>>> = trials
         .par_iter()
@@ -1610,7 +1663,7 @@ fn run_trial_grid(
             .map(|row| row.period_start)
             .collect()
     } else {
-        groups.iter().map(|group| group.as_of).collect()
+        groups.iter().map(|group| group.decision_at).collect()
     };
 
     // Transpose trial_returns (N_trials x T) into returns (T x N_trials).
@@ -1670,13 +1723,13 @@ fn calendarize_sell_path_set(
             .collect();
         path.sharpe = sharpe_ratio(&path.group_returns, Decimal::ONE);
         path.max_drawdown = max_drawdown_from_returns(&path.group_returns);
-        path.tail_loss = tail_loss_from_returns(&path.group_returns, Decimal::new(10, 2));
+        path.tail_loss = tail_loss_from_returns(&path.group_returns, Decimal::new(10, 2))?;
     }
 
     // Hard gate baseline is exit-at-first (non-trivial null). AlwaysHold is
     // definitionally zero alpha and is covered by unit tests / offline compare,
     // not persisted into SharpeDistribution.
-    let baseline_uplift = median_decimal(&path_mean_returns)
+    let baseline_uplift = median_decimal(&path_mean_returns)?
         - mean_calendar_return(&baseline_calendar_returns(
             template,
             SellNullBaseline::ExitAtFirstDecision,
@@ -1685,7 +1738,7 @@ fn calendarize_sell_path_set(
     path_set.sharpe_distribution = sharpe_distribution_with_diagnostics(
         &path_set.paths,
         Some(baseline_uplift.round_dp(RESEARCH_DECIMAL_SCALE)),
-    );
+    )?;
     Ok(())
 }
 
@@ -1695,7 +1748,7 @@ fn synthetic_lot_outcomes(groups: &[TimelineGroup], returns: &[Decimal]) -> Vec<
         .zip(returns)
         .map(|(group, &return_value)| LotOutcome {
             position_id: PositionId::from_v7(),
-            as_of: group.as_of,
+            decision_at: group.decision_at,
             return_value,
             cumulative_exit_pct: Decimal::ONE,
             rank_pairs: Vec::new(),
@@ -1724,23 +1777,23 @@ fn baseline_calendar_returns(
 fn sharpe_distribution_with_diagnostics(
     paths: &[BacktestPath],
     baseline_uplift: Option<Decimal>,
-) -> SharpeDistribution {
+) -> QuantResult<SharpeDistribution> {
     let mut sharpes: Vec<Decimal> = paths.iter().map(|path| path.sharpe).collect();
     sharpes.sort();
     let mut max_drawdowns: Vec<Decimal> = paths.iter().map(|path| path.max_drawdown).collect();
     max_drawdowns.sort();
     let mut tail_losses: Vec<Decimal> = paths.iter().map(|path| path.tail_loss).collect();
     tail_losses.sort();
-    SharpeDistribution {
-        min: percentile(&sharpes, Decimal::ZERO),
-        p25: percentile(&sharpes, Decimal::new(25, 2)),
-        median: percentile(&sharpes, Decimal::new(5, 1)),
-        p75: percentile(&sharpes, Decimal::new(75, 2)),
-        max: percentile(&sharpes, Decimal::ONE),
-        median_max_drawdown: Some(percentile(&max_drawdowns, Decimal::new(5, 1))),
-        median_tail_loss: Some(percentile(&tail_losses, Decimal::new(5, 1))),
+    Ok(SharpeDistribution {
+        min: percentile(&sharpes, Decimal::ZERO)?,
+        p25: percentile(&sharpes, Decimal::new(25, 2))?,
+        median: percentile(&sharpes, Decimal::new(5, 1))?,
+        p75: percentile(&sharpes, Decimal::new(75, 2))?,
+        max: percentile(&sharpes, Decimal::ONE)?,
+        median_max_drawdown: Some(percentile(&max_drawdowns, Decimal::new(5, 1))?),
+        median_tail_loss: Some(percentile(&tail_losses, Decimal::new(5, 1))?),
         baseline_uplift,
-    }
+    })
 }
 
 fn max_drawdown_from_returns(returns: &[Decimal]) -> Decimal {
@@ -1755,39 +1808,88 @@ fn max_drawdown_from_returns(returns: &[Decimal]) -> Decimal {
     max_dd.round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
-fn tail_loss_from_returns(returns: &[Decimal], quantile: Decimal) -> Decimal {
+fn tail_loss_from_returns(returns: &[Decimal], quantile: Decimal) -> QuantResult<Decimal> {
     if returns.is_empty() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
+    }
+    if quantile <= Decimal::ZERO || quantile > Decimal::ONE {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!("tail-loss quantile must be in (0, 1], got {quantile}"),
+        }
+        .into());
     }
     let mut sorted = returns.to_vec();
     sorted.sort();
     let n = sorted.len();
-    let raw = (Decimal::from(n as u64) * quantile).ceil();
+    let n_u64 = u64::try_from(n).map_err(|error| ResearchError::ValidationMethodology {
+        detail: format!("return count does not fit u64: {error}"),
+    })?;
+    let raw = Decimal::from(n_u64)
+        .checked_mul(quantile)
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "tail-loss quantile multiplication overflowed Decimal".to_owned(),
+        })?
+        .ceil();
     let take = raw
         .to_u64()
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(1)
-        .max(1)
-        .min(n);
-    stats::mean(&sorted[..take]).round_dp(RESEARCH_DECIMAL_SCALE)
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!("tail-loss count {raw} does not fit u64"),
+        })?;
+    let take = usize::try_from(take).map_err(|error| ResearchError::ValidationMethodology {
+        detail: format!("tail-loss count does not fit usize: {error}"),
+    })?;
+    if take == 0 || take > n {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!("tail-loss count {take} is outside 1..={n}"),
+        }
+        .into());
+    }
+    Ok(stats::mean(&sorted[..take]).round_dp(RESEARCH_DECIMAL_SCALE))
 }
 
 /// `sorted` must already be ascending. Nearest-rank percentile (`0` = min,
 /// `1` = max); `0` for an empty series.
-fn percentile(sorted: &[Decimal], fraction: Decimal) -> Decimal {
+fn percentile(sorted: &[Decimal], fraction: Decimal) -> QuantResult<Decimal> {
     if sorted.is_empty() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
     }
-    let last = Decimal::from(u64::try_from(sorted.len() - 1).unwrap_or(u64::MAX));
-    let index = (last * fraction)
-        .round()
-        .to_u64()
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0);
-    sorted[index.min(sorted.len() - 1)]
+    if !(Decimal::ZERO..=Decimal::ONE).contains(&fraction) {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!("percentile fraction must be in [0, 1], got {fraction}"),
+        }
+        .into());
+    }
+    let last_index =
+        sorted
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "non-empty percentile input has no last index".to_owned(),
+            })?;
+    let last = Decimal::from(u64::try_from(last_index).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("percentile index does not fit u64: {error}"),
+        }
+    })?);
+    let index =
+        (last * fraction)
+            .round()
+            .to_u64()
+            .ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "percentile index does not fit u64".to_owned(),
+            })?;
+    let index = usize::try_from(index).map_err(|error| ResearchError::ValidationMethodology {
+        detail: format!("percentile index does not fit usize: {error}"),
+    })?;
+    sorted.get(index).copied().ok_or_else(|| {
+        ResearchError::ValidationMethodology {
+            detail: format!("percentile index {index} is out of bounds"),
+        }
+        .into()
+    })
 }
 
-fn median_decimal(values: &[Decimal]) -> Decimal {
+fn median_decimal(values: &[Decimal]) -> QuantResult<Decimal> {
     let mut sorted = values.to_vec();
     sorted.sort();
     percentile(&sorted, Decimal::new(5, 1))
@@ -1819,10 +1921,15 @@ fn compute_dsr_and_pbo(
         .into());
     };
     let trial_sharpes = trial_sharpe_series(matrix);
+    let returns_period_count = u64::try_from(path.group_returns.len()).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("representative path period count does not fit u64: {error}"),
+        }
+    })?;
     let dsr_input = DsrInput {
         observed_sharpe: path.sharpe,
-        returns_period_count: path.group_returns.len() as u64,
-        period_length: ChronoDuration::seconds(dataset.sample_interval_secs.max(1)),
+        returns_period_count,
+        period_length: validated_period_length(dataset)?,
         skewness: stats::skewness(&path.group_returns),
         kurtosis: stats::kurtosis(&path.group_returns),
         // Bailey multiple-testing N/V: same population — the governed trial
@@ -1830,7 +1937,7 @@ fn compute_dsr_and_pbo(
         trial_count: trial_grid_count,
         trial_sharpe_variance: stats::variance(&trial_sharpes),
     };
-    let dsr = deflated_sharpe_ratio(&dsr_input);
+    let dsr = deflated_sharpe_ratio(&dsr_input)?;
     let pbo = probability_of_backtest_overfitting(matrix, &config.pbo)?;
     Ok((dsr, pbo))
 }
@@ -1851,11 +1958,16 @@ fn min_trl_for_path(
     dataset: &TrainingDatasetInfo,
     path: &BacktestPath,
     dsr_significance: &Decimal,
-) -> Option<ChronoDuration> {
+) -> QuantResult<Option<ChronoDuration>> {
+    let returns_period_count = u64::try_from(path.group_returns.len()).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("representative path period count does not fit u64: {error}"),
+        }
+    })?;
     let input = DsrInput {
         observed_sharpe: path.sharpe,
-        returns_period_count: path.group_returns.len() as u64,
-        period_length: ChronoDuration::seconds(dataset.sample_interval_secs.max(1)),
+        returns_period_count,
+        period_length: validated_period_length(dataset)?,
         skewness: stats::skewness(&path.group_returns),
         kurtosis: stats::kurtosis(&path.group_returns),
         trial_count: 1,
@@ -1871,11 +1983,18 @@ mod tests {
         calendarize_sell_path_set, selected_label_matured_at, validate_sell_examples,
     };
     use chrono::{DateTime, TimeZone, Utc};
+    use quant_pivot_models::domain::DecisionClock;
+    use quant_pivot_models::enums::common::MarketCategory;
     use quant_pivot_models::types::{
-        BacktestPathSetId, MarketId, ModelVersionId, OrderIntentId, Price, SchemaVersion, Shares,
-        TokenId, TrainingExampleId, TrainingSampleSource,
+        BacktestPathSetId, ContentHash, EventId, MarketId, ModelInputContract, ModelVersionId,
+        OrderIntentId, Price, SchemaVersion, Shares, TokenId, TrainingExampleId,
+        TrainingSampleSource,
     };
     use quant_pivot_models::{enums::quant::DataQualityStatus, types::PositionId};
+    use quant_pivot_research::factors::FactorValue;
+    use quant_pivot_research::gates::GateStatus;
+    use quant_pivot_research::selection::SelectedMarket;
+    use quant_pivot_research::training::{LabelName, LeakageFindings};
     use quant_pivot_research::{
         features::FeatureVector,
         model::{LabelSelector, PositionStateFeatures, SellSignalPolicy},
@@ -1909,19 +2028,26 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: market_id.clone(),
             token_id: token_id.clone(),
-            as_of,
+            selected_market: SelectedMarket {
+                market_id: market_id.clone(),
+                event_id: EventId::new("event:test"),
+                category: MarketCategory::Sports,
+                primary_token_id: token_id.clone(),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+                source_refs: Vec::new(),
+            },
+            decision_boundary: DecisionClock::new(0).boundary(as_of).expect("boundary"),
             sample_source: TrainingSampleSource::ExitDecision,
             feature_vector: FeatureVector {
                 market_id,
                 token_id: Some(token_id),
-                as_of,
+                decision_at: as_of,
                 generic_schema_version: SchemaVersion::FIRST,
                 generic: BTreeMap::new(),
                 domain: None,
-                substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
-                staleness_ms: 0,
-                source_refs: Vec::new(),
             },
             factor_values: Vec::new(),
             labels: vec![TrainingLabel {
@@ -1932,6 +2058,7 @@ mod tests {
                 matured_at: closed_at,
             }],
             source_refs: Vec::new(),
+            decision_capture: None,
             lot_context: Some(LotTrainingContext {
                 order_intent_id: OrderIntentId::from_v7(),
                 position_id,
@@ -1942,9 +2069,9 @@ mod tests {
                 max_hold_secs: 86_400,
             }),
             position_state: Some(PositionStateFeatures {
-                unrealized_pnl_pct: dec!(0),
+                unrealized_pnl_pct: Some(dec!(0)),
                 time_in_trade_ratio: dec!(0.1),
-                peak_mark_drawdown: dec!(0),
+                peak_mark_drawdown: Some(dec!(0)),
             }),
             book_fidelity: None,
         }
@@ -2004,7 +2131,7 @@ mod tests {
         ];
         let (groups, _) = build_lot_timeline_groups(&examples, &label()).expect("groups");
         assert!(
-            groups[0].as_of < groups[1].as_of,
+            groups[0].decision_at < groups[1].decision_at,
             "groups must be ascending by as_of"
         );
     }
@@ -2013,7 +2140,7 @@ mod tests {
     fn selected_label_matured_at_returns_none_for_unlabeled_example() {
         let example = lot_decision(PositionId::from_v7(), ts(0), ts(100));
         let other = LabelSelector {
-            name: quant_pivot_research::training::LabelName::new("settlement_outcome"),
+            name: LabelName::new("settlement_outcome"),
             horizon_secs: 0,
         };
         assert!(selected_label_matured_at(&example, &other).is_none());
@@ -2143,113 +2270,74 @@ mod tests {
         );
     }
 
-    /// Phase 11.5.1 integration: synthetic multi-lot `ExitDecision` fixture →
-    /// `SellFoldSource` + `LotReplayBacktester` CPCV → calendarize → diagnostics
-    /// → quality-gate input shape. Exercises the full algorithm path without
-    /// `ClickHouse` / Postgres (those are covered by governance bind e2e).
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn sell_cpcv_pipeline_produces_calendarized_diagnostics_for_gates() {
-        use super::{
-            FoldReplayEngineAdapter, FoldTemplate, ReplayTemplate, SellFoldTemplate,
-            calendarize_sell_path_set, sell_seed_weights,
-        };
+    fn content_hash_seed(seed: u8) -> ContentHash {
+        let hex = format!("{seed:02x}{}", "0".repeat(62));
+        ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+    }
+
+    fn market_factor(score: rust_decimal::Decimal) -> FactorValue {
         use quant_pivot_models::{
             enums::{factor::FactorFamily, quant::FactorDirection},
-            types::{ContentHash, FactorDefinitionId, Probability},
+            types::{FactorDefinitionId, Probability},
         };
-        use quant_pivot_research::{
-            factors::{FactorExplanation, FactorValue, NormalizedFactor, names},
-            gates::{
-                CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateSubject,
-                ModelQualityGate, QualityGateInput, QualityGateThresholds,
-                SellQualityGateThresholds, ValidationGateThresholds,
+        use quant_pivot_research::factors::{FactorExplanation, NormalizedFactor, names};
+        FactorValue {
+            definition_id: FactorDefinitionId::from_v7(),
+            name: names::MOMENTUM_ROC,
+            family: FactorFamily::Momentum,
+            raw_value: Some(score),
+            normalization: NormalizedFactor::cross_section(Probability::new(score)),
+            direction: FactorDirection::Positive,
+            confidence: Probability::new(dec!(0.9)),
+            explanation: FactorExplanation {
+                headline: "t".to_owned(),
+                drivers: Vec::new(),
             },
-            model::{ModelArtifactHeader, ModelFamily, TrainingObjectiveSpec},
-            training::DatasetCoverage,
-            validation::{
-                CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
-                DefaultCombinatorialPurgedBacktester, PurgeConfig,
-            },
-        };
-
-        fn hash(seed: u8) -> ContentHash {
-            let hex = format!("{seed:02x}{}", "0".repeat(62));
-            ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+            input_feature_refs: Vec::new(),
         }
+    }
 
-        fn market_factor(score: rust_decimal::Decimal) -> FactorValue {
-            FactorValue {
-                definition_id: FactorDefinitionId::from_v7(),
-                name: names::MOMENTUM_ROC,
-                family: FactorFamily::Momentum,
-                raw_value: Some(score),
-                normalization: NormalizedFactor::cross_section(Probability::new(score)),
-                direction: FactorDirection::Positive,
-                confidence: Probability::new(dec!(0.9)),
-                explanation: FactorExplanation {
-                    headline: "t".to_owned(),
-                    drivers: Vec::new(),
-                },
-                input_feature_refs: Vec::new(),
-            }
-        }
+    fn lot_with_signal(
+        position_id: &PositionId,
+        decision_offsets_secs: &[i64],
+        momentum: rust_decimal::Decimal,
+        alpha_bps: rust_decimal::Decimal,
+    ) -> Vec<TrainingExample> {
+        let first = ts(*decision_offsets_secs.first().unwrap_or(&0));
+        let closed_at = ts(*decision_offsets_secs.last().unwrap_or(&0) + 3_600);
+        let n = u64::try_from(decision_offsets_secs.len().max(1)).expect("len");
+        decision_offsets_secs
+            .iter()
+            .enumerate()
+            .map(|(i, &offset)| {
+                let as_of = ts(offset);
+                let scale = Decimal::from(n - u64::try_from(i).expect("i")) / Decimal::from(n);
+                let mut example = lot_decision(position_id.clone(), as_of, closed_at);
+                example.factor_values = vec![market_factor(momentum * scale)];
+                example.position_state = Some(PositionStateFeatures {
+                    unrealized_pnl_pct: Some(momentum * dec!(0.5) * scale),
+                    time_in_trade_ratio: momentum * scale,
+                    peak_mark_drawdown: Some(dec!(0)),
+                });
+                example.labels[0].value = alpha_bps * scale;
+                if let Some(ctx) = example.lot_context.as_mut() {
+                    ctx.opened_at = first;
+                }
+                example
+            })
+            .collect()
+    }
 
-        fn lot_with_signal(
-            position_id: &PositionId,
-            decision_offsets_secs: &[i64],
-            momentum: rust_decimal::Decimal,
-            alpha_bps: rust_decimal::Decimal,
-        ) -> Vec<TrainingExample> {
-            let first = ts(*decision_offsets_secs.first().unwrap_or(&0));
-            let closed_at = ts(*decision_offsets_secs.last().unwrap_or(&0) + 3_600);
-            let n = decision_offsets_secs.len().max(1) as u64;
-            decision_offsets_secs
-                .iter()
-                .enumerate()
-                .map(|(i, &offset)| {
-                    let as_of = ts(offset);
-                    // Later decisions within a lot get a slightly weaker signal so
-                    // rank_pairs are not constant, while same-as_of rows across
-                    // lots stay comparable for LTR grouping.
-                    let scale = Decimal::from(n - i as u64) / Decimal::from(n);
-                    let mut example = lot_decision(position_id.clone(), as_of, closed_at);
-                    example.factor_values = vec![market_factor(momentum * scale)];
-                    example.position_state = Some(PositionStateFeatures {
-                        unrealized_pnl_pct: momentum * dec!(0.5) * scale,
-                        time_in_trade_ratio: momentum * scale,
-                        peak_mark_drawdown: dec!(0),
-                    });
-                    example.labels[0].value = alpha_bps * scale;
-                    // Keep lot_context.opened_at = first decision so calendar
-                    // anchors stay on the lot's first as_of.
-                    if let Some(ctx) = example.lot_context.as_mut() {
-                        ctx.opened_at = first;
-                    }
-                    example
-                })
-                .collect()
-        }
-
-        // Non-overlapping lot windows (gap ≫ label horizon) so purge leaves a
-        // non-empty train set; paired lots share as_of so LTR simplex sees
-        // ≥2-row cross-sections; first-as_of values still span many calendar
-        // buckets for Sharpe/DSR.
-        //
-        //   Pair 0/1: 0h, 0.5h  → closed 1h
-        //   Pair 2/3: ~2.8h, 3.3h → closed ~3.8h
-        //   Pair 4/5: ~5.6h, 6.1h → closed ~6.6h
-        //   Pair 6/7: ~8.3h, 8.8h → closed ~9.3h
-        let mut examples = Vec::new();
+    fn sell_cpcv_examples() -> Vec<TrainingExample> {
         let signals = [
             (dec!(0.9), dec!(80)),
+            (dec!(0.15), dec!(-60)),
             (dec!(0.85), dec!(70)),
+            (dec!(0.2), dec!(-50)),
             (dec!(0.7), dec!(40)),
+            (dec!(0.35), dec!(-20)),
             (dec!(0.65), dec!(30)),
             (dec!(0.4), dec!(-10)),
-            (dec!(0.35), dec!(-20)),
-            (dec!(0.2), dec!(-50)),
-            (dec!(0.15), dec!(-60)),
         ];
         let schedules: [[i64; 2]; 8] = [
             [0, 1_800],
@@ -2261,18 +2349,41 @@ mod tests {
             [30_000, 31_800],
             [30_000, 31_800],
         ];
+        let mut examples = Vec::new();
         for ((momentum, alpha), schedule) in signals.into_iter().zip(schedules) {
             let lot = PositionId::from_v7();
             examples.extend(lot_with_signal(&lot, &schedule, momentum, alpha));
         }
+        examples
+    }
 
+    /// Phase 11.5.1 integration: synthetic multi-lot `ExitDecision` fixture →
+    /// `SellFoldSource` + `LotReplayBacktester` CPCV → calendarize → diagnostics
+    /// → quality-gate input shape. Exercises the full algorithm path without
+    /// `ClickHouse` / Postgres (those are covered by governance bind e2e).
+    #[test]
+    fn sell_cpcv_pipeline_produces_calendarized_diagnostics_for_gates() {
+        use super::{
+            FoldReplayEngineAdapter, FoldTemplate, ReplayTemplate, SellFoldTemplate,
+            calendarize_sell_path_set, sell_seed_weights,
+        };
+        use quant_pivot_research::{
+            factors::names,
+            model::{ModelArtifactHeader, ModelFamily, TrainingObjectiveSpec},
+            validation::{
+                CombinatorialPurgedBacktester, CpcvConfig, CpcvRequest,
+                DefaultCombinatorialPurgedBacktester, PurgeConfig,
+            },
+        };
+
+        let examples = sell_cpcv_examples();
         validate_sell_examples(&examples, &label()).expect("validate");
         let (groups, sequences) = build_lot_timeline_groups(&examples, &label()).expect("groups");
         assert_eq!(groups.len(), 8);
 
         let sequences: Arc<[LotDecisionSequence]> = Arc::from(sequences);
         let groups_arc: Arc<[TimelineGroup]> = Arc::from(groups);
-        let seed_weights = sell_seed_weights(&examples);
+        let seed_weights = sell_seed_weights(&examples).expect("seed weights");
         assert!(
             seed_weights.iter().any(|w| w.factor == names::MOMENTUM_ROC),
             "seed weights must cover market factors present on examples"
@@ -2285,20 +2396,19 @@ mod tests {
             header_template: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
                 model_family: ModelFamily::HoldVsExitWeighted,
-                feature_schema_hash: hash(1),
-                factor_schema_hash: hash(2),
+                feature_schema_hash: content_hash_seed(1),
+                factor_schema_hash: content_hash_seed(2),
             },
             base_objective: TrainingObjectiveSpec::default(),
             prediction_horizon_secs: 86_400,
-            label_schema_hash: hash(3),
+            label_schema_hash: content_hash_seed(3),
+            input_contract: Arc::new(ModelInputContract::single_required("book.mid")),
             groups: Arc::clone(&groups_arc),
             purge: PurgeConfig::pct_only(Decimal::ZERO),
         });
         let replay_template = ReplayTemplate::Sell(SellReplayTemplate {
             sequences: Arc::clone(&sequences),
             policy: SellSignalPolicy {
-                // Low bars so the scorer's ranking skill is visible in replay
-                // returns (policy still shared with live via try_from_runtime).
                 min_confidence: dec!(0),
                 min_p_exit_better: dec!(0),
                 min_expected_alpha_bps: dec!(0),
@@ -2325,7 +2435,6 @@ mod tests {
             })
             .expect("cpcv");
 
-        // N=4,k=2 → φ = C(3,1) = 3 paths; C(4,2) = 6 combinations.
         assert_eq!(path_set.paths.len(), 3);
         assert_eq!(path_set.combination_count, 6);
 
@@ -2334,37 +2443,38 @@ mod tests {
         };
         calendarize_sell_path_set(&mut path_set, &groups_arc, sell_replay, 3_600)
             .expect("calendarize");
+        assert_sell_cpcv_gate_shape(&path_set, &groups_arc);
+    }
+
+    fn assert_sell_cpcv_gate_shape(path_set: &BacktestPathSet, groups_arc: &[TimelineGroup]) {
+        use quant_pivot_models::types::Probability;
+        use quant_pivot_research::{
+            gates::{
+                CpcvPathSetGateInput, DefaultModelQualityGate, GateId, GateIntent, GateSubject,
+                ModelQualityGate, QualityGateInput, QualityGateThresholds,
+                SellQualityGateThresholds, ValidationGateThresholds,
+            },
+            model::ModelFamily,
+            training::DatasetCoverage,
+        };
 
         let dist = &path_set.sharpe_distribution;
-        assert!(
-            dist.median_max_drawdown.is_some(),
-            "calendarize must persist median_max_drawdown"
-        );
-        assert!(
-            dist.median_tail_loss.is_some(),
-            "calendarize must persist median_tail_loss"
-        );
-        assert!(
-            dist.baseline_uplift.is_some(),
-            "calendarize must persist baseline_uplift"
-        );
+        assert!(dist.median_max_drawdown.is_some());
+        assert!(dist.median_tail_loss.is_some());
+        assert!(dist.baseline_uplift.is_some());
         for path in &path_set.paths {
-            assert!(
-                path.group_returns.len() >= 2,
-                "each path must have ≥ 2 calendar buckets after calendarize"
-            );
+            assert!(path.group_returns.len() >= 2);
         }
 
-        // Gate consumes the same diagnostic fields governance persists.
         let gate_input = CpcvPathSetGateInput {
             median_rank_ic: path_set.median_rank_ic,
-            deflated_sharpe: dec!(0.97), // DSR computed in service finalize; assert shape here
+            deflated_sharpe: dec!(0.97),
             pbo: dec!(0.20),
             min_track_record_length_secs: Some(86_400),
             median_max_drawdown: dist.median_max_drawdown,
             median_tail_loss: dist.median_tail_loss,
             baseline_uplift: dist.baseline_uplift,
-            window_start: Some(groups_arc.first().expect("group").as_of),
+            window_start: Some(groups_arc.first().expect("group").decision_at),
             window_end: Some(groups_arc.last().expect("group").label_horizon_end),
         };
         let decision = DefaultModelQualityGate::new()
@@ -2382,7 +2492,7 @@ mod tests {
                     labels_available: 990,
                     ..Default::default()
                 },
-                leakage: quant_pivot_research::training::LeakageFindings::default(),
+                leakage: LeakageFindings::default(),
                 shadow_stability: Some(Probability::new(dec!(0.80))),
                 thresholds: QualityGateThresholds::conservative(),
                 validation_thresholds: ValidationGateThresholds::conservative(),
@@ -2390,7 +2500,6 @@ mod tests {
                 sell_thresholds: SellQualityGateThresholds::default(),
                 model_family: Some(ModelFamily::HoldVsExitWeighted),
                 return_model_calibrated: false,
-                calibration_gate_enabled: true,
             })
             .expect("evaluate");
 
@@ -2412,9 +2521,6 @@ mod tests {
             .iter()
             .find(|row| row.gate == GateId::CalibrationRequired)
             .expect("calibration row");
-        assert_eq!(
-            calibration.status,
-            quant_pivot_research::gates::GateStatus::NotApplicable
-        );
+        assert_eq!(calibration.status, GateStatus::NotApplicable);
     }
 }

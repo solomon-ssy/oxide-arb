@@ -89,7 +89,7 @@ fn candidate(
         liquidity_score: Probability::ZERO,
         data_quality_score: Probability::ZERO,
         model_score_percentile: Probability::ZERO,
-        as_of: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        decision_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     }
 }
 
@@ -159,7 +159,7 @@ fn input<'a>(
         portfolio_plan_id: PortfolioPlanId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
-        as_of: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        decision_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         candidates,
         account,
         caps,

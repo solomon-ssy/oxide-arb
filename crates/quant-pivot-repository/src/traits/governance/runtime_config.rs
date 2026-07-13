@@ -5,7 +5,7 @@ use quant_pivot_models::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
     },
-    types::{ContentHash, RuntimeConfigVersionId},
+    types::{ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
 
 #[async_trait::async_trait]
@@ -17,6 +17,15 @@ pub trait RuntimeConfigVersionRepository: Send + Sync {
 
     async fn activate_version(
         &self,
+        activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError>;
+
+    /// Append an activation only when the exact expected activation is still
+    /// current. Production pointer switches use this CAS to avoid overwriting
+    /// a concurrent governed config transition.
+    async fn activate_version_if_current(
+        &self,
+        expected_current_activation_id: Option<&RuntimeConfigActivationId>,
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError>;
 

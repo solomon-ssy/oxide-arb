@@ -1,6 +1,7 @@
 //! Entry-plan derivation for published recommendations.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     enums::quant::EntryTriggerKind,
     runtime_config::RuntimeConfig,
@@ -14,13 +15,12 @@ use rust_decimal::Decimal;
 /// Default path is [`EntryTriggerKind::LimitPrice`] with trigger and limit at
 /// `entry_price_ref`. When `allow_market_orders` is enabled, the plan uses
 /// [`EntryTriggerKind::Immediate`] with `limit_price` as a slippage cap.
-#[must_use]
 pub fn derive_entry_plan(
     candidate: &SignalCandidate,
-    as_of: DateTime<Utc>,
+    valid_from: DateTime<Utc>,
     valid_until: DateTime<Utc>,
     config: &RuntimeConfig,
-) -> EntryPlan {
+) -> QuantResult<EntryPlan> {
     let policy = &config.execution.entry_order_policy;
     let entry_price = candidate.entry_price_ref;
     let (trigger_kind, trigger_price, limit_price, cancel_if_not_triggered) =
@@ -35,24 +35,29 @@ pub fn derive_entry_plan(
             )
         };
 
-    EntryPlan {
+    let min_depth_usd = policy
+        .min_entry_book_depth_usd
+        .value
+        .trim()
+        .parse::<Decimal>()
+        .map_err(|error| {
+            QuantError::config(format!(
+                "execution.entry_order_policy.min_entry_book_depth_usd is not a valid decimal: {error}"
+            ))
+        })?;
+
+    Ok(EntryPlan {
         trigger_kind,
         trigger_price,
         limit_price,
         max_slippage_bps: Bps::new(Decimal::from(policy.max_slippage_bps)),
-        valid_from: as_of,
+        valid_from,
         valid_until,
-        min_depth_usd: Usd::new(parse_decimal_lossless(
-            &policy.min_entry_book_depth_usd.value,
-        )),
+        min_depth_usd: Usd::new(min_depth_usd),
         max_book_age_ms: config.data_quality.max_book_age_ms,
         cancel_if_not_triggered,
         entry_reason: candidate.model_explanation.headline.clone(),
-    }
-}
-
-fn parse_decimal_lossless(value: &str) -> Decimal {
-    value.trim().parse::<Decimal>().unwrap_or(Decimal::ZERO)
+    })
 }
 
 #[cfg(test)]
@@ -93,7 +98,7 @@ mod tests {
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
-            as_of: Utc
+            decision_at: Utc
                 .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
                 .single()
                 .expect("valid time"),
@@ -110,7 +115,8 @@ mod tests {
         let valid_until = as_of + chrono::Duration::seconds(3_600);
         let config = RuntimeConfig::default();
 
-        let plan = derive_entry_plan(&candidate(entry_price), as_of, valid_until, &config);
+        let plan = derive_entry_plan(&candidate(entry_price), as_of, valid_until, &config)
+            .expect("valid entry plan");
 
         assert_eq!(plan.trigger_kind, EntryTriggerKind::LimitPrice);
         assert_eq!(plan.trigger_price, Some(entry_price));
@@ -118,5 +124,29 @@ mod tests {
         assert!(plan.cancel_if_not_triggered);
         assert_eq!(plan.valid_from, as_of);
         assert_eq!(plan.valid_until, valid_until);
+    }
+
+    #[test]
+    fn invalid_minimum_depth_fails_closed() {
+        let as_of = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("valid time");
+        let mut config = RuntimeConfig::default();
+        config
+            .execution
+            .entry_order_policy
+            .min_entry_book_depth_usd
+            .value = "not-a-decimal".to_owned();
+
+        assert!(
+            derive_entry_plan(
+                &candidate(Price::new(dec!(0.50))),
+                as_of,
+                as_of + chrono::Duration::seconds(3_600),
+                &config,
+            )
+            .is_err()
+        );
     }
 }

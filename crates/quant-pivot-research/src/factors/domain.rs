@@ -37,7 +37,7 @@ use rust_decimal::{
 use crate::{
     factors::{
         computer::FactorComputer,
-        generic::factor_definition_id,
+        identity::provisional_factor_definition_id,
         names::{DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE},
         value::{
             FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, RawFactor,
@@ -45,7 +45,7 @@ use crate::{
         },
     },
     features::{
-        FeatureName, FeatureValue, FeatureVector, NullReason,
+        FeatureCellState, FeatureName, FeatureValue, FeatureVector, feature_scalar,
         names::{domain_crypto, market as market_names},
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -190,11 +190,16 @@ enum InputState {
 /// whether an absence is structural (`NullReason::NotApplicable`) or a data
 /// gap — the two must never collapse into the same `RawFactor` eligibility.
 fn read_input(features: &FeatureVector, name: &FeatureName) -> InputState {
-    match features.value(name) {
-        Some(FeatureValue::Missing(NullReason::NotApplicable)) => InputState::NotApplicable,
-        Some(FeatureValue::Missing(_)) | None => InputState::Missing,
-        Some(present) => present
-            .to_fact_decimal()
+    match features.cell(name) {
+        Some(cell) if cell.state == FeatureCellState::NotApplicable => InputState::NotApplicable,
+        Some(cell) if cell.state == FeatureCellState::Missing => InputState::Missing,
+        // Absence of the domain slice for a category-routed market is a source
+        // or linkage gap. Structural non-applicability is represented only by
+        // an explicit `FeatureCellState::NotApplicable` cell.
+        None => InputState::Missing,
+        Some(cell) => cell
+            .value()
+            .and_then(feature_scalar)
             .map_or(InputState::Missing, InputState::Present),
     }
 }
@@ -213,7 +218,7 @@ fn raw(
         Probability::ZERO
     };
     RawFactor {
-        definition_id: factor_definition_id(spec.name.as_str()),
+        definition_id: provisional_factor_definition_id(spec.name.as_str()),
         name: spec.name.clone(),
         family: spec.family,
         raw_value,
@@ -255,7 +260,7 @@ struct StrikePressureFactor {
 
 impl FactorComputer for StrikePressureFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        factor_definition_id(self.spec.name.as_str())
+        provisional_factor_definition_id(self.spec.name.as_str())
     }
 
     fn spec(&self) -> &FactorDefinitionSpec {
@@ -319,7 +324,7 @@ struct BetaRegimeFactor {
 
 impl FactorComputer for BetaRegimeFactor {
     fn definition_id(&self) -> FactorDefinitionId {
-        factor_definition_id(self.spec.name.as_str())
+        provisional_factor_definition_id(self.spec.name.as_str())
     }
 
     fn spec(&self) -> &FactorDefinitionSpec {
@@ -373,7 +378,7 @@ mod tests {
     use super::{DomainFactorRegistry, crypto_domain_factors};
     use crate::factors::value::RawFactorEligibility;
     use crate::features::{
-        DomainFeatureSlice, FeatureValue, FeatureVector,
+        DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
         names::{domain_crypto, market as market_names},
     };
     use chrono::Utc;
@@ -387,18 +392,22 @@ mod tests {
 
     fn vector(category: MarketCategory, domain: Option<DomainFeatureSlice>) -> FeatureVector {
         let mut generic = BTreeMap::new();
-        generic.insert(market_names::CATEGORY, FeatureValue::Category(category));
+        generic.insert(
+            market_names::CATEGORY,
+            FeatureCell::observed(
+                FeatureValue::Category(category),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
         FeatureVector {
             market_id: MarketId::new("m"),
             token_id: Some(TokenId::new("t")),
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
             generic_schema_version: SchemaVersion::FIRST,
             generic,
             domain,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         }
     }
 
@@ -406,19 +415,31 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert(
             domain_crypto::DISTANCE_TO_STRIKE,
-            FeatureValue::Decimal(dec!(0.02)),
+            FeatureCell::observed(
+                FeatureValue::Decimal(dec!(0.02)),
+                None,
+                FeatureStaleness::Unknown,
+            ),
         );
         values.insert(
             domain_crypto::TIME_TO_OBSERVATION,
-            FeatureValue::Count(86_400),
+            FeatureCell::observed(FeatureValue::Count(86_400), None, FeatureStaleness::Unknown),
         );
         values.insert(
             domain_crypto::UNDERLYING_MOMENTUM,
-            FeatureValue::Decimal(dec!(0.01)),
+            FeatureCell::observed(
+                FeatureValue::Decimal(dec!(0.01)),
+                None,
+                FeatureStaleness::Unknown,
+            ),
         );
         values.insert(
             domain_crypto::UNDERLYING_REALIZED_VOL,
-            FeatureValue::Decimal(dec!(0.005)),
+            FeatureCell::observed(
+                FeatureValue::Decimal(dec!(0.005)),
+                None,
+                FeatureStaleness::Unknown,
+            ),
         );
         DomainFeatureSlice {
             family: DomainFamily::Crypto,
@@ -477,11 +498,11 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert(
             domain_crypto::DISTANCE_TO_STRIKE,
-            FeatureValue::Missing(crate::features::NullReason::NotApplicable),
+            FeatureCell::not_applicable(crate::features::NullReason::NotApplicable),
         );
         values.insert(
             domain_crypto::TIME_TO_OBSERVATION,
-            FeatureValue::Missing(crate::features::NullReason::NotApplicable),
+            FeatureCell::not_applicable(crate::features::NullReason::NotApplicable),
         );
         let slice = DomainFeatureSlice {
             family: DomainFamily::Crypto,

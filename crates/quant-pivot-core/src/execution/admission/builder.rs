@@ -10,7 +10,9 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult, execution::ExecutionError, storage::StorageError,
+};
 use quant_pivot_models::{
     domain::{
         CapitalAllocationInfo, DataQualityPort, ModelVersionInfo, OrderIntentInfo,
@@ -123,6 +125,13 @@ impl AdmissionInputBuilder {
         let data_quality = deps.data_quality.snapshot();
         let mode = deps.runtime_mode.current();
         let kill_switch = deps.kill_switch.current();
+        let now_ms = u64::try_from(now.timestamp_millis()).map_err(|error| {
+            ExecutionError::TimeConversion {
+                field: "admission.now_ms",
+                value: now.timestamp_millis().to_string(),
+                detail: error.to_string(),
+            }
+        })?;
         let state_version = StateVersion {
             config_version_id: fetched.active_version.runtime_config_version_id,
             account_as_of: fetched.account.as_of,
@@ -154,7 +163,7 @@ impl AdmissionInputBuilder {
                 exit_monitor_ready: deps.exit_monitor_health.is_ready(now),
             },
             now,
-            now_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+            now_ms,
             state_version,
         })
     }

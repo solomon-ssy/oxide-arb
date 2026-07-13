@@ -427,6 +427,11 @@ fn page_condition(query: &ResearchJobListQuery) -> Condition {
         )
         .add_option(
             query
+                .result_ref
+                .map(|id| quant_research_job::Column::ResultRef.eq(id)),
+        )
+        .add_option(
+            query
                 .from
                 .map(|from| quant_research_job::Column::CreatedAt.gte(from)),
         )

@@ -4,34 +4,47 @@ use super::AppContext;
 use crate::{
     app::{
         ports::{
-            account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
-            cpcv_backtest::CoreCpcvBacktestPort, execution_read::CoreExecutionReadPort,
-            execution_recovery::CoreExecutionRecoveryPort, market_data::CoreMarketData,
-            metrics_scrape::CoreMetricsScrape, model_training::CoreModelTrainingPort,
-            quant_report::CoreQuantReportPort, reconciliation::CoreReconciliationPort,
-            research_catalog::CoreResearchCatalogPort, structural_monitor::CoreStructuralMonitor,
+            account_read::CoreAccountReadPort,
+            backtest::CoreBacktestPort,
+            cpcv_backtest::CoreCpcvBacktestPort,
+            execution_read::CoreExecutionReadPort,
+            execution_recovery::CoreExecutionRecoveryPort,
+            market_data::CoreMarketData,
+            metrics_scrape::CoreMetricsScrape,
+            model_training::CoreModelTrainingPort,
+            quant_report::{CoreQuantReportPort, CoreQuantReportPortDeps},
+            reconciliation::CoreReconciliationPort,
+            research_catalog::CoreResearchCatalogPort,
+            structural_monitor::CoreStructuralMonitor,
             training_dataset::CoreTrainingDatasetPort,
         },
         task_id::TaskId,
         task_registry::AppRunner,
     },
     prefetch::feature_window::FeatureWindowProvider,
-    service::model_calibration_fit::ModelCalibrationFitService,
+    service::{
+        feature_integrity::FeatureIntegrityService,
+        model_calibration_fit::ModelCalibrationFitService,
+    },
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
     CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
-    MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog, OrderIntentPort,
-    ReconciliationPort, ResearchJobPort, RuntimeConfigPort,
+    FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog,
+    OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort,
 };
-use quant_pivot_repository::traits::{
-    AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
-    CalibrationArtifactRepository, DomainSourceCursorRepository, EquitySnapshotRepository,
-    ExecutionOrderRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
-    PositionRepository, RecommendationReportRepository, RecommendationRepository,
-    ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
-    RuntimeConfigVersionRepository, SettlementRedeemRepository, TradeTapeBlockCursorRepository,
-    UserRepository, UserRoleRepository,
+use quant_pivot_repository::{
+    clickhouse::ChFeatureParityEventRepository,
+    traits::{
+        AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
+        CalibrationArtifactRepository, CatalogVersionRepository, DomainSourceCursorRepository,
+        EquitySnapshotRepository, ExecutionOrderRepository, FeatureParityEventRepository,
+        FeatureRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
+        PositionRepository, RecommendationReportRepository, RecommendationRepository,
+        ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+        RuntimeConfigVersionRepository, ServingEvidenceRepository, SettlementRedeemRepository,
+        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+    },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
 use quant_pivot_web::{
@@ -148,6 +161,7 @@ async fn build_app_state(
         model_spec: Arc::clone(&ctx.research.model_spec),
         research_catalog: Arc::new(CoreResearchCatalogPort::from_research(&ctx.research)),
         research_jobs,
+        feature_integrity: build_feature_integrity(ctx),
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
             as Arc<dyn ModelCalibrationFitPort>,
@@ -167,13 +181,21 @@ async fn build_app_state(
             Arc::clone(&ctx.governance.applicator) as Arc<dyn RuntimeConfigPort>,
             ctx.config.market_data.trade_tape_on_chain.clone(),
         )),
-        quant_reports: Arc::new(CoreQuantReportPort::new(
-            Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,
-            Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
-            Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
-            Arc::clone(&ctx.report.lifecycle),
-            Arc::clone(&ctx.report.scheduler),
-        )),
+        quant_reports: Arc::new(CoreQuantReportPort::new(CoreQuantReportPortDeps {
+            report_repo: Arc::clone(&repos.recommendation_report)
+                as Arc<dyn RecommendationReportRepository>,
+            recommendation_repo: Arc::clone(&repos.recommendation)
+                as Arc<dyn RecommendationRepository>,
+            order_intent_repo: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+            lifecycle: Arc::clone(&ctx.report.lifecycle),
+            scheduler: Arc::clone(&ctx.report.scheduler),
+            serving_evidence: Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+                &ctx.infra.ch,
+            ))) as Arc<dyn ServingEvidenceRepository>,
+            feature_repo: Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>,
+            runtime_config_repo: Arc::clone(&repos.runtime_config)
+                as Arc<dyn RuntimeConfigVersionRepository>,
+        })),
         order_intents,
         account_read: Arc::new(CoreAccountReadPort::new(
             Arc::clone(&repos.account_snapshot) as Arc<dyn AccountSnapshotRepository>,
@@ -186,6 +208,22 @@ async fn build_app_state(
         reconciliation: execution.reconciliation,
         execution_recovery: execution.execution_recovery,
     })
+}
+
+fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {
+    Arc::new(FeatureIntegrityService::new(
+        Arc::clone(&ctx.report.feature_parity),
+        Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
+            &ctx.infra.ch,
+        ))) as Arc<dyn FeatureParityEventRepository>,
+        Some(Arc::new(
+            crate::service::feature_integrity::CatalogFeatureIntegrityCoverage::new(Arc::clone(
+                &ctx.research.catalog_version_repo,
+            )
+                as Arc<dyn CatalogVersionRepository>),
+        )),
+        Arc::clone(&ctx.infra.metrics),
+    ))
 }
 
 struct WebAuthServices {
@@ -320,7 +358,6 @@ fn build_research_web_ports(ctx: &AppContext) -> ResearchWebPorts {
         model_training: Arc::new(CoreModelTrainingPort::from_research(
             &ctx.research,
             Arc::clone(&runtime_config),
-            Arc::clone(&bias_table),
         )),
         backtests,
         cpcv_backtests,

@@ -10,6 +10,7 @@
 //! established boundary already used throughout the research plane's
 //! statistical fits; results are quantized back to `Decimal` immediately.
 
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -175,17 +176,33 @@ pub fn sqrt(value: Decimal) -> Decimal {
 }
 
 /// A count converted to `f64` through `Decimal` (no lossy `as` cast).
-#[must_use]
-pub fn count_f64(n: u64) -> f64 {
-    Decimal::from(n).to_f64().unwrap_or(0.0)
+pub fn count_f64(n: u64) -> QuantResult<f64> {
+    Decimal::from(n)
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!("count {n} is not representable as finite f64"),
+            }
+            .into()
+        })
 }
 
 /// The two-sided normal quantile for a confidence level (e.g. `0.95 → 1.96`).
-#[must_use]
-pub fn wilson_z(confidence: Decimal) -> f64 {
-    let level = confidence.to_f64().unwrap_or(0.95).clamp(0.5, 0.999_999);
+pub fn wilson_z(confidence: Decimal) -> QuantResult<f64> {
+    let level = confidence
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!("Wilson confidence {confidence} is not representable as finite f64"),
+        })?
+        .clamp(0.5, 0.999_999);
     let upper = 1.0 - (1.0 - level) / 2.0;
-    Normal::new(0.0, 1.0).map_or(1.96, |dist| dist.inverse_cdf(upper))
+    let distribution =
+        Normal::new(0.0, 1.0).map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!("standard normal construction failed: {error}"),
+        })?;
+    Ok(distribution.inverse_cdf(upper))
 }
 
 /// Standard normal CDF `Φ(z)`. Used by the Probabilistic/Deflated Sharpe
@@ -207,23 +224,26 @@ pub fn normal_inverse_cdf(p: f64) -> f64 {
 }
 
 /// Wilson score interval for a binomial proportion, quantized to `scale`.
-#[must_use]
-pub fn wilson_interval(p_hat: f64, n: u64, z: f64, scale: u32) -> (Decimal, Decimal) {
+pub fn wilson_interval(p_hat: f64, n: u64, z: f64, scale: u32) -> QuantResult<(Decimal, Decimal)> {
     if n == 0 {
-        return (Decimal::ZERO, Decimal::ZERO);
+        return Ok((Decimal::ZERO, Decimal::ZERO));
     }
-    let n = count_f64(n);
+    let n = count_f64(n)?;
     let z2 = z * z;
     let denom = 1.0 + z2 / n;
     let center = (p_hat + z2 / (2.0 * n)) / denom;
     let margin = z * ((p_hat * (1.0 - p_hat) / n) + z2 / (4.0 * n * n)).sqrt() / denom;
     let lo = Decimal::from_f64((center - margin).clamp(0.0, 1.0))
-        .unwrap_or(Decimal::ZERO)
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "Wilson lower bound is not representable as Decimal".to_owned(),
+        })?
         .round_dp(scale);
     let hi = Decimal::from_f64((center + margin).clamp(0.0, 1.0))
-        .unwrap_or(Decimal::ONE)
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: "Wilson upper bound is not representable as Decimal".to_owned(),
+        })?
         .round_dp(scale);
-    (lo, hi)
+    Ok((lo, hi))
 }
 
 /// Pool-adjacent-violators core: `group_means[i]` (weight `group_weights[i]`)
@@ -333,8 +353,8 @@ mod calibration_stat_tests {
 
     #[test]
     fn wilson_interval_contains_point_estimate() {
-        let z = wilson_z(Decimal::new(95, 2));
-        let (lo, hi) = wilson_interval(0.5, 100, z, 6);
+        let z = wilson_z(Decimal::new(95, 2)).expect("Wilson z");
+        let (lo, hi) = wilson_interval(0.5, 100, z, 6).expect("Wilson interval");
         assert!(lo < Decimal::new(5, 1));
         assert!(hi > Decimal::new(5, 1));
     }
@@ -342,7 +362,7 @@ mod calibration_stat_tests {
     #[test]
     fn wilson_z_matches_known_95_percent_quantile() {
         // The standard two-sided 95% normal quantile, to float precision.
-        let z = wilson_z(Decimal::new(95, 2));
+        let z = wilson_z(Decimal::new(95, 2)).expect("Wilson z");
         assert!(
             (z - 1.959_963_984_540_054_5).abs() < 1e-9,
             "z={z}, expected ~1.959963984540054"
@@ -355,15 +375,15 @@ mod calibration_stat_tests {
         // independently computed in Python from the standard Wilson score
         // interval closed form (Wilson, 1927), rounded to the same 6-dp scale
         // `wilson_interval` quantizes to.
-        let z = wilson_z(Decimal::new(95, 2));
-        let (lo, hi) = wilson_interval(0.2, 50, z, 6);
+        let z = wilson_z(Decimal::new(95, 2)).expect("Wilson z");
+        let (lo, hi) = wilson_interval(0.2, 50, z, 6).expect("Wilson interval");
         assert_eq!(lo, Decimal::new(112_438, 6), "lo={lo}");
         assert_eq!(hi, Decimal::new(330_371, 6), "hi={hi}");
     }
 
     #[test]
     fn wilson_interval_zero_samples_yields_zero_width() {
-        let (lo, hi) = wilson_interval(0.5, 0, 1.96, 6);
+        let (lo, hi) = wilson_interval(0.5, 0, 1.96, 6).expect("Wilson interval");
         assert_eq!(lo, Decimal::ZERO);
         assert_eq!(hi, Decimal::ZERO);
     }

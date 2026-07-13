@@ -35,8 +35,8 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, JobProgressSink, Paginated,
-        WindowBoundsError, query::TimeWindow,
+        CalibrationArtifactInfo, CalibrationArtifactListQuery, DecisionClock, JobProgressSink,
+        Paginated, WindowBoundsError, query::TimeWindow,
     },
     enums::{common::MarketCategory, quant::CalibrationKind},
     runtime_config::{
@@ -45,16 +45,18 @@ use quant_pivot_models::{
     types::{CalibrationArtifactId, MarketId, ResearchJobProgress, TokenId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, EventRepository, MarketLinkageRepository, MarketRepository,
-    QuantFactReadRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    CalibrationArtifactRepository, CatalogVersionRepository, MarketLinkageRepository,
+    MarketRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
-    features::PitView,
+    features::ResolvedBook,
     model::favorite_longshot::{
         BiasFitConfig, BiasSample, CategoryBiasCurve, FavoriteLongshotBiasTable,
     },
+    pit::PointInTimeSnapshotSource,
 };
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 
 use crate::{
     governance::ModelScoreCalibrationPayload,
@@ -164,6 +166,7 @@ pub async fn resolve_frozen_bias_table(
 struct FrozenFit {
     favorite_longshot: FavoriteLongshotConfig,
     max_book_staleness: StdDuration,
+    knowledge_lag: StdDuration,
 }
 
 /// One market's terminal settlement, keyed to its YES leg.
@@ -178,8 +181,8 @@ struct SettledMarket {
 /// Core bias-table fitter + calibration-artifact read port.
 pub struct BiasTableFitService {
     fact_read: Arc<dyn QuantFactReadRepository>,
+    catalog_repo: Arc<dyn CatalogVersionRepository>,
     market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
@@ -191,8 +194,8 @@ impl BiasTableFitService {
     #[must_use]
     pub const fn new(
         fact_read: Arc<dyn QuantFactReadRepository>,
+        catalog_repo: Arc<dyn CatalogVersionRepository>,
         market_repo: Arc<dyn MarketRepository>,
-        event_repo: Arc<dyn EventRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         calibration_repo: Arc<dyn CalibrationArtifactRepository>,
         runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
@@ -200,8 +203,8 @@ impl BiasTableFitService {
     ) -> Self {
         Self {
             fact_read,
+            catalog_repo,
             market_repo,
-            event_repo,
             linkage_repo,
             calibration_repo,
             runtime_config_repo,
@@ -228,9 +231,16 @@ impl BiasTableFitService {
             })
         })?;
         let max_book_staleness = book_staleness(&config.data_quality);
+        let knowledge_lag_secs =
+            config
+                .pit_knowledge_lag_secs()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "frozen runtime config has no unambiguous PIT knowledge lag".to_owned(),
+                })?;
         Ok(FrozenFit {
             favorite_longshot: config.factors.structural.favorite_longshot,
             max_book_staleness,
+            knowledge_lag: StdDuration::from_secs(knowledge_lag_secs),
         })
     }
 
@@ -242,7 +252,7 @@ impl BiasTableFitService {
         let to_ms = window.to.timestamp_millis();
         let markets = self
             .fact_read
-            .observed_markets_between(from_ms, to_ms)
+            .observed_markets_between(from_ms, to_ms, to_ms)
             .await
             .map_err(QuantError::from)?;
         if markets.is_empty() {
@@ -250,7 +260,7 @@ impl BiasTableFitService {
         }
         let resolutions = self
             .fact_read
-            .resolutions_between(markets, from_ms, to_ms)
+            .resolutions_between(markets, from_ms, to_ms, to_ms)
             .await
             .map_err(QuantError::from)?;
 
@@ -307,6 +317,7 @@ impl BiasTableFitService {
         window: &TimeWindow,
         stride_secs: u64,
         max_book_staleness: StdDuration,
+        knowledge_lag: StdDuration,
         progress: &Arc<dyn JobProgressSink>,
         cancel: &CancellationToken,
     ) -> QuantResult<Vec<BiasSample>> {
@@ -330,23 +341,27 @@ impl BiasTableFitService {
             window_end: window.to,
             samples: samples_spec,
             lookback: StdDuration::ZERO,
-            source_delay: StdDuration::ZERO,
+            knowledge_lag,
             max_horizon_secs: 0,
             // The bias fit reads only settlement mids — no domain data.
             domain: DomainConfig::disabled(),
         };
         let loader = HistoricalWindowLoader::new(
             Arc::clone(&self.fact_read),
-            Arc::clone(&self.market_repo),
-            Arc::clone(&self.event_repo),
+            Arc::clone(&self.catalog_repo),
             Arc::clone(&self.linkage_repo),
             max_book_staleness,
         );
         let historical = loader.load(&spec).await?;
-        let pit = PitView::Historical(&historical.pit);
 
-        let stride = Duration::seconds(i64::try_from(stride_secs.max(1)).unwrap_or(i64::MAX));
-        let total = settled.len() as u64;
+        let stride_seconds =
+            i64::try_from(stride_secs.max(1)).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("bias-table sample stride exceeds i64 seconds: {error}"),
+            })?;
+        let stride = Duration::seconds(stride_seconds);
+        let total = u64::try_from(settled.len()).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("bias-table settled market count exceeds u64: {error}"),
+        })?;
         let mut samples = Vec::new();
         for (index, market) in settled.iter().enumerate() {
             if cancel.is_cancelled() {
@@ -357,7 +372,9 @@ impl BiasTableFitService {
             if index % 256 == 0 {
                 progress.report(ResearchJobProgress::with_total(
                     "sampling",
-                    index as u64,
+                    u64::try_from(index).map_err(|error| ResearchError::DatasetBuild {
+                        detail: format!("bias-table sampling index exceeds u64: {error}"),
+                    })?,
                     total,
                 ));
             }
@@ -368,10 +385,14 @@ impl BiasTableFitService {
             while as_of < upper {
                 let ttr = upper.max(market.resolved_at) - as_of;
                 let ttr_secs = ttr.num_seconds();
+                let boundary = DecisionClock::new(knowledge_lag.as_secs()).boundary(as_of)?;
                 if ttr_secs > 0
-                    && let Some(mid) = pit
-                        .resolve_book(&market.yes_token_id, as_of)
+                    && let Some(mid) = historical
+                        .pit
+                        .book_at_boundary(&market.yes_token_id, &boundary)
                         .await?
+                        .map(ResolvedBook::try_from)
+                        .transpose()?
                         .and_then(|book| book.mid())
                 {
                     let mid_inner = mid.inner();
@@ -381,7 +402,13 @@ impl BiasTableFitService {
                             sampled_at: as_of,
                             category: market.category,
                             entry_mid: mid,
-                            ttr_secs: ttr_secs.to_u64().unwrap_or(u64::MAX),
+                            ttr_secs: u64::try_from(ttr_secs).map_err(|error| {
+                                ResearchError::DatasetBuild {
+                                    detail: format!(
+                                        "positive bias-table time-to-resolution is invalid: {error}"
+                                    ),
+                                }
+                            })?,
                             settled_yes: market.settled_yes,
                         });
                     }
@@ -427,11 +454,15 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
                 &window,
                 config.fit_sample_stride_secs,
                 frozen.max_book_staleness,
+                frozen.knowledge_lag,
                 &progress,
                 &cancel,
             )
             .await?;
-        let total_sample_count = samples.len() as u64;
+        let total_sample_count =
+            u64::try_from(samples.len()).map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("bias-table sample count exceeds u64: {error}"),
+            })?;
 
         let fit_config = BiasFitConfig {
             bins: config.bins,
@@ -471,10 +502,21 @@ impl CalibrationArtifactFitPort for BiasTableFitService {
 
         progress.report(ResearchJobProgress::with_total("persist", 0, 1));
         let persisted = self.persist(table).await?;
-        let category_count = persisted
-            .payload_json
-            .as_object()
-            .map_or(0, |obj| obj.len() as u64);
+        let category_count = u64::try_from(
+            persisted
+                .payload_json
+                .as_object()
+                .ok_or_else(|| ResearchError::Serialization {
+                    detail: format!(
+                        "persisted bias-table artifact {} payload is not an object",
+                        persisted.artifact_id
+                    ),
+                })?
+                .len(),
+        )
+        .map_err(|error| ResearchError::Serialization {
+            detail: format!("bias-table category count exceeds u64: {error}"),
+        })?;
         Ok(BiasTableFitOutcome {
             artifact_id: Some(persisted.artifact_id),
             category_count,
@@ -524,8 +566,9 @@ impl BiasTableFitService {
         &self,
         table: FavoriteLongshotBiasTable,
     ) -> QuantResult<CalibrationArtifactInfo> {
+        let artifact = table.try_into()?;
         self.calibration_repo
-            .create(table.into())
+            .create(artifact)
             .await
             .map_err(QuantError::from)
     }

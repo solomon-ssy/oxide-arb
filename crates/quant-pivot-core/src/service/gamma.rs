@@ -15,22 +15,30 @@ use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use quant_pivot_api::{
     fees::FeeCalculator,
-    gamma::{GammaClient, RejectedMarket},
+    gamma::{CatalogSourceTimestamps, GammaClient, RejectedMarket},
     ws::TOKEN_INTERN,
 };
 use quant_pivot_error::{QuantError, market::MarketError};
 use quant_pivot_models::{
     domain::{
-        CatalogStatusPort, CoreEvent, CoreEventPublisher, market,
+        CATALOG_ORIGIN_GAMMA_SYNC, CatalogCommit, CatalogStatusPort, CatalogSyncFailureStage,
+        CatalogSyncKind, CatalogTimestampQuality, CoreEvent, CoreEventPublisher,
+        NewCatalogSyncBatch, NewEventCatalogVersion, NewFailedCatalogSyncBatch,
+        NewMarketCatalogVersion, market,
         market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
     enums::market::MarketStatus,
-    types::MarketId,
+    hashing::CanonicalDigest,
+    types::{
+        CatalogSyncBatchId, ContentHash, EventCatalogVersionId, EventId, MarketCatalogVersionId,
+        MarketId,
+    },
 };
-use quant_pivot_repository::traits::{EventRepository, MarketRepository};
+use quant_pivot_repository::traits::{CatalogVersionRepository, MarketRepository};
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
+use serde::Serialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -48,7 +56,7 @@ pub struct GammaServiceDeps {
     pub market_filter: Arc<MarketFilter>,
     pub fee_calculator: Arc<FeeCalculator>,
     pub market_repo: Arc<dyn MarketRepository>,
-    pub event_repo: Arc<dyn EventRepository>,
+    pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
     pub cache: Arc<CacheManager>,
     pub metrics: Arc<MetricsHub>,
     pub catalog: Arc<CatalogReadiness>,
@@ -73,7 +81,7 @@ pub struct GammaService {
     market_filter: Arc<MarketFilter>,
     fee_calculator: Arc<FeeCalculator>,
     market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
+    catalog_version_repo: Arc<dyn CatalogVersionRepository>,
     cache: Arc<CacheManager>,
     metrics: Arc<MetricsHub>,
     catalog: Arc<CatalogReadiness>,
@@ -95,7 +103,7 @@ impl GammaService {
             market_filter: deps.market_filter,
             fee_calculator: deps.fee_calculator,
             market_repo: deps.market_repo,
-            event_repo: deps.event_repo,
+            catalog_version_repo: deps.catalog_version_repo,
             cache: deps.cache,
             metrics: deps.metrics,
             catalog: deps.catalog,
@@ -168,10 +176,46 @@ impl GammaService {
                 > i64::try_from(self.full_sync_interval_secs).unwrap_or(i64::MAX)
         });
 
-        if needs_full {
-            self.full_sync().await?;
+        let (sync_kind, source_cursor) = if needs_full {
+            (CatalogSyncKind::Full, None)
         } else if let Some(since) = last {
-            self.incremental_sync(since).await?;
+            (CatalogSyncKind::Incremental, Some(since))
+        } else {
+            return Ok(());
+        };
+        let attempt = CatalogSyncAttempt {
+            batch_id: CatalogSyncBatchId::from_v7(),
+            sync_kind,
+            source_cursor,
+            started_at: Utc::now(),
+        };
+        let result = match source_cursor {
+            None => self.full_sync(&attempt).await,
+            Some(since) => self.incremental_sync(&attempt, since).await,
+        };
+        if let Err(error) = result {
+            let stage = catalog_failure_stage(&error);
+            if let Err(audit_error) = self
+                .catalog_version_repo
+                .record_failure(NewFailedCatalogSyncBatch {
+                    catalog_sync_batch_id: attempt.batch_id,
+                    sync_kind: attempt.sync_kind.as_str().to_owned(),
+                    source_cursor: attempt.source_cursor,
+                    started_at: attempt.started_at,
+                    fetched_at: None,
+                    failure_stage: stage,
+                    failure_detail: error.to_string(),
+                })
+                .await
+            {
+                tracing::error!(
+                    sync_error = %error,
+                    audit_error = %audit_error,
+                    "gamma sync failed and its catalog attempt audit could not be persisted"
+                );
+                return Err(audit_error.into());
+            }
+            return Err(error);
         }
 
         *self.last_sync_at.lock() = Some(Utc::now());
@@ -179,12 +223,13 @@ impl GammaService {
         Ok(())
     }
 
-    async fn full_sync(&self) -> Result<(), QuantError> {
+    async fn full_sync(&self, attempt: &CatalogSyncAttempt) -> Result<(), QuantError> {
         let mut batch = self
             .gamma_client
             .full_sync_with_fees()
             .await
             .map_err(QuantError::from)?;
+        let fetched_at = Utc::now();
 
         let event_count = batch.registry_events.len();
         let market_count = batch.registry_markets.len();
@@ -200,45 +245,64 @@ impl GammaService {
             .map(|m| m.market_id.clone())
             .collect();
 
-        self.record_rejections(&batch.rejected);
         let now = Utc::now();
         let past_deadline_paused =
             apply_past_deadline_to_sync_batch(&mut batch.registry_markets, &mut batch.markets, now);
+        self.preserve_manual_blocks(&mut batch.registry_markets, &mut batch.markets)
+            .await?;
+
+        let deactivated = self.collect_stale_markets(&seen_ids);
+        let deactivated_count = deactivated.len();
+        let deactivated_upserts = convert_registry_to_upsert(&deactivated);
+        batch.registry_markets.extend(deactivated);
+        batch.markets.extend(deactivated_upserts);
+        self.append_missing_registry_events(&mut batch.registry_events, &batch.registry_markets);
+
+        let newly_settled = self
+            .detect_settlement_transitions(&batch.registry_markets)
+            .await?;
+        let commit = build_catalog_commit(CatalogCommitInput {
+            batch_id: attempt.batch_id.clone(),
+            sync_kind: CatalogSyncKind::Full,
+            source_cursor: None,
+            started_at: attempt.started_at,
+            fetched_at,
+            rejected_count: batch.rejected.len(),
+            current_events: batch.events,
+            registry_events: &batch.registry_events,
+            event_source_timestamps: &batch.event_source_timestamps,
+            current_markets: batch.markets,
+            registry_markets: &batch.registry_markets,
+            market_source_timestamps: &batch.market_source_timestamps,
+        })?;
+        self.catalog_version_repo.commit(commit).await?;
+        self.invalidate_projection_cache(&batch.registry_events, &batch.registry_markets)
+            .await;
+
+        self.market_registry
+            .register_events(batch.registry_events.clone());
+        prewarm_token_intern(&batch.registry_markets);
+        self.market_registry
+            .register_markets(batch.registry_markets.clone());
+        self.fee_calculator
+            .ingest_market_fee_schedules(batch.fee_data);
+        self.publish_market_resolutions(newly_settled);
+        self.market_cache.rebuild();
+        self.sync_ws_subscriptions();
+
+        self.record_rejections(&batch.rejected);
         if past_deadline_paused > 0 {
             self.metrics
                 .gamma_markets_paused
                 .with_label_values(&["past_deadline"])
                 .inc_by(past_deadline_paused);
         }
-        self.preserve_manual_blocks(&mut batch.registry_markets, &mut batch.markets)
-            .await;
-
-        self.market_registry.register_events(batch.registry_events);
-        prewarm_token_intern(&batch.registry_markets);
-        self.market_registry
-            .register_markets(batch.registry_markets);
-        self.fee_calculator
-            .ingest_market_fee_schedules(batch.fee_data);
-
-        let deactivated = self.market_registry.deactivate_stale(&seen_ids);
-        let deactivated_count = deactivated.len();
         if deactivated_count > 0 {
             self.metrics
                 .gamma_markets_paused
                 .with_label_values(&["stale_catalog"])
                 .inc_by(u64::try_from(deactivated_count).unwrap_or(u64::MAX));
         }
-        let deactivated_upserts = convert_registry_to_upsert(&deactivated);
-
-        let mut persist_batch = batch.markets;
-        persist_batch.extend(deactivated_upserts);
-        self.preserve_manual_blocks(&mut [], &mut persist_batch)
-            .await;
-
-        self.persist_events(&batch.events).await;
-        self.persist_markets(&persist_batch).await;
-        self.market_cache.rebuild();
-        self.sync_ws_subscriptions();
 
         self.metrics
             .gamma_markets_total
@@ -255,20 +319,17 @@ impl GammaService {
         Ok(())
     }
 
-    async fn incremental_sync(&self, since: DateTime<Utc>) -> Result<(), QuantError> {
-        let batch = self
+    async fn incremental_sync(
+        &self,
+        attempt: &CatalogSyncAttempt,
+        since: DateTime<Utc>,
+    ) -> Result<(), QuantError> {
+        let mut batch = self
             .gamma_client
             .incremental_sync_with_fees(since)
             .await
             .map_err(QuantError::from)?;
-
-        if batch.registry_events.is_empty() {
-            return Ok(());
-        }
-
-        self.record_rejections(&batch.rejected);
-        self.market_registry
-            .register_events(batch.registry_events.clone());
+        let fetched_at = Utc::now();
 
         let embedded_ids: HashSet<MarketId> = batch
             .registry_markets
@@ -289,7 +350,12 @@ impl GammaService {
 
             for (market_id, result) in missing_ids.into_iter().zip(fetched) {
                 match result {
-                    Ok(market) => extra_registry.push(market),
+                    Ok(market) => {
+                        batch
+                            .market_source_timestamps
+                            .insert(market_id, market.source_timestamps);
+                        extra_registry.push(market.registry);
+                    }
                     Err(e) => {
                         tracing::warn!(
                             market_id = %market_id,
@@ -307,35 +373,50 @@ impl GammaService {
         let mut all_registry = batch.registry_markets;
         all_registry.extend(extra_registry);
 
-        if all_registry.is_empty() {
-            return Ok(());
-        }
-
         let now = Utc::now();
         let mut persist_upserts: Vec<UpsertMarket> = batch.markets;
         persist_upserts.extend(extra_upserts);
         let past_deadline_paused =
             apply_past_deadline_to_sync_batch(&mut all_registry, &mut persist_upserts, now);
+        self.preserve_manual_blocks(&mut all_registry, &mut persist_upserts)
+            .await?;
+
+        let registered = all_registry.len();
+        let newly_settled = self.detect_settlement_transitions(&all_registry).await?;
+        let commit = build_catalog_commit(CatalogCommitInput {
+            batch_id: attempt.batch_id.clone(),
+            sync_kind: CatalogSyncKind::Incremental,
+            source_cursor: Some(since),
+            started_at: attempt.started_at,
+            fetched_at,
+            rejected_count: batch.rejected.len(),
+            current_events: batch.events,
+            registry_events: &batch.registry_events,
+            event_source_timestamps: &batch.event_source_timestamps,
+            current_markets: persist_upserts,
+            registry_markets: &all_registry,
+            market_source_timestamps: &batch.market_source_timestamps,
+        })?;
+        self.catalog_version_repo.commit(commit).await?;
+        self.invalidate_projection_cache(&batch.registry_events, &all_registry)
+            .await;
+
+        self.market_registry
+            .register_events(batch.registry_events.clone());
+        prewarm_token_intern(&all_registry);
+        self.market_registry.register_markets(all_registry);
+        self.fee_calculator.ingest_market_fee_schedules(fee_data);
+        self.publish_market_resolutions(newly_settled);
+        self.market_cache.rebuild();
+        self.sync_ws_subscriptions();
+
+        self.record_rejections(&batch.rejected);
         if past_deadline_paused > 0 {
             self.metrics
                 .gamma_markets_paused
                 .with_label_values(&["past_deadline"])
                 .inc_by(past_deadline_paused);
         }
-        self.preserve_manual_blocks(&mut all_registry, &mut persist_upserts)
-            .await;
-
-        prewarm_token_intern(&all_registry);
-        let registered = all_registry.len();
-        self.market_registry.register_markets(all_registry);
-        self.fee_calculator.ingest_market_fee_schedules(fee_data);
-
-        let persist_batch = persist_upserts;
-
-        self.persist_events(&batch.events).await;
-        self.persist_markets(&persist_batch).await;
-        self.market_cache.rebuild();
-        self.sync_ws_subscriptions();
 
         tracing::info!(
             events = batch.registry_events.len(),
@@ -383,49 +464,39 @@ impl GammaService {
         );
     }
 
-    async fn persist_markets(&self, markets: &[UpsertMarket]) {
-        if markets.is_empty() {
-            return;
-        }
-        let newly_settled = self.detect_settlement_transitions(markets).await;
-        match self.market_repo.upsert_batch(markets.to_vec()).await {
-            Ok(n) => {
-                tracing::debug!(count = n, "persisted markets");
-                self.publish_market_resolutions(newly_settled);
-            }
-            Err(e) => tracing::warn!(error = %e, "failed to persist markets"),
-        }
-    }
-
     /// Load prior persisted statuses for the settled markets in this batch and
     /// resolve which of them are settling for the first time.
     async fn detect_settlement_transitions(
         &self,
-        markets: &[UpsertMarket],
-    ) -> Vec<(MarketId, bool)> {
+        markets: &[MarketRegistryInfo],
+    ) -> Result<Vec<(MarketId, bool)>, QuantError> {
         let ids: Vec<MarketId> = markets
             .iter()
             .filter(|market| market.status == MarketStatus::Settled)
             .map(|market| market.market_id.clone())
             .collect();
         if ids.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let prior: HashMap<MarketId, MarketStatus> = match self.market_repo.find_by_ids(&ids).await
-        {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|row| (row.market_id.clone(), row.status))
-                .collect(),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "failed to load prior market statuses; skipping market.resolved publish"
-                );
-                return Vec::new();
-            }
-        };
-        settlement_transitions(markets, &prior, Utc::now())
+        let prior: HashMap<MarketId, MarketStatus> = self
+            .market_repo
+            .find_by_ids(&ids)
+            .await?
+            .into_iter()
+            .map(|row| (row.market_id.clone(), row.status))
+            .collect();
+        let scan = settlement_transitions(markets, &prior, Utc::now());
+        for market_id in &scan.ambiguous {
+            tracing::warn!(
+                %market_id,
+                "suppressing market.resolved because the winning token is unavailable or ambiguous"
+            );
+            self.metrics
+                .gamma_markets_rejected
+                .with_label_values(&["ambiguous_settlement"])
+                .inc();
+        }
+        Ok(scan.publishable)
     }
 
     fn publish_market_resolutions(&self, resolved: Vec<(MarketId, bool)>) {
@@ -449,31 +520,25 @@ impl GammaService {
         &self,
         registry_markets: &mut [MarketRegistryInfo],
         upsert_markets: &mut [UpsertMarket],
-    ) {
+    ) -> Result<(), QuantError> {
         let ids = registry_markets
             .iter()
             .map(|market| market.market_id.clone())
             .chain(upsert_markets.iter().map(|market| market.market_id.clone()))
             .collect::<Vec<_>>();
         if ids.is_empty() {
-            return;
+            return Ok(());
         }
-        let blocked = match self.market_repo.find_by_ids(&ids).await {
-            Ok(markets) => markets
-                .into_iter()
-                .filter(|market| market.status == MarketStatus::ManuallyBlocked)
-                .map(|market| market.market_id.as_str().to_owned())
-                .collect::<HashSet<_>>(),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "failed to load current market statuses while preserving manual blocks"
-                );
-                return;
-            }
-        };
+        let blocked = self
+            .market_repo
+            .find_by_ids(&ids)
+            .await?
+            .into_iter()
+            .filter(|market| market.status == MarketStatus::ManuallyBlocked)
+            .map(|market| market.market_id.as_str().to_owned())
+            .collect::<HashSet<_>>();
         if blocked.is_empty() {
-            return;
+            return Ok(());
         }
         for market in registry_markets {
             if blocked.contains(market.market_id.as_str()) {
@@ -485,21 +550,368 @@ impl GammaService {
                 market.status = MarketStatus::ManuallyBlocked;
             }
         }
+        Ok(())
     }
 
-    async fn persist_events(&self, events: &[UpsertEvent]) {
-        if events.is_empty() {
-            return;
+    /// Compute stale entries without mutating the live registry. The returned
+    /// projection is published only after the ledger transaction commits.
+    fn collect_stale_markets(&self, seen_ids: &HashSet<MarketId>) -> Vec<MarketRegistryInfo> {
+        self.market_registry
+            .active_markets()
+            .iter()
+            .filter(|market_id| !seen_ids.contains(*market_id))
+            .filter_map(|market_id| self.market_registry.get_market(market_id))
+            .map(|market| {
+                let mut market = (*market).clone();
+                market.status = MarketStatus::Paused;
+                market
+            })
+            .collect()
+    }
+
+    /// Stale markets can belong to events absent from the new full response.
+    /// Freeze the registry's last observed event state in the same batch so
+    /// every market version has an immutable membership parent.
+    fn append_missing_registry_events(
+        &self,
+        events: &mut Vec<EventRegistryInfo>,
+        markets: &[MarketRegistryInfo],
+    ) {
+        let mut event_ids = events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect::<HashSet<_>>();
+        for event_id in markets.iter().map(|market| &market.event_id) {
+            if event_ids.contains(event_id) {
+                continue;
+            }
+            if let Some(event) = self.market_registry.get_event(event_id) {
+                event_ids.insert(event_id.clone());
+                events.push(event);
+            }
         }
-        match self.event_repo.upsert_batch(events.to_vec()).await {
-            Ok(n) => tracing::debug!(count = n, "persisted events"),
-            Err(e) => tracing::warn!(error = %e, "failed to persist events"),
+    }
+
+    async fn invalidate_projection_cache(
+        &self,
+        events: &[EventRegistryInfo],
+        markets: &[MarketRegistryInfo],
+    ) {
+        for event in events {
+            self.cache
+                .invalidate(&CacheKey::EventInfo {
+                    event_id: event.event_id.clone(),
+                })
+                .await;
         }
+        for market in markets {
+            self.cache
+                .invalidate(&CacheKey::MarketInfo {
+                    market_id: market.market_id.clone(),
+                })
+                .await;
+            self.cache
+                .invalidate(&CacheKey::MarketMetadata {
+                    market_id: market.market_id.clone(),
+                })
+                .await;
+        }
+        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
     }
 }
 
+#[derive(Debug, Clone)]
+struct CatalogSyncAttempt {
+    batch_id: CatalogSyncBatchId,
+    sync_kind: CatalogSyncKind,
+    source_cursor: Option<DateTime<Utc>>,
+    started_at: DateTime<Utc>,
+}
+
+const fn catalog_failure_stage(error: &QuantError) -> CatalogSyncFailureStage {
+    match error {
+        QuantError::Api(_) => CatalogSyncFailureStage::Fetch,
+        QuantError::Storage(_) => CatalogSyncFailureStage::Persist,
+        _ => CatalogSyncFailureStage::Prepare,
+    }
+}
+
+struct CatalogCommitInput<'a> {
+    batch_id: CatalogSyncBatchId,
+    sync_kind: CatalogSyncKind,
+    source_cursor: Option<DateTime<Utc>>,
+    started_at: DateTime<Utc>,
+    fetched_at: DateTime<Utc>,
+    rejected_count: usize,
+    current_events: Vec<UpsertEvent>,
+    registry_events: &'a [EventRegistryInfo],
+    event_source_timestamps: &'a HashMap<EventId, CatalogSourceTimestamps>,
+    current_markets: Vec<UpsertMarket>,
+    registry_markets: &'a [MarketRegistryInfo],
+    market_source_timestamps: &'a HashMap<MarketId, CatalogSourceTimestamps>,
+}
+
+#[derive(Serialize)]
+struct CatalogBatchDigest {
+    sync_kind: CatalogSyncKind,
+    source_cursor: Option<DateTime<Utc>>,
+    fetched_at: DateTime<Utc>,
+    rejected_count: usize,
+    events: Vec<(EventId, ContentHash)>,
+    markets: Vec<(MarketId, ContentHash)>,
+}
+
+fn build_catalog_commit(input: CatalogCommitInput<'_>) -> Result<CatalogCommit, QuantError> {
+    let CatalogCommitInput {
+        sync_kind,
+        source_cursor,
+        batch_id: catalog_sync_batch_id,
+        started_at,
+        fetched_at,
+        rejected_count,
+        current_events,
+        registry_events,
+        event_source_timestamps,
+        current_markets,
+        registry_markets,
+        market_source_timestamps,
+    } = input;
+    let event_build = build_event_versions(
+        &catalog_sync_batch_id,
+        registry_events,
+        event_source_timestamps,
+        fetched_at,
+    )?;
+    let market_build = build_market_versions(
+        &catalog_sync_batch_id,
+        registry_markets,
+        market_source_timestamps,
+        &event_build.version_ids,
+        fetched_at,
+    )?;
+
+    let batch_hash = CanonicalDigest::content_hash_json(&CatalogBatchDigest {
+        sync_kind,
+        source_cursor,
+        fetched_at,
+        rejected_count,
+        events: event_build.digests,
+        markets: market_build.digests,
+    })?;
+    let event_count = catalog_count("event", event_build.versions.len())?;
+    let market_count = catalog_count("market", market_build.versions.len())?;
+    let rejected_count = catalog_count("rejected", rejected_count)?;
+
+    Ok(CatalogCommit {
+        batch: NewCatalogSyncBatch {
+            catalog_sync_batch_id,
+            sync_kind: sync_kind.as_str().to_owned(),
+            source_cursor,
+            started_at,
+            fetched_at,
+            event_count,
+            market_count,
+            rejected_count,
+            batch_hash,
+        },
+        current_events,
+        event_versions: event_build.versions,
+        current_markets,
+        market_versions: market_build.versions,
+    })
+}
+
+struct EventVersionBuild {
+    version_ids: BTreeMap<EventId, EventCatalogVersionId>,
+    versions: Vec<NewEventCatalogVersion>,
+    digests: Vec<(EventId, ContentHash)>,
+}
+
+fn build_event_versions(
+    batch_id: &CatalogSyncBatchId,
+    events: &[EventRegistryInfo],
+    source_timestamps: &HashMap<EventId, CatalogSourceTimestamps>,
+    available_at: DateTime<Utc>,
+) -> Result<EventVersionBuild, QuantError> {
+    let mut ordered = events.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+    reject_duplicate_catalog_ids("event", ordered.iter().map(|event| event.event_id.as_str()))?;
+    let mut version_ids = BTreeMap::new();
+    let mut versions = Vec::with_capacity(ordered.len());
+    let mut digests = Vec::with_capacity(ordered.len());
+    for event in ordered {
+        let timestamps = resolve_catalog_timestamps(
+            "event",
+            event.event_id.as_str(),
+            source_timestamps.get(&event.event_id).copied(),
+            available_at,
+        )?;
+        let payload =
+            serde_json::to_value(event).map_err(|error| MarketError::CatalogSerialization {
+                entity: "event",
+                id: event.event_id.to_string(),
+                reason: error.to_string(),
+            })?;
+        let content_hash = CanonicalDigest::content_hash_json(event)?;
+        let version_id = EventCatalogVersionId::from_v7();
+        version_ids.insert(event.event_id.clone(), version_id.clone());
+        digests.push((event.event_id.clone(), content_hash.clone()));
+        versions.push(NewEventCatalogVersion {
+            event_catalog_version_id: version_id,
+            catalog_sync_batch_id: batch_id.clone(),
+            event_id: event.event_id.clone(),
+            source_effective_at: timestamps.source_effective_at,
+            source_timestamp_quality: timestamps.quality.as_str().to_owned(),
+            available_at,
+            origin: CATALOG_ORIGIN_GAMMA_SYNC.to_owned(),
+            content_hash,
+            payload,
+        });
+    }
+    Ok(EventVersionBuild {
+        version_ids,
+        versions,
+        digests,
+    })
+}
+
+struct MarketVersionBuild {
+    versions: Vec<NewMarketCatalogVersion>,
+    digests: Vec<(MarketId, ContentHash)>,
+}
+
+fn build_market_versions(
+    batch_id: &CatalogSyncBatchId,
+    markets: &[MarketRegistryInfo],
+    source_timestamps: &HashMap<MarketId, CatalogSourceTimestamps>,
+    event_version_ids: &BTreeMap<EventId, EventCatalogVersionId>,
+    available_at: DateTime<Utc>,
+) -> Result<MarketVersionBuild, QuantError> {
+    let mut ordered = markets.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+    reject_duplicate_catalog_ids(
+        "market",
+        ordered.iter().map(|market| market.market_id.as_str()),
+    )?;
+    let mut versions = Vec::with_capacity(ordered.len());
+    let mut digests = Vec::with_capacity(ordered.len());
+    for market in ordered {
+        let event_catalog_version_id = event_version_ids
+            .get(&market.event_id)
+            .cloned()
+            .ok_or_else(|| MarketError::MissingEventVersion {
+                market_id: market.market_id.to_string(),
+                event_id: market.event_id.to_string(),
+            })?;
+        let timestamps = resolve_catalog_timestamps(
+            "market",
+            market.market_id.as_str(),
+            source_timestamps.get(&market.market_id).copied(),
+            available_at,
+        )?;
+        let payload =
+            serde_json::to_value(market).map_err(|error| MarketError::CatalogSerialization {
+                entity: "market",
+                id: market.market_id.to_string(),
+                reason: error.to_string(),
+            })?;
+        let content_hash = CanonicalDigest::content_hash_json(market)?;
+        digests.push((market.market_id.clone(), content_hash.clone()));
+        versions.push(NewMarketCatalogVersion {
+            market_catalog_version_id: MarketCatalogVersionId::from_v7(),
+            catalog_sync_batch_id: batch_id.clone(),
+            event_catalog_version_id,
+            market_id: market.market_id.clone(),
+            event_id: market.event_id.clone(),
+            source_effective_at: timestamps.source_effective_at,
+            source_timestamp_quality: timestamps.quality.as_str().to_owned(),
+            source_created_at: timestamps.source_created_at,
+            available_at,
+            origin: CATALOG_ORIGIN_GAMMA_SYNC.to_owned(),
+            content_hash,
+            payload,
+        });
+    }
+    Ok(MarketVersionBuild { versions, digests })
+}
+
+struct ResolvedCatalogTimestamps {
+    source_effective_at: DateTime<Utc>,
+    quality: CatalogTimestampQuality,
+    source_created_at: Option<DateTime<Utc>>,
+}
+
+fn resolve_catalog_timestamps(
+    entity: &'static str,
+    id: &str,
+    source: Option<CatalogSourceTimestamps>,
+    available_at: DateTime<Utc>,
+) -> Result<ResolvedCatalogTimestamps, MarketError> {
+    let source_created_at = source.and_then(|timestamps| timestamps.created_at);
+    let source_updated_at = source.and_then(|timestamps| timestamps.updated_at);
+    for (field, timestamp) in [
+        ("created_at", source_created_at),
+        ("updated_at", source_updated_at),
+    ] {
+        if timestamp.is_some_and(|timestamp| timestamp > available_at) {
+            return Err(MarketError::CatalogTimestampInFuture {
+                entity,
+                id: id.to_owned(),
+                field,
+                timestamp: timestamp.map_or_else(String::new, |value| value.to_rfc3339()),
+                available_at: available_at.to_rfc3339(),
+            });
+        }
+    }
+
+    Ok(source_updated_at.map_or(
+        ResolvedCatalogTimestamps {
+            source_effective_at: available_at,
+            quality: CatalogTimestampQuality::AvailableAtFallback,
+            source_created_at,
+        },
+        |source_effective_at| ResolvedCatalogTimestamps {
+            source_effective_at,
+            quality: CatalogTimestampQuality::Source,
+            source_created_at,
+        },
+    ))
+}
+
+fn reject_duplicate_catalog_ids<'a>(
+    entity: &'static str,
+    ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), MarketError> {
+    let mut previous: Option<&str> = None;
+    for id in ids {
+        if previous == Some(id) {
+            return Err(MarketError::DuplicateCatalogEntity {
+                entity,
+                id: id.to_owned(),
+            });
+        }
+        previous = Some(id);
+    }
+    Ok(())
+}
+
+fn catalog_count(entity: &'static str, count: usize) -> Result<i64, MarketError> {
+    i64::try_from(count).map_err(|_| MarketError::CatalogCountOverflow { entity })
+}
+
+/// Result of scanning one committed catalog projection for live settlements.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SettlementTransitionScan {
+    /// Unambiguous transitions, paired with whether the canonical primary
+    /// (`token_yes`) leg won.
+    publishable: Vec<(MarketId, bool)>,
+    /// Recent transitions whose winning token cannot be proven. They remain
+    /// settled in the catalog but must never emit a fabricated `false` event.
+    ambiguous: Vec<MarketId>,
+}
+
 /// Markets in `batch` transitioning to [`MarketStatus::Settled`] from a
-/// previously persisted non-settled row, paired with whether YES won.
+/// previously persisted non-settled row.
 ///
 /// Requiring a prior row keeps `market.resolved` a true *transition* signal: a
 /// fresh bootstrap ingesting thousands of historically settled markets
@@ -509,37 +921,55 @@ impl GammaService {
 /// (within [`LIVE_RESOLUTION_WINDOW`]) pass — stale DB reconciliation during
 /// full sync stays silent.
 fn settlement_transitions(
-    batch: &[UpsertMarket],
+    batch: &[MarketRegistryInfo],
     prior: &HashMap<MarketId, MarketStatus>,
     now: DateTime<Utc>,
-) -> Vec<(MarketId, bool)> {
-    batch
-        .iter()
-        .filter(|market| market.status == MarketStatus::Settled)
-        .filter(|market| {
-            prior
+) -> SettlementTransitionScan {
+    let mut scan = SettlementTransitionScan::default();
+    for market in batch.iter().filter(|market| {
+        market.status == MarketStatus::Settled
+            && prior
                 .get(&market.market_id)
                 .is_some_and(|status| *status != MarketStatus::Settled)
-        })
-        .filter(|market| is_recently_resolved(market, now))
-        .map(|market| (market.market_id.clone(), yes_outcome_won(market)))
-        .collect()
+            && is_recently_resolved(market, now)
+    }) {
+        match primary_outcome_won(market) {
+            Some(primary_won) => scan
+                .publishable
+                .push((market.market_id.clone(), primary_won)),
+            None => scan.ambiguous.push(market.market_id.clone()),
+        }
+    }
+    scan
 }
 
 /// Whether the settlement is recent enough to notify operators (live transition).
-fn is_recently_resolved(market: &UpsertMarket, now: DateTime<Utc>) -> bool {
-    market
-        .resolved_at
-        .is_some_and(|resolved_at| now - resolved_at <= LIVE_RESOLUTION_WINDOW)
+fn is_recently_resolved(market: &MarketRegistryInfo, now: DateTime<Utc>) -> bool {
+    market.resolved_at.is_some_and(|resolved_at| {
+        resolved_at <= now && now - resolved_at <= LIVE_RESOLUTION_WINDOW
+    })
 }
 
-/// Whether the settled market resolved to YES (Gamma settlement carries the
-/// winning outcome name; binary markets use "Yes"/"No").
-fn yes_outcome_won(market: &UpsertMarket) -> bool {
-    market
-        .outcome
-        .as_deref()
-        .is_some_and(|outcome| outcome.eq_ignore_ascii_case("yes"))
+/// Resolve Gamma's winning outcome label back to one exact token, then compare
+/// token identity. This remains correct for custom binary labels such as
+/// `Over`/`Under`; a missing, duplicate, or unknown label is not `false`.
+fn primary_outcome_won(market: &MarketRegistryInfo) -> Option<bool> {
+    let winning_outcome = market.outcome.as_deref()?.trim();
+    let mut matching_tokens = market
+        .tokens
+        .iter()
+        .filter(|token| token.outcome.trim().eq_ignore_ascii_case(winning_outcome));
+    let winner = matching_tokens.next()?;
+    if matching_tokens.next().is_some() {
+        return None;
+    }
+    if winner.token_id == market.token_yes {
+        Some(true)
+    } else if winner.token_id == market.token_no {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn prewarm_token_intern(markets: &[MarketRegistryInfo]) {
@@ -596,9 +1026,14 @@ fn collect_missing_market_ids(
 mod tests {
     use super::*;
     use quant_pivot_models::{
-        enums::common::{CategorySet, TickSize},
+        domain::market::TokenInfo,
+        enums::{
+            common::{CategorySet, TickSize},
+            market::EventStatus,
+        },
         types::{EventId, TokenId},
     };
+    use rust_decimal::Decimal;
 
     #[test]
     fn collect_missing_dedupes_and_skips_embedded() {
@@ -607,6 +1042,7 @@ mod tests {
             title: "t".into(),
             slug: "s".into(),
             series_slug: None,
+            status: EventStatus::Active,
             market_ids: vec![
                 MarketId::new("m1"),
                 MarketId::new("m2"),
@@ -615,6 +1051,7 @@ mod tests {
             categories: CategorySet::EMPTY,
             tags: Vec::new(),
             neg_risk: false,
+            end_date: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }];
@@ -623,34 +1060,60 @@ mod tests {
         assert_eq!(missing, vec![MarketId::new("m2")]);
     }
 
-    fn upsert(
+    fn registry_market(
         id: &str,
         status: MarketStatus,
         outcome: Option<&str>,
         resolved_at: Option<DateTime<Utc>>,
-    ) -> UpsertMarket {
-        UpsertMarket {
+    ) -> MarketRegistryInfo {
+        registry_market_with_labels(id, status, outcome, resolved_at, ["Yes", "No"])
+    }
+
+    fn registry_market_with_labels(
+        id: &str,
+        status: MarketStatus,
+        outcome: Option<&str>,
+        resolved_at: Option<DateTime<Utc>>,
+        labels: [&str; 2],
+    ) -> MarketRegistryInfo {
+        let token_yes = TokenId::new(format!("{id}-yes"));
+        let token_no = TokenId::new(format!("{id}-no"));
+        MarketRegistryInfo {
             market_id: MarketId::new(id),
             event_id: EventId::new("evt-1"),
+            token_yes: token_yes.clone(),
+            token_no: token_no.clone(),
             question: "Test?".into(),
             slug: "test".into(),
             description: None,
             categories: CategorySet::EMPTY,
             status,
             outcome: outcome.map(str::to_owned),
-            yes_token_id: TokenId::new(format!("{id}-yes")),
-            no_token_id: TokenId::new(format!("{id}-no")),
-            tick_size: TickSize::Hundredth,
             neg_risk: false,
+            tick_size: TickSize::Hundredth,
+            tokens: vec![
+                TokenInfo {
+                    token_id: token_yes,
+                    outcome: labels[0].to_owned(),
+                    neg_risk: false,
+                },
+                TokenInfo {
+                    token_id: token_no,
+                    outcome: labels[1].to_owned(),
+                    neg_risk: false,
+                },
+            ],
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ONE,
+            liquidity_usd: None,
+            volume_24h: None,
+            fee_schedule: None,
             end_date: None,
             resolved_at,
-            fees_enabled: false,
-            fee_rate: None,
-            fee_exponent: None,
-            fee_taker_only: None,
-            fee_rebate_rate: None,
-            fee_source: None,
-            fee_observed_at: None,
+            created_at: None,
+            updated_at: Utc::now(),
         }
     }
 
@@ -659,28 +1122,28 @@ mod tests {
         let now = Utc::now();
         let batch = vec![
             // Active → Settled with YES winning: publish (outcome = true).
-            upsert(
+            registry_market(
                 "m-live",
                 MarketStatus::Settled,
                 Some("Yes"),
                 Some(now - chrono::Duration::hours(1)),
             ),
             // Already settled in DB: no re-publish.
-            upsert(
+            registry_market(
                 "m-old",
                 MarketStatus::Settled,
                 Some("No"),
                 Some(now - chrono::Duration::hours(1)),
             ),
             // Settled but never persisted before (bootstrap backfill): skip.
-            upsert(
+            registry_market(
                 "m-new",
                 MarketStatus::Settled,
                 Some("Yes"),
                 Some(now - chrono::Duration::hours(1)),
             ),
             // Not settled: never a candidate.
-            upsert("m-active", MarketStatus::Active, None, None),
+            registry_market("m-active", MarketStatus::Active, None, None),
         ];
         let prior = HashMap::from([
             (MarketId::new("m-live"), MarketStatus::Active),
@@ -688,14 +1151,15 @@ mod tests {
             (MarketId::new("m-active"), MarketStatus::Active),
         ]);
 
-        let resolved = settlement_transitions(&batch, &prior, now);
-        assert_eq!(resolved, vec![(MarketId::new("m-live"), true)]);
+        let scan = settlement_transitions(&batch, &prior, now);
+        assert_eq!(scan.publishable, vec![(MarketId::new("m-live"), true)]);
+        assert!(scan.ambiguous.is_empty());
     }
 
     #[test]
-    fn settlement_transitions_maps_no_outcome_to_false() {
+    fn settlement_transitions_maps_secondary_token_outcome_to_false() {
         let now = Utc::now();
-        let batch = vec![upsert(
+        let batch = vec![registry_market(
             "m1",
             MarketStatus::Settled,
             Some("No"),
@@ -703,31 +1167,66 @@ mod tests {
         )];
         let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Paused)]);
         assert_eq!(
-            settlement_transitions(&batch, &prior, now),
+            settlement_transitions(&batch, &prior, now).publishable,
             vec![(MarketId::new("m1"), false)]
         );
     }
 
     #[test]
-    fn settlement_transitions_missing_outcome_defaults_to_false() {
+    fn settlement_transitions_missing_outcome_is_ambiguous_not_false() {
         let now = Utc::now();
-        let batch = vec![upsert(
+        let batch = vec![registry_market(
             "m1",
             MarketStatus::Settled,
             None,
             Some(now - chrono::Duration::hours(1)),
         )];
         let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Active)]);
+        let scan = settlement_transitions(&batch, &prior, now);
+        assert!(scan.publishable.is_empty());
+        assert_eq!(scan.ambiguous, vec![MarketId::new("m1")]);
+    }
+
+    #[test]
+    fn settlement_transitions_resolves_custom_labels_by_token_identity() {
+        let now = Utc::now();
+        let resolved_at = Some(now - chrono::Duration::hours(1));
+        let batch = vec![
+            registry_market_with_labels(
+                "m-over",
+                MarketStatus::Settled,
+                Some("Over"),
+                resolved_at,
+                ["Over", "Under"],
+            ),
+            registry_market_with_labels(
+                "m-under",
+                MarketStatus::Settled,
+                Some("Under"),
+                resolved_at,
+                ["Over", "Under"],
+            ),
+        ];
+        let prior = HashMap::from([
+            (MarketId::new("m-over"), MarketStatus::Active),
+            (MarketId::new("m-under"), MarketStatus::Active),
+        ]);
+
+        let scan = settlement_transitions(&batch, &prior, now);
         assert_eq!(
-            settlement_transitions(&batch, &prior, now),
-            vec![(MarketId::new("m1"), false)]
+            scan.publishable,
+            vec![
+                (MarketId::new("m-over"), true),
+                (MarketId::new("m-under"), false),
+            ]
         );
+        assert!(scan.ambiguous.is_empty());
     }
 
     #[test]
     fn settlement_transitions_suppresses_stale_resolved_at() {
         let now = Utc::now();
-        let batch = vec![upsert(
+        let batch = vec![registry_market(
             "m-stale",
             MarketStatus::Settled,
             Some("Yes"),
@@ -735,13 +1234,15 @@ mod tests {
         )];
         let prior = HashMap::from([(MarketId::new("m-stale"), MarketStatus::Active)]);
 
-        assert!(settlement_transitions(&batch, &prior, now).is_empty());
+        let scan = settlement_transitions(&batch, &prior, now);
+        assert!(scan.publishable.is_empty());
+        assert!(scan.ambiguous.is_empty());
     }
 
     #[test]
     fn settlement_transitions_keeps_recent_resolved_at() {
         let now = Utc::now();
-        let batch = vec![upsert(
+        let batch = vec![registry_market(
             "m-recent",
             MarketStatus::Settled,
             Some("Yes"),
@@ -750,7 +1251,7 @@ mod tests {
         let prior = HashMap::from([(MarketId::new("m-recent"), MarketStatus::Active)]);
 
         assert_eq!(
-            settlement_transitions(&batch, &prior, now),
+            settlement_transitions(&batch, &prior, now).publishable,
             vec![(MarketId::new("m-recent"), true)]
         );
     }
@@ -758,22 +1259,47 @@ mod tests {
     #[test]
     fn settlement_transitions_bootstrap_empty_prior_publishes_nothing() {
         let now = Utc::now();
-        let batch = vec![upsert(
+        let batch = vec![registry_market(
             "m-bootstrap",
             MarketStatus::Settled,
             Some("Yes"),
             Some(now - chrono::Duration::hours(1)),
         )];
 
-        assert!(settlement_transitions(&batch, &HashMap::new(), now).is_empty());
+        let scan = settlement_transitions(&batch, &HashMap::new(), now);
+        assert!(scan.publishable.is_empty());
+        assert!(scan.ambiguous.is_empty());
     }
 
     #[test]
     fn settlement_transitions_missing_resolved_at_is_not_publishable() {
         let now = Utc::now();
-        let batch = vec![upsert("m1", MarketStatus::Settled, Some("Yes"), None)];
+        let batch = vec![registry_market(
+            "m1",
+            MarketStatus::Settled,
+            Some("Yes"),
+            None,
+        )];
         let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Active)]);
 
-        assert!(settlement_transitions(&batch, &prior, now).is_empty());
+        let scan = settlement_transitions(&batch, &prior, now);
+        assert!(scan.publishable.is_empty());
+        assert!(scan.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn settlement_transitions_future_resolved_at_is_not_publishable() {
+        let now = Utc::now();
+        let batch = vec![registry_market(
+            "m1",
+            MarketStatus::Settled,
+            Some("Yes"),
+            Some(now + chrono::Duration::seconds(1)),
+        )];
+        let prior = HashMap::from([(MarketId::new("m1"), MarketStatus::Active)]);
+
+        let scan = settlement_transitions(&batch, &prior, now);
+        assert!(scan.publishable.is_empty());
+        assert!(scan.ambiguous.is_empty());
     }
 }

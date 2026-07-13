@@ -3,7 +3,7 @@
 //! Connection-level parameters for the Phase 11.2.2 crypto feature sources:
 //! the Binance spot REST kline client and the Chainlink on-chain aggregator
 //! reader (which reuses the Polygon RPC endpoint from `[polymarket.onchain]`).
-//! Runtime tunables (per-family enablement, source delay, backfill depth,
+//! Runtime tunables (per-family enablement, availability lag, backfill depth,
 //! basis thresholds) live in `runtime_config.domain` — never here.
 
 use std::collections::BTreeMap;

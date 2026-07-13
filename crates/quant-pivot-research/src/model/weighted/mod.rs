@@ -32,15 +32,16 @@ use quant_pivot_models::{
         common::MarketCategory,
         quant::{DataQualityStatus, OutcomeSide},
     },
+    runtime_config::FactorCrossSectionConfig,
     types::{
         ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
         Usd,
     },
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
-    factors::FactorName,
+    factors::{FactorName, NormalizedFactor},
     features::FeatureName,
     model::{
         artifact::WeightedFactorModelArtifact,
@@ -48,7 +49,8 @@ use crate::{
         overlay::{WeightOverlay, WeightSource},
         runtime::{
             FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
-            ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
+            ModelInputAuditRow, ModelInputAuditState, ModelRuntimeInput, ModelRuntimeMetrics,
+            ModelRuntimeOutput, QuantModelRuntime,
         },
         signal::{FactorContribution, ModelExplanation, SignalCandidate, SignalWarning},
     },
@@ -106,7 +108,7 @@ impl WeightedFactorRuntime {
             ),
             None => (artifact_weights, WeightSource::Artifact),
         };
-        let batch_layout = ScoringBatchLayout::from_weights(&weights);
+        let batch_layout = ScoringBatchLayout::from_weights(&weights)?;
         Ok(Self {
             artifact,
             weights,
@@ -178,9 +180,9 @@ impl WeightedFactorRuntime {
         net: Decimal,
         model_run_id: &ModelRunId,
         as_of: DateTime<Utc>,
-    ) -> Option<SignalCandidate> {
+    ) -> QuantResult<Option<SignalCandidate>> {
         if net.is_zero() {
-            return None;
+            return Ok(None);
         }
 
         let outcome_side = if net.is_sign_positive() {
@@ -188,7 +190,9 @@ impl WeightedFactorRuntime {
         } else {
             OutcomeSide::No
         };
-        let (token_id, entry_price_ref) = Self::resolve_entry(row, outcome_side)?;
+        let Some((token_id, entry_price_ref)) = Self::resolve_entry(row, outcome_side) else {
+            return Ok(None);
+        };
 
         let (confidence_mass, confidence_weighted, contributions) =
             Self::row_contributions(row, &self.weights);
@@ -196,13 +200,25 @@ impl WeightedFactorRuntime {
         let conviction = net.abs();
         let composite_score = self.apply_multipliers(conviction, &row.context);
         let confidence = self.apply_confidence(confidence_mass, confidence_weighted, &row.context);
+        let data_quality_score = clamp_unit(
+            self.artifact
+                .multipliers
+                .data_quality
+                .multiplier_for(row.context.data_quality),
+        );
+        let liquidity_score = clamp_unit(
+            self.artifact
+                .multipliers
+                .liquidity
+                .multiplier_for(row.context.liquidity_usd.map(Usd::inner)),
+        );
 
         let estimate = self.artifact.return_model.estimate(
             composite_score.inner(),
             confidence.inner(),
             entry_price_ref,
             self.calibration.as_ref(),
-        );
+        )?;
 
         let (top_positive, top_negative) = split_contributions(&contributions);
         let provenance = if estimate.calibrated {
@@ -214,7 +230,7 @@ impl WeightedFactorRuntime {
             "buy {outcome_side}: composite {composite_score}, confidence {confidence} ({provenance} return)"
         );
 
-        Some(SignalCandidate {
+        Ok(Some(SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
             model_run_id: model_run_id.clone(),
             market_id: row.market_id.clone(),
@@ -235,16 +251,15 @@ impl WeightedFactorRuntime {
             },
             rejection_warnings: context_warnings(&row.context, &self.artifact),
             rank_before_portfolio: 0,
-            liquidity_score: Probability::ZERO,
-            data_quality_score: Probability::ZERO,
+            liquidity_score,
+            data_quality_score,
             model_score_percentile: Probability::ZERO,
-            as_of,
-        })
+            decision_at: as_of,
+        }))
     }
 
     /// Resolve the target token + executable entry price for the chosen outcome.
-    /// `OutcomeSide::No` requires a NO token; its price falls back to the binary
-    /// complement of the YES price when an explicit NO price is absent.
+    /// `OutcomeSide::No` requires both a NO token and its PIT-resolved executable ask.
     fn resolve_entry(
         row: &FactorInferenceRow,
         outcome_side: OutcomeSide,
@@ -253,10 +268,7 @@ impl WeightedFactorRuntime {
             OutcomeSide::Yes => Some((row.token_id.clone(), row.context.yes_price)),
             OutcomeSide::No => {
                 let token = row.context.secondary_token_id.clone()?;
-                let price = row
-                    .context
-                    .no_price
-                    .unwrap_or_else(|| complement(row.context.yes_price));
+                let price = row.context.no_price?;
                 Some((token, price))
             }
         }
@@ -296,13 +308,72 @@ impl WeightedFactorRuntime {
         } else {
             Decimal::ZERO
         };
-        let penalty = context.substitutions.iter().fold(Decimal::ONE, |acc, sub| {
-            acc * self
-                .artifact
-                .substitution_confidence_rules
-                .multiplier_for(sub.reason)
-        });
+        let penalty = context
+            .substitution_reasons
+            .iter()
+            .fold(Decimal::ONE, |acc, reason| {
+                acc * self
+                    .artifact
+                    .substitution_confidence_rules
+                    .multiplier_for(*reason)
+            });
         clamp_unit(base * penalty)
+    }
+
+    fn input_audit(&self, table: &FactorInferenceTable) -> QuantResult<Vec<ModelInputAuditRow>> {
+        let input_contract_hash = self.artifact.input_contract_hash.clone();
+        let transform_hash = self.artifact.input_transform_hash()?;
+        let training_input_hash = self.artifact.training_input_hash.clone();
+        let row_count = table
+            .rows
+            .iter()
+            .try_fold(0usize, |count, row| count.checked_add(row.factors.len()))
+            .ok_or_else(|| ResearchError::Inference {
+                detail: "weighted model-input audit row count overflow".to_owned(),
+            })?;
+        let mut audit = Vec::with_capacity(row_count);
+        for row in &table.rows {
+            for factor in &row.factors {
+                let (raw_state, score) = match &factor.normalization {
+                    NormalizedFactor::Scored { score, .. } => {
+                        (ModelInputAuditState::Scored, Some(score.inner()))
+                    }
+                    NormalizedFactor::MissingInput => (ModelInputAuditState::MissingInput, None),
+                    NormalizedFactor::NotApplicable => (ModelInputAuditState::NotApplicable, None),
+                    NormalizedFactor::Indeterminate { .. } => {
+                        (ModelInputAuditState::Indeterminate, None)
+                    }
+                };
+                let encoded_value_bits = score
+                    .map(|value| {
+                        value
+                            .to_f64()
+                            .filter(|value| value.is_finite())
+                            .ok_or_else(|| ResearchError::Inference {
+                                detail: format!(
+                                    "weighted factor `{}` normalized score cannot be represented as finite f64",
+                                    factor.name
+                                ),
+                            })
+                            .map(f64::to_bits)
+                    })
+                    .transpose()?;
+                audit.push(ModelInputAuditRow {
+                    model_version_id: self.artifact.header.model_version_id.clone(),
+                    model_family: self.artifact.header.model_family,
+                    market_id: row.market_id.clone(),
+                    raw_input_name: factor.name.to_string(),
+                    raw_state,
+                    raw_value: factor.raw_value.map(|value| value.to_string()),
+                    encoded_column: format!("{}.normalized_score", factor.name),
+                    encoded_value_bits,
+                    input_contract_hash: input_contract_hash.clone(),
+                    transform_hash: transform_hash.clone(),
+                    training_input_hash: training_input_hash.clone(),
+                });
+            }
+        }
+        Ok(audit)
     }
 }
 
@@ -321,7 +392,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
     }
 
     fn required_features(&self) -> Vec<FeatureName> {
-        self.artifact.required_features.clone()
+        self.artifact.required_features()
     }
 
     fn category_scope(&self) -> Option<MarketCategory> {
@@ -332,19 +403,34 @@ impl QuantModelRuntime for WeightedFactorRuntime {
         self.weight_source
     }
 
+    fn factor_cross_section(&self) -> Option<&FactorCrossSectionConfig> {
+        Some(&self.artifact.factor_cross_section)
+    }
+
+    fn frozen_reference_quantiles(&self) -> Option<&crate::factors::FrozenReferenceQuantiles> {
+        Some(&self.artifact.frozen_reference_quantiles)
+    }
+
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
         let started = Instant::now();
         let table = expect_factor_table(input)?;
-        let markets_scored = u32::try_from(table.rows.len()).unwrap_or(u32::MAX);
+        let markets_scored =
+            u32::try_from(table.rows.len()).map_err(|error| ResearchError::Inference {
+                detail: format!("weighted market count does not fit u32: {error}"),
+            })?;
+        let input_audit = self.input_audit(&table)?;
 
-        let nets = self.batch_layout.compute_nets(&table.rows);
+        let nets = self.batch_layout.compute_nets(&table.rows)?;
         let mut candidates: Vec<SignalCandidate> = table
             .rows
             .iter()
             .zip(nets)
-            .filter_map(|(row, net)| {
-                self.score_row_with_net(row, net, &table.model_run_id, table.as_of)
+            .map(|(row, net)| {
+                self.score_row_with_net(row, net, &table.model_run_id, table.decision_at)
             })
+            .collect::<QuantResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect();
 
         candidates.sort_by(|left, right| {
@@ -355,12 +441,22 @@ impl QuantModelRuntime for WeightedFactorRuntime {
                 .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
         });
         for (index, candidate) in candidates.iter_mut().enumerate() {
-            candidate.rank_before_portfolio = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            candidate.rank_before_portfolio =
+                u32::try_from(index + 1).map_err(|error| ResearchError::Inference {
+                    detail: format!("weighted candidate rank does not fit u32: {error}"),
+                })?;
         }
 
-        let candidates_emitted = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
+        let candidates_emitted =
+            u32::try_from(candidates.len()).map_err(|error| ResearchError::Inference {
+                detail: format!("weighted candidate count does not fit u32: {error}"),
+            })?;
         let inference_duration_ms =
-            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(started.elapsed().as_millis()).map_err(|error| {
+                ResearchError::Inference {
+                    detail: format!("weighted inference duration does not fit u64: {error}"),
+                }
+            })?;
 
         Ok(ModelRuntimeOutput {
             candidates,
@@ -369,7 +465,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
                 candidates_emitted,
                 inference_duration_ms,
             },
-            warnings: Vec::new(),
+            input_audit,
         })
     }
 }
@@ -383,11 +479,6 @@ fn expect_factor_table(input: ModelRuntimeInput) -> QuantResult<FactorInferenceT
         }
         .into()),
     }
-}
-
-/// The binary complement price `1 - p`, clamped into `[0, 1]`.
-fn complement(price: Price) -> Price {
-    Price::new((Decimal::ONE - price.inner()).clamp(Decimal::ZERO, Decimal::ONE))
 }
 
 /// Clamp a decimal into `[0, 1]` and build a [`Probability`] at the scorer scale.
@@ -448,6 +539,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         enums::quant::{DataQualityStatus, FactorDirection, OutcomeSide},
+        runtime_config::FactorCrossSectionConfig,
         types::{
             ContentHash, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
             Probability, TokenId, Usd,
@@ -455,7 +547,10 @@ mod tests {
     };
     use rust_decimal_macros::dec;
 
-    use quant_pivot_models::enums::factor::{FactorFamily, FactorIndeterminateReason};
+    use quant_pivot_models::{
+        enums::factor::{FactorFamily, FactorIndeterminateReason},
+        types::ModelInputContract,
+    };
 
     use crate::{
         factors::{
@@ -467,10 +562,11 @@ mod tests {
             artifact::{
                 FactorWeight, ModelArtifactHeader, ScoreMultiplierSpec,
                 SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+                model_input_contract_hash,
             },
             runtime::{
                 FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
-                ModelRuntimeInput, QuantModelRuntime,
+                ModelInputAuditState, ModelRuntimeInput, QuantModelRuntime,
             },
         },
     };
@@ -502,6 +598,9 @@ mod tests {
     }
 
     fn artifact() -> WeightedFactorModelArtifact {
+        let input_contract = ModelInputContract::single_required("book.mid");
+        let input_contract_hash =
+            model_input_contract_hash(&input_contract).expect("input contract hash");
         WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
@@ -509,6 +608,10 @@ mod tests {
                 feature_schema_hash: hash("aa"),
                 factor_schema_hash: hash("bb"),
             },
+            training_dataset_hash: hash("cc"),
+            training_input_hash: hash("dd"),
+            input_contract,
+            input_contract_hash,
             weights: vec![
                 FactorWeight {
                     factor: LIQUIDITY_DEPTH,
@@ -523,7 +626,8 @@ mod tests {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
+            factor_cross_section: FactorCrossSectionConfig::default(),
+            frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
             objective_report: None,
             category_scope: None,
         }
@@ -533,11 +637,11 @@ mod tests {
         MarketInferenceContext {
             secondary_token_id: Some(TokenId::new("no")),
             yes_price: Price::new(dec!(0.5)),
-            no_price: None,
+            no_price: Some(Price::new(dec!(0.52))),
             liquidity_usd: Some(Usd::new(dec!(60000))),
             data_quality: DataQualityStatus::Fresh,
             time_to_resolution_secs: Some(86_400),
-            substitutions: Vec::new(),
+            substitution_reasons: Vec::new(),
         }
     }
 
@@ -560,10 +664,13 @@ mod tests {
 
     #[tokio::test]
     async fn weighted_runtime_scores_candidates_from_factor_table() {
+        let expected_contract_hash =
+            model_input_contract_hash(&ModelInputContract::single_required("book.mid"))
+                .expect("contract hash");
         let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
             rows: vec![row("0xstrong", true), row("0xbear", false)],
         };
         let output = runtime
@@ -583,14 +690,93 @@ mod tests {
             .find(|c| c.market_id.as_str() == "0xbear")
             .expect("bear candidate");
         assert_eq!(bull.outcome_side, OutcomeSide::Yes);
+        assert_eq!(bull.entry_price_ref.inner(), dec!(0.5));
         assert_eq!(bear.outcome_side, OutcomeSide::No);
         assert_eq!(bear.token_id.as_str(), "no");
+        assert_eq!(bear.entry_price_ref.inner(), dec!(0.52));
+        assert_ne!(
+            bear.entry_price_ref.inner(),
+            dec!(1) - bull.entry_price_ref.inner(),
+            "weighted runtime must never synthesize the NO ask"
+        );
         for candidate in &output.candidates {
             assert!(candidate.composite_score.inner() >= dec!(0));
             assert!(candidate.composite_score.inner() <= dec!(1));
             assert!(candidate.rank_before_portfolio >= 1);
         }
         assert_eq!(output.runtime_metrics.markets_scored, 2);
+        assert_eq!(output.input_audit.len(), 4);
+        assert!(output.input_audit.iter().all(|row| {
+            row.raw_state == ModelInputAuditState::Scored
+                && row.raw_value.as_deref() == Some("1")
+                && row
+                    .encoded_value_bits
+                    .is_some_and(|bits| f64::from_bits(bits).is_finite())
+                && row.input_contract_hash == expected_contract_hash
+                && !row.transform_hash.as_str().is_empty()
+                && !row.training_input_hash.as_str().is_empty()
+        }));
+    }
+
+    #[tokio::test]
+    async fn weighted_runtime_never_fabricates_a_missing_no_quote() {
+        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+        let mut bearish = row("0xmissing-no", false);
+        bearish.context.no_price = None;
+        let output = runtime
+            .infer_batch(ModelRuntimeInput::FactorTable(FactorInferenceTable {
+                model_run_id: ModelRunId::from_v7(),
+                decision_at: Utc::now(),
+                rows: vec![bearish],
+            }))
+            .await
+            .expect("missing quote is an explicit market-level rejection");
+        assert!(output.candidates.is_empty());
+        assert_eq!(output.runtime_metrics.markets_scored, 1);
+    }
+
+    #[tokio::test]
+    async fn weighted_audit_keeps_missing_factor_without_numeric_sentinel() {
+        let runtime = WeightedFactorRuntime::new(artifact(), None, None).expect("runtime");
+        let mut missing = factor(
+            LIQUIDITY_DEPTH,
+            Probability::new(dec!(0.8)),
+            FactorDirection::Positive,
+        );
+        missing.raw_value = None;
+        missing.normalization = NormalizedFactor::MissingInput;
+        let table = FactorInferenceTable {
+            model_run_id: ModelRunId::from_v7(),
+            decision_at: Utc::now(),
+            rows: vec![FactorInferenceRow {
+                market_id: MarketId::new("0xmissing"),
+                token_id: TokenId::new("yes"),
+                factors: vec![
+                    missing,
+                    factor(
+                        MOMENTUM_ROC,
+                        Probability::new(dec!(0.6)),
+                        FactorDirection::Positive,
+                    ),
+                ],
+                context: context(),
+            }],
+        };
+        let output = runtime
+            .infer_batch(ModelRuntimeInput::FactorTable(table))
+            .await
+            .expect("infer");
+        let missing = output
+            .input_audit
+            .iter()
+            .find(|row| row.raw_input_name == LIQUIDITY_DEPTH.as_str())
+            .expect("missing factor audit");
+        assert_eq!(missing.raw_state, ModelInputAuditState::MissingInput);
+        assert!(missing.raw_value.is_none());
+        assert!(
+            missing.encoded_value_bits.is_none(),
+            "missing factor must not be written as a numeric zero"
+        );
     }
 
     #[tokio::test]
@@ -615,7 +801,7 @@ mod tests {
         };
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
             rows: vec![neutral_row],
         };
         let output = runtime
@@ -666,7 +852,7 @@ mod tests {
         };
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
-            as_of: Utc::now(),
+            decision_at: Utc::now(),
             rows: vec![row],
         };
         let output = runtime

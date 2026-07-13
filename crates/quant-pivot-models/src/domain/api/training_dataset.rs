@@ -9,7 +9,7 @@
 //! 3. `POST /research/training-datasets/build` — materialize using the same body
 //!    plus the `training_dataset_id` returned from step 2 (stable plan → build).
 //! 4. Poll `GET /research/training-datasets/{id}` until `status` is terminal
-//!    (`built`, `insufficient_labels`, `failed`, `ready`, or `expired`).
+//!    (`insufficient_labels`, `failed`, `ready`, or `expired`).
 //!
 //! Leakage violations abort the build with an HTTP error and **do not** write a
 //! ledger row (distinct from terminal `failed`, which persists diagnostics).
@@ -27,8 +27,9 @@ use crate::{
     domain::{TrainingDatasetInfo, pagination::PageRequest},
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     types::{
-        ContentHash, DatasetCoverage, ModelSpecId, RuntimeConfigVersionId, SchemaVersion,
-        TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource, default_sample_sources,
+        ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId, RuntimeConfigVersionId,
+        SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
+        TrainingSampleSources, default_sample_sources,
     },
 };
 
@@ -64,7 +65,7 @@ pub struct BuildTrainingDatasetRequest {
     pub horizons_secs: Vec<u64>,
     /// Feature source visibility delay in seconds (PIT cutoff).
     #[validate(range(min = 1))]
-    pub source_delay_secs: u64,
+    pub knowledge_lag_secs: u64,
     /// Feature schema version to materialize (defaults to v1).
     #[serde(default = "default_feature_schema_version")]
     pub feature_schema_version: SchemaVersion,
@@ -127,23 +128,37 @@ pub struct TrainingDatasetView {
     /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
     pub status: TrainingDatasetStatus,
     pub purpose: DatasetPurpose,
-    pub feature_schema_hash: ContentHash,
-    pub factor_schema_hash: ContentHash,
-    pub label_schema_hash: ContentHash,
-    pub dataset_hash: ContentHash,
-    pub parquet_uri: String,
-    pub sample_count: i64,
+    pub feature_schema_hash: Option<ContentHash>,
+    pub factor_schema_hash: Option<ContentHash>,
+    pub label_schema_hash: Option<ContentHash>,
+    pub dataset_hash: Option<ContentHash>,
+    pub manifest_hash: Option<ContentHash>,
+    /// Structured projection of the exact frozen artifact manifest. `None`
+    /// means the legacy audit row predates v2 manifest persistence.
+    pub manifest: Option<DatasetManifestView>,
+    pub artifact_bytes_hash: Option<ContentHash>,
+    pub parquet_uri: Option<String>,
+    pub sample_count: Option<i64>,
     /// Feature source visibility delay in seconds (PIT cutoff).
-    pub source_delay_secs: i64,
+    pub knowledge_lag_secs: i64,
     /// Deterministic sample grid step in seconds.
     pub sample_interval_secs: i64,
     /// Forward label horizons frozen into this dataset (seconds).
     pub horizons_secs: TrainingHorizonsSecs,
+    pub feature_schema_version: Option<SchemaVersion>,
+    pub sample_sources: Option<TrainingSampleSources>,
     /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
-    pub coverage_json: DatasetCoverage,
+    pub coverage_json: Option<DatasetCoverage>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub failure_detail: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
+
+/// Typed API projection of the exact frozen dataset manifest.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct DatasetManifestView(pub DatasetManifest);
 
 /// Paginated filter for the training-dataset ledger catalog.
 ///
@@ -175,13 +190,20 @@ impl From<TrainingDatasetInfo> for TrainingDatasetView {
             factor_schema_hash: info.factor_schema_hash,
             label_schema_hash: info.label_schema_hash,
             dataset_hash: info.dataset_hash,
-            parquet_uri: info.parquet_uri.to_string(),
+            manifest_hash: info.manifest_hash,
+            manifest: info.manifest_json.map(DatasetManifestView),
+            artifact_bytes_hash: info.artifact_bytes_hash,
+            parquet_uri: info.parquet_uri.map(|uri| uri.to_string()),
             sample_count: info.sample_count,
-            source_delay_secs: info.source_delay_secs,
+            knowledge_lag_secs: info.knowledge_lag_secs,
             sample_interval_secs: info.sample_interval_secs,
             horizons_secs: info.horizons_secs,
+            feature_schema_version: info.feature_schema_version,
+            sample_sources: info.sample_sources,
             coverage_json: info.coverage_json,
             runtime_config_version_id: info.runtime_config_version_id,
+            failure_detail: info.failure_detail,
+            completed_at: info.completed_at,
             created_at: info.created_at,
         }
     }

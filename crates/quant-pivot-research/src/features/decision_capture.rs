@@ -4,25 +4,25 @@
 //! fields (identity, market context, book replay handle) and is built alongside
 //! [`ResolvedInputs`](super::builder::ResolvedInputs) — never re-derived in the composer.
 
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
+        DecisionBoundary, FeatureVectorInfo,
         market::{book::BookLevel, registry::MarketRegistryInfo},
         quant::NewReportDataQualitySnapshot,
     },
-    enums::{market::MarketStatus, quant::DataQualityStatus},
+    enums::quant::DataQualityStatus,
     hashing::CanonicalDigest,
     types::{
-        BookSnapshotRef, BookSnapshotSource, Bps, ContentHash, EventId, MarketContext, MarketId,
+        BookSnapshotRef, BookSnapshotSource, Bps, CatalogSyncBatchId, ContentHash,
+        EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketContext, MarketId,
         Probability, RecommendationIdentity, ReportDataQualitySnapshotId, ReportDataQualityTokens,
         RuntimeConfigVersionId, TokenDataQualityRecord, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     features::{
@@ -31,8 +31,68 @@ use crate::{
         resolved::{ResolvedBook, ResolvedMarketContext},
         value::EvidenceSourceRef,
     },
+    pit::ResolvedMarketSnapshot,
     selection::SelectedMarket,
 };
+
+/// Exact immutable catalog revisions used for one decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogDecisionRef {
+    pub catalog_sync_batch_id: CatalogSyncBatchId,
+    pub market_catalog_version_id: MarketCatalogVersionId,
+    pub event_catalog_version_id: EventCatalogVersionId,
+    pub market_content_hash: ContentHash,
+    pub event_content_hash: ContentHash,
+    pub membership_hash: ContentHash,
+    pub market_effective_at: DateTime<Utc>,
+    pub market_available_at: DateTime<Utc>,
+    pub event_effective_at: DateTime<Utc>,
+    pub event_available_at: DateTime<Utc>,
+    pub market_timestamp_quality: String,
+    pub event_timestamp_quality: String,
+}
+
+impl From<&ResolvedMarketSnapshot> for CatalogDecisionRef {
+    fn from(snapshot: &ResolvedMarketSnapshot) -> Self {
+        Self {
+            catalog_sync_batch_id: snapshot.catalog_sync_batch_id.clone(),
+            market_catalog_version_id: snapshot.market_catalog_version_id.clone(),
+            event_catalog_version_id: snapshot.event_catalog_version_id.clone(),
+            market_content_hash: snapshot.market_content_hash.clone(),
+            event_content_hash: snapshot.event_content_hash.clone(),
+            membership_hash: snapshot.membership_hash.clone(),
+            market_effective_at: snapshot.market_effective_at,
+            market_available_at: snapshot.market_available_at,
+            event_effective_at: snapshot.event_effective_at,
+            event_available_at: snapshot.event_available_at,
+            market_timestamp_quality: snapshot.market_timestamp_quality.clone(),
+            event_timestamp_quality: snapshot.event_timestamp_quality.clone(),
+        }
+    }
+}
+
+/// Source snapshot identity committed before feature computation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionSnapshotEvidence {
+    pub boundary: DecisionBoundary,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub token_id: TokenId,
+    pub catalog: CatalogDecisionRef,
+    pub book_snapshot_ref: BookSnapshotRef,
+    pub book_effective_at: DateTime<Utc>,
+    pub book_available_at: DateTime<Utc>,
+}
+
+/// Full business capture consumed by report composition and parity replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionCaptureEvidence {
+    pub snapshot: DecisionSnapshotEvidence,
+    pub identity: RecommendationIdentity,
+    pub market_context: MarketContext,
+    pub data_quality: DataQualityStatus,
+    pub liquidity_score: Probability,
+}
 
 /// Frozen decision-time bundle for one market: PIT inputs + capture payload.
 pub struct ResolvedMarketBundle<'a> {
@@ -65,17 +125,35 @@ pub struct MarketDecisionCapture {
     pub data_quality: DataQualityStatus,
     /// Normalized visible liquidity in `[0, 1]` vs the configured cap.
     pub liquidity_score: Probability,
+    /// Durable source snapshot identity shared by online and replay.
+    pub snapshot: DecisionSnapshotEvidence,
+}
+
+impl MarketDecisionCapture {
+    #[must_use]
+    pub fn evidence(&self) -> DecisionCaptureEvidence {
+        DecisionCaptureEvidence {
+            snapshot: self.snapshot.clone(),
+            identity: self.identity.clone(),
+            market_context: self.market_context.clone(),
+            data_quality: self.data_quality,
+            liquidity_score: self.liquidity_score,
+        }
+    }
+
+    pub fn evidence_hash(&self) -> QuantResult<ContentHash> {
+        crate::hashing::ResearchHasher::canonical(&self.evidence())
+    }
 }
 
 /// Build [`MarketContext`] from resolved book, metadata, and selection snapshot fields.
-#[must_use]
 pub fn market_context_from_resolved(
     as_of: DateTime<Utc>,
     book: &ResolvedBook,
     market: &ResolvedMarketContext,
     selected: &SelectedMarket,
     registry: Option<&MarketRegistryInfo>,
-) -> MarketContext {
+) -> QuantResult<MarketContext> {
     let spread_bps = match (book.best_bid(), book.best_ask(), book.mid()) {
         (Some(bid), Some(ask), Some(mid)) if mid.inner() > Decimal::ZERO => {
             Bps::relative(ask.inner() - bid.inner(), mid.inner()).map(Bps::inner)
@@ -85,12 +163,22 @@ pub fn market_context_from_resolved(
     let book_age_ms = book_age_ms(as_of, book);
     let time_to_resolution_secs = market
         .end_date
-        .map(|end| u64::try_from((end - as_of).num_seconds()).unwrap_or(0));
+        .map(|end| {
+            u64::try_from((end - as_of).num_seconds()).map_err(|error| {
+                ResearchError::PitResolution {
+                    detail: format!(
+                        "market {} resolution time {end} is before decision_at {as_of} or cannot be represented: {error}",
+                        selected.market_id
+                    ),
+                }
+            })
+        })
+        .transpose()?;
     let fee_rate = registry
         .and_then(|info| info.fee_schedule.as_ref())
         .map(|schedule| schedule.fee_rate);
 
-    MarketContext {
+    Ok(MarketContext {
         best_bid: book.best_bid(),
         best_ask: book.best_ask(),
         mid_price: book.mid(),
@@ -99,38 +187,52 @@ pub fn market_context_from_resolved(
         volume_24h_usd: selected
             .volume_24h_usd
             .or_else(|| registry.and_then(|info| info.volume_24h)),
-        book_age_ms,
+        book_age_ms: book_age_ms?,
         time_to_resolution_secs,
         market_status: market.status,
         neg_risk: market.neg_risk,
         fee_rate,
-    }
+    })
 }
 
 /// Build display identity from the selection row and registry metadata.
-#[must_use]
 pub fn recommendation_identity_from_resolved(
     selected: &SelectedMarket,
     registry: Option<&MarketRegistryInfo>,
-) -> RecommendationIdentity {
-    let (question, outcome_name) = registry.map_or_else(
-        || (String::new(), String::new()),
-        |info| {
-            let outcome = info
-                .tokens
-                .iter()
-                .find(|token| token.token_id == selected.primary_token_id)
-                .map(|token| token.outcome.clone())
-                .or_else(|| info.outcome.clone())
-                .unwrap_or_default();
-            (info.question.clone(), outcome)
-        },
-    );
-    RecommendationIdentity {
-        category: selected.category,
-        question,
-        outcome_name,
+) -> QuantResult<RecommendationIdentity> {
+    let info = registry.ok_or_else(|| ResearchError::PitResolution {
+        detail: format!(
+            "market {} has no point-in-time catalog identity",
+            selected.market_id
+        ),
+    })?;
+    let outcome_name = info
+        .tokens
+        .iter()
+        .find(|token| token.token_id == selected.primary_token_id)
+        .map(|token| token.outcome.clone())
+        .or_else(|| info.outcome.clone())
+        .filter(|outcome| !outcome.trim().is_empty())
+        .ok_or_else(|| ResearchError::PitResolution {
+            detail: format!(
+                "market {} has no outcome identity for token {}",
+                selected.market_id, selected.primary_token_id
+            ),
+        })?;
+    if info.question.trim().is_empty() {
+        return Err(ResearchError::PitResolution {
+            detail: format!(
+                "market {} has an empty catalog question",
+                selected.market_id
+            ),
+        }
+        .into());
     }
+    Ok(RecommendationIdentity {
+        category: selected.category,
+        question: info.question.clone(),
+        outcome_name,
+    })
 }
 
 /// Build a live [`BookSnapshotRef`] with a blake3 digest over bid/ask levels.
@@ -141,9 +243,18 @@ pub fn recommendation_identity_from_resolved(
 pub fn book_snapshot_ref_from_resolved(book: &ResolvedBook) -> QuantResult<BookSnapshotRef> {
     Ok(BookSnapshotRef {
         token_id: book.token_id.clone(),
-        source: BookSnapshotSource::Live {
+        source: BookSnapshotSource::ClickHouse {
+            event_time_ms: i64::try_from(book.timestamp_ms).map_err(|error| {
+                ResearchError::PitResolution {
+                    detail: format!(
+                        "book {} event time does not fit i64: {error}",
+                        book.token_id
+                    ),
+                }
+            })?,
+            ingestion_time_ms: book.available_at.timestamp_millis(),
+            sequence: book.sequence,
             book_version: book.version,
-            event_time_ms: book.timestamp_ms,
         },
         content_hash: book_levels_content_hash(book)?,
     })
@@ -165,13 +276,15 @@ pub fn liquidity_score_from_resolved(book: &ResolvedBook, liquidity_cap_usd: Usd
 #[must_use]
 pub fn book_evidence_ref(
     book_snapshot_ref: &BookSnapshotRef,
-    observed_at: DateTime<Utc>,
+    effective_at: DateTime<Utc>,
+    available_at: DateTime<Utc>,
 ) -> EvidenceSourceRef {
     use crate::features::value::EvidenceSourceKind;
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::Book,
         reference: book_snapshot_ref.canonical_string(),
-        observed_at,
+        effective_at,
+        available_at: Some(available_at),
     }
 }
 
@@ -181,17 +294,21 @@ pub fn book_evidence_ref(
 ///
 /// Propagates book content-hash failures.
 pub fn market_decision_capture_from_resolved(
-    as_of: DateTime<Utc>,
+    boundary: &DecisionBoundary,
     selected: &SelectedMarket,
     book: ResolvedBook,
     market: ResolvedMarketContext,
     registry: Option<&MarketRegistryInfo>,
+    catalog: CatalogDecisionRef,
     liquidity_cap_usd: Usd,
 ) -> QuantResult<MarketDecisionCapture> {
+    let as_of = boundary.decision_at();
     let book_snapshot_ref = book_snapshot_ref_from_resolved(&book)?;
-    let identity = recommendation_identity_from_resolved(selected, registry);
-    let market_context = market_context_from_resolved(as_of, &book, &market, selected, registry);
+    let identity = recommendation_identity_from_resolved(selected, registry)?;
+    let market_context = market_context_from_resolved(as_of, &book, &market, selected, registry)?;
     let liquidity_score = liquidity_score_from_resolved(&book, liquidity_cap_usd);
+    let book_effective_at = book.effective_at;
+    let book_available_at = book.available_at;
     Ok(MarketDecisionCapture {
         market_id: selected.market_id.clone(),
         event_id: selected.event_id.clone(),
@@ -200,21 +317,42 @@ pub fn market_decision_capture_from_resolved(
         market,
         identity,
         market_context,
-        book_snapshot_ref,
+        book_snapshot_ref: book_snapshot_ref.clone(),
         data_quality: DataQualityStatus::Fresh,
         liquidity_score,
+        snapshot: DecisionSnapshotEvidence {
+            boundary: boundary.clone(),
+            market_id: selected.market_id.clone(),
+            event_id: selected.event_id.clone(),
+            token_id: selected.primary_token_id.clone(),
+            catalog,
+            book_snapshot_ref,
+            book_effective_at,
+            book_available_at,
+        },
     })
 }
 
 /// Draft the report-level DQ snapshot covering every market in the round.
-#[must_use]
 pub fn draft_data_quality_snapshot(
     as_of: DateTime<Utc>,
     runtime_config_version_id: RuntimeConfigVersionId,
     bundles: &[ResolvedMarketBundle<'_>],
     vectors: &[FeatureVector],
+    persisted: &[FeatureVectorInfo],
     rejected_markets: &[RejectedMarketDraft],
-) -> NewReportDataQualitySnapshot {
+) -> QuantResult<NewReportDataQualitySnapshot> {
+    if bundles.len() != vectors.len() || vectors.len() != persisted.len() {
+        return Err(ResearchError::Determinism {
+            detail: format!(
+                "data-quality snapshot alignment mismatch: bundles={}, vectors={}, persisted={}",
+                bundles.len(),
+                vectors.len(),
+                persisted.len()
+            ),
+        }
+        .into());
+    }
     let rejected_by_market: std::collections::HashMap<_, _> = rejected_markets
         .iter()
         .map(|row| (row.market_id.clone(), row))
@@ -222,35 +360,52 @@ pub fn draft_data_quality_snapshot(
     let records = bundles
         .iter()
         .zip(vectors)
-        .map(|(bundle, vector)| {
-            let book = &bundle.capture.book;
-            let missing = rejected_by_market
-                .get(&vector.market_id)
-                .map(|row| {
-                    row.missing_required
-                        .iter()
-                        .map(|(name, _)| name.as_str().to_owned())
-                        .collect()
+        .zip(persisted)
+        .map(
+            |((bundle, vector), persisted)| -> QuantResult<TokenDataQualityRecord> {
+                let wrong_market = persisted.market_id != vector.market_id;
+                let wrong_token = persisted.token_id.as_ref() != vector.token_id.as_ref();
+                let wrong_decision = persisted.decision_at != as_of;
+                let wrong_data_quality = persisted.data_quality != vector.data_quality;
+                if wrong_market || wrong_token || wrong_decision || wrong_data_quality {
+                    return Err(ResearchError::Determinism {
+                        detail: format!(
+                            "persisted feature vector {} is not aligned with DQ row for market {}",
+                            persisted.feature_vector_id, vector.market_id
+                        ),
+                    }
+                    .into());
+                }
+                let book = &bundle.capture.book;
+                let missing = rejected_by_market
+                    .get(&vector.market_id)
+                    .map(|row| {
+                        row.missing_required
+                            .iter()
+                            .map(|(name, _)| name.as_str().to_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(TokenDataQualityRecord {
+                    feature_vector_id: Some(persisted.feature_vector_id.clone()),
+                    token_id: bundle.capture.token_id.clone(),
+                    market_id: bundle.capture.market_id.clone(),
+                    status: vector.data_quality,
+                    book_age_ms: book_age_ms(as_of, book)?,
+                    crossed: book.is_crossed(),
+                    empty: book.is_empty(),
+                    fact_lag_ms: fact_lag_ms(as_of, bundle.inputs.window)?,
+                    missing_required: missing,
                 })
-                .unwrap_or_default();
-            TokenDataQualityRecord {
-                token_id: bundle.capture.token_id.clone(),
-                market_id: bundle.capture.market_id.clone(),
-                status: vector.data_quality,
-                book_age_ms: book_age_ms(as_of, book),
-                crossed: book.is_crossed(),
-                empty: book.is_empty(),
-                fact_lag_ms: Some(fact_lag_ms(as_of, bundle.inputs.window)),
-                missing_required: missing,
-            }
-        })
-        .collect();
-    NewReportDataQualitySnapshot {
+            },
+        )
+        .collect::<QuantResult<Vec<_>>>()?;
+    Ok(NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
-        as_of,
+        decision_at: as_of,
         runtime_config_version_id,
         tokens_json: ReportDataQualityTokens(records),
-    }
+    })
 }
 
 /// Rejected market summary used when drafting the DQ snapshot (mirrors core partition).
@@ -259,36 +414,6 @@ pub struct RejectedMarketDraft {
     pub market_id: MarketId,
     /// Required features that were missing.
     pub missing_required: Vec<(FeatureName, NullReason)>,
-}
-
-/// Empty book stub when PIT resolve returns no snapshot (DQ flags `empty`).
-#[must_use]
-pub fn empty_book(token_id: TokenId, as_of: DateTime<Utc>) -> ResolvedBook {
-    ResolvedBook {
-        token_id,
-        bids: Arc::new([]),
-        asks: Arc::new([]),
-        timestamp_ms: 0,
-        version: 0,
-        observed_at: as_of,
-    }
-}
-
-/// Minimal market context when registry metadata is unavailable at resolve.
-#[must_use]
-pub const fn stub_market_context(
-    market_id: MarketId,
-    as_of: DateTime<Utc>,
-) -> ResolvedMarketContext {
-    ResolvedMarketContext {
-        market_id,
-        observed_at: as_of,
-        status: MarketStatus::Active,
-        neg_risk: false,
-        end_date: None,
-        created_at: as_of,
-        outcome_count: 2,
-    }
 }
 
 #[derive(Serialize)]
@@ -305,20 +430,36 @@ fn book_levels_content_hash(book: &ResolvedBook) -> QuantResult<ContentHash> {
     .map_err(Into::into)
 }
 
-fn book_age_ms(as_of: DateTime<Utc>, book: &ResolvedBook) -> u64 {
-    u64::try_from((as_of - book.observed_at).num_milliseconds()).unwrap_or(0)
+fn book_age_ms(as_of: DateTime<Utc>, book: &ResolvedBook) -> QuantResult<u64> {
+    u64::try_from((as_of - book.effective_at).num_milliseconds()).map_err(|_| {
+        ResearchError::PitResolution {
+            detail: format!(
+                "book observation {} is after decision time {as_of}",
+                book.effective_at
+            ),
+        }
+        .into()
+    })
 }
 
-fn fact_lag_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> u64 {
-    window.freshest_bucket_time().map_or(0, |bucket_time| {
-        u64::try_from((as_of - bucket_time).num_milliseconds()).unwrap_or(0)
-    })
+fn fact_lag_ms(as_of: DateTime<Utc>, window: &MarketWindowSnapshot) -> QuantResult<Option<u64>> {
+    window
+        .freshest_bucket_time()
+        .map(|bucket_time| {
+            u64::try_from((as_of - bucket_time).num_milliseconds()).map_err(|_| {
+                ResearchError::PitResolution {
+                    detail: format!("feature bucket {bucket_time} is after decision time {as_of}"),
+                }
+                .into()
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        book_snapshot_ref_from_resolved, empty_book, liquidity_score_from_resolved,
+        book_snapshot_ref_from_resolved, liquidity_score_from_resolved,
         market_context_from_resolved, recommendation_identity_from_resolved,
     };
     use crate::features::{ResolvedBook, resolved::ResolvedMarketContext};
@@ -354,7 +495,9 @@ mod tests {
             .expect("level")]),
             timestamp_ms: 1_700_000_000_000,
             version: 42,
-            observed_at: Utc::now(),
+            sequence: 42,
+            effective_at: Utc::now(),
+            available_at: Utc::now(),
         }
     }
 
@@ -364,7 +507,7 @@ mod tests {
         let first = book_snapshot_ref_from_resolved(&book).expect("hash");
         let second = book_snapshot_ref_from_resolved(&book).expect("hash");
         assert_eq!(first, second);
-        assert!(first.canonical_string().starts_with("book:live:"));
+        assert!(first.canonical_string().starts_with("book:ch:"));
     }
 
     #[test]
@@ -373,12 +516,12 @@ mod tests {
         let book = sample_book();
         let market = ResolvedMarketContext {
             market_id: MarketId::new("0xm"),
-            observed_at: as_of,
+            effective_at: as_of,
+            available_at: as_of,
             status: MarketStatus::Active,
             neg_risk: false,
             end_date: None,
-            created_at: as_of,
-            outcome_count: 2,
+            created_at: Some(as_of),
         };
         let selected = SelectedMarket {
             market_id: MarketId::new("0xm"),
@@ -390,7 +533,8 @@ mod tests {
             volume_24h_usd: Some(Usd::new(dec!(1000))),
             source_refs: Vec::new(),
         };
-        let ctx = market_context_from_resolved(as_of, &book, &market, &selected, None);
+        let ctx =
+            market_context_from_resolved(as_of, &book, &market, &selected, None).expect("context");
         assert_eq!(ctx.depth_usd, book.visible_liquidity_usd());
         assert!(ctx.spread_bps.is_some());
         assert_eq!(ctx.volume_24h_usd, selected.volume_24h_usd);
@@ -442,10 +586,11 @@ mod tests {
             fee_schedule: None,
             end_date: None,
             resolved_at: None,
-            created_at: Utc::now(),
+            created_at: Some(Utc::now()),
             updated_at: Utc::now(),
         };
-        let identity = recommendation_identity_from_resolved(&selected, Some(&registry));
+        let identity =
+            recommendation_identity_from_resolved(&selected, Some(&registry)).expect("identity");
         assert_eq!(identity.question, "Will it happen?");
         assert_eq!(identity.outcome_name, "Yes");
         assert_eq!(identity.category, MarketCategory::Politics);
@@ -457,10 +602,17 @@ mod tests {
         let score = liquidity_score_from_resolved(&book, Usd::new(dec!(10)));
         assert!(score.inner() <= dec!(1));
         assert!(score.inner() > dec!(0));
-        let empty = liquidity_score_from_resolved(
-            &empty_book(TokenId::new("t"), Utc::now()),
-            Usd::new(dec!(100)),
-        );
+        let no_levels = ResolvedBook {
+            token_id: TokenId::new("t"),
+            bids: Arc::new([]),
+            asks: Arc::new([]),
+            timestamp_ms: 1,
+            version: 1,
+            sequence: 1,
+            effective_at: Utc::now(),
+            available_at: Utc::now(),
+        };
+        let empty = liquidity_score_from_resolved(&no_levels, Usd::new(dec!(100)));
         assert_eq!(empty.inner(), dec!(0));
     }
 }

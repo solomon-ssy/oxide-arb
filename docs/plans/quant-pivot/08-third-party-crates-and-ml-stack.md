@@ -87,7 +87,7 @@ core hot path 不直接依赖 polars
 建议：
 
 - Phase 3 可先不用，等数据量增大后引入。
-- 如果引入，封装在 `PitQueryEngine` trait 后面。
+- 如果引入，封装在 `PointInTimeSnapshotSource` trait 后面。
 
 ### 3.3 `arrow` / `parquet`
 

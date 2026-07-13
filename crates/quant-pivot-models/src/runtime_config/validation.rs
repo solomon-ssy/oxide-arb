@@ -4,7 +4,10 @@
 //! and superseded pre-quant configuration paths are not accepted (clean-break
 //! runtime configuration).
 
-use crate::{runtime_config::FeatureFamily, types::CalibrationArtifactId};
+use crate::{
+    runtime_config::{FeatureFamily, PerFactorNormalization},
+    types::CalibrationArtifactId,
+};
 
 use super::{
     DecimalString, ResearchValidationConfig, ResearchValidationTrialsConfig, RuntimeConfig,
@@ -28,13 +31,13 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic runtime-config v9 invariants.
+/// Mode-agnostic invariants for the only supported runtime-config schema (v10).
 ///
 /// Phase 11.3 added the `model.calibration` embargo/confidence bounds and the
 /// `portfolio.kelly_safety` edge-uncertainty bounds. Phase 11.4 adds the
 /// governed learning-to-rank objective under `research.training`, with
-/// hardening in v9 for honest RankIC-weighted naming, diagnostic `ndcg_k`, and
-/// `TopN` rank-equal pseudo-portfolio knobs.
+/// the earlier honest RankIC-weighted naming, diagnostic `ndcg_k`, and `TopN`
+/// rank-equal pseudo-portfolio hardening carried forward into v10.
 #[must_use]
 pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
@@ -161,27 +164,32 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
         &config.features.structural.trade_tape_min_coverage_ratio,
         report,
     );
-    let mut seen = HashSet::new();
-    for feature_ref in &config.features.required_features {
-        let label = feature_ref.name.trim();
-        if label.is_empty() {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "features.required_features",
-                detail: "feature names must not be empty".to_owned(),
-            });
-            continue;
-        }
-        if !seen.insert(label.to_owned()) {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "features.required_features",
-                detail: format!("duplicate feature `{label}`"),
-            });
-        }
-    }
     for validator in FEATURES_CONFIG_VALIDATORS {
         validator(&config.features, report);
     }
+    validate_executable_price_feature_family(config, report);
     validate_feature_family_domain_coherence(config, report);
+}
+
+/// Every model family prices candidates from the actual primary/secondary
+/// best-ask cells. Disabling the price-book family would make the runtime emit
+/// an empty batch while appearing otherwise healthy, so reject that config at
+/// its governed boundary.
+fn validate_executable_price_feature_family(
+    config: &RuntimeConfig,
+    report: &mut ConfigValidationReport,
+) {
+    if !config
+        .features
+        .enabled_feature_families
+        .contains(&FeatureFamily::PriceBook)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "features.enabled_feature_families",
+            detail: "must contain `PriceBook`; model entry prices require PIT-resolved primary and secondary best-ask FeatureCells"
+                .to_owned(),
+        });
+    }
 }
 
 /// `features.enabled_feature_families` containing [`FeatureFamily::Domain`]
@@ -483,7 +491,7 @@ fn validate_factor_normalization(config: &RuntimeConfig, report: &mut ConfigVali
 }
 
 fn validate_per_factor_normalization(
-    spec: &super::PerFactorNormalization,
+    spec: &PerFactorNormalization,
     report: &mut ConfigValidationReport,
 ) {
     use crate::enums::factor::FactorNormalization;
@@ -539,12 +547,6 @@ fn validate_factor_cross_section(config: &RuntimeConfig, report: &mut ConfigVali
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "factors.cross_section.min_size",
             detail: "must be at least 2 (a cross-section of one has no dispersion)".to_owned(),
-        });
-    }
-    if cross_section.historical_lookback_secs == 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "factors.cross_section.historical_lookback_secs",
-            detail: "must be greater than zero".to_owned(),
         });
     }
 }
@@ -635,8 +637,8 @@ fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationRe
         report,
     );
     unit_ratio(
-        "quality_gate.min_critical_feature_coverage",
-        &gate.min_critical_feature_coverage,
+        "quality_gate.min_materialization_coverage",
+        &gate.min_materialization_coverage,
         report,
     );
     unit_ratio("quality_gate.max_drawdown", &gate.max_drawdown, report);
@@ -688,11 +690,6 @@ fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport
     decimal(
         "training.min_exit_depth_usd",
         &config.training.min_exit_depth_usd,
-        report,
-    );
-    decimal(
-        "training.min_selection_depth_usd",
-        &config.training.min_selection_depth_usd,
         report,
     );
     if config.training.max_book_staleness_ms == 0 {
@@ -751,10 +748,10 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
             });
         }
     }
-    if config.pit_source_delay_secs().is_none() {
+    if config.pit_knowledge_lag_secs().is_none() {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "reports.schedules.source_delay_secs",
-            detail: "enabled schedules must share one source_delay_secs".to_owned(),
+            field: "reports.schedules.knowledge_lag_secs",
+            detail: "enabled schedules must share one knowledge_lag_secs".to_owned(),
         });
     }
 }
@@ -915,6 +912,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
         &config.execution.entry_order_policy.min_entry_book_depth_usd,
         report,
     );
+    validate_execution_breaker(config, report);
     if config.execution.kill_switch.emergency_exit.max_slippage_bps == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.kill_switch.emergency_exit.max_slippage_bps",
@@ -932,6 +930,51 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     );
     validate_opportunistic_sell(config, report);
     validate_settlement_redeem(config, report);
+}
+
+fn validate_execution_breaker(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let breaker = &config.execution.breaker;
+    if breaker.venue_consecutive_failures_to_degrade == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.breaker.venue_consecutive_failures_to_degrade",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    if breaker.venue_consecutive_failures_to_halt < breaker.venue_consecutive_failures_to_degrade {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.breaker.venue_consecutive_failures_to_halt",
+            detail: "must be >= venue_consecutive_failures_to_degrade".to_owned(),
+        });
+    }
+    if breaker.venue_error_rate_bps_to_halt == 0 || breaker.venue_error_rate_bps_to_halt > 10_000 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.breaker.venue_error_rate_bps_to_halt",
+            detail: "must be in 1..=10000".to_owned(),
+        });
+    }
+    for (field, value) in [
+        (
+            "execution.breaker.venue_min_window_samples",
+            u64::from(breaker.venue_min_window_samples),
+        ),
+        (
+            "execution.breaker.venue_window_secs",
+            breaker.venue_window_secs,
+        ),
+        ("execution.breaker.cooldown_secs", breaker.cooldown_secs),
+    ] {
+        if value == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: "must be greater than zero".to_owned(),
+            });
+        }
+    }
+    non_negative_decimal(
+        "execution.breaker.daily_realized_loss_cap_usd",
+        &breaker.daily_realized_loss_cap_usd,
+        report,
+    );
 }
 
 fn validate_research(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -1309,11 +1352,11 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeConfig, validate_runtime_config};
+    use super::{ConfigValidationError, RuntimeConfig, validate_runtime_config};
     use crate::{
         enums::factor::FactorFamily,
         runtime_config::{
-            DecimalString, FeatureNameRef, RUNTIME_CONFIG_SCHEMA_VERSION, ReportScheduleConfig,
+            DecimalString, FeatureFamily, RUNTIME_CONFIG_SCHEMA_VERSION, ReportScheduleConfig,
             ScheduleCadence,
         },
         types::CalibrationArtifactId,
@@ -1339,6 +1382,27 @@ mod tests {
         config.execution.kill_switch.emergency_exit.max_slippage_bps = 0;
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
+    }
+
+    #[test]
+    fn execution_breaker_rejects_invalid_thresholds_and_loss_cap() {
+        let mut config = RuntimeConfig::default();
+        config
+            .execution
+            .breaker
+            .venue_consecutive_failures_to_degrade = 0;
+        config.execution.breaker.venue_consecutive_failures_to_halt = 0;
+        config.execution.breaker.venue_error_rate_bps_to_halt = 10_001;
+        config.execution.breaker.venue_min_window_samples = 0;
+        config.execution.breaker.venue_window_secs = 0;
+        config.execution.breaker.cooldown_secs = 0;
+        config.execution.breaker.daily_realized_loss_cap_usd = DecimalString::new("not-a-decimal");
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+
+        let mut config = RuntimeConfig::default();
+        config.execution.breaker.daily_realized_loss_cap_usd = DecimalString::new("-1");
+        assert!(validate_runtime_config(&config).has_errors());
     }
 
     #[test]
@@ -1513,21 +1577,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_required_feature_name_is_rejected() {
-        let mut config = RuntimeConfig::default();
-        config.features.required_features = vec![FeatureNameRef::new("   ")];
-        let report = validate_runtime_config(&config);
-        assert!(report.has_errors());
-    }
-
-    #[test]
     fn invalid_enabled_cron_schedule_is_rejected() {
         let mut config = RuntimeConfig::default();
         config.reports.schedules = vec![ReportScheduleConfig {
             schedule_id: "bad".to_owned(),
             enabled: true,
             top_n: 10,
-            source_delay_secs: 0,
+            knowledge_lag_secs: 0,
             cadence: ScheduleCadence::Cron {
                 expr: "not-a-cron".to_owned(),
                 timezone: None,
@@ -1549,14 +1605,20 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_required_feature_is_rejected() {
+    fn price_book_feature_family_is_required_for_executable_model_prices() {
         let mut config = RuntimeConfig::default();
-        config.features.required_features = vec![
-            FeatureNameRef::new("book.spread_bps"),
-            FeatureNameRef::new("book.spread_bps"),
-        ];
+        config
+            .features
+            .enabled_feature_families
+            .retain(|family| *family != FeatureFamily::PriceBook);
+
         let report = validate_runtime_config(&config);
-        assert!(report.has_errors());
+        assert!(report.errors.iter().any(|error| matches!(
+            error,
+            ConfigValidationError::InvalidValue { field, detail }
+                if *field == "features.enabled_feature_families"
+                    && detail.contains("PriceBook")
+        )));
     }
 
     #[test]

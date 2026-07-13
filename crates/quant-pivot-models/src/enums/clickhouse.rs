@@ -45,38 +45,6 @@ pub enum ChSnapshotReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
-pub enum ChBookDecisionStage {
-    FeatureGenerated = 1,
-    FactorScored = 2,
-    ModelScored = 3,
-    PortfolioPruned = 4,
-    RecommendationPublished = 5,
-    IntentCreated = 6,
-    ExecutionUpdated = 7,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
-#[repr(i8)]
-pub enum ChBookQuality {
-    Fresh = 1,
-    Stale = 2,
-    Crossed = 3,
-    Gap = 4,
-    Invalid = 5,
-    Insufficient = 6,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
-#[repr(i8)]
-pub enum ChBookEvidenceTier {
-    ExactReplay = 1,
-    DecisionContext = 2,
-    AggregateOnly = 3,
-    Insufficient = 4,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
-#[repr(i8)]
 pub enum ChTradeParticipantRole {
     Maker = 1,
     Taker = 2,
@@ -256,7 +224,7 @@ pub enum ChFactorDirection {
 pub enum ChNormalizationSource {
     CrossSection = 1,
     PerMarket = 2,
-    HistoricalQuantile = 3,
+    FrozenReferenceQuantile = 3,
 }
 
 impl ChNormalizationSource {
@@ -265,7 +233,7 @@ impl ChNormalizationSource {
         match self {
             Self::CrossSection => "cross_section",
             Self::PerMarket => "per_market",
-            Self::HistoricalQuantile => "historical_quantile",
+            Self::FrozenReferenceQuantile => "frozen_reference_quantile",
         }
     }
 
@@ -275,7 +243,7 @@ impl ChNormalizationSource {
         match label {
             "cross_section" => Some(Self::CrossSection),
             "per_market" => Some(Self::PerMarket),
-            "historical_quantile" => Some(Self::HistoricalQuantile),
+            "frozen_reference_quantile" => Some(Self::FrozenReferenceQuantile),
             _ => None,
         }
     }
@@ -293,6 +261,47 @@ pub enum ChFeatureValueKind {
     Category = 6,
 }
 
+impl ChFeatureValueKind {
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Decimal => "decimal",
+            Self::Probability => "probability",
+            Self::Bps => "bps",
+            Self::Usd => "usd",
+            Self::Count => "count",
+            Self::Bool => "bool",
+            Self::Category => "category",
+        }
+    }
+}
+
+/// Semantic state of one persisted feature cell.
+///
+/// The numeric codes are an append-only `ClickHouse` wire contract. A feature
+/// event is emitted for every state; absence of a row is never used to encode
+/// missingness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChFeatureCellState {
+    Observed = 1,
+    Substituted = 2,
+    Missing = 3,
+    NotApplicable = 4,
+}
+
+impl ChFeatureCellState {
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Substituted => "substituted",
+            Self::Missing => "missing",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChFeatureSourceKind {
@@ -302,6 +311,7 @@ pub enum ChFeatureSourceKind {
     TradeTape = 4,
     Derived = 5,
     DomainExternal = 6,
+    Linkage = 7,
 }
 
 impl ChFeatureSourceKind {
@@ -314,6 +324,7 @@ impl ChFeatureSourceKind {
             Self::TradeTape => "trade_tape",
             Self::Derived => "derived",
             Self::DomainExternal => "domain_external",
+            Self::Linkage => "linkage",
         }
     }
 
@@ -327,6 +338,7 @@ impl ChFeatureSourceKind {
             "trade_tape" => Some(Self::TradeTape),
             "derived" => Some(Self::Derived),
             "domain_external" => Some(Self::DomainExternal),
+            "linkage" => Some(Self::Linkage),
             _ => None,
         }
     }
@@ -335,8 +347,8 @@ impl ChFeatureSourceKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChExitSignalEvaluatorKind, ChExitSignalVerdict, ChFeatureSourceKind, ChFeatureValueKind,
-        ChNormalizationSource, ChQuantLedgerEventKind,
+        ChExitSignalEvaluatorKind, ChExitSignalVerdict, ChFeatureCellState, ChFeatureSourceKind,
+        ChFeatureValueKind, ChNormalizationSource, ChQuantLedgerEventKind,
     };
 
     #[test]
@@ -350,6 +362,7 @@ mod tests {
 
     #[test]
     fn feature_kind_codes_are_stable() {
+        assert_eq!(ChFeatureCellState::Missing as i8, 3);
         assert_eq!(
             ChFeatureValueKind::from_i8(1),
             Some(ChFeatureValueKind::Probability)
@@ -357,6 +370,11 @@ mod tests {
         assert_eq!(
             ChFeatureSourceKind::from_wire("clickhouse_fact"),
             Some(ChFeatureSourceKind::ClickHouseFact)
+        );
+        assert_eq!(ChFeatureSourceKind::Linkage as i8, 7);
+        assert_eq!(
+            ChFeatureSourceKind::from_wire("linkage"),
+            Some(ChFeatureSourceKind::Linkage)
         );
     }
 
@@ -367,8 +385,8 @@ mod tests {
             "cross_section"
         );
         assert_eq!(
-            ChNormalizationSource::from_wire("historical_quantile"),
-            Some(ChNormalizationSource::HistoricalQuantile)
+            ChNormalizationSource::from_wire("frozen_reference_quantile"),
+            Some(ChNormalizationSource::FrozenReferenceQuantile)
         );
     }
 

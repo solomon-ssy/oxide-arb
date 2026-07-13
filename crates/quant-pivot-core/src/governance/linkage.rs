@@ -7,21 +7,20 @@
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
-use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult, governance::GovernanceError, storage::StorageError,
+};
 use quant_pivot_models::{
     domain::{
         LinkageOutcome, LinkageResolveSummaryView, LinkageSourceMetadata, MarketInfo,
-        MarketLinkage, MarketLinkageInfo, MarketSubject, OverrideContext, OverrideLinkageRequest,
-        ResolvedBinding,
+        MarketLinkageDerivation, MarketLinkageGovernancePort, MarketLinkageInfo, MarketSubject,
+        NewMarketLinkage, OverrideContext, OverrideLinkageRequest, ResolvedBinding,
     },
     enums::{
         common::MarketCategory,
-        domain::{DomainFamily, LinkageStatus, ResolverTier},
+        domain::{LinkageStatus, ResolverTier},
     },
-    types::{
-        ContentHash, DomainInstrumentKey, EventId, MarketId, MarketLinkageId, Probability,
-        ResolverVersion,
-    },
+    types::{ContentHash, DomainInstrumentKey, EventId, MarketId, Probability, ResolverVersion},
 };
 use quant_pivot_repository::traits::{EventRepository, MarketLinkageRepository, MarketRepository};
 use quant_pivot_research::linkage::{LayeredResolver, ResolutionResult, validate_manual_override};
@@ -65,14 +64,10 @@ impl LinkageResolverService {
     ) -> QuantResult<MarketLinkageInfo> {
         let metadata_hash = metadata.metadata_hash()?;
         let result = self.resolver.resolve(&metadata)?;
-        let linkage = resolution_to_linkage(&metadata, metadata_hash, result, Utc::now())?;
+        let linkage = resolution_to_new_linkage(&metadata, metadata_hash, result, Utc::now())?;
         self.deps
             .linkage_repo
-            .append(
-                linkage
-                    .to_new()
-                    .map_err(|error| QuantError::config(error.to_string()))?,
-            )
+            .append(linkage)
             .await
             .map_err(QuantError::from)
     }
@@ -90,7 +85,11 @@ impl LinkageResolverService {
         market_ids: &[MarketId],
     ) -> QuantResult<LinkageResolveSummaryView> {
         let markets = self.load_crypto_markets(market_ids).await?;
-        let examined = u64::try_from(markets.len()).unwrap_or(u64::MAX);
+        let examined =
+            u64::try_from(markets.len()).map_err(|error| GovernanceError::NumericOverflow {
+                field: "linkage resolver market count",
+                detail: error.to_string(),
+            })?;
         if markets.is_empty() {
             return Ok(LinkageResolveSummaryView {
                 examined: 0,
@@ -164,7 +163,7 @@ impl LinkageResolverService {
     /// The real audit trail is [`ResolvedBinding::override_context`]
     /// (`reason` + `actor`), persisted both inside `outcome` and projected
     /// into the ledger's first-class `override_reason` / `override_actor`
-    /// columns (via [`MarketLinkage::to_new`]) — never discarded.
+    /// columns (via [`NewMarketLinkage::from_derivation`]) — never discarded.
     ///
     /// # Errors
     ///
@@ -210,7 +209,6 @@ impl LinkageResolverService {
             &request.evidence,
         )
         .map_err(QuantError::config)?;
-        let domain_family = subject.family();
         let outcome = LinkageOutcome::Resolved(ResolvedBinding {
             subject,
             instrument_key,
@@ -221,39 +219,19 @@ impl LinkageResolverService {
             }),
         });
         let resolver_version = self.resolver.resolver_version();
-        let content_hash = MarketLinkage::compute_content_hash(
-            market_id,
-            domain_family,
-            &outcome,
-            ResolverTier::Override,
-            resolver_version,
-            &metadata_hash,
-        )?;
-        let derived_at = Utc::now();
-        let linkage = MarketLinkage {
-            linkage_id: MarketLinkageId::from_v7(),
+        let effective_at = Utc::now();
+        let linkage = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: market_id.clone(),
-            domain_family,
             outcome,
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Override,
             resolver_version,
             metadata_hash,
-            content_hash,
-            derived_at,
-            // Inert placeholder — the database assigns the authoritative
-            // `created_at` on insert (`NewMarketLinkage` excludes this
-            // column); only a value reloaded through `into_domain` ever
-            // participates in a PIT tie-break.
-            created_at: derived_at,
-        };
+            effective_at,
+        })?;
         self.deps
             .linkage_repo
-            .append(
-                linkage
-                    .to_new()
-                    .map_err(|error| QuantError::config(error.to_string()))?,
-            )
+            .append(linkage)
             .await
             .map_err(QuantError::from)
     }
@@ -325,46 +303,25 @@ fn is_current(
     })
 }
 
-fn resolution_to_linkage(
+fn resolution_to_new_linkage(
     metadata: &LinkageSourceMetadata,
     metadata_hash: ContentHash,
     result: ResolutionResult,
-    derived_at: chrono::DateTime<Utc>,
-) -> QuantResult<MarketLinkage> {
-    let domain_family = domain_family_for(&result);
-    let content_hash = MarketLinkage::compute_content_hash(
-        &metadata.market_id,
-        domain_family,
-        &result.outcome,
-        result.resolver_tier,
-        result.resolver_version,
-        &metadata_hash,
-    )?;
-    Ok(MarketLinkage {
-        linkage_id: MarketLinkageId::from_v7(),
+    effective_at: chrono::DateTime<Utc>,
+) -> QuantResult<NewMarketLinkage> {
+    NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id: metadata.market_id.clone(),
-        domain_family,
         outcome: result.outcome,
         confidence: result.confidence,
         resolver_tier: result.resolver_tier,
         resolver_version: result.resolver_version,
         metadata_hash,
-        content_hash,
-        derived_at,
-        // Inert placeholder — see the override construction site above.
-        created_at: derived_at,
+        effective_at,
     })
 }
 
-const fn domain_family_for(result: &ResolutionResult) -> DomainFamily {
-    match &result.outcome {
-        LinkageOutcome::Resolved(binding) => binding.subject.family(),
-        LinkageOutcome::Unresolved { .. } => DomainFamily::Crypto,
-    }
-}
-
 #[async_trait::async_trait]
-impl quant_pivot_models::domain::MarketLinkageGovernancePort for LinkageResolverService {
+impl MarketLinkageGovernancePort for LinkageResolverService {
     async fn resolve_changed_markets(
         &self,
         market_ids: &[MarketId],

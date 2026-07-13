@@ -53,8 +53,9 @@ pub struct ComposeReportInput<'a> {
     pub trigger: &'a ReportTrigger,
     pub trigger_key: String,
     pub trigger_time: DateTime<Utc>,
-    pub source_delay_secs: u64,
-    pub as_of: DateTime<Utc>,
+    pub knowledge_lag_secs: u64,
+    pub decision_at: DateTime<Utc>,
+    pub published_at: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub runtime_config: &'a RuntimeConfig,
     pub runtime_mode: QuantRuntimeMode,
@@ -129,7 +130,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         // horizon so it still ages out.
         let report_valid_until = match recommendations.iter().map(|rec| rec.valid_until).max() {
             Some(max) => max,
-            None => as_of_plus_secs(input.as_of, fallback_horizon_secs)?,
+            None => instant_plus_secs(input.decision_at, fallback_horizon_secs)?,
         };
 
         let status = if recommendations.is_empty() {
@@ -137,10 +138,10 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         } else {
             RecommendationReportStatus::Published
         };
-        let summary = report_summary(&input, &recommendations);
+        let summary = report_summary(&input, &recommendations)?;
         // Build the notification before `summary` / `recommendations` move below.
         let notification =
-            report_notification(&report_id, status, &input, &summary, &recommendations);
+            report_notification(&report_id, status, &input, &summary, &recommendations)?;
 
         let account_snapshot_id = input.account_snapshot.account_snapshot_id.clone();
         let equity_snapshot_id = input.equity_snapshot.equity_snapshot_id.clone();
@@ -150,10 +151,10 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             trigger_kind: input.trigger.kind(),
             trigger_key: input.trigger_key.clone(),
             trigger_time: input.trigger_time,
-            source_delay_secs: i64::try_from(input.source_delay_secs).map_err(|error| {
-                QuantError::config(format!("source_delay_secs too large: {error}"))
+            knowledge_lag_secs: i64::try_from(input.knowledge_lag_secs).map_err(|error| {
+                QuantError::config(format!("knowledge_lag_secs too large: {error}"))
             })?,
-            as_of: input.as_of,
+            decision_at: input.decision_at,
             // Informational nominal horizon: the governed fallback (per-rec
             // horizons are data-driven and live on each recommendation).
             horizon_secs: i64::try_from(fallback_horizon_secs).map_err(|error| {
@@ -161,6 +162,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             })?,
             runtime_mode: input.runtime_mode,
             runtime_config_version_id: input.runtime_config_version_id.clone(),
+            model_run_id: input.model_run_id.clone(),
             model_version_id: input.model_version_id.clone(),
             market_selection_id: input.market_selection_id.clone(),
             portfolio_plan_id: input.portfolio_plan.portfolio_plan_id.clone(),
@@ -174,7 +176,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             equity_snapshot_ref: equity_snapshot_id,
             data_quality_snapshot_ref,
             summary_json: summary,
-            published_at: Some(input.trigger_time),
+            published_at: Some(input.published_at),
             // Roll-up of recommendation validity (data-driven), frozen at publish.
             valid_until: Some(report_valid_until),
             revoked_at: None,
@@ -185,16 +187,18 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 .map(|empty| empty.reason.as_str().to_owned()),
         };
         let operation_log = operation_log(&report_id, &input, status, &report)?;
-        let ch_rows = recommendation_events(&report_id, &recommendations, input.trigger_time);
+        let ch_rows = recommendation_events(&report_id, &recommendations, input.published_at)?;
 
         Ok(ComposedReport {
             transaction: NewReportTransaction {
+                feature_parity_state_id: None,
                 account_snapshot: input.account_snapshot,
                 equity_snapshot: input.equity_snapshot,
                 data_quality_snapshot: input.data_quality_snapshot,
                 portfolio_plan: input.portfolio_plan,
                 report,
                 recommendations,
+                sampled_feature_parity: None,
                 operation_log,
             },
             ch_rows,
@@ -205,17 +209,20 @@ impl RecommendationComposer for DefaultRecommendationComposer {
     }
 }
 
-/// `as_of + secs`, failing closed on overflow.
-fn as_of_plus_secs(as_of: DateTime<Utc>, secs: u64) -> QuantResult<DateTime<Utc>> {
+/// `instant + secs`, failing closed on overflow.
+fn instant_plus_secs(instant: DateTime<Utc>, secs: u64) -> QuantResult<DateTime<Utc>> {
     let secs = i64::try_from(secs)
         .map_err(|error| QuantError::config(format!("horizon seconds too large: {error}")))?;
-    Ok(as_of + Duration::seconds(secs))
+    instant
+        .checked_add_signed(Duration::seconds(secs))
+        .ok_or_else(|| QuantError::config("horizon deadline is outside chrono range"))
 }
 
 /// Per-recommendation effective horizon (seconds): the model's frozen prediction
 /// horizon (`suggested_horizon_secs`), falling back to the governed default when
 /// the model supplies none (classical / non-ML runs), capped by the market's
-/// time-to-resolution hard wall. Never zero.
+/// time-to-resolution hard wall. A zero result means there is no actionable
+/// prediction window and must be rejected by the caller.
 const fn effective_horizon_secs(
     candidate: &SignalCandidate,
     capture: &MarketDecisionCapture,
@@ -229,7 +236,7 @@ const fn effective_horizon_secs(
 }
 
 /// Pure core of [`effective_horizon_secs`]: the model horizon (or the governed
-/// fallback when absent) capped by the market's time-to-resolution, floored at 1s.
+/// fallback when absent) capped by the market's time-to-resolution.
 const fn effective_horizon_from(
     suggested_horizon_secs: u64,
     time_to_resolution_secs: Option<u64>,
@@ -240,20 +247,35 @@ const fn effective_horizon_from(
     } else {
         fallback_horizon_secs
     };
-    let capped = match time_to_resolution_secs {
+    match time_to_resolution_secs {
         Some(ttr) if ttr < base => ttr,
         _ => base,
-    };
-    if capped == 0 { 1 } else { capped }
+    }
 }
 
 /// Entry-window length (seconds) = `effective_horizon * entry_window_ratio`,
 /// rounded, floored at 1s — the recommendation accepts new entries only while at
 /// least `ratio` of the signal's edge horizon remains (the half-life point at
 /// `ratio = 0.5`). The exit / time-stop still uses the full effective horizon.
-fn entry_window_secs(effective_horizon_secs: u64, entry_window_ratio: Decimal) -> u64 {
+fn entry_window_secs(effective_horizon_secs: u64, entry_window_ratio: Decimal) -> QuantResult<u64> {
+    if effective_horizon_secs == 0 {
+        return Err(ReportError::InvariantViolation {
+            stage: "compose",
+            detail: "recommendation has no actionable prediction horizon".to_owned(),
+        }
+        .into());
+    }
+    if entry_window_ratio <= Decimal::ZERO || entry_window_ratio > Decimal::ONE {
+        return Err(QuantError::config(
+            "reports.entry_window_ratio must be in (0, 1]",
+        ));
+    }
     let secs = (Decimal::from(effective_horizon_secs) * entry_window_ratio).round();
-    secs.to_u64().unwrap_or(effective_horizon_secs).max(1)
+    let secs = secs.to_u64().ok_or_else(|| ReportError::NumericOverflow {
+        field: "recommendation.entry_window_secs",
+        detail: format!("cannot represent rounded window {secs} as u64"),
+    })?;
+    Ok(secs.max(1))
 }
 
 /// Build the operator-notification payload from the composed report parts.
@@ -263,13 +285,18 @@ fn report_notification(
     input: &ComposeReportInput<'_>,
     summary: &ReportSummary,
     recommendations: &[NewRecommendation],
-) -> ReportNotificationPayload {
-    ReportNotificationPayload {
+) -> QuantResult<ReportNotificationPayload> {
+    Ok(ReportNotificationPayload {
         report_id: report_id.clone(),
         kind: ReportKind::TopN,
         status: status.as_str().to_owned(),
         runtime_mode: input.runtime_mode,
-        published_count: u32::try_from(recommendations.len()).unwrap_or(u32::MAX),
+        published_count: u32::try_from(recommendations.len()).map_err(|error| {
+            ReportError::NumericOverflow {
+                field: "report.notification.published_count",
+                detail: error.to_string(),
+            }
+        })?,
         total_suggested_usd: summary.total_suggested_usd,
         top3: recommendations
             .iter()
@@ -283,7 +310,7 @@ fn report_notification(
             .collect(),
         warnings: summary.warnings.clone(),
         empty_reason: input.empty.as_ref().map(|empty| empty.reason),
-    }
+    })
 }
 
 fn compose_recommendation(
@@ -306,9 +333,11 @@ fn compose_recommendation(
     })?;
 
     let horizon_secs = effective_horizon_secs(candidate, capture, fallback_horizon_secs);
-    let valid_until = as_of_plus_secs(
-        input.as_of,
-        entry_window_secs(horizon_secs, entry_window_ratio),
+    let valid_until = actionable_valid_until(
+        input.decision_at,
+        input.published_at,
+        entry_window_secs(horizon_secs, entry_window_ratio)?,
+        &candidate.market_id,
     )?;
     let compose_context = resolve_compose_context(candidate, input)?;
     let auto_gate = calibrated_auto_execution_gate(
@@ -334,6 +363,26 @@ fn compose_recommendation(
         risk_envelope,
     };
     build_new_recommendation(assembly)
+}
+
+fn actionable_valid_until(
+    decision_at: DateTime<Utc>,
+    published_at: DateTime<Utc>,
+    entry_window_secs: u64,
+    market_id: &MarketId,
+) -> QuantResult<DateTime<Utc>> {
+    let valid_until = instant_plus_secs(decision_at, entry_window_secs)?;
+    if valid_until <= published_at {
+        return Err(ReportError::InvariantViolation {
+            stage: "compose",
+            detail: format!(
+                "recommendation market {market_id} has no actionable entry window at \
+                 publication: published_at={published_at} valid_until={valid_until}"
+            ),
+        }
+        .into());
+    }
+    Ok(valid_until)
 }
 
 fn resolve_compose_context(
@@ -449,11 +498,16 @@ fn build_new_recommendation(
         liquidity_score: candidate.liquidity_score,
         data_quality_score: candidate.data_quality_score,
         model_score_percentile: candidate.model_score_percentile,
-        entry_plan: derive_entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
+        entry_plan: derive_entry_plan(
+            candidate,
+            input.published_at,
+            valid_until,
+            input.runtime_config,
+        )?,
         sizing_plan: planned.sizing.clone(),
         exit_plan: exit_plan(
             candidate,
-            input.as_of,
+            input.decision_at,
             input.runtime_config,
             horizon_secs,
             capture.market_context.time_to_resolution_secs,
@@ -472,7 +526,7 @@ fn build_new_recommendation(
             data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
         }),
         execution_eligibility: execution_eligibility(auto_gate, input.return_model_calibrated),
-        valid_from: input.as_of,
+        valid_from: input.published_at,
         valid_until,
         status: RecommendationStatus::Published,
     })
@@ -522,7 +576,7 @@ fn exit_plan(
         (candidate.entry_price_ref.inner() * (Decimal::ONE - loss))
             .clamp(Decimal::ZERO, Decimal::ONE),
     );
-    let time_exit_at = as_of_plus_secs(as_of, horizon_secs)?;
+    let time_exit_at = instant_plus_secs(as_of, horizon_secs)?;
 
     // Origination of the hold-to-resolution + auto-redeem lifecycle: when the
     // market resolves within the governed window, forcing an on-book time-exit
@@ -745,7 +799,7 @@ fn compute_aggregate_exposure_cap_usd(
 fn report_summary(
     input: &ComposeReportInput<'_>,
     recommendations: &[NewRecommendation],
-) -> ReportSummary {
+) -> QuantResult<ReportSummary> {
     let mut category_allocation: BTreeMap<MarketCategory, Usd> = BTreeMap::new();
     let mut event_allocation: BTreeMap<EventId, Usd> = BTreeMap::new();
     for rec in recommendations {
@@ -782,14 +836,31 @@ fn report_summary(
         }
     });
 
-    ReportSummary {
+    let planner_rejected_count = u32::try_from(input.planner_rejected.len()).map_err(|error| {
+        ReportError::NumericOverflow {
+            field: "report.summary.planner_rejected_count",
+            detail: error.to_string(),
+        }
+    })?;
+    let rejected_count = input
+        .feature_rejected_count
+        .checked_add(planner_rejected_count)
+        .and_then(|count| count.checked_add(empty_rejected_count))
+        .ok_or_else(|| ReportError::NumericOverflow {
+            field: "report.summary.rejected_count",
+            detail: "feature, planner, and empty rejection counts exceed u32".to_owned(),
+        })?;
+    let published_recommendation_count =
+        u32::try_from(recommendations.len()).map_err(|error| ReportError::NumericOverflow {
+            field: "report.summary.published_recommendation_count",
+            detail: error.to_string(),
+        })?;
+
+    Ok(ReportSummary {
         market_selection_count: input.market_selection_count,
         candidate_count: input.candidate_count,
-        rejected_count: input
-            .feature_rejected_count
-            .saturating_add(u32::try_from(input.planner_rejected.len()).unwrap_or(u32::MAX))
-            .saturating_add(empty_rejected_count),
-        published_recommendation_count: u32::try_from(recommendations.len()).unwrap_or(u32::MAX),
+        rejected_count,
+        published_recommendation_count,
         total_suggested_usd,
         max_single_recommendation_usd,
         aggregate_exposure_cap_usd: aggregate_exposure_cap_usd(input),
@@ -806,7 +877,7 @@ fn report_summary(
             .empty
             .as_ref()
             .map_or_else(Vec::new, |empty| empty.warnings.clone()),
-    }
+    })
 }
 
 fn confidence_summary(recommendations: &[NewRecommendation]) -> ConfidenceSummary {
@@ -887,22 +958,28 @@ fn recommendation_events(
     report_id: &RecommendationReportId,
     recommendations: &[NewRecommendation],
     event_time: DateTime<Utc>,
-) -> Vec<QuantRecommendationEventRow> {
+) -> QuantResult<Vec<QuantRecommendationEventRow>> {
     recommendations
         .iter()
-        .map(|rec| QuantRecommendationEventRow {
-            event_time: event_time.timestamp_millis(),
-            recommendation_report_id: report_id.clone(),
-            recommendation_id: rec.recommendation_id.clone(),
-            rank: u32::try_from(rec.rank).unwrap_or(0),
-            market_id: rec.market_id.clone(),
-            token_id: rec.token_id.clone(),
-            side: rec.outcome_side.into(),
-            score: ChProbability::from(rec.composite_score),
-            risk_adjusted_score: ChProbability::from(rec.risk_adjusted_score),
-            suggested_usd: ChUsd::from(rec.sizing_plan.suggested_usd),
-            valid_until: rec.valid_until.timestamp_millis(),
-            status: rec.status.into(),
+        .map(|rec| {
+            let rank = u32::try_from(rec.rank).map_err(|error| ReportError::NumericOverflow {
+                field: "recommendation.rank",
+                detail: error.to_string(),
+            })?;
+            Ok(QuantRecommendationEventRow {
+                event_time: event_time.timestamp_millis(),
+                recommendation_report_id: report_id.clone(),
+                recommendation_id: rec.recommendation_id.clone(),
+                rank,
+                market_id: rec.market_id.clone(),
+                token_id: rec.token_id.clone(),
+                side: rec.outcome_side.into(),
+                score: ChProbability::from(rec.composite_score),
+                risk_adjusted_score: ChProbability::from(rec.risk_adjusted_score),
+                suggested_usd: ChUsd::from(rec.sizing_plan.suggested_usd),
+                valid_until: rec.valid_until.timestamp_millis(),
+                status: rec.status.into(),
+            })
         })
         .collect()
 }
@@ -934,7 +1011,8 @@ fn operation_log(
             "trigger_key": input.trigger_key,
             "trigger_kind": input.trigger.kind().as_str(),
             "status": status.as_str(),
-            "as_of": input.as_of.to_rfc3339(),
+            "decision_at": input.decision_at.to_rfc3339(),
+            "published_at": input.published_at.to_rfc3339(),
             "candidate_count": input.candidate_count,
             "published_count": input.planned.len(),
             "empty_reason": input.empty.as_ref().map(|empty| empty.reason.as_str()),
@@ -956,42 +1034,50 @@ fn empty_portfolio_plan(
     account: &AccountSnapshot,
     config: &RuntimeConfig,
     rejected_summary: PortfolioRejectedSummary,
-) -> NewPortfolioPlan {
-    let total_budget = Usd::new(parse_decimal_lossless(
+) -> QuantResult<NewPortfolioPlan> {
+    let total_budget = Usd::new(parse_decimal(
+        "portfolio.budget.total_budget_usd",
         &config.portfolio.budget.total_budget_usd.value,
-    ));
+    )?);
     let constraints = PortfolioConstraintsSnapshot {
-        max_market_exposure_usd: Usd::new(parse_decimal_lossless(
+        max_market_exposure_usd: Usd::new(parse_decimal(
+            "portfolio.constraints.max_market_exposure_usd",
             &config.portfolio.constraints.max_market_exposure_usd.value,
-        )),
-        max_event_exposure_usd: Usd::new(parse_decimal_lossless(
+        )?),
+        max_event_exposure_usd: Usd::new(parse_decimal(
+            "portfolio.constraints.max_event_exposure_usd",
             &config.portfolio.constraints.max_event_exposure_usd.value,
-        )),
-        max_category_exposure_usd: Usd::new(parse_decimal_lossless(
+        )?),
+        max_category_exposure_usd: Usd::new(parse_decimal(
+            "portfolio.constraints.max_category_exposure_usd",
             &config.portfolio.constraints.max_category_exposure_usd.value,
-        )),
-        max_correlated_exposure_usd: Usd::new(parse_decimal_lossless(
+        )?),
+        max_correlated_exposure_usd: Usd::new(parse_decimal(
+            "portfolio.constraints.max_correlated_exposure_usd",
             &config
                 .portfolio
                 .constraints
                 .max_correlated_exposure_usd
                 .value,
-        )),
-        max_single_recommendation_usd: Usd::new(parse_decimal_lossless(
+        )?),
+        max_single_recommendation_usd: Usd::new(parse_decimal(
+            "portfolio.budget.max_single_recommendation_usd",
             &config.portfolio.budget.max_single_recommendation_usd.value,
-        )),
-        min_recommendation_usd: Usd::new(parse_decimal_lossless(
+        )?),
+        min_recommendation_usd: Usd::new(parse_decimal(
+            "portfolio.budget.min_recommendation_usd",
             &config.portfolio.budget.min_recommendation_usd.value,
-        )),
-        liquidity_usage_cap_pct: parse_decimal_lossless(
+        )?),
+        liquidity_usage_cap_pct: parse_decimal(
+            "portfolio.constraints.liquidity_usage_cap_pct",
             &config.portfolio.constraints.liquidity_usage_cap_pct.value,
-        ),
+        )?,
     };
-    NewPortfolioPlan {
+    Ok(NewPortfolioPlan {
         portfolio_plan_id,
         model_run_id,
         market_selection_id,
-        as_of,
+        decision_at: as_of,
         budget_usd: total_budget,
         allocated_usd: Usd::ZERO,
         risk_budget_json: PortfolioRiskBudget {
@@ -1004,7 +1090,7 @@ fn empty_portfolio_plan(
         constraints_json: constraints,
         rejected_summary,
         optimizer_meta_json: PortfolioOptimizerMeta::default(),
-    }
+    })
 }
 
 pub(super) fn empty_plan_for_report(
@@ -1015,7 +1101,7 @@ pub(super) fn empty_plan_for_report(
     config: &RuntimeConfig,
     reason: EmptyReportReason,
     rejected_count: u32,
-) -> NewPortfolioPlan {
+) -> QuantResult<NewPortfolioPlan> {
     empty_portfolio_plan(
         PortfolioPlanId::from_v7(),
         model_run_id,
@@ -1052,10 +1138,6 @@ fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
         .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
 }
 
-fn parse_decimal_lossless(value: &str) -> Decimal {
-    value.trim().parse::<Decimal>().unwrap_or(Decimal::ZERO)
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
@@ -1084,10 +1166,10 @@ mod tests {
 
     use super::{
         ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer,
-        auto_execution_gate, effective_horizon_from, empty_plan_for_report, entry_window_secs,
-        execution_eligibility, exit_plan,
+        actionable_valid_until, auto_execution_gate, effective_horizon_from, empty_plan_for_report,
+        entry_window_secs, execution_eligibility, exit_plan,
     };
-    use crate::report::types::ReportTrigger;
+    use crate::report::{composer::compute_aggregate_exposure_cap_usd, types::ReportTrigger};
 
     #[test]
     fn effective_horizon_uses_model_horizon_capped_by_resolution() {
@@ -1104,24 +1186,86 @@ mod tests {
         // suggested == 0 (classical run) -> governed fallback, still capped.
         assert_eq!(effective_horizon_from(0, Some(86_400), 7_200), 7_200);
         assert_eq!(effective_horizon_from(0, Some(900), 7_200), 900);
-        // Never zero (a market at/after resolution still yields a 1s floor).
-        assert_eq!(effective_horizon_from(0, Some(0), 7_200), 1);
+        // A market at/after resolution has no actionable model horizon.
+        assert_eq!(effective_horizon_from(0, Some(0), 7_200), 0);
     }
 
     #[test]
     fn entry_window_is_the_ratio_slice_of_the_horizon() {
         // Default 0.5 ratio -> enter within the first half (the half-life point).
-        assert_eq!(entry_window_secs(3_600, dec!(0.5)), 1_800);
+        assert_eq!(entry_window_secs(3_600, dec!(0.5)).expect("window"), 1_800);
         // Full ratio -> entry valid across the whole horizon.
-        assert_eq!(entry_window_secs(3_600, dec!(1.0)), 3_600);
+        assert_eq!(entry_window_secs(3_600, dec!(1.0)).expect("window"), 3_600);
         // Rounds and floors at 1s.
-        assert_eq!(entry_window_secs(1, dec!(0.5)), 1);
+        assert_eq!(entry_window_secs(1, dec!(0.5)).expect("window"), 1);
+        assert!(entry_window_secs(0, dec!(0.5)).is_err());
+    }
+
+    #[test]
+    fn empty_plan_rejects_invalid_budget_instead_of_substituting_zero() {
+        let as_of = Utc
+            .with_ymd_and_hms(2026, 7, 10, 12, 0, 0)
+            .single()
+            .expect("valid time");
+        let account = AccountSnapshot::new(
+            as_of,
+            AccountSource::Polymarket,
+            Usd::new(dec!(10_000)),
+            Usd::new(dec!(10_000)),
+            Usd::new(dec!(10_000)),
+            Usd::ZERO,
+            Vec::new(),
+        );
+        let mut config = RuntimeConfig::default();
+        config.portfolio.budget.total_budget_usd.value = "not-a-decimal".to_owned();
+
+        assert!(
+            empty_plan_for_report(
+                None,
+                MarketSelectionId::from_v7(),
+                as_of,
+                &account,
+                &config,
+                EmptyReportReason::NoPositiveSignal,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validity_is_anchored_to_decision_and_opens_at_publication() {
+        let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let published_at = decision_at + Duration::seconds(30);
+        let market_id = MarketId::new("0xmarket");
+
+        let valid_until = actionable_valid_until(decision_at, published_at, 1_800, &market_id)
+            .expect("actionable window");
+
+        assert_eq!(valid_until, decision_at + Duration::seconds(1_800));
+        assert_ne!(valid_until, published_at + Duration::seconds(1_800));
+    }
+
+    #[test]
+    fn publication_after_prediction_window_fails_closed() {
+        let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let market_id = MarketId::new("0xmarket");
+
+        assert!(
+            actionable_valid_until(
+                decision_at,
+                decision_at + Duration::seconds(1_800),
+                1_800,
+                &market_id,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn aggregate_exposure_cap_usd_matches_lp_gate() {
         assert_eq!(
-            super::compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0.25)),
+            compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0.25)),
             Some(Usd::new(dec!(2500))),
             "capital_base_usd × pct, rounded to cent precision"
         );
@@ -1130,12 +1274,12 @@ mod tests {
     #[test]
     fn aggregate_exposure_cap_usd_none_when_pct_disabled() {
         assert_eq!(
-            super::compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0)),
+            compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(0)),
             None,
             "pct <= 0 must report no cap, never a fabricated 0 cap"
         );
         assert_eq!(
-            super::compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(-1)),
+            compute_aggregate_exposure_cap_usd(dec!(10_000), dec!(-1)),
             None
         );
     }
@@ -1143,12 +1287,12 @@ mod tests {
     #[test]
     fn aggregate_exposure_cap_usd_none_when_capital_base_non_positive() {
         assert_eq!(
-            super::compute_aggregate_exposure_cap_usd(dec!(0), dec!(0.25)),
+            compute_aggregate_exposure_cap_usd(dec!(0), dec!(0.25)),
             None,
             "a non-positive capital base must never report a fabricated cap"
         );
         assert_eq!(
-            super::compute_aggregate_exposure_cap_usd(dec!(-500), dec!(0.25)),
+            compute_aggregate_exposure_cap_usd(dec!(-500), dec!(0.25)),
             None
         );
     }
@@ -1178,7 +1322,7 @@ mod tests {
             liquidity_score: Probability::ZERO,
             data_quality_score: Probability::ZERO,
             model_score_percentile: Probability::ZERO,
-            as_of: Utc
+            decision_at: Utc
                 .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
                 .single()
                 .expect("valid time"),
@@ -1400,10 +1544,11 @@ mod tests {
             &config,
             EmptyReportReason::NoPositiveSignal,
             0,
-        );
+        )
+        .expect("valid empty portfolio plan");
         let data_quality_snapshot = NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
-            as_of,
+            decision_at: as_of,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         };
@@ -1440,8 +1585,9 @@ mod tests {
             },
             trigger_key: "ad_hoc:compose-test".to_owned(),
             trigger_time,
-            source_delay_secs: 0,
-            as_of,
+            knowledge_lag_secs: 0,
+            decision_at: as_of,
+            published_at: trigger_time,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             runtime_config: &config,
             runtime_mode: QuantRuntimeMode::ReportOnly,

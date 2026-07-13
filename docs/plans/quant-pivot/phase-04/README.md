@@ -53,7 +53,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    Fire["Schedule Fire (as_of = trigger - source_delay)"] --> Freeze["Freeze RuntimeConfig version"]
+    Fire["Schedule Fire (as_of = trigger - knowledge_lag)"] --> Freeze["Freeze RuntimeConfig version"]
     Freeze --> Sel["MarketSelector.build_snapshot"]
     Sel --> Feat["FeaturePipelineService.run"]
     Feat --> Model["ModelRunner.run → accepted: Vec&lt;SignalCandidate&gt;"]
@@ -188,7 +188,7 @@ flowchart LR
    **Phase 5**（§6 标注，04.4 接口返回明确延后语义）。
 6. **零兼容、零 re-export**；`f64` 仅允许出现在 Kelly/曲线的中间数值边界，禁止泄漏到
    money domain（`Usd` / `Price` / `Shares` / `Probability`）。
-7. **报告调度硬规则**：`as_of` 永不裸 `Utc::now()`（= trigger − source_delay）；整轮
+7. **报告调度硬规则**：`as_of` 永不裸 `Utc::now()`（= trigger − knowledge_lag）；整轮
    pipeline 使用**同一** `runtime_config_version_id` 冻结快照；报告失败不得 panic 或
    拖垮 ingest；报告成功不得直接下单（仍走 Phase 5 mode gate）。
 

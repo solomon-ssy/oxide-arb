@@ -24,8 +24,8 @@ use rust_decimal::Decimal;
 
 /// A pre-fetched, PIT-bounded window of observations for one instrument.
 ///
-/// All observations satisfy `observed_at <= cutoff` (the `as_of - source_delay`
-/// visibility bound) and are ascending by `observed_at`.
+/// All observations satisfy the source cutoff frozen in the decision boundary
+/// and are ascending by `observed_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DomainObservationWindow {
     /// Upper visibility bound the window was fetched under.

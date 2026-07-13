@@ -10,6 +10,7 @@
 use std::f64::consts::LN_2;
 
 use ndarray::Array1;
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
@@ -113,36 +114,55 @@ pub fn vol_adjusted(simple_return_value: Decimal, realized_vol: Decimal) -> Opti
 /// fixed point-count span would smooth over wildly different time horizons on a
 /// dense vs. a sparse book.
 ///
-/// `samples` must be ascending by time (non-monotonic gaps clamp to zero). The
+/// `samples` must be ascending by time. A non-monotonic timestamp is a typed
+/// determinism failure; it is never treated as a simultaneous observation. The
 /// transcendental (`exp`) crosses into `f64`, then every output is quantized to
 /// [`STAT_SCALE`] so the series is deterministic across platforms. `None` for an
 /// empty series or a zero half-life. The first sample seeds the series exactly.
-#[must_use]
-pub fn ema_time_decayed(samples: &[(i64, Decimal)], halflife_secs: u64) -> Option<Vec<Decimal>> {
+///
+/// # Errors
+///
+/// Returns a determinism error for non-monotonic timestamps, overflowing time
+/// differences, non-finite arithmetic, or an unrepresentable numeric conversion.
+pub fn ema_time_decayed(
+    samples: &[(i64, Decimal)],
+    halflife_secs: u64,
+) -> QuantResult<Option<Vec<Decimal>>> {
     if samples.is_empty() || halflife_secs == 0 {
-        return None;
+        return Ok(None);
     }
-    let halflife = Decimal::from(halflife_secs).to_f64()?;
+    let halflife = strict_f64(Decimal::from(halflife_secs), "EMA half-life")?;
     let mut out = Vec::with_capacity(samples.len());
     let (seed_ms, seed_value) = samples[0];
     out.push(seed_value.round_dp(STAT_SCALE));
-    let mut previous = seed_value.to_f64()?;
+    let mut previous = strict_f64(seed_value, "EMA seed")?;
     let mut previous_ms = seed_ms;
     for &(ms, value) in &samples[1..] {
-        let value_f = value.to_f64()?;
-        let delta_ms = (ms - previous_ms).max(0);
-        let delta_secs = Decimal::from(delta_ms).to_f64()? / 1000.0;
+        let value_f = strict_f64(value, "EMA observation")?;
+        let delta_ms = ms.checked_sub(previous_ms).ok_or_else(|| {
+            invalid_ema(format!(
+                "EMA timestamp difference overflow: previous={previous_ms}, current={ms}"
+            ))
+        })?;
+        if delta_ms < 0 {
+            return Err(invalid_ema(format!(
+                "EMA samples are not ascending: previous={previous_ms}, current={ms}"
+            )));
+        }
+        let delta_secs = strict_f64(Decimal::from(delta_ms), "EMA elapsed milliseconds")? / 1000.0;
         let decay = (-delta_secs * LN_2 / halflife).exp();
         let ema = decay.mul_add(previous, (1.0 - decay) * value_f);
-        if !ema.is_finite() {
-            return None;
+        if !decay.is_finite() || !ema.is_finite() {
+            return Err(invalid_ema("EMA arithmetic produced a non-finite value"));
         }
-        let quantized = Decimal::from_f64(ema).map(|value| value.round_dp(STAT_SCALE))?;
+        let quantized = Decimal::from_f64(ema)
+            .map(|value| value.round_dp(STAT_SCALE))
+            .ok_or_else(|| invalid_ema("EMA result cannot be represented as Decimal"))?;
         out.push(quantized);
         previous = ema;
         previous_ms = ms;
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The normalized instantaneous EMA slope: `(ema_last - ema_prev) / ema_last`
@@ -151,18 +171,26 @@ pub fn ema_time_decayed(samples: &[(i64, Decimal)], halflife_secs: u64) -> Optio
 /// This is the *current smoothed velocity* of the price — distinct from the
 /// window's total return (`simple_return`), which is total displacement. `None`
 /// for fewer than two EMA points or a zero level.
-#[must_use]
-pub fn ema_slope_time(samples: &[(i64, Decimal)], halflife_secs: u64) -> Option<Decimal> {
-    let ema = ema_time_decayed(samples, halflife_secs)?;
+///
+/// # Errors
+///
+/// Propagates [`ema_time_decayed`] timestamp and numeric failures.
+pub fn ema_slope_time(
+    samples: &[(i64, Decimal)],
+    halflife_secs: u64,
+) -> QuantResult<Option<Decimal>> {
+    let Some(ema) = ema_time_decayed(samples, halflife_secs)? else {
+        return Ok(None);
+    };
     if ema.len() < 2 {
-        return None;
+        return Ok(None);
     }
     let last = ema[ema.len() - 1];
     let previous = ema[ema.len() - 2];
     if last.is_zero() {
-        return None;
+        return Ok(None);
     }
-    Some(((last - previous) / last).round_dp(STAT_SCALE))
+    Ok(Some(((last - previous) / last).round_dp(STAT_SCALE)))
 }
 
 /// Volatility-normalized MACD: `((EMA_fast - EMA_slow) / EMA_slow) / realized_vol`.
@@ -171,28 +199,51 @@ pub fn ema_slope_time(samples: &[(i64, Decimal)], halflife_secs: u64) -> Option<
 /// time-decayed EMA legs (half-lives in seconds), so its smoothing horizon is a
 /// duration independent of sampling density. `None` when either EMA is
 /// undefined, the slow EMA is zero, or realized volatility is non-positive.
-#[must_use]
+///
+/// # Errors
+///
+/// Propagates [`ema_time_decayed`] timestamp and numeric failures.
 pub fn macd_time(
     samples: &[(i64, Decimal)],
     fast_halflife_secs: u64,
     slow_halflife_secs: u64,
-) -> Option<Decimal> {
-    let fast = ema_time_decayed(samples, fast_halflife_secs)?
-        .last()
-        .copied()?;
-    let slow = ema_time_decayed(samples, slow_halflife_secs)?
-        .last()
-        .copied()?;
+) -> QuantResult<Option<Decimal>> {
+    let Some(fast) =
+        ema_time_decayed(samples, fast_halflife_secs)?.and_then(|ema| ema.last().copied())
+    else {
+        return Ok(None);
+    };
+    let Some(slow) =
+        ema_time_decayed(samples, slow_halflife_secs)?.and_then(|ema| ema.last().copied())
+    else {
+        return Ok(None);
+    };
     if slow.is_zero() {
-        return None;
+        return Ok(None);
     }
     let macd_line = (fast - slow) / slow;
     let values: Vec<Decimal> = samples.iter().map(|&(_, value)| value).collect();
-    let vol = realized_volatility(&values)?;
+    let Some(vol) = realized_volatility(&values) else {
+        return Ok(None);
+    };
     if vol <= Decimal::ZERO {
-        return None;
+        return Ok(None);
     }
-    Some((macd_line / vol).round_dp(STAT_SCALE))
+    Ok(Some((macd_line / vol).round_dp(STAT_SCALE)))
+}
+
+fn strict_f64(value: Decimal, field: &'static str) -> QuantResult<f64> {
+    value
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid_ema(format!("{field} is not representable as a finite f64")))
+}
+
+fn invalid_ema(detail: impl Into<String>) -> QuantError {
+    ResearchError::Determinism {
+        detail: detail.into(),
+    }
+    .into()
 }
 
 #[cfg(test)]
@@ -291,6 +342,7 @@ mod tests {
     fn ema_last_smooths_toward_recent() {
         let series = timed(&[100, 100, 130], 60);
         let ema = ema_time_decayed(&series, 120)
+            .expect("valid EMA input")
             .and_then(|ema| ema.last().copied())
             .expect("ema");
         // The EMA of a step-up lands strictly between the old and new level.
@@ -304,8 +356,18 @@ mod tests {
     fn ema_slope_is_signed_by_recent_move() {
         let up = timed(&[100, 101, 105], 60);
         let down = timed(&[105, 101, 100], 60);
-        assert!(ema_slope_time(&up, 120).expect("slope") > Decimal::ZERO);
-        assert!(ema_slope_time(&down, 120).expect("slope") < Decimal::ZERO);
+        assert!(
+            ema_slope_time(&up, 120)
+                .expect("valid EMA input")
+                .expect("slope")
+                > Decimal::ZERO
+        );
+        assert!(
+            ema_slope_time(&down, 120)
+                .expect("valid EMA input")
+                .expect("slope")
+                < Decimal::ZERO
+        );
     }
 
     #[test]
@@ -326,9 +388,11 @@ mod tests {
         // sparse series lands in the same neighborhood as the dense one, not at
         // a point-count-dependent lag.
         let dense_last = ema_time_decayed(&dense, 120)
+            .expect("valid dense EMA input")
             .and_then(|ema| ema.last().copied())
             .expect("dense ema");
         let sparse_last = ema_time_decayed(&sparse, 120)
+            .expect("valid sparse EMA input")
             .and_then(|ema| ema.last().copied())
             .expect("sparse ema");
         let gap = (dense_last - sparse_last).abs();
@@ -338,9 +402,25 @@ mod tests {
     #[test]
     fn ema_time_decayed_is_deterministic() {
         let series = timed(&[100, 102, 101, 105, 103], 45);
-        let first = ema_time_decayed(&series, 90).expect("ema");
-        let second = ema_time_decayed(&series, 90).expect("ema");
+        let first = ema_time_decayed(&series, 90)
+            .expect("valid EMA input")
+            .expect("ema");
+        let second = ema_time_decayed(&series, 90)
+            .expect("valid EMA input")
+            .expect("ema");
         assert_eq!(first, second, "must be deterministic");
+    }
+
+    #[test]
+    fn ema_rejects_non_monotonic_timestamps_instead_of_clamping_the_gap() {
+        let series = [
+            (60_000_i64, Decimal::from(100)),
+            (30_000_i64, Decimal::from(101)),
+        ];
+
+        let error = ema_time_decayed(&series, 120).expect_err("descending time must fail");
+
+        assert!(error.to_string().contains("not ascending"));
     }
 
     #[test]
@@ -357,7 +437,9 @@ mod tests {
         let series: Vec<(i64, Decimal)> = (0..30)
             .map(|i| (i * 30_000, Decimal::from(100 + i)))
             .collect();
-        let macd = macd_time(&series, 150, 450).expect("macd");
+        let macd = macd_time(&series, 150, 450)
+            .expect("valid MACD input")
+            .expect("macd");
         // A steady uptrend keeps the fast EMA above the slow EMA → positive MACD.
         assert!(macd > Decimal::ZERO, "{macd}");
     }

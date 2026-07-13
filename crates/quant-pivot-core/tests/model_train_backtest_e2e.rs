@@ -1,21 +1,12 @@
 //! End-to-end trainer + backtest (Phase 3.6): train a weighted model from a
-//! frozen dataset, register a Candidate, replay a **point-in-time** backtest, and
+//! frozen dataset, register a Candidate, replay its exact frozen input, and
 //! fit a calibrated child version — all without ever touching a live `BookStore`.
 //!
-//! Frozen Parquet supplies only the replay **schedule** (`(as_of, market, token)`)
-//! and forward **label truth**; both training and backtest **recompute** features
-//! and factors point-in-time through the shared [`materialize_cross_section`]
-//! kernel from prefetched facts. This test seeds an in-memory
-//! [`QuantFactReadRepository`] (never a `BookStore`) plus a Postgres market catalog
-//! so train and backtest share the same PIT-resolved `liquidity_depth` cross-section.
+//! Frozen Parquet is the sole source of the selected market, `FeatureCell`,
+//! factor, and label bytes consumed by both training and backtest.
 
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
-use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use tokio_util::sync::CancellationToken;
 
@@ -30,22 +21,17 @@ use quant_pivot_core::{
         },
     },
 };
-use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
-        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
-    },
     domain::{
-        CpcvBacktestPort, JobProgressSink, ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion,
-        NewTrainingDataset, NoopProgressSink, RunCpcvBacktestRequest,
+        BacktestPathSetView, CompleteTrainingDatasetBuild, CpcvBacktestPort, DecisionClock,
+        ModelVersionInfo, NewModelSpec, NewRuntimeConfigVersion, NewTrainingDatasetPlan,
+        NoopProgressSink, RunCpcvBacktestRequest,
     },
     entities::{
         market::{Column as MarketColumn, Entity as MarketEntity},
         quant_model_run,
     },
     enums::{
-        clickhouse::{ChFactSource, ChSnapshotReason},
         common::MarketCategory,
         factor::FactorFamily,
         model::ModelFamily,
@@ -55,6 +41,7 @@ use quant_pivot_models::{
         },
         runtime_config::RuntimeConfigVersionSource,
     },
+    hashing::CanonicalDigest,
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorWeights, FactorsConfig, FeatureFamily,
         FeaturesConfig, MomentumFeaturesConfig, PortfolioBudget, PortfolioConfig,
@@ -62,10 +49,11 @@ use quant_pivot_models::{
         StructuralFeaturesConfig, TrainingOptimizerKind, wire::DecimalString,
     },
     types::{
-        BacktestPathSetId, ContentHash, DatasetCoverage, DomainInstrumentKey, FactorDefinitionId,
-        MarketId, ModelSpecId, ModelVersionId, Price, Probability, RuntimeConfigVersionId,
-        SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSource, Usd,
+        BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
+        DatasetManifest, EventId, FactorDefinitionId, MarketId, ModelSpecId, ModelVersionId,
+        Probability, RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -77,25 +65,33 @@ use quant_pivot_repository::{
     },
     traits::{
         BacktestPathSetRepository, CalibrationArtifactRepository, EventRepository,
-        MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
-        RuntimeConfigVersionRepository, TrainingDatasetRepository,
+        MarketRepository, ModelRegistryRepository, RuntimeConfigVersionRepository,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
-    factors::{FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
-    features::{FeatureName, FeatureValue, FeatureVector, names},
+    factors::{
+        FactorEngine, FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH,
+    },
+    features::{
+        FeatureCell, FeatureName, FeatureSchema, FeatureStaleness, FeatureValue, FeatureVector,
+        names,
+    },
+    hashing::ResearchHasher,
     model::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact,
         ModelRuntimeFactoryBuilder, TrainingObjectiveSpec,
     },
-    training::{DatasetParquetCodec, LabelName, TrainingExample, TrainingLabel},
+    training::{
+        DatasetHashContract, DatasetParquetCodec, LabelName, TrainingDatasetArtifact,
+        TrainingExample, TrainingLabel, dataset_manifest_hash, dataset_source_fingerprint,
+    },
     validation::PurgeConfig,
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
-    report_pipeline_harness::EmptyLinkageRepo,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -110,7 +106,7 @@ const TICKS: i64 = 4;
 const MARKETS_PER_TICK: usize = 20;
 const BASE_TS: i64 = 1_700_000_000;
 const TICK_INTERVAL_SECS: i64 = 3600;
-const SOURCE_DELAY_SECS: i64 = 10;
+const KNOWLEDGE_LAG_SECS: i64 = 10;
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -130,19 +126,50 @@ fn token_id(tick: i64, i: usize) -> TokenId {
 
 fn as_of_for(tick: i64) -> chrono::DateTime<Utc> {
     Utc.timestamp_opt(BASE_TS + tick * TICK_INTERVAL_SECS, 0)
-        .unwrap()
+        .single()
+        .expect("fixture timestamp")
 }
 
 /// Cross-sectional liquidity (USD) for the `i`-th market in a tick — strictly
-/// increasing in `i` so the recomputed `liquidity_depth` rank spreads scores
+/// increasing in `i` so the frozen `liquidity_depth` rank spreads scores
 /// across calibration buckets.
 fn liquidity_usd(i: usize) -> Decimal {
     Decimal::from(1_000 * (i as u64 + 1))
 }
 
-/// `60` examples across `3` ticks. Parquet carries only schedule + settlement
-/// labels; stored factor/feature columns are intentionally stale decoys — train
-/// and backtest both rematerialize from the shared in-memory fact source.
+fn feature_values(i: usize) -> BTreeMap<FeatureName2, FeatureCell> {
+    let values = [
+        (
+            names::book::MID,
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
+        ),
+        (
+            names::book::BEST_ASK,
+            FeatureValue::Probability(Probability::new(dec!(0.51))),
+        ),
+        (
+            names::book::VISIBLE_LIQUIDITY_USD,
+            FeatureValue::Usd(Usd::new(liquidity_usd(i))),
+        ),
+        // Non-crypto category: this suite exercises frozen liquidity inputs,
+        // not the crypto domain-weight publish invariant.
+        (
+            names::market::CATEGORY,
+            FeatureValue::Category(MarketCategory::Politics),
+        ),
+    ];
+    values
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                FeatureCell::observed(value, None, FeatureStaleness::Unknown),
+            )
+        })
+        .collect()
+}
+
+/// Frozen examples spanning deterministic cross-sections.
 fn examples() -> Vec<TrainingExample> {
     let mut out = Vec::new();
     for tick in 0..TICKS {
@@ -152,31 +179,14 @@ fn examples() -> Vec<TrainingExample> {
             let settled_yes = strength > dec!(0.5);
             let market = market_id(tick, i);
             let token = token_id(tick, i);
-            let mut values: BTreeMap<FeatureName2, FeatureValue> = BTreeMap::new();
-            values.insert(names::book::MID.clone(), FeatureValue::Decimal(dec!(0.5)));
-            values.insert(
-                names::book::VISIBLE_LIQUIDITY_USD.clone(),
-                FeatureValue::Usd(Usd::new(liquidity_usd(i))),
-            );
-            // Non-crypto category: this suite exercises liquidity rematerialization,
-            // not the Phase 11.2.2 crypto domain-weight publish invariant. Unanimous
-            // Crypto examples would infer `category_scope=Crypto` and reject a
-            // liquidity-only seed weight set.
-            values.insert(
-                names::market::CATEGORY.clone(),
-                FeatureValue::Category(MarketCategory::Politics),
-            );
             let feature_vector = FeatureVector {
                 market_id: market.clone(),
                 token_id: Some(token.clone()),
-                as_of,
+                decision_at: as_of,
                 generic_schema_version: SchemaVersion::FIRST,
-                generic: values,
+                generic: feature_values(i),
                 domain: None,
-                substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
-                staleness_ms: 0,
-                source_refs: Vec::new(),
             };
             let liquidity = FactorValue {
                 definition_id: FactorDefinitionId::from_v7(),
@@ -194,9 +204,23 @@ fn examples() -> Vec<TrainingExample> {
             };
             out.push(TrainingExample {
                 example_id: TrainingExampleId::from_v7(),
-                market_id: market,
-                token_id: token,
-                as_of,
+                market_id: market.clone(),
+                token_id: token.clone(),
+                selected_market: quant_pivot_research::selection::SelectedMarket {
+                    market_id: market,
+                    event_id: EventId::new(EVENT_ID),
+                    category: MarketCategory::Politics,
+                    primary_token_id: token,
+                    secondary_token_id: None,
+                    liquidity_usd: Some(Usd::new(liquidity_usd(i))),
+                    volume_24h_usd: None,
+                    source_refs: Vec::new(),
+                },
+                decision_boundary: DecisionClock::new(
+                    u64::try_from(KNOWLEDGE_LAG_SECS).expect("knowledge lag"),
+                )
+                .boundary(as_of)
+                .expect("boundary"),
                 sample_source: TrainingSampleSource::HistoricalPit,
                 feature_vector,
                 factor_values: vec![liquidity],
@@ -212,6 +236,7 @@ fn examples() -> Vec<TrainingExample> {
                     matured_at: as_of + ChronoDuration::seconds(1),
                 }],
                 source_refs: Vec::new(),
+                decision_capture: None,
                 lot_context: None,
                 position_state: None,
                 book_fidelity: None,
@@ -221,277 +246,7 @@ fn examples() -> Vec<TrainingExample> {
     out
 }
 
-// ── In-memory fact source (never a live BookStore) ───────────────────────────
-
-#[derive(Default)]
-struct FactScenario {
-    books: HashMap<TokenId, Vec<BookSnapshotRow>>,
-    micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
-    resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
-}
-
-struct ControllableFactRead {
-    scenario: Arc<Mutex<FactScenario>>,
-}
-
-#[async_trait]
-impl QuantFactReadRepository for ControllableFactRead {
-    async fn microstructure_window(
-        &self,
-        token_ids: Vec<TokenId>,
-        from_ms: i64,
-        to_ms: i64,
-    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
-        let scenario = self.scenario.lock().expect("lock");
-        let mut rows = Vec::new();
-        for token_id in token_ids {
-            if let Some(series) = scenario.micro.get(&token_id) {
-                for row in series {
-                    if row.bucket_time >= from_ms && row.bucket_time < to_ms {
-                        rows.push(row.clone());
-                    }
-                }
-            }
-        }
-        Ok(rows)
-    }
-
-    async fn microstructure_series(
-        &self,
-        _token_ids: Vec<TokenId>,
-        _from_ms: i64,
-        _to_ms: i64,
-        _minute: bool,
-    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
-        Ok(Vec::new())
-    }
-
-    async fn trade_tape_window_by_market(
-        &self,
-        _market_ids: Vec<MarketId>,
-        _from_ms: i64,
-        _to_ms: i64,
-    ) -> Result<Vec<TradeTapeRow>, StorageError> {
-        Ok(Vec::new())
-    }
-
-    async fn last_trades(
-        &self,
-        _token_ids: Vec<TokenId>,
-        _from_ms: i64,
-        _to_ms: i64,
-        _limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
-        Ok(Vec::new())
-    }
-
-    async fn book_snapshot_at(
-        &self,
-        token_id: &TokenId,
-        as_of_ms: i64,
-    ) -> Result<Option<BookSnapshotRow>, StorageError> {
-        let scenario = self.scenario.lock().expect("lock");
-        Ok(scenario.books.get(token_id).and_then(|rows| {
-            rows.iter()
-                .filter(|row| row.event_time <= as_of_ms)
-                .max_by_key(|row| (row.event_time, row.ingestion_time, row.sequence))
-                .cloned()
-        }))
-    }
-
-    async fn book_snapshots_between(
-        &self,
-        token_ids: Vec<TokenId>,
-        from_ms: i64,
-        to_ms: i64,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
-        let scenario = self.scenario.lock().expect("lock");
-        let mut rows = Vec::new();
-        for token_id in token_ids {
-            if let Some(series) = scenario.books.get(&token_id) {
-                for row in series {
-                    if row.event_time >= from_ms && row.event_time <= to_ms {
-                        rows.push(row.clone());
-                    }
-                }
-            }
-        }
-        Ok(rows)
-    }
-
-    async fn resolution_at(
-        &self,
-        market_id: &MarketId,
-        as_of_ms: i64,
-    ) -> Result<Option<MarketResolutionRow>, StorageError> {
-        let scenario = self.scenario.lock().expect("lock");
-        Ok(scenario.resolutions.get(market_id).and_then(|rows| {
-            rows.iter()
-                .filter(|row| row.resolved_at <= as_of_ms)
-                .max_by_key(|row| (row.resolved_at, row.observed_at, row.sequence))
-                .cloned()
-        }))
-    }
-
-    async fn resolutions_between(
-        &self,
-        market_ids: Vec<MarketId>,
-        from_ms: i64,
-        to_ms: i64,
-    ) -> Result<Vec<MarketResolutionRow>, StorageError> {
-        let scenario = self.scenario.lock().expect("lock");
-        let mut rows = Vec::new();
-        for market_id in market_ids {
-            if let Some(series) = scenario.resolutions.get(&market_id) {
-                for row in series {
-                    if row.resolved_at >= from_ms && row.resolved_at <= to_ms {
-                        rows.push(row.clone());
-                    }
-                }
-            }
-        }
-        Ok(rows)
-    }
-
-    async fn observed_markets_between(
-        &self,
-        from_ms: i64,
-        to_ms: i64,
-    ) -> Result<Vec<MarketId>, StorageError> {
-        let markets: BTreeSet<MarketId> = {
-            let scenario = self.scenario.lock().expect("lock");
-            scenario
-                .books
-                .values()
-                .flatten()
-                .filter(|row| row.event_time >= from_ms && row.event_time <= to_ms)
-                .filter_map(|row| row.market_id.clone())
-                .collect()
-        };
-        Ok(markets.into_iter().collect())
-    }
-
-    async fn domain_observations_between(
-        &self,
-        _instrument_keys: Vec<DomainInstrumentKey>,
-        _from_ms: i64,
-        _to_ms: i64,
-    ) -> Result<Vec<DomainObservationRow>, StorageError> {
-        Ok(Vec::new())
-    }
-
-    async fn domain_observation_at(
-        &self,
-        _instrument_key: &DomainInstrumentKey,
-        _metric: &str,
-        _as_of_ms: i64,
-    ) -> Result<Option<DomainObservationRow>, StorageError> {
-        Ok(None)
-    }
-
-    async fn mid_price_series(
-        &self,
-        _token_ids: Vec<TokenId>,
-        _from_ms: i64,
-        _to_ms: i64,
-        _bucket_secs: u32,
-    ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
-        Ok(Vec::new())
-    }
-}
-
-/// A top-of-book snapshot whose visible depth scales with `liquidity` so the
-/// recomputed `liquidity_depth` factor varies across the cross-section.
-fn book_row(
-    token: &TokenId,
-    market: &MarketId,
-    event_time_ms: i64,
-    liquidity: Decimal,
-) -> BookSnapshotRow {
-    // size such that 0.48*size + 0.52*size == liquidity (price-weighted USD depth).
-    let size = liquidity; // 1.0 * size across the two sides ≈ liquidity
-    BookSnapshotRow {
-        token_id: token.clone(),
-        market_id: Some(market.clone()),
-        snapshot_reason: ChSnapshotReason::Startup,
-        top_n: 5,
-        bids_json: format!(r#"[["0.48","{size}"]]"#),
-        asks_json: format!(r#"[["0.52","{size}"]]"#),
-        bid_depth_usd: None,
-        ask_depth_usd: None,
-        mid_price: Some(ChPrice::from(Price::new(dec!(0.5)))),
-        spread_bps: None,
-        book_version: 1,
-        levels_count: 1,
-        event_time: event_time_ms,
-        ingestion_time: event_time_ms,
-        sequence: 1,
-        source: ChFactSource::WsSnapshot,
-        schema_version: ChSchemaVersion::FIRST,
-    }
-}
-
-fn micro_row(token: &TokenId, market: &MarketId, bucket_time_ms: i64) -> BookMicrostructureRow {
-    let price = Price::new(dec!(0.5));
-    BookMicrostructureRow {
-        token_id: token.clone(),
-        market_id: Some(market.clone()),
-        bucket_time: bucket_time_ms,
-        best_bid_open: None,
-        best_bid_high: Some(ChPrice::from(price)),
-        best_bid_low: Some(ChPrice::from(price)),
-        best_bid_close: Some(ChPrice::from(price)),
-        best_ask_open: None,
-        best_ask_high: None,
-        best_ask_low: None,
-        best_ask_close: None,
-        spread_bps_min: None,
-        spread_bps_avg: None,
-        spread_bps_max: None,
-        mid_price_open: Some(ChPrice::from(price)),
-        mid_price_close: Some(ChPrice::from(price)),
-        top1_depth_usd_avg: Some(ChUsd::from(Decimal::from(500))),
-        top5_depth_usd_avg: None,
-        top20_depth_usd_avg: None,
-        imbalance_avg: None,
-        update_count: 1,
-        snapshot_count: 1,
-        delta_count: 0,
-        delete_count: 0,
-        crossed_count: 0,
-        invalid_level_count: 0,
-        gap_count: 0,
-        last_trade_count: 0,
-        max_book_age_ms: 0,
-        schema_version: ChSchemaVersion::FIRST,
-    }
-}
-
-/// Build the in-memory facts backing every `(as_of, market, token)` in the
-/// schedule: one book + one micro bucket per token, observed `15s` before the
-/// tick (older than the `10s` source delay, younger than the relaxed book-age
-/// bound), so the PIT replay resolves a Fresh cross-section without leakage.
-fn fact_scenario() -> FactScenario {
-    let mut scenario = FactScenario::default();
-    for tick in 0..TICKS {
-        let as_of_ms = as_of_for(tick).timestamp_millis();
-        let evidence_ms = as_of_ms - 15_000;
-        for i in 0..MARKETS_PER_TICK {
-            let token = token_id(tick, i);
-            let market = market_id(tick, i);
-            scenario.books.insert(
-                token.clone(),
-                vec![book_row(&token, &market, evidence_ms, liquidity_usd(i))],
-            );
-            scenario
-                .micro
-                .insert(token.clone(), vec![micro_row(&token, &market, evidence_ms)]);
-        }
-    }
-    scenario
-}
-
-// ── Postgres catalog + ledger seeding ────────────────────────────────────────
+// ── Postgres catalog + ledger seeding ───────────────────────────────────────────────────────────────────────────────
 
 /// Governed training knobs exercised through `TrainingObjectiveSpec::from_runtime_config`.
 fn e2e_research_training() -> ResearchTrainingConfig {
@@ -507,10 +262,7 @@ fn e2e_research_training() -> ResearchTrainingConfig {
     }
 }
 
-/// Shared PIT replay slice: trainer hand-wiring and the frozen runtime-config
-/// JSON the CPCV production port loads must see the **same** features / factors
-/// / data-quality / book-staleness, or rematerialization drifts (train ok,
-/// CPCV → zero examples).
+/// Shared frozen training slice used by trainer and CPCV configuration.
 struct E2eReplaySlice {
     features: FeaturesConfig,
     factors: FactorsConfig,
@@ -552,8 +304,7 @@ fn e2e_replay_slice() -> E2eReplaySlice {
             ..FactorsConfig::default()
         },
         domain: DomainConfig::default(),
-        // Relaxed book-age bound that fits the `10s` source delay + `15s`
-        // evidence lag seeded in [`fact_scenario`].
+        // Frozen data-quality contract used to derive schema bindings.
         data_quality: DataQualityConfig {
             max_book_age_ms: 60_000,
             max_feature_bucket_age_secs: 120,
@@ -614,7 +365,11 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: quant_pivot_models::types::ModelInputContract::single_required(
+                "book.mid",
+            ),
+            training_contract: quant_pivot_models::types::ModelTrainingContract::settlement_default(
+            ),
             status: PublicationStatus::Published,
         })
         .await
@@ -667,38 +422,102 @@ async fn seed_dataset(
     store: &Arc<dyn ArtifactStore>,
     model_spec_id: &ModelSpecId,
     rc_id: &RuntimeConfigVersionId,
-) -> TrainingDatasetId {
-    let bytes = DatasetParquetCodec::encode(&examples()).expect("encode parquet");
+) -> (TrainingDatasetId, ContentHash) {
     let dataset_id = TrainingDatasetId::from_v7();
+    let examples = examples();
+    let window_start = as_of_for(0);
+    let window_end = window_start + ChronoDuration::hours(4);
+    let replay = replay_config();
+    let feature_schema = FeatureSchema::build(&replay.features).expect("feature schema");
+    let feature_schema_hash =
+        ResearchHasher::feature_schema(&feature_schema).expect("feature hash");
+    let factor_schema_hash =
+        FactorEngine::new(&replay.factors, &replay.features, &replay.domain, None)
+            .factor_schema_hash()
+            .expect("factor hash");
+    let label_schema_hash =
+        ResearchHasher::label_schema(&[settlement()]).expect("label schema hash");
+    let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
+        DatasetHashContract {
+            model_spec_id,
+            window_start,
+            window_end,
+            purpose: DatasetPurpose::Training,
+            feature_schema_hash: &feature_schema_hash,
+            factor_schema_hash: &factor_schema_hash,
+            label_schema_hash: &label_schema_hash,
+        },
+        &examples,
+    )
+    .expect("semantic dataset hash");
+    let manifest = DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: dataset_id.clone(),
+        model_spec_id: model_spec_id.clone(),
+        runtime_config_version_id: rc_id.clone(),
+        window_start,
+        window_end,
+        purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: u64::try_from(KNOWLEDGE_LAG_SECS).expect("knowledge lag"),
+        sample_interval_secs: u64::try_from(TICK_INTERVAL_SECS).expect("sample interval"),
+        horizons_secs: vec![0],
+        feature_schema_hash: feature_schema_hash.clone(),
+        factor_schema_hash: factor_schema_hash.clone(),
+        label_schema_hash: label_schema_hash.clone(),
+        semantic_dataset_hash: dataset_hash.clone(),
+        source_fingerprint: dataset_source_fingerprint(&examples).expect("source fingerprint"),
+        sample_count: u64::try_from(examples.len()).expect("sample count"),
+    };
+    let bytes = DatasetParquetCodec::encode(&examples, &manifest).expect("encode parquet");
+    let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+    let artifact_bytes_hash =
+        ContentHash::parse(CanonicalDigest::prefixed_bytes(&bytes)).expect("bytes hash");
     let hex = dataset_id.as_uuid().simple().to_string();
     let key = ArtifactKey::new(ArtifactNamespace::Dataset, hex, "parquet").expect("key");
     let uri = store.put(key, &bytes).await.expect("store parquet");
 
-    let window_start = as_of_for(0);
-    let dataset = NewTrainingDataset {
-        training_dataset_id: dataset_id.clone(),
-        model_spec_id: model_spec_id.clone(),
-        window_start,
-        window_end: window_start + ChronoDuration::hours(4),
-        status: TrainingDatasetStatus::Built,
-        purpose: DatasetPurpose::Training,
-        feature_schema_hash: content_hash('a'),
-        factor_schema_hash: content_hash('b'),
-        label_schema_hash: content_hash('d'),
-        dataset_hash: content_hash('e'),
-        parquet_uri: uri,
-        sample_count: TICKS * i64::try_from(MARKETS_PER_TICK).expect("count"),
-        source_delay_secs: SOURCE_DELAY_SECS,
-        sample_interval_secs: TICK_INTERVAL_SECS,
-        horizons_secs: TrainingHorizonsSecs(vec![0]),
-        coverage_json: DatasetCoverage::default(),
-        runtime_config_version_id: rc_id.clone(),
-    };
-    PgTrainingDatasetRepository::new(db.clone())
-        .create(dataset)
+    let dataset_repo = PgTrainingDatasetRepository::new(db.clone());
+    dataset_repo
+        .create_plan(NewTrainingDatasetPlan {
+            training_dataset_id: dataset_id.clone(),
+            model_spec_id: model_spec_id.clone(),
+            window_start,
+            window_end,
+            purpose: DatasetPurpose::Training,
+            knowledge_lag_secs: KNOWLEDGE_LAG_SECS,
+            sample_interval_secs: TICK_INTERVAL_SECS,
+            horizons_secs: TrainingHorizonsSecs(vec![0]),
+            feature_schema_version: Some(SchemaVersion::FIRST),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+            runtime_config_version_id: rc_id.clone(),
+        })
+        .await
+        .expect("dataset plan");
+    dataset_repo
+        .start_build(&dataset_id)
+        .await
+        .expect("start dataset");
+    dataset_repo
+        .complete_build(
+            &dataset_id,
+            CompleteTrainingDatasetBuild {
+                status: TrainingDatasetStatus::Ready,
+                feature_schema_hash,
+                factor_schema_hash,
+                label_schema_hash,
+                dataset_hash: dataset_hash.clone(),
+                manifest_hash,
+                manifest_json: manifest,
+                artifact_bytes_hash,
+                parquet_uri: uri,
+                sample_count: TICKS * i64::try_from(MARKETS_PER_TICK).expect("count"),
+                coverage_json: DatasetCoverage::default(),
+                failure_detail: None,
+            },
+        )
         .await
         .expect("dataset ledger");
-    dataset_id
+    (dataset_id, dataset_hash)
 }
 
 fn trainer_config() -> ModelTrainerConfig {
@@ -744,10 +563,6 @@ fn replay_config() -> ReplayConfig {
     }
 }
 
-fn e2e_max_book_staleness() -> Duration {
-    Duration::from_millis(e2e_replay_slice().max_book_staleness_ms)
-}
-
 /// Assert the training `quant_model_run` row was finalized with version FK + artifact hash.
 async fn assert_training_run_ledger(
     db: &DatabaseConnection,
@@ -774,69 +589,31 @@ async fn assert_training_run_ledger(
     assert_eq!(training_run.input_hash, dataset_hash, "dataset provenance");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
-async fn train_then_backtest_then_calibrate_e2e() {
-    let (pool, _container) = setup_pg().await;
-    let db = pool.connection().clone();
-    let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
-        std::env::temp_dir().join(format!("qp_tb_e2e_{}", Uuid::new_v4().simple())),
-    ));
-
-    let rc_id = seed_runtime_config(&db).await;
-    let model_spec_id = seed_model_spec(&db).await;
-    seed_catalog(&db).await;
-    let dataset_id = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
-
-    let registry: Arc<dyn ModelRegistryRepository> =
-        Arc::new(PgModelRegistryRepository::new(db.clone()));
-    let fact_read: Arc<dyn QuantFactReadRepository> = Arc::new(ControllableFactRead {
-        scenario: Arc::new(Mutex::new(fact_scenario())),
-    });
-    let market_repo: Arc<dyn MarketRepository> = Arc::new(PgMarketRepository::new(db.clone()));
-    let trainer = ModelTrainerService::new(
-        ModelTrainerServiceDeps {
-            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            artifact_store: Arc::clone(&store),
-            model_registry_repo: Arc::clone(&registry),
-            model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
-            fact_read: Arc::clone(&fact_read),
-            market_repo: Arc::clone(&market_repo),
-            event_repo: Arc::new(PgEventRepository::new(db.clone())),
-            linkage_repo: Arc::new(EmptyLinkageRepo),
+fn weighted_train_input(
+    model_spec_id: ModelSpecId,
+    dataset_id: TrainingDatasetId,
+    rc_id: RuntimeConfigVersionId,
+) -> TrainModelInput {
+    TrainModelInput {
+        model_version_id: ModelVersionId::from_v7(),
+        model_spec_id,
+        training_dataset_id: dataset_id,
+        runtime_config_version_id: rc_id,
+        model_family: ModelFamily::WeightedFactor,
+        input_contract: quant_pivot_models::types::ModelInputContract::single_required("book.mid"),
+        label: LabelSelector {
+            name: settlement(),
+            horizon_secs: 0,
         },
-        trainer_config(),
-        replay_config(),
-        e2e_max_book_staleness(),
-    );
+        prediction_horizon_secs: 86_400,
+        validation_folds: 3,
+        selection_enabled_categories: vec![],
+        category_scope: None,
+    }
+}
 
-    // ── Train ────────────────────────────────────────────────────────────
-    let outcome = trainer
-        .train(
-            TrainModelInput {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_id: model_spec_id.clone(),
-                training_dataset_id: dataset_id.clone(),
-                runtime_config_version_id: rc_id.clone(),
-                model_family: ModelFamily::WeightedFactor,
-                label: LabelSelector {
-                    name: settlement(),
-                    horizon_secs: 0,
-                },
-                prediction_horizon_secs: 86_400,
-                validation_folds: 3,
-                selection_enabled_categories: vec![],
-                category_scope: None,
-            },
-            &NoopProgressSink,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("train");
-    let version = outcome.version;
+fn assert_weighted_train_metrics(version: &ModelVersionInfo) {
     assert_eq!(version.publication_status, PublicationStatus::Candidate);
-    assert_eq!(version.training_dataset_id.as_ref(), Some(&dataset_id));
     assert_eq!(
         version.training_objective_json["rank_loss"],
         serde_json::json!("rank_ic_weighted_ranknet")
@@ -886,10 +663,12 @@ async fn train_then_backtest_then_calibrate_e2e() {
         "held_out_objective must be present: {}",
         version.metrics_json
     );
+}
 
-    // Publish-boundary invariant: the artifact's weights are frozen + content
-    // addressed — re-deriving the hash from the stored bytes matches the
-    // registry record (config cannot retroactively change a published hash).
+async fn assert_artifact_politics_scope(
+    store: &Arc<dyn ArtifactStore>,
+    version: &ModelVersionInfo,
+) {
     let bytes = store
         .get_by_key(&ModelArtifact::artifact_key(&version.artifact_hash).expect("key"))
         .await
@@ -905,11 +684,57 @@ async fn train_then_backtest_then_calibrate_e2e() {
         Some(MarketCategory::Politics),
         "unanimous Politics examples freeze Politics scope (not Crypto domain weights)"
     );
+}
 
-    // Training run ledger: version FK backfilled on succeed, output_hash links artifact.
-    assert_training_run_ledger(&db, &version, content_hash('e')).await;
+fn make_trainer(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    registry: Arc<dyn ModelRegistryRepository>,
+) -> ModelTrainerService {
+    ModelTrainerService::new(
+        ModelTrainerServiceDeps {
+            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+            artifact_store: store,
+            model_registry_repo: registry,
+            model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
+        },
+        trainer_config(),
+        replay_config(),
+    )
+}
 
-    // ── Backtest (same PIT rematerialization path as training) ─────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn train_then_backtest_then_calibrate_e2e() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
+        std::env::temp_dir().join(format!("qp_tb_e2e_{}", Uuid::new_v4().simple())),
+    ));
+
+    let rc_id = seed_runtime_config(&db).await;
+    let model_spec_id = seed_model_spec(&db).await;
+    seed_catalog(&db).await;
+    let (dataset_id, dataset_hash) = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
+
+    let registry: Arc<dyn ModelRegistryRepository> =
+        Arc::new(PgModelRegistryRepository::new(db.clone()));
+    let trainer = make_trainer(&db, Arc::clone(&store), Arc::clone(&registry));
+
+    let outcome = trainer
+        .train(
+            weighted_train_input(model_spec_id.clone(), dataset_id.clone(), rc_id.clone()),
+            &NoopProgressSink,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("train");
+    let version = outcome.version;
+    assert_eq!(version.training_dataset_id.as_ref(), Some(&dataset_id));
+    assert_weighted_train_metrics(&version);
+    assert_artifact_politics_scope(&store, &version).await;
+    assert_training_run_ledger(&db, &version, dataset_hash).await;
+
     let calibration_loader: Arc<dyn CalibrationArtifactLoader> = Arc::new(
         CoreCalibrationArtifactLoader::new(Arc::new(PgCalibrationArtifactRepository::new(
             db.clone(),
@@ -927,15 +752,11 @@ async fn train_then_backtest_then_calibrate_e2e() {
             backtest_report_repo: Arc::new(PgBacktestReportRepository::new(db.clone())),
             comparison_report_repo: Arc::new(PgModelComparisonReportRepository::new(db.clone())),
             factory_builder,
-            fact_read,
-            market_repo,
-            event_repo: Arc::new(PgEventRepository::new(db.clone())),
-            linkage_repo: Arc::new(EmptyLinkageRepo),
         },
         &portfolio(),
-        replay_config(),
-        e2e_max_book_staleness(),
-    );
+        None,
+    )
+    .expect("backtest service");
 
     let report = backtester
         .run(
@@ -958,7 +779,6 @@ async fn train_then_backtest_then_calibrate_e2e() {
         "report hash persisted"
     );
 
-    // ── Calibration registered a child Candidate version (≥ 2 versions) ────
     let next = registry
         .next_version_for_spec(&model_spec_id)
         .await
@@ -971,7 +791,6 @@ async fn train_then_backtest_then_calibrate_e2e() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -982,47 +801,15 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
     let rc_id = seed_runtime_config(&db).await;
     let model_spec_id = seed_model_spec(&db).await;
     seed_catalog(&db).await;
-    let dataset_id = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
+    let (dataset_id, _dataset_hash) = seed_dataset(&db, &store, &model_spec_id, &rc_id).await;
 
     let registry: Arc<dyn ModelRegistryRepository> =
         Arc::new(PgModelRegistryRepository::new(db.clone()));
-    let fact_read: Arc<dyn QuantFactReadRepository> = Arc::new(ControllableFactRead {
-        scenario: Arc::new(Mutex::new(fact_scenario())),
-    });
-    let market_repo: Arc<dyn MarketRepository> = Arc::new(PgMarketRepository::new(db.clone()));
-    let trainer = ModelTrainerService::new(
-        ModelTrainerServiceDeps {
-            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            artifact_store: Arc::clone(&store),
-            model_registry_repo: Arc::clone(&registry),
-            model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
-            fact_read: Arc::clone(&fact_read),
-            market_repo: Arc::clone(&market_repo),
-            event_repo: Arc::new(PgEventRepository::new(db.clone())),
-            linkage_repo: Arc::new(EmptyLinkageRepo),
-        },
-        trainer_config(),
-        replay_config(),
-        e2e_max_book_staleness(),
-    );
+    let trainer = make_trainer(&db, Arc::clone(&store), Arc::clone(&registry));
 
     let outcome = trainer
         .train(
-            TrainModelInput {
-                model_version_id: ModelVersionId::from_v7(),
-                model_spec_id: model_spec_id.clone(),
-                training_dataset_id: dataset_id.clone(),
-                runtime_config_version_id: rc_id.clone(),
-                model_family: ModelFamily::WeightedFactor,
-                label: LabelSelector {
-                    name: settlement(),
-                    horizon_secs: 0,
-                },
-                prediction_horizon_secs: 86_400,
-                validation_folds: 3,
-                selection_enabled_categories: vec![],
-                category_scope: None,
-            },
+            weighted_train_input(model_spec_id.clone(), dataset_id.clone(), rc_id.clone()),
             &NoopProgressSink,
             &CancellationToken::new(),
         )
@@ -1039,8 +826,6 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         "trainer must persist coord_search_effective_n ≥ 1, got {coord_n}"
     );
 
-    // Production path: CoreCpcvBacktestPort creates ModelRunKind::Cpcv itself —
-    // tests must not pre-insert model_run (that masked the FK bug).
     let path_set_id = BacktestPathSetId::from_v7();
     let port = CoreCpcvBacktestPort::new(CoreCpcvBacktestPortDeps {
         dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
@@ -1048,34 +833,36 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         path_set_repo: Arc::new(PgBacktestPathSetRepository::new(db.clone())),
         model_registry_repo: Arc::clone(&registry),
         model_run_repo: Arc::new(PgModelRunRepository::new(db.clone())),
-        fact_read: Arc::clone(&fact_read),
-        market_repo: Arc::clone(&market_repo),
-        event_repo: Arc::new(PgEventRepository::new(db.clone())),
-        linkage_repo: Arc::new(EmptyLinkageRepo),
         runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone())),
         bias_table_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
     });
-    let progress: Arc<dyn JobProgressSink> = Arc::new(NoopProgressSink);
     let view = port
         .run(
             version.model_version_id.clone(),
             RunCpcvBacktestRequest {
-                training_dataset_id: dataset_id.clone(),
-                runtime_config_version_id: rc_id.clone(),
-                model_family: "weighted_factor".to_owned(),
-                label_name: settlement().as_str().to_owned(),
-                label_horizon_secs: 0,
-                prediction_horizon_secs: 86_400,
+                training_dataset_id: dataset_id,
+                runtime_config_version_id: rc_id,
                 reason: "train-then-cpcv e2e".to_owned(),
                 path_set_id: Some(path_set_id.clone()),
             },
-            progress,
+            Arc::new(NoopProgressSink),
             CancellationToken::new(),
         )
         .await
         .expect("cpcv port");
 
-    assert_eq!(view.path_set_id, path_set_id);
+    assert_cpcv_view_and_bind(&db, &registry, &version, &view, &path_set_id, coord_n).await;
+}
+
+async fn assert_cpcv_view_and_bind(
+    db: &DatabaseConnection,
+    registry: &Arc<dyn ModelRegistryRepository>,
+    version: &ModelVersionInfo,
+    view: &BacktestPathSetView,
+    path_set_id: &BacktestPathSetId,
+    coord_n: u64,
+) {
+    assert_eq!(view.path_set_id, *path_set_id);
     assert_eq!(
         view.trial_count, view.trial_grid_count,
         "DSR N must equal the governed trial-grid count (same population as V)"
@@ -1085,7 +872,6 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         i64::try_from(coord_n).unwrap_or(0),
         "coord_search_effective_n is audit-only and must still be persisted"
     );
-    // N=4,k=2 → φ = C(3,1) = 3 paths; C(4,2) = 6 combinations.
     assert_eq!(view.path_count, 3);
     assert_eq!(view.combination_count, 6);
     assert!(
@@ -1096,7 +882,7 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
     let cpcv_run = quant_model_run::Entity::find()
         .filter(quant_model_run::Column::RunKind.eq(ModelRunKind::Cpcv))
         .filter(quant_model_run::Column::Status.eq(ModelRunStatus::Succeeded))
-        .one(&db)
+        .one(db)
         .await
         .expect("query cpcv run")
         .expect("port must create ModelRunKind::Cpcv");
@@ -1124,11 +910,11 @@ async fn train_then_cpcv_persists_path_set_with_dsr_n_decomposition() {
         .expect("version");
     assert_eq!(
         bound.publish_path_set_id.as_ref(),
-        Some(&path_set_id),
+        Some(path_set_id),
         "explicit bind must pin publish_path_set_id"
     );
 
-    let listed = PgBacktestPathSetRepository::new(db)
+    let listed = PgBacktestPathSetRepository::new(db.clone())
         .list_by_model_version(&version.model_version_id)
         .await
         .expect("list");

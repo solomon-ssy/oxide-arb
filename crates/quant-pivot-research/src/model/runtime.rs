@@ -10,6 +10,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::ModelVersionInfo,
     enums::{common::MarketCategory, quant::DataQualityStatus},
+    runtime_config::FactorCrossSectionConfig,
     types::{ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd},
 };
 use serde::{Deserialize, Serialize};
@@ -17,8 +18,8 @@ use serde::{Deserialize, Serialize};
 pub use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily, ModelFamilyParseError};
 
 use crate::{
-    factors::{FactorName, FactorValue},
-    features::{FeatureName, FeatureValue, SubstitutionAudit},
+    factors::{FactorValue, FrozenReferenceQuantiles},
+    features::{FeatureCell, FeatureName, NullReason},
     model::{
         overlay::{WeightOverlay, WeightSource},
         sell_scorer::SellScorerRuntime,
@@ -48,8 +49,8 @@ pub struct MarketInferenceContext {
     pub data_quality: DataQualityStatus,
     /// Seconds until market resolution, when known (horizon multiplier input).
     pub time_to_resolution_secs: Option<u64>,
-    /// Audited feature substitutions (confidence-penalty input).
-    pub substitutions: Vec<SubstitutionAudit>,
+    /// Reasons of substituted feature cells (confidence-penalty input).
+    pub substitution_reasons: Vec<NullReason>,
 }
 
 /// One market's factor row for factor-table inference.
@@ -70,8 +71,8 @@ pub struct FactorInferenceRow {
 pub struct FactorInferenceTable {
     /// The owning model run; stamped onto every emitted candidate.
     pub model_run_id: ModelRunId,
-    /// Decision time the batch was assembled as of.
-    pub as_of: DateTime<Utc>,
+    /// Frozen decision time for the inference batch.
+    pub decision_at: DateTime<Utc>,
     /// Per-market factor rows.
     pub rows: Vec<FactorInferenceRow>,
 }
@@ -83,8 +84,8 @@ pub struct InferenceMatrixRow {
     pub market_id: MarketId,
     /// Outcome token id.
     pub token_id: TokenId,
-    /// Feature values, column-aligned with [`InferenceMatrix::feature_names`].
-    pub features: Vec<FeatureValue>,
+    /// Feature cells, column-aligned with [`InferenceMatrix::feature_names`].
+    pub features: Vec<FeatureCell>,
     /// Per-market scoring context (prices, liquidity, quality, horizon) — the
     /// classical runtime prices and sides its candidates from this, exactly like
     /// the weighted factor-table path.
@@ -94,8 +95,10 @@ pub struct InferenceMatrixRow {
 /// A dense feature matrix (classical-ML input).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceMatrix {
-    /// Decision time the matrix was assembled as of.
-    pub as_of: DateTime<Utc>,
+    /// Owning model run; stamped onto every emitted candidate.
+    pub model_run_id: ModelRunId,
+    /// Frozen decision time for the inference batch.
+    pub decision_at: DateTime<Utc>,
     /// Column order for every row.
     pub feature_names: Vec<FeatureName>,
     /// Per-market feature rows.
@@ -113,12 +116,12 @@ pub enum ModelRuntimeInput {
 }
 
 impl ModelRuntimeInput {
-    /// Decision time the batch was assembled as of.
+    /// Frozen decision time for this inference batch.
     #[must_use]
-    pub const fn as_of(&self) -> DateTime<Utc> {
+    pub const fn decision_at(&self) -> DateTime<Utc> {
         match self {
-            Self::FactorTable(table) => table.as_of,
-            Self::FeatureMatrix(matrix) => matrix.as_of,
+            Self::FactorTable(table) => table.decision_at,
+            Self::FeatureMatrix(matrix) => matrix.decision_at,
         }
     }
 
@@ -153,26 +156,58 @@ pub struct ModelRuntimeMetrics {
     pub inference_duration_ms: u64,
 }
 
-/// A non-fatal warning surfaced by a model runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Semantic state of one raw value consumed by a serving model.
+///
+/// Classical inputs retain the source [`FeatureCell`] state. Weighted inputs
+/// retain the factor engine's normalization outcome, so an absent factor score
+/// is never encoded as a numeric zero in serving evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ModelRuntimeWarning {
-    /// A schema hash mismatch was tolerated in a degraded mode.
-    SchemaHashMismatch {
-        /// Hash the runtime expected.
-        expected: ContentHash,
-        /// Hash actually presented.
-        actual: ContentHash,
-    },
-    /// A required factor was missing for a market.
-    MissingFactor {
-        /// Affected market.
-        market_id: MarketId,
-        /// Missing factor.
-        factor: FactorName,
-    },
-    /// Any other degradation, described inline.
-    Degraded(String),
+pub enum ModelInputAuditState {
+    Observed,
+    Substituted,
+    Missing,
+    NotApplicable,
+    Scored,
+    MissingInput,
+    Indeterminate,
+}
+
+impl ModelInputAuditState {
+    /// Stable `ClickHouse` wire value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Substituted => "substituted",
+            Self::Missing => "missing",
+            Self::NotApplicable => "not_applicable",
+            Self::Scored => "scored",
+            Self::MissingInput => "missing_input",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// Exact evidence emitted by the same inference transform invocation that fed
+/// the estimator.
+///
+/// `encoded_value_bits` is the IEEE-754 payload consumed by a classical
+/// estimator (or the normalized weighted-factor score). It is absent for a
+/// factor that was not scored; no sentinel numeric value is permitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInputAuditRow {
+    pub model_version_id: ModelVersionId,
+    pub model_family: ModelFamily,
+    pub market_id: MarketId,
+    pub raw_input_name: String,
+    pub raw_state: ModelInputAuditState,
+    pub raw_value: Option<String>,
+    pub encoded_column: String,
+    pub encoded_value_bits: Option<u64>,
+    pub input_contract_hash: ContentHash,
+    pub transform_hash: ContentHash,
+    pub training_input_hash: ContentHash,
 }
 
 /// Output of a model runtime's batch inference.
@@ -182,8 +217,8 @@ pub struct ModelRuntimeOutput {
     pub candidates: Vec<SignalCandidate>,
     /// Runtime metrics for the batch.
     pub runtime_metrics: ModelRuntimeMetrics,
-    /// Non-fatal warnings.
-    pub warnings: Vec<ModelRuntimeWarning>,
+    /// Exact model inputs produced during this inference call.
+    pub input_audit: Vec<ModelInputAuditRow>,
 }
 
 /// Unified inference entry point. Business layers depend only on this trait.
@@ -204,6 +239,14 @@ pub trait QuantModelRuntime: Send + Sync {
     /// the model imposes no extra selection requirement.
     fn required_features(&self) -> Vec<FeatureName>;
 
+    /// Ordered raw inputs needed to assemble this runtime's inference payload.
+    ///
+    /// Defaults to required features. Classical runtimes override this to add
+    /// optional inputs without making them pre-selection rejection gates.
+    fn input_features(&self) -> Vec<FeatureName> {
+        self.required_features()
+    }
+
     /// The single market category this runtime's frozen artifact declares
     /// itself scoped to, or `None` for a generic cross-category scorer
     /// (11.2.2 category routing). Enforced by the core `ModelRunner` and
@@ -221,6 +264,17 @@ pub trait QuantModelRuntime: Send + Sync {
     /// metrics for governance audit (3.7).
     fn weight_source(&self) -> WeightSource {
         WeightSource::Artifact
+    }
+
+    /// Weighted-only normalization policy frozen in the artifact.
+    fn factor_cross_section(&self) -> Option<&FactorCrossSectionConfig> {
+        None
+    }
+
+    /// Weighted-only train-fitted reference distributions. Classical runtimes
+    /// return `None` because they never enter the factor plane.
+    fn frozen_reference_quantiles(&self) -> Option<&FrozenReferenceQuantiles> {
+        None
     }
 
     /// Score a batch, producing candidates.

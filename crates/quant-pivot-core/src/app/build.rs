@@ -90,6 +90,7 @@ impl AppContext {
             research: &research,
             account: &account,
             events: events.clone(),
+            max_recovery_attempts: deploy.quant.research_jobs.max_recovery_attempts,
         })
         .await?;
         // Late-bind the report scheduler so runtime-config activation rebuilds

@@ -8,6 +8,7 @@
 //! | GET  | `/quant/reports/latest` | `quant_report:read` | Latest published `TopN` report |
 //! | GET  | `/quant/reports/{id}` | `quant_report:read` | Report detail (header + summary) |
 //! | GET  | `/quant/reports/{id}/recommendations` | `quant_report:read` | Report recommendations |
+//! | GET  | `/quant/reports/{id}/diagnostics` | `quant_report:read` | Durable serving diagnostics |
 //! | GET  | `/quant/reports/{id}/diff/{other_id}` | `quant_report:read` | Structural diff vs another report |
 //! | POST | `/quant/reports/run` | `quant_report:enqueue` (governed) | Enqueue an ad-hoc report (202) |
 //! | POST | `/quant/reports/{id}/revoke` | `quant_report:revoke` (governed) | Revoke a published report |
@@ -21,8 +22,8 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         AdHocReportCommand, Paginated, QuantRecommendationView, QuantReportDetailView,
-        QuantReportListQuery, QuantReportView, ReportDiffView, RevokeReportRequest,
-        RunReportAccepted, RunReportRequest,
+        QuantReportDiagnosticsView, QuantReportListQuery, QuantReportView, ReportDiffView,
+        RevokeReportRequest, RunReportAccepted, RunReportRequest,
     },
     enums::{
         operation_log::OperationCategory,
@@ -77,6 +78,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/quant/reports/{id}/recommendations",
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
             recommendations,
+        ),
+        spec(
+            Method::GET,
+            "/quant/reports/{id}/diagnostics",
+            Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
+            diagnostics,
         ),
         spec(
             Method::GET,
@@ -136,6 +143,19 @@ pub async fn recommendations(
     Ok(WebResponse::ok(views))
 }
 
+/// `GET /api/quant/reports/{id}/diagnostics` — durable serving evidence summary.
+pub async fn diagnostics(
+    state: web::Data<AppState>,
+    id: web::Path<RecommendationReportId>,
+) -> Result<WebResponse<QuantReportDiagnosticsView>, WebError> {
+    let view = state
+        .quant_reports
+        .find_report_diagnostics(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("report not found: {id}")))?;
+    Ok(WebResponse::ok(view))
+}
+
 /// `GET /api/quant/reports/{id}/diff/{other_id}` — structural diff.
 pub async fn diff(
     state: web::Data<AppState>,
@@ -177,7 +197,7 @@ pub async fn run(
         .enqueue_ad_hoc(AdHocReportCommand {
             request_id: request.request_id,
             top_n: request.top_n,
-            source_delay_secs: request.source_delay_secs,
+            knowledge_lag_secs: request.knowledge_lag_secs,
         })
         .await?;
     op_ctx.set_action(OperationCategory::QuantReport, "quant.report.run");

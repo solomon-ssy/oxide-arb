@@ -138,7 +138,12 @@ impl DefaultModelRuntimeFactory {
             }
             .into());
         }
-        if header.factor_schema_hash != self.binding.factor_schema_hash {
+        // Classical artifacts consume only their frozen raw-input contract and
+        // fitted transform. An unrelated factor-schema change must not prevent
+        // loading them; weighted and exit-scorer families remain strictly bound.
+        if !header.model_family.is_classical()
+            && header.factor_schema_hash != self.binding.factor_schema_hash
+        {
             return Err(ResearchError::SchemaHashMismatch {
                 detail: format!(
                     "factor schema hash: artifact `{}`, active `{}`",
@@ -289,6 +294,7 @@ mod tests {
     use quant_pivot_models::{
         domain::ModelVersionInfo,
         enums::quant::PublicationStatus,
+        runtime_config::FactorCrossSectionConfig,
         types::{ContentHash, ModelSpecId, ModelVersionId},
     };
     use rust_decimal_macros::dec;
@@ -301,6 +307,7 @@ mod tests {
             artifact::{
                 FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
                 ScoreMultiplierSpec, SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+                model_input_contract_hash,
             },
             calibrator::{CalibrationArtifactLoader, ResolvedCalibration},
             runtime::{ModelFamily, ModelRuntimeFactory},
@@ -309,7 +316,7 @@ mod tests {
 
     use async_trait::async_trait;
     use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-    use quant_pivot_models::types::CalibrationArtifactId;
+    use quant_pivot_models::types::{CalibrationArtifactId, ModelInputContract};
     use std::fmt::Write;
 
     /// Test-only loader: these fixtures never construct a `Calibrated` return
@@ -344,6 +351,9 @@ mod tests {
     }
 
     fn artifact(version: &ModelVersionId, feature_hash: ContentHash) -> ModelArtifact {
+        let input_contract = ModelInputContract::single_required("book.mid");
+        let input_contract_hash =
+            model_input_contract_hash(&input_contract).expect("input contract hash");
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: version.clone(),
@@ -351,6 +361,10 @@ mod tests {
                 feature_schema_hash: feature_hash,
                 factor_schema_hash: hash("fac"),
             },
+            training_dataset_hash: hash("dataset"),
+            training_input_hash: hash("input"),
+            input_contract,
+            input_contract_hash,
             weights: vec![FactorWeight {
                 factor: names::LIQUIDITY_DEPTH,
                 weight: dec!(1),
@@ -359,7 +373,8 @@ mod tests {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
+            factor_cross_section: FactorCrossSectionConfig::default(),
+            frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
             objective_report: None,
             category_scope: None,
         }))

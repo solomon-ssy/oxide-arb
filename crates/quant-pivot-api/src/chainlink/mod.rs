@@ -178,6 +178,7 @@ impl ChainlinkAggregatorSource {
             value,
             observed_at,
             publish_time: observed_at,
+            available_at: None,
         }))
     }
 

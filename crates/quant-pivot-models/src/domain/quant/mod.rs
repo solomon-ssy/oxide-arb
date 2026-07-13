@@ -14,12 +14,14 @@ mod candidate;
 mod capital;
 #[allow(clippy::needless_update)] // NewModelComparisonReport omits DB-managed created_at
 mod comparison;
-#[allow(clippy::needless_update)] // NewTrainingDataset omits DB-managed created_at
+#[allow(clippy::needless_update)] // NewTrainingDatasetPlan omits materialization/timestamps
 mod dataset;
 mod execution;
 mod exit_training;
 mod factor;
 mod feature;
+#[allow(clippy::needless_update)] // Insert DTOs omit database-managed timestamps.
+mod feature_parity;
 #[allow(clippy::needless_update)] // NewModelGovernanceAudit omits DB-managed created_at
 mod governance_audit;
 #[allow(clippy::needless_update)] // NewMarketLinkage omits DB-managed created_at
@@ -57,6 +59,7 @@ pub use execution::*;
 pub use exit_training::*;
 pub use factor::*;
 pub use feature::*;
+pub use feature_parity::*;
 pub use governance_audit::*;
 pub use linkage::*;
 pub use model::*;

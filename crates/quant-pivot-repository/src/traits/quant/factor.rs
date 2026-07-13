@@ -42,6 +42,13 @@ pub trait FactorRepository: Send + Sync {
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<FactorDefinitionInfo, StorageError>;
 
+    /// Atomically publish all requested revisions, retiring any previously
+    /// published revision with the same logical name in the same transaction.
+    async fn publish_definitions(
+        &self,
+        factor_definition_ids: &[FactorDefinitionId],
+    ) -> Result<Vec<FactorDefinitionInfo>, StorageError>;
+
     async fn retire_definition(
         &self,
         factor_definition_id: &FactorDefinitionId,
@@ -53,8 +60,8 @@ pub trait FactorRepository: Send + Sync {
     ) -> Result<Vec<FactorValueInfo>, StorageError>;
 
     /// Factor values for the given definitions within `[from, until)`, ascending
-    /// by `as_of`. Backs the `HistoricalQuantile` small-cross-section normalization
-    /// and the factor-collinearity analysis.
+    /// by `as_of`. Research-only input for factor-collinearity analysis; serving
+    /// normalization must never call this mutable-history query.
     async fn recent_values(
         &self,
         factor_definition_ids: &[FactorDefinitionId],

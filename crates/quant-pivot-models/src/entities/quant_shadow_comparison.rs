@@ -11,7 +11,7 @@ pub struct Model {
     pub shadow_comparison_id: ShadowComparisonId,
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub topn_overlap: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub rank_delta_json: Json,

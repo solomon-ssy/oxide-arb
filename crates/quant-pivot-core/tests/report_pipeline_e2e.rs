@@ -38,7 +38,7 @@ async fn ad_hoc_publishes_report_with_recommendations() {
             request_id: request_id.to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
-            source_delay_secs: Some(0),
+            knowledge_lag_secs: Some(0),
         })
         .await
         .expect("ad-hoc report");
@@ -79,7 +79,7 @@ async fn ad_hoc_idempotent_on_trigger_key() {
         request_id: "idempotent-ad-hoc".to_owned(),
         trigger_time: Utc::now(),
         top_n: Some(5),
-        source_delay_secs: Some(0),
+        knowledge_lag_secs: Some(0),
     };
     let first = harness
         .lifecycle
@@ -120,7 +120,7 @@ async fn empty_selection_publishes_published_empty() {
             request_id: "empty-selection".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
-            source_delay_secs: Some(0),
+            knowledge_lag_secs: Some(0),
         })
         .await
         .expect("empty selection report");
@@ -155,7 +155,7 @@ async fn account_unavailable_fails_without_report_row() {
             request_id: request_id.to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
-            source_delay_secs: Some(0),
+            knowledge_lag_secs: Some(0),
         })
         .await
         .expect_err("account unavailable must fail closed");
@@ -190,7 +190,7 @@ async fn revoke_after_publish() {
             request_id: "revoke-me".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
-            source_delay_secs: Some(0),
+            knowledge_lag_secs: Some(0),
         })
         .await
         .expect("publish report");
@@ -253,7 +253,7 @@ async fn evidence_refs_and_rank_scores_populated() {
             request_id: "evidence-and-ranks".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
-            source_delay_secs: Some(0),
+            knowledge_lag_secs: Some(0),
         })
         .await
         .expect("published report");
@@ -323,7 +323,7 @@ async fn report_persists_real_drawdown_from_equity_history() {
                 request_id: "drawdown-neutral-baseline".to_owned(),
                 trigger_time: Utc::now(),
                 top_n: Some(5),
-                source_delay_secs: Some(0),
+                knowledge_lag_secs: Some(0),
             })
             .await
             .expect("neutral drawdown baseline report");
@@ -376,7 +376,7 @@ async fn report_persists_real_drawdown_from_equity_history() {
             request_id: "drawdown-aware-sizing".to_owned(),
             trigger_time: Utc::now(),
             top_n: Some(5),
-            source_delay_secs: Some(0),
+            knowledge_lag_secs: Some(0),
         })
         .await
         .expect("drawdown-aware report");

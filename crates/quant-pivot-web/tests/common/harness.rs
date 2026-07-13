@@ -33,17 +33,21 @@ use quant_pivot_models::{
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestPathSetView, BacktestPort,
-        BacktestReportInfo, BacktestReportListQuery, BacktestReportView, BasisAlertInfo,
-        BasisAlertListQuery, BiasTableFitJobParams, BiasTableFitOutcome, BindCalibrationRequest,
-        BindPublishPathSetRequest, BookSnapshot, BuildTrainingDatasetRequest,
-        CalibrationArtifactFitPort, CalibrationArtifactInfo, CalibrationArtifactListQuery,
-        CatalogState, CatalogStatusPort, ComparisonReportListQuery, CoreEventPublisher,
-        CpcvBacktestPort, CreateModelSpecCommand, DataQualityPort, DataQualitySnapshot,
-        DomainSourceCursorInfo, ExecutionOrderInfo, ExecutionReadPort, ExecutionRecoveryPort,
-        ExecutionRecoveryView, ExecutionSubmitPort, FactorCollinearitySource,
-        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
-        FactorGovernancePort, FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent,
+        AcknowledgeFeatureParityLatchRequest, BacktestPathSetInfo, BacktestPathSetListQuery,
+        BacktestPathSetView, BacktestPort, BacktestReportInfo, BacktestReportListQuery,
+        BacktestReportView, BasisAlertInfo, BasisAlertListQuery, BiasTableFitJobParams,
+        BiasTableFitOutcome, BindCalibrationRequest, BindPublishPathSetRequest, BookSnapshot,
+        BuildTrainingDatasetRequest, CalibrationArtifactFitPort, CalibrationArtifactInfo,
+        CalibrationArtifactListQuery, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
+        CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand, DataQualityPort,
+        DataQualitySnapshot, DomainSourceCursorInfo, ExecutionOrderInfo, ExecutionReadPort,
+        ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
+        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
+        FactorDefinitionListQuery, FactorGovernancePort, FeatureContractEntryView,
+        FeatureContractView, FeatureIntegrityActionContext, FeatureIntegrityLatchView,
+        FeatureIntegrityPort, FeatureIntegritySummaryView, FeatureNullPolicyView,
+        FeatureParityEventListQuery, FeatureParityEventView, FeatureParityRunListQuery,
+        FeatureParityRunView, FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent,
         GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort,
         KillSwitchView, LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort,
         MarketLinkageInfo, MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
@@ -53,24 +57,25 @@ use quant_pivot_models::{
         ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, NegRiskEventDriftView,
         NewBasisAlert, NewMarketLinkage, OverrideLinkageRequest, Paginated,
         ParticipantConcentrationDetailView, ParticipantConcentrationSummaryView,
-        PromoteDatasetRequest, PublishFactorCommand, PublishFactorsBatchCommand,
-        PublishModelCommand, PublishedModelOptionView, QualityGateReportView,
-        QuantModeTransitionReport, ReconciliationPort, RegisterFactorDefinitionsCommand,
-        ResearchCatalogPort, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
-        ResolveReconciliationCommand, ResolveReconciliationOutcome, RetireFactorCommand,
-        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
-        RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand, StructuralMonitorPort,
-        SystemStatus, TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest,
-        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
-        TrainingDatasetPort, TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
+        PublishFactorCommand, PublishFactorsBatchCommand, PublishModelCommand,
+        PublishedModelOptionView, QualityGateReportView, QuantModeTransitionReport,
+        ReconciliationPort, RegisterFactorDefinitionsCommand, ResearchCatalogPort,
+        ResearchJobListQuery, ResearchJobPort, ResearchJobView, ResolveReconciliationCommand,
+        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
+        RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
+        RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
+        StructuralMonitorPort, SystemStatus, TradeTapeCoverageView, TradeTapeSourceHealthView,
+        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
+        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        UpsertDomainSourceCursor, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
-    runtime_config::RuntimeConfig,
+    runtime_config::{FeatureFamily, RuntimeConfig},
     types::{
-        BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId,
+        BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
         DomainInstrumentKey, DomainSourceId, FactorDefinitionId, MarketId, MarketLinkageId,
         ModelComparisonReportId, ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId,
-        RuntimeConfigVersionId, TokenId, TrainingDatasetId,
+        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -84,6 +89,7 @@ use quant_pivot_repository::{
         QuantFactReadRepository, ReconciliationRepository, SettlementRedeemRepository,
     },
 };
+use quant_pivot_research::features::FeatureValueKind;
 use quant_pivot_storage::cache::connect_pool;
 use quant_pivot_test_support::{
     account::core_account_read_port, report_pipeline_harness::FixtureReportSeedContext,
@@ -178,6 +184,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         model_spec: Arc::new(MockModelSpecPort),
         research_catalog: Arc::new(MockResearchCatalogPort),
         research_jobs: Arc::new(MockResearchJobPort),
+        feature_integrity: Arc::new(MockFeatureIntegrityPort),
         calibration_artifacts: Arc::new(MockCalibrationArtifactFitPort),
         model_calibration_fit: Arc::new(MockModelCalibrationFitPort),
         market_linkages: Arc::new(MockMarketLinkageRepository),
@@ -437,6 +444,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -446,6 +454,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
         _minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         Ok(Vec::new())
@@ -456,6 +465,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -475,6 +485,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
@@ -484,6 +495,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
         Ok(None)
     }
@@ -493,6 +505,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
+        _available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -500,7 +513,8 @@ impl QuantFactReadRepository for MockQuantFactRead {
     async fn resolution_at(
         &self,
         _market_id: &MarketId,
-        _as_of_ms: i64,
+        _source_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
         Ok(None)
     }
@@ -510,6 +524,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _market_ids: Vec<MarketId>,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -519,6 +534,8 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _instrument_keys: Vec<DomainInstrumentKey>,
         _from_ms: i64,
         _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         Ok(Vec::new())
     }
@@ -528,6 +545,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _instrument_key: &DomainInstrumentKey,
         _metric: &str,
         _as_of_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         Ok(None)
     }
@@ -536,6 +554,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         &self,
         _from_ms: i64,
         _to_ms: i64,
+        _decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
         Ok(Vec::new())
     }
@@ -731,6 +750,7 @@ pub struct MockModelTrainingPort;
 impl ModelTrainingPort for MockModelTrainingPort {
     async fn train(
         &self,
+        _model_version_id: ModelVersionId,
         _request: TrainModelRequest,
         _progress: Arc<dyn JobProgressSink>,
         _cancel: CancellationToken,
@@ -929,14 +949,6 @@ impl ModelGovernancePort for MockModelGovernancePort {
         Err(QuantError::NotImplemented("model retire".into()))
     }
 
-    async fn promote_dataset_ready(
-        &self,
-        _request: PromoteDatasetRequest,
-        _actor: GovernanceActor,
-    ) -> QuantResult<TrainingDatasetInfo> {
-        Err(QuantError::NotImplemented("dataset promote".into()))
-    }
-
     async fn preview_gate(
         &self,
         _model_version_id: &ModelVersionId,
@@ -1019,6 +1031,31 @@ pub struct MockModelSpecPort;
 
 #[async_trait]
 impl ModelSpecPort for MockModelSpecPort {
+    async fn feature_contract(&self) -> QuantResult<FeatureContractView> {
+        Ok(FeatureContractView {
+            feature_schema_hash: ContentHash::parse(concat!(
+                "blake3:",
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ))
+            .expect("canonical feature schema hash fixture"),
+            feature_schema_version: SchemaVersion::new(6),
+            features: vec![FeatureContractEntryView {
+                name: "book.mid".to_owned(),
+                compute_revision: 1,
+                family: FeatureFamily::PriceBook,
+                value_kind: FeatureValueKind::Probability,
+                unit: "probability".to_owned(),
+                null_policy: FeatureNullPolicyView {
+                    policy: "reject_market".to_owned(),
+                    value: None,
+                },
+                source: "published_l2_book".to_owned(),
+                point_in_time_rule: "book_version_at_or_before_source_cutoff".to_owned(),
+                staleness_policy: "max_book_age".to_owned(),
+            }],
+        })
+    }
+
     async fn create(
         &self,
         _command: CreateModelSpecCommand,
@@ -1147,6 +1184,49 @@ impl ResearchJobPort for MockResearchJobPort {
     }
 }
 
+pub struct MockFeatureIntegrityPort;
+
+#[async_trait]
+impl FeatureIntegrityPort for MockFeatureIntegrityPort {
+    async fn summary(&self) -> QuantResult<FeatureIntegritySummaryView> {
+        Err(QuantError::NotImplemented(
+            "feature integrity summary".into(),
+        ))
+    }
+
+    async fn list_runs(
+        &self,
+        _query: FeatureParityRunListQuery,
+    ) -> QuantResult<Paginated<FeatureParityRunView>> {
+        Err(QuantError::NotImplemented("feature parity runs".into()))
+    }
+
+    async fn list_events(
+        &self,
+        query: FeatureParityEventListQuery,
+    ) -> QuantResult<Paginated<FeatureParityEventView>> {
+        Ok(Paginated::empty_for(&query))
+    }
+
+    async fn request_full_run(
+        &self,
+        _request: RunFullFeatureParityRequest,
+        _ctx: FeatureIntegrityActionContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented("feature parity full run".into()))
+    }
+
+    async fn acknowledge_latch(
+        &self,
+        _request: AcknowledgeFeatureParityLatchRequest,
+        _ctx: FeatureIntegrityActionContext,
+    ) -> QuantResult<FeatureIntegrityLatchView> {
+        Err(QuantError::NotImplemented(
+            "feature parity acknowledge".into(),
+        ))
+    }
+}
+
 pub struct MockCalibrationArtifactFitPort;
 
 #[async_trait]
@@ -1219,11 +1299,10 @@ impl StructuralMonitorPort for MockStructuralMonitorPort {
     async fn trade_tape_coverage(&self) -> QuantResult<TradeTapeCoverageView> {
         let now = chrono::Utc::now();
         Ok(TradeTapeCoverageView {
-            as_of: now,
-            pit_as_of: now,
-            pit_cutoff: now,
+            decision_at: now,
+            knowledge_cutoff: now,
             window_secs: 86_400,
-            source_delay_secs: 60,
+            knowledge_lag_secs: 60,
             active_market_count: 0,
             token_cursor_count: 0,
             market_cursor_count: 0,
@@ -1250,11 +1329,10 @@ impl StructuralMonitorPort for MockStructuralMonitorPort {
     async fn participant_concentration(&self) -> QuantResult<ParticipantConcentrationSummaryView> {
         let now = chrono::Utc::now();
         Ok(ParticipantConcentrationSummaryView {
-            as_of: now,
-            pit_as_of: now,
-            pit_cutoff: now,
+            decision_at: now,
+            knowledge_cutoff: now,
             window_secs: 86_400,
-            source_delay_secs: 60,
+            knowledge_lag_secs: 60,
             min_unique_participants: 5,
             min_notional_usd: Decimal::ZERO,
             min_coverage_ratio: Decimal::ZERO,
@@ -1316,7 +1394,7 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
     async fn valid_at(
         &self,
         _market_id: &MarketId,
-        _as_of: chrono::DateTime<chrono::Utc>,
+        _boundary: &quant_pivot_models::domain::DecisionBoundary,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
         Ok(None)
     }
@@ -1324,7 +1402,7 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
     async fn valid_at_for_markets(
         &self,
         _market_ids: &[MarketId],
-        _as_of: chrono::DateTime<chrono::Utc>,
+        _boundary: &quant_pivot_models::domain::DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }
@@ -1339,7 +1417,7 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
     async fn ledger_for_markets(
         &self,
         _market_ids: &[MarketId],
-        _derived_before: chrono::DateTime<chrono::Utc>,
+        _end_boundary: &quant_pivot_models::domain::DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }

@@ -11,9 +11,9 @@ use actix_web::{http::Method, web};
 use chrono::Utc;
 use quant_pivot_models::{
     domain::{
-        LinkageResolveSummaryView, MarketLinkageDetailView, MarketLinkageHistoryEntryView,
-        MarketLinkageListQuery, MarketLinkageSummaryView, OverrideLinkageRequest, Paginated,
-        ResolveLinkagesRequest,
+        DecisionClock, LinkageResolveSummaryView, MarketLinkageDetailView,
+        MarketLinkageHistoryEntryView, MarketLinkageListQuery, MarketLinkageSummaryView,
+        OverrideLinkageRequest, Paginated, ResolveLinkagesRequest,
     },
     enums::{
         operation_log::OperationCategory,
@@ -87,9 +87,10 @@ pub async fn get(
     market_id: web::Path<MarketId>,
 ) -> Result<WebResponse<MarketLinkageDetailView>, WebError> {
     let market_id = market_id.into_inner();
+    let boundary = DecisionClock::new(0).boundary(Utc::now())?;
     let info = state
         .market_linkages
-        .valid_at(&market_id, Utc::now())
+        .valid_at(&market_id, &boundary)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("market linkage not found: {market_id}")))?;
     Ok(WebResponse::ok(MarketLinkageDetailView::from(info)))
@@ -105,9 +106,10 @@ pub async fn history(
     market_id: web::Path<MarketId>,
 ) -> Result<WebResponse<Vec<MarketLinkageHistoryEntryView>>, WebError> {
     let market_id = market_id.into_inner();
+    let boundary = DecisionClock::new(0).boundary(Utc::now())?;
     let rows = state
         .market_linkages
-        .ledger_for_markets(&[market_id], Utc::now())
+        .ledger_for_markets(&[market_id], &boundary)
         .await?;
     Ok(WebResponse::ok(
         rows.into_iter()

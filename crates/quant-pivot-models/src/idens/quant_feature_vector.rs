@@ -2,7 +2,8 @@ use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+        ColumnDef, Expr, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table,
+        TableCreateStatement,
     },
 };
 
@@ -24,13 +25,16 @@ pub enum QuantFeatureVector {
     FeatureVectorId,
     MarketId,
     TokenId,
-    AsOf,
+    DecisionAt,
+    DecisionBoundary,
     FeatureSchemaVersion,
     FeatureHash,
     DataQuality,
     StalenessMs,
     Payload,
     SourceRefs,
+    DecisionCapture,
+    DecisionCaptureHash,
     CreatedAt,
 }
 
@@ -42,9 +46,16 @@ pub fn table() -> TableCreateStatement {
         .col(column::market_id(QuantFeatureVector::MarketId))
         .col(column::token_id_null(QuantFeatureVector::TokenId))
         .col(
-            ColumnDef::new(QuantFeatureVector::AsOf)
+            ColumnDef::new(QuantFeatureVector::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
+        )
+        // Nullable only for pre-v10 audit rows. Every v10 application write
+        // supplies the full boundary and downstream replay rejects `NULL`.
+        .col(
+            ColumnDef::new(QuantFeatureVector::DecisionBoundary)
+                .json_binary()
+                .null(),
         )
         .col(
             ColumnDef::new(QuantFeatureVector::FeatureSchemaVersion)
@@ -74,6 +85,16 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
+        .col(
+            ColumnDef::new(QuantFeatureVector::DecisionCapture)
+                .json_binary()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantFeatureVector::DecisionCaptureHash)
+                .text()
+                .null(),
+        )
         .col(timestamp_with_write_default(QuantFeatureVector::CreatedAt))
         .foreign_key(
             ForeignKey::create()
@@ -82,20 +103,23 @@ pub fn table() -> TableCreateStatement {
                 .to(Market::Table, Market::MarketId)
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        .check(Expr::cust(
+            "(decision_capture IS NULL) = (decision_capture_hash IS NULL)",
+        ))
         .to_owned()
 }
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
-            "idx_quant_feature_vector_market_as_of",
+            "idx_quant_feature_vector_market_decision_at",
             quant_feature_vector_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_feature_vector_market_as_of")
+                .name("idx_quant_feature_vector_market_decision_at")
                 .table(QuantFeatureVector::Table)
                 .col(QuantFeatureVector::MarketId)
-                .col((QuantFeatureVector::AsOf, IndexOrder::Desc))
+                .col((QuantFeatureVector::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "feature vectors by market and PIT timestamp",
         ),
@@ -111,14 +135,14 @@ pub fn indexes() -> Vec<IndexSpec> {
             "feature vector canonical hash lookup",
         ),
         IndexSpec::sea_query(
-            "idx_quant_feature_vector_schema_as_of",
+            "idx_quant_feature_vector_schema_decision_at",
             quant_feature_vector_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_feature_vector_schema_as_of")
+                .name("idx_quant_feature_vector_schema_decision_at")
                 .table(QuantFeatureVector::Table)
                 .col(QuantFeatureVector::FeatureSchemaVersion)
-                .col((QuantFeatureVector::AsOf, IndexOrder::Desc))
+                .col((QuantFeatureVector::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "feature vectors by schema version",
         ),

@@ -11,12 +11,13 @@ use crate::{
         ReportPublisherDeps, build_report_scheduler,
     },
     service::equity::EquitySnapshotService,
+    service::feature_integrity::{FeatureParityRunCoordinator, RepositoryFeatureParityGate},
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::CoreEventPublisher;
 use quant_pivot_repository::traits::{
-    EquitySnapshotRepository, PositionRepository, RecommendationReportRepository,
-    RecommendationRepository, RuntimeConfigVersionRepository,
+    EquitySnapshotRepository, FeatureParityRepository, PositionRepository,
+    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
@@ -28,12 +29,14 @@ pub struct ReportBundleDeps<'a> {
     pub research: &'a ResearchBundle,
     pub account: &'a AccountBundle,
     pub events: CoreEventPublisher,
+    pub max_recovery_attempts: i32,
 }
 
 /// Recommendation report bundle (Phase 4+).
 pub struct ReportBundle {
     pub lifecycle: Arc<ReportLifecycleService>,
     pub scheduler: Arc<dyn ReportScheduleRunner>,
+    pub feature_parity: Arc<FeatureParityRunCoordinator>,
 }
 
 impl ReportBundle {
@@ -50,6 +53,11 @@ impl ReportBundle {
             Arc::clone(&repos.position) as Arc<dyn PositionRepository>;
         let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
             Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
+        let feature_parity = Arc::new(FeatureParityRunCoordinator::new(
+            Arc::clone(&repos.feature_parity) as Arc<dyn FeatureParityRepository>,
+            Arc::clone(&runtime_config_repo),
+            deps.max_recovery_attempts,
+        ));
         let composer = Arc::new(DefaultRecommendationComposer::new());
         let builder = Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
             runtime_config_repo: Arc::clone(&runtime_config_repo),
@@ -66,7 +74,6 @@ impl ReportBundle {
                 Arc::clone(&position_repo),
             )),
             composer,
-            pit_source: Arc::clone(&deps.data.pit_source),
             quant_fact_read_repo: Arc::clone(&deps.infra.quant_fact_read),
             correlation_estimator: Arc::new(HistoricalCorrelationEstimator::new()),
             runtime_mode: deps.governance.runtime_mode.clone(),
@@ -89,6 +96,11 @@ impl ReportBundle {
             publisher,
             runtime_mode: deps.governance.runtime_mode.clone(),
             metrics: Arc::clone(&deps.infra.metrics),
+            feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
+                &repos.feature_parity,
+            )
+                as Arc<dyn FeatureParityRepository>)),
+            feature_parity_runs: Arc::clone(&feature_parity),
         }));
         let scheduler = build_report_scheduler(
             Arc::clone(&lifecycle),
@@ -99,6 +111,7 @@ impl ReportBundle {
         Ok(Self {
             lifecycle,
             scheduler,
+            feature_parity,
         })
     }
 }

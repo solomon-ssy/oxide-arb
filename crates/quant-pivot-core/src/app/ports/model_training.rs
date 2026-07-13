@@ -1,6 +1,6 @@
 //! Core implementation of [`ModelTrainingPort`] for the Admin API (Phase 3.6).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -14,13 +14,12 @@ use quant_pivot_models::{
     types::{ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    CalibrationArtifactRepository, EventRepository, MarketLinkageRepository, MarketRepository,
-    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    model::{LabelSelector, ModelFamilyParseError, TrainingObjectiveSpec},
+    model::{LabelSelector, TrainingObjectiveSpec},
     training::LabelName,
     validation::PurgeConfig,
 };
@@ -28,7 +27,6 @@ use quant_pivot_research::{
 use crate::{
     app::bundles::ResearchBundle,
     service::{
-        bias_table_fit::resolve_frozen_bias_table,
         historical_replay::ReplayConfig,
         model_training::{
             ModelTrainerConfig, ModelTrainerService, ModelTrainerServiceDeps, TrainModelInput,
@@ -42,12 +40,8 @@ pub struct CoreModelTrainingPort {
     artifact_store: Arc<dyn ArtifactStore>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
     model_run_repo: Arc<dyn ModelRunRepository>,
-    fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
-    linkage_repo: Arc<dyn MarketLinkageRepository>,
+    frozen_model_parity: Arc<crate::service::frozen_model_parity::FrozenModelParityService>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-    bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
 impl CoreModelTrainingPort {
@@ -56,19 +50,14 @@ impl CoreModelTrainingPort {
     pub fn from_research(
         research: &ResearchBundle,
         runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
-        bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     ) -> Self {
         Self {
             dataset_repo: Arc::clone(&research.training_dataset_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             model_registry_repo: Arc::clone(&research.model_registry_repo),
             model_run_repo: Arc::clone(&research.model_run_repo),
-            fact_read: Arc::clone(&research.quant_fact_read),
-            market_repo: Arc::clone(&research.market_repo),
-            event_repo: Arc::clone(&research.event_repo),
-            linkage_repo: Arc::clone(&research.market_linkage_repo),
+            frozen_model_parity: Arc::clone(&research.frozen_model_parity),
             runtime_config,
-            bias_table_repo,
         }
     }
 
@@ -77,19 +66,12 @@ impl CoreModelTrainingPort {
         runtime_config_version_id: &RuntimeConfigVersionId,
     ) -> QuantResult<ModelTrainerService> {
         let runtime = self.load_runtime_config(runtime_config_version_id).await?;
-        let max_book_staleness = Duration::from_millis(runtime.training.max_book_staleness_ms);
-        let bias_table =
-            resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
         Ok(ModelTrainerService::new(
             ModelTrainerServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 model_registry_repo: Arc::clone(&self.model_registry_repo),
                 model_run_repo: Arc::clone(&self.model_run_repo),
-                fact_read: Arc::clone(&self.fact_read),
-                market_repo: Arc::clone(&self.market_repo),
-                event_repo: Arc::clone(&self.event_repo),
-                linkage_repo: Arc::clone(&self.linkage_repo),
             },
             ModelTrainerConfig {
                 factors: runtime.factors.clone(),
@@ -119,9 +101,8 @@ impl CoreModelTrainingPort {
                 factors: runtime.factors,
                 domain: runtime.domain,
                 data_quality: runtime.data_quality,
-                bias_table,
+                bias_table: None,
             },
-            max_book_staleness,
         ))
     }
 
@@ -145,50 +126,99 @@ impl CoreModelTrainingPort {
 impl ModelTrainingPort for CoreModelTrainingPort {
     async fn train(
         &self,
+        model_version_id: ModelVersionId,
         request: TrainModelRequest,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainedModelView> {
-        if let Some(model_version_id) = &request.model_version_id
-            && let Some(existing) = self
-                .model_registry_repo
-                .find_model_version_by_id(model_version_id)
-                .await
-                .map_err(QuantError::from)?
+        if let Some(existing) = self
+            .model_registry_repo
+            .find_model_version_by_id(&model_version_id)
+            .await
+            .map_err(QuantError::from)?
         {
+            self.frozen_model_parity
+                .verify_and_record(
+                    &existing,
+                    "model_training_retry",
+                    "verify existing candidate against its frozen training artifact",
+                )
+                .await?;
             return Ok(TrainedModelView::from(existing));
         }
-        let model_version_id = request
-            .model_version_id
-            .clone()
-            .unwrap_or_else(ModelVersionId::from_v7);
-        let model_family = request
-            .model_family
-            .parse()
-            .map_err(|error: ModelFamilyParseError| QuantError::config(error.to_string()))?;
-        let runtime = self
-            .load_runtime_config(&request.runtime_config_version_id)
+        let _reason = request.reason;
+        let dataset = self
+            .dataset_repo
+            .find_by_id(&request.training_dataset_id)
             .await?;
-        let service = self.service_for(&request.runtime_config_version_id).await?;
+        let dataset = dataset.ok_or_else(|| StorageError::NotFound {
+            entity: "training_dataset",
+            id: request.training_dataset_id.to_string(),
+        })?;
+        let model_spec = self
+            .model_registry_repo
+            .find_model_spec_by_id(&dataset.model_spec_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "model_spec",
+                id: dataset.model_spec_id.to_string(),
+            })?;
+        model_spec
+            .training_contract
+            .validate()
+            .map_err(|detail| QuantError::config(format!("invalid training_contract: {detail}")))?;
+        model_spec
+            .input_contract
+            .validate()
+            .map_err(|detail| QuantError::config(format!("invalid input_contract: {detail}")))?;
+        if model_spec.input_contract.inputs.is_empty() {
+            return Err(QuantError::config(
+                "model spec input_contract must contain at least one raw feature",
+            ));
+        }
+        let prediction_horizon_secs =
+            u64::try_from(model_spec.prediction_horizon_secs).map_err(|error| {
+                QuantError::config(format!(
+                    "model spec prediction_horizon_secs is invalid: {error}"
+                ))
+            })?;
+        if prediction_horizon_secs == 0 {
+            return Err(QuantError::config(
+                "model spec prediction_horizon_secs must be positive",
+            ));
+        }
+        let runtime = self
+            .load_runtime_config(&dataset.runtime_config_version_id)
+            .await?;
+        let service = self.service_for(&dataset.runtime_config_version_id).await?;
         let outcome = service
             .train(
                 TrainModelInput {
                     model_version_id,
-                    model_spec_id: request.model_spec_id,
-                    training_dataset_id: request.training_dataset_id,
-                    runtime_config_version_id: request.runtime_config_version_id,
-                    model_family,
+                    model_spec_id: dataset.model_spec_id,
+                    training_dataset_id: dataset.training_dataset_id,
+                    runtime_config_version_id: dataset.runtime_config_version_id,
+                    model_family: model_spec.model_family,
+                    input_contract: model_spec.input_contract.clone(),
                     label: LabelSelector {
-                        name: LabelName::new(request.label_name),
-                        horizon_secs: request.label_horizon_secs,
+                        name: LabelName::new(model_spec.training_contract.target_label_name),
+                        horizon_secs: model_spec.training_contract.target_label_horizon_secs,
                     },
-                    prediction_horizon_secs: request.prediction_horizon_secs,
-                    validation_folds: request.validation_folds,
+                    prediction_horizon_secs,
+                    validation_folds: model_spec.training_contract.validation_folds,
                     selection_enabled_categories: runtime.selection.enabled_categories.clone(),
                     category_scope: None,
                 },
                 &*progress,
                 &cancel,
+            )
+            .await?;
+        self.frozen_model_parity
+            .verify_and_record(
+                &outcome.version,
+                "model_training",
+                "post-training full frozen dataset/model parity",
             )
             .await?;
         let mut view = TrainedModelView::from(outcome.version);

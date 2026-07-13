@@ -1,20 +1,20 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::clickhouse::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-    QuantFactorEventRow, QuantFeatureEventRow, QuantPositionEventRow,
-    QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
-    QuantSignalCandidateEventRow,
+    QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
+    QuantPositionEventRow, QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
+    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow,
 };
 
 /// Generic batch sink for one `ClickHouse` fact stream.
 ///
-/// This is the single telemetry write abstraction: book ingest facts and quant
-/// pipeline facts are both persisted through `FactWriter<Row>` implementations,
-/// all funnelling into the storage `ChWriteManager` (permit + retry + metrics).
+/// Book/telemetry callers may place this sink behind an `AsyncWriter`. Serving
+/// evidence callers await it directly and must not declare completion until
+/// the insert acknowledgement is returned.
 #[async_trait::async_trait]
 pub trait FactWriter<T: Send>: Send + Sync {
-    /// Persist a batch of fact rows. Best-effort callers (e.g. the hot-path
-    /// `AsyncWriter` flush) log and drop on error; durable callers propagate it.
+    /// Persist a batch of fact rows. Best-effort callers may log a failure;
+    /// durable callers propagate it and fail closed.
     async fn write_batch(&self, rows: Vec<T>) -> Result<(), StorageError>;
 }
 
@@ -28,6 +28,21 @@ pub trait QuantFactRepository: Send + Sync {
     async fn insert_factor_events(
         &self,
         rows: Vec<QuantFactorEventRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_model_input_events(
+        &self,
+        rows: Vec<QuantModelInputEventRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_serving_evidence_completions(
+        &self,
+        rows: Vec<QuantServingEvidenceCompletionRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_feature_parity_events(
+        &self,
+        rows: Vec<QuantFeatureParityEventRow>,
     ) -> Result<(), StorageError>;
 
     async fn insert_signal_candidate_events(

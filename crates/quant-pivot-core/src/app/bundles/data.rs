@@ -15,7 +15,7 @@ use crate::{
     observability::{
         backpressure::BackpressurePolicy, book_fact_writer::BookFactWriter, metrics_hub::MetricsHub,
     },
-    pit::platform::live_book::LiveBookDataSource,
+    pit::platform::ch_historical::DurablePitSource,
     service::{
         catalog_readiness::CatalogReadiness,
         gamma::{GammaService, GammaServiceDeps},
@@ -29,15 +29,16 @@ use quant_pivot_api::{
     ws::{ClobWsManager, WsEventDropHook, WsShardHealthPort},
 };
 use quant_pivot_models::{
-    config::DeployConfig,
-    domain::{CoreEventPublisher, PointInTimeDataSource},
-    runtime_config::RuntimeConfig,
+    config::DeployConfig, domain::CoreEventPublisher, runtime_config::RuntimeConfig,
 };
 use quant_pivot_repository::{
     cached::{CachedEventRepository, CachedMarketRepository},
     postgres::{PgEventRepository, PgMarketRepository},
-    traits::{EventRepository, MarketLinkageRepository, MarketRepository},
+    traits::{
+        CatalogVersionRepository, EventRepository, MarketLinkageRepository, MarketRepository,
+    },
 };
+use quant_pivot_research::pit::PointInTimeSnapshotSource;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -65,11 +66,13 @@ pub struct DataBundle {
     pub ws_subscription: Arc<WsSubscriptionCoordinator>,
     pub catalog: Arc<CatalogReadiness>,
     pub market_repo: Arc<dyn MarketRepository>,
+    /// Immutable catalog ledger used by every historical/replay resolver.
+    pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
     pub gamma_client: Arc<GammaClient>,
     /// Token freshness snapshots and fact-lag aggregation for governance and web.
     pub data_quality: Arc<BookDataQualityService>,
-    /// Live point-in-time source for Phase 3 feature/report builders.
-    pub pit_source: Arc<dyn PointInTimeDataSource>,
+    /// Durable point-in-time source shared by serving and replay.
+    pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     /// Best-effort nudge when pipeline status changes (web readiness).
     pub status_nudge: SystemStatusNudge,
     /// Polymarket taker fee calculator (category schedules from Gamma sync).
@@ -106,6 +109,8 @@ impl DataBundle {
             Arc::clone(&deps.infra.cache),
         ));
         let event_repo: Arc<dyn EventRepository> = cached_event_repo(deps);
+        let catalog_version_repo: Arc<dyn CatalogVersionRepository> =
+            Arc::clone(&deps.infra.repos.catalog_version) as Arc<dyn CatalogVersionRepository>;
         let linkage_resolver = Arc::new(LinkageResolverService::new(LinkageResolverDeps {
             linkage_repo: Arc::clone(&deps.infra.repos.market_linkage)
                 as Arc<dyn MarketLinkageRepository>,
@@ -118,7 +123,7 @@ impl DataBundle {
             gamma_client: &gamma_client,
             ws_manager: &ws_manager,
             market_repo: &market_repo,
-            event_repo: &event_repo,
+            catalog_version_repo: &catalog_version_repo,
             market_registry: &market_registry,
             market_cache: &market_cache,
             market_filter: &market_filter,
@@ -134,9 +139,9 @@ impl DataBundle {
             &deps.runtime.data_quality,
             Arc::clone(&deps.infra.ingest_lag_tracker),
         ));
-        let pit_source: Arc<dyn PointInTimeDataSource> = Arc::new(LiveBookDataSource::new(
-            Arc::clone(&book_store),
-            Arc::clone(&market_registry),
+        let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(DurablePitSource::new(
+            Arc::clone(&deps.infra.quant_fact_read),
+            Arc::clone(&catalog_version_repo),
         ));
         let data_pipeline = build_data_pipeline(
             &book_store,
@@ -160,6 +165,7 @@ impl DataBundle {
             ws_subscription,
             catalog,
             market_repo,
+            catalog_version_repo,
             gamma_client,
             data_quality,
             pit_source,
@@ -181,7 +187,7 @@ struct GammaServiceAssembly<'a> {
     gamma_client: &'a Arc<GammaClient>,
     ws_manager: &'a Arc<ClobWsManager>,
     market_repo: &'a Arc<dyn MarketRepository>,
-    event_repo: &'a Arc<dyn EventRepository>,
+    catalog_version_repo: &'a Arc<dyn CatalogVersionRepository>,
     market_registry: &'a Arc<MarketRegistry>,
     market_cache: &'a Arc<MarketCache>,
     market_filter: &'a Arc<MarketFilter>,
@@ -199,7 +205,7 @@ fn assemble_gamma_service(
         gamma_client,
         ws_manager,
         market_repo,
-        event_repo,
+        catalog_version_repo,
         market_registry,
         market_cache,
         market_filter,
@@ -228,7 +234,7 @@ fn assemble_gamma_service(
         market_filter: Arc::clone(market_filter),
         fee_calculator: Arc::clone(fee_calculator),
         market_repo: Arc::clone(market_repo),
-        event_repo: Arc::clone(event_repo),
+        catalog_version_repo: Arc::clone(catalog_version_repo),
         cache: Arc::clone(&deps.infra.cache),
         metrics: Arc::clone(deps.metrics),
         catalog: Arc::clone(catalog),

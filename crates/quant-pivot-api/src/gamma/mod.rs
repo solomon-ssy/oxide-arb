@@ -7,7 +7,8 @@ mod sync;
 mod wire;
 
 pub use catalog::{CatalogMarketReject, RejectedMarket};
-use mapper::{CatalogMarketMapCtx, CatalogMarketWithCtx, GammaCatalogBatch};
+use mapper::{CatalogMarketMapCtx, CatalogMarketWithCtx};
+pub use mapper::{CatalogSourceTimestamps, GammaCatalogBatch};
 pub use resolution::GammaResolution;
 
 use crate::infra::retry::{self, RetryPolicy};
@@ -22,6 +23,12 @@ use quant_pivot_models::{
     types::{EventId, MarketId, TokenId},
 };
 use wire::WireMarket;
+
+/// One individually fetched market together with unmodified upstream clocks.
+pub struct FetchedCatalogMarket {
+    pub registry: MarketRegistryInfo,
+    pub source_timestamps: CatalogSourceTimestamps,
+}
 
 /// Gamma API client for market discovery and metadata sync.
 ///
@@ -87,14 +94,14 @@ impl GammaClient {
         &self,
         market_ids: &[MarketId],
         max_concurrency: usize,
-    ) -> Vec<Result<MarketRegistryInfo, ApiError>> {
+    ) -> Vec<Result<FetchedCatalogMarket, ApiError>> {
         if market_ids.is_empty() {
             return Vec::new();
         }
 
         let concurrency = max_concurrency.max(1);
         stream::iter(market_ids.iter().cloned())
-            .map(|market_id| async move { self.get_market(&market_id).await })
+            .map(|market_id| async move { self.get_market_with_source_time(&market_id).await })
             .buffer_unordered(concurrency)
             .collect()
             .await
@@ -128,6 +135,15 @@ impl GammaClient {
         &self,
         condition_id: &MarketId,
     ) -> Result<MarketRegistryInfo, ApiError> {
+        self.get_market_with_source_time(condition_id)
+            .await
+            .map(|fetched| fetched.registry)
+    }
+
+    async fn get_market_with_source_time(
+        &self,
+        condition_id: &MarketId,
+    ) -> Result<FetchedCatalogMarket, ApiError> {
         let cid = condition_id.as_str();
         let Some(wire) = self.fetch_market_by_condition_id(cid).await? else {
             return Err(ApiError::Gamma {
@@ -152,6 +168,10 @@ impl GammaClient {
             context: format!("gamma get_market({cid})"),
             detail: reason.to_string(),
         })?;
+        let source_timestamps = CatalogSourceTimestamps {
+            created_at: catalog.created_at,
+            updated_at: catalog.updated_at,
+        };
         CatalogMarketWithCtx {
             market: catalog,
             ctx: CatalogMarketMapCtx {
@@ -160,7 +180,10 @@ impl GammaClient {
             },
         }
         .try_into()
-        .map(|(_, registry)| registry)
+        .map(|(_, registry)| FetchedCatalogMarket {
+            registry,
+            source_timestamps,
+        })
         .map_err(|reason| ApiError::Deserialize {
             context: format!("gamma get_market({cid})"),
             detail: reason.to_string(),

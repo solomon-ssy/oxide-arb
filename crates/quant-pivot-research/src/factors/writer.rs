@@ -32,7 +32,7 @@ pub fn factor_events(
         if !outcome.eligibility.is_eligible() {
             continue;
         }
-        let as_of_ms = outcome.as_of.timestamp_millis();
+        let decision_at_ms = outcome.decision_at.timestamp_millis();
         for scored in &outcome.factors {
             let value_state = scored.value.value_state();
             match value_state {
@@ -45,8 +45,8 @@ pub fn factor_events(
                         continue;
                     };
                     rows.push(QuantFactorEventRow {
-                        event_time: as_of_ms,
-                        as_of: as_of_ms,
+                        event_time: decision_at_ms,
+                        decision_at: decision_at_ms,
                         market_id: outcome.market_id.clone(),
                         factor_name: scored.value.name.as_str().to_owned(),
                         factor_family: scored.value.family.as_str().to_owned(),
@@ -62,8 +62,8 @@ pub fn factor_events(
                 }
                 FactorValueState::NotApplicable => {
                     rows.push(QuantFactorEventRow {
-                        event_time: as_of_ms,
-                        as_of: as_of_ms,
+                        event_time: decision_at_ms,
+                        decision_at: decision_at_ms,
                         market_id: outcome.market_id.clone(),
                         factor_name: scored.value.name.as_str().to_owned(),
                         factor_family: scored.value.family.as_str().to_owned(),

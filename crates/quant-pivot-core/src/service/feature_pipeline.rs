@@ -5,28 +5,31 @@
 //! [`FeatureWindowProvider`], Postgres persistence, and the `ClickHouse` feature
 //! event writer. PIT inputs are resolved per market (the only async step), then
 //! vectors are built in parallel from those frozen inputs. Vectors whose data
-//! quality is [`DataQualityStatus::Insufficient`] are **partitioned out**: they
-//! are never persisted, never emitted as facts, and never offered downstream —
-//! a bad vector cannot reach the factor / model plane. The Phase 4 report
-//! scheduler is deferred; this service is the callable unit schedulers invoke.
+//! quality is [`DataQualityStatus::Insufficient`] are durably retained as audit
+//! evidence but partitioned out before the factor/model plane. The serving
+//! completion commits every selected vector and separately binds the admitted
+//! model-input subset, so parity can replay rejections without treating them as
+//! inference inputs.
 
 use crate::{
     ingest::{
         market_registry::MarketRegistry,
         trade_tape_health::{cursors_by_contract_address, trade_tape_market_ingest_available},
     },
-    observability::feature_fact_writer::FeatureEventWriter,
+    observability::{
+        feature_fact_writer::FeatureEventWriter, serving_evidence::FeatureEvidenceCommitment,
+    },
     prefetch::feature_window::FeatureWindowProvider,
     service::basis_alert::detect_basis_alerts,
 };
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::future::join_all;
-use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError, research::ResearchError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        FeatureVectorInfo, MarketLinkage, NewFeatureVector, TradeTapeSourceKind,
-        market::registry::NegRiskLegSet, quant::NewReportDataQualitySnapshot,
+        DecisionBoundary, FeatureVectorInfo, MarketLinkage, NewFeatureVector, TradeTapeSourceKind,
+        quant::NewReportDataQualitySnapshot,
     },
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
@@ -43,9 +46,10 @@ use quant_pivot_research::{
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureName, FeatureSchema,
         FeatureSourceWindows, FeatureVector, MarketDecisionCapture, MarketWindowSnapshot,
-        NullReason, PitView, RejectedMarketDraft, ResolvedMarketBundle, TradeTapeWindowSnapshot,
-        draft_data_quality_snapshot, feature_events, merged_required_features,
+        NullReason, RejectedMarketDraft, ResolvedMarketBundle, TradeTapeWindowSnapshot,
+        draft_data_quality_snapshot, feature_events,
     },
+    pit::PointInTimeSnapshotSource,
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use std::{
@@ -58,20 +62,18 @@ use std::{
 pub struct FeaturePipelineRequest<'a> {
     /// Markets selected for this round.
     pub included: &'a [SelectedMarket],
-    /// Decision time.
-    pub as_of: DateTime<Utc>,
+    /// Decision time and the single, already-derived source visibility cutoff.
+    pub boundary: DecisionBoundary,
     /// Frozen feature config.
     pub features: &'a FeaturesConfig,
     /// Frozen domain-plane config (Phase 11.2.2).
     pub domain: &'a DomainConfig,
     /// Frozen data-quality config.
     pub data_quality: &'a DataQualityConfig,
-    /// Model-required features (drives critical-missing rejection).
+    /// Model-required features (drives fail-closed missing-input rejection).
     pub model_requirements: &'a ModelFeatureRequirements,
-    /// Source visibility delay, in seconds.
-    pub source_delay_secs: u64,
-    /// Point-in-time data view (live or historical).
-    pub pit: PitView<'a>,
+    /// Durable point-in-time snapshot source.
+    pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Config version governing this round (DQ snapshot header).
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Liquidity cap used to normalize capture liquidity scores.
@@ -81,14 +83,14 @@ pub struct FeaturePipelineRequest<'a> {
 /// A market whose feature vector failed the data-quality bar and was excluded.
 ///
 /// Rejected markets are observable (so operators can see *why* a market dropped
-/// out) but carry no persisted vector: they never reach persistence, facts, or
-/// the downstream factor / model plane.
+/// out). Their vectors/cells are persisted for audit but never enter the factor
+/// or model plane.
 pub struct RejectedMarket {
     /// The excluded market.
     pub market_id: MarketId,
     /// The primary outcome token, when scoped.
     pub token_id: Option<TokenId>,
-    /// Required / critical features that were missing, with their reasons.
+    /// Required features that were missing, with their reasons.
     pub missing_required: Vec<(FeatureName, NullReason)>,
 }
 
@@ -96,10 +98,14 @@ pub struct RejectedMarket {
 pub struct FeaturePipelineResult {
     /// Vectors that passed the data-quality bar (persisted + emitted).
     pub accepted: Vec<FeatureVector>,
-    /// Markets excluded for insufficient data quality (not persisted).
+    /// Markets excluded for insufficient data quality.
     pub rejected: Vec<RejectedMarket>,
     /// Postgres persistence rows, aligned with `accepted`.
     pub persisted: Vec<FeatureVectorInfo>,
+    /// Canonical commitment returned only after every selected feature cell is
+    /// durably acknowledged and the admitted subset is bound. `None` means no
+    /// vector passed the DQ gate, although rejected audit facts were persisted.
+    pub feature_evidence: Option<FeatureEvidenceCommitment>,
     /// Decision captures keyed by market id (accepted + rejected).
     pub captures: HashMap<MarketId, MarketDecisionCapture>,
     /// Draft report-level DQ snapshot for the transaction composer.
@@ -152,7 +158,8 @@ impl FeaturePipelineService {
     }
 
     /// Run one feature round: prefetch windows, resolve PIT inputs, build vectors
-    /// in parallel, partition by data quality, persist + emit only the accepted.
+    /// in parallel, retain complete audit evidence, then expose only accepted
+    /// vectors to the model plane.
     ///
     /// # Errors
     ///
@@ -161,12 +168,14 @@ impl FeaturePipelineService {
         &self,
         request: FeaturePipelineRequest<'_>,
     ) -> QuantResult<FeaturePipelineResult> {
-        let builder = ConfiguredFeatureBuilder::new(request.features, request.domain);
-        let source_delay = Duration::from_secs(request.source_delay_secs);
-        let windows = self.load_windows(&builder, &request, source_delay).await?;
+        let builder = ConfiguredFeatureBuilder::new(request.features, request.domain)?;
+        let windows = self.load_windows(&builder, &request).await?;
 
         let max_concurrent = usize::try_from(request.features.max_concurrent_market_resolves)
-            .unwrap_or(usize::MAX)
+            .map_err(|error| ReportError::NumericOverflow {
+                field: "features.max_concurrent_market_resolves",
+                detail: error.to_string(),
+            })?
             .max(1);
         let resolve_jobs = request
             .included
@@ -203,7 +212,7 @@ impl FeaturePipelineService {
             Self::resolve_bundles(&builder, &request, &resolve_jobs, max_concurrent).await?;
 
         // The union across every route (generic + every category-specific
-        // model): the null-policy / critical-missing gate is a per-feature
+        // model): the null-policy / required-input gate is a per-feature
         // decision the builder only ever consults for a feature that is
         // structurally applicable to the market being built (a domain
         // feature is only evaluated when that market's domain slice exists
@@ -212,61 +221,143 @@ impl FeaturePipelineService {
         // that category.
         let required = request.model_requirements.union_all();
         let vectors =
-            builder.build_batch(&bundles, &required, request.features, request.data_quality);
+            builder.build_batch(&bundles, &required, request.features, request.data_quality)?;
 
-        let required_names = merged_required_features(&required, request.features);
-        let schema = builder.schema();
-        let mut accepted = Vec::with_capacity(vectors.len());
-        let mut rejected = Vec::new();
-        let mut rejected_drafts = Vec::new();
-        for (_bundle, vector) in bundles.iter().zip(&vectors) {
-            if vector.data_quality == DataQualityStatus::Insufficient {
-                let rejected_market = reject_market(vector, &required_names, schema);
-                rejected_drafts.push(RejectedMarketDraft {
-                    market_id: rejected_market.market_id.clone(),
-                    missing_required: rejected_market.missing_required.clone(),
-                });
-                rejected.push(rejected_market);
-            } else {
-                accepted.push(vector.clone());
-            }
-        }
-
-        let captures = finalize_captures(&bundles, &vectors);
+        let required_names: HashSet<FeatureName> = required.iter().cloned().collect();
+        let partition = partition_feature_vectors(&bundles, &vectors, &required_names);
+        let persistence = self
+            .persist_vectors(&vectors, &partition.captures, builder.schema(), &request)
+            .await?;
         let data_quality_snapshot = draft_data_quality_snapshot(
-            request.as_of,
+            request.boundary.decision_at(),
             request.runtime_config_version_id.clone(),
             &bundles,
             &vectors,
-            &rejected_drafts,
-        );
+            &persistence.all,
+            &partition.rejected_drafts,
+        )?;
+        self.persist_basis_alerts(&partition.accepted, &windows.domain, request.domain)
+            .await?;
 
-        let rows = accepted
+        Ok(FeaturePipelineResult {
+            accepted: partition.accepted,
+            rejected: partition.rejected,
+            persisted: persistence.accepted,
+            feature_evidence: persistence.evidence,
+            captures: partition.captures,
+            data_quality_snapshot,
+        })
+    }
+
+    /// Persist every resolved vector and commit every selected market's feature
+    /// cells as serving evidence. The commitment separately binds the subset
+    /// admitted to model input, so rejected vectors remain replayable without
+    /// pretending that they reached inference.
+    async fn persist_vectors(
+        &self,
+        vectors: &[FeatureVector],
+        captures: &HashMap<MarketId, MarketDecisionCapture>,
+        schema: &FeatureSchema,
+        request: &FeaturePipelineRequest<'_>,
+    ) -> QuantResult<PersistedFeatureVectors> {
+        let rows = vectors
             .iter()
-            .map(FeatureVector::try_to_new)
+            .map(|vector| {
+                let capture = captures.get(&vector.market_id).ok_or_else(|| {
+                    ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail: format!(
+                            "market {} has no decision capture before persistence",
+                            vector.market_id
+                        ),
+                    }
+                })?;
+                if capture.token_id
+                    != vector
+                        .token_id
+                        .clone()
+                        .ok_or_else(|| ReportError::InvariantViolation {
+                            stage: "feature_pipeline",
+                            detail: format!(
+                                "market {} feature vector has no token id",
+                                vector.market_id
+                            ),
+                        })?
+                    || capture.data_quality != vector.data_quality
+                    || capture.snapshot.boundary != request.boundary
+                {
+                    return Err(ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail: format!(
+                            "market {} decision capture is not aligned with its vector",
+                            vector.market_id
+                        ),
+                    }
+                    .into());
+                }
+                let mut row = vector.try_to_new(&request.boundary)?;
+                row.decision_capture_hash = Some(capture.evidence_hash()?);
+                row.decision_capture =
+                    Some(serde_json::to_value(capture.evidence()).map_err(|error| {
+                        ResearchError::Serialization {
+                            detail: format!(
+                                "serialize decision capture for market {}: {error}",
+                                vector.market_id
+                            ),
+                        }
+                    })?);
+                Ok(row)
+            })
             .collect::<QuantResult<Vec<NewFeatureVector>>>()?;
-        let persisted = self
+        let all_persisted = self
             .feature_repo
             .create_batch(rows)
             .await
             .map_err(QuantError::from)?;
+        ensure_persistence_alignment(vectors, &all_persisted)?;
 
         let ingestion_time = Utc::now().timestamp_millis();
-        let ch_rows = accepted
+        let projected = vectors
             .iter()
-            .flat_map(|vector| feature_events(vector, schema, ingestion_time))
-            .collect::<Vec<_>>();
-        self.event_writer.write_batch(ch_rows);
-
-        self.persist_basis_alerts(&accepted, &windows.domain, request.domain)
-            .await?;
-
-        Ok(FeaturePipelineResult {
+            .zip(&all_persisted)
+            .map(|(vector, persisted)| {
+                feature_events(
+                    vector,
+                    persisted,
+                    &request.boundary,
+                    &request.runtime_config_version_id,
+                    schema,
+                    ingestion_time,
+                )
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let mut accepted = Vec::new();
+        let mut admitted_vector_ids = Vec::new();
+        let mut all_events = Vec::new();
+        for ((vector, info), events) in vectors.iter().zip(&all_persisted).zip(projected) {
+            if vector.data_quality != DataQualityStatus::Insufficient {
+                accepted.push(info.clone());
+                admitted_vector_ids.push(info.feature_vector_id.clone());
+            }
+            all_events.extend(events);
+        }
+        let evidence = if admitted_vector_ids.is_empty() {
+            if !all_events.is_empty() {
+                self.event_writer.write_batch(all_events).await?;
+            }
+            None
+        } else {
+            Some(
+                self.event_writer
+                    .write_batch(all_events)
+                    .await?
+                    .bind_model_vectors(&admitted_vector_ids)?,
+            )
+        };
+        Ok(PersistedFeatureVectors {
             accepted,
-            rejected,
-            persisted,
-            captures,
-            data_quality_snapshot,
+            all: all_persisted,
+            evidence,
         })
     }
 
@@ -282,9 +373,14 @@ impl FeaturePipelineService {
         domain_inputs: &HashMap<MarketId, DomainSliceInputs>,
         domain: &DomainConfig,
     ) -> QuantResult<()> {
-        let cooldown = ChronoDuration::seconds(
-            i64::try_from(domain.crypto.cross_check.alert_cooldown_secs).unwrap_or(i64::MAX),
-        );
+        let cooldown_secs =
+            i64::try_from(domain.crypto.cross_check.alert_cooldown_secs).map_err(|error| {
+                ReportError::NumericOverflow {
+                    field: "domain.crypto.cross_check.alert_cooldown_secs",
+                    detail: error.to_string(),
+                }
+            })?;
+        let cooldown = ChronoDuration::seconds(cooldown_secs);
         for alert in detect_basis_alerts(accepted, domain_inputs, domain) {
             let recent = self
                 .basis_alert_repo
@@ -309,15 +405,14 @@ impl FeaturePipelineService {
         &self,
         builder: &ConfiguredFeatureBuilder,
         request: &FeaturePipelineRequest<'_>,
-        source_delay: Duration,
     ) -> QuantResult<FeaturePrefetchWindows> {
         let lookback = Duration::from_secs(request.features.max_microstructure_lookback_secs());
         let microstructure = if builder.schema().needs_window() {
             self.window_provider
-                .load_windows(request.included, request.as_of, lookback, source_delay)
+                .load_windows(request.included, &request.boundary, lookback)
                 .await?
         } else {
-            empty_windows(request.included, request.as_of, source_delay)
+            empty_windows(request.included, &request.boundary)
         };
         let trade_tape = if builder.needs_trade_tape() && self.trade_tape_on_chain.enabled {
             let cursors = self
@@ -329,12 +424,7 @@ impl FeaturePipelineService {
                 Duration::from_secs(request.features.structural.trade_tape_window_secs);
             let mut windows = self
                 .window_provider
-                .load_trade_tape_windows(
-                    request.included,
-                    request.as_of,
-                    trade_lookback,
-                    source_delay,
-                )
+                .load_trade_tape_windows(request.included, &request.boundary, trade_lookback)
                 .await?;
             for market in request.included {
                 let neg_risk = self
@@ -354,7 +444,7 @@ impl FeaturePipelineService {
             }
             windows
         } else {
-            empty_trade_tape_windows(request.included, request.as_of, source_delay)
+            empty_trade_tape_windows(request.included, &request.boundary)
         };
         let domain = if builder.needs_domain() {
             self.load_domain_inputs(request).await?
@@ -372,9 +462,9 @@ impl FeaturePipelineService {
     /// category-mapped market, then assemble per-market domain-slice inputs via
     /// the SAME pure function the offline replay uses (zero train-serve skew).
     ///
-    /// The observation fetch is bounded by the **domain** source delay
-    /// (`domain.crypto.source_delay_secs`), not the report-schedule delay: the
-    /// pure assembly re-slices to that cutoff, so fetching under a different
+    /// The observation fetch is bounded by the **domain** source cutoff
+    /// (`domain.crypto.availability_lag_secs`), not merely the global knowledge
+    /// cutoff: the pure assembly re-slices to that cutoff, so fetching under a different
     /// bound would silently truncate the window.
     async fn load_domain_inputs(
         &self,
@@ -397,7 +487,7 @@ impl FeaturePipelineService {
             .collect();
         let ledger_rows = self
             .linkage_repo
-            .ledger_for_markets(&market_ids, request.as_of)
+            .ledger_for_markets(&market_ids, &request.boundary)
             .await
             .map_err(QuantError::from)?;
         let mut linkages: HashMap<MarketId, Vec<MarketLinkage>> = HashMap::new();
@@ -419,14 +509,12 @@ impl FeaturePipelineService {
             linkages.entry(market_id).or_default().push(linkage);
         }
         let lookback = Duration::from_secs(crypto_lookback_secs(request.domain));
-        let domain_delay = Duration::from_secs(request.domain.crypto.source_delay_secs);
         let observations = self
             .window_provider
             .load_domain_observations(
                 instruments.into_iter().collect(),
-                request.as_of,
+                &request.boundary,
                 lookback,
-                domain_delay,
             )
             .await?;
         let mut inputs = HashMap::new();
@@ -436,10 +524,10 @@ impl FeaturePipelineService {
                 linkages
                     .get(&market.market_id)
                     .map_or(&[][..], Vec::as_slice),
-                request.as_of,
+                &request.boundary,
                 request.domain,
                 &observations,
-            ) {
+            )? {
                 inputs.insert(market.market_id.clone(), slice_inputs);
             }
         }
@@ -449,11 +537,8 @@ impl FeaturePipelineService {
     /// Resolve one PIT bundle per market with bounded concurrency, preserving
     /// input order.
     ///
-    /// Each neg-risk market's sibling YES legs are enumerated up front (a sync
-    /// registry read on the live source) and resolved at the SAME `as_of` inside
-    /// [`ConfiguredFeatureBuilder::resolve_inputs`], so the structural full-leg
-    /// aggregates are byte-identical online and offline. Binary markets yield an
-    /// empty leg list and skip sibling resolution entirely.
+    /// Neg-risk membership and every sibling leg are projected from the same
+    /// immutable catalog snapshot inside [`ConfiguredFeatureBuilder::resolve_inputs`].
     async fn resolve_bundles<'a>(
         builder: &ConfiguredFeatureBuilder,
         request: &FeaturePipelineRequest<'a>,
@@ -468,29 +553,21 @@ impl FeaturePipelineService {
     ) -> QuantResult<Vec<ResolvedMarketBundle<'a>>> {
         let mut bundles = Vec::with_capacity(resolve_jobs.len());
         for chunk in resolve_jobs.chunks(max_concurrent) {
-            // Resolve sibling legs before the concurrent futures borrow them; the
-            // per-market `Vec<NegRiskLeg>` must outlive the `join_all` await.
-            let sibling_sets: Vec<NegRiskLegSet> = chunk
-                .iter()
-                .map(|(_, market, _, _, _)| request.pit.neg_risk_leg_set(&market.event_id))
-                .collect();
-            let chunk_results = join_all(chunk.iter().zip(&sibling_sets).map(
-                |((_, market, window, trade_tape, domain), sibling)| {
+            let chunk_results =
+                join_all(chunk.iter().map(|(_, market, window, trade_tape, domain)| {
                     builder.resolve_inputs(
                         market,
-                        request.as_of,
+                        &request.boundary,
                         request.pit,
                         FeatureSourceWindows {
                             microstructure: window,
                             trade_tape,
                             domain: *domain,
                         },
-                        sibling,
                         request.liquidity_cap_usd,
                     )
-                },
-            ))
-            .await;
+                }))
+                .await;
             for ((index, _, _, _, _), bundle) in chunk.iter().zip(chunk_results) {
                 bundles.push((*index, bundle?));
             }
@@ -504,6 +581,71 @@ struct FeaturePrefetchWindows {
     microstructure: HashMap<TokenId, MarketWindowSnapshot>,
     trade_tape: HashMap<MarketId, TradeTapeWindowSnapshot>,
     domain: HashMap<MarketId, DomainSliceInputs>,
+}
+
+struct FeatureVectorPartition {
+    accepted: Vec<FeatureVector>,
+    rejected: Vec<RejectedMarket>,
+    captures: HashMap<MarketId, MarketDecisionCapture>,
+    rejected_drafts: Vec<RejectedMarketDraft>,
+}
+
+struct PersistedFeatureVectors {
+    /// Accepted rows only, aligned 1:1 with `FeatureVectorPartition::accepted`.
+    accepted: Vec<FeatureVectorInfo>,
+    /// Every selected vector, including DQ-rejected rows, in deterministic
+    /// selection order. The report DQ snapshot freezes these exact ids.
+    all: Vec<FeatureVectorInfo>,
+    /// Serving commitment over all selected vectors, bound to the accepted
+    /// model-input subset.
+    evidence: Option<FeatureEvidenceCommitment>,
+}
+
+fn partition_feature_vectors(
+    bundles: &[ResolvedMarketBundle<'_>],
+    vectors: &[FeatureVector],
+    required_names: &HashSet<FeatureName>,
+) -> FeatureVectorPartition {
+    let mut accepted = Vec::with_capacity(vectors.len());
+    let mut rejected = Vec::new();
+    let mut rejected_drafts = Vec::new();
+    for vector in vectors {
+        if vector.data_quality == DataQualityStatus::Insufficient {
+            let rejected_market = reject_market(vector, required_names);
+            rejected_drafts.push(RejectedMarketDraft {
+                market_id: rejected_market.market_id.clone(),
+                missing_required: rejected_market.missing_required.clone(),
+            });
+            rejected.push(rejected_market);
+        } else {
+            accepted.push(vector.clone());
+        }
+    }
+    let captures = finalize_captures(bundles, vectors);
+    FeatureVectorPartition {
+        accepted,
+        rejected,
+        captures,
+        rejected_drafts,
+    }
+}
+
+fn ensure_persistence_alignment(
+    vectors: &[FeatureVector],
+    persisted: &[FeatureVectorInfo],
+) -> QuantResult<()> {
+    if persisted.len() == vectors.len() {
+        return Ok(());
+    }
+    Err(ReportError::InvariantViolation {
+        stage: "feature_pipeline",
+        detail: format!(
+            "feature repository returned {} rows for {} resolved vectors",
+            persisted.len(),
+            vectors.len()
+        ),
+    }
+    .into())
 }
 
 /// Merge post-build data quality into frozen captures for every market.
@@ -522,20 +664,16 @@ fn finalize_captures(
         .collect()
 }
 
-/// Summarize why a market was rejected: the required / critical features that
+/// Summarize why a market was rejected: the required features that
 /// were missing, with their reasons.
-fn reject_market(
-    vector: &FeatureVector,
-    required_names: &HashSet<FeatureName>,
-    schema: &FeatureSchema,
-) -> RejectedMarket {
+fn reject_market(vector: &FeatureVector, required_names: &HashSet<FeatureName>) -> RejectedMarket {
     let missing_required = vector
-        .iter_values()
-        .filter_map(|(name, value)| {
-            let reason = value.null_reason()?;
-            let spec = schema.by_name(name)?;
-            let is_required = spec.critical || required_names.contains(name);
-            is_required.then_some((name.clone(), reason))
+        .iter_cells()
+        .filter_map(|(name, cell)| {
+            let reason = cell.reason?;
+            required_names
+                .contains(name)
+                .then_some((name.clone(), reason))
         })
         .collect();
     RejectedMarket {
@@ -549,8 +687,7 @@ fn reject_market(
 /// needs no windowed feature — avoids an unnecessary `ClickHouse` round-trip.
 fn empty_windows(
     markets: &[SelectedMarket],
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
+    boundary: &DecisionBoundary,
 ) -> HashMap<TokenId, MarketWindowSnapshot> {
     markets
         .iter()
@@ -558,7 +695,11 @@ fn empty_windows(
             let token = market.primary_token_id.clone();
             (
                 token.clone(),
-                MarketWindowSnapshot::empty(token, as_of, source_delay),
+                MarketWindowSnapshot::empty(
+                    token,
+                    boundary.decision_at(),
+                    boundary.knowledge_cutoff(),
+                ),
             )
         })
         .collect()
@@ -566,8 +707,7 @@ fn empty_windows(
 
 fn empty_trade_tape_windows(
     markets: &[SelectedMarket],
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
+    boundary: &DecisionBoundary,
 ) -> HashMap<MarketId, TradeTapeWindowSnapshot> {
     markets
         .iter()
@@ -575,7 +715,11 @@ fn empty_trade_tape_windows(
             let market_id = market.market_id.clone();
             (
                 market_id.clone(),
-                TradeTapeWindowSnapshot::empty(market_id, as_of, source_delay),
+                TradeTapeWindowSnapshot::empty(
+                    market_id,
+                    boundary.decision_at(),
+                    boundary.knowledge_cutoff(),
+                ),
             )
         })
         .collect()

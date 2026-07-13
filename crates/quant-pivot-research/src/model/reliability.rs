@@ -9,7 +9,7 @@
 //! **same** independent calibration split the probability mapping was fit
 //! on, never re-derived from training data.
 
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::Probability;
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 use serde::{Deserialize, Serialize};
@@ -113,7 +113,7 @@ pub fn compute_reliability(
     let calibrated: Vec<Probability> = samples
         .iter()
         .map(|s| apply_mapping(mapping, s.score))
-        .collect();
+        .collect::<QuantResult<_>>()?;
 
     let brier_score = mean_decimal(
         &samples
@@ -125,16 +125,15 @@ pub fn compute_reliability(
             })
             .collect::<Vec<_>>(),
     );
-    let log_loss = mean_decimal(
-        &samples
-            .iter()
-            .zip(&calibrated)
-            .map(|(s, p)| log_loss_term(p.inner(), s.won))
-            .collect::<Vec<_>>(),
-    );
+    let log_loss_terms = samples
+        .iter()
+        .zip(&calibrated)
+        .map(|(s, p)| log_loss_term(p.inner(), s.won))
+        .collect::<QuantResult<Vec<_>>>()?;
+    let log_loss = mean_decimal(&log_loss_terms);
 
-    let z = wilson_z(ci_confidence);
-    let bins = build_bins(samples, &calibrated, z);
+    let z = wilson_z(ci_confidence)?;
+    let bins = build_bins(samples, &calibrated, z)?;
     let ece = expected_calibration_error(&bins, n);
 
     Ok(ReliabilityReport {
@@ -142,7 +141,9 @@ pub fn compute_reliability(
         brier_score,
         log_loss,
         ece,
-        n_samples: n as u64,
+        n_samples: u64::try_from(n).map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!("reliability sample count exceeds u64: {error}"),
+        })?,
     })
 }
 
@@ -157,7 +158,7 @@ fn build_bins(
     samples: &[ReliabilitySample],
     calibrated: &[Probability],
     z: f64,
-) -> Vec<ReliabilityBin> {
+) -> QuantResult<Vec<ReliabilityBin>> {
     let width = Decimal::ONE / Decimal::from(RELIABILITY_BINS as u64);
     let mut bins = Vec::new();
     for index in 0..RELIABILITY_BINS {
@@ -177,17 +178,28 @@ fn build_bins(
         if members.is_empty() {
             continue;
         }
-        let n = members.len() as u64;
-        let wins = members.iter().filter(|&&i| samples[i].won).count() as u64;
+        let n =
+            u64::try_from(members.len()).map_err(|error| ResearchError::ValidationMethodology {
+                detail: format!("reliability-bin sample count exceeds u64: {error}"),
+            })?;
+        let wins = u64::try_from(members.iter().filter(|&&i| samples[i].won).count()).map_err(
+            |error| ResearchError::ValidationMethodology {
+                detail: format!("reliability-bin win count exceeds u64: {error}"),
+            },
+        )?;
         let mean_predicted = mean_decimal(
             &members
                 .iter()
                 .map(|&i| calibrated[i].inner())
                 .collect::<Vec<_>>(),
         );
-        let p_hat = count_f64(wins) / count_f64(n);
-        let empirical_frequency = Decimal::from_f64(p_hat).unwrap_or(Decimal::ZERO);
-        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z, RESEARCH_DECIMAL_SCALE);
+        let p_hat = count_f64(wins)? / count_f64(n)?;
+        let empirical_frequency =
+            Decimal::from_f64(p_hat).ok_or_else(|| ResearchError::ValidationMethodology {
+                detail: "empirical reliability frequency is not representable as Decimal"
+                    .to_owned(),
+            })?;
+        let (ci_lo, ci_hi) = wilson_interval(p_hat, n, z, RESEARCH_DECIMAL_SCALE)?;
         let mae_values: Vec<Decimal> = members
             .iter()
             .filter_map(|&i| samples[i].max_adverse_excursion_bps)
@@ -209,7 +221,7 @@ fn build_bins(
             mean_adverse_excursion_bps,
         });
     }
-    bins
+    Ok(bins)
 }
 
 /// `Σ (bin_count / n) * |mean_predicted - empirical_frequency|`.
@@ -228,17 +240,24 @@ fn expected_calibration_error(bins: &[ReliabilityBin], n: usize) -> Decimal {
 }
 
 /// `-[y*ln(p) + (1-y)*ln(1-p)]`, clamped away from `{0, 1}` to avoid `ln(0)`.
-fn log_loss_term(p: Decimal, won: bool) -> Decimal {
+fn log_loss_term(p: Decimal, won: bool) -> QuantResult<Decimal> {
     let clamped = p
         .to_f64()
-        .unwrap_or(0.5)
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!("calibrated probability {p} is not representable as f64"),
+        })?
         .clamp(LOG_LOSS_EPS, 1.0 - LOG_LOSS_EPS);
     let term = if won {
         -clamped.ln()
     } else {
         -(1.0 - clamped).ln()
     };
-    Decimal::from_f64(term).unwrap_or(Decimal::ZERO)
+    Decimal::from_f64(term).ok_or_else(|| {
+        ResearchError::ValidationMethodology {
+            detail: format!("log-loss term {term} is not representable as Decimal"),
+        }
+        .into()
+    })
 }
 
 fn mean_decimal(values: &[Decimal]) -> Decimal {

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::MarketCandidate,
-    types::{MarketId, MarketSelectionId, SelectionExclusionSummary},
+    types::{MarketSelectionId, SelectionExclusionSummary},
 };
 
 use crate::{
@@ -50,7 +50,7 @@ impl ConfiguredMarketSelector {
         candidates: &[MarketCandidate],
     ) -> QuantResult<SelectionResult> {
         let thresholds = SelectionThresholds::resolve(&request.selection, &request.data_quality)?;
-        let feature_schema = FeatureSchema::build(&request.features);
+        let feature_schema = FeatureSchema::build(&request.features)?;
 
         let mut included = Vec::new();
         let mut excluded = Vec::new();
@@ -60,7 +60,7 @@ impl ConfiguredMarketSelector {
             let ctx = MarketCandidateCtx {
                 candidate,
                 thresholds: &thresholds,
-                as_of: request.as_of,
+                decision_at: request.decision_at,
                 model_requirements: &request.model_requirements,
                 feature_schema: &feature_schema,
             };
@@ -125,16 +125,17 @@ impl MarketSelector for ConfiguredMarketSelector {
             exclusion_summary,
         } = self.select_markets(&request, &candidates)?;
 
-        let included_ids = included
-            .iter()
-            .map(|market| market.market_id.clone())
-            .collect::<Vec<MarketId>>();
-        let selector_hash =
-            ResearchHasher::canonical(&SelectorHashInput::new(&request, &included_ids))?;
+        let selector_hash = ResearchHasher::canonical(&SelectorHashInput::new(
+            &request,
+            &candidates,
+            &included,
+            &excluded,
+            exclusion_summary,
+        )?)?;
 
         Ok(MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
-            as_of: request.as_of,
+            decision_at: request.decision_at,
             runtime_config_version_id: request.runtime_config_version_id,
             selector_hash,
             included,
@@ -159,7 +160,7 @@ mod tests {
     };
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::{DomainAvailability, MarketCandidate},
+        domain::{DomainAvailability, MarketCandidate, MarketDataHealth},
         enums::{common::MarketCategory, market::MarketStatus},
         runtime_config::{DataQualityConfig, DecimalString, FeaturesConfig, SelectionConfig},
         types::{EventId, MarketId, Price, RuntimeConfigVersionId, TokenId, Usd},
@@ -186,12 +187,12 @@ mod tests {
             best_ask: Some(Price::new(Decimal::new(51, 2))),
             depth_usd: Some(Usd::new(Decimal::from(2_000))),
             book_age_ms: Some(500),
-            crossed: false,
-            empty: false,
-            connection_healthy: true,
-            ingest_lag_ms: 1_000,
+            crossed: Some(false),
+            empty: Some(false),
+            market_data_health: MarketDataHealth::Healthy,
+            ingest_lag_ms: Some(1_000),
             domain_availability: DomainAvailability::NotMapped,
-            observed_at: as_of(),
+            decision_at: as_of(),
         }
     }
 
@@ -213,13 +214,13 @@ mod tests {
         model_requirements: ModelFeatureRequirements,
     ) -> MarketSelectionBuildRequest {
         MarketSelectionBuildRequest {
-            as_of: as_of(),
+            decision_at: as_of(),
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             selection,
             data_quality: DataQualityConfig::default(),
             features: FeaturesConfig::default(),
             model_requirements,
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
         }
     }
 
@@ -303,15 +304,15 @@ mod tests {
         // updates).
         let mut stale = healthy_candidate("0xstale");
         stale.book_age_ms = Some(60_000);
-        stale.connection_healthy = false;
+        stale.market_data_health = MarketDataHealth::Unhealthy;
         // Aged book while the connection is HEALTHY → still the venue truth,
         // admitted (quiet ≠ stale on Polymarket).
         let mut quiet = healthy_candidate("0xquiet");
         quiet.book_age_ms = Some(60_000);
-        quiet.connection_healthy = true;
+        quiet.market_data_health = MarketDataHealth::Healthy;
         // Ingest pipeline backpressure is independent of book age.
         let mut lagging = healthy_candidate("0xlag");
-        lagging.ingest_lag_ms = 120_000;
+        lagging.ingest_lag_ms = Some(120_000);
 
         let snapshot = build(
             request_with(selection_config()),
@@ -490,6 +491,36 @@ mod tests {
             .selector_hash;
 
         assert_ne!(hash_a, hash_b);
+    }
+
+    #[tokio::test]
+    async fn selector_hash_commits_candidate_world_and_model_contract() {
+        let request = request_with(selection_config());
+        let candidate = healthy_candidate("0xa");
+        let baseline = ConfiguredMarketSelector::new()
+            .build_snapshot(request.clone(), vec![candidate.clone()])
+            .await
+            .expect("baseline snapshot");
+
+        let mut changed_source_fact = candidate.clone();
+        changed_source_fact.depth_usd = Some(Usd::new(Decimal::from(3_000)));
+        let source_changed = ConfiguredMarketSelector::new()
+            .build_snapshot(request, vec![changed_source_fact])
+            .await
+            .expect("source-changed snapshot");
+        assert_eq!(baseline.included, source_changed.included);
+        assert_ne!(baseline.selector_hash, source_changed.selector_hash);
+
+        let required = ModelFeatureRequirements::generic_only(vec![SPREAD_BPS]);
+        let contract_changed = ConfiguredMarketSelector::new()
+            .build_snapshot(
+                request_with_model(selection_config(), required),
+                vec![candidate],
+            )
+            .await
+            .expect("contract-changed snapshot");
+        assert_eq!(baseline.included, contract_changed.included);
+        assert_ne!(baseline.selector_hash, contract_changed.selector_hash);
     }
 
     #[tokio::test]

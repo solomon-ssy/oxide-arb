@@ -216,7 +216,7 @@ struct SampleKey {
 impl SampleKey {
     fn of(sample: &SampleOutcome) -> Self {
         Self {
-            as_of: sample.as_of.timestamp_millis(),
+            as_of: sample.decision_at.timestamp_millis(),
             market_id: sample.market_id.as_str().to_owned(),
             token_id: sample.token_id.as_str().to_owned(),
         }
@@ -256,7 +256,7 @@ mod tests {
         outcome_side: OutcomeSide,
     ) -> SampleOutcome {
         SampleOutcome {
-            as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
             category: MarketCategory::Crypto,
@@ -273,7 +273,7 @@ mod tests {
             liquidity_usd: None,
             time_to_resolution_secs: None,
             prediction_horizon_secs: 0,
-            substitutions: Vec::new(),
+            substitution_reasons: Vec::new(),
         }
     }
 
@@ -317,7 +317,7 @@ mod tests {
                 realized_pnl_usd: realized_pnl,
                 gross_return: dec!(0),
                 pnl_curve: vec![PnlCurvePoint {
-                    as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                    decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                     cumulative_realized_pnl_usd: realized_pnl,
                 }],
             },

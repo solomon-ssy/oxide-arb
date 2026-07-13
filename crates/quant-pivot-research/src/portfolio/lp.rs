@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{
         BindingConstraint, CorrelationSource, OptimizerSolverStatus, PortfolioSolveMode,
@@ -74,7 +74,7 @@ impl LinearProgrammingPortfolioAllocator {
 impl PortfolioAllocator for LinearProgrammingPortfolioAllocator {
     fn allocate(&self, input: &AllocationInput<'_>) -> QuantResult<AllocationOutput> {
         let start = Instant::now();
-        let model = PreparedModel::build(input, self.config);
+        let model = PreparedModel::build(input, self.config)?;
         let solver = self.config.effective_solver();
         let correlation_source = input
             .correlation
@@ -87,7 +87,7 @@ impl PortfolioAllocator for LinearProgrammingPortfolioAllocator {
             });
         }
 
-        let solve_result = model.solve(solver);
+        let solve_result = model.solve(solver)?;
         let allocations = model.assemble(&solve_result.values);
         let objective_value = model.objective_value(&allocations);
         let outcome = OptimizerOutcome {
@@ -96,7 +96,11 @@ impl PortfolioAllocator for LinearProgrammingPortfolioAllocator {
             status: solve_result.status,
             fell_back_to_relaxation: solve_result.fell_back,
             objective_value: Some(objective_value),
-            elapsed_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms: u64::try_from(start.elapsed().as_millis()).map_err(|error| {
+                ResearchError::PortfolioOptimization {
+                    detail: format!("optimizer elapsed time exceeds u64 milliseconds: {error}"),
+                }
+            })?,
             correlation_source,
             constraint_conflicts: solve_result.conflicts,
         };
@@ -163,7 +167,7 @@ impl<'a> PreparedModel<'a> {
     }
 
     /// Project the allocation input into deterministic solver space.
-    fn build(input: &'a AllocationInput<'a>, config: OptimizerConfig) -> Self {
+    fn build(input: &'a AllocationInput<'a>, config: OptimizerConfig) -> QuantResult<Self> {
         let caps = input.caps;
         let budget = BudgetRoom::resolve(caps.total_budget_usd, input.available_usd);
         let min_rec = caps.min_recommendation_usd.max(Decimal::ZERO);
@@ -200,8 +204,9 @@ impl<'a> PreparedModel<'a> {
             let score = meta.candidate.composite_score.inner() * meta.candidate.confidence.inner();
             let ret_norm = normalize(meta.candidate.expected_return_bps, ret_min, ret_max);
             let weight = (score * (Decimal::ONE + lambda * ret_norm)).max(Decimal::ZERO);
-            let tie = TIE_BREAK_EPSILON.mul_add(count_to_f64(n - rank), 1.0);
-            let weight_f64 = (decimal_to_f64(weight) * tie).max(0.0);
+            let tie =
+                TIE_BREAK_EPSILON.mul_add(count_to_f64(n - rank, "candidate tie-break rank")?, 1.0);
+            let weight_f64 = (decimal_to_f64(weight, "candidate objective weight")? * tie).max(0.0);
             let ub = candidate_upper_bound(meta, caps);
             let market_key = meta.candidate.market_id.as_str().to_owned();
             let event_key = meta
@@ -222,7 +227,7 @@ impl<'a> PreparedModel<'a> {
 
         let buckets = build_buckets(&candidates, caps, input, &cluster_initial);
 
-        Self {
+        Ok(Self {
             input,
             caps,
             budget,
@@ -232,51 +237,51 @@ impl<'a> PreparedModel<'a> {
             min_rec,
             top_n: input.top_n,
             integer_inclusion: config.integer_inclusion,
-        }
+        })
     }
 
     /// Run the solve ladder (MILP → relaxation → empty) and recover final sizes.
-    fn solve(&self, solver: PortfolioSolverKind) -> Solved {
-        let ctx = self.solver_context();
+    fn solve(&self, solver: PortfolioSolverKind) -> QuantResult<Solved> {
+        let ctx = self.solver_context()?;
 
         if self.integer_inclusion {
             let milp_result = try_milp(&ctx, solver);
             match milp_result {
                 Ok(raw) => {
-                    return Solved {
-                        values: self.recover(&raw),
+                    return Ok(Solved {
+                        values: self.recover(&raw)?,
                         mode: PortfolioSolveMode::MilpExact,
                         status: OptimizerSolverStatus::Optimal,
                         fell_back: false,
                         conflicts: Vec::new(),
-                    };
+                    });
                 }
                 Err(failure) => {
                     let conflicts = failure.conflicts();
                     // Fall back to the pure-Rust continuous relaxation.
                     if let Ok(raw) = try_relaxation(&ctx) {
-                        return Solved {
-                            values: self.recover(&raw),
+                        return Ok(Solved {
+                            values: self.recover(&raw)?,
                             mode: PortfolioSolveMode::ContinuousRelaxation,
                             status: OptimizerSolverStatus::FellBackRelaxation,
                             fell_back: true,
                             conflicts,
-                        };
+                        });
                     }
-                    return self.empty_solved(true, conflicts);
+                    return Ok(self.empty_solved(true, conflicts));
                 }
             }
         }
 
         match try_relaxation(&ctx) {
-            Ok(raw) => Solved {
-                values: self.recover(&raw),
+            Ok(raw) => Ok(Solved {
+                values: self.recover(&raw)?,
                 mode: PortfolioSolveMode::ContinuousRelaxation,
                 status: OptimizerSolverStatus::Optimal,
                 fell_back: false,
                 conflicts: Vec::new(),
-            },
-            Err(failure) => self.empty_solved(false, failure.conflicts()),
+            }),
+            Err(failure) => Ok(self.empty_solved(false, failure.conflicts())),
         }
     }
 
@@ -290,41 +295,52 @@ impl<'a> PreparedModel<'a> {
         }
     }
 
-    fn solver_context(&self) -> SolveContext {
-        SolveContext {
+    fn solver_context(&self) -> QuantResult<SolveContext> {
+        Ok(SolveContext {
             n: self.candidates.len(),
             weight: self.candidates.iter().map(|c| c.weight_f64).collect(),
             ub: self
                 .candidates
                 .iter()
-                .map(|c| decimal_to_f64(c.ub))
-                .collect(),
-            min_rec: decimal_to_f64(self.min_rec),
-            budget: decimal_to_f64(self.budget.effective.max(Decimal::ZERO)),
-            top_n: self.top_n,
+                .map(|c| decimal_to_f64(c.ub, "candidate upper bound"))
+                .collect::<QuantResult<Vec<_>>>()?,
+            min_rec: decimal_to_f64(self.min_rec, "minimum recommendation size")?,
+            budget: decimal_to_f64(
+                self.budget.effective.max(Decimal::ZERO),
+                "effective portfolio budget",
+            )?,
+            top_n: count_to_f64(
+                self.top_n.min(self.candidates.len()),
+                "portfolio top_n cardinality",
+            )?,
             buckets: self
                 .buckets
                 .iter()
-                .map(|b| (b.indices.clone(), decimal_to_f64(b.rhs.max(Decimal::ZERO))))
-                .collect(),
-        }
+                .map(|b| {
+                    Ok((
+                        b.indices.clone(),
+                        decimal_to_f64(b.rhs.max(Decimal::ZERO), "portfolio bucket constraint")?,
+                    ))
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
+        })
     }
 
     /// Snap raw solver values to the money scale, enforce min-ticket, and apply
     /// `TopN` selection (by conviction-weighted contribution, canonical tie-break).
     /// Dropping a candidate only frees shared cap room, so the result stays
     /// feasible without a second solve.
-    fn recover(&self, raw: &[f64]) -> Vec<Decimal> {
+    fn recover(&self, raw: &[f64]) -> QuantResult<Vec<Decimal>> {
         let mut snapped: Vec<Decimal> = self
             .candidates
             .iter()
             .zip(raw)
             .map(|(candidate, &value)| {
-                f64_to_decimal(value)
+                Ok(f64_to_decimal(value, "solver allocation")?
                     .clamp(Decimal::ZERO, candidate.ub)
-                    .round_dp(RESEARCH_DECIMAL_SCALE)
+                    .round_dp(RESEARCH_DECIMAL_SCALE))
             })
-            .collect();
+            .collect::<QuantResult<Vec<_>>>()?;
 
         // Drop sub-minimum tickets.
         for (candidate_idx, value) in snapped.iter_mut().enumerate() {
@@ -348,7 +364,7 @@ impl<'a> PreparedModel<'a> {
         for &candidate_idx in funded.iter().skip(self.top_n) {
             snapped[candidate_idx] = Decimal::ZERO;
         }
-        snapped
+        Ok(snapped)
     }
 
     /// Build one [`Allocation`] per original candidate with binding attribution.
@@ -632,20 +648,44 @@ fn normalize(value: Decimal, min: Decimal, max: Decimal) -> Decimal {
     }
 }
 
-fn decimal_to_f64(value: Decimal) -> f64 {
-    value.to_f64().unwrap_or(0.0)
+fn decimal_to_f64(value: Decimal, field: &'static str) -> QuantResult<f64> {
+    value
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            ResearchError::PortfolioOptimization {
+                detail: format!("{field} Decimal {value} is not representable as finite f64"),
+            }
+            .into()
+        })
 }
 
 /// Convert a (small) count to `f64` without a lossy `as` cast.
-fn count_to_f64(count: usize) -> f64 {
-    u32::try_from(count).map_or(f64::MAX, f64::from)
+fn count_to_f64(count: usize, field: &'static str) -> QuantResult<f64> {
+    count
+        .to_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| {
+            ResearchError::PortfolioOptimization {
+                detail: format!("{field} count {count} is not representable as finite f64"),
+            }
+            .into()
+        })
 }
 
-fn f64_to_decimal(value: f64) -> Decimal {
+fn f64_to_decimal(value: f64, field: &'static str) -> QuantResult<Decimal> {
     if !value.is_finite() {
-        return Decimal::ZERO;
+        return Err(ResearchError::PortfolioOptimization {
+            detail: format!("{field} produced non-finite f64 value {value}"),
+        }
+        .into());
     }
-    Decimal::from_f64(value).unwrap_or(Decimal::ZERO)
+    Decimal::from_f64(value).ok_or_else(|| {
+        ResearchError::PortfolioOptimization {
+            detail: format!("{field} f64 value {value} is not representable as Decimal"),
+        }
+        .into()
+    })
 }
 
 /// Solver-space view (pure f64) handed to the `good_lp` model builder.
@@ -655,7 +695,7 @@ struct SolveContext {
     ub: Vec<f64>,
     min_rec: f64,
     budget: f64,
-    top_n: usize,
+    top_n: f64,
     buckets: Vec<(Vec<usize>, f64)>,
 }
 
@@ -878,8 +918,7 @@ where
             constraints.push(constraint!(u[i] >= ctx.min_rec * x[i]));
         }
         let cardinality = x.iter().fold(Expression::from(0.0), |acc, &v| acc + v);
-        let top_n = count_to_f64(ctx.top_n.min(ctx.n));
-        constraints.push(constraint!(cardinality <= top_n));
+        constraints.push(constraint!(cardinality <= ctx.top_n));
     }
 
     let mut model = vars.maximise(objective).using(solver);
@@ -895,4 +934,16 @@ where
         }
     })?;
     Ok(u.iter().map(|&v| solution.value(v)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f64_to_decimal;
+
+    #[test]
+    fn non_finite_solver_allocation_fails_closed() {
+        assert!(f64_to_decimal(f64::NAN, "solver allocation").is_err());
+        assert!(f64_to_decimal(f64::INFINITY, "solver allocation").is_err());
+        assert!(f64_to_decimal(f64::NEG_INFINITY, "solver allocation").is_err());
+    }
 }

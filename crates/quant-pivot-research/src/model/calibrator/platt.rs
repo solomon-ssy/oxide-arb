@@ -14,6 +14,8 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{enums::quant::CalibrationMethod, types::Probability};
 use rust_decimal::{Decimal, prelude::FromPrimitive, prelude::ToPrimitive};
 
+use crate::model::apply_mapping;
+
 use super::{MonotoneMapping, ProbabilityCalibrator};
 
 /// Minimum paired samples for a numerically meaningful 2-parameter fit.
@@ -23,12 +25,15 @@ const MIN_STEP: f64 = 1e-10;
 const SIGMA: f64 = 1e-12;
 const STOPPING_GRAD: f64 = 1e-5;
 /// Backtracking halving steps: `2^-step_idx` reaches `MIN_STEP` well before 40.
-const MAX_BACKTRACK_STEPS: u32 = 40;
+const MAX_BACKTRACK_STEPS: i32 = 40;
 
-/// Platt's Newton loop counts samples as `f64`; cap at `u32::MAX` to avoid
-/// lossy `usize` casts on wide platforms.
-fn sample_count_as_f64(len: usize) -> f64 {
-    f64::from(u32::try_from(len).unwrap_or(u32::MAX))
+/// Platt's Newton loop counts samples through an exact `u32` → `f64`
+/// conversion; larger splits are rejected instead of silently capped.
+fn sample_count_as_f64(len: usize) -> QuantResult<f64> {
+    let count = u32::try_from(len).map_err(|error| ResearchError::DatasetBuild {
+        detail: format!("platt calibration sample count exceeds exact f64 boundary: {error}"),
+    })?;
+    Ok(f64::from(count))
 }
 
 /// Convert every calibration-split score to `f64`, failing closed (never a
@@ -103,23 +108,34 @@ impl ProbabilityCalibrator for PlattCalibrator {
         })
     }
 
-    fn calibrate(&self, mapping: &MonotoneMapping, score: Decimal) -> Probability {
-        super::apply_mapping(mapping, score)
+    fn calibrate(&self, mapping: &MonotoneMapping, score: Decimal) -> QuantResult<Probability> {
+        apply_mapping(mapping, score)
     }
 }
 
 /// Evaluate the calibrated sigmoid `1 / (1 + exp(a*score + b))` at `score`,
 /// numerically stable for large `|a*score+b|`.
-#[must_use]
-pub fn sigmoid(a: Decimal, b: Decimal, score: Decimal) -> Decimal {
-    let linear_term = (a.to_f64().unwrap_or(0.0))
-        .mul_add(score.to_f64().unwrap_or(0.0), b.to_f64().unwrap_or(0.0));
+pub fn sigmoid(a: Decimal, b: Decimal, score: Decimal) -> QuantResult<Decimal> {
+    let strict_f64 = |value: Decimal, field: &'static str| {
+        value
+            .to_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| ResearchError::Inference {
+                detail: format!("Platt {field} is not representable as finite f64"),
+            })
+    };
+    let linear_term = strict_f64(a, "a")?.mul_add(strict_f64(score, "score")?, strict_f64(b, "b")?);
     let prob = if linear_term >= 0.0 {
         (-linear_term).exp() / (1.0 + (-linear_term).exp())
     } else {
         1.0 / (1.0 + linear_term.exp())
     };
-    Decimal::from_f64(prob).unwrap_or(Decimal::ZERO)
+    Decimal::from_f64(prob).ok_or_else(|| {
+        ResearchError::Inference {
+            detail: "Platt sigmoid output is not representable as Decimal".to_owned(),
+        }
+        .into()
+    })
 }
 
 /// Stable sigmoid probability and its complement at `linear_term = a*score + b`.
@@ -137,8 +153,8 @@ fn sigmoid_pair(linear_term: f64) -> (f64, f64) {
 fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
     let sample_len = scores.len();
     let won_count = outcomes.iter().filter(|&&won| won).count();
-    let won_count_f64 = f64::from(u32::try_from(won_count).unwrap_or(u32::MAX));
-    let total_count_f64 = sample_count_as_f64(sample_len);
+    let won_count_f64 = sample_count_as_f64(won_count)?;
+    let total_count_f64 = sample_count_as_f64(sample_len)?;
     let lost_count_f64 = total_count_f64 - won_count_f64;
     if lost_count_f64 <= 0.0 || won_count_f64 <= 0.0 {
         return Err(QuantError::from(ResearchError::DatasetBuild {
@@ -191,7 +207,7 @@ fn fit_platt(scores: &[f64], outcomes: &[bool]) -> QuantResult<(f64, f64)> {
 
         let mut updated = false;
         for step_idx in 0..MAX_BACKTRACK_STEPS {
-            let step = 2.0_f64.powi(-i32::try_from(step_idx).unwrap_or(i32::MAX));
+            let step = 2.0_f64.powi(-step_idx);
             if step < MIN_STEP {
                 break;
             }
@@ -306,9 +322,15 @@ mod tests {
         let MonotoneMapping::Platt { .. } = &mapping else {
             panic!("expected platt mapping");
         };
-        let low = calibrator.calibrate(&mapping, dec!(0.05));
-        let mid = calibrator.calibrate(&mapping, dec!(0.5));
-        let high = calibrator.calibrate(&mapping, dec!(0.95));
+        let low = calibrator
+            .calibrate(&mapping, dec!(0.05))
+            .expect("calibrate low");
+        let mid = calibrator
+            .calibrate(&mapping, dec!(0.5))
+            .expect("calibrate mid");
+        let high = calibrator
+            .calibrate(&mapping, dec!(0.95))
+            .expect("calibrate high");
         assert!(low.inner() < mid.inner());
         assert!(mid.inner() < high.inner());
     }

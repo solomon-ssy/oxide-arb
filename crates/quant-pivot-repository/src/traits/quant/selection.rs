@@ -25,4 +25,10 @@ pub trait MarketSelectionRepository: Send + Sync {
         &self,
         snapshot_id: &MarketSelectionId,
     ) -> Result<Vec<MarketSelectionMemberInfo>, StorageError>;
+
+    /// Batch-load members for immutable selection snapshots without N+1 reads.
+    async fn list_members_by_snapshot_ids(
+        &self,
+        snapshot_ids: &[MarketSelectionId],
+    ) -> Result<Vec<MarketSelectionMemberInfo>, StorageError>;
 }

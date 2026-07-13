@@ -7,7 +7,6 @@ use tracing::info;
 
 pub struct ClickHousePool {
     client: clickhouse::Client,
-    database: String,
 }
 
 impl ClickHousePool {
@@ -34,16 +33,11 @@ impl ClickHousePool {
                 .with_database(&config.database)
                 .with_user(&config.user)
                 .with_password(&config.password),
-            database: config.database.clone(),
         }
     }
 
     pub const fn client(&self) -> &clickhouse::Client {
         &self.client
-    }
-
-    pub fn database(&self) -> &str {
-        &self.database
     }
 
     pub async fn health_check(&self) -> Result<(), StorageError> {

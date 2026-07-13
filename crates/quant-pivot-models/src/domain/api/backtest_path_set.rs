@@ -28,7 +28,12 @@ use crate::{
 ///
 /// `Serialize` is derived so the request can be frozen into a durable
 /// research job's `params_json` and replayed on execute.
+///
+/// Model family, input contract, supervised target, and prediction horizon are
+/// deliberately absent: the server resolves them from the model version's
+/// linked dataset and immutable model specification.
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct RunCpcvBacktestRequest {
     /// Frozen, PIT-materialized dataset the model version was trained on.
     pub training_dataset_id: TrainingDatasetId,
@@ -36,22 +41,6 @@ pub struct RunCpcvBacktestRequest {
     /// partitions, purge/embargo, trial grid, PBO block count, gate
     /// thresholds) + portfolio caps + provenance.
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    /// Model family to validate: `"weighted_factor"` or `"classical:<kind>"` —
-    /// the exact same training-time parameter [`RunBacktestRequest`]'s sibling
-    /// `POST /research/models/{id}/train` accepts, since CPCV re-trains every
-    /// fold from scratch and must reproduce the candidate's own training
-    /// configuration.
-    #[validate(length(min = 1))]
-    pub model_family: String,
-    /// Supervised target label name (e.g. `"settlement_outcome"`).
-    #[validate(length(min = 1))]
-    pub label_name: String,
-    /// Horizon of the target label in seconds (`0` for horizon-independent labels).
-    pub label_horizon_secs: u64,
-    /// Model-intrinsic prediction horizon in seconds (frozen into every
-    /// ephemeral fold/trial artifact).
-    #[validate(range(min = 1))]
-    pub prediction_horizon_secs: u64,
     /// Operator reason recorded on the operation log.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
@@ -60,6 +49,46 @@ pub struct RunCpcvBacktestRequest {
     /// persisting params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_set_id: Option<BacktestPathSetId>,
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::RunCpcvBacktestRequest;
+
+    fn request() -> serde_json::Value {
+        serde_json::json!({
+            "training_dataset_id": uuid::Uuid::now_v7(),
+            "runtime_config_version_id": uuid::Uuid::now_v7(),
+            "reason": "validate the frozen candidate"
+        })
+    }
+
+    #[test]
+    fn cpcv_request_only_accepts_dataset_runtime_and_reason() {
+        serde_json::from_value::<RunCpcvBacktestRequest>(request())
+            .expect("minimal frozen CPCV request");
+    }
+
+    #[test]
+    fn cpcv_request_rejects_client_owned_training_contract_fields() {
+        for field in [
+            "model_family",
+            "label_name",
+            "label_horizon_secs",
+            "prediction_horizon_secs",
+        ] {
+            let mut value = request();
+            value[field] = serde_json::json!(if field == "model_family" {
+                "weighted_factor"
+            } else {
+                "client_override"
+            });
+            assert!(
+                serde_json::from_value::<RunCpcvBacktestRequest>(value).is_err(),
+                "legacy client-owned field `{field}` must fail closed"
+            );
+        }
+    }
 }
 
 /// Stored CPCV path-set result returned after a run and on fetch.

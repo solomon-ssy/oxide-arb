@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::quant_report_data_quality_snapshot::Entity")]
 pub struct ReportDataQualitySnapshotInfo {
     pub report_data_quality_snapshot_id: ReportDataQualitySnapshotId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub tokens_json: ReportDataQualityTokens,
     pub created_at: DateTime<Utc>,
@@ -21,7 +21,7 @@ info_from_model!(
     crate::entities::quant_report_data_quality_snapshot::Model,
     {
         report_data_quality_snapshot_id,
-        as_of,
+        decision_at,
         runtime_config_version_id,
         tokens_json,
         created_at,
@@ -33,7 +33,7 @@ info_from_model!(
 #[sea_orm(active_model = "crate::entities::quant_report_data_quality_snapshot::ActiveModel")]
 pub struct NewReportDataQualitySnapshot {
     pub report_data_quality_snapshot_id: ReportDataQualitySnapshotId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub tokens_json: ReportDataQualityTokens,
 }

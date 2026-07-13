@@ -1,16 +1,15 @@
 //! Offline model-training orchestration (Phase 3.6).
 //!
-//! Loads a frozen training dataset's Parquet, decodes its **schedule and label
-//! truth**, rematerializes every example's features and factors point-in-time
-//! through the shared [`materialize_cross_section`] kernel (same path as the
-//! backtest replay), trains with the pure research trainer, content-addresses
+//! Loads a frozen training dataset's Parquet as the complete feature/factor/label
+//! truth, verifies its semantic content hash, trains with the pure research
+//! trainer, content-addresses
 //! the artifact into the [`ArtifactStore`], and registers a **Candidate**
-//! `quant_model_version` plus a `Training` `quant_model_run`. Parquet is never
-//! trusted for features or factors. The weighted-factor path is always available;
+//! `quant_model_version` plus a `Training` `quant_model_run`. Training never
+//! rematerializes or replaces frozen rows. The weighted-factor path is always available;
 //! the classical (smartcore) path is linked only under the `ml-classical`
 //! feature and otherwise fails closed with `RuntimeUnavailable`.
 
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
 use tokio::{runtime::Handle, task};
@@ -31,8 +30,8 @@ use quant_pivot_models::{
     },
     runtime_config::sections::FactorsConfig,
     types::{
-        ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId,
-        training::TrainingSampleSource,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId,
+        TrainingDatasetId, training::TrainingSampleSource,
     },
 };
 #[cfg(feature = "ml-classical")]
@@ -40,40 +39,41 @@ use quant_pivot_models::{
     enums::quant::ModelSerializationFormat, hashing::CanonicalDigest, types::ModelArtifactId,
 };
 use quant_pivot_repository::traits::{
-    EventRepository, MarketLinkageRepository, MarketRepository, ModelRegistryRepository,
-    ModelRunRepository, QuantFactReadRepository, TrainingDatasetRepository,
+    ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    factors::{FactorName, names as factor_names},
+    factors::{FactorEngine, FactorName, names as factor_names},
+    features::FeatureSchema,
+    hashing::ResearchHasher,
     model::{
         ClassicalKind, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
         ModelFamily, ModelTrainer, ReturnModelSpec, ScoreMultiplierSpec, SellScorerOutputSpec,
         SellScorerTrainer, SubstitutionConfidenceRules, TrainModelRequest, TrainSellScorerRequest,
         TrainedModelArtifact, TrainingObjectiveSpec, ValidationSpec, WeightedFactorTrainer,
-        infer_training_category_scope,
+        artifact::MODEL_ARTIFACT_FORMAT_VERSION, infer_training_category_scope,
     },
     selection::ModelFeatureRequirements,
-    training::{DatasetParquetCodec, TrainingExample},
+    training::TrainingExample,
     validation::PurgeConfig,
 };
 #[cfg(feature = "ml-classical")]
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace},
-    features::FeatureSchema,
     model::{
-        ClassicalAdapterRegistry, ClassicalTrainOutput, ValidationReport,
+        ClassicalAdapterRegistry, ClassicalOutputSemantics, ClassicalTrainOutput, ValidationReport,
         artifact::ClassicalModelArtifact,
     },
-    training::{TrainingMatrix, build_training_matrix, matrix_spec_from_schema},
+    training::{
+        RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingMatrix, build_training_matrix,
+        matrix_spec_from_contract,
+    },
 };
 use rust_decimal::Decimal;
 
 use crate::service::{
-    dataset_replay::{
-        RematerializeInputs, rematerialize_exit_decision_examples, rematerialize_training_examples,
-    },
     historical_replay::ReplayConfig,
+    training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
 
 /// Derive the candidate factor seed: configured `factor_weights` if present,
@@ -144,14 +144,6 @@ pub struct ModelTrainerServiceDeps {
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Model-run ledger.
     pub model_run_repo: Arc<dyn ModelRunRepository>,
-    /// `ClickHouse` fact reader for point-in-time rematerialization.
-    pub fact_read: Arc<dyn QuantFactReadRepository>,
-    /// Postgres market catalog for the replay window.
-    pub market_repo: Arc<dyn MarketRepository>,
-    /// Postgres event catalog snapshot for neg-risk leg enumeration.
-    pub event_repo: Arc<dyn EventRepository>,
-    /// Frozen market → external-subject linkage ledger (11.2.2).
-    pub linkage_repo: Arc<dyn MarketLinkageRepository>,
 }
 
 /// Frozen config governing training (from the runtime-config version).
@@ -176,6 +168,8 @@ pub struct TrainModelInput {
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Family to train.
     pub model_family: ModelFamily,
+    /// Exact ordered raw-input contract frozen by the owning model spec.
+    pub input_contract: ModelInputContract,
     /// Supervised target label.
     pub label: LabelSelector,
     /// Model-intrinsic prediction horizon (seconds), frozen into the artifact.
@@ -199,29 +193,26 @@ pub struct ModelTrainerService {
     deps: ModelTrainerServiceDeps,
     config: ModelTrainerConfig,
     replay: ReplayConfig,
-    max_book_staleness: Duration,
 }
 
 impl ModelTrainerService {
-    /// Assemble the service from deps, frozen config, and replay parameters.
+    /// Assemble the service from persistence dependencies and frozen trainer config.
     #[must_use]
     pub const fn new(
         deps: ModelTrainerServiceDeps,
         config: ModelTrainerConfig,
         replay: ReplayConfig,
-        max_book_staleness: Duration,
     ) -> Self {
         Self {
             deps,
             config,
             replay,
-            max_book_staleness,
         }
     }
 
     /// Train a model and register it as a Candidate version.
     ///
-    /// Reports coarse but honest phases (`load → decode → materialize → fit`) to
+    /// Reports coarse but honest phases (`load → decode → verify → fit`) to
     /// `progress`; the fit itself is a single opaque research-trainer call,
     /// offloaded to a blocking thread. `cancel` is polled at each phase boundary.
     pub async fn train(
@@ -233,33 +224,14 @@ impl ModelTrainerService {
         ensure_not_cancelled(cancel, "load")?;
         progress.report(ResearchJobProgress::indeterminate("load", 0));
         let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        self.validate_dataset_contracts(&dataset)?;
         progress.report(ResearchJobProgress::indeterminate("decode", 0));
-        let parquet_examples = self.decode_examples(&dataset).await?;
-        // Rematerialize features/factors point-in-time (the dominant pre-fit cost).
-        ensure_not_cancelled(cancel, "materialize")?;
+        let examples = self.decode_examples(&dataset).await?;
+        ensure_not_cancelled(cancel, "verify")?;
         progress.report(ResearchJobProgress::indeterminate(
-            "materialize",
-            parquet_examples.len() as u64,
+            "verify",
+            examples.len() as u64,
         ));
-        // Exit scorers train on per-lot `ExitDecision` rows: recompute market
-        // factors PIT but preserve each lot's frozen labels + position-state
-        // (the generic rematerialize would rewrite them to `HistoricalPit` and
-        // drop the lot state, tripping the Sell-training guard).
-        let rematerialize = RematerializeInputs {
-            dataset: &dataset,
-            parquet_examples: &parquet_examples,
-            fact_read: Arc::clone(&self.deps.fact_read),
-            market_repo: Arc::clone(&self.deps.market_repo),
-            event_repo: Arc::clone(&self.deps.event_repo),
-            linkage_repo: Arc::clone(&self.deps.linkage_repo),
-            replay: &self.replay,
-            max_book_staleness: self.max_book_staleness,
-        };
-        let examples = if input.model_family.is_exit_scorer() {
-            rematerialize_exit_decision_examples(&rematerialize).await?
-        } else {
-            rematerialize_training_examples(&rematerialize).await?
-        };
 
         let model_version_id = input.model_version_id.clone();
         let model_run_id = ModelRunId::from_v7();
@@ -306,7 +278,39 @@ impl ModelTrainerService {
         }
     }
 
-    /// Load the dataset, rejecting any status outside `{Built, Ready}` (§6.1).
+    fn validate_dataset_contracts(&self, dataset: &TrainingDatasetInfo) -> QuantResult<()> {
+        let materialization = require_dataset_materialization(dataset)?;
+        let feature_schema = FeatureSchema::build(&self.replay.features)?;
+        let feature_schema_hash = ResearchHasher::feature_schema(&feature_schema)?;
+        if &feature_schema_hash != materialization.feature_schema_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset feature contract mismatch: dataset {}, runtime {}",
+                    materialization.feature_schema_hash, feature_schema_hash
+                ),
+            }
+            .into());
+        }
+        let factor_schema_hash = FactorEngine::new(
+            &self.replay.factors,
+            &self.replay.features,
+            &self.replay.domain,
+            None,
+        )
+        .factor_schema_hash()?;
+        if &factor_schema_hash != materialization.factor_schema_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen dataset factor contract mismatch: dataset {}, runtime {}",
+                    materialization.factor_schema_hash, factor_schema_hash
+                ),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Load the dataset, accepting only an integrity-gated `Ready` artifact.
     async fn load_ready_dataset(
         &self,
         training_dataset_id: &TrainingDatasetId,
@@ -320,13 +324,10 @@ impl ModelTrainerService {
                 entity: "training_dataset",
                 id: training_dataset_id.to_string(),
             })?;
-        if !matches!(
-            dataset.status,
-            TrainingDatasetStatus::Built | TrainingDatasetStatus::Ready
-        ) {
+        if dataset.status != TrainingDatasetStatus::Ready {
             return Err(ResearchError::DatasetBuild {
                 detail: format!(
-                    "training requires a Built/Ready dataset, got {}",
+                    "training requires a Ready dataset, got {}",
                     dataset.status.as_str()
                 ),
             }
@@ -340,8 +341,13 @@ impl ModelTrainerService {
         &self,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<Vec<TrainingExample>> {
-        let bytes = self.deps.artifact_store.get(&dataset.parquet_uri).await?;
-        DatasetParquetCodec::decode(&bytes)
+        let materialization = require_dataset_materialization(dataset)?;
+        let bytes = self
+            .deps
+            .artifact_store
+            .get(materialization.parquet_uri)
+            .await?;
+        verify_frozen_dataset_artifact(dataset, &bytes)
     }
 
     /// Train + register, dispatching on family.
@@ -352,11 +358,12 @@ impl ModelTrainerService {
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
     ) -> QuantResult<ModelVersionInfo> {
+        let materialization = require_dataset_materialization(dataset)?;
         let header = ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
             model_family: input.model_family,
-            feature_schema_hash: dataset.feature_schema_hash.clone(),
-            factor_schema_hash: dataset.factor_schema_hash.clone(),
+            feature_schema_hash: materialization.feature_schema_hash.clone(),
+            factor_schema_hash: materialization.factor_schema_hash.clone(),
         };
 
         let (artifact, metrics_json, training_objective_json) =
@@ -365,7 +372,10 @@ impl ModelTrainerService {
                     .await?
             } else {
                 match input.model_family.classical_kind() {
-                    None => self.train_weighted(header, input, examples).await?,
+                    None => {
+                        self.train_weighted(header, input, dataset, examples)
+                            .await?
+                    }
                     Some(kind) => {
                         self.train_classical(header, input, dataset, examples, kind)
                             .await?
@@ -373,6 +383,7 @@ impl ModelTrainerService {
                 }
             };
 
+        let metrics_json = attach_artifact_diagnostics(metrics_json, &artifact)?;
         let artifact_hash = artifact.content_hash()?;
         let key = ModelArtifact::artifact_key(&artifact_hash)?;
         self.deps
@@ -411,26 +422,11 @@ impl ModelTrainerService {
         &self,
         header: ModelArtifactHeader,
         input: &TrainModelInput,
+        dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
     ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
-        let spec = self
-            .deps
-            .model_registry_repo
-            .find_model_spec_by_id(&input.model_spec_id)
-            .await
-            .map_err(QuantError::from)?
-            .ok_or_else(|| {
-                QuantError::from(ResearchError::InvalidModelArtifact {
-                    detail: format!("model spec {} not found for training", input.model_spec_id),
-                })
-            })?;
-        let requirements: ModelFeatureRequirements =
-            serde_json::from_value(spec.feature_requirements).map_err(|error| {
-                QuantError::config(format!(
-                    "model spec {} has invalid feature_requirements: {error}",
-                    input.model_spec_id
-                ))
-            })?;
+        let materialization = require_dataset_materialization(dataset)?;
+        let requirements = ModelFeatureRequirements::from_input_contract(&input.input_contract);
         let category_scope = input.category_scope.or_else(|| {
             infer_training_category_scope(
                 examples,
@@ -438,13 +434,10 @@ impl ModelTrainerService {
                 &input.selection_enabled_categories,
             )
         });
-        let required_features = match category_scope {
-            Some(category) => requirements.for_category(category),
-            None => requirements.generic.clone(),
-        };
         let seed_weights = weighted_seed_weights(&self.config.factors, examples);
         let request = TrainModelRequest {
             examples: examples.to_vec(),
+            training_dataset_hash: materialization.dataset_hash.clone(),
             label: input.label.clone(),
             seed_weights,
             objective: self.config.objective.clone(),
@@ -458,7 +451,8 @@ impl ModelTrainerService {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features,
+            input_contract: input.input_contract.clone(),
+            factor_cross_section: self.config.factors.cross_section.clone(),
             category_scope,
         };
         // Offload the CPU-bound fit to a blocking thread so it never occupies an
@@ -511,6 +505,7 @@ impl ModelTrainerService {
         dataset: &TrainingDatasetInfo,
         examples: &[TrainingExample],
     ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
+        let materialization = require_dataset_materialization(dataset)?;
         if !examples
             .iter()
             .all(|example| example.sample_source == TrainingSampleSource::ExitDecision)
@@ -534,8 +529,9 @@ impl ModelTrainerService {
             header,
             prediction_horizon_secs: input.prediction_horizon_secs,
             output_spec: SellScorerOutputSpec::conservative(),
-            label_schema_hash: dataset.label_schema_hash.clone(),
-            required_features: Vec::new(),
+            label_schema_hash: materialization.label_schema_hash.clone(),
+            training_dataset_hash: materialization.dataset_hash.clone(),
+            input_contract: input.input_contract.clone(),
         };
         // Offload the CPU-bound fit to a blocking thread (keeps the runtime free).
         let trained =
@@ -614,6 +610,7 @@ impl ModelTrainerService {
         input: &TrainModelInput,
         dataset: &TrainingDatasetInfo,
     ) -> QuantResult<()> {
+        let materialization = require_dataset_materialization(dataset)?;
         self.deps
             .model_run_repo
             .create(NewModelRun {
@@ -625,7 +622,7 @@ impl ModelTrainerService {
                 window_start: dataset.window_start,
                 window_end: dataset.window_end,
                 status: ModelRunStatus::Running,
-                input_hash: dataset.dataset_hash.clone(),
+                input_hash: materialization.dataset_hash.clone(),
                 output_hash: None,
                 metrics_json: serde_json::json!({}),
                 error_code: None,
@@ -636,6 +633,58 @@ impl ModelTrainerService {
             .await?;
         Ok(())
     }
+}
+
+fn attach_artifact_diagnostics(
+    mut metrics: serde_json::Value,
+    artifact: &ModelArtifact,
+) -> QuantResult<serde_json::Value> {
+    let object = metrics
+        .as_object_mut()
+        .ok_or_else(|| ResearchError::Serialization {
+            detail: "model metrics must be a JSON object".to_owned(),
+        })?;
+    let diagnostics = match artifact {
+        ModelArtifact::WeightedFactor(weighted) => serde_json::json!({
+            "format_version": MODEL_ARTIFACT_FORMAT_VERSION,
+            "transform_kind": "factor_native",
+            "training_dataset_hash": weighted.training_dataset_hash,
+            "training_input_hash": weighted.training_input_hash,
+            "input_contract_hash": weighted.input_contract_hash,
+            "input_transform_hash": weighted.input_transform_hash()?,
+            "input_contract": weighted.input_contract,
+            "factor_inputs": weighted.weights.iter().map(|weight| weight.factor.as_str()).collect::<Vec<_>>(),
+        }),
+        ModelArtifact::Classical(classical) => serde_json::json!({
+            "format_version": MODEL_ARTIFACT_FORMAT_VERSION,
+            "transform_kind": "fitted_feature_matrix",
+            "training_dataset_hash": classical.training_dataset_hash,
+            "training_input_hash": classical.training_input_hash,
+            "input_contract_hash": classical.input_contract_hash,
+            "input_transform_hash": classical.input_transform_hash,
+            "input_contract": classical.input_contract,
+            "prediction_horizon_secs": classical.prediction_horizon_secs,
+            "output_semantics": classical.output_semantics,
+            "multipliers": classical.multipliers,
+            "substitution_confidence_rules": classical.substitution_confidence_rules,
+            "serialized_model_hash": classical.serialized_model_hash,
+            "serialized_model_uri": classical.serialized_model_uri,
+            "serialization_format": classical.serialization_format,
+            "input_transform": classical.input_transform,
+        }),
+        ModelArtifact::SellScorer(sell) => serde_json::json!({
+            "format_version": MODEL_ARTIFACT_FORMAT_VERSION,
+            "transform_kind": "factor_native",
+            "training_dataset_hash": sell.training_dataset_hash,
+            "training_input_hash": sell.training_input_hash,
+            "input_contract_hash": sell.input_contract_hash,
+            "input_transform_hash": sell.input_transform_hash()?,
+            "input_contract": sell.input_contract,
+            "factor_inputs": sell.weights.iter().map(|weight| weight.factor.as_str()).collect::<Vec<_>>(),
+        }),
+    };
+    object.insert("artifact_diagnostics".to_owned(), diagnostics);
+    Ok(metrics)
 }
 
 /// Classical training path — only linked under `ml-classical`.
@@ -649,8 +698,22 @@ impl ModelTrainerService {
         examples: &[TrainingExample],
         kind: ClassicalKind,
     ) -> QuantResult<(ModelArtifact, serde_json::Value, serde_json::Value)> {
-        let schema = FeatureSchema::build(&self.replay.features);
-        let matrix = build_classical_matrix(examples, &input.label, &schema)?;
+        let materialization = require_dataset_materialization(dataset)?;
+        let output_semantics =
+            classical_output_semantics(kind, &input.label, input.prediction_horizon_secs)?;
+        let schema = FeatureSchema::build(&self.replay.features)?;
+        let schema_hash = ResearchHasher::feature_schema(&schema)?;
+        if &schema_hash != materialization.feature_schema_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "classical frozen dataset feature schema mismatch: dataset {}, runtime {}",
+                    materialization.feature_schema_hash, schema_hash
+                ),
+            }
+            .into());
+        }
+        let matrix =
+            build_classical_matrix(examples, &input.label, &schema, &input.input_contract)?;
         let folds = input.validation_folds.max(2);
         let validation = ValidationSpec {
             folds,
@@ -671,6 +734,13 @@ impl ModelTrainerService {
                 detail: format!("classical trainer task join failed: {error}"),
             })
         })??;
+        if output.input_contract != input.input_contract {
+            return Err(ResearchError::Determinism {
+                detail: "classical trainer input contract differs from its owning model spec"
+                    .to_owned(),
+            }
+            .into());
+        }
 
         let model_key = ArtifactKey::new(
             ArtifactNamespace::Model,
@@ -691,14 +761,61 @@ impl ModelTrainerService {
             kind,
             crate_name: output.crate_name.clone(),
             crate_version: output.crate_version.clone(),
-            label_schema_hash: dataset.label_schema_hash.clone(),
-            training_dataset_hash: dataset.dataset_hash.clone(),
+            label_schema_hash: materialization.label_schema_hash.clone(),
+            training_dataset_hash: materialization.dataset_hash.clone(),
+            prediction_horizon_secs: input.prediction_horizon_secs,
+            output_semantics,
+            multipliers: ScoreMultiplierSpec::conservative(),
+            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+            input_contract: output.input_contract,
+            input_contract_hash: output.input_contract_hash,
+            input_transform_hash: output.input_transform_hash,
+            training_input_hash: output.training_input_hash,
             serialized_model_uri,
+            serialized_model_hash: output.model_bytes_hash,
             serialization_format: ModelSerializationFormat::Bincode,
-            preprocessing: output.preprocessing,
+            input_transform: output.input_transform,
             metrics: output.metrics,
         }));
         Ok((artifact, metrics_json, objective_json))
+    }
+}
+
+#[cfg(feature = "ml-classical")]
+pub(crate) fn classical_output_semantics(
+    kind: ClassicalKind,
+    label: &LabelSelector,
+    prediction_horizon_secs: u64,
+) -> QuantResult<ClassicalOutputSemantics> {
+    if prediction_horizon_secs == 0 {
+        return Err(ResearchError::DatasetBuild {
+            detail: "classical model prediction horizon must be positive".to_owned(),
+        }
+        .into());
+    }
+    match kind {
+        ClassicalKind::LogisticRegression if label.name == SETTLEMENT_OUTCOME => {
+            Ok(ClassicalOutputSemantics::SettlementProbability)
+        }
+        ClassicalKind::LogisticRegression => Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "logistic classical model requires `{SETTLEMENT_OUTCOME}` target, got `{}`",
+                label.name
+            ),
+        }
+        .into()),
+        _ if label.name == RETURN_TO_HORIZON
+            && label.horizon_secs == prediction_horizon_secs =>
+        {
+            Ok(ClassicalOutputSemantics::ForwardReturnBps)
+        }
+        _ => Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "classical regressor requires `{RETURN_TO_HORIZON}` at the model prediction horizon {prediction_horizon_secs}s, got `{}` at {}s",
+                label.name, label.horizon_secs
+            ),
+        }
+        .into()),
     }
 }
 
@@ -708,9 +825,9 @@ impl ModelTrainerService {
 /// wall-clock time, never leaking). Columns come from the governed
 /// [`FeatureSchema`] (11.2.2 remediation R2) — not an ad hoc scan of whichever
 /// numeric names happen to appear in this particular example batch — so the
-/// classical path respects the same `critical` / `unit` / `value_kind`
+/// classical path respects the same requiredness / `unit` / `value_kind`
 /// contract the online governed path enforces (e.g. `Bps`-unit features are
-/// correctly scaled, and a schema-`critical` column genuinely gates row
+/// correctly scaled, and a contract-required column genuinely gates row
 /// admission instead of silently being treated as fillable). This also makes
 /// the column set reproducible across runs and comparable to the schema
 /// hash, rather than an artifact of which markets happened to be sampled.
@@ -723,16 +840,22 @@ pub(crate) fn build_classical_matrix(
     examples: &[TrainingExample],
     label: &LabelSelector,
     schema: &FeatureSchema,
+    input_contract: &ModelInputContract,
 ) -> QuantResult<TrainingMatrix> {
     let mut sorted: Vec<_> = examples.to_vec();
     sorted.sort_by(|a, b| {
-        a.as_of
-            .cmp(&b.as_of)
+        a.decision_at()
+            .cmp(&b.decision_at())
             .then_with(|| a.market_id.as_str().cmp(b.market_id.as_str()))
             .then_with(|| a.token_id.as_str().cmp(b.token_id.as_str()))
     });
 
-    let spec = matrix_spec_from_schema(schema, label.name.clone(), label.horizon_secs);
+    let spec = matrix_spec_from_contract(
+        schema,
+        input_contract,
+        label.name.clone(),
+        label.horizon_secs,
+    )?;
     build_training_matrix(&sorted, &spec)
 }
 

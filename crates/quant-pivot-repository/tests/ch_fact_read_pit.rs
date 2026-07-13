@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use quant_pivot_models::{
-    clickhouse::{BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd},
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd},
     config::ClickHouseConfig,
     enums::clickhouse::{ChFactSource, ChSnapshotReason},
     types::{MarketId, Price, Shares, TokenId, Usd},
@@ -69,6 +69,17 @@ async fn insert_book_rows(client: &clickhouse::Client, rows: &[BookSnapshotRow])
     insert.end().await.expect("end insert");
 }
 
+async fn insert_microstructure_rows(client: &clickhouse::Client, rows: &[BookMicrostructureRow]) {
+    let mut insert = client
+        .insert::<BookMicrostructureRow>("book_microstructure_1s")
+        .await
+        .expect("insert microstructure");
+    for row in rows {
+        insert.write(row).await.expect("write microstructure row");
+    }
+    insert.end().await.expect("end microstructure insert");
+}
+
 /// Wait until inserted `book_snapshots` rows are query-visible.
 ///
 /// Fresh `MergeTree` parts can lag briefly behind HTTP insert ack on a cold
@@ -133,6 +144,49 @@ fn book_row(
     }
 }
 
+fn microstructure_row(
+    token_id: &TokenId,
+    market_id: &MarketId,
+    bucket_time: i64,
+    available_at: i64,
+    mid: Decimal,
+) -> BookMicrostructureRow {
+    let price = ChPrice::from(Price::new(mid));
+    BookMicrostructureRow {
+        token_id: token_id.clone(),
+        market_id: Some(market_id.clone()),
+        bucket_time,
+        best_bid_open: None,
+        best_bid_high: None,
+        best_bid_low: None,
+        best_bid_close: None,
+        best_ask_open: None,
+        best_ask_high: None,
+        best_ask_low: None,
+        best_ask_close: None,
+        spread_bps_min: None,
+        spread_bps_avg: None,
+        spread_bps_max: None,
+        mid_price_open: Some(price),
+        mid_price_close: Some(price),
+        top1_depth_usd_avg: None,
+        top5_depth_usd_avg: None,
+        top20_depth_usd_avg: None,
+        imbalance_avg: None,
+        update_count: 1,
+        snapshot_count: 1,
+        delta_count: 0,
+        delete_count: 0,
+        crossed_count: 0,
+        invalid_level_count: 0,
+        gap_count: 0,
+        last_trade_count: 0,
+        max_book_age_ms: 0,
+        schema_version: ChSchemaVersion::FIRST,
+        available_at,
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn ch_read_orders_by_event_time_with_tiebreaker() {
@@ -163,8 +217,19 @@ async fn ch_read_orders_by_event_time_with_tiebreaker() {
     .await;
     wait_for_book_snapshot_rows(&client, &token, 2).await;
 
+    let before_late_arrival = read
+        .book_snapshot_at(&token, event_time + 5, event_time + 1)
+        .await
+        .expect("read before late arrival")
+        .expect("earlier visible revision");
+    assert_eq!(
+        before_late_arrival.mid_price.map(ChPrice::to_price),
+        Some(Price::new(Decimal::new(49, 2))),
+        "a backdated revision must not be visible before its ingestion time"
+    );
+
     let row = read
-        .book_snapshot_at(&token, event_time + 5)
+        .book_snapshot_at(&token, event_time + 5, event_time + 5)
         .await
         .expect("read")
         .unwrap_or_else(|| {
@@ -178,6 +243,97 @@ async fn ch_read_orders_by_event_time_with_tiebreaker() {
         row.mid_price.map(ChPrice::to_price),
         Some(Price::new(Decimal::new(50, 2))),
         "tie-breaker must prefer later ingestion_time at same event_time"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker ClickHouse"]
+async fn historical_scans_reject_rows_not_yet_available() {
+    let (pool, client, _container) = setup_clickhouse().await;
+    let read = ChQuantFactReadRepository::new(pool);
+    let event_time = fresh_event_time_ms();
+
+    let market_id = MarketId::new("0xavailability-axis");
+    let token_id = TokenId::new("availability-axis-yes");
+    let late_ingestion = event_time + 10_000;
+    let mut late_book = book_row(
+        token_id.as_str(),
+        event_time,
+        late_ingestion,
+        1,
+        Decimal::new(50, 2),
+    );
+    late_book.market_id = Some(market_id.clone());
+    insert_book_rows(&client, std::slice::from_ref(&late_book)).await;
+    wait_for_book_snapshot_rows(&client, &token_id, 1).await;
+
+    assert!(
+        read.observed_markets_between(event_time - 1, event_time + 1, event_time)
+            .await
+            .expect("markets before ingestion")
+            .is_empty(),
+        "a historical candidate must not exist before its book ingestion time"
+    );
+    assert_eq!(
+        read.observed_markets_between(event_time - 1, event_time + 1, late_ingestion)
+            .await
+            .expect("markets after ingestion"),
+        vec![market_id.clone()]
+    );
+
+    let visible_at = event_time + 1_000;
+    let corrected_at = event_time + 2_000;
+    insert_microstructure_rows(
+        &client,
+        &[
+            microstructure_row(
+                &token_id,
+                &market_id,
+                event_time,
+                visible_at,
+                Decimal::new(40, 2),
+            ),
+            microstructure_row(
+                &token_id,
+                &market_id,
+                event_time,
+                corrected_at,
+                Decimal::new(60, 2),
+            ),
+        ],
+    )
+    .await;
+
+    let before_correction = read
+        .mid_price_series(
+            vec![token_id.clone()],
+            event_time - 1,
+            event_time + 1,
+            visible_at,
+            60,
+        )
+        .await
+        .expect("mid series before correction");
+    assert_eq!(before_correction.len(), 1);
+    assert_eq!(
+        before_correction[0].mid_price.map(ChPrice::to_price),
+        Some(Price::new(Decimal::new(40, 2)))
+    );
+
+    let after_correction = read
+        .mid_price_series(
+            vec![token_id],
+            event_time - 1,
+            event_time + 1,
+            corrected_at,
+            60,
+        )
+        .await
+        .expect("mid series after correction");
+    assert_eq!(after_correction.len(), 1);
+    assert_eq!(
+        after_correction[0].mid_price.map(ChPrice::to_price),
+        Some(Price::new(Decimal::new(60, 2)))
     );
 }
 
@@ -213,6 +369,19 @@ async fn resolution_at_is_pit_bounded() {
             winning_token_id: no.clone(),
             winning_outcome: "No".to_owned(),
             asset_token_ids: vec![yes.clone(), no.clone()],
+            // A correction whose economic time is in range but whose writer
+            // observation is not yet visible at `as_of`.
+            resolved_at: early + 1_000,
+            observed_at: as_of + 1_000,
+            source: ChFactSource::WsMarketResolved,
+            sequence: 3,
+            schema_version: ChSchemaVersion::FIRST,
+        },
+        MarketResolutionRow {
+            market_id: market_id.clone(),
+            winning_token_id: no.clone(),
+            winning_outcome: "No".to_owned(),
+            asset_token_ids: vec![yes.clone(), no.clone()],
             resolved_at: late,
             observed_at: late,
             source: ChFactSource::WsMarketResolved,
@@ -230,17 +399,93 @@ async fn resolution_at_is_pit_bounded() {
     insert.end().await.expect("end");
 
     let resolved = read
-        .resolution_at(&market_id, as_of)
+        .resolution_at(&market_id, as_of, as_of)
         .await
         .expect("read")
         .expect("resolution");
     assert_eq!(resolved.resolved_at, early);
     assert_eq!(resolved.winning_token_id, yes);
+
+    let corrected = read
+        .resolution_at(&market_id, as_of, as_of + 1_000)
+        .await
+        .expect("read corrected")
+        .expect("corrected resolution");
+    assert_eq!(corrected.resolved_at, early + 1_000);
+    assert_eq!(corrected.winning_token_id, no);
+
+    let before_correction = read
+        .resolutions_between(vec![market_id.clone()], early, as_of, as_of)
+        .await
+        .expect("bounded resolution range");
+    assert_eq!(before_correction.len(), 1);
+    let after_correction = read
+        .resolutions_between(vec![market_id], early, as_of, as_of + 1_000)
+        .await
+        .expect("visible corrected range");
+    assert_eq!(after_correction.len(), 2);
 }
 
 #[tokio::test]
 #[ignore = "requires Docker ClickHouse"]
-async fn trade_tape_window_dedupes_replacing_merge_tree() {
+async fn domain_observation_preserves_prior_revisions_after_merge() {
+    use quant_pivot_models::{
+        clickhouse::{ChDecimal64, DomainObservationRow},
+        types::{DomainInstrumentKey, DomainSourceId},
+    };
+
+    let (pool, client, _container) = setup_clickhouse().await;
+    let read = ChQuantFactReadRepository::new(pool);
+    let event_time = fresh_event_time_ms();
+    let visible_at = event_time + 1_000;
+    let corrected_at = event_time + 2_000;
+    let instrument_key = DomainInstrumentKey::new("BINANCE:BTCUSDT:1m");
+    let base = DomainObservationRow {
+        family: "crypto".to_owned(),
+        source_id: DomainSourceId::binance(),
+        instrument_key: instrument_key.clone(),
+        metric: "close".to_owned(),
+        value: ChDecimal64::from(Decimal::new(40, 2)),
+        event_time,
+        publish_time: event_time,
+        ingestion_time: visible_at,
+        schema_version: ChSchemaVersion::FIRST,
+    };
+    let mut correction = base.clone();
+    correction.value = ChDecimal64::from(Decimal::new(60, 2));
+    correction.ingestion_time = corrected_at;
+
+    let mut insert = client
+        .insert::<DomainObservationRow>("quant_domain_observation")
+        .await
+        .expect("insert domain observations");
+    insert.write(&base).await.expect("write original");
+    insert.write(&correction).await.expect("write correction");
+    insert.end().await.expect("end domain insert");
+    client
+        .query("OPTIMIZE TABLE quant_domain_observation FINAL")
+        .execute()
+        .await
+        .expect("merge domain observation parts");
+
+    let before = read
+        .domain_observation_at(&instrument_key, "close", event_time, visible_at)
+        .await
+        .expect("observation before correction")
+        .expect("original observation remains queryable");
+    assert_eq!(before.value.to_decimal(), Decimal::new(40, 2));
+
+    let after = read
+        .domain_observation_at(&instrument_key, "close", event_time, corrected_at)
+        .await
+        .expect("observation after correction")
+        .expect("corrected observation");
+    assert_eq!(after.value.to_decimal(), Decimal::new(60, 2));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker ClickHouse"]
+async fn trade_tape_preserves_prior_revisions_after_merge() {
     use quant_pivot_models::clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow};
     use quant_pivot_models::enums::clickhouse::{
         ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource,
@@ -283,11 +528,33 @@ async fn trade_tape_window_dedupes_replacing_merge_tree() {
     insert.write(&stale).await.expect("write stale");
     insert.write(&fresh).await.expect("write fresh");
     insert.end().await.expect("end");
+    client
+        .query("OPTIMIZE TABLE quant_trade_tape FINAL")
+        .execute()
+        .await
+        .expect("merge trade tape parts");
+
+    let rows_before_revision = read
+        .trade_tape_window_by_market(
+            vec![market_id.clone()],
+            event_time - 1,
+            event_time + 1,
+            event_time + 1,
+        )
+        .await
+        .expect("read before revision");
+    assert_eq!(rows_before_revision.len(), 1);
+    assert_eq!(rows_before_revision[0].ingestion_time, stale.ingestion_time);
 
     let rows = read
-        .trade_tape_window_by_market(vec![market_id.clone()], event_time - 1, event_time + 1)
+        .trade_tape_window_by_market(
+            vec![market_id.clone()],
+            event_time - 1,
+            event_time + 1,
+            event_time + 1_000,
+        )
         .await
-        .expect("read");
+        .expect("read after revision");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].ingestion_time, fresh.ingestion_time);
 }

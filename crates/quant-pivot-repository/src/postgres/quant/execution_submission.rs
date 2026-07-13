@@ -16,6 +16,7 @@ use crate::{
                 settle_capital,
             },
             execution_order::validate_execution_order_transition,
+            feature_parity::verify_clear_latch_generation,
             order_intent::{load_intent_for_update, validate_intent_transition},
             position,
         },
@@ -37,8 +38,8 @@ use quant_pivot_models::{
         quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
     },
     types::{
-        ExecutedPartialExitNodes, ExecutionOrderId, OrderIntentId, Price, RecommendationId,
-        ReconciliationId,
+        ExecutedPartialExitNodes, ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price,
+        RecommendationId, ReconciliationId,
     },
 };
 use sea_orm::{
@@ -150,9 +151,11 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     async fn create_entry_order_and_lock_capital(
         &self,
         order: NewExecutionOrder,
+        feature_parity_state_id: &FeatureParityStateId,
     ) -> Result<ExecutionOrderInfo, StorageError> {
         let intent_id = order.order_intent_id.clone();
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
 
         // Re-lock the intent and re-verify the claim is still held (double-submit guard).
         let intent = load_intent_for_update(&txn, &intent_id).await?;

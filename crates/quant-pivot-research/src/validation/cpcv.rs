@@ -22,7 +22,7 @@
 //! implementations; Phase 11.5.1 supplies lot-grouped implementations with
 //! zero changes here.
 
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::types::BacktestPathSetId;
 use rayon::prelude::*;
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -61,34 +61,54 @@ impl CpcvConfig {
     /// integer). **Not** the number of combinations (`C(N,k)`) — a common and
     /// consequential mix-up (the original Phase 11.5 design draft made
     /// exactly this error for `N=8,k=2`: 28 combinations, but only φ=7 paths).
-    #[must_use]
-    pub fn path_count(&self) -> u64 {
-        binomial(
-            self.n_groups.saturating_sub(1),
-            self.k_test.saturating_sub(1),
-        )
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchError::ValidationMethodology`] for invalid zero
+    /// dimensions or when the exact combinatorial count exceeds `u64`.
+    pub fn path_count(&self) -> QuantResult<u64> {
+        let n = self.n_groups.checked_sub(1).ok_or_else(|| {
+            methodology("cpcv.n_groups must be positive before computing path count".to_owned())
+        })?;
+        let k = self.k_test.checked_sub(1).ok_or_else(|| {
+            methodology("cpcv.k_test must be positive before computing path count".to_owned())
+        })?;
+        binomial(n, k)
     }
 
     /// `C(N, k)` — the number of purge/embargo/train/evaluate folds this
     /// config runs. Reported for audit visibility; never confused with
     /// [`Self::path_count`].
-    #[must_use]
-    pub fn combination_count(&self) -> u64 {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResearchError::ValidationMethodology`] when `k_test` exceeds
+    /// `n_groups` or the exact count exceeds `u64`.
+    pub fn combination_count(&self) -> QuantResult<u64> {
         binomial(self.n_groups, self.k_test)
     }
 }
 
-fn binomial(n: u32, k: u32) -> u64 {
+fn binomial(n: u32, k: u32) -> QuantResult<u64> {
     if k > n {
-        return 0;
+        return Err(methodology(format!(
+            "cannot compute binomial coefficient C({n}, {k}) with k > n"
+        )));
     }
     let (n, k) = (u64::from(n), u64::from(k));
     let k = k.min(n - k);
     let mut result: u128 = 1;
     for i in 0..k {
-        result = result * u128::from(n - i) / u128::from(i + 1);
+        result = result
+            .checked_mul(u128::from(n - i))
+            .ok_or_else(|| methodology(format!("binomial C({n}, {k}) overflowed u128")))?
+            / u128::from(i + 1);
     }
-    u64::try_from(result).unwrap_or(u64::MAX)
+    u64::try_from(result).map_err(|error| {
+        methodology(format!(
+            "binomial C({n}, {k})={result} does not fit u64: {error}"
+        ))
+    })
 }
 
 /// A row/group-index filter selecting which [`TimelineGroup`]s (by index into
@@ -302,13 +322,21 @@ impl DefaultCombinatorialPurgedBacktester {
 /// A contiguous, roughly-equal partition of `groups`'s indices into
 /// `n_groups` buckets. Contiguous (not interleaved) so a partition's own
 /// interval span stays tight for purge/embargo purposes.
-fn partition_indices(group_count: usize, n_groups: u32) -> Vec<Vec<usize>> {
-    let n_groups = n_groups as usize;
+fn partition_indices(group_count: usize, n_groups: usize) -> QuantResult<Vec<Vec<usize>>> {
     (0..n_groups)
         .map(|partition| {
-            let start = group_count * partition / n_groups;
-            let end = group_count * (partition + 1) / n_groups;
-            (start..end).collect()
+            let start = group_count
+                .checked_mul(partition)
+                .ok_or_else(|| methodology("CPCV partition start overflowed usize".to_owned()))?
+                / n_groups;
+            let next_partition = partition
+                .checked_add(1)
+                .ok_or_else(|| methodology("CPCV partition index overflowed usize".to_owned()))?;
+            let end = group_count
+                .checked_mul(next_partition)
+                .ok_or_else(|| methodology("CPCV partition end overflowed usize".to_owned()))?
+                / n_groups;
+            Ok((start..end).collect())
         })
         .collect()
 }
@@ -331,11 +359,13 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
             fold_source,
             replay,
         } = request;
-        validate_config(groups.len(), cpcv)?;
+        let n_groups = usize::try_from(cpcv.n_groups)
+            .map_err(|error| methodology(format!("cpcv.n_groups does not fit usize: {error}")))?;
+        let k_test = usize::try_from(cpcv.k_test)
+            .map_err(|error| methodology(format!("cpcv.k_test does not fit usize: {error}")))?;
+        validate_config(groups.len(), cpcv, n_groups)?;
 
-        let partitions = partition_indices(groups.len(), cpcv.n_groups);
-        let n_groups = cpcv.n_groups as usize;
-        let k_test = cpcv.k_test as usize;
+        let partitions = partition_indices(groups.len(), n_groups)?;
         let combos = combinations(n_groups, k_test);
         let splitter = DefaultPurgedSplitter::new();
 
@@ -346,7 +376,7 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
                     .iter()
                     .flat_map(|&p| partitions[p].iter().copied())
                     .collect();
-                let split = splitter.split(groups, &test_group_indices, &purge);
+                let split = splitter.split(groups, &test_group_indices, &purge)?;
                 let model = fold_source.train_fold(&GroupRowFilter {
                     group_indices: split.train_indices,
                 })?;
@@ -367,22 +397,23 @@ impl CombinatorialPurgedBacktester for DefaultCombinatorialPurgedBacktester {
             folds.push(result?);
         }
 
-        let path_count = usize::try_from(cpcv.path_count()).unwrap_or(usize::MAX);
+        let path_count = usize::try_from(cpcv.path_count()?)
+            .map_err(|error| methodology(format!("CPCV path count does not fit usize: {error}")))?;
         let paths = reconstruct_paths(groups, n_groups, path_count, &partitions, &folds)?;
-        let sharpe_distribution = sharpe_distribution(&paths);
-        let median_rank_ic = median(&paths.iter().map(|p| p.rank_ic).collect::<Vec<_>>());
+        let sharpe_distribution = sharpe_distribution(&paths)?;
+        let median_rank_ic = median(&paths.iter().map(|p| p.rank_ic).collect::<Vec<_>>())?;
 
         Ok(BacktestPathSet {
             path_set_id,
             paths,
-            combination_count: cpcv.combination_count(),
+            combination_count: cpcv.combination_count()?,
             sharpe_distribution,
             median_rank_ic,
         })
     }
 }
 
-fn validate_config(group_count: usize, cpcv: CpcvConfig) -> QuantResult<()> {
+fn validate_config(group_count: usize, cpcv: CpcvConfig, n_groups: usize) -> QuantResult<()> {
     if cpcv.n_groups < 2 {
         return Err(ResearchError::ValidationMethodology {
             detail: format!("cpcv.n_groups must be >= 2, got {}", cpcv.n_groups),
@@ -398,7 +429,7 @@ fn validate_config(group_count: usize, cpcv: CpcvConfig) -> QuantResult<()> {
         }
         .into());
     }
-    if group_count < cpcv.n_groups as usize {
+    if group_count < n_groups {
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "cpcv.n_groups={} exceeds the available timeline group count {group_count}",
@@ -460,7 +491,8 @@ fn reconstruct_paths(
                 per_group[group_index] = evaluation;
             }
         }
-        let path_index = u32::try_from(path_index).unwrap_or(u32::MAX);
+        let path_index = u32::try_from(path_index)
+            .map_err(|error| methodology(format!("CPCV path index does not fit u32: {error}")))?;
         paths.push(build_path(path_index, &per_group)?);
     }
     Ok(paths)
@@ -495,7 +527,7 @@ fn build_path(path_index: u32, per_group: &[Option<GroupEvaluation>]) -> QuantRe
     let rank_ic =
         stats::spearman(&pooled_scores, &pooled_realized).round_dp(RESEARCH_DECIMAL_SCALE);
     let max_drawdown = max_drawdown_from_returns(&group_returns);
-    let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2));
+    let tail_loss = tail_loss_from_returns(&group_returns, Decimal::new(10, 2))?;
 
     Ok(BacktestPath {
         path_index,
@@ -526,60 +558,93 @@ fn max_drawdown_from_returns(returns: &[Decimal]) -> Decimal {
 /// Mean of the worst `quantile` fraction of `returns` (tail loss). Mirrors
 /// [`crate::backtest::metrics::tail_loss`]'s convention over an abstract
 /// return series rather than [`crate::backtest::SampleOutcome`].
-fn tail_loss_from_returns(returns: &[Decimal], quantile: Decimal) -> Decimal {
+fn tail_loss_from_returns(returns: &[Decimal], quantile: Decimal) -> QuantResult<Decimal> {
     if returns.is_empty() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
+    }
+    if quantile <= Decimal::ZERO || quantile > Decimal::ONE {
+        return Err(methodology(format!(
+            "tail-loss quantile must be in (0, 1], got {quantile}"
+        )));
     }
     let mut sorted = returns.to_vec();
     sorted.sort();
     let n = sorted.len();
-    let raw = (Decimal::from(n as u64) * quantile).ceil();
+    let n_u64 = u64::try_from(n)
+        .map_err(|error| methodology(format!("return count does not fit u64: {error}")))?;
+    let raw = Decimal::from(n_u64)
+        .checked_mul(quantile)
+        .ok_or_else(|| methodology("tail-loss quantile multiplication overflowed".to_owned()))?
+        .ceil();
     let take = raw
         .to_u64()
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(1)
-        .max(1)
-        .min(n);
-    stats::mean(&sorted[..take]).round_dp(RESEARCH_DECIMAL_SCALE)
+        .ok_or_else(|| methodology(format!("tail-loss count {raw} does not fit u64")))?;
+    let take = usize::try_from(take)
+        .map_err(|error| methodology(format!("tail-loss count does not fit usize: {error}")))?;
+    if take == 0 || take > n {
+        return Err(methodology(format!(
+            "tail-loss count {take} is outside 1..={n}"
+        )));
+    }
+    Ok(stats::mean(&sorted[..take]).round_dp(RESEARCH_DECIMAL_SCALE))
 }
 
-fn sharpe_distribution(paths: &[BacktestPath]) -> SharpeDistribution {
+fn sharpe_distribution(paths: &[BacktestPath]) -> QuantResult<SharpeDistribution> {
     let mut sharpes: Vec<Decimal> = paths.iter().map(|p| p.sharpe).collect();
     sharpes.sort();
-    SharpeDistribution {
-        min: percentile(&sharpes, Decimal::ZERO),
-        p25: percentile(&sharpes, Decimal::new(25, 2)),
-        median: percentile(&sharpes, Decimal::new(5, 1)),
-        p75: percentile(&sharpes, Decimal::new(75, 2)),
-        max: percentile(&sharpes, Decimal::ONE),
+    Ok(SharpeDistribution {
+        min: percentile(&sharpes, Decimal::ZERO)?,
+        p25: percentile(&sharpes, Decimal::new(25, 2))?,
+        median: percentile(&sharpes, Decimal::new(5, 1))?,
+        p75: percentile(&sharpes, Decimal::new(75, 2))?,
+        max: percentile(&sharpes, Decimal::ONE)?,
         median_max_drawdown: None,
         median_tail_loss: None,
         baseline_uplift: None,
-    }
+    })
 }
 
 /// `sorted` must already be ascending. Nearest-rank percentile (`0` = min,
 /// `1` = max); `0` for an empty series.
-fn percentile(sorted: &[Decimal], fraction: Decimal) -> Decimal {
+fn percentile(sorted: &[Decimal], fraction: Decimal) -> QuantResult<Decimal> {
     if sorted.is_empty() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
     }
-    let last = Decimal::from(u64::try_from(sorted.len() - 1).unwrap_or(u64::MAX));
+    if !(Decimal::ZERO..=Decimal::ONE).contains(&fraction) {
+        return Err(methodology(format!(
+            "percentile fraction must be in [0, 1], got {fraction}"
+        )));
+    }
+    let last_index = sorted
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| methodology("non-empty percentile input has no last index".to_owned()))?;
+    let last_u64 = u64::try_from(last_index)
+        .map_err(|error| methodology(format!("percentile index does not fit u64: {error}")))?;
+    let last = Decimal::from(last_u64);
     let index = (last * fraction)
         .round()
         .to_u64()
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0);
-    sorted[index.min(sorted.len() - 1)]
+        .ok_or_else(|| methodology("percentile index does not fit u64".to_owned()))?;
+    let index = usize::try_from(index)
+        .map_err(|error| methodology(format!("percentile index does not fit usize: {error}")))?;
+    sorted
+        .get(index)
+        .copied()
+        .ok_or_else(|| methodology(format!("percentile index {index} is out of bounds")))
 }
 
-fn median(values: &[Decimal]) -> Decimal {
+fn median(values: &[Decimal]) -> QuantResult<Decimal> {
     if values.is_empty() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
     }
     let mut sorted = values.to_vec();
     sorted.sort();
     percentile(&sorted, Decimal::new(5, 1))
+}
+
+fn methodology(detail: String) -> QuantError {
+    ResearchError::ValidationMethodology { detail }.into()
 }
 
 #[cfg(test)]
@@ -667,7 +732,7 @@ mod tests {
             .map(|h| {
                 let as_of = Utc.timestamp_opt(1_700_000_000 + h * 3_600, 0).unwrap();
                 TimelineGroup {
-                    as_of,
+                    decision_at: as_of,
                     label_horizon_end: as_of,
                 }
             })
@@ -682,7 +747,8 @@ mod tests {
                 n_groups: 8,
                 k_test: 2
             }
-            .path_count(),
+            .path_count()
+            .expect("path count"),
             7
         );
         assert_eq!(
@@ -690,7 +756,8 @@ mod tests {
                 n_groups: 8,
                 k_test: 2
             }
-            .combination_count(),
+            .combination_count()
+            .expect("combination count"),
             28
         );
         // phi(6, 2) = C(5, 1) = 5 (matches the stats.stackexchange worked example).
@@ -699,9 +766,20 @@ mod tests {
                 n_groups: 6,
                 k_test: 2
             }
-            .path_count(),
+            .path_count()
+            .expect("path count"),
             5
         );
+    }
+
+    #[test]
+    fn combinatorial_count_overflow_is_rejected_instead_of_saturated() {
+        let config = CpcvConfig {
+            n_groups: 100,
+            k_test: 50,
+        };
+        assert!(config.path_count().is_err());
+        assert!(config.combination_count().is_err());
     }
 
     #[test]

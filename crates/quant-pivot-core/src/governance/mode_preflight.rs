@@ -181,8 +181,8 @@ impl DefaultModePreflight {
         } else {
             snapshot
                 .stale
-                .saturating_mul(10_000)
-                .saturating_div(snapshot.total_tokens)
+                .checked_mul(10_000)
+                .map_or(u64::MAX, |scaled| scaled / snapshot.total_tokens)
         };
         let green = snapshot.total_tokens > 0
             && !snapshot.ingest_lag_exceeded

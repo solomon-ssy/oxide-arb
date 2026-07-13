@@ -139,6 +139,16 @@ pub struct MetricsHub {
     pub report_schedule_active_jobs: IntGauge,
     pub report_expire_swept_total: IntCounter,
 
+    // ── Training/serving feature parity (11.6) ────────────────────────
+    /// Runs by controlled kind/status labels.
+    pub feature_parity_runs_total: IntCounterVec,
+    /// Stage comparisons by controlled stage/status/reason labels.
+    pub feature_parity_comparisons_total: IntCounterVec,
+    /// `1` while deterministic parity blocks risk-increasing actions.
+    pub feature_parity_latch_open: IntGauge,
+    /// Containment attempts by terminal outcome (`completed`/`failed`).
+    pub feature_parity_containment_total: IntCounterVec,
+
     // ── Execution governance (05.1) ───────────────────────────────────────
     /// `1` when the operational kill-switch blocks new auto entries (any
     /// non-`closed` state), `0` when `closed`.
@@ -224,6 +234,13 @@ struct ReportMetrics {
     schedule_active_jobs: IntGauge,
     expire_swept: IntCounter,
     skipped_empty: IntCounter,
+}
+
+struct FeatureParityMetrics {
+    runs: IntCounterVec,
+    comparisons: IntCounterVec,
+    latch_open: IntGauge,
+    containment: IntCounterVec,
 }
 
 /// Execution / risk / governance counters (Phase 05.1–05.5).
@@ -460,6 +477,34 @@ fn register_report_metrics(registry: &Registry) -> ReportMetrics {
     }
 }
 
+fn register_feature_parity_metrics(registry: &Registry) -> FeatureParityMetrics {
+    FeatureParityMetrics {
+        runs: register_counter_vec!(
+            registry,
+            "quant_feature_parity_runs_total",
+            "Deterministic parity runs by kind and terminal/pending status",
+            &["kind", "status"]
+        ),
+        comparisons: register_counter_vec!(
+            registry,
+            "quant_feature_parity_comparisons_total",
+            "Deterministic parity evidence comparisons by stage, status and controlled reason",
+            &["stage", "status", "reason"]
+        ),
+        latch_open: register_gauge_int!(
+            registry,
+            "quant_feature_parity_latch_open",
+            "1 when deterministic feature parity blocks new risk"
+        ),
+        containment: register_counter_vec!(
+            registry,
+            "quant_feature_parity_containment_total",
+            "Feature parity report/intent containment attempts by outcome",
+            &["outcome"]
+        ),
+    }
+}
+
 fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
     ExecutionMetrics {
         auto_execution_halted: register_gauge_int!(
@@ -542,6 +587,7 @@ impl MetricsHub {
         let subscription = register_subscription_metrics(&registry);
         let infra = register_infra_metrics(&registry);
         let report = register_report_metrics(&registry);
+        let feature_parity = register_feature_parity_metrics(&registry);
         let data_quality_tokens = register_gauge_vec!(
             &registry,
             "quant_pivot_data_quality_tokens",
@@ -601,6 +647,10 @@ impl MetricsHub {
             report_schedule_run_duration_seconds: report.schedule_run_duration,
             report_schedule_active_jobs: report.schedule_active_jobs,
             report_expire_swept_total: report.expire_swept,
+            feature_parity_runs_total: feature_parity.runs,
+            feature_parity_comparisons_total: feature_parity.comparisons,
+            feature_parity_latch_open: feature_parity.latch_open,
+            feature_parity_containment_total: feature_parity.containment,
             auto_execution_halted: execution.auto_execution_halted,
             admission_denied: execution.admission_denied,
             order_intents_created: execution.order_intents_created,
@@ -758,6 +808,28 @@ impl MetricsHub {
     /// Count reports expired by the TTL sweep in one pass.
     pub fn inc_report_expire_swept(&self, swept: u64) {
         self.report_expire_swept_total.inc_by(swept);
+    }
+
+    pub fn record_feature_parity_run(&self, kind: &str, status: &str) {
+        self.feature_parity_runs_total
+            .with_label_values(&[kind, status])
+            .inc();
+    }
+
+    pub fn record_feature_parity_comparison(&self, stage: &str, status: &str, reason: &str) {
+        self.feature_parity_comparisons_total
+            .with_label_values(&[stage, status, reason])
+            .inc();
+    }
+
+    pub fn set_feature_parity_latch_open(&self, open: bool) {
+        self.feature_parity_latch_open.set(i64::from(open));
+    }
+
+    pub fn record_feature_parity_containment(&self, outcome: &str) {
+        self.feature_parity_containment_total
+            .with_label_values(&[outcome])
+            .inc();
     }
 
     /// Publish per-status live-book counts for data-quality observability.

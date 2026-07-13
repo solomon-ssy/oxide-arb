@@ -396,7 +396,9 @@ pub fn enum_label(value: &str) -> UiText {
         "reject_candidate" => UiText::localized("Reject candidate", "剔除候选"),
         // SmallCrossSectionPolicy
         "indeterminate" => UiText::localized("Indeterminate", "标记为不确定"),
-        "historical_quantile" => UiText::localized("Historical quantile", "历史分位归一化"),
+        "frozen_reference_quantile" => {
+            UiText::localized("Frozen reference quantile", "冻结参考分位归一化")
+        }
         // NeutralizeDimension
         "category" => UiText::localized("Market category", "市场分类"),
         // ReportDeliveryPolicy
@@ -662,14 +664,6 @@ fn feature_fields() -> Vec<FieldUiEntry> {
         )
         .widget(FieldWidget::EnumSet),
         f(
-            "features.required_features",
-            "Required features",
-            "必需特征",
-            "Feature names that must be present (and fresh) for a candidate to be scored. Each must exist in the active feature schema and be unique; a missing required feature fails the candidate closed.",
-            "候选被打分所必须存在（且新鲜）的特征名。每项都必须存在于当前特征 schema 且唯一；缺失任一必需特征会使候选失败关闭。",
-        )
-        .widget(FieldWidget::StringList),
-        f(
             "features.bar_windows_secs",
             "Bar windows",
             "K 线窗口",
@@ -758,11 +752,11 @@ fn domain_fields() -> Vec<FieldUiEntry> {
         )
         .widget(FieldWidget::JsonTree),
         secs(
-            "domain.crypto.source_delay_secs",
+            "domain.crypto.availability_lag_secs",
             "Crypto source visibility delay",
             "加密源可见性延迟",
-            "PIT delay applied to domain observations: only rows with `event_time <= as_of - delay` are visible to crypto domain features. Mirrors report `source_delay_secs`; must be ≥ 0.",
-            "应用于域观测的 PIT 延迟：仅 `event_time <= as_of - delay` 的行对加密域特征可见。镜像报告 `source_delay_secs`；必须 ≥ 0。",
+            "Source availability lag for crypto observations. The effective cutoff is the earlier of this source lag and the report's global knowledge cutoff; must be ≥ 0.",
+            "加密域观测的来源可用性延迟。有效 cutoff 取该来源延迟与报告全局 knowledge cutoff 中更早者；必须 ≥ 0。",
         ),
         integer(
             "domain.crypto.backfill_days",
@@ -927,15 +921,8 @@ fn factor_fields() -> Vec<FieldUiEntry> {
             "factors.cross_section.small_cross_section_policy",
             "Small-cross-section policy",
             "小样本策略",
-            "What to do when the present cross-section is below the minimum: 'Indeterminate' emits a reasoned no-score; 'Historical quantile' normalizes against the factor's rolling history.",
-            "在场截面低于最小规模时的处理：『不确定』给出带原因的无分数；『历史分位』则用该因子的滚动历史归一化。",
-        ),
-        secs(
-            "factors.cross_section.historical_lookback_secs",
-            "Historical quantile lookback",
-            "历史分位回看窗口",
-            "Rolling lookback (seconds) used by the 'Historical quantile' small-cross-section policy to build the factor's reference distribution.",
-            "『历史分位』小样本策略用于构建该因子参考分布的滚动回看窗口（秒）。",
+            "What to do when the present cross-section is below the minimum: 'Indeterminate' emits a reasoned no-score; 'Frozen reference quantile' applies the training CDF carried by the loaded model artifact.",
+            "在场截面低于最小规模时的处理：『不确定』给出带原因的无分数；『冻结参考分位』使用已加载模型 artifact 携带的训练 CDF。",
         ),
         ratio(
             "factors.orthogonalize.max_correlation",
@@ -1175,14 +1162,6 @@ fn model_calibration_fields() -> Vec<FieldUiEntry> {
             "Minimum seconds between a model's training-dataset window end and its calibration-dataset window start (purge + embargo).",
             "模型训练集窗口结束与校准集窗口开始之间的最小间隔秒数（purge + embargo）。",
         ),
-        boolean(
-            "model.calibration.require_for_publish",
-            "Require calibration for publish",
-            "发布强制要求已校准",
-            "Hard-gate GateId::CalibrationRequired: when on (the production default), Publish/AutoExecution on a Buy model requires a Calibrated return model. Disabling is an auditable, operator-governed cold-start bootstrap window — never disable outside one.",
-            "硬门禁 GateId::CalibrationRequired：开启时（生产默认），Buy 模型的发布/自动执行需要已校准的收益模型。关闭是可审计、由运营方治理的冷启动窗口——除该窗口外禁止关闭。",
-        )
-        .critical(),
         ratio_confidence(
             "model.calibration.ci_confidence",
             "Reliability CI confidence",
@@ -1299,10 +1278,10 @@ fn quality_gate_fields() -> Vec<FieldUiEntry> {
             "带可用标签的样本最低占比（[0,1]）。低于此值门禁失败：未标注行过多会使指标不可信。",
         ),
         ratio(
-            "quality_gate.min_critical_feature_coverage",
-            "Minimum critical-feature coverage",
+            "quality_gate.min_materialization_coverage",
+            "Minimum materialization coverage",
             "最低关键特征覆盖率",
-            "Minimum fraction of build rows with all critical features present ([0, 1]). Guards against training on sparsely-featured data.",
+            "Minimum fraction of planned samples that materialize into frozen examples ([0, 1]). Guards against training on incomplete point-in-time data.",
             "关键特征齐全的构建行最低占比（[0,1]）。防止在特征稀疏的数据上训练。",
         ),
         ratio(
@@ -1623,13 +1602,6 @@ fn training_fields() -> Vec<FieldUiEntry> {
             "Minimum forward top-1 depth (USD) required for the liquidity_exit_possible label to be true. Sets how much exit liquidity a training example must show to count as exitable.",
             "liquidity_exit_possible 标签为真所需的前瞻 top-1 深度（USD）下限。决定训练样本需展示多少退出流动性才算『可退出』。",
         ),
-        usd(
-            "training.min_selection_depth_usd",
-            "Minimum PIT selection depth",
-            "PIT 选择最低深度",
-            "Book-derived liquidity floor (combined visible USD depth) a market must show at an as_of to enter the offline point-in-time selection funnel. The offline plane replays the online selection with book depth as the liquidity proxy (no Gamma liquidity/volume history), so this is a book-depth quantity distinct from selection.min_liquidity_usd; frozen with the config and captured in dataset_hash.",
-            "市场在某个 as_of 进入离线 point-in-time 选择漏斗所需的书本派生流动性下限（合计可见 USD 深度）。离线平面用书本深度作为流动性代理复现线上选择（无 Gamma 流动性/量能历史），因此这是与 selection.min_liquidity_usd 不同的书本深度量纲；随配置冻结并计入 dataset_hash。",
-        ),
     ]
 }
 
@@ -1643,8 +1615,8 @@ fn report_fields() -> Vec<FieldUiEntry> {
             "reports.schedules",
             "Schedules",
             "报告计划",
-            "Recurring report schedules. Each row has a stable id, a cadence (fixed interval or cron with optional timezone), a TopN size (≤ maximum TopN), a source delay, and an enabled toggle. Disabled schedules are removed from the live scheduler on activation.",
-            "周期性报告计划。每行包含稳定 id、触发节奏（固定间隔或带可选时区的 cron）、TopN 规模（≤ 最大 TopN）、数据源延迟以及启用开关。停用的计划会在激活时从实时调度器移除。",
+            "Recurring report schedules. Each row has a stable id, a cadence (fixed interval or cron with optional timezone), a TopN size (≤ maximum TopN), a PIT knowledge lag, and an enabled toggle. Disabled schedules are removed from the live scheduler on activation.",
+            "周期性报告计划。每行包含稳定 id、触发节奏（固定间隔或带可选时区的 cron）、TopN 规模（≤ 最大 TopN）、PIT 知识延迟以及启用开关。停用的计划会在激活时从实时调度器移除。",
         )
         .widget(FieldWidget::ScheduleList),
         integer(
@@ -2530,7 +2502,6 @@ fn features_section() -> SchemaNode {
         fields_in_order(&[
             "features.feature_schema_version",
             "features.enabled_feature_families",
-            "features.required_features",
             "features.bar_windows_secs",
             "features.momentum.roc_windows_secs",
             "features.momentum.roc_lag_secs",
@@ -2564,7 +2535,7 @@ fn domain_section() -> SchemaNode {
         ),
         fields_in_order(&[
             "domain.enabled_by_family",
-            "domain.crypto.source_delay_secs",
+            "domain.crypto.availability_lag_secs",
             "domain.crypto.backfill_days",
             "domain.crypto.momentum_window_secs",
             "domain.crypto.volatility_window_secs",
@@ -2597,7 +2568,6 @@ fn factors_section() -> SchemaNode {
             "factors.normalization.per_factor",
             "factors.cross_section.min_size",
             "factors.cross_section.small_cross_section_policy",
-            "factors.cross_section.historical_lookback_secs",
             "factors.orthogonalize.max_correlation",
             "factors.orthogonalize.neutralize_by",
             "factors.structural.reversal_after_shock.shock_k",
@@ -2654,7 +2624,6 @@ fn model_section() -> SchemaNode {
             "model.calibration.method",
             "model.calibration.min_samples_isotonic",
             "model.calibration.embargo_secs",
-            "model.calibration.require_for_publish",
             "model.calibration.ci_confidence",
         ]),
     ));
@@ -2688,7 +2657,6 @@ fn training_section() -> SchemaNode {
         fields_in_order(&[
             "training.max_book_staleness_ms",
             "training.min_exit_depth_usd",
-            "training.min_selection_depth_usd",
         ]),
     )
 }
@@ -2809,7 +2777,7 @@ fn quality_gate_section() -> SchemaNode {
     let mut children = fields_in_order(&[
         "quality_gate.min_sample_count",
         "quality_gate.min_label_coverage",
-        "quality_gate.min_critical_feature_coverage",
+        "quality_gate.min_materialization_coverage",
         "quality_gate.max_drawdown",
         "quality_gate.min_liquidity_exit_feasibility",
         "quality_gate.min_shadow_overlap_stability",

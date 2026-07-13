@@ -1,6 +1,6 @@
 //! Core implementation of [`BacktestPort`] for the Admin API (Phase 3.6).
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -15,10 +15,9 @@ use quant_pivot_models::{
     types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
 };
 use quant_pivot_repository::traits::{
-    BacktestReportRepository, CalibrationArtifactRepository, EventRepository,
-    MarketLinkageRepository, MarketRepository, ModelComparisonReportRepository,
-    ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    BacktestReportRepository, CalibrationArtifactRepository, ModelComparisonReportRepository,
+    ModelRegistryRepository, ModelRunRepository, RuntimeConfigVersionRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
 
@@ -27,7 +26,6 @@ use crate::{
     service::{
         backtest::{BacktestInput, BacktestService, BacktestServiceDeps},
         bias_table_fit::resolve_frozen_bias_table,
-        historical_replay::ReplayConfig,
     },
 };
 
@@ -40,10 +38,6 @@ pub struct CoreBacktestPort {
     backtest_report_repo: Arc<dyn BacktestReportRepository>,
     comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
     factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-    fact_read: Arc<dyn QuantFactReadRepository>,
-    market_repo: Arc<dyn MarketRepository>,
-    event_repo: Arc<dyn EventRepository>,
-    linkage_repo: Arc<dyn MarketLinkageRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
 }
@@ -64,10 +58,6 @@ impl CoreBacktestPort {
             backtest_report_repo: Arc::clone(&research.backtest_report_repo),
             comparison_report_repo: Arc::clone(&research.comparison_report_repo),
             factory_builder: Arc::clone(&research.model_runtime_factory_builder),
-            fact_read: Arc::clone(&research.quant_fact_read),
-            market_repo: Arc::clone(&research.market_repo),
-            event_repo: Arc::clone(&research.event_repo),
-            linkage_repo: Arc::clone(&research.market_linkage_repo),
             runtime_config,
             bias_table_repo,
         }
@@ -83,10 +73,9 @@ impl CoreBacktestPort {
         runtime_config_version_id: &RuntimeConfigVersionId,
     ) -> QuantResult<BacktestService> {
         let runtime = self.load_runtime_config(runtime_config_version_id).await?;
-        let max_book_staleness = Duration::from_millis(runtime.training.max_book_staleness_ms);
         let bias_table =
             resolve_frozen_bias_table(self.bias_table_repo.as_ref(), &runtime.factors).await?;
-        Ok(BacktestService::new(
+        BacktestService::new(
             BacktestServiceDeps {
                 dataset_repo: Arc::clone(&self.dataset_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
@@ -95,21 +84,10 @@ impl CoreBacktestPort {
                 backtest_report_repo: Arc::clone(&self.backtest_report_repo),
                 comparison_report_repo: Arc::clone(&self.comparison_report_repo),
                 factory_builder: Arc::clone(&self.factory_builder),
-                fact_read: Arc::clone(&self.fact_read),
-                market_repo: Arc::clone(&self.market_repo),
-                event_repo: Arc::clone(&self.event_repo),
-                linkage_repo: Arc::clone(&self.linkage_repo),
             },
             &runtime.portfolio,
-            ReplayConfig {
-                features: runtime.features,
-                factors: runtime.factors,
-                domain: runtime.domain,
-                data_quality: runtime.data_quality,
-                bias_table,
-            },
-            max_book_staleness,
-        ))
+            bias_table.map(|table| table.content_hash.clone()),
+        )
     }
 
     async fn load_runtime_config(

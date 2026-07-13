@@ -16,10 +16,10 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, RuntimeConfigVersionId, SchemaVersion,
-        SelectionExclusionSummary, Usd,
+        ContentHash, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -72,7 +72,8 @@ async fn seed_model_run(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -130,7 +131,7 @@ async fn seed_market_selection(
         .create_snapshot(
             NewMarketSelection {
                 market_selection_id: id.clone(),
-                as_of: Utc::now(),
+                decision_at: Utc::now(),
                 runtime_config_version_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
@@ -168,7 +169,7 @@ async fn optimizer_meta_persisted_in_plan_row() {
         portfolio_plan_id: plan_id.clone(),
         model_run_id: Some(model_run_id),
         market_selection_id,
-        as_of: Utc::now(),
+        decision_at: Utc::now(),
         budget_usd: Usd::new(dec!(10000)),
         allocated_usd: Usd::ZERO,
         risk_budget_json: PortfolioRiskBudget::default(),

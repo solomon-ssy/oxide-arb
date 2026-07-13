@@ -6,7 +6,8 @@ use std::{sync::Arc, time::Duration};
 use chrono::Utc;
 use quant_pivot_models::domain::OrderIntentPort;
 use quant_pivot_repository::traits::{
-    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+    FeatureParityRepository, OrderIntentRepository, RecommendationReportRepository,
+    RecommendationRepository,
 };
 
 use super::AppContext;
@@ -46,6 +47,12 @@ impl AppContext {
             model_registry: Arc::clone(&self.research.model_registry_repo),
             artifact_store: Arc::clone(&self.research.artifact_store),
             calibration_loader: Arc::clone(&self.research.calibration_loader),
+            feature_parity_gate: Arc::new(
+                crate::service::feature_integrity::RepositoryFeatureParityGate::new(Arc::clone(
+                    &repos.feature_parity,
+                )
+                    as Arc<dyn FeatureParityRepository>),
+            ),
         }))
     }
 

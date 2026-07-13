@@ -9,6 +9,23 @@ use thiserror::Error;
 /// Failure modes of the offline governance closure (Phase 3.7).
 #[derive(Debug, Error)]
 pub enum GovernanceError {
+    /// A governance count cannot be represented by its durable/API type.
+    #[error("governance numeric overflow in {field}: {detail}")]
+    NumericOverflow {
+        /// The count being converted.
+        field: &'static str,
+        /// The checked-conversion failure.
+        detail: String,
+    },
+
+    /// A market-linkage outcome could not be projected into its durable JSON
+    /// payload. The row must not be appended with partial provenance.
+    #[error("market-linkage payload serialization failed: {detail}")]
+    LinkagePayloadSerialization {
+        /// The serialization failure.
+        detail: String,
+    },
+
     /// A quality gate did not clear; the model / dataset may not advance.
     #[error("quality gate failed for {entity} `{id}`: {failures}")]
     QualityGateFailed {

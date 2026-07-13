@@ -4,10 +4,14 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{ModelVersionListQuery, NewModelSpec, NewModelVersion, PageRequest},
     enums::{model::ModelFamily, quant::PublicationStatus},
-    types::{ContentHash, ModelSpecId, ModelVersionId, SchemaVersion},
+    types::{
+        ContentHash, FeatureParityRunId, FeatureParityStateId, ModelInputContract, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, SchemaVersion,
+    },
 };
 use quant_pivot_repository::{
-    postgres::PgModelRegistryRepository, traits::ModelRegistryRepository,
+    postgres::PgModelRegistryRepository,
+    traits::{ModelRegistryRepository, RollbackModelVersionCommit},
 };
 use quant_pivot_test_support::pg::setup_pg;
 
@@ -26,7 +30,8 @@ fn new_spec(name: &str, family: ModelFamily) -> NewModelSpec {
         feature_schema_version: SchemaVersion::FIRST,
         label_schema_version: SchemaVersion::FIRST,
         spec_json: serde_json::json!({}),
-        feature_requirements: serde_json::json!({}),
+        input_contract: ModelInputContract::single_required("book.mid"),
+        training_contract: ModelTrainingContract::settlement_default(),
         status: PublicationStatus::Draft,
     }
 }
@@ -85,7 +90,8 @@ async fn create_model_version_allocates_monotonic_versions_under_lock() {
         feature_schema_version: SchemaVersion::FIRST,
         label_schema_version: SchemaVersion::FIRST,
         spec_json: serde_json::json!({}),
-        feature_requirements: serde_json::json!({}),
+        input_contract: ModelInputContract::single_required("book.mid"),
+        training_contract: ModelTrainingContract::settlement_default(),
         status: PublicationStatus::Draft,
     })
     .await
@@ -158,4 +164,62 @@ async fn find_and_page_versions_join_model_family_from_spec() {
         .collect();
     assert!(families.contains(&ModelFamily::WeightedFactor));
     assert!(families.contains(&ModelFamily::HoldVsExitWeighted));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn rollback_without_durable_latch_and_subject_permit_leaves_both_statuses_unchanged() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgModelRegistryRepository::new(pool.connection().clone());
+    let spec = repo
+        .create_model_spec(new_spec(
+            "rollback-fail-closed-spec",
+            ModelFamily::WeightedFactor,
+        ))
+        .await
+        .expect("model spec");
+
+    let mut current_new = new_version(spec.model_spec_id.clone(), 'e');
+    current_new.publication_status = PublicationStatus::Published;
+    let current = repo
+        .create_model_version(current_new)
+        .await
+        .expect("current version");
+    let mut target_new = new_version(spec.model_spec_id.clone(), 'f');
+    target_new.publication_status = PublicationStatus::Retired;
+    let target = repo
+        .create_model_version(target_new)
+        .await
+        .expect("rollback target");
+
+    let error = repo
+        .rollback_to_retired_predecessor(RollbackModelVersionCommit {
+            model_spec_id: &spec.model_spec_id,
+            expected_current_model_version_id: &current.model_version_id,
+            target_model_version_id: &target.model_version_id,
+            expected_target_artifact_hash: &target.artifact_hash,
+            expected_target_publish_path_set_id: None,
+            quality_gate_payload_hash: &content_hash('g'),
+            feature_parity_state_id: &FeatureParityStateId::from_v7(),
+            feature_parity_run_id: &FeatureParityRunId::from_v7(),
+        })
+        .await
+        .expect_err("missing durable permits must block rollback");
+    assert!(error.to_string().contains("feature parity latch"));
+
+    let current_after = repo
+        .find_model_version_by_id(&current.model_version_id)
+        .await
+        .expect("current lookup")
+        .expect("current row");
+    let target_after = repo
+        .find_model_version_by_id(&target.model_version_id)
+        .await
+        .expect("target lookup")
+        .expect("target row");
+    assert_eq!(
+        current_after.publication_status,
+        PublicationStatus::Published
+    );
+    assert_eq!(target_after.publication_status, PublicationStatus::Retired);
 }

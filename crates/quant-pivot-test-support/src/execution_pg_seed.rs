@@ -9,11 +9,11 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
         ApproveOrderIntent, CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot,
-        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewMarketSelection,
-        NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent,
-        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, PositionExit,
-        PositionFill, SubmissionLedgerWrite,
+        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
+        NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
+        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+        NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewRuntimeConfigVersion, PositionExit, PositionFill, SubmissionLedgerWrite,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -27,10 +27,10 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EmptyReportReason, EntryTriggerKind,
-            ExecutionOrderState, ExitSettlementMode, ModelRunKind, ModelRunStatus,
-            OrderIntentStatus, OutcomeSide, PublicationStatus, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
-            ReportTriggerKind, SizingModelKind,
+            ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
+            FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
+            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
@@ -39,34 +39,34 @@ use quant_pivot_models::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
         ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec,
         EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId,
-        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
-        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
-        OperationLogId, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId,
-        Usd,
+        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId, OrderId,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
+        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgExecutionSubmissionRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgOrderIntentRepository, PgRecommendationReportRepository,
+        PgEventRepository, PgExecutionSubmissionRepository, PgFeatureParityRepository,
+        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgOrderIntentRepository, PgRecommendationReportRepository,
         PgRuntimeConfigVersionRepository,
     },
     traits::{
-        EventRepository, ExecutionSubmissionRepository, MarketRepository,
+        EventRepository, ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
         MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
         OrderIntentRepository, RecommendationReportRepository, RuntimeConfigVersionRepository,
     },
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
 
 /// shares (100) * `limit_price` (0.6).
@@ -74,6 +74,7 @@ pub const EXECUTION_NOTIONAL: Decimal = dec!(60);
 
 /// Stable ids produced by [`seed_report_fixture`] / [`seed_report_on_infra`].
 pub struct ExecutionTxnIds {
+    pub feature_parity_state_id: FeatureParityStateId,
     pub account_snapshot: AccountSnapshotId,
     pub data_quality_snapshot: ReportDataQualitySnapshotId,
     pub portfolio_plan: PortfolioPlanId,
@@ -90,6 +91,7 @@ pub struct ExecutionTxnIds {
 
 /// Shared model/runtime lineage for multiple demo reports (one model spec).
 pub struct SharedDemoInfra {
+    pub feature_parity_state_id: FeatureParityStateId,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
     pub model_run_id: ModelRunId,
@@ -159,6 +161,7 @@ pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra 
     let (model_version_id, model_run_id) =
         seed_model_version_named(db, &runtime_config_version_id, "ui-demo-seed-model").await;
     SharedDemoInfra {
+        feature_parity_state_id: ensure_clear_feature_parity_state(db).await,
         runtime_config_version_id,
         model_version_id,
         model_run_id,
@@ -187,10 +190,49 @@ async fn find_existing_demo_infra(db: &DatabaseConnection) -> Option<SharedDemoI
         .await
         .ok()??;
     Some(SharedDemoInfra {
+        feature_parity_state_id: ensure_clear_feature_parity_state(db).await,
         runtime_config_version_id: run.runtime_config_version_id,
         model_version_id: version.model_version_id,
         model_run_id: run.model_run_id,
     })
+}
+
+async fn ensure_clear_feature_parity_state(db: &DatabaseConnection) -> FeatureParityStateId {
+    use quant_pivot_models::entities::quant_feature_parity_state;
+
+    let repository = PgFeatureParityRepository::new(db.clone());
+    if let Some(state) = repository
+        .current_state()
+        .await
+        .expect("load feature parity state")
+    {
+        assert_eq!(
+            state.state,
+            FeatureParityLatchState::Clear,
+            "execution fixture must not bypass an open parity latch"
+        );
+        return state.state_id;
+    }
+
+    let state_id = FeatureParityStateId::from_v7();
+    quant_feature_parity_state::Entity::insert(
+        NewFeatureParityState {
+            state_id: state_id.clone(),
+            state: FeatureParityLatchState::Clear,
+            transition: FeatureParityStateTransition::GovernedAcknowledge,
+            cause_run_id: None,
+            recovery_run_id: None,
+            previous_state_id: None,
+            actor: Some("execution-test-fixture".to_owned()),
+            acting_role: Some("risk_owner".to_owned()),
+            reason: "test fixture clear generation".to_owned(),
+        }
+        .into_active_model(),
+    )
+    .exec(db)
+    .await
+    .expect("seed feature parity clear generation");
+    state_id
 }
 
 /// Seed catalog + published report on existing shared infra.
@@ -210,6 +252,7 @@ pub async fn seed_report_on_infra(
     let market_selection_id =
         seed_market_selection(db, &infra.runtime_config_version_id, &config.market_id).await;
     let ids = ExecutionTxnIds {
+        feature_parity_state_id: infra.feature_parity_state_id.clone(),
         account_snapshot: AccountSnapshotId::from_v7(),
         data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
@@ -376,7 +419,10 @@ pub async fn fill_entry_lot(
         .await
         .expect("claim");
     let order = submission
-        .create_entry_order_and_lock_capital(new_execution_order(intent_id, ids))
+        .create_entry_order_and_lock_capital(
+            new_execution_order(intent_id, ids),
+            &ids.feature_parity_state_id,
+        )
         .await
         .expect("create entry order");
     submission
@@ -752,7 +798,8 @@ async fn seed_model_version_named(
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -809,7 +856,7 @@ async fn seed_market_selection(
         .create_snapshot(
             NewMarketSelection {
                 market_selection_id: id.clone(),
-                as_of: Utc::now(),
+                decision_at: Utc::now(),
                 runtime_config_version_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
@@ -843,13 +890,44 @@ fn build_report_transaction_inner(
         .iter()
         .map(|rec| rec.sizing_plan.suggested_usd)
         .sum();
+    let report = NewRecommendationReport {
+        recommendation_report_id: ids.report.clone(),
+        report_kind: ReportKind::TopN,
+        trigger_kind: ReportTriggerKind::Scheduled,
+        trigger_key: trigger_key.to_owned(),
+        trigger_time: as_of,
+        knowledge_lag_secs: 10,
+        decision_at: as_of,
+        horizon_secs: 86_400,
+        runtime_mode: QuantRuntimeMode::AutoExecution,
+        runtime_config_version_id: ids.runtime_config_version.clone(),
+        model_run_id: None,
+        model_version_id: ids.model_version.clone(),
+        market_selection_id: ids.market_selection.clone(),
+        portfolio_plan_id: ids.portfolio_plan.clone(),
+        top_n: 20,
+        status,
+        account_source: AccountSource::Polymarket,
+        capital_base_usd: Usd::new(dec!(10000)),
+        account_snapshot_ref: ids.account_snapshot.clone(),
+        equity_snapshot_ref: equity_snapshot_id.clone(),
+        data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
+        summary_json: summary,
+        published_at,
+        valid_until: Some(as_of + chrono::Duration::hours(1)),
+        revoked_at: None,
+        expired_at: None,
+        status_reason: None,
+    };
+    let sampled_feature_parity = crate::report_fixtures::sampled_parity(&report);
     NewReportTransaction {
+        feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot(ids)
         },
         equity_snapshot: NewEquitySnapshot {
-            equity_snapshot_id: equity_snapshot_id.clone(),
+            equity_snapshot_id,
             as_of,
             source: AccountSource::Polymarket,
             venue_net_liquidation_usd: Usd::new(dec!(10000)),
@@ -864,7 +942,7 @@ fn build_report_transaction_inner(
         },
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
-            as_of,
+            decision_at: as_of,
             runtime_config_version_id: ids.runtime_config_version.clone(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
@@ -872,7 +950,7 @@ fn build_report_transaction_inner(
             portfolio_plan_id: ids.portfolio_plan.clone(),
             model_run_id: Some(ids.model_run.clone()),
             market_selection_id: ids.market_selection.clone(),
-            as_of,
+            decision_at: as_of,
             budget_usd: Usd::new(dec!(10000)),
             allocated_usd,
             risk_budget_json: PortfolioRiskBudget::default(),
@@ -880,35 +958,9 @@ fn build_report_transaction_inner(
             rejected_summary: PortfolioRejectedSummary::default(),
             optimizer_meta_json: PortfolioOptimizerMeta::default(),
         },
-        report: NewRecommendationReport {
-            recommendation_report_id: ids.report.clone(),
-            report_kind: ReportKind::TopN,
-            trigger_kind: ReportTriggerKind::Scheduled,
-            trigger_key: trigger_key.to_owned(),
-            trigger_time: as_of,
-            source_delay_secs: 10,
-            as_of,
-            horizon_secs: 86_400,
-            runtime_mode: QuantRuntimeMode::AutoExecution,
-            runtime_config_version_id: ids.runtime_config_version.clone(),
-            model_version_id: ids.model_version.clone(),
-            market_selection_id: ids.market_selection.clone(),
-            portfolio_plan_id: ids.portfolio_plan.clone(),
-            top_n: 20,
-            status,
-            account_source: AccountSource::Polymarket,
-            capital_base_usd: Usd::new(dec!(10000)),
-            account_snapshot_ref: ids.account_snapshot.clone(),
-            equity_snapshot_ref: equity_snapshot_id,
-            data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
-            summary_json: summary,
-            published_at,
-            valid_until: Some(as_of + chrono::Duration::hours(1)),
-            revoked_at: None,
-            expired_at: None,
-            status_reason: None,
-        },
+        report,
         recommendations,
+        sampled_feature_parity: Some(sampled_feature_parity),
         operation_log: report_operation_log(ids),
     }
 }
@@ -1030,7 +1082,7 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
         weight: dec!(0.4),
         contribution: dec!(0.32),
         confidence: Probability::new(dec!(0.75)),
-        direction: quant_pivot_models::enums::quant::FactorDirection::Positive,
+        direction: FactorDirection::Positive,
         explanation: "deep".to_owned(),
         source_refs: Vec::new(),
     }])
@@ -1067,7 +1119,7 @@ fn evidence_refs(ids: &ExecutionTxnIds) -> EvidenceRefs {
         model_run_id: ids.model_run.clone(),
         market_selection_id: ids.market_selection.clone(),
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
-            "book:live:{}:1:1700000000@blake3:{}",
+            "book:ch:{}:1700000000:1700000000:1:1@blake3:{}",
             ids.token,
             "0".repeat(64)
         ))

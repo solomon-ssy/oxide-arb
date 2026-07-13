@@ -11,7 +11,7 @@
 //! the transaction. Non-authoritative WebSocket lifecycle events are published
 //! only after the transaction commits.
 
-use std::sync::Arc;
+use std::{fmt::Display, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -55,6 +55,7 @@ use crate::{
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
+    service::feature_integrity::FeatureParityGatePort,
 };
 
 /// Notify the intent plane that a report's recommendations are no longer valid.
@@ -66,8 +67,8 @@ use crate::{
 #[async_trait]
 pub trait IntentInvalidationHook: Send + Sync {
     /// Invalidate every active (pre-submission) intent derived from `report_id`,
-    /// releasing reserved capital. Returns the number invalidated. Best-effort:
-    /// the caller logs and continues on error (approval re-check + sweep backstop).
+    /// releasing reserved capital. Returns the number invalidated. Any failure
+    /// propagates so governed parity recovery cannot precede containment.
     async fn invalidate_for_report(
         &self,
         report_id: &RecommendationReportId,
@@ -77,7 +78,7 @@ pub trait IntentInvalidationHook: Send + Sync {
 
     /// Invalidate every active (pre-submission) intent derived from a single
     /// `recommendation_id`, releasing reserved capital — the per-recommendation
-    /// expiry cascade. Returns the number invalidated. Best-effort.
+    /// expiry cascade. Returns the number invalidated.
     async fn invalidate_for_recommendation(
         &self,
         recommendation_id: &RecommendationId,
@@ -108,6 +109,9 @@ pub struct OrderIntentServiceDeps {
     /// Deep calibrator resolution (calibration recheck), the same shared
     /// check publish / report / admission use.
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    /// Global training-serving parity latch. Existing exits and settlement do
+    /// not enter this service; only risk-increasing intent creation is blocked.
+    pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
 }
 
 /// Governed order-intent service (implements the web [`OrderIntentPort`], the
@@ -126,6 +130,7 @@ pub struct CoreOrderIntentService {
     model_registry: Arc<dyn ModelRegistryRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    feature_parity_gate: Arc<dyn FeatureParityGatePort>,
 }
 
 impl CoreOrderIntentService {
@@ -146,6 +151,7 @@ impl CoreOrderIntentService {
             model_registry: deps.model_registry,
             artifact_store: deps.artifact_store,
             calibration_loader: deps.calibration_loader,
+            feature_parity_gate: deps.feature_parity_gate,
         }
     }
 
@@ -178,6 +184,9 @@ impl CoreOrderIntentService {
         command: CreateIntentCommand,
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
+        self.feature_parity_gate
+            .ensure_clear("new entry intent creation")
+            .await?;
         let rec = self.load_recommendation(&command.recommendation_id).await?;
         let report = self.load_report(&rec.recommendation_report_id).await?;
         self.ensure_create_allowed(&rec, &report, now).await?;
@@ -193,7 +202,7 @@ impl CoreOrderIntentService {
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let config = self.config.current();
         let entry = project_entry_order_spec(&rec, &config.execution.entry_order_policy)?;
-        let exit = project_exit_policy_spec(&rec);
+        let exit = project_exit_policy_spec(&rec, entry.limit_price);
         let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
         let (new_intent, allocation) =
             compose_create_rows(&rec, &report, mode, resolved, entry, exit);
@@ -468,19 +477,12 @@ impl IntentInvalidationHook for CoreOrderIntentService {
         let mut count = 0_u32;
         for intent in active {
             let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
-            match self
+            let updated = self
                 .intents
                 .invalidate(&intent.order_intent_id, reason, log)
-                .await
-            {
-                Ok(updated) => {
-                    self.publish(&updated, IntentEventKind::Invalidated, now);
-                    count = count.saturating_add(1);
-                }
-                Err(error) => {
-                    tracing::warn!(intent_id = %intent.order_intent_id, %error, "intent invalidation skipped");
-                }
-            }
+                .await?;
+            self.publish(&updated, IntentEventKind::Invalidated, now);
+            count = count.saturating_add(1);
         }
         Ok(count)
     }
@@ -498,19 +500,12 @@ impl IntentInvalidationHook for CoreOrderIntentService {
         let mut count = 0_u32;
         for intent in active {
             let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
-            match self
+            let updated = self
                 .intents
                 .invalidate(&intent.order_intent_id, reason, log)
-                .await
-            {
-                Ok(updated) => {
-                    self.publish(&updated, IntentEventKind::Invalidated, now);
-                    count = count.saturating_add(1);
-                }
-                Err(error) => {
-                    tracing::warn!(intent_id = %intent.order_intent_id, %error, "intent invalidation skipped");
-                }
-            }
+                .await?;
+            self.publish(&updated, IntentEventKind::Invalidated, now);
+            count = count.saturating_add(1);
         }
         Ok(count)
     }
@@ -638,8 +633,16 @@ fn resolve_policy(
             reason: reason.as_str().to_owned(),
         }),
         IntentPolicyDecision::RequiresApproval { approval_ttl, .. } => {
-            let approval_deadline =
-                now + Duration::seconds(i64::try_from(approval_ttl.as_secs()).unwrap_or(0));
+            let ttl_secs = i64::try_from(approval_ttl.as_secs()).map_err(|error| {
+                execution_time_conversion("approval_ttl_secs", &approval_ttl.as_secs(), &error)
+            })?;
+            let approval_deadline = now
+                .checked_add_signed(Duration::seconds(ttl_secs))
+                .ok_or_else(|| ExecutionError::TimeConversion {
+                    field: "approval_deadline",
+                    value: format!("{now}+{ttl_secs}s"),
+                    detail: "deadline is outside the chrono range".to_owned(),
+                })?;
             let expires_at = ensure_future_expiry(
                 approval_deadline
                     .min(recommendation_valid_until)
@@ -694,9 +697,15 @@ fn project_entry_order_spec(
     let order_type = if policy.allow_market_orders {
         OrderType::Fok
     } else {
-        OrderType::Gtd {
-            expiration: u64::try_from(rec.entry_plan.valid_until.timestamp()).unwrap_or(0),
-        }
+        let expiration =
+            u64::try_from(rec.entry_plan.valid_until.timestamp()).map_err(|error| {
+                execution_time_conversion(
+                    "entry_plan.valid_until",
+                    &rec.entry_plan.valid_until.timestamp(),
+                    &error,
+                )
+            })?;
+        OrderType::Gtd { expiration }
     };
     Ok(EntryOrderSpec {
         token_id: rec.token_id.clone(),
@@ -716,15 +725,11 @@ fn project_entry_order_spec(
 /// `partial_exit_nodes`; the canonical full exit stays in the scalar fields. The
 /// entry reference price and composite score are frozen as the baselines for
 /// percentage-based stops and signal-degradation re-inference.
-fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
+fn project_exit_policy_spec(
+    rec: &RecommendationInfo,
+    entry_reference_price: Price,
+) -> ExitPolicySpec {
     let exit = &rec.exit_plan;
-    let entry_reference_price = rec
-        .entry_plan
-        .limit_price
-        .or(rec.entry_plan.trigger_price)
-        .or(rec.market_context.mid_price)
-        .or(rec.market_context.best_ask)
-        .unwrap_or(Price::ZERO);
     ExitPolicySpec {
         take_profit_price: exit.take_profit_price,
         take_profit_pct: exit.take_profit_pct,
@@ -745,6 +750,18 @@ fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
         manual_review_at: exit.manual_review_at,
         entry_reference_price,
         entry_composite_score: rec.composite_score,
+    }
+}
+
+fn execution_time_conversion(
+    field: &'static str,
+    value: &impl Display,
+    error: &impl Display,
+) -> ExecutionError {
+    ExecutionError::TimeConversion {
+        field,
+        value: value.to_string(),
+        detail: error.to_string(),
     }
 }
 
@@ -924,8 +941,9 @@ mod tests {
 
     #[test]
     fn exit_projection_drops_full_exit_nodes() {
-        let exit = project_exit_policy_spec(&rec());
-        assert_eq!(exit.take_profit_price, rec().exit_plan.take_profit_price);
+        let rec = rec();
+        let exit = project_exit_policy_spec(&rec, Price::new(dec!(0.60)));
+        assert_eq!(exit.take_profit_price, rec.exit_plan.take_profit_price);
         // Fixture has no partial nodes; full-exit nodes (sell_pct == 1) are never carried.
         assert!(exit.partial_exit_nodes.iter().all(|n| n.sell_pct < dec!(1)));
     }
@@ -1035,6 +1053,42 @@ mod tests {
         )
         .expect("policy");
         assert_eq!(resolved.expires_at, now + Duration::seconds(900));
+    }
+
+    #[test]
+    fn semi_auto_rejects_unrepresentable_approval_ttl() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        assert!(matches!(
+            resolve_policy(
+                IntentPolicyDecision::RequiresApproval {
+                    approval_ttl: StdDuration::from_secs(u64::MAX),
+                },
+                now,
+                now + Duration::hours(1),
+                now + Duration::hours(1),
+            ),
+            Err(ExecutionError::TimeConversion {
+                field: "approval_ttl_secs",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn gtd_projection_rejects_pre_epoch_expiration() {
+        let mut rec = rec();
+        rec.entry_plan.valid_until = Utc.timestamp_opt(-1, 0).single().expect("timestamp");
+        let policy = EntryOrderPolicy {
+            allow_market_orders: false,
+            ..EntryOrderPolicy::default()
+        };
+        assert!(matches!(
+            project_entry_order_spec(&rec, &policy),
+            Err(ExecutionError::TimeConversion {
+                field: "entry_plan.valid_until",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1179,16 +1233,22 @@ mod tests {
         use chrono::Utc;
         use quant_pivot_error::storage::StorageError;
         use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-        use quant_pivot_models::types::BacktestPathSetId;
+        use quant_pivot_models::runtime_config::FactorCrossSectionConfig;
+        use quant_pivot_models::types::{
+            BacktestPathSetId, FeatureParityRunId, FeatureParityStateId,
+        };
         use quant_pivot_models::{
             domain::{
                 ModelSpecInfo, ModelSpecListQuery, ModelVersionInfo, ModelVersionListQuery,
                 NewModelSpec, NewModelVersion, Paginated,
             },
             enums::quant::{DownsideSource, PublicationStatus},
-            types::{CalibrationArtifactId, ContentHash, ModelSpecId, ModelVersionId},
+            types::{
+                CalibrationArtifactId, ContentHash, ModelInputContract, ModelSpecId, ModelVersionId,
+            },
         };
         use quant_pivot_repository::traits::ModelRegistryRepository;
+        use quant_pivot_research::factors::FrozenReferenceQuantiles;
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
             factors::names::LIQUIDITY_DEPTH,
@@ -1197,6 +1257,7 @@ mod tests {
                 ModelArtifactHeader, ModelFamily, MonotoneMapping, ReliabilityReport,
                 ResolvedCalibration, ReturnModelSpec, ScoreMultiplierSpec,
                 SubstitutionConfidenceRules, WeightedFactorModelArtifact,
+                model_input_contract_hash,
             },
         };
         use std::sync::Arc;
@@ -1259,12 +1320,6 @@ mod tests {
             ) -> Result<Vec<ModelVersionInfo>, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn publish_model_version(
-                &self,
-                _model_version_id: &ModelVersionId,
-            ) -> Result<ModelVersionInfo, StorageError> {
-                unimplemented!("not exercised by the calibration recheck tests")
-            }
             async fn retire_model_version(
                 &self,
                 _model_version_id: &ModelVersionId,
@@ -1275,6 +1330,8 @@ mod tests {
                 &self,
                 _model_spec_id: &ModelSpecId,
                 _model_version_id: &ModelVersionId,
+                _feature_parity_state_id: &FeatureParityStateId,
+                _feature_parity_run_id: &FeatureParityRunId,
             ) -> Result<
                 (
                     ModelVersionInfo,
@@ -1291,10 +1348,16 @@ mod tests {
             ) -> Result<ModelVersionInfo, StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
-            async fn restore_model_version(
+            async fn rollback_to_retired_predecessor(
                 &self,
-                _model_version_id: &ModelVersionId,
-            ) -> Result<ModelVersionInfo, StorageError> {
+                _commit: quant_pivot_repository::traits::RollbackModelVersionCommit<'_>,
+            ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
+                unimplemented!("not exercised by the calibration recheck tests")
+            }
+            async fn compensate_failed_rollback(
+                &self,
+                _commit: quant_pivot_repository::traits::CompensateRollbackModelVersionCommit<'_>,
+            ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
             async fn set_quality_gate_report(
@@ -1373,8 +1436,17 @@ mod tests {
             model_version_id: ModelVersionId,
             return_model: ReturnModelSpec,
         ) -> ModelArtifact {
+            let input_contract = ModelInputContract::single_required("book.mid");
+            let input_contract_hash =
+                model_input_contract_hash(&input_contract).expect("input contract hash");
             ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
                 header: header(model_version_id),
+                training_dataset_hash: ContentHash::parse(format!("blake3:{}", "3".repeat(64)))
+                    .expect("hash"),
+                training_input_hash: ContentHash::parse(format!("blake3:{}", "4".repeat(64)))
+                    .expect("hash"),
+                input_contract,
+                input_contract_hash,
                 weights: vec![FactorWeight {
                     factor: LIQUIDITY_DEPTH,
                     weight: rust_decimal::Decimal::ONE,
@@ -1383,7 +1455,8 @@ mod tests {
                 multipliers: ScoreMultiplierSpec::conservative(),
                 substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
                 return_model,
-                required_features: Vec::new(),
+                factor_cross_section: FactorCrossSectionConfig::default(),
+                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
                 objective_report: None,
                 category_scope: None,
             }))

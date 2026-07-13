@@ -8,20 +8,18 @@
 //! `FeatureMatrix` path is added alongside when the classical runtime lands.
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::ModelRunId;
 use quant_pivot_research::{
     factors::MarketFactorOutcome,
-    features::{
-        CellAvailability, FeatureName, FeatureValue, FeatureVector, NullReason, availability_of,
-        base_name_if_availability_column,
-    },
+    features::{FeatureCell, FeatureName, FeatureStaleness, FeatureVector, NullReason},
     model::{
         FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow, ModelFamily,
         ModelRuntimeInput, QuantModelRuntime,
     },
     selection::SelectedMarket,
+    training::TrainingExample,
 };
-use rust_decimal::Decimal;
 
 use crate::projection::inference_context::build_market_inference_context;
 
@@ -59,7 +57,7 @@ pub fn build_factor_row(
 #[must_use]
 pub fn build_factor_table(
     model_run_id: &ModelRunId,
-    as_of: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
     markets: &[SelectedMarket],
     vectors: &[FeatureVector],
     outcomes: &[MarketFactorOutcome],
@@ -72,7 +70,7 @@ pub fn build_factor_table(
     }
     FactorInferenceTable {
         model_run_id: model_run_id.clone(),
-        as_of,
+        decision_at,
         rows,
     }
 }
@@ -88,7 +86,7 @@ pub fn build_factor_table(
 pub fn build_runtime_input(
     model: &dyn QuantModelRuntime,
     model_run_id: &ModelRunId,
-    as_of: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
     markets: &[SelectedMarket],
     vectors: &[FeatureVector],
     outcomes: &[MarketFactorOutcome],
@@ -96,14 +94,15 @@ pub fn build_runtime_input(
     match model.model_family() {
         ModelFamily::WeightedFactor => ModelRuntimeInput::FactorTable(build_factor_table(
             model_run_id,
-            as_of,
+            decision_at,
             markets,
             vectors,
             outcomes,
         )),
         family if family.is_classical() => ModelRuntimeInput::FeatureMatrix(build_feature_matrix(
-            &model.required_features(),
-            as_of,
+            &model.input_features(),
+            model_run_id,
+            decision_at,
             markets,
             vectors,
         )),
@@ -111,31 +110,117 @@ pub fn build_runtime_input(
     }
 }
 
-/// Resolve one classical-model feature column for `vector`.
+/// Assemble a runtime batch directly from immutable v2 Parquet rows.
 ///
-/// A `{feature}.__available` column (synthesized by
-/// `quant_pivot_research::training::matrix` at training time — see
-/// [`base_name_if_availability_column`]) never exists as a real key in any
-/// `FeatureVector`; it must be **recomputed** here from the base feature's
-/// live availability via the identical [`availability_of`] rule the training
-/// matrix used, or the classical model's learned availability signal is
-/// always fed the same constant at serve time regardless of the market's
-/// real state (11.2.2 remediation R2 — the training/serving skew this
-/// closes). Every other column is a genuine feature lookup, `Missing` when
-/// truly absent (imputed by the runtime's frozen preprocessing).
-fn resolve_feature_column(vector: &FeatureVector, name: &FeatureName) -> FeatureValue {
-    if let Some(base) = base_name_if_availability_column(name) {
-        let decimal = match availability_of(vector, &base) {
-            CellAvailability::Present => Decimal::ONE,
-            CellAvailability::NotApplicable => Decimal::ZERO,
-            CellAvailability::MissingApplicable => -Decimal::ONE,
-        };
-        return FeatureValue::Decimal(decimal);
+/// This is the only training-dataset backtest input path. It consumes the
+/// frozen `FeatureCell`/factor bytes and frozen selection context verbatim;
+/// rematerialization is reserved for a separate parity verification and can
+/// never replace the model input under evaluation.
+pub fn build_frozen_runtime_input(
+    model: &dyn QuantModelRuntime,
+    model_run_id: &ModelRunId,
+    examples: &[&TrainingExample],
+) -> QuantResult<ModelRuntimeInput> {
+    let first = examples
+        .first()
+        .ok_or_else(|| ResearchError::DatasetBuild {
+            detail: "cannot build a model-input batch from an empty frozen cross-section"
+                .to_owned(),
+        })?;
+    let decision_at = first.decision_at();
+    let mut market_ids = std::collections::HashSet::with_capacity(examples.len());
+    for example in examples {
+        if example.decision_at() != decision_at {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen cross-section mixes decision times {decision_at} and {}",
+                    example.decision_at()
+                ),
+            }
+            .into());
+        }
+        if !market_ids.insert(example.market_id.clone()) {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "frozen cross-section contains duplicate market {} at {decision_at}",
+                    example.market_id
+                ),
+            }
+            .into());
+        }
     }
-    vector
-        .value(name)
-        .cloned()
-        .unwrap_or(FeatureValue::Missing(NullReason::SourceUnavailable))
+
+    match model.model_family() {
+        ModelFamily::WeightedFactor => {
+            let mut rows = Vec::with_capacity(examples.len());
+            for example in examples {
+                // Dataset build records an empty factor vector only when the
+                // factor eligibility gate rejected the market.
+                if example.factor_values.is_empty() {
+                    continue;
+                }
+                let Some(context) = build_market_inference_context(
+                    &example.feature_vector,
+                    &example.selected_market,
+                ) else {
+                    continue;
+                };
+                rows.push(FactorInferenceRow {
+                    market_id: example.market_id.clone(),
+                    token_id: example.token_id.clone(),
+                    factors: example.factor_values.clone(),
+                    context,
+                });
+            }
+            Ok(ModelRuntimeInput::FactorTable(FactorInferenceTable {
+                model_run_id: model_run_id.clone(),
+                decision_at,
+                rows,
+            }))
+        }
+        family if family.is_classical() => {
+            let markets = examples
+                .iter()
+                .map(|example| example.selected_market.clone())
+                .collect::<Vec<_>>();
+            let vectors = examples
+                .iter()
+                .map(|example| example.feature_vector.clone())
+                .collect::<Vec<_>>();
+            Ok(ModelRuntimeInput::FeatureMatrix(build_feature_matrix(
+                &model.input_features(),
+                model_run_id,
+                decision_at,
+                &markets,
+                &vectors,
+            )))
+        }
+        family => Err(ResearchError::RuntimeUnavailable {
+            family: family.to_string(),
+            detail: "portfolio backtest has no frozen-input route for this family".to_owned(),
+        }
+        .into()),
+    }
+}
+
+/// Resolve one governed raw classical input for `vector`.
+///
+/// Encoded indicator columns do not participate here. Structural absence is
+/// retained explicitly for an absent domain slice; any other missing key is an
+/// applicable source/contract gap and is never fabricated as zero.
+fn resolve_feature_column(vector: &FeatureVector, name: &FeatureName) -> FeatureCell {
+    if let Some(cell) = vector.cell(name) {
+        return cell.clone();
+    }
+    if name.as_str().starts_with("domain.") && vector.domain.is_none() {
+        FeatureCell::not_applicable(NullReason::NotApplicable)
+    } else {
+        FeatureCell::missing(
+            NullReason::SourceUnavailable,
+            None,
+            FeatureStaleness::Unknown,
+        )
+    }
 }
 
 /// Assemble a dense feature matrix over `feature_names` (the classical model's
@@ -143,13 +228,14 @@ fn resolve_feature_column(vector: &FeatureVector, name: &FeatureName) -> Feature
 ///
 /// Every market with a scoreable context is included; a feature absent from a
 /// market's vector is left `Missing` and imputed by the runtime's frozen
-/// preprocessing (the same mean-fill the model was standardized with). A
-/// `.__available` column is never looked up as a literal key — it is
-/// recomputed live (see [`resolve_feature_column`]).
+/// train-partition median. Encoded indicator columns are never looked up as
+/// source features; the
+/// fitted transform derives them from each raw feature-cell state.
 #[must_use]
 pub fn build_feature_matrix(
     feature_names: &[FeatureName],
-    as_of: DateTime<Utc>,
+    model_run_id: &ModelRunId,
+    decision_at: DateTime<Utc>,
     markets: &[SelectedMarket],
     vectors: &[FeatureVector],
 ) -> InferenceMatrix {
@@ -158,7 +244,7 @@ pub fn build_feature_matrix(
         let Some(context) = build_market_inference_context(vector, market) else {
             continue;
         };
-        let features: Vec<FeatureValue> = feature_names
+        let features: Vec<FeatureCell> = feature_names
             .iter()
             .map(|name| resolve_feature_column(vector, name))
             .collect();
@@ -170,7 +256,8 @@ pub fn build_feature_matrix(
         });
     }
     InferenceMatrix {
-        as_of,
+        model_run_id: model_run_id.clone(),
+        decision_at,
         feature_names: feature_names.to_vec(),
         rows,
     }
@@ -178,35 +265,65 @@ pub fn build_feature_matrix(
 
 #[cfg(test)]
 mod tests {
-    use super::build_feature_matrix;
-    use chrono::{Duration, TimeZone, Utc};
+    use super::{build_feature_matrix, build_frozen_runtime_input};
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
-        enums::{common::MarketCategory, domain::DomainFamily, quant::DataQualityStatus},
+        domain::DecisionClock,
+        enums::{
+            common::MarketCategory,
+            domain::DomainFamily,
+            factor::FactorFamily,
+            quant::{DataQualityStatus, FactorDirection},
+        },
+        hashing::CanonicalDigest,
         types::{
-            EventId, MarketId, Probability, SchemaVersion, TokenId, TrainingExampleId,
-            TrainingSampleSource,
+            ContentHash, EventId, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
+            Probability, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource,
         },
     };
     use quant_pivot_research::{
-        features::{FeatureName, FeatureValue, FeatureVector, NullReason, names::book},
-        selection::SelectedMarket,
-        training::{
-            FeatureColumnSpec, FeatureMatrixSpec, LabelName, MatrixScale, TrainingExample,
-            TrainingLabel, build_training_matrix,
+        factors::{FactorExplanation, FactorValue, NormalizedFactor, names::LIQUIDITY_DEPTH},
+        features::{
+            DomainFeatureSlice, FeatureCell, FeatureCellState, FeatureName, FeatureStaleness,
+            FeatureValue, FeatureVector, NullReason, names::book,
         },
+        model::{ModelFamily, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime},
+        selection::SelectedMarket,
+        training::TrainingExample,
     };
     use rust_decimal_macros::dec;
     use std::collections::BTreeMap;
 
     const FEATURE: &str = "domain.crypto.distance_to_strike";
 
-    fn vector(domain_value: Option<FeatureValue>) -> FeatureVector {
+    fn vector(domain_value: Option<FeatureCell>) -> FeatureVector {
         let mut generic = BTreeMap::new();
         generic.insert(
-            book::MID,
-            FeatureValue::Probability(Probability::new(dec!(0.5))),
+            book::BEST_ASK,
+            FeatureCell::observed(
+                FeatureValue::Probability(Probability::new(dec!(0.56))),
+                None,
+                FeatureStaleness::Unknown,
+            ),
         );
-        let domain = domain_value.map(|value| quant_pivot_research::features::DomainFeatureSlice {
+        generic.insert(
+            book::SECONDARY_BEST_ASK,
+            FeatureCell::observed(
+                FeatureValue::Probability(Probability::new(dec!(0.47))),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
+        generic.insert(
+            book::MID,
+            FeatureCell::observed(
+                FeatureValue::Probability(Probability::new(dec!(0.5))),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
+        let domain = domain_value.map(|value| DomainFeatureSlice {
             family: DomainFamily::Crypto,
             schema_version: SchemaVersion::FIRST,
             values: BTreeMap::from([(FeatureName::from_static(FEATURE), value)]),
@@ -214,14 +331,11 @@ mod tests {
         FeatureVector {
             market_id: MarketId::new("m1"),
             token_id: Some(TokenId::new("t1")),
-            as_of: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            decision_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             generic_schema_version: SchemaVersion::FIRST,
             generic,
             domain,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 0,
-            source_refs: Vec::new(),
         }
     }
 
@@ -231,104 +345,156 @@ mod tests {
             event_id: EventId::new("e1"),
             category: MarketCategory::Crypto,
             primary_token_id: TokenId::new("t1"),
-            secondary_token_id: None,
+            secondary_token_id: Some(TokenId::new("t1-no")),
             liquidity_usd: None,
             volume_24h_usd: None,
             source_refs: Vec::new(),
         }
     }
 
-    fn training_example(vector: FeatureVector) -> TrainingExample {
-        let as_of = vector.as_of;
-        TrainingExample {
-            example_id: TrainingExampleId::from_v7(),
-            market_id: vector.market_id.clone(),
-            token_id: vector.token_id.clone().expect("token"),
-            as_of,
-            sample_source: TrainingSampleSource::HistoricalPit,
-            feature_vector: vector,
-            factor_values: Vec::new(),
-            labels: vec![TrainingLabel {
-                label_name: LabelName::from_static("return_to_horizon"),
-                horizon_secs: 60,
-                value: dec!(1),
-                is_resolved: true,
-                matured_at: as_of + Duration::seconds(60),
-            }],
-            source_refs: Vec::new(),
-            lot_context: None,
-            position_state: None,
-            book_fidelity: None,
-        }
-    }
-
-    /// The regression this closes (11.2.2 remediation R2): the training
-    /// matrix's synthesized `.__available` column names, replayed through
-    /// `build_feature_matrix` against the *same* `FeatureVector`s, must
-    /// reproduce the exact three-state signal the training matrix itself
-    /// computed — never a single collapsed constant.
     #[test]
-    fn feature_matrix_recomputes_availability_never_a_constant() {
-        let present = vector(Some(FeatureValue::Decimal(dec!(0.02))));
-        let not_applicable = vector(None);
-        let missing_applicable = vector(Some(FeatureValue::Missing(
-            NullReason::DomainSourceUnavailable,
+    fn feature_matrix_preserves_raw_cell_states_and_real_run_id() {
+        let present = vector(Some(FeatureCell::observed(
+            FeatureValue::Decimal(dec!(0.02)),
+            None,
+            FeatureStaleness::Unknown,
         )));
-
-        let spec = FeatureMatrixSpec {
-            columns: vec![FeatureColumnSpec {
-                feature: FeatureName::from_static(FEATURE),
-                scale: MatrixScale::Identity,
-                critical: false,
-                fill_missing: 0.0,
-            }],
-            label_name: LabelName::from_static("return_to_horizon"),
-            label_horizon_secs: 60,
-        };
-        let examples = vec![
-            training_example(present.clone()),
-            training_example(not_applicable.clone()),
-            training_example(missing_applicable.clone()),
-        ];
-        let matrix = build_training_matrix(&examples, &spec).expect("matrix");
-        assert_eq!(
-            matrix.feature_names,
-            vec![
-                FeatureName::from_static(FEATURE),
-                FeatureName::from_static("domain.crypto.distance_to_strike.__available"),
-            ]
-        );
+        let not_applicable = vector(None);
+        let missing_applicable = vector(Some(FeatureCell::missing(
+            NullReason::DomainSourceUnavailable,
+            None,
+            FeatureStaleness::Unknown,
+        )));
 
         let market = market();
         let vectors = [present, not_applicable, missing_applicable];
         let markets = [market.clone(), market.clone(), market];
+        let model_run_id = ModelRunId::from_v7();
         let inference = build_feature_matrix(
-            &matrix.feature_names,
+            &[FeatureName::from_static(FEATURE)],
+            &model_run_id,
             Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             &markets,
             &vectors,
         );
         assert_eq!(inference.rows.len(), 3, "every row has a scoreable context");
+        assert_eq!(inference.model_run_id, model_run_id);
+        assert!(inference.rows.iter().all(|row| {
+            row.context.yes_price.inner() == dec!(0.56)
+                && row.context.no_price.map(Price::inner) == Some(dec!(0.47))
+        }));
+        assert_eq!(
+            inference.rows[0].features[0],
+            FeatureCell::observed(
+                FeatureValue::Decimal(dec!(0.02)),
+                None,
+                FeatureStaleness::Unknown,
+            )
+        );
+        assert_eq!(
+            inference.rows[1].features[0],
+            FeatureCell::not_applicable(NullReason::NotApplicable)
+        );
+        assert_eq!(
+            inference.rows[2].features[0],
+            FeatureCell::missing(
+                NullReason::DomainSourceUnavailable,
+                None,
+                FeatureStaleness::Unknown,
+            )
+        );
+        assert_eq!(
+            inference.rows[2].features[0].state,
+            FeatureCellState::Missing,
+        );
+    }
 
-        let availability = |row_idx: usize| &inference.rows[row_idx].features[1];
+    struct WeightedProbe {
+        version_id: ModelVersionId,
+        schema_hash: ContentHash,
+    }
+
+    #[async_trait::async_trait]
+    impl QuantModelRuntime for WeightedProbe {
+        fn model_version_id(&self) -> ModelVersionId {
+            self.version_id.clone()
+        }
+
+        fn model_family(&self) -> ModelFamily {
+            ModelFamily::WeightedFactor
+        }
+
+        fn feature_schema_hash(&self) -> ContentHash {
+            self.schema_hash.clone()
+        }
+
+        fn required_features(&self) -> Vec<FeatureName> {
+            Vec::new()
+        }
+
+        async fn infer_batch(&self, _input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
+            unreachable!("frozen-input projection test does not invoke inference")
+        }
+    }
+
+    #[test]
+    fn frozen_weighted_input_preserves_factor_bytes_and_real_run_id() {
+        let feature_vector = vector(None);
+        let selected_market = market();
+        let decision_at = feature_vector.decision_at;
+        let factor = FactorValue {
+            definition_id: FactorDefinitionId::from_v7(),
+            name: LIQUIDITY_DEPTH,
+            family: FactorFamily::Liquidity,
+            raw_value: Some(dec!(123.45)),
+            normalization: NormalizedFactor::cross_section(Probability::new(dec!(0.73))),
+            direction: FactorDirection::Positive,
+            confidence: Probability::new(dec!(0.91)),
+            explanation: FactorExplanation {
+                headline: "frozen".to_owned(),
+                drivers: Vec::new(),
+            },
+            input_feature_refs: Vec::new(),
+        };
+        let example = TrainingExample {
+            example_id: TrainingExampleId::from_v7(),
+            market_id: selected_market.market_id.clone(),
+            token_id: selected_market.primary_token_id.clone(),
+            selected_market,
+            decision_boundary: DecisionClock::new(30)
+                .boundary(decision_at)
+                .expect("boundary"),
+            sample_source: TrainingSampleSource::HistoricalPit,
+            feature_vector,
+            factor_values: vec![factor.clone()],
+            labels: Vec::new(),
+            source_refs: Vec::new(),
+            decision_capture: None,
+            lot_context: None,
+            position_state: None,
+            book_fidelity: None,
+        };
+        let run_id = ModelRunId::from_v7();
+        let runtime = WeightedProbe {
+            version_id: ModelVersionId::from_v7(),
+            schema_hash: CanonicalDigest::content_hash_json("schema").expect("hash"),
+        };
+
+        let input = build_frozen_runtime_input(&runtime, &run_id, &[&example]).expect("input");
+        let ModelRuntimeInput::FactorTable(table) = input else {
+            panic!("weighted probe must receive a factor table");
+        };
+        assert_eq!(table.model_run_id, run_id);
+        assert_eq!(table.decision_at, decision_at);
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].factors, vec![factor]);
+        assert_eq!(table.rows[0].context.yes_price.inner(), dec!(0.56));
         assert_eq!(
-            *availability(0),
-            FeatureValue::Decimal(dec!(1)),
-            "present row"
+            table.rows[0].context.no_price.map(Price::inner),
+            Some(dec!(0.47)),
+            "frozen replay must consume the persisted secondary ask verbatim"
         );
-        assert_eq!(
-            *availability(1),
-            FeatureValue::Decimal(dec!(0)),
-            "structurally not-applicable row"
-        );
-        assert_eq!(
-            *availability(2),
-            FeatureValue::Decimal(dec!(-1)),
-            "applicable-but-missing row"
-        );
-        // The three rows must be pairwise distinct — never a collapsed constant.
-        assert_ne!(availability(0), availability(1));
-        assert_ne!(availability(1), availability(2));
-        assert_ne!(availability(0), availability(2));
+
+        assert!(build_frozen_runtime_input(&runtime, &run_id, &[&example, &example]).is_err());
     }
 }

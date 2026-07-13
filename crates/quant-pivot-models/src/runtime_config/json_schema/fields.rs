@@ -516,7 +516,7 @@ mod tests {
                 "schedule_id": "invalid-top-n",
                 "enabled": true,
                 "top_n": max_top_n + 1,
-                "source_delay_secs": 10,
+                "knowledge_lag_secs": 10,
                 "cadence": { "kind": "interval", "interval_secs": 300 }
             }]),
         );

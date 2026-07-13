@@ -33,8 +33,8 @@ use quant_pivot_models::{
     enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{
-        ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
-        SelectionExclusionSummary, TokenId, Usd,
+        ContentHash, EventId, MarketId, MarketSelectionId, ModelInputContract,
+        ModelInputRequiredness, RuntimeConfigVersionId, SelectionExclusionSummary, TokenId, Usd,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ pub trait MarketSelector: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketSelectionBuildRequest {
     /// Decision time.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Config version governing this selection.
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Frozen selection-policy snapshot.
@@ -74,7 +74,7 @@ pub struct MarketSelectionBuildRequest {
     /// Feature availability the active model requires.
     pub model_requirements: ModelFeatureRequirements,
     /// Source visibility delay, in seconds.
-    pub source_delay_secs: u64,
+    pub knowledge_lag_secs: u64,
 }
 
 /// Feature availability requirements imposed by the routed model(s) on selection.
@@ -115,6 +115,21 @@ impl ModelFeatureRequirements {
         }
     }
 
+    /// Project one model spec's typed input contract into selection gating.
+    /// Optional inputs remain visible to the transform but never reject a
+    /// candidate before model-input materialization.
+    #[must_use]
+    pub fn from_input_contract(contract: &ModelInputContract) -> Self {
+        Self::generic_only(
+            contract
+                .inputs
+                .iter()
+                .filter(|input| input.requiredness == ModelInputRequiredness::Required)
+                .map(|input| FeatureName::new(input.feature_name.clone()))
+                .collect(),
+        )
+    }
+
     /// The full, deduplicated requirement set for a candidate of `category`:
     /// `generic` ∪ that category's specific requirements (empty when the
     /// category has no routed pointer).
@@ -129,7 +144,7 @@ impl ModelFeatureRequirements {
 
     /// Every feature required by any route (`generic` ∪ every category's
     /// specific set), for consumers that need one flat, category-agnostic
-    /// superset (e.g. the critical-missing feature gate, which is not
+    /// superset (e.g. the required-input feature gate, which is not
     /// selection's per-category eligibility check).
     #[must_use]
     pub fn union_all(&self) -> Vec<FeatureName> {
@@ -163,7 +178,7 @@ pub struct MarketSelectionSnapshot {
     /// Snapshot id.
     pub market_selection_id: MarketSelectionId,
     /// Decision time.
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Governing config version.
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Canonical selector hash (same inputs → same hash).

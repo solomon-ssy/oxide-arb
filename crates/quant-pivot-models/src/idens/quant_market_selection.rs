@@ -16,7 +16,7 @@ use crate::schema::{
 pub enum QuantMarketSelection {
     Table,
     MarketSelectionId,
-    AsOf,
+    DecisionAt,
     RuntimeConfigVersionId,
     SelectorHash,
     MarketCount,
@@ -30,7 +30,7 @@ pub fn table() -> TableCreateStatement {
         .if_not_exists()
         .col(column::uuid_pk(QuantMarketSelection::MarketSelectionId))
         .col(
-            ColumnDef::new(QuantMarketSelection::AsOf)
+            ColumnDef::new(QuantMarketSelection::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
@@ -61,25 +61,25 @@ pub fn table() -> TableCreateStatement {
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
-            "idx_quant_market_selection_as_of",
+            "idx_quant_market_selection_decision_at",
             quant_market_selection_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_market_selection_as_of")
+                .name("idx_quant_market_selection_decision_at")
                 .table(QuantMarketSelection::Table)
-                .col((QuantMarketSelection::AsOf, IndexOrder::Desc))
+                .col((QuantMarketSelection::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "selection snapshots by recency",
         ),
         IndexSpec::sea_query(
-            "idx_quant_market_selection_runtime_as_of",
+            "idx_quant_market_selection_runtime_decision_at",
             quant_market_selection_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_market_selection_runtime_as_of")
+                .name("idx_quant_market_selection_runtime_decision_at")
                 .table(QuantMarketSelection::Table)
                 .col(QuantMarketSelection::RuntimeConfigVersionId)
-                .col((QuantMarketSelection::AsOf, IndexOrder::Desc))
+                .col((QuantMarketSelection::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "selection snapshots by runtime config",
         ),

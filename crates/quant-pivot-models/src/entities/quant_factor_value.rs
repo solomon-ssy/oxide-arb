@@ -22,7 +22,7 @@ pub struct Model {
     pub feature_vector_id: FeatureVectorId,
     pub model_run_id: ModelRunId,
     pub market_id: MarketId,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     /// Authoritative factor-value state (scored / missing-input / not-applicable
     /// / indeterminate). Orthogonal to `indeterminate_reason`.
     pub value_state: FactorValueState,

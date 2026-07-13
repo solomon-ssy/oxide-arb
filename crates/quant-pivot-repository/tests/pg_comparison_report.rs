@@ -12,8 +12,9 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelSpecId,
-        ModelVersionId, Probability, RuntimeConfigVersionId, SchemaVersion,
+        BacktestReportId, ContentHash, ModelComparisonReportId, ModelInputContract, ModelRunId,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, Probability, RuntimeConfigVersionId,
+        SchemaVersion,
     },
 };
 use quant_pivot_repository::{
@@ -162,7 +163,8 @@ async fn quant_model_comparison_report_migration_and_crud() {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await

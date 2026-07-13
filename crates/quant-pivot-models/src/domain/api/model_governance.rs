@@ -3,11 +3,11 @@
 //! | Method | Path | Permission | Purpose |
 //! |--------|------|------------|---------|
 //! | POST | `/research/models/{id}/publish` | `publication:publish` | Promote a candidate/shadow version |
-//! | POST | `/research/models/{id}/rollback` | `publication:rollback` | Retire published version, restore predecessor |
+//! | POST | `/research/models/{id}/rollback` | `publication:rollback` | Re-gate and atomically restore the audited predecessor |
 //! | POST | `/research/models/{id}/retire` | `publication:retire` | Retire published version without restore |
 //! | POST | `/research/models/{id}/bind-publish-path-set` | `publication:create` | Bind CPCV path set for publish gates |
 //!
-//! Both endpoints require `X-Acting-Role` (Casbin `ActingRoleGoverned`) and record the
+//! Governed endpoints require `X-Acting-Role` (Casbin `ActingRoleGoverned`) and record the
 //! actor on `quant_model_governance_audit`.
 
 use serde::{Deserialize, Serialize};

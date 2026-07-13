@@ -75,9 +75,9 @@ crate::pg_enum! {
         CrossSection => "cross_section",
         /// Per-market scaling against a fixed semantic domain (`MinMax`).
         PerMarket => "per_market",
-        /// Small cross-section → normalized against the factor's historical rolling
-        /// distribution (empirical quantile).
-        HistoricalQuantile => "historical_quantile",
+        /// Small cross-section → normalized against the empirical training CDF
+        /// frozen into the model artifact.
+        FrozenReferenceQuantile => "frozen_reference_quantile",
     }
 }
 
@@ -113,8 +113,9 @@ crate::pg_enum! {
         CrossSectionTooSmall => "cross_section_too_small",
         /// Every present value was equal — the cross-section carries no signal.
         ZeroVariance => "zero_variance",
-        /// Small cross-section + `historical_quantile` policy but no usable history.
-        NoHistory => "no_history",
+        /// Small cross-section + frozen-reference policy but the model artifact
+        /// has no usable reference CDF for this factor.
+        NoFrozenReference => "no_frozen_reference",
         /// A neg-risk sibling leg's order book was absent at `as_of`, so the
         /// full-leg structural factor could not be computed (never a silent zero).
         LegBookMissing => "leg_book_missing",

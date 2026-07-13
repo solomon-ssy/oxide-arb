@@ -2,27 +2,33 @@
 
 use super::equity_snapshot::insert_equity_snapshot_monotonic;
 use crate::{
-    postgres::{error, state_hash},
+    postgres::{error, quant::feature_parity, state_hash},
     traits::RecommendationReportRepository,
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        NewOperationLog, NewReportTransaction, PageWindow, Paginated, QuantReportListQuery,
+        FeatureParityJobParams, NewOperationLog, NewRecommendationReport, NewReportFeatureParity,
+        NewReportTransaction, PageWindow, Paginated, QuantReportListQuery,
         RecommendationReportInfo,
     },
     entities::{
-        operation_log, quant_account_snapshot, quant_portfolio_plan, quant_recommendation,
-        quant_recommendation_report, quant_report_data_quality_snapshot,
+        operation_log, quant_account_snapshot, quant_feature_parity_run, quant_portfolio_plan,
+        quant_recommendation, quant_recommendation_report, quant_report_data_quality_snapshot,
+        quant_research_job,
     },
-    enums::quant::{RecommendationReportStatus, RecommendationStatus, ReportKind},
+    enums::quant::{
+        FeatureParityRunKind, FeatureParityRunStatus, RecommendationReportStatus,
+        RecommendationStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
+    },
     schema::column,
-    types::RecommendationReportId,
+    types::{FeatureParityStateId, ModelRunId, RecommendationReportId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
 };
 
 use crate::postgres::query::paginate_mapped;
@@ -38,6 +44,102 @@ impl PgRecommendationReportRepository {
     }
 }
 
+async fn verify_feature_parity_commit(
+    txn: &DatabaseTransaction,
+    expected_state_id: &FeatureParityStateId,
+) -> Result<(), StorageError> {
+    feature_parity::verify_clear_latch_generation(txn, expected_state_id).await
+}
+
+fn validate_sampled_feature_parity(
+    report: &NewRecommendationReport,
+    parity: Option<&NewReportFeatureParity>,
+) -> Result<(), StorageError> {
+    let parity = parity.ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_FEATURE_PARITY_RUN),
+            "every committed report requires atomic sampled parity",
+        )
+    })?;
+    let run = &parity.run;
+    let job = &parity.job;
+    let params: FeatureParityJobParams =
+        serde_json::from_value(job.params_json.clone()).map_err(|error| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_RESEARCH_JOB),
+                format!("invalid feature_parity job params: {error}"),
+            )
+        })?;
+    if run.kind != FeatureParityRunKind::Sampled
+        || run.status != FeatureParityRunStatus::Queued
+        || run.report_id.as_ref() != Some(&report.recommendation_report_id)
+        || run.model_version_id.as_ref() != Some(&report.model_version_id)
+        || run.training_dataset_id.is_some()
+        || run.window_start != report.decision_at
+        || run.window_end <= run.window_start
+        || run.feature_contract_hash.is_none()
+    {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_FEATURE_PARITY_RUN),
+            "sampled parity run must be queued and bound to the exact report/model/decision window",
+        ));
+    }
+    if job.kind != ResearchJobKind::FeatureParity
+        || job.status != ResearchJobStatus::Queued
+        || job.runtime_config_version_id.as_ref() != Some(&report.runtime_config_version_id)
+        || job.model_spec_id.is_some()
+        || job.parent_job_id.is_some()
+        || job.recovery_attempt != 0
+        || job.max_recovery_attempts < 0
+        || params.parity_run_id != run.run_id
+        || params.materialization_timeout_secs == 0
+        || params.request.window_start != Some(run.window_start)
+        || params.request.window_end != Some(run.window_end)
+        || params.request.reason != run.reason
+    {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RESEARCH_JOB),
+            "sampled parity research job must exactly bind the report parity run and runtime config",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_report_data_quality(
+    report: &NewRecommendationReport,
+    dq: &quant_pivot_models::domain::NewReportDataQualitySnapshot,
+) -> Result<(), StorageError> {
+    let wrong_snapshot = dq.report_data_quality_snapshot_id != report.data_quality_snapshot_ref;
+    let wrong_decision = dq.decision_at != report.decision_at;
+    let wrong_config = dq.runtime_config_version_id != report.runtime_config_version_id;
+    if wrong_snapshot || wrong_decision || wrong_config {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "report DQ snapshot must bind the exact report decision and runtime config",
+        ));
+    }
+    let mut vector_ids = std::collections::HashSet::new();
+    let mut markets = std::collections::HashSet::new();
+    for record in &dq.tokens_json.0 {
+        let vector_id = record.feature_vector_id.as_ref().ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                format!(
+                    "new report DQ row for market {} has no exact feature-vector binding",
+                    record.market_id
+                ),
+            )
+        })?;
+        if !vector_ids.insert(vector_id.clone()) || !markets.insert(record.market_id.clone()) {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "report DQ snapshot contains duplicate feature-vector or market bindings",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl RecommendationReportRepository for PgRecommendationReportRepository {
     async fn create_report(
@@ -45,16 +147,28 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         transaction: NewReportTransaction,
     ) -> Result<RecommendationReportInfo, StorageError> {
         let NewReportTransaction {
+            feature_parity_state_id,
             account_snapshot,
             equity_snapshot,
             data_quality_snapshot,
             portfolio_plan,
             report,
             recommendations,
+            sampled_feature_parity,
             operation_log,
         } = transaction;
 
+        validate_sampled_feature_parity(&report, sampled_feature_parity.as_ref())?;
+        validate_report_data_quality(&report, &data_quality_snapshot)?;
+        let feature_parity_state_id = feature_parity_state_id.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "report commit requires a durable feature-parity clear generation",
+            )
+        })?;
+
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        verify_feature_parity_commit(&txn, &feature_parity_state_id).await?;
 
         // Insert FK targets before the report header, then the report's children.
         quant_account_snapshot::Entity::insert(account_snapshot.into_active_model())
@@ -76,6 +190,19 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
+        if let Some(parity) = sampled_feature_parity {
+            let parity_key = report_model.recommendation_report_id.to_string();
+            quant_feature_parity_run::Entity::insert(parity.run.into_active_model())
+                .exec(&txn)
+                .await
+                .map_err(|error| {
+                    error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &parity_key)
+                })?;
+            quant_research_job::Entity::insert(parity.job.into_active_model())
+                .exec(&txn)
+                .await
+                .map_err(StorageError::from)?;
+        }
         if !recommendations.is_empty() {
             let rows = recommendations
                 .into_iter()
@@ -100,6 +227,62 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         quant_recommendation_report::Entity::find_by_id(report_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn find_by_model_run_id(
+        &self,
+        model_run_id: &ModelRunId,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
+        quant_recommendation_report::Entity::find()
+            .filter(quant_recommendation_report::Column::ModelRunId.eq(model_run_id.clone()))
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn list_committed_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RecommendationReportInfo>, StorageError> {
+        if to <= from {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "committed report window requires to > from",
+            ));
+        }
+        quant_recommendation_report::Entity::find()
+            .filter(quant_recommendation_report::Column::DecisionAt.gte(from))
+            .filter(quant_recommendation_report::Column::DecisionAt.lt(to))
+            .order_by_asc(quant_recommendation_report::Column::DecisionAt)
+            .order_by_asc(quant_recommendation_report::Column::RecommendationReportId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn find_data_quality_snapshot(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<quant_pivot_models::domain::ReportDataQualitySnapshotInfo>, StorageError>
+    {
+        let Some(snapshot_id) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+            .select_only()
+            .column(quant_recommendation_report::Column::DataQualitySnapshotRef)
+            .into_tuple::<quant_pivot_models::types::ReportDataQualitySnapshotId>()
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Ok(None);
+        };
+        quant_report_data_quality_snapshot::Entity::find_by_id(snapshot_id)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
@@ -149,6 +332,33 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn find_actionable_ids_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RecommendationReportId>, StorageError> {
+        if to <= from {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "actionable report window requires to > from",
+            ));
+        }
+        quant_recommendation_report::Entity::find()
+            .select_only()
+            .column(quant_recommendation_report::Column::RecommendationReportId)
+            .filter(quant_recommendation_report::Column::DecisionAt.gte(from))
+            .filter(quant_recommendation_report::Column::DecisionAt.lt(to))
+            .filter(quant_recommendation_report::Column::Status.is_in([
+                RecommendationReportStatus::Published,
+                RecommendationReportStatus::PublishedEmpty,
+            ]))
+            .order_by_asc(quant_recommendation_report::Column::DecisionAt)
+            .into_tuple::<RecommendationReportId>()
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
     }
 
     async fn find_expirable(
@@ -280,12 +490,12 @@ fn page_condition(query: &QuantReportListQuery) -> Condition {
         .add_option(
             query
                 .from
-                .map(|from| quant_recommendation_report::Column::CreatedAt.gte(from)),
+                .map(|from| quant_recommendation_report::Column::DecisionAt.gte(from)),
         )
         .add_option(
             query
                 .to
-                .map(|to| quant_recommendation_report::Column::CreatedAt.lt(to)),
+                .map(|to| quant_recommendation_report::Column::DecisionAt.lt(to)),
         )
 }
 
@@ -310,6 +520,11 @@ async fn transition_report_status(
             report_id,
         ));
     };
+    if row.status == report_status {
+        let info = row.into();
+        txn.commit().await.map_err(StorageError::from)?;
+        return Ok(info);
+    }
     if !matches!(
         row.status,
         RecommendationReportStatus::Published | RecommendationReportStatus::PublishedEmpty

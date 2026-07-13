@@ -5,7 +5,7 @@ use crate::{
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
         fee::FeeSource,
-        market::MarketStatus,
+        market::{EventStatus, MarketStatus},
     },
     types::{EventId, MarketId, TokenId, Usd},
 };
@@ -196,10 +196,12 @@ pub struct EventRegistryInfo {
     pub slug: String,
     /// Recurring-series slug (Tier-0 linkage anchor), when present.
     pub series_slug: Option<String>,
+    pub status: EventStatus,
     pub market_ids: Vec<MarketId>,
     pub categories: CategorySet,
     pub tags: Vec<String>,
     pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -232,7 +234,9 @@ pub struct MarketRegistryInfo {
     pub fee_schedule: Option<MarketFeeSchedule>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    /// Upstream creation time. Missing remains `None`; age features must not
+    /// substitute local ingestion time.
+    pub created_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }
 

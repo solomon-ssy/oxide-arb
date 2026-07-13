@@ -14,7 +14,11 @@
 
 use std::collections::HashMap;
 
-use rust_decimal::{Decimal, prelude::FromPrimitive};
+use quant_pivot_error::{QuantResult, research::ResearchError};
+use rust_decimal::{
+    Decimal,
+    prelude::{FromPrimitive, ToPrimitive},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::factors::value::FactorName;
@@ -72,24 +76,25 @@ pub struct FactorCollinearityAnalyzer;
 
 impl FactorCollinearityAnalyzer {
     /// Build the Spearman correlation matrix and flag pairs above `threshold`.
-    #[must_use]
     pub fn analyze(
         panel: &FactorObservationMatrix,
         threshold: Decimal,
-    ) -> FactorCollinearityReport {
+    ) -> QuantResult<FactorCollinearityReport> {
         let factor_count = panel.factors.len();
         let columns: Vec<Vec<Option<f64>>> = (0..factor_count)
             .map(|index| column(panel, index))
-            .collect();
+            .collect::<QuantResult<_>>()?;
 
         let mut matrix = vec![vec![Decimal::ZERO; factor_count]; factor_count];
         let mut violations = Vec::new();
         for i in 0..factor_count {
             matrix[i][i] = Decimal::ONE;
             for j in (i + 1)..factor_count {
-                let rho = spearman(&columns[i], &columns[j]);
+                let rho = spearman(&columns[i], &columns[j])?;
                 let rho_decimal = Decimal::from_f64(rho)
-                    .unwrap_or(Decimal::ZERO)
+                    .ok_or_else(|| ResearchError::ValidationMethodology {
+                        detail: format!("Spearman correlation {rho} does not fit Decimal"),
+                    })?
                     .round_dp(CORR_SCALE);
                 matrix[i][j] = rho_decimal;
                 matrix[j][i] = rho_decimal;
@@ -102,12 +107,12 @@ impl FactorCollinearityAnalyzer {
                 }
             }
         }
-        FactorCollinearityReport {
+        Ok(FactorCollinearityReport {
             factors: panel.factors.clone(),
             matrix,
             violations,
             threshold,
-        }
+        })
     }
 }
 
@@ -162,17 +167,30 @@ pub fn neutralize_by_group(
 }
 
 /// Extract one factor's column as optional `f64`s (index-aligned with rows).
-fn column(panel: &FactorObservationMatrix, index: usize) -> Vec<Option<f64>> {
-    use rust_decimal::prelude::ToPrimitive;
+fn column(panel: &FactorObservationMatrix, index: usize) -> QuantResult<Vec<Option<f64>>> {
     panel
         .rows
         .iter()
-        .map(|row| row.get(index).copied().flatten().and_then(|v| v.to_f64()))
+        .enumerate()
+        .map(|(row_index, row)| {
+            row.get(index)
+                .copied()
+                .flatten()
+                .map(|value| {
+                    value.to_f64().ok_or_else(|| ResearchError::ValidationMethodology {
+                        detail: format!(
+                            "factor panel value {value} at row {row_index}, column {index} does not fit f64"
+                        ),
+                    })
+                })
+                .transpose()
+                .map_err(Into::into)
+        })
         .collect()
 }
 
 /// Spearman rank correlation over the observations where both columns present.
-fn spearman(left: &[Option<f64>], right: &[Option<f64>]) -> f64 {
+fn spearman(left: &[Option<f64>], right: &[Option<f64>]) -> QuantResult<f64> {
     let mut a = Vec::new();
     let mut b = Vec::new();
     for (left_value, right_value) in left.iter().zip(right.iter()) {
@@ -182,19 +200,15 @@ fn spearman(left: &[Option<f64>], right: &[Option<f64>]) -> f64 {
         }
     }
     if a.len() < MIN_OVERLAP {
-        return 0.0;
+        return Ok(0.0);
     }
-    pearson(&average_ranks(&a), &average_ranks(&b))
+    pearson(&average_ranks(&a)?, &average_ranks(&b)?)
 }
 
 /// Average (tie-corrected) ranks of a slice, in the slice's own order.
-fn average_ranks(values: &[f64]) -> Vec<f64> {
+fn average_ranks(values: &[f64]) -> QuantResult<Vec<f64>> {
     let mut order: Vec<usize> = (0..values.len()).collect();
-    order.sort_by(|left, right| {
-        values[*left]
-            .partial_cmp(&values[*right])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    order.sort_by(|left, right| values[*left].total_cmp(&values[*right]));
     let mut ranks = vec![0.0; values.len()];
     let mut start = 0;
     while start < order.len() {
@@ -206,21 +220,32 @@ fn average_ranks(values: &[f64]) -> Vec<f64> {
         }
         // Average rank (1-based) of the tie group `[start, end]`.
         let sum: usize = (start..=end).map(|position| position + 1).sum();
-        let average = f64::from(u32::try_from(sum).unwrap_or(u32::MAX))
-            / f64::from(u32::try_from(end - start + 1).unwrap_or(1));
+        let sum = u32::try_from(sum).map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!("factor rank sum does not fit u32: {error}"),
+        })?;
+        let width = u32::try_from(end - start + 1).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("factor tie-group width does not fit u32: {error}"),
+            }
+        })?;
+        let average = f64::from(sum) / f64::from(width);
         for position in start..=end {
             ranks[order[position]] = average;
         }
         start = end + 1;
     }
-    ranks
+    Ok(ranks)
 }
 
 /// Pearson correlation of two equal-length slices; `0` for zero variance.
-fn pearson(left: &[f64], right: &[f64]) -> f64 {
-    let n = f64::from(u32::try_from(left.len()).unwrap_or(u32::MAX));
+fn pearson(left: &[f64], right: &[f64]) -> QuantResult<f64> {
+    let n = f64::from(u32::try_from(left.len()).map_err(|error| {
+        ResearchError::ValidationMethodology {
+            detail: format!("factor overlap count does not fit u32: {error}"),
+        }
+    })?);
     if n == 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
     let mean_left = left.iter().sum::<f64>() / n;
     let mean_right = right.iter().sum::<f64>() / n;
@@ -236,9 +261,16 @@ fn pearson(left: &[f64], right: &[f64]) -> f64 {
     }
     let denominator = (var_left * var_right).sqrt();
     if denominator == 0.0 {
-        return 0.0;
+        return Ok(0.0);
     }
-    (covariance / denominator).clamp(-1.0, 1.0)
+    let correlation = covariance / denominator;
+    if !correlation.is_finite() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!("Pearson correlation is non-finite: {correlation}"),
+        }
+        .into());
+    }
+    Ok(correlation.clamp(-1.0, 1.0))
 }
 
 #[cfg(test)]
@@ -275,7 +307,8 @@ mod tests {
         };
         let threshold = Decimal::new(9, 1);
 
-        let raw = FactorCollinearityAnalyzer::analyze(&panel, threshold);
+        let raw = FactorCollinearityAnalyzer::analyze(&panel, threshold)
+            .expect("raw collinearity report");
         assert!(
             raw.matrix[0][1] > Decimal::new(5, 1),
             "raw factors are inflated by the shared category level (ρ={})",
@@ -286,7 +319,8 @@ mod tests {
             .flat_map(|category| [Some(category); 3])
             .collect();
         let neutralized = neutralize_by_group(&panel, &groups);
-        let report = FactorCollinearityAnalyzer::analyze(&neutralized, threshold);
+        let report = FactorCollinearityAnalyzer::analyze(&neutralized, threshold)
+            .expect("neutralized collinearity report");
         assert!(
             report.matrix[0][1].abs() < raw.matrix[0][1].abs(),
             "neutralizing the category level shrinks the correlation (raw={}, neutralized={})",

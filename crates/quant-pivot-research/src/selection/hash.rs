@@ -7,16 +7,24 @@
 //! [`SelectorHashInput`], which is then hashed verbatim by
 //! [`ResearchHasher::canonical`].
 
-use quant_pivot_models::types::{MarketId, RuntimeConfigVersionId};
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{
+    domain::MarketCandidate,
+    types::{ContentHash, RuntimeConfigVersionId, SelectionExclusionSummary},
+};
 use serde::Serialize;
 
-use crate::selection::MarketSelectionBuildRequest;
+use crate::{
+    features::FeatureSchema,
+    hashing::ResearchHasher,
+    selection::{ExcludedMarket, MarketSelectionBuildRequest, SelectedMarket},
+};
 
 /// The canonical, order-normalized shape hashed into a `selector_hash`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SelectorHashInput {
-    /// Decision time bucketed to whole seconds.
-    pub as_of_bucket: i64,
+    /// Exact decision time in epoch milliseconds.
+    pub decision_at: i64,
     /// Governing runtime-config version.
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Sorted enabled category slugs.
@@ -43,14 +51,33 @@ pub struct SelectorHashInput {
     pub reject_crossed_books: bool,
     /// Reject empty (one-sided) books.
     pub reject_empty_books: bool,
-    /// Sorted ids of the markets actually selected.
-    pub selected_market_ids: Vec<String>,
+    /// Global knowledge lag frozen for the round.
+    pub knowledge_lag_secs: u64,
+    /// Governed feature schema used by model-eligibility filtering.
+    pub feature_schema_hash: ContentHash,
+    /// Ordered, category-aware model requiredness contract.
+    pub model_requirements_hash: ContentHash,
+    /// Complete candidate world, sorted by market id.
+    pub candidates: Vec<MarketCandidate>,
+    /// Complete selected projection, sorted by market id.
+    pub included: Vec<SelectedMarket>,
+    /// Complete exclusion result, sorted by market id.
+    pub excluded: Vec<ExcludedMarket>,
+    /// Aggregate exclusion counts persisted with the snapshot.
+    pub exclusion_summary: SelectionExclusionSummary,
 }
 
 impl SelectorHashInput {
-    /// Build the canonical input from a request and its resulting selected set.
-    #[must_use]
-    pub fn new(request: &MarketSelectionBuildRequest, included: &[MarketId]) -> Self {
+    /// Build the canonical input from the complete request, candidate world and
+    /// included/excluded result. Membership alone is insufficient: a changed
+    /// source fact or rejection reason must also perturb the selector digest.
+    pub fn new(
+        request: &MarketSelectionBuildRequest,
+        candidates: &[MarketCandidate],
+        included: &[SelectedMarket],
+        excluded: &[ExcludedMarket],
+        exclusion_summary: SelectionExclusionSummary,
+    ) -> QuantResult<Self> {
         let selection = &request.selection;
         let data_quality = &request.data_quality;
 
@@ -61,14 +88,15 @@ impl SelectorHashInput {
             .collect::<Vec<_>>();
         enabled_categories.sort();
 
-        let mut selected_market_ids = included
-            .iter()
-            .map(|market_id| market_id.as_str().to_owned())
-            .collect::<Vec<_>>();
-        selected_market_ids.sort();
+        let mut candidates = candidates.to_vec();
+        candidates.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+        let mut included = included.to_vec();
+        included.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+        let mut excluded = excluded.to_vec();
+        excluded.sort_by(|left, right| left.market_id.cmp(&right.market_id));
 
-        Self {
-            as_of_bucket: request.as_of.timestamp(),
+        Ok(Self {
+            decision_at: request.decision_at.timestamp_millis(),
             runtime_config_version_id: request.runtime_config_version_id.clone(),
             enabled_categories,
             min_liquidity_usd: selection.min_liquidity_usd.value.clone(),
@@ -82,7 +110,17 @@ impl SelectorHashInput {
             max_ingest_lag_ms: data_quality.max_ingest_lag_ms,
             reject_crossed_books: data_quality.reject_crossed_books,
             reject_empty_books: data_quality.reject_empty_books,
-            selected_market_ids,
-        }
+            knowledge_lag_secs: request.knowledge_lag_secs,
+            feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(
+                &request.features,
+            )?)?,
+            model_requirements_hash: ResearchHasher::model_feature_requirements(
+                &request.model_requirements,
+            )?,
+            candidates,
+            included,
+            excluded,
+            exclusion_summary,
+        })
     }
 }

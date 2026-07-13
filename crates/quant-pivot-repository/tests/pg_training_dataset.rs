@@ -3,15 +3,21 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset},
+    domain::{
+        CompleteTrainingDatasetBuild, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
+        NewTrainingDatasetPlan,
+    },
     enums::{
         model::ModelFamily,
         quant::{DatasetPurpose, PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
+    hashing::CanonicalDigest,
     types::{
-        ArtifactUri, ContentHash, DatasetCoverage, ModelSpecId, ModelVersionId,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
+        DatasetManifest, ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId,
         RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
+        TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -54,7 +60,8 @@ async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -69,36 +76,83 @@ fn dataset_hash(dataset_id: &TrainingDatasetId) -> ContentHash {
     ContentHash::parse(format!("blake3:{hex}")).expect("hash")
 }
 
-fn new_dataset(
+fn new_plan(
     dataset_id: TrainingDatasetId,
     model_spec_id: ModelSpecId,
     runtime_config_version_id: RuntimeConfigVersionId,
-    status: TrainingDatasetStatus,
-) -> NewTrainingDataset {
-    let hash = dataset_hash(&dataset_id);
+) -> NewTrainingDatasetPlan {
     let window_start = Utc::now() - ChronoDuration::hours(2);
-    NewTrainingDataset {
+    NewTrainingDatasetPlan {
         training_dataset_id: dataset_id,
         model_spec_id,
         window_start,
         window_end: window_start + ChronoDuration::hours(1),
-        status,
         purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: 10,
+        sample_interval_secs: 3600,
+        horizons_secs: TrainingHorizonsSecs(vec![3600]),
+        feature_schema_version: Some(SchemaVersion::FIRST),
+        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+        runtime_config_version_id,
+    }
+}
+
+fn completion(
+    plan: &NewTrainingDatasetPlan,
+    status: TrainingDatasetStatus,
+) -> CompleteTrainingDatasetBuild {
+    let hash = dataset_hash(&plan.training_dataset_id);
+    let manifest = DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: plan.training_dataset_id.clone(),
+        model_spec_id: plan.model_spec_id.clone(),
+        runtime_config_version_id: plan.runtime_config_version_id.clone(),
+        window_start: plan.window_start,
+        window_end: plan.window_end,
+        purpose: plan.purpose,
+        knowledge_lag_secs: u64::try_from(plan.knowledge_lag_secs).expect("knowledge lag"),
+        sample_interval_secs: u64::try_from(plan.sample_interval_secs).expect("sample interval"),
+        horizons_secs: plan.horizons_secs.0.clone(),
         feature_schema_hash: hash.clone(),
         factor_schema_hash: hash.clone(),
         label_schema_hash: hash.clone(),
-        dataset_hash: hash,
+        semantic_dataset_hash: hash.clone(),
+        source_fingerprint: content_hash('f'),
+        sample_count: 42,
+    };
+    let manifest_hash =
+        CanonicalDigest::content_hash_json(&manifest).expect("canonical manifest hash");
+    CompleteTrainingDatasetBuild {
+        status,
+        feature_schema_hash: hash.clone(),
+        factor_schema_hash: hash.clone(),
+        label_schema_hash: hash.clone(),
+        dataset_hash: hash.clone(),
+        manifest_hash,
+        manifest_json: manifest,
+        artifact_bytes_hash: hash,
         parquet_uri: ArtifactUri::parse("file:///tmp/pg-training-dataset.parquet").expect("uri"),
         sample_count: 42,
-        source_delay_secs: 10,
-        sample_interval_secs: 3600,
-        horizons_secs: TrainingHorizonsSecs(vec![3600]),
         coverage_json: DatasetCoverage {
             planned_samples: 42,
             ..DatasetCoverage::default()
         },
-        runtime_config_version_id,
+        failure_detail: None,
     }
+}
+
+async fn create_ready(
+    repo: &PgTrainingDatasetRepository,
+    dataset_id: TrainingDatasetId,
+    model_spec_id: ModelSpecId,
+    runtime_config_version_id: RuntimeConfigVersionId,
+) {
+    let plan = new_plan(dataset_id.clone(), model_spec_id, runtime_config_version_id);
+    repo.create_plan(plan.clone()).await.expect("create plan");
+    repo.start_build(&dataset_id).await.expect("start build");
+    repo.complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
+        .await
+        .expect("complete build");
 }
 
 #[tokio::test]
@@ -111,18 +165,17 @@ async fn quant_training_dataset_migration_and_crud() {
     let dataset_id = TrainingDatasetId::from_v7();
     let repo = PgTrainingDatasetRepository::new(db.clone());
 
+    let plan = new_plan(dataset_id.clone(), model_spec_id, rc_id);
+    repo.create_plan(plan.clone()).await.expect("create plan");
+    let building = repo.start_build(&dataset_id).await.expect("start build");
+    assert!(building.dataset_hash.is_none());
     let created = repo
-        .create(new_dataset(
-            dataset_id.clone(),
-            model_spec_id,
-            rc_id,
-            TrainingDatasetStatus::Built,
-        ))
+        .complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
         .await
-        .expect("create");
+        .expect("complete build");
     assert_eq!(created.training_dataset_id, dataset_id);
-    assert_eq!(created.status, TrainingDatasetStatus::Built);
-    assert_eq!(created.sample_count, 42);
+    assert_eq!(created.status, TrainingDatasetStatus::Ready);
+    assert_eq!(created.sample_count, Some(42));
 
     let found = repo
         .find_by_id(&dataset_id)
@@ -142,37 +195,45 @@ async fn training_dataset_status_transitions_enforce_state_machine() {
     let dataset_id = TrainingDatasetId::from_v7();
     let repo = PgTrainingDatasetRepository::new(db.clone());
 
-    repo.create(new_dataset(
-        dataset_id.clone(),
-        model_spec_id.clone(),
-        rc_id.clone(),
-        TrainingDatasetStatus::Planned,
-    ))
-    .await
-    .expect("create planned");
+    let plan = new_plan(dataset_id.clone(), model_spec_id.clone(), rc_id.clone());
+    repo.create_plan(plan.clone())
+        .await
+        .expect("create planned");
 
-    repo.mark_status(&dataset_id, TrainingDatasetStatus::Building)
+    repo.start_build(&dataset_id)
         .await
         .expect("planned -> building");
-    repo.mark_status(&dataset_id, TrainingDatasetStatus::Built)
+    repo.complete_build(&dataset_id, completion(&plan, TrainingDatasetStatus::Ready))
         .await
-        .expect("building -> built");
-    repo.mark_status(&dataset_id, TrainingDatasetStatus::Ready)
-        .await
-        .expect("built -> ready");
+        .expect("building -> ready");
 
     let insufficient_id = TrainingDatasetId::from_v7();
-    repo.create(new_dataset(
+    let insufficient_plan = new_plan(
         insufficient_id.clone(),
         model_spec_id.clone(),
         rc_id.clone(),
-        TrainingDatasetStatus::InsufficientLabels,
-    ))
+    );
+    repo.create_plan(insufficient_plan.clone())
+        .await
+        .expect("create insufficient plan");
+    repo.start_build(&insufficient_id)
+        .await
+        .expect("start insufficient");
+    repo.complete_build(
+        &insufficient_id,
+        completion(
+            &insufficient_plan,
+            TrainingDatasetStatus::InsufficientLabels,
+        ),
+    )
     .await
-    .expect("create insufficient");
+    .expect("complete insufficient");
 
     let err = repo
-        .mark_status(&insufficient_id, TrainingDatasetStatus::Ready)
+        .complete_build(
+            &insufficient_id,
+            completion(&insufficient_plan, TrainingDatasetStatus::Ready),
+        )
         .await
         .expect_err("insufficient -> ready must conflict");
     assert!(
@@ -198,14 +259,7 @@ async fn model_version_training_dataset_foreign_key() {
     let repo = PgTrainingDatasetRepository::new(db.clone());
     let registry = PgModelRegistryRepository::new(db.clone());
 
-    repo.create(new_dataset(
-        dataset_id.clone(),
-        model_spec_id.clone(),
-        rc_id,
-        TrainingDatasetStatus::Built,
-    ))
-    .await
-    .expect("create dataset");
+    create_ready(&repo, dataset_id.clone(), model_spec_id.clone(), rc_id).await;
 
     let hash = content_hash('a');
     registry

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{
-        Paginated, QuantEvidenceView, QuantRecommendationView, QuantReportListQuery,
-        RecommendationReportInfo, ReportDiff,
+        Paginated, QuantEvidenceView, QuantRecommendationView, QuantReportDiagnosticsView,
+        QuantReportListQuery, RecommendationReportInfo, ReportDiff,
     },
     enums::quant::ReportKind,
     types::{RecommendationId, RecommendationReportId},
@@ -20,16 +20,17 @@ use quant_pivot_error::QuantResult;
 
 /// Validated command to enqueue an ad-hoc report build.
 ///
-/// The trigger time is assigned by the port implementation at enqueue (it is the
-/// `as_of` anchor minus `source_delay_secs`), so the caller never supplies it.
+/// The decision time is assigned by the port implementation at enqueue. The
+/// knowledge lag only derives source cutoffs and never shifts the decision time,
+/// so the caller supplies neither clock value.
 #[derive(Debug, Clone)]
 pub struct AdHocReportCommand {
     /// Caller-supplied idempotency key (`ad_hoc:{request_id}` trigger key).
     pub request_id: String,
     /// Optional override of the configured `TopN` width.
     pub top_n: Option<u32>,
-    /// Optional override of the configured source delay.
-    pub source_delay_secs: Option<u64>,
+    /// Optional override of the configured PIT knowledge lag.
+    pub knowledge_lag_secs: Option<u64>,
 }
 
 /// Outcome of enqueuing an ad-hoc report: correlation handles for the async job.
@@ -57,6 +58,12 @@ pub trait QuantReportPort: Send + Sync {
         &self,
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
+
+    /// Load durable serving diagnostics for one report.
+    async fn find_report_diagnostics(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<QuantReportDiagnosticsView>>;
 
     /// Load the latest published (or published-empty) report of `kind`.
     async fn latest_report(

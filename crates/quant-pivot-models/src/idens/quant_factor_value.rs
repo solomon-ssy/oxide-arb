@@ -32,7 +32,7 @@ pub enum QuantFactorValue {
     FeatureVectorId,
     ModelRunId,
     MarketId,
-    AsOf,
+    DecisionAt,
     ValueState,
     RawValue,
     NormalizedScore,
@@ -57,7 +57,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_fk(QuantFactorValue::ModelRunId))
         .col(column::market_id(QuantFactorValue::MarketId))
         .col(
-            ColumnDef::new(QuantFactorValue::AsOf)
+            ColumnDef::new(QuantFactorValue::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
@@ -133,26 +133,26 @@ pub fn table() -> TableCreateStatement {
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
-            "idx_quant_factor_value_definition_as_of",
+            "idx_quant_factor_value_definition_decision_at",
             quant_factor_value_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_factor_value_definition_as_of")
+                .name("idx_quant_factor_value_definition_decision_at")
                 .table(QuantFactorValue::Table)
                 .col(QuantFactorValue::FactorDefinitionId)
-                .col((QuantFactorValue::AsOf, IndexOrder::Desc))
+                .col((QuantFactorValue::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "factor values by definition and PIT timestamp",
         ),
         IndexSpec::sea_query(
-            "idx_quant_factor_value_market_as_of",
+            "idx_quant_factor_value_market_decision_at",
             quant_factor_value_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_factor_value_market_as_of")
+                .name("idx_quant_factor_value_market_decision_at")
                 .table(QuantFactorValue::Table)
                 .col(QuantFactorValue::MarketId)
-                .col((QuantFactorValue::AsOf, IndexOrder::Desc))
+                .col((QuantFactorValue::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "factor values by market and PIT timestamp",
         ),
@@ -164,7 +164,7 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .name("idx_quant_factor_value_run")
                 .table(QuantFactorValue::Table)
                 .col(QuantFactorValue::ModelRunId)
-                .col((QuantFactorValue::AsOf, IndexOrder::Desc))
+                .col((QuantFactorValue::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "factor values by owning model run and PIT timestamp",
         ),

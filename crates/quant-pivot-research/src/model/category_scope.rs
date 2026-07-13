@@ -98,11 +98,15 @@ mod tests {
     use super::{infer_training_category_scope, validate_category_scope_weights};
     use crate::{
         factors::names::{DOMAIN_CRYPTO_STRIKE_PRESSURE, LIQUIDITY_DEPTH},
-        features::{FeatureName, FeatureValue, FeatureVector, names::market as market_names},
+        features::{
+            FeatureCell, FeatureName, FeatureStaleness, FeatureValue, FeatureVector,
+            names::market as market_names,
+        },
         selection::ModelFeatureRequirements,
         training::TrainingExample,
     };
     use chrono::Utc;
+    use quant_pivot_models::domain::DecisionClock;
     use quant_pivot_models::types::training::TrainingSampleSource;
     use quant_pivot_models::{
         enums::{common::MarketCategory, quant::DataQualityStatus},
@@ -112,29 +116,42 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn example(category: MarketCategory) -> TrainingExample {
+        let decision_at = Utc::now();
         let mut generic = BTreeMap::new();
-        generic.insert(market_names::CATEGORY, FeatureValue::Category(category));
+        generic.insert(
+            market_names::CATEGORY,
+            FeatureCell::observed(
+                FeatureValue::Category(category),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
         TrainingExample {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new("m"),
             token_id: TokenId::new("t"),
-            as_of: Utc::now(),
+            selected_market: crate::training::fixtures::selected_market(
+                &MarketId::new("m"),
+                &TokenId::new("t"),
+                category,
+            ),
+            decision_boundary: DecisionClock::new(0)
+                .boundary(decision_at)
+                .expect("boundary"),
             sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: FeatureVector {
                 market_id: MarketId::new("m"),
                 token_id: Some(TokenId::new("t")),
-                as_of: Utc::now(),
+                decision_at,
                 generic_schema_version: SchemaVersion::new(5),
                 generic,
                 domain: None,
-                substitutions: Vec::new(),
                 data_quality: DataQualityStatus::Fresh,
-                staleness_ms: 0,
-                source_refs: Vec::new(),
             },
             factor_values: Vec::new(),
             labels: Vec::new(),
             source_refs: Vec::new(),
+            decision_capture: None,
             lot_context: None,
             position_state: None,
             book_fidelity: None,

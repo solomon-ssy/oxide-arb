@@ -9,8 +9,8 @@ use quant_pivot_models::{
         quant::{ModelGovernanceAction, PublicationStatus},
     },
     types::{
-        AuditEventId, ContentHash, ModelGovernanceAuditId, ModelSpecId, ModelVersionId,
-        Probability, SchemaVersion, ShadowComparisonId,
+        AuditEventId, ContentHash, ModelGovernanceAuditId, ModelInputContract, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, SchemaVersion, ShadowComparisonId,
     },
 };
 use quant_pivot_repository::{
@@ -40,7 +40,8 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -85,7 +86,7 @@ async fn quant_shadow_comparison_migration_and_crud() {
             shadow_comparison_id: ShadowComparisonId::from_v7(),
             active_model_version_id: active.clone(),
             shadow_model_version_id: shadow.clone(),
-            as_of: now - ChronoDuration::hours(hours_ago),
+            decision_at: now - ChronoDuration::hours(hours_ago),
             topn_overlap: Probability::new(overlap),
             rank_delta_json: serde_json::json!({ "mean_abs_rank_delta": "1" }),
             score_delta_json: serde_json::json!({ "mean_abs_score_delta": "0.05" }),

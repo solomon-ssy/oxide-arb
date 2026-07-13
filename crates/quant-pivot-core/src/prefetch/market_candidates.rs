@@ -1,72 +1,149 @@
 //! Core-side projector that freezes [`MarketCandidate`] slices for the research
 //! market selector.
 //!
-//! [`MarketCandidateProvider`] is the producer half of the models-domain
-//! decoupling: it reads the registry, the lock-free [`BookStore`], the global
-//! [`IngestPipelineLagTracker`], and (for category-mapped markets) the frozen
-//! linkage ledger + domain-observation facts **once** per round, and emits
-//! neutral, serializable [`MarketCandidate`] values. The research selector
-//! consumes that slice as a pure function — it never sees a core type. All
-//! database reads happen up front in one batch; the per-market projection is
-//! pure over the frozen readings.
+//! [`MarketCandidateProvider`] loads the complete durable catalog candidate set and
+//! primary books once per decision boundary. Selection, feature computation,
+//! and decision capture then read the same immutable [`DecisionSnapshotSource`]
+//! so concurrent ingest/catalog updates cannot tear a report round.
 
 use std::{collections::HashMap, sync::Arc};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_api::ws::WsShardHealthPort;
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::{DomainAvailability, MarketCandidate, MarketRegistryInfo},
+    domain::{
+        DecisionBoundary, DomainAvailability, MarketCandidate, MarketDataHealth, MarketRegistryInfo,
+    },
     enums::common::MarketCategory,
     runtime_config::DomainConfig,
-    types::{MarketId, Usd},
+    types::{MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{MarketLinkageRepository, QuantFactReadRepository};
-
-use crate::{
-    ingest::{book_store::BookStore, market_registry::MarketRegistry},
-    observability::fact_lag::IngestPipelineLagTracker,
-    prefetch::domain_availability::resolve_domain_availability,
+use quant_pivot_research::{
+    features::ResolvedBook,
+    pit::{BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot},
 };
+
+use crate::prefetch::domain_availability::resolve_domain_availability;
+
+/// One report round's immutable PIT world and its selection candidates.
+pub struct MarketCandidateBatch {
+    pub candidates: Vec<MarketCandidate>,
+    pub snapshot_source: Arc<DecisionSnapshotSource>,
+}
+
+/// Boundary-bound in-memory projection returned by the durable batch resolver.
+pub struct DecisionSnapshotSource {
+    boundary: DecisionBoundary,
+    books: HashMap<TokenId, BookSnapshotAt>,
+    markets: HashMap<MarketId, ResolvedMarketSnapshot>,
+}
+
+impl DecisionSnapshotSource {
+    fn new(
+        boundary: DecisionBoundary,
+        books: HashMap<TokenId, BookSnapshotAt>,
+        snapshots: Vec<ResolvedMarketSnapshot>,
+    ) -> Self {
+        let markets = snapshots
+            .into_iter()
+            .map(|snapshot| (snapshot.market.market_id.clone(), snapshot))
+            .collect();
+        Self {
+            boundary,
+            books,
+            markets,
+        }
+    }
+
+    fn validate_boundary(&self, boundary: &DecisionBoundary) -> QuantResult<()> {
+        if boundary != &self.boundary {
+            return Err(ResearchError::PitResolution {
+                detail: "decision snapshot was queried with a different boundary".to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PointInTimeSnapshotSource for DecisionSnapshotSource {
+    async fn book_at_boundary(
+        &self,
+        token_id: &TokenId,
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<Option<BookSnapshotAt>> {
+        self.validate_boundary(boundary)?;
+        Ok(self.books.get(token_id).cloned())
+    }
+
+    async fn books_at_boundary(
+        &self,
+        token_ids: &[TokenId],
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<HashMap<TokenId, BookSnapshotAt>> {
+        self.validate_boundary(boundary)?;
+        Ok(token_ids
+            .iter()
+            .filter_map(|token_id| {
+                self.books
+                    .get(token_id)
+                    .cloned()
+                    .map(|book| (token_id.clone(), book))
+            })
+            .collect())
+    }
+
+    async fn market_snapshot_at(
+        &self,
+        market_id: &MarketId,
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<Option<ResolvedMarketSnapshot>> {
+        self.validate_boundary(boundary)?;
+        Ok(self.markets.get(market_id).cloned())
+    }
+
+    async fn market_snapshots_at_boundary(
+        &self,
+        boundary: &DecisionBoundary,
+    ) -> QuantResult<Vec<ResolvedMarketSnapshot>> {
+        self.validate_boundary(boundary)?;
+        let mut snapshots = self.markets.values().cloned().collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| {
+            left.market
+                .market_id
+                .as_str()
+                .cmp(right.market.market_id.as_str())
+        });
+        Ok(snapshots)
+    }
+}
 
 /// Projects the decision-time market world into frozen candidate facts.
 pub struct MarketCandidateProvider {
-    registry: Arc<MarketRegistry>,
-    book_store: Arc<BookStore>,
-    ws_health: Arc<dyn WsShardHealthPort>,
-    ingest_lag: Arc<IngestPipelineLagTracker>,
+    pit_source: Arc<dyn PointInTimeSnapshotSource>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     fact_read: Arc<dyn QuantFactReadRepository>,
 }
 
 impl MarketCandidateProvider {
-    /// Build the provider over the live registry, book store, WS health,
-    /// ingest-lag tracker, linkage ledger, and domain fact reader.
+    /// Build the provider over the durable PIT resolver and domain evidence.
     #[must_use]
     pub const fn new(
-        registry: Arc<MarketRegistry>,
-        book_store: Arc<BookStore>,
-        ws_health: Arc<dyn WsShardHealthPort>,
-        ingest_lag: Arc<IngestPipelineLagTracker>,
+        pit_source: Arc<dyn PointInTimeSnapshotSource>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
         fact_read: Arc<dyn QuantFactReadRepository>,
     ) -> Self {
         Self {
-            registry,
-            book_store,
-            ws_health,
-            ingest_lag,
+            pit_source,
             linkage_repo,
             fact_read,
         }
     }
 
-    /// Freeze every active market into a [`MarketCandidate`] as of `as_of`.
-    ///
-    /// The ingest-lag reading is process-global and taken once, so all candidates
-    /// in a round share the same `ingest_lag_ms`. Domain availability is read in
-    /// one batch over the category-mapped subset. Markets that vanish from the
-    /// registry between the id snapshot and the metadata read are skipped.
+    /// Freeze every visible market and required book at one boundary.
     ///
     /// # Errors
     ///
@@ -74,46 +151,74 @@ impl MarketCandidateProvider {
     /// fails closed as a whole rather than serving guessed availability).
     pub async fn candidates(
         &self,
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
         domain: &DomainConfig,
-    ) -> QuantResult<Vec<MarketCandidate>> {
-        let now_ms = u64::try_from(as_of.timestamp_millis()).unwrap_or(0);
-        let ingest_lag_ms = self.ingest_lag.peek_worst_ms();
-        let connection_healthy = self.ws_health.market_data_healthy();
-        let market_ids = self.registry.active_markets();
-
-        let mut infos = Vec::with_capacity(market_ids.len());
-        for market_id in market_ids.iter() {
-            if let Some(info) = self.registry.get_market(market_id) {
-                infos.push(info);
-            }
-        }
-        let availability = self
-            .project_domain_availability(&infos, as_of, domain)
+    ) -> QuantResult<MarketCandidateBatch> {
+        let decision_at = boundary.decision_at();
+        let snapshots = self
+            .pit_source
+            .market_snapshots_at_boundary(boundary)
             .await?;
-
-        Ok(infos
+        let mut token_ids = snapshots
             .iter()
-            .map(|info| {
-                let domain_availability = availability
-                    .get(&info.market_id)
-                    .copied()
-                    .unwrap_or(DomainAvailability::NotMapped);
-                self.project(
-                    info,
-                    as_of,
-                    now_ms,
-                    connection_healthy,
-                    ingest_lag_ms,
-                    domain_availability,
-                )
+            .flat_map(|snapshot| {
+                [
+                    snapshot.market.token_yes.clone(),
+                    snapshot.market.token_no.clone(),
+                ]
             })
-            .collect())
+            .collect::<Vec<_>>();
+        token_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        token_ids.dedup();
+        let books = self
+            .pit_source
+            .books_at_boundary(&token_ids, boundary)
+            .await?;
+        let infos = snapshots
+            .iter()
+            .map(|snapshot| Arc::clone(&snapshot.market))
+            .collect::<Vec<_>>();
+        let availability = self
+            .project_domain_availability(&infos, boundary, domain)
+            .await?;
+        let mut candidates = Vec::with_capacity(snapshots.len());
+        for snapshot in &snapshots {
+            let info = snapshot.market.as_ref();
+            let domain_availability =
+                availability.get(&info.market_id).copied().ok_or_else(|| {
+                    ResearchError::Determinism {
+                        detail: format!(
+                            "domain availability batch omitted market {}",
+                            info.market_id
+                        ),
+                    }
+                })?;
+            let book = books
+                .get(&info.token_yes)
+                .cloned()
+                .map(ResolvedBook::try_from)
+                .transpose()?;
+            candidates.push(project_candidate(
+                info,
+                book.as_ref(),
+                decision_at,
+                domain_availability,
+            )?);
+        }
+        Ok(MarketCandidateBatch {
+            candidates,
+            snapshot_source: Arc::new(DecisionSnapshotSource::new(
+                boundary.clone(),
+                books,
+                snapshots,
+            )),
+        })
     }
 
     /// One batched domain-availability reading for the category-mapped subset
     /// (Phase 11.2.2 §3.8): mapped ∧ enabled ∧ `Resolved` linkage ∧ the linked
-    /// instrument has a visible PIT observation at `as_of`.
+    /// instrument has an observation effective by its source cutoff and
+    /// available by the decision time.
     ///
     /// Thin wrapper over [`resolve_domain_availability`] — the same batched
     /// projector the offline keep-rate estimator uses, so the live and
@@ -122,7 +227,7 @@ impl MarketCandidateProvider {
     async fn project_domain_availability(
         &self,
         infos: &[Arc<MarketRegistryInfo>],
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
         domain: &DomainConfig,
     ) -> QuantResult<HashMap<MarketId, DomainAvailability>> {
         let markets: Vec<(MarketId, MarketCategory)> = infos
@@ -133,67 +238,50 @@ impl MarketCandidateProvider {
             self.linkage_repo.as_ref(),
             self.fact_read.as_ref(),
             domain,
-            as_of,
+            boundary,
             &markets,
         )
         .await
     }
+}
 
-    /// Project one registry row plus its primary-token book into a candidate.
-    fn project(
-        &self,
-        info: &MarketRegistryInfo,
-        as_of: DateTime<Utc>,
-        now_ms: u64,
-        connection_healthy: bool,
-        ingest_lag_ms: u64,
-        domain_availability: DomainAvailability,
-    ) -> MarketCandidate {
-        let book = self.book_store.load(&info.token_yes);
-        let (best_bid, best_ask, depth_usd, crossed, empty) =
-            book.as_ref()
-                .map_or((None, None, None, false, true), |snapshot| {
-                    let best_bid = snapshot.best_bid();
-                    let best_ask = snapshot.best_ask();
-                    let depth = Usd::new(
-                        (snapshot.total_bid_depth_usd + snapshot.total_ask_depth_usd).to_decimal(),
-                    );
-                    let crossed =
-                        matches!((best_bid, best_ask), (Some(bid), Some(ask)) if bid >= ask);
-                    let empty = snapshot.bids.is_empty() || snapshot.asks.is_empty();
-                    (best_bid, best_ask, Some(depth), crossed, empty)
-                });
-        // Local WS receipt-clock age (venue clock skew / reconnect re-writes
-        // excluded), consistent with the data-quality plane; falls back to the
-        // published venue timestamp, and `None` when no book exists at all.
-        let book_age_ms = self
-            .ws_health
-            .token_message_age_ms(&info.token_yes)
-            .or_else(|| {
-                book.as_ref()
-                    .map(|snapshot| now_ms.saturating_sub(snapshot.timestamp_ms))
-            });
-
-        MarketCandidate {
-            market_id: info.market_id.clone(),
-            event_id: info.event_id.clone(),
-            category: info.fee_category(),
-            status: info.status,
-            primary_token_id: info.token_yes.clone(),
-            secondary_token_id: Some(info.token_no.clone()),
-            end_date: info.end_date,
-            liquidity_usd: info.liquidity_usd,
-            volume_24h_usd: info.volume_24h,
-            best_bid,
-            best_ask,
-            depth_usd,
-            book_age_ms,
-            crossed,
-            empty,
-            connection_healthy,
-            ingest_lag_ms,
-            domain_availability,
-            observed_at: as_of,
-        }
-    }
+fn project_candidate(
+    info: &MarketRegistryInfo,
+    book: Option<&ResolvedBook>,
+    decision_at: DateTime<Utc>,
+    domain_availability: DomainAvailability,
+) -> QuantResult<MarketCandidate> {
+    let book_age_ms = book
+        .map(|book| {
+            u64::try_from((decision_at - book.effective_at).num_milliseconds()).map_err(|_| {
+                ResearchError::PitResolution {
+                    detail: format!(
+                        "book {} observation {} is after decision {decision_at}",
+                        book.token_id, book.effective_at
+                    ),
+                }
+            })
+        })
+        .transpose()?;
+    Ok(MarketCandidate {
+        market_id: info.market_id.clone(),
+        event_id: info.event_id.clone(),
+        category: info.fee_category(),
+        status: info.status,
+        primary_token_id: info.token_yes.clone(),
+        secondary_token_id: Some(info.token_no.clone()),
+        end_date: info.end_date,
+        liquidity_usd: info.liquidity_usd,
+        volume_24h_usd: info.volume_24h,
+        best_bid: book.and_then(ResolvedBook::best_bid),
+        best_ask: book.and_then(ResolvedBook::best_ask),
+        depth_usd: book.map(ResolvedBook::visible_liquidity_usd),
+        book_age_ms,
+        crossed: book.map(ResolvedBook::is_crossed),
+        empty: book.map(ResolvedBook::is_empty),
+        market_data_health: MarketDataHealth::NotApplicable,
+        ingest_lag_ms: None,
+        domain_availability,
+        decision_at,
+    })
 }

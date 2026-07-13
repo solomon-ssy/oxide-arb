@@ -18,6 +18,7 @@
 
 use std::{str::FromStr, time::Duration};
 
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{TradeParticipantRole, TradeTapePrint},
     runtime_config::{DecimalString, FeatureFamily},
@@ -49,14 +50,14 @@ impl FeatureGroupBuilder for StructuralFeatureBuilder {
         FeatureFamily::Structural
     }
 
-    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
+    fn compute(&self, ctx: &FeatureComputeCtx<'_>) -> QuantResult<Vec<RawFeature>> {
         let mut out = Vec::with_capacity(16);
         out.extend(shock_features(ctx));
         out.push(price_extremity_feature(ctx));
         out.push(book_churn_intensity_feature(ctx));
         out.extend(trade_tape_features(ctx));
         out.extend(negrisk_features(ctx));
-        out
+        Ok(out)
     }
 }
 
@@ -66,9 +67,10 @@ fn shock_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
     let evidence = EvidenceSourceRef {
         source_kind: EvidenceSourceKind::ClickHouseFact,
         reference: window.token_id.as_str().to_owned(),
-        observed_at: window
+        effective_at: window
             .freshest_bucket_time()
             .unwrap_or_else(|| window.cutoff()),
+        available_at: window.latest_available_at(),
     };
     let lookback = Duration::from_secs(ctx.config.structural.shock_window_secs);
     let mids: Vec<_> = window
@@ -144,9 +146,10 @@ fn book_churn_intensity_feature(ctx: &FeatureComputeCtx<'_>) -> RawFeature {
                 EvidenceSourceRef {
                     source_kind: EvidenceSourceKind::ClickHouseFact,
                     reference: window.token_id.as_str().to_owned(),
-                    observed_at: window
+                    effective_at: window
                         .freshest_bucket_time()
                         .unwrap_or_else(|| window.cutoff()),
+                    available_at: window.latest_available_at(),
                 },
             )
         },
@@ -268,10 +271,11 @@ fn trade_tape_evidence(ctx: &FeatureComputeCtx<'_>) -> EvidenceSourceRef {
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::TradeTape,
         reference: ctx.trade_tape.market_id.as_str().to_owned(),
-        observed_at: ctx
+        effective_at: ctx
             .trade_tape
             .freshest_trade_time()
             .unwrap_or_else(|| ctx.trade_tape.cutoff()),
+        available_at: ctx.trade_tape.latest_available_at(),
     }
 }
 
@@ -351,10 +355,15 @@ fn negrisk_features(ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
     if ctx.sibling_leg_total == 0 || ctx.sibling_legs.len() != ctx.sibling_leg_total {
         return negrisk_all_missing(NullReason::LegBookMissing);
     }
-    let Some(aggregate) = LegAggregate::from_legs(ctx.sibling_legs) else {
+    let Ok(leg_count) = u64::try_from(ctx.sibling_legs.len()) else {
+        return negrisk_all_missing(NullReason::OutOfValidRange);
+    };
+    let Some(aggregate) = LegAggregate::from_legs(ctx.sibling_legs, leg_count) else {
         return negrisk_all_missing(NullReason::LegBookMissing);
     };
-    let evidence = sibling_evidence(ctx.sibling_legs, ctx.as_of);
+    let Some(evidence) = sibling_evidence(ctx.sibling_legs) else {
+        return negrisk_all_missing(NullReason::LegBookMissing);
+    };
     vec![
         RawFeature::present(
             names::NEGRISK_LEG_ASK_SUM,
@@ -389,7 +398,7 @@ struct LegAggregate {
 
 impl LegAggregate {
     /// Compute the aggregate, or `None` when any leg does not quote both sides.
-    fn from_legs(legs: &[ResolvedLeg]) -> Option<Self> {
+    fn from_legs(legs: &[ResolvedLeg], leg_count: u64) -> Option<Self> {
         let mut ask_sum = Decimal::ZERO;
         let mut bid_sum = Decimal::ZERO;
         let mut favorite_ask = Decimal::MIN;
@@ -411,7 +420,7 @@ impl LegAggregate {
         Some(Self {
             ask_sum,
             bid_sum,
-            leg_count: u64::try_from(legs.len()).unwrap_or(u64::MAX),
+            leg_count,
             convert_edge: basket_cost - no_favorite_cost,
         })
     }
@@ -435,26 +444,22 @@ fn book_evidence(book: &ResolvedBook) -> EvidenceSourceRef {
     EvidenceSourceRef {
         source_kind: EvidenceSourceKind::Book,
         reference: book.token_id.as_str().to_owned(),
-        observed_at: book.observed_at,
+        effective_at: book.effective_at,
+        available_at: Some(book.available_at),
     }
 }
 
-/// Sibling-leg evidence anchored on the STALEST leg (worst-case freshness),
-/// falling back to `as_of` for an empty set (kept total and deterministic).
-fn sibling_evidence(
-    legs: &[ResolvedLeg],
-    as_of: chrono::DateTime<chrono::Utc>,
-) -> EvidenceSourceRef {
-    let observed_at = legs
-        .iter()
-        .map(|leg| leg.book.observed_at)
-        .min()
-        .unwrap_or(as_of);
-    EvidenceSourceRef {
+/// Sibling-leg evidence anchored on the stalest leg (worst-case freshness).
+/// An empty leg set has no evidence and remains missing.
+fn sibling_evidence(legs: &[ResolvedLeg]) -> Option<EvidenceSourceRef> {
+    let effective_at = legs.iter().map(|leg| leg.book.effective_at).min()?;
+    let available_at = legs.iter().map(|leg| leg.book.available_at).max();
+    Some(EvidenceSourceRef {
         source_kind: EvidenceSourceKind::Book,
         reference: "negrisk_event_legs".to_owned(),
-        observed_at,
-    }
+        effective_at,
+        available_at,
+    })
 }
 
 /// Wrap a windowed decimal, or mark it missing for insufficient history.
@@ -473,8 +478,6 @@ fn decimal_window(
 
 #[cfg(test)]
 mod trade_tape_null_reason_tests {
-    use std::time::Duration;
-
     use chrono::Utc;
     use quant_pivot_models::{
         domain::{TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind},
@@ -498,9 +501,9 @@ mod trade_tape_null_reason_tests {
         let market_id = MarketId::new("m-null");
         let as_of = Utc::now();
         if source_available {
-            TradeTapeWindowSnapshot::available(market_id, as_of, Duration::ZERO, prints)
+            TradeTapeWindowSnapshot::available(market_id, as_of, as_of, prints)
         } else {
-            TradeTapeWindowSnapshot::empty(market_id, as_of, Duration::ZERO)
+            TradeTapeWindowSnapshot::empty(market_id, as_of, as_of)
         }
     }
 
@@ -520,12 +523,13 @@ mod trade_tape_null_reason_tests {
         trade_tape: &TradeTapeWindowSnapshot,
         config: &FeaturesConfig,
     ) -> Vec<RawFeature> {
-        let window =
-            MarketWindowSnapshot::empty(TokenId::new("tok-yes"), Utc::now(), Duration::ZERO);
+        let as_of = trade_tape.decision_at;
+        let window = MarketWindowSnapshot::empty(TokenId::new("tok-yes"), as_of, as_of);
         let ctx = FeatureComputeCtx {
-            as_of: Utc::now(),
+            decision_at: as_of,
             category: MarketCategory::Sports,
             book: None,
+            secondary_book: None,
             market: None,
             window: &window,
             trade_tape,
@@ -534,9 +538,11 @@ mod trade_tape_null_reason_tests {
             config,
             data_quality: &DataQualityConfig::default(),
             book_snapshot_ref: None,
+            secondary_book_snapshot_ref: None,
         };
         StructuralFeatureBuilder
             .compute(&ctx)
+            .expect("valid structural fixture")
             .into_iter()
             .filter(|feature| is_trade_tape_feature(&feature.name))
             .collect()
@@ -547,6 +553,7 @@ mod trade_tape_null_reason_tests {
             market_id: MarketId::new("m-null"),
             token_id: TokenId::new("tok-yes"),
             event_time: Utc::now(),
+            available_at: None,
             participant_address: address.to_owned(),
             participant_role: TradeParticipantRole::Maker,
             side: None,

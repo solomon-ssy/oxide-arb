@@ -147,7 +147,7 @@ pub enum ResearchError {
     },
 
     /// A future-leakage invariant was violated: a feature read state newer than
-    /// `as_of - source_delay`, or a label read state at or before `as_of`. This
+    /// `as_of - knowledge_lag`, or a label read state at or before `as_of`. This
     /// is a hard, money-critical failure — the dataset must never be persisted.
     #[error("future leakage detected: {detail}")]
     LeakageDetected {
@@ -170,6 +170,14 @@ pub enum ResearchError {
     #[error("leakage-aware validation methodology failed: {detail}")]
     ValidationMethodology {
         /// Context describing the violated invariant.
+        detail: String,
+    },
+
+    /// Portfolio optimizer inputs or outputs could not cross the solver's
+    /// checked `Decimal`/`f64` boundary without fabricating a monetary value.
+    #[error("portfolio optimization failed: {detail}")]
+    PortfolioOptimization {
+        /// Context describing the conversion or solver-boundary failure.
         detail: String,
     },
 

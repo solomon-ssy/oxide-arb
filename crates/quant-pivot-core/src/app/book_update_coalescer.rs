@@ -205,7 +205,7 @@ mod tests {
             fee_schedule: None,
             end_date: None,
             resolved_at: None,
-            created_at: Utc::now(),
+            created_at: Some(Utc::now()),
             updated_at: Utc::now(),
         }
     }

@@ -1,9 +1,10 @@
 //! Market-linkage ledger repository trait (Phase 11.2.2).
 
-use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{MarketLinkageInfo, MarketLinkageListQuery, NewMarketLinkage, Paginated},
+    domain::{
+        DecisionBoundary, MarketLinkageInfo, MarketLinkageListQuery, NewMarketLinkage, Paginated,
+    },
     types::{MarketId, MarketLinkageId},
 };
 
@@ -19,28 +20,27 @@ pub trait MarketLinkageRepository: Send + Sync {
     /// `content_hash` already exists, the existing row is returned untouched.
     async fn append(&self, linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError>;
 
-    /// The PIT-valid record for `market_id` at `as_of`: the latest row with
-    /// `derived_at <= as_of` (never a future revision).
+    /// The latest row visible at `boundary`: source-effective no later than the
+    /// linkage cutoff and system-available no later than the decision time.
     async fn valid_at(
         &self,
         market_id: &MarketId,
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
     ) -> Result<Option<MarketLinkageInfo>, StorageError>;
 
-    /// Batched [`Self::valid_at`]: each market's PIT-valid record at `as_of`
-    /// (`derived_at <= as_of`, never a future revision), one row per market
+    /// Batched [`Self::valid_at`], one row per market
     /// that has one. This is the **only** PIT-correct batch read — the online
     /// domain-availability projector must use this, never
-    /// [`Self::latest_for_markets`] (which ignores `as_of` entirely and would
+    /// [`Self::latest_for_markets`] (which ignores the decision boundary and would
     /// leak a future metadata revision into a past decision).
     async fn valid_at_for_markets(
         &self,
         market_ids: &[MarketId],
-        as_of: DateTime<Utc>,
+        boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError>;
 
-    /// Each market's newest ledger record (any status), ignoring `as_of`
-    /// entirely. Drives **only** resolver idempotence (skip re-resolving a
+    /// Each market's newest ledger record (any status), ignoring decision-time
+    /// visibility entirely. Drives **only** resolver idempotence (skip re-resolving a
     /// market whose newest record already matches the current metadata/ruleset)
     /// — never a PIT decision-time read; use [`Self::valid_at_for_markets`] for
     /// that.
@@ -49,13 +49,13 @@ pub trait MarketLinkageRepository: Send + Sync {
         market_ids: &[MarketId],
     ) -> Result<Vec<MarketLinkageInfo>, StorageError>;
 
-    /// The full ledger history for the given markets with
-    /// `derived_at <= derived_before`, ascending by `derived_at`. Feeds the
-    /// offline replay prefetch (bitemporal per-`as_of` selection is in-memory).
+    /// The full ledger history visible through `end_boundary`, ordered by
+    /// market, effective time, availability time, and stable linkage id. Feeds
+    /// offline replay; each sample applies its own boundary in memory.
     async fn ledger_for_markets(
         &self,
         market_ids: &[MarketId],
-        derived_before: DateTime<Utc>,
+        end_boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError>;
 
     /// Look up one ledger record by id.

@@ -8,8 +8,9 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
-        NewBacktestReport, NewFactorDefinition, NewModelComparisonReport, NewModelRun,
-        NewModelSpec, NewModelVersion, NewTrainingDataset,
+        CompleteTrainingDatasetBuild, NewBacktestReport, NewFactorDefinition,
+        NewModelComparisonReport, NewModelRun, NewModelSpec, NewModelVersion,
+        NewTrainingDatasetPlan,
     },
     enums::{
         factor::{FactorDefinitionScope, FactorFamily},
@@ -19,9 +20,11 @@ use quant_pivot_models::{
         },
     },
     types::{
-        ArtifactUri, BacktestReportId, ContentHash, DatasetCoverage, FactorDefinitionId,
-        ModelComparisonReportId, ModelRunId, ModelSpecId, ModelVersionId, Probability,
-        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
+        ArtifactUri, BacktestReportId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        DatasetCoverage, DatasetManifest, FactorDefinitionId, ModelComparisonReportId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        Probability, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
+        TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -34,6 +37,7 @@ use quant_pivot_repository::{
         ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
     },
 };
+use quant_pivot_research::training::dataset_manifest_hash;
 use rust_decimal_macros::dec;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
@@ -57,7 +61,6 @@ pub struct ResearchUiSeedSummary {
     pub factors: usize,
     pub primary_model_spec_id: Option<ModelSpecId>,
     pub dataset_ready_id: Option<TrainingDatasetId>,
-    pub dataset_built_id: Option<TrainingDatasetId>,
     pub baseline_model_version_id: Option<ModelVersionId>,
     pub candidate_model_version_id: Option<ModelVersionId>,
     pub shadow_model_version_id: Option<ModelVersionId>,
@@ -186,14 +189,8 @@ async fn load_existing_datasets(db: &DatabaseConnection, summary: &mut ResearchU
         .expect("list research datasets");
     summary.datasets = dataset_rows.len();
     for row in &dataset_rows {
-        match row.status {
-            TrainingDatasetStatus::Ready => {
-                summary.dataset_ready_id = Some(row.training_dataset_id.clone());
-            }
-            TrainingDatasetStatus::Built => {
-                summary.dataset_built_id = Some(row.training_dataset_id.clone());
-            }
-            _ => {}
+        if row.status == TrainingDatasetStatus::Ready {
+            summary.dataset_ready_id = Some(row.training_dataset_id.clone());
         }
     }
 }
@@ -299,7 +296,8 @@ async fn seed_secondary_model_spec(registry: &PgModelRegistryRepository) -> usiz
                 "ui_demo": true,
                 "notes": "secondary spec for model-spec catalog filters"
             }),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Draft,
         })
         .await
@@ -316,48 +314,130 @@ async fn seed_training_datasets(
     let scenarios: [(&str, TrainingDatasetStatus, i64); 6] = [
         ("planned", TrainingDatasetStatus::Planned, 0),
         ("building", TrainingDatasetStatus::Building, 0),
-        ("built", TrainingDatasetStatus::Built, 11_500),
         ("ready", TrainingDatasetStatus::Ready, 11_200),
+        (
+            "insufficient",
+            TrainingDatasetStatus::InsufficientLabels,
+            11_500,
+        ),
         ("failed", TrainingDatasetStatus::Failed, 0),
         ("expired", TrainingDatasetStatus::Expired, 9_800),
     ];
 
     for (slug, status, built_samples) in scenarios {
-        let dataset_id = TrainingDatasetId::from_v7();
-        let window_start = Utc::now() - ChronoDuration::days(14);
-        let hash = content_hash(&format!("dataset-{slug}"));
-        repo.create(NewTrainingDataset {
-            training_dataset_id: dataset_id.clone(),
-            model_spec_id: model_spec_id.clone(),
-            window_start,
-            window_end: window_start + ChronoDuration::days(7),
+        let dataset_id = seed_training_dataset_scenario(
+            repo,
+            model_spec_id,
+            runtime_config_version_id,
+            slug,
             status,
-            purpose: DatasetPurpose::Training,
-            feature_schema_hash: hash.clone(),
-            factor_schema_hash: hash.clone(),
-            label_schema_hash: hash.clone(),
-            dataset_hash: hash,
-            parquet_uri: ArtifactUri::parse(format!("file:///tmp/ui-demo-research-{slug}.parquet"))
-                .expect("parquet uri"),
-            sample_count: built_samples,
-            source_delay_secs: 10,
-            sample_interval_secs: 3_600,
-            horizons_secs: TrainingHorizonsSecs(vec![3_600, 86_400]),
-            coverage_json: dataset_coverage(slug, built_samples),
-            runtime_config_version_id: runtime_config_version_id.clone(),
-        })
-        .await
-        .expect("create training dataset");
+            built_samples,
+        )
+        .await;
 
-        if status == TrainingDatasetStatus::Built {
-            summary.dataset_built_id = Some(dataset_id.clone());
-        }
         if status == TrainingDatasetStatus::Ready {
             summary.dataset_ready_id = Some(dataset_id);
         }
     }
 
     scenarios.len()
+}
+
+async fn seed_training_dataset_scenario(
+    repo: &PgTrainingDatasetRepository,
+    model_spec_id: &ModelSpecId,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+    slug: &str,
+    status: TrainingDatasetStatus,
+    built_samples: i64,
+) -> TrainingDatasetId {
+    let dataset_id = TrainingDatasetId::from_v7();
+    let window_start = Utc::now() - ChronoDuration::days(14);
+    let hash = content_hash(&format!("dataset-{slug}"));
+    repo.create_plan(NewTrainingDatasetPlan {
+        training_dataset_id: dataset_id.clone(),
+        model_spec_id: model_spec_id.clone(),
+        window_start,
+        window_end: window_start + ChronoDuration::days(7),
+        purpose: DatasetPurpose::Training,
+        knowledge_lag_secs: 10,
+        sample_interval_secs: 3_600,
+        horizons_secs: TrainingHorizonsSecs(vec![3_600, 86_400]),
+        feature_schema_version: Some(SchemaVersion::new(6)),
+        sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+        runtime_config_version_id: runtime_config_version_id.clone(),
+    })
+    .await
+    .expect("create training dataset");
+
+    if status != TrainingDatasetStatus::Planned {
+        repo.start_build(&dataset_id)
+            .await
+            .expect("start training dataset build");
+    }
+    match status {
+        TrainingDatasetStatus::Ready
+        | TrainingDatasetStatus::InsufficientLabels
+        | TrainingDatasetStatus::Expired => {
+            let manifest = DatasetManifest {
+                format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+                training_dataset_id: dataset_id.clone(),
+                model_spec_id: model_spec_id.clone(),
+                runtime_config_version_id: runtime_config_version_id.clone(),
+                window_start,
+                window_end: window_start + ChronoDuration::days(7),
+                purpose: DatasetPurpose::Training,
+                knowledge_lag_secs: 10,
+                sample_interval_secs: 3_600,
+                horizons_secs: vec![3_600, 86_400],
+                feature_schema_hash: hash.clone(),
+                factor_schema_hash: hash.clone(),
+                label_schema_hash: hash.clone(),
+                semantic_dataset_hash: hash.clone(),
+                source_fingerprint: content_hash(&format!("dataset-sources-{slug}")),
+                sample_count: u64::try_from(built_samples).expect("non-negative sample count"),
+            };
+            let manifest_hash = dataset_manifest_hash(&manifest).expect("manifest hash");
+            repo.complete_build(
+                &dataset_id,
+                CompleteTrainingDatasetBuild {
+                    status: if status == TrainingDatasetStatus::Expired {
+                        TrainingDatasetStatus::Ready
+                    } else {
+                        status
+                    },
+                    feature_schema_hash: hash.clone(),
+                    factor_schema_hash: hash.clone(),
+                    label_schema_hash: hash.clone(),
+                    dataset_hash: hash,
+                    manifest_hash,
+                    manifest_json: manifest,
+                    artifact_bytes_hash: content_hash(&format!("dataset-bytes-{slug}")),
+                    parquet_uri: ArtifactUri::parse(format!(
+                        "file:///tmp/ui-demo-research-{slug}.parquet"
+                    ))
+                    .expect("parquet uri"),
+                    sample_count: built_samples,
+                    coverage_json: dataset_coverage(slug, built_samples),
+                    failure_detail: None,
+                },
+            )
+            .await
+            .expect("complete training dataset build");
+            if status == TrainingDatasetStatus::Expired {
+                repo.expire(&dataset_id)
+                    .await
+                    .expect("expire training dataset");
+            }
+        }
+        TrainingDatasetStatus::Failed => {
+            repo.fail_build(&dataset_id, "seeded build failure".to_owned())
+                .await
+                .expect("fail training dataset build");
+        }
+        TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => {}
+    }
+    dataset_id
 }
 
 async fn seed_model_versions(
@@ -371,7 +451,7 @@ async fn seed_model_versions(
         registry,
         model_spec_id,
         PublicationStatus::Candidate,
-        Some(ready_dataset),
+        Some(ready_dataset.clone()),
         "candidate",
         demo_metrics(dec!(0.31), dec!(0.58)),
     )
@@ -382,7 +462,7 @@ async fn seed_model_versions(
         registry,
         model_spec_id,
         PublicationStatus::Candidate,
-        Some(summary.dataset_built_id.clone().expect("built dataset")),
+        Some(ready_dataset),
         "shadow",
         demo_metrics(dec!(0.27), dec!(0.55)),
     )
@@ -396,16 +476,12 @@ async fn seed_model_versions(
     let retired_id = create_model_version(
         registry,
         model_spec_id,
-        PublicationStatus::Candidate,
+        PublicationStatus::Published,
         None,
         "retired",
         demo_metrics(dec!(0.22), dec!(0.52)),
     )
     .await;
-    registry
-        .publish_model_version(&retired_id)
-        .await
-        .expect("publish retired target");
     registry
         .retire_model_version(&retired_id)
         .await
@@ -734,10 +810,13 @@ async fn seed_factor(
     scope: FactorDefinitionScope,
     status: PublicationStatus,
 ) -> FactorDefinitionId {
-    let factor_definition_id = FactorDefinitionId::from_v7();
+    let definition_hash = content_hash(&format!("factor-definition-{name}"));
+    let factor_definition_id = FactorDefinitionId::from_definition_hash(&definition_hash);
     let row = factors
         .create_definition(NewFactorDefinition {
             factor_definition_id: factor_definition_id.clone(),
+            definition_hash,
+            feature_contract_hash: content_hash("ui-demo-feature-contract"),
             name: name.to_owned(),
             factor_family,
             scope,
@@ -783,7 +862,7 @@ fn demo_metrics(
 }
 
 fn dataset_coverage(_slug: &str, built_samples: i64) -> DatasetCoverage {
-    let built = u64::try_from(built_samples).unwrap_or(0);
+    let built = u64::try_from(built_samples).expect("demo dataset sample count is non-negative");
     DatasetCoverage {
         planned_samples: 12_000,
         built_examples: built,

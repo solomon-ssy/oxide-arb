@@ -26,7 +26,7 @@ use serde::Serialize;
 
 use crate::{
     factors::FactorSet,
-    features::{FeatureName, FeatureSchema, FeatureSpec, FeatureValue, FeatureVector},
+    features::{FeatureCell, FeatureName, FeatureSchema, FeatureSpec, FeatureValue, FeatureVector},
     model::ModelArtifact,
     selection::ModelFeatureRequirements,
     training::LabelName,
@@ -71,11 +71,17 @@ struct FeatureHashComposite {
 /// Quantize every embedded `Decimal` in `values` at [`HASH_STAT_SCALE`],
 /// returning a hash-only projection (the caller's stored map is untouched).
 fn quantized_for_hash(
-    values: &BTreeMap<FeatureName, FeatureValue>,
-) -> BTreeMap<FeatureName, FeatureValue> {
+    values: &BTreeMap<FeatureName, FeatureCell>,
+) -> BTreeMap<FeatureName, FeatureCell> {
     values
         .iter()
-        .map(|(name, value)| (name.clone(), quantize_value_for_hash(value)))
+        .map(|(name, cell)| {
+            let mut projected = cell.clone();
+            projected.value = projected.value.as_ref().map(quantize_value_for_hash);
+            projected.evidence = None;
+            projected.staleness = crate::features::FeatureStaleness::Unknown;
+            (name.clone(), projected)
+        })
         .collect()
 }
 
@@ -91,10 +97,7 @@ fn quantize_value_for_hash(value: &FeatureValue) -> FeatureValue {
         FeatureValue::Probability(inner) => {
             FeatureValue::Probability(inner.round_dp(HASH_STAT_SCALE))
         }
-        FeatureValue::Count(_)
-        | FeatureValue::Bool(_)
-        | FeatureValue::Category(_)
-        | FeatureValue::Missing(_) => value.clone(),
+        FeatureValue::Count(_) | FeatureValue::Bool(_) | FeatureValue::Category(_) => value.clone(),
     }
 }
 
@@ -228,7 +231,10 @@ impl ResearchHasher {
 
     /// Canonical hash of a serialized model artifact.
     pub fn model_artifact(artifact: &ModelArtifact) -> QuantResult<ContentHash> {
-        Self::canonical(artifact)
+        Self::canonical(&crate::model::artifact::StoredModelArtifactRef {
+            format_version: crate::model::artifact::MODEL_ARTIFACT_FORMAT_VERSION,
+            artifact,
+        })
     }
 
     /// Order-independent hash of a dataset's label schema (`label_schema_hash`).
@@ -321,15 +327,15 @@ mod tests {
     fn sample_spec(name: &'static str) -> FeatureSpec {
         FeatureSpec {
             name: FeatureName::from_static(name),
+            compute_revision: 1,
             family: FeatureFamily::PriceBook,
             value_kind: FeatureValueKind::Decimal,
             unit: FeatureUnit::Ratio,
             valid_range: None,
             null_policy: NullPolicy::Penalize,
             source_requirement: SourceRequirement::PublishedL2Book,
-            point_in_time_rule: PitRule::BookVersionAtOrBeforeAsOf,
+            point_in_time_rule: PitRule::BookVersionAtOrBeforeSourceCutoff,
             staleness_policy: StalenessRule::MaxBookAge,
-            critical: false,
         }
     }
 
@@ -338,11 +344,13 @@ mod tests {
         let forward = FeatureSchema::new(
             SchemaVersion::new(1),
             vec![sample_spec("alpha"), sample_spec("beta")],
-        );
+        )
+        .expect("schema");
         let shuffled = FeatureSchema::new(
             SchemaVersion::new(1),
             vec![sample_spec("beta"), sample_spec("alpha")],
-        );
+        )
+        .expect("schema");
         assert_eq!(
             ResearchHasher::feature_schema(&forward).expect("hash"),
             ResearchHasher::feature_schema(&shuffled).expect("hash"),
@@ -351,8 +359,10 @@ mod tests {
 
     #[test]
     fn feature_schema_version_changes_hash() {
-        let v1 = FeatureSchema::new(SchemaVersion::new(1), vec![sample_spec("alpha")]);
-        let v2 = FeatureSchema::new(SchemaVersion::new(2), vec![sample_spec("alpha")]);
+        let v1 =
+            FeatureSchema::new(SchemaVersion::new(1), vec![sample_spec("alpha")]).expect("schema");
+        let v2 =
+            FeatureSchema::new(SchemaVersion::new(2), vec![sample_spec("alpha")]).expect("schema");
         assert_ne!(
             ResearchHasher::feature_schema(&v1).expect("hash"),
             ResearchHasher::feature_schema(&v2).expect("hash"),
@@ -395,7 +405,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::features::{
-        DomainFeatureSlice, EvidenceSourceRef, FeatureValue, FeatureVector, NullReason,
+        DomainFeatureSlice, EvidenceSourceRef, FeatureCell, FeatureStaleness, FeatureValue,
+        FeatureVector,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -410,29 +421,26 @@ mod tests {
     /// across the two builders below so tests can prove those fields never
     /// perturb `feature_hash`.
     fn base_vector(
-        generic: BTreeMap<FeatureName, FeatureValue>,
+        generic: BTreeMap<FeatureName, FeatureCell>,
         domain: Option<DomainFeatureSlice>,
     ) -> FeatureVector {
         FeatureVector {
             market_id: MarketId::new("m1"),
             token_id: Some(TokenId::new("t1")),
-            as_of: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+            decision_at: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
             generic_schema_version: SchemaVersion::new(1),
             generic,
             domain,
-            substitutions: Vec::new(),
             data_quality: DataQualityStatus::Fresh,
-            staleness_ms: 100,
-            source_refs: Vec::new(),
         }
     }
 
-    fn generic_with(
-        name: &'static str,
-        value: FeatureValue,
-    ) -> BTreeMap<FeatureName, FeatureValue> {
+    fn generic_with(name: &'static str, value: FeatureValue) -> BTreeMap<FeatureName, FeatureCell> {
         let mut map = BTreeMap::new();
-        map.insert(FeatureName::from_static(name), value);
+        map.insert(
+            FeatureName::from_static(name),
+            FeatureCell::observed(value, None, FeatureStaleness::Unknown),
+        );
         map
     }
 
@@ -467,6 +475,38 @@ mod tests {
     }
 
     #[test]
+    fn feature_vector_hash_commits_the_secondary_executable_ask() {
+        let generic = generic_with(
+            "book.mid",
+            FeatureValue::Probability(Probability::new(dec!(0.5))),
+        );
+        let mut first = base_vector(generic, None);
+        first.generic.insert(
+            FeatureName::from_static("book.secondary_best_ask"),
+            FeatureCell::observed(
+                FeatureValue::Probability(Probability::new(dec!(0.44))),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
+        let mut second = first.clone();
+        second.generic.insert(
+            FeatureName::from_static("book.secondary_best_ask"),
+            FeatureCell::observed(
+                FeatureValue::Probability(Probability::new(dec!(0.45))),
+                None,
+                FeatureStaleness::Unknown,
+            ),
+        );
+
+        assert_ne!(
+            ResearchHasher::feature_vector(&first).expect("first hash"),
+            ResearchHasher::feature_vector(&second).expect("second hash"),
+            "durable parity must observe an executable NO-ask change"
+        );
+    }
+
+    #[test]
     fn feature_vector_hash_ignores_context_and_audit_metadata() {
         // Same generic/domain content; every context/audit field differs.
         let generic = generic_with(
@@ -474,31 +514,32 @@ mod tests {
             FeatureValue::Probability(Probability::new(dec!(0.5))),
         );
         let a = base_vector(generic.clone(), None);
-        let b = FeatureVector {
+        let mut b = FeatureVector {
             market_id: MarketId::new("m-different"),
             token_id: None,
-            as_of: Utc.with_ymd_and_hms(2026, 6, 1, 12, 30, 0).unwrap(),
+            decision_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 30, 0).unwrap(),
             generic_schema_version: SchemaVersion::new(1),
             generic,
             domain: None,
-            substitutions: vec![crate::features::SubstitutionAudit {
-                feature: FeatureName::from_static("market.neg_risk"),
-                reason: NullReason::SourceUnavailable,
-                substituted: FeatureValue::Bool(false),
-            }],
             data_quality: DataQualityStatus::Degraded,
-            staleness_ms: 987_654,
-            source_refs: vec![EvidenceSourceRef {
-                source_kind: EvidenceSourceKind::Book,
-                reference: "snapshot-42".to_owned(),
-                observed_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 29, 0).unwrap(),
-            }],
         };
+        b.generic
+            .get_mut(&FeatureName::from_static("book.mid"))
+            .expect("cell")
+            .evidence = Some(EvidenceSourceRef {
+            source_kind: EvidenceSourceKind::Book,
+            reference: "snapshot-42".to_owned(),
+            effective_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 29, 0).unwrap(),
+            available_at: Some(Utc.with_ymd_and_hms(2026, 6, 1, 12, 29, 1).unwrap()),
+        });
+        b.generic
+            .get_mut(&FeatureName::from_static("book.mid"))
+            .expect("cell")
+            .staleness = FeatureStaleness::Known { age_ms: 987_654 };
         assert_eq!(
             ResearchHasher::feature_vector(&a).expect("hash"),
             ResearchHasher::feature_vector(&b).expect("hash"),
-            "market_id/token_id/as_of/staleness_ms/source_refs/data_quality/substitutions \
-             are context metadata and must never perturb feature_hash",
+            "context and cell audit metadata must never perturb feature_hash",
         );
     }
 
@@ -603,8 +644,8 @@ mod tests {
         );
         let _ = ResearchHasher::feature_vector(&vector).expect("hash");
         assert_eq!(
-            vector.generic[&FeatureName::from_static("book.mid")],
-            FeatureValue::Decimal(high_precision),
+            vector.generic[&FeatureName::from_static("book.mid")].value(),
+            Some(&FeatureValue::Decimal(high_precision)),
         );
     }
 }

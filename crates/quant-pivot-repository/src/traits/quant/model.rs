@@ -23,6 +23,14 @@ pub trait ModelRunRepository: Send + Sync {
         model_run_id: &ModelRunId,
     ) -> Result<Option<ModelRunInfo>, StorageError>;
 
+    /// Successful live serving runs whose decision time is in `[from, until)`.
+    /// Ordered by decision time and stable id for deterministic parity sampling.
+    async fn list_succeeded_live_between(
+        &self,
+        from: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<ModelRunInfo>, StorageError>;
+
     /// Finalize a `Running` run as `Succeeded`, recording its output hash and
     /// metrics. Rejects the transition if the run is not currently `Running`.
     ///

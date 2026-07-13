@@ -8,24 +8,23 @@
 //! Determinism is a money-critical invariant: the same `(examples, label, seed,
 //! output_spec, header)` yields a byte-identical artifact hash.
 
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::types::ContentHash;
+use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_models::types::{ContentHash, ModelInputContract};
 use rust_decimal::{
     Decimal,
     prelude::{FromPrimitive, ToPrimitive},
 };
 
 use crate::{
-    features::FeatureName,
     model::{
         TrainingObjectiveSpec,
         artifact::{
             FactorWeight, ModelArtifact, ModelArtifactHeader, SellScorerArtifact,
-            SellScorerOutputSpec,
+            SellScorerOutputSpec, model_input_contract_hash,
         },
         trainer::{
             LabelSelector, TrainedModelArtifact, ValidationSpec, fit_simplex_weights,
-            signed_contribution,
+            signed_contribution, weighted_training_input_hash,
         },
     },
     training::TrainingExample,
@@ -63,8 +62,10 @@ pub struct TrainSellScorerRequest {
     pub output_spec: SellScorerOutputSpec,
     /// Hold-vs-exit label-schema hash the scorer is trained against.
     pub label_schema_hash: ContentHash,
-    /// Features the scorer requires (eligibility / audit).
-    pub required_features: Vec<FeatureName>,
+    /// Semantic hash of the exact frozen training dataset/partition.
+    pub training_dataset_hash: ContentHash,
+    /// Exact ordered raw-input contract frozen by the owning model spec.
+    pub input_contract: ModelInputContract,
 }
 
 /// The Sell-side hold-vs-exit trainer.
@@ -94,18 +95,33 @@ impl SellScorerTrainer {
             &request.seed_weights,
             &request.objective,
             request.validation,
+            None,
         )?;
 
         // Calibrate the net→business-output mapping on the training labels so
         // `exit_alpha_bps` / `p_exit_better` reflect the realized hold-vs-exit
-        // alpha rather than hand-authored constants. The governed `output_spec`
-        // is the fail-closed fallback (degenerate / single-class calibration).
+        // alpha rather than hand-authored constants. Degenerate or single-class
+        // calibration fails training; hand-authored scales must never
+        // masquerade as a fitted business-output mapping.
         let output_spec = calibrate_output_spec(
             &request.examples,
             &request.label,
             &fit.factor_weights,
             &request.output_spec,
-        );
+        )?;
+        let factors = fit
+            .factor_weights
+            .iter()
+            .map(|weight| weight.factor.clone())
+            .collect::<Vec<_>>();
+        let training_input_hash = weighted_training_input_hash(
+            &request.examples,
+            &request.label,
+            &factors,
+            &fit.frozen_reference_quantiles,
+            None,
+        )?;
+        let input_contract_hash = model_input_contract_hash(&request.input_contract)?;
 
         let artifact = SellScorerArtifact {
             header: request.header.clone(),
@@ -113,7 +129,10 @@ impl SellScorerTrainer {
             prediction_horizon_secs: request.prediction_horizon_secs,
             output_spec,
             label_schema_hash: request.label_schema_hash.clone(),
-            required_features: request.required_features.clone(),
+            training_dataset_hash: request.training_dataset_hash.clone(),
+            training_input_hash,
+            input_contract: request.input_contract.clone(),
+            input_contract_hash,
             objective_report: Some(fit.objective_report.clone()),
         };
         artifact.validate()?;
@@ -133,22 +152,26 @@ impl SellScorerTrainer {
 /// labels: `max_exit_alpha_bps` is the origin OLS slope of realized exit alpha on
 /// the fitted net, and `p_exit_gain` is the logistic gain maximizing the Bernoulli
 /// likelihood of `label > 0`. `default_sell_pct` stays the governed policy floor.
-/// Falls back to `fallback` whenever calibration is degenerate.
+/// Degenerate calibration is a typed training failure.
 fn calibrate_output_spec(
     examples: &[TrainingExample],
     label: &LabelSelector,
     weights: &[FactorWeight],
-    fallback: &SellScorerOutputSpec,
-) -> SellScorerOutputSpec {
+    governed: &SellScorerOutputSpec,
+) -> QuantResult<SellScorerOutputSpec> {
     let pairs = net_label_pairs(examples, label, weights);
     if pairs.len() < 2 {
-        return fallback.clone();
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "sell scorer calibration requires at least two resolved training labels"
+                .to_owned(),
+        }
+        .into());
     }
-    SellScorerOutputSpec {
-        max_exit_alpha_bps: calibrate_alpha_scale(&pairs).unwrap_or(fallback.max_exit_alpha_bps),
-        p_exit_gain: calibrate_logistic_gain(&pairs).unwrap_or(fallback.p_exit_gain),
-        default_sell_pct: fallback.default_sell_pct,
-    }
+    Ok(SellScorerOutputSpec {
+        max_exit_alpha_bps: calibrate_alpha_scale(&pairs)?,
+        p_exit_gain: calibrate_logistic_gain(&pairs)?,
+        default_sell_pct: governed.default_sell_pct,
+    })
 }
 
 /// `(net, label_bps)` over every resolved example, where `net` uses the fitted
@@ -178,9 +201,8 @@ fn net_label_pairs(
 }
 
 /// Origin OLS slope `Σ(net·label) / Σ(net²)` of realized alpha on net, clamped to
-/// a sane positive band. `None` when net has no variance or the slope is not a
-/// usable positive scale (the quality gate rejects such a model on rank IC).
-fn calibrate_alpha_scale(pairs: &[(Decimal, Decimal)]) -> Option<Decimal> {
+/// a sane positive band. Missing variance or a non-positive slope fails the fit.
+fn calibrate_alpha_scale(pairs: &[(Decimal, Decimal)]) -> QuantResult<Decimal> {
     let mut numerator = Decimal::ZERO;
     let mut denominator = Decimal::ZERO;
     for (net, label) in pairs {
@@ -188,36 +210,58 @@ fn calibrate_alpha_scale(pairs: &[(Decimal, Decimal)]) -> Option<Decimal> {
         denominator += *net * *net;
     }
     if denominator <= Decimal::ZERO {
-        return None;
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "sell scorer alpha calibration has zero net-score variance".to_owned(),
+        }
+        .into());
     }
     let slope = numerator / denominator;
     if slope <= Decimal::ZERO {
-        return None;
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: format!("sell scorer alpha calibration slope must be positive, got {slope}"),
+        }
+        .into());
     }
-    Some(slope.clamp(
+    Ok(slope.clamp(
         Decimal::from(MIN_ALPHA_SCALE_BPS),
         Decimal::from(MAX_ALPHA_SCALE_BPS),
     ))
 }
 
 /// Logistic gain (`net → P(exit_better)`) maximizing the Bernoulli likelihood of
-/// `label > 0` over a fixed candidate grid. `None` when a class is absent or nets
-/// are degenerate (the governed default gain then applies).
-fn calibrate_logistic_gain(pairs: &[(Decimal, Decimal)]) -> Option<Decimal> {
+/// `label > 0` over a fixed candidate grid. A missing class or degenerate input
+/// fails the fit. Decimal conversion failures are never discarded.
+fn calibrate_logistic_gain(pairs: &[(Decimal, Decimal)]) -> QuantResult<Decimal> {
     let observations: Vec<(f64, f64)> = pairs
         .iter()
-        .filter_map(|(net, label)| {
-            let net = net.to_f64()?;
+        .map(|(net, label)| {
+            let net = net
+                .to_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| ResearchError::InvalidModelArtifact {
+                    detail: format!(
+                        "sell scorer calibration net score `{net}` is not a finite f64"
+                    ),
+                })?;
             let y = if *label > Decimal::ZERO { 1.0 } else { 0.0 };
-            Some((net, y))
+            Ok((net, y))
         })
-        .collect();
+        .collect::<Result<_, ResearchError>>()?;
     if observations.len() < 2 {
-        return None;
+        return Err(ResearchError::InvalidModelArtifact {
+            detail: "sell scorer probability calibration requires at least two observations"
+                .to_owned(),
+        }
+        .into());
     }
     let positives = observations.iter().filter(|(_, y)| *y > 0.5).count();
     if positives == 0 || positives == observations.len() {
-        return None;
+        return Err(ResearchError::InvalidModelArtifact {
+            detail:
+                "sell scorer probability calibration requires both positive and non-positive labels"
+                    .to_owned(),
+        }
+        .into());
     }
     let mut best_gain = None;
     let mut best_ll = f64::NEG_INFINITY;
@@ -232,7 +276,15 @@ fn calibrate_logistic_gain(pairs: &[(Decimal, Decimal)]) -> Option<Decimal> {
             best_gain = Some(gain);
         }
     }
-    best_gain.and_then(Decimal::from_f64)
+    let best_gain = best_gain.ok_or_else(|| ResearchError::InvalidModelArtifact {
+        detail: "sell scorer probability calibration produced no gain candidate".to_owned(),
+    })?;
+    Decimal::from_f64(best_gain).ok_or_else(|| {
+        ResearchError::InvalidModelArtifact {
+            detail: format!("sell scorer calibration gain `{best_gain}` is not a Decimal"),
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -249,24 +301,30 @@ mod tests {
             (dec!(0.50), dec!(100)),
             (dec!(0.80), dec!(160)),
         ];
-        assert_eq!(calibrate_alpha_scale(&pairs), Some(dec!(200)));
+        assert_eq!(
+            calibrate_alpha_scale(&pairs).expect("positive fitted slope"),
+            dec!(200)
+        );
     }
 
     #[test]
-    fn alpha_scale_none_on_degenerate_or_negative() {
-        // No net variance ⇒ None (denominator zero).
+    fn alpha_scale_rejects_degenerate_or_negative() {
+        // No net variance is a hard calibration failure.
         let flat = vec![(dec!(0), dec!(50)), (dec!(0), dec!(-30))];
-        assert_eq!(calibrate_alpha_scale(&flat), None);
-        // Net anti-correlated with alpha ⇒ negative slope ⇒ None (fail to fallback).
+        assert!(calibrate_alpha_scale(&flat).is_err());
+        // Net anti-correlated with alpha is also rejected.
         let inverted = vec![(dec!(0.5), dec!(-100)), (dec!(0.8), dec!(-160))];
-        assert_eq!(calibrate_alpha_scale(&inverted), None);
+        assert!(calibrate_alpha_scale(&inverted).is_err());
     }
 
     #[test]
     fn alpha_scale_clamps_into_band() {
         // Huge slope clamps to the 10_000 bps ceiling.
         let pairs = vec![(dec!(0.01), dec!(1000)), (dec!(0.02), dec!(2000))];
-        assert_eq!(calibrate_alpha_scale(&pairs), Some(Decimal::from(10_000)));
+        assert_eq!(
+            calibrate_alpha_scale(&pairs).expect("clamped fitted slope"),
+            Decimal::from(10_000)
+        );
     }
 
     #[test]
@@ -288,9 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn logistic_gain_none_on_single_class() {
-        // Every label positive ⇒ no class contrast ⇒ None (governed default used).
+    fn logistic_gain_rejects_single_class() {
+        // Every label positive means there is no probability calibration signal.
         let pairs = vec![(dec!(0.5), dec!(10)), (dec!(-0.5), dec!(20))];
-        assert_eq!(calibrate_logistic_gain(&pairs), None);
+        assert!(calibrate_logistic_gain(&pairs).is_err());
     }
 }

@@ -397,7 +397,7 @@ mod tests {
         let sha = format!("sha256:{}", "a".repeat(BLAKE3_HEX_LEN));
         assert!(ContentHash::parse(sha).is_err());
         assert!(ContentHash::parse("blake3:short").is_err());
-        assert!(ContentHash::parse("blake3:".to_owned() + &"A".repeat(BLAKE3_HEX_LEN)).is_err());
+        assert!(ContentHash::parse(format!("blake3:{}", "A".repeat(BLAKE3_HEX_LEN))).is_err());
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub struct BuildReportRequest {
     pub trigger: ReportTrigger,
     pub trigger_time: DateTime<Utc>,
     pub top_n_override: Option<u32>,
-    pub source_delay_secs_override: Option<u64>,
+    pub knowledge_lag_secs_override: Option<u64>,
 }
 
 /// Context carried when a report is intentionally empty.

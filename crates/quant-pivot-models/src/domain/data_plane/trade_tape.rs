@@ -3,7 +3,7 @@
 //! These types model fill-side participant observations, not execution orders.
 //! They intentionally do not reuse execution/reconciliation trade structs.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -95,6 +95,9 @@ pub struct TradeTapePrint {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub event_time: DateTime<Utc>,
+    /// Time at which this revision became visible to the system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_at: Option<DateTime<Utc>>,
     pub participant_address: String,
     pub participant_role: TradeParticipantRole,
     pub side: Option<Side>,
@@ -188,11 +191,16 @@ pub struct UpsertTradeTapeBlockCursor {
 impl TradeTapePrint {
     /// Decode a `ClickHouse` trade-tape row into the domain print shape.
     #[must_use]
-    pub fn from_clickhouse_row(row: &TradeTapeRow, default_time: DateTime<Utc>) -> Self {
+    pub fn from_clickhouse_row_at(
+        row: &TradeTapeRow,
+        event_time: DateTime<Utc>,
+        available_at: DateTime<Utc>,
+    ) -> Self {
         Self {
             market_id: row.market_id.clone(),
             token_id: row.token_id.clone(),
-            event_time: millis_to_utc(row.event_time, default_time),
+            event_time,
+            available_at: Some(available_at),
             participant_address: row.participant_address.clone(),
             participant_role: row.participant_role.into(),
             side: ch_trade_side_to_domain(row.side),
@@ -253,10 +261,4 @@ pub const fn ch_trade_side_to_domain(side: ChTradeSide) -> Option<Side> {
         ChTradeSide::Sell => Some(Side::Sell),
         ChTradeSide::Unknown => None,
     }
-}
-
-fn millis_to_utc(timestamp_ms: i64, default: DateTime<Utc>) -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(timestamp_ms)
-        .single()
-        .unwrap_or(default)
 }

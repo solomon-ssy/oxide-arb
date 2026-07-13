@@ -115,6 +115,9 @@ pub trait KillSwitchPort: Send + Sync {
 pub trait RuntimeConfigPort: Send + Sync {
     fn current(&self) -> Arc<RuntimeConfig>;
     fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), ControlError>;
+    /// Apply one complete live snapshot. Returning `Err` must leave
+    /// [`Self::current`] at the previous snapshot; callers use that invariant
+    /// to coordinate durable activation compensation.
     async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError>;
 }
 

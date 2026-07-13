@@ -18,9 +18,19 @@ use quant_pivot_models::{
             resolve_binary_pair_exact,
         },
     },
-    enums::{common::CategorySet, fee::FeeSource, market::MarketStatus},
+    enums::{common::CategorySet, fee::FeeSource},
     types::{EventId, MarketId, TokenId},
 };
+use std::collections::HashMap;
+
+/// Source timestamps retained separately from the live registry's resolved
+/// clock fields so the durable ledger can distinguish source time from a
+/// conservative availability-time fallback.
+#[derive(Debug, Clone, Copy)]
+pub struct CatalogSourceTimestamps {
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
 
 /// Complete output of a Gamma catalog sync — persistence DTOs and in-memory views.
 pub struct GammaCatalogBatch {
@@ -28,6 +38,8 @@ pub struct GammaCatalogBatch {
     pub markets: Vec<UpsertMarket>,
     pub registry_events: Vec<EventRegistryInfo>,
     pub registry_markets: Vec<MarketRegistryInfo>,
+    pub event_source_timestamps: HashMap<EventId, CatalogSourceTimestamps>,
+    pub market_source_timestamps: HashMap<MarketId, CatalogSourceTimestamps>,
     pub fee_data: Vec<MarketFeeSchedule>,
     /// Markets dropped during normalization, for sync summaries and metrics.
     pub rejected: Vec<RejectedMarket>,
@@ -35,6 +47,32 @@ pub struct GammaCatalogBatch {
 
 impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
     fn from(events: Vec<CatalogEvent>) -> Self {
+        let event_source_timestamps = events
+            .iter()
+            .map(|event| {
+                (
+                    EventId::new(&event.id),
+                    CatalogSourceTimestamps {
+                        created_at: event.created_at,
+                        updated_at: event.updated_at,
+                    },
+                )
+            })
+            .collect();
+        let market_source_timestamps = events
+            .iter()
+            .flat_map(|event| {
+                event.markets.iter().map(|market| {
+                    (
+                        MarketId::new(&market.condition_id),
+                        CatalogSourceTimestamps {
+                            created_at: market.created_at,
+                            updated_at: market.updated_at,
+                        },
+                    )
+                })
+            })
+            .collect();
         let fee_data = events
             .iter()
             .flat_map(|event| {
@@ -84,6 +122,8 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
             markets: upsert_markets,
             registry_events,
             registry_markets,
+            event_source_timestamps,
+            market_source_timestamps,
             fee_data,
             rejected,
         }
@@ -97,6 +137,7 @@ impl From<&CatalogEvent> for EventRegistryInfo {
             title: event.title.clone(),
             slug: event.slug.clone(),
             series_slug: event.series_slug.clone(),
+            status: event.status,
             market_ids: event
                 .markets
                 .iter()
@@ -105,6 +146,7 @@ impl From<&CatalogEvent> for EventRegistryInfo {
             categories: event.categories,
             tags: event.tags.clone(),
             neg_risk: event.neg_risk,
+            end_date: event.end_date,
             created_at: event.created_at.unwrap_or_else(Utc::now),
             updated_at: event.updated_at.unwrap_or_else(Utc::now),
         }
@@ -154,7 +196,7 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
         let market_id = MarketId::new(&market.condition_id);
         let (yes_token, no_token) = resolve_binary_pair_exact(&market_id, &tokens.0)?;
         let status = market.status;
-        let created = market.created_at.unwrap_or_else(Utc::now);
+        let created = market.created_at;
         let updated = market.updated_at.unwrap_or_else(Utc::now);
         let fee_schedule = market.fee_schedule_with_observed_at(Some(updated));
         let fee_columns = fee_schedule.as_ref().map_or_else(
@@ -165,8 +207,10 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             .settlement
             .as_ref()
             .map(|settlement| settlement.winning_outcome.clone());
-        let resolved_at =
-            (status == MarketStatus::Settled).then(|| market.resolved_at.unwrap_or(updated));
+        // `closedTime` is the only source resolution clock. A settled market
+        // without it remains unknown; substituting `updatedAt` (or wall clock)
+        // would fabricate label maturity and a live settlement transition.
+        let resolved_at = market.resolved_at;
 
         let upsert = UpsertMarket {
             market_id: market_id.clone(),
@@ -259,7 +303,7 @@ impl CatalogMarket {
 mod tests {
     use super::*;
     use crate::gamma::wire::WireEvent;
-    use quant_pivot_models::enums::common::MarketCategory;
+    use quant_pivot_models::enums::{common::MarketCategory, market::MarketStatus};
 
     fn batch_from(json: &str) -> GammaCatalogBatch {
         let wire: WireEvent = serde_json::from_str(json).expect("wire event");
@@ -322,6 +366,32 @@ mod tests {
         assert_eq!(upsert.outcome.as_deref(), Some("Over"));
         let resolved_at = upsert.resolved_at.expect("resolved_at from closedTime");
         assert_eq!(resolved_at.to_rfc3339(), "2026-06-11T04:05:01+00:00");
+    }
+
+    #[test]
+    fn settled_market_without_closed_time_keeps_resolution_time_unknown() {
+        let batch = batch_from(
+            r#"{
+                "id": "evt-1",
+                "title": "E",
+                "slug": "e",
+                "markets": [{
+                    "conditionId": "0xdone",
+                    "question": "Over/Under?",
+                    "closed": true,
+                    "active": false,
+                    "umaResolutionStatus": "resolved",
+                    "updatedAt": "2026-06-11T05:00:00Z",
+                    "clobTokenIds": ["111", "222"],
+                    "outcomes": ["Over", "Under"],
+                    "outcomePrices": ["1", "0"]
+                }]
+            }"#,
+        );
+
+        assert_eq!(batch.markets[0].status, MarketStatus::Settled);
+        assert!(batch.markets[0].resolved_at.is_none());
+        assert!(batch.registry_markets[0].resolved_at.is_none());
     }
 
     #[test]

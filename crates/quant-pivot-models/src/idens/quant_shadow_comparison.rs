@@ -29,7 +29,7 @@ pub enum QuantShadowComparison {
     ShadowComparisonId,
     ActiveModelVersionId,
     ShadowModelVersionId,
-    AsOf,
+    DecisionAt,
     TopnOverlap,
     RankDeltaJson,
     ScoreDeltaJson,
@@ -47,7 +47,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_fk(QuantShadowComparison::ActiveModelVersionId))
         .col(column::uuid_fk(QuantShadowComparison::ShadowModelVersionId))
         .col(
-            ColumnDef::new(QuantShadowComparison::AsOf)
+            ColumnDef::new(QuantShadowComparison::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
@@ -106,14 +106,14 @@ pub fn table() -> TableCreateStatement {
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
-            "idx_quant_shadow_comparison_shadow_version_as_of",
+            "idx_quant_shadow_comparison_shadow_version_decision_at",
             quant_shadow_comparison_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_shadow_comparison_shadow_version_as_of")
+                .name("idx_quant_shadow_comparison_shadow_version_decision_at")
                 .table(QuantShadowComparison::Table)
                 .col(QuantShadowComparison::ShadowModelVersionId)
-                .col((QuantShadowComparison::AsOf, IndexOrder::Desc))
+                .col((QuantShadowComparison::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "shadow comparisons by shadow version and recency (publish stability window)",
         ),

@@ -1,17 +1,13 @@
 //! [`CategoryPointerGuard`]: config-apply-time validation of
 //! `model.category_model_pointers` (11.2.2 remediation R7).
 //!
-//! The online runner already falls back to the generic model — loudly — when
-//! a category pointer is dangling or mis-scoped (see
-//! `ModelRunner::category_scope_ok`), but that is a **runtime safety net**,
-//! not a substitute for catching a bad pointer at the moment an operator
-//! activates it. This guard runs on every runtime-config activation and
+//! A configured category route is a governed decision and never falls back to
+//! the generic model. This guard runs on every runtime-config activation and
 //! rejects the activation outright when a category pointer does not parse,
 //! does not resolve to a `Published` registered model version, or resolves to
-//! a version whose frozen artifact declares a `category_scope` that disagrees
-//! with the pointer's own category key — a structural precondition that never
-//! changes with data freshness, unlike the runtime quality-gate staleness
-//! check the router repeats every round.
+//! a version whose frozen artifact does not declare the exact category scope.
+//! The online runner repeats the same invariant before each round so artifact
+//! replacement or registry corruption still fails closed.
 
 use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
@@ -95,22 +91,21 @@ impl CategoryPointerGuard {
         Ok(())
     }
 
-    /// A `category_scope` of exactly the pointer's own category, or `None`
-    /// (a generic scorer deliberately pinned to a category slot), is
-    /// accepted; any other declared category is a structural mismatch.
+    /// Only a `category_scope` exactly matching the pointer's category is
+    /// accepted. An unscoped artifact is a generic route, not a category model.
     fn check_scope(
         category: MarketCategory,
         version_id: &ModelVersionId,
         category_scope: Option<MarketCategory>,
     ) -> Result<(), ControlError> {
-        if category_scope.is_none_or(|scope| scope == category) {
+        if category_scope == Some(category) {
             return Ok(());
         }
         Err(ControlError::Precondition(format!(
             "model.category_model_pointers[{category}] = `{version_id}` has \
              category_scope={category_scope:?}, which disagrees with its own category key \
-             `{category}` — a model artifact must declare category_scope = Some({category}) \
-             or None before it can be pointed to from that category"
+             `{category}` — a category route must declare \
+             category_scope = Some({category})"
         )))
     }
 }
@@ -127,17 +122,20 @@ mod tests {
             NewModelSpec, NewModelVersion, Paginated,
         },
         enums::{common::MarketCategory, model::ModelFamily, quant::PublicationStatus},
-        runtime_config::{ModelConfig, ModelVersionRef},
-        types::{ContentHash, ModelSpecId, ModelVersionId, SchemaVersion},
+        runtime_config::{FactorCrossSectionConfig, ModelConfig, ModelVersionRef},
+        types::{
+            BacktestPathSetId, ContentHash, FeatureParityRunId, FeatureParityStateId,
+            ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion,
+        },
     };
     use quant_pivot_repository::traits::ModelRegistryRepository;
     use quant_pivot_research::{
         artifact::{ArtifactStore, LocalArtifactStore},
-        factors::names,
+        factors::{FrozenReferenceQuantiles, names},
         model::{
             FactorWeight, ModelArtifact, ModelArtifactHeader, ModelFamily as ResearchModelFamily,
             ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
-            WeightedFactorModelArtifact,
+            WeightedFactorModelArtifact, model_input_contract_hash,
         },
     };
     use rust_decimal_macros::dec;
@@ -198,12 +196,6 @@ mod tests {
         ) -> Result<Vec<ModelVersionInfo>, StorageError> {
             unimplemented!()
         }
-        async fn publish_model_version(
-            &self,
-            _model_version_id: &ModelVersionId,
-        ) -> Result<ModelVersionInfo, StorageError> {
-            unimplemented!()
-        }
         async fn retire_model_version(
             &self,
             _model_version_id: &ModelVersionId,
@@ -214,6 +206,8 @@ mod tests {
             &self,
             _model_spec_id: &ModelSpecId,
             _model_version_id: &ModelVersionId,
+            _feature_parity_state_id: &FeatureParityStateId,
+            _feature_parity_run_id: &FeatureParityRunId,
         ) -> Result<
             (
                 ModelVersionInfo,
@@ -230,10 +224,16 @@ mod tests {
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
-        async fn restore_model_version(
+        async fn rollback_to_retired_predecessor(
             &self,
-            _model_version_id: &ModelVersionId,
-        ) -> Result<ModelVersionInfo, StorageError> {
+            _commit: quant_pivot_repository::traits::RollbackModelVersionCommit<'_>,
+        ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
+            unimplemented!()
+        }
+        async fn compensate_failed_rollback(
+            &self,
+            _commit: quant_pivot_repository::traits::CompensateRollbackModelVersionCommit<'_>,
+        ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
             unimplemented!()
         }
         async fn set_quality_gate_report(
@@ -246,7 +246,7 @@ mod tests {
         async fn set_publish_path_set_id(
             &self,
             _model_version_id: &ModelVersionId,
-            _publish_path_set_id: Option<quant_pivot_models::types::BacktestPathSetId>,
+            _publish_path_set_id: Option<BacktestPathSetId>,
         ) -> Result<ModelVersionInfo, StorageError> {
             unimplemented!()
         }
@@ -261,7 +261,8 @@ mod tests {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            feature_requirements: serde_json::json!({}),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -295,6 +296,9 @@ mod tests {
         model_version_id: ModelVersionId,
         category_scope: Option<MarketCategory>,
     ) -> ModelArtifact {
+        let input_contract = ModelInputContract::single_required("book.mid");
+        let input_contract_hash =
+            model_input_contract_hash(&input_contract).expect("input contract hash");
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id,
@@ -304,6 +308,12 @@ mod tests {
                 factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
                     .expect("hash"),
             },
+            training_dataset_hash: ContentHash::parse(format!("blake3:{}", "3".repeat(64)))
+                .expect("hash"),
+            training_input_hash: ContentHash::parse(format!("blake3:{}", "4".repeat(64)))
+                .expect("hash"),
+            input_contract,
+            input_contract_hash,
             weights: vec![FactorWeight {
                 factor: names::LIQUIDITY_DEPTH,
                 weight: dec!(1),
@@ -312,7 +322,8 @@ mod tests {
             multipliers: ScoreMultiplierSpec::conservative(),
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
+            factor_cross_section: FactorCrossSectionConfig::default(),
+            frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
             objective_report: None,
             category_scope,
         }))
@@ -373,10 +384,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_unscoped_artifact_is_accepted_as_a_category_pointer() {
+    async fn generic_unscoped_artifact_is_rejected_as_a_category_pointer() {
         let (guard, version_id) = seeded_guard(None, PublicationStatus::Published).await;
         let config = config_with(MarketCategory::Crypto, &version_id);
-        assert!(guard.validate(&config).await.is_ok());
+        let error = guard.validate(&config).await.expect_err("must reject");
+        assert!(error.to_string().contains("category_scope=None"));
     }
 
     #[tokio::test]

@@ -57,11 +57,11 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
                 quant_shadow_comparison::Column::ShadowModelVersionId
                     .eq(shadow_model_version_id.clone()),
             )
-            .filter(quant_shadow_comparison::Column::AsOf.gte(since))
+            .filter(quant_shadow_comparison::Column::DecisionAt.gte(since))
             .select_only()
             .column_as(Expr::cust("COUNT(*)"), "sample_count")
-            .column_as(Expr::cust("MIN(as_of)"), "window_start")
-            .column_as(Expr::cust("MAX(as_of)"), "window_end")
+            .column_as(Expr::cust("MIN(decision_at)"), "window_start")
+            .column_as(Expr::cust("MAX(decision_at)"), "window_end")
             .column_as(Expr::cust("AVG(topn_overlap)"), "mean_topn_overlap")
             .column_as(
                 Expr::cust("BOOL_OR(hard_divergence)"),

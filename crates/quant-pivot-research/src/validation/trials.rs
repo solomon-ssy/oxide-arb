@@ -12,7 +12,7 @@
 //! [`Trial`]s; each trial gets one full-window train + backtest by the
 //! caller (`quant-pivot-core`'s CPCV/trial orchestration), never a resample.
 
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::runtime_config::RankLossKind;
 use rust_decimal::Decimal;
 
@@ -92,13 +92,19 @@ fn generate_weighted_factor(
     grid: &WeightedFactorTrialGrid,
     base: &TrainingObjectiveSpec,
 ) -> QuantResult<Vec<Trial>> {
-    let expanded = grid.lambda_multipliers.len() * grid.rank_loss_kinds.len();
+    let expanded = grid
+        .lambda_multipliers
+        .len()
+        .checked_mul(grid.rank_loss_kinds.len())
+        .ok_or_else(|| methodology("weighted-factor trial grid size overflowed usize"))?;
     validate_grid_size(expanded, grid.max_trials)?;
 
     let mut trials = Vec::with_capacity(expanded);
-    let mut trial_id = 0_u32;
     for &multiplier in &grid.lambda_multipliers {
         for &rank_loss in &grid.rank_loss_kinds {
+            let trial_id = u32::try_from(trials.len()).map_err(|error| {
+                methodology(format!("weighted-factor trial id exceeds u32: {error}"))
+            })?;
             let objective = TrainingObjectiveSpec {
                 rank_loss,
                 lambda_tail: base.lambda_tail * multiplier,
@@ -113,7 +119,6 @@ fn generate_weighted_factor(
                 #[cfg(feature = "ml-classical")]
                 classical_params: None,
             });
-            trial_id += 1;
         }
     }
     Ok(trials)
@@ -125,7 +130,11 @@ fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
 
     // Sum, not Cartesian product: forest and linear params apply to disjoint
     // ClassicalKind families. Crossing them inflated DSR N with inert dimensions.
-    let expanded = grid.forest_n_trees_multipliers.len() + grid.linear_alpha_multipliers.len();
+    let expanded = grid
+        .forest_n_trees_multipliers
+        .len()
+        .checked_add(grid.linear_alpha_multipliers.len())
+        .ok_or_else(|| methodology("classical trial grid size overflowed usize"))?;
     validate_grid_size(expanded, grid.max_trials)?;
 
     let base = ClassicalParams {
@@ -133,13 +142,31 @@ fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
         linear: LinearParams::default(),
     };
     let mut trials = Vec::with_capacity(expanded);
-    let mut trial_id = 0_u32;
     for &forest_multiplier in &grid.forest_n_trees_multipliers {
-        let base_n_trees = u32::try_from(base.forest.n_trees).unwrap_or(u32::MAX);
-        let scaled_n_trees = (Decimal::from(base_n_trees) * forest_multiplier)
-            .round()
-            .max(Decimal::ONE);
-        let n_trees = scaled_n_trees.to_usize().unwrap_or(1);
+        if forest_multiplier <= Decimal::ZERO {
+            return Err(methodology(format!(
+                "forest n_trees multiplier must be positive, got {forest_multiplier}"
+            )));
+        }
+        let trial_id = u32::try_from(trials.len())
+            .map_err(|error| methodology(format!("classical trial id exceeds u32: {error}")))?;
+        let base_n_trees = u64::try_from(base.forest.n_trees).map_err(|error| {
+            methodology(format!("base forest n_trees does not fit u64: {error}"))
+        })?;
+        let scaled_n_trees = Decimal::from(base_n_trees)
+            .checked_mul(forest_multiplier)
+            .ok_or_else(|| methodology("forest n_trees scaling overflowed Decimal"))?
+            .round();
+        let n_trees = scaled_n_trees.to_usize().ok_or_else(|| {
+            methodology(format!(
+                "scaled forest n_trees {scaled_n_trees} does not fit usize"
+            ))
+        })?;
+        if n_trees == 0 {
+            return Err(methodology(
+                "scaled forest n_trees must be positive".to_owned(),
+            ));
+        }
         trials.push(Trial {
             trial_id,
             label: format!("forest_x{forest_multiplier}"),
@@ -152,10 +179,24 @@ fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
                 linear: base.linear,
             }),
         });
-        trial_id += 1;
     }
     for &linear_multiplier in &grid.linear_alpha_multipliers {
-        let linear_scale = linear_multiplier.to_f64().unwrap_or(1.0);
+        if linear_multiplier <= Decimal::ZERO {
+            return Err(methodology(format!(
+                "linear alpha multiplier must be positive, got {linear_multiplier}"
+            )));
+        }
+        let trial_id = u32::try_from(trials.len())
+            .map_err(|error| methodology(format!("classical trial id exceeds u32: {error}")))?;
+        let linear_scale = linear_multiplier.to_f64().ok_or_else(|| {
+            methodology(format!(
+                "linear alpha multiplier {linear_multiplier} cannot be represented as f64"
+            ))
+        })?;
+        let alpha = base.linear.alpha * linear_scale;
+        if !alpha.is_finite() {
+            return Err(methodology("scaled linear alpha is non-finite".to_owned()));
+        }
         trials.push(Trial {
             trial_id,
             label: format!("linear_x{linear_multiplier}"),
@@ -163,12 +204,11 @@ fn generate_classical(grid: &ClassicalTrialGrid) -> QuantResult<Vec<Trial>> {
             classical_params: Some(ClassicalParams {
                 forest: base.forest,
                 linear: LinearParams {
-                    alpha: base.linear.alpha * linear_scale,
+                    alpha,
                     ..base.linear
                 },
             }),
         });
-        trial_id += 1;
     }
     Ok(trials)
 }
@@ -188,7 +228,12 @@ fn validate_grid_size(expanded: usize, max_trials: u32) -> QuantResult<()> {
         }
         .into());
     }
-    if expanded as u64 > u64::from(max_trials) {
+    let max_trials = usize::try_from(max_trials).map_err(|error| {
+        methodology(format!(
+            "max_trials cannot be represented as usize: {error}"
+        ))
+    })?;
+    if expanded > max_trials {
         return Err(ResearchError::ValidationMethodology {
             detail: format!(
                 "trial grid expands to {expanded} trials, exceeding max_trials={max_trials}"
@@ -197,6 +242,13 @@ fn validate_grid_size(expanded: usize, max_trials: u32) -> QuantResult<()> {
         .into());
     }
     Ok(())
+}
+
+fn methodology(detail: impl Into<String>) -> QuantError {
+    ResearchError::ValidationMethodology {
+        detail: detail.into(),
+    }
+    .into()
 }
 
 #[cfg(test)]

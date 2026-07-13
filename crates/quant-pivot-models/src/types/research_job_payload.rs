@@ -41,10 +41,11 @@ impl ResearchJobProgress {
     #[must_use]
     pub fn pct(&self) -> Option<f64> {
         match self.total {
-            Some(total) if total > 0 =>
-            {
-                #[allow(clippy::cast_precision_loss)]
-                Some((self.processed.min(total) as f64) / (total as f64))
+            Some(total) if total > 0 => {
+                let processed = self.processed.min(total);
+                let processed = u32::try_from(processed).ok().map(f64::from)?;
+                let total = u32::try_from(total).ok().map(f64::from)?;
+                Some(processed / total)
             }
             _ => None,
         }

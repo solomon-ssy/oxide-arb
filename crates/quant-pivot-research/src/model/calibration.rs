@@ -64,7 +64,9 @@ pub struct StratumFit {
     /// Samples in the stratum.
     pub sample_count: u64,
     /// Mean realized return (bps) in the stratum.
-    pub mean_realized_bps: Decimal,
+    /// Mean realized return when the stratum had samples. `None` is an explicit
+    /// absence, never a fabricated zero-return observation.
+    pub mean_realized_bps: Option<Decimal>,
 }
 
 /// Stratified calibration provenance report (serialized into `metrics_json`).
@@ -172,7 +174,7 @@ fn calibrate_data_quality(
         .map(|(status, mean)| StratumFit {
             label: status.as_str().to_owned(),
             sample_count: count_in(samples.iter().filter(|s| s.data_quality == *status)),
-            mean_realized_bps: mean.unwrap_or(Decimal::ZERO),
+            mean_realized_bps: *mean,
         })
         .collect();
     let calibrated = DataQualityMultipliers {
@@ -237,7 +239,7 @@ pub fn calibrate_liquidity_multipliers(
                 sample_count: count_in(samples.iter().filter(|s| {
                     liquidity_tier_index(&baseline.tiers, s.liquidity_usd) == Some(idx)
                 })),
-                mean_realized_bps: mean.unwrap_or(Decimal::ZERO),
+                mean_realized_bps: *mean,
             })
             .collect();
     fits.push(StratumFit {
@@ -247,7 +249,7 @@ pub fn calibrate_liquidity_multipliers(
                 .iter()
                 .filter(|s| liquidity_tier_index(&baseline.tiers, s.liquidity_usd).is_none()),
         ),
-        mean_realized_bps: floor_mean.unwrap_or(Decimal::ZERO),
+        mean_realized_bps: floor_mean,
     });
     (calibrated, fits)
 }
@@ -371,13 +373,13 @@ pub fn calibrate_substitution_rules(
         .map(|(reason, mean)| StratumFit {
             label: format!("substitution_{}", reason_label(*reason)),
             sample_count: count_in(samples.iter().filter(|s| has_reason(s, *reason))),
-            mean_realized_bps: mean.unwrap_or(Decimal::ZERO),
+            mean_realized_bps: *mean,
         })
         .collect();
     fits.push(StratumFit {
         label: "substitution_none".to_owned(),
         sample_count: count_in(samples.iter().filter(|s| s.substitution_reasons.is_empty())),
-        mean_realized_bps: clean.unwrap_or(Decimal::ZERO),
+        mean_realized_bps: clean,
     });
     (calibrated, fits)
 }
@@ -429,7 +431,7 @@ fn horizon_fit(
                 .iter()
                 .filter(|s| horizon_bucket(s, baseline) == bucket),
         ),
-        mean_realized_bps: stratum_mean(subset).unwrap_or(Decimal::ZERO),
+        mean_realized_bps: stratum_mean(subset),
     }
 }
 

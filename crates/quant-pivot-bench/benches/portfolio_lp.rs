@@ -44,7 +44,7 @@ fn candidate(index: usize, composite: Decimal) -> SignalCandidate {
         liquidity_score: Probability::ZERO,
         data_quality_score: Probability::ZERO,
         model_score_percentile: Probability::ZERO,
-        as_of: chrono::Utc::now(),
+        decision_at: chrono::Utc::now(),
     }
 }
 

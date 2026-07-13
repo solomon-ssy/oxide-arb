@@ -21,8 +21,10 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::CalibrationArtifactRepository;
 use quant_pivot_research::model::{
-    CalibrationArtifactLoader, ModelArtifact, MonotoneMapping, ResolvedCalibration,
+    CalibrationArtifactLoader, ModelArtifact, MonotoneMapping, ReliabilityReport,
+    ResolvedCalibration, validate_mapping,
 };
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 /// Resolve a model artifact's return-model calibration state through the
@@ -74,7 +76,7 @@ pub struct ModelScoreCalibrationPayload {
     pub model_version_id: ModelVersionId,
     pub calibration_dataset_id: TrainingDatasetId,
     pub mapping: MonotoneMapping,
-    pub reliability: quant_pivot_research::model::ReliabilityReport,
+    pub reliability: ReliabilityReport,
 }
 
 /// Canonical projection for the `model_score` content hash — recomputable
@@ -189,6 +191,7 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
                 ),
             }));
         }
+        validate_model_score_payload(&payload, info.sample_count)?;
         Ok(ResolvedCalibration {
             artifact_id: artifact_id.clone(),
             mapping: payload.mapping,
@@ -197,16 +200,99 @@ impl CalibrationArtifactLoader for CoreCalibrationArtifactLoader {
     }
 }
 
+fn validate_model_score_payload(
+    payload: &ModelScoreCalibrationPayload,
+    persisted_sample_count: i64,
+) -> QuantResult<()> {
+    validate_mapping(&payload.mapping)?;
+    let reliability = &payload.reliability;
+    let persisted_sample_count =
+        u64::try_from(persisted_sample_count).map_err(|error| ResearchError::DatasetBuild {
+            detail: format!("calibration artifact sample_count is invalid: {error}"),
+        })?;
+    if reliability.n_samples == 0
+        || reliability.n_samples != persisted_sample_count
+        || reliability.bins.is_empty()
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "calibration reliability sample contract is invalid: persisted={persisted_sample_count}, report={}, bins={}",
+                reliability.n_samples,
+                reliability.bins.len()
+            ),
+        }
+        .into());
+    }
+    if reliability.brier_score < Decimal::ZERO
+        || reliability.brier_score > Decimal::ONE
+        || reliability.log_loss < Decimal::ZERO
+        || reliability.ece < Decimal::ZERO
+        || reliability.ece > Decimal::ONE
+    {
+        return Err(ResearchError::DatasetBuild {
+            detail: "calibration reliability metrics are outside their valid ranges".to_owned(),
+        }
+        .into());
+    }
+    let mut sample_total = 0_u64;
+    let mut previous_hi = Decimal::ZERO;
+    for bin in &reliability.bins {
+        if bin.sample_count == 0
+            || bin.predicted_lo < Decimal::ZERO
+            || bin.predicted_lo >= bin.predicted_hi
+            || bin.predicted_hi > Decimal::ONE
+            || bin.predicted_lo < previous_hi
+            || bin.mean_predicted.inner() < bin.predicted_lo
+            || bin.mean_predicted.inner() > bin.predicted_hi
+            || bin.empirical_frequency.inner() < Decimal::ZERO
+            || bin.empirical_frequency.inner() > Decimal::ONE
+            || bin.wilson_ci.0.inner() < Decimal::ZERO
+            || bin.wilson_ci.0.inner() > bin.wilson_ci.1.inner()
+            || bin.wilson_ci.1.inner() > Decimal::ONE
+        {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "calibration reliability bin [{}, {}] is structurally invalid",
+                    bin.predicted_lo, bin.predicted_hi
+                ),
+            }
+            .into());
+        }
+        sample_total = sample_total.checked_add(bin.sample_count).ok_or_else(|| {
+            ResearchError::DatasetBuild {
+                detail: "calibration reliability sample count overflow".to_owned(),
+            }
+        })?;
+        previous_hi = bin.predicted_hi;
+    }
+    if sample_total != reliability.n_samples {
+        return Err(ResearchError::DatasetBuild {
+            detail: format!(
+                "calibration reliability bins contain {sample_total} samples, expected {}",
+                reliability.n_samples
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
     use quant_pivot_error::storage::StorageError;
-    use quant_pivot_models::domain::{
-        CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact, Paginated,
+    use quant_pivot_models::{
+        domain::{
+            CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact,
+            Paginated,
+        },
+        types::Probability,
     };
-    use quant_pivot_research::model::ReliabilityReport;
+    use quant_pivot_research::model::{
+        IsotonicKnot, MonotoneMapping, ReliabilityBin, ReliabilityReport,
+    };
     use rust_decimal_macros::dec;
 
     use super::{
@@ -286,9 +372,22 @@ mod tests {
         ModelScoreCalibrationPayload {
             model_version_id: ModelVersionId::from_v7(),
             calibration_dataset_id: TrainingDatasetId::from_v7(),
-            mapping: quant_pivot_research::model::MonotoneMapping::Isotonic { knots: Vec::new() },
+            mapping: MonotoneMapping::Isotonic {
+                knots: vec![IsotonicKnot {
+                    score: dec!(0.5),
+                    probability: dec!(0.5),
+                }],
+            },
             reliability: ReliabilityReport {
-                bins: Vec::new(),
+                bins: vec![ReliabilityBin {
+                    predicted_lo: dec!(0),
+                    predicted_hi: dec!(1),
+                    sample_count: 1_000,
+                    mean_predicted: Probability::new(dec!(0.5)),
+                    empirical_frequency: Probability::new(dec!(0.5)),
+                    wilson_ci: (Probability::new(dec!(0.45)), Probability::new(dec!(0.55))),
+                    mean_adverse_excursion_bps: Some(dec!(-500)),
+                }],
                 brier_score: dec!(0.1),
                 log_loss: dec!(0.3),
                 ece: dec!(0.02),
@@ -298,7 +397,7 @@ mod tests {
     }
 
     fn loader(row: Option<CalibrationArtifactInfo>) -> CoreCalibrationArtifactLoader {
-        CoreCalibrationArtifactLoader::new(std::sync::Arc::new(FakeRepo {
+        CoreCalibrationArtifactLoader::new(Arc::new(FakeRepo {
             row: Mutex::new(row),
         }))
     }
@@ -331,6 +430,23 @@ mod tests {
             result.is_err(),
             "an inactive (never-activated or superseded) calibrator must never resolve"
         );
+    }
+
+    #[tokio::test]
+    async fn load_rejects_hash_valid_but_empty_mapping() {
+        let mut row = valid_row(true);
+        let mut payload: ModelScoreCalibrationPayload =
+            serde_json::from_value(row.payload_json.clone()).expect("payload");
+        payload.mapping = MonotoneMapping::Isotonic { knots: Vec::new() };
+        row.payload_json = serde_json::to_value(&payload).expect("payload json");
+        row.content_hash = model_score_content_hash(
+            &TimeWindow::new(row.fit_window_start, row.fit_window_end),
+            &row.calibration_split_hash,
+            &payload,
+        )
+        .expect("hash");
+        let artifact_id = row.artifact_id.clone();
+        assert!(loader(Some(row)).load(&artifact_id).await.is_err());
     }
 
     #[tokio::test]

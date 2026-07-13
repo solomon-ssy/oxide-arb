@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{enums::common::MarketCategory, types::Probability};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
@@ -81,10 +82,9 @@ pub fn category_breakdown(samples: &[SampleOutcome]) -> Vec<CategoryMetric> {
 ///
 /// `quantile` is the lower tail fraction (e.g. `0.10`); the result is the mean
 /// realized return of the worst `ceil(n · quantile)` samples (≤ 0 for losses).
-#[must_use]
-pub fn tail_loss(samples: &[SampleOutcome], quantile: Decimal) -> Decimal {
+pub fn tail_loss(samples: &[SampleOutcome], quantile: Decimal) -> QuantResult<Decimal> {
     if samples.is_empty() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
     }
     let mut realized: Vec<Decimal> = samples.iter().map(|s| s.realized_return_bps).collect();
     realized.sort();
@@ -92,9 +92,15 @@ pub fn tail_loss(samples: &[SampleOutcome], quantile: Decimal) -> Decimal {
     let q = quantile.clamp(Decimal::ZERO, Decimal::ONE);
     // ceil(n * q), at least one sample.
     let raw = (Decimal::from(n as u64) * q).ceil();
-    let take = raw.to_usize().unwrap_or(1).max(1).min(n);
+    let take = raw
+        .to_usize()
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!("tail-loss sample count {raw} is not representable as usize"),
+        })?
+        .max(1)
+        .min(n);
     let tail = &realized[..take];
-    stats::mean(tail).round_dp(RESEARCH_DECIMAL_SCALE)
+    Ok(stats::mean(tail).round_dp(RESEARCH_DECIMAL_SCALE))
 }
 
 /// Maximum cumulative-`PnL` drawdown as a fraction of `budget` (or of the peak

@@ -2,17 +2,22 @@
 
 > 状态：生产级破坏式重构。**11.1 已落地并完成收尾闭环加固**（时间原生 EMA/MACD、
 > 退出/卖出复用入场冻结因子面、共线默认 raw 面板 + 类别中性化、Indeterminate 置零 confidence、
-> 离线 replay 在 HistoricalQuantile 下 fail-closed）；**11.2.2 已落地**（crypto 外部垂直：两层向量、
+> 小截面只允许截面统计或模型 artifact 内冻结的 `FrozenReferenceQuantile`）；**11.2.2 已落地**（crypto 外部垂直：两层向量、
 > Tier 0/1 linkage、Binance 特征源、domain PIT、category 路由）；**11.4 已落地并完成生产级语义加固**
 >（`as_of` 横截面 LTR、`rank_ic_weighted_ranknet` 诚实命名、TopN **rank-equal** token 伪组合、
 > singleton 可观测丢弃、`rank_loss_group_count`、NDCG@k/Rank IC 诊断、argmin/Decimal→f64
-> fail-closed、schema v9）；
+> fail-closed；全局 runtime schema 的当前版本统一见下方 11.6 状态）；
 > **11.5 已落地**（Buy 侧 CPCV/DSR/PBO/purge/trial-grid，见其文档头部"闭环加固"）；
 > **11.5.1 已落地**（Sell/Hold-vs-Exit lot 级 CPCV：`FoldRuntime`/`RankObservation` 泛化、
 > residual-shares 状态机 + 路径分叉停止、activity-only lot-native Sharpe/DSR/PBO、null baseline uplift、
-> Sell path-set DD/tail 硬门禁、UI 隐藏单路径 Backtest / 锁定 family+label）；
-> **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。11.0/11.2.1/11.3/11.6–11.11
-> 仍在设计/规划或部分落地阶段。
+> Sell path-set DD/tail 硬门禁、UI 隐藏单路径 Backtest；CPCV family/target/horizon 现由 11.6
+> ModelSpec/training contract 服务端冻结推导，UI 只读展示且请求不可覆盖）；
+> **11.6 的 W0–W4、W6 代码与 Rust/UI/architecture/loopback/PostgreSQL/ClickHouse 门禁已在
+> 2026-07-13 当前工作树重跑通过，但尚未达到目标环境 Phase Exit**；项目从未正式生产运行，
+> 因此不建设旧库升级或数据搬运路径，W5 仅保留从空库初始化、重建 artifact、full parity、
+> governed acknowledge 与 canary 的首次环境激活；
+> **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。
+> 11.0/11.2.1/11.3/11.7–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -83,11 +88,11 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.3 | Probabilistic Calibration & Kelly Safety | 校准 + 收益模型 + Kelly 安全 | 5, 8, 13 | [11.3](11.3-probabilistic-calibration-and-kelly.md) |
 | 11.4 | Training Objective & Learning-to-Rank | 训练目标(LTR + 下行/换手) | 6 | [11.4](11.4-training-objective-learning-to-rank.md) |
 | 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论(买方 WeightedFactor/classical) — **已落地** (model_run FK + publish_path_set_id bind + trial fail-closed + classical purged CV + publish label-horizon rescan;Sell → 11.5.1) | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
-| 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 — **已落地 + remediation**（residual-shares 状态机 + 路径分叉停止、activity-only DSR/PBO、null baseline uplift、Sell DD/tail 硬门禁、UI 锁死 family/label） | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
-| 11.6 | Training-Serving Parity & No-Silent-Zero | 特征一致性 / 禁止静默零 | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
+| 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 — **已落地 + remediation**（residual-shares 状态机 + 路径分叉停止、activity-only DSR/PBO、null baseline uplift、Sell DD/tail 硬门禁；CPCV request 契约由 11.6 统一冻结） | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
+| 11.6 | Training-Serving Parity & No-Silent-Zero | 决策时钟、PIT catalog、FeatureCell、frozen transform、运行期 parity/latch — **W0–W4/W6 与全部本地/容器门禁已完成；W5 空库首次激活待执行** | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Labeling, Entry & Exit Closed-Loop | 三重障碍标注 + 入场/退出闭环 | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance — **设计冻结、尚未实施；未来 v10→v11** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -127,6 +132,7 @@ flowchart TD
     P117 --> P118
     P115 --> P119
     P113 --> P119
+    P116 --> P119
     P119 --> P1110
     P110 --> P1111
     P119 --> P1111
@@ -135,8 +141,10 @@ flowchart TD
 执行原则:
 
 - **11.0** 是设计冻结点:锁定新枚举、删除清单、feature-gate 策略;后续子phase 按实际落地逐步 bump runtime schema。
-  11.4 当前从代码实际 `v8` 升至 **`v9`**（诚实命名 + TopN 伪组合 + 诊断 knobs）。
-- **11.1 / 11.6** 是数据地基:先把因子/归一化/训练-服务一致性打好,再谈训练目标。
+  11.4 实施当时的历史 bump 是 `v8 → v9`（诚实命名 + TopN 伪组合 + 诊断 knobs）；它不是当前
+  active contract，当前唯一版本见下方 11.6 基线。
+- **11.1 / 11.6** 是数据地基：11.6 的 frozen input transform、immutable factor revision 和 parity
+  facts 是后续模型 publish、11.9 drift/challenger 的硬前提；确定性 mismatch 不得由 drift 逻辑吞并。
 - **11.4 → 11.5 → 11.3** 是模型可信链:先有正确目标,再有防过拟合验证,最后才有校准喂 Kelly。
   **11.5 → 11.5.1**:11.5 只给买方(WeightedFactor/classical)接方法论,证明 purge/CPCV/trial-grid/
   CSCV/DSR/PBO 算法正确;11.5.1 把同一套算法(设计上对"原子分裂单元"无感知)套用到 Sell/Hold-vs-Exit
@@ -152,8 +160,13 @@ flowchart TD
   的垂直闭环设计(确定性优先 linkage 取代 LLM 优先;`ResolutionOracle` + basis 取代"特征源=结算源=Binance")。
   11.2.1 **提前**落地 11.3 的 `FavoriteLongshotBiasTable`(favorite-longshot 因子所需),11.3 正式落地时统一收敛
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
-  11.2.2 再 bump 至 **v5**;`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2 再 bump 至 **5**
-  (两层向量重构在 11.2.2)。Tier 2 LLM linkage 不加 schema bump（见 11.2.3）。
+  11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
+  再 bump 至 **5**（两层向量重构在 11.2.2）。当前实际 runtime config 已由后续已落地工作推进至
+  **v10**，feature schema 已推进至 **v6**；这是 11.6 的唯一有效版本组合。Tier 2 LLM linkage
+  不改 feature schema，但若实现时新增 runtime wire 字段，必须从届时当前版本显式 bump，
+  不得静默改写 v10（见 11.2.3）。11.9 尚未实现；其 `feedback` 段首次获得真实字段时才执行未来的
+  **v10 → v11**，当前仓库不得提前宣称 v11。Dataset Parquet 与 model artifact 当前只接受
+  `format_version = 2`；未来 runtime v11 不自动意味着 feature v7 或 artifact v3。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 
@@ -165,8 +178,9 @@ flowchart TD
    **校准后**的模型输出;未校准 artifact 禁止 publish(11.3)。
 3. **防过拟合是硬门禁**:任何 model version publish 前必须有 CPCV 多路径分布 + Deflated Sharpe +
    PBO 报告;`rank_ic` 升为**硬门禁**(11.5)。
-4. **训练-服务零 skew**:同一 feature/factor 定义只有一份,离线与在线走同一定义;禁止"离线重跑今日
-   逻辑覆盖历史"(11.6);禁止任何静默填零(全平面)。
+4. **训练-服务零 skew**：`DecisionBoundary` 只推导一次 source cutoff；selection/feature/capture 共用
+   durable PIT snapshot；训练与 serving 共用 fitted input transform；禁止当前投影回填历史、stub 伪值、
+   静默填零和 category→generic fallback。确定性 parity mismatch 必须 revoke + latch（11.6）。
 5. **零死语义**:任何 enum 值/config 字段/DTO 字段,要么在生产路径被 emit/消费,要么删除。新增
    `scripts/lint-dead-semantics.sh`(11.0)在 CI 强制。
 
@@ -203,8 +217,15 @@ bash scripts/lint-architecture.sh
 bash scripts/lint-quant-pivot-boundary.sh
 bash scripts/lint-quant-pivot-errors.sh
 bash scripts/lint-dead-semantics.sh   # 11.0 新增
+bash scripts/lint-training-serving-parity.sh   # 11.6 新增
 cargo test --workspace
+cd ui && pnpm lint && pnpm check && pnpm test:unit && pnpm build:antdv-next
 ```
+
+文档中的 `[x]` 只表示对应代码波次已实现，不替代本节当前合并态质量门，也不代表已在目标环境从空库
+初始化、重建 artifact 或完成 governed 恢复。11.6 的 W5 是独立的首次环境激活操作；
+实施清单见 [11.6 §7](11.6-training-serving-parity-and-no-silent-zero.md)，唯一可执行 SOP 见
+[operations runbook §7.5](../../../operations/runbook.md)。
 
 ## 8. 与既有 Phase 06 设计文档的关系(零兼容处理)
 
@@ -276,9 +297,12 @@ attribution)是**设计文档,未落地**(审计点 19/20)。Phase 11 采取**�
 
 **训练-服务一致性(11.6)**
 
-- Feature stores & training-serving consistency: <https://scalemind.dev/ai/ml/mlops/feature-stores-and-training-serving-consistency/>
-- Training-serving skew(Google Rules of ML #29/#32/#37): <https://datarekha.com/mlops/training-serving-skew/>
-- Feature stores & PIT joins: <https://hld.handbook.academy/curriculum/ai-ml-system-design/feature-stores-model-serving/>
+- Google Rules of ML（#29 保存 serving feature、#32 复用转换、#37 同样本同得分）：
+  <https://developers.google.com/machine-learning/guides/rules-of-ml/>
+- Feast point-in-time joins：<https://docs.feast.dev/getting-started/concepts/point-in-time-joins>
+- TensorFlow Transform best practices：<https://www.tensorflow.org/tfx/guide/tft_bestpractices>
+- scikit-learn MissingIndicator：
+  <https://scikit-learn.org/stable/modules/generated/sklearn.impute.MissingIndicator.html>
 
 **MLOps 自动再训练 / champion-challenger / drift(11.9)**
 

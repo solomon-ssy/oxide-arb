@@ -1,6 +1,7 @@
 //! `quant_feature_vector` table entity.
 
 use crate::{
+    domain::DecisionBoundary,
     enums::quant::DataQualityStatus,
     types::{ContentHash, FeatureVectorId, MarketId, SchemaVersion, TokenId},
 };
@@ -14,7 +15,9 @@ pub struct Model {
     pub feature_vector_id: FeatureVectorId,
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub decision_boundary: Option<DecisionBoundary>,
     pub feature_schema_version: SchemaVersion,
     pub feature_hash: ContentHash,
     pub data_quality: DataQualityStatus,
@@ -23,6 +26,9 @@ pub struct Model {
     pub payload: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub source_refs: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub decision_capture: Option<Json>,
+    pub decision_capture_hash: Option<ContentHash>,
     pub created_at: DateTime<Utc>,
 }
 

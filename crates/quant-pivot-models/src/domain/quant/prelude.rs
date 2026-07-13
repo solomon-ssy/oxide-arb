@@ -13,7 +13,7 @@ pub use super::{
     NewMarketSelection, NewMarketSelectionMember, NewModelComparisonReport, NewModelRun,
     NewModelSpec, NewModelVersion, NewOrderIntent, NewPortfolioPlan, NewPosition,
     NewRecommendation, NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
-    NewReportTransaction, NewTrainingDataset, OrderIntentInfo, PortfolioPlanInfo, PositionInfo,
+    NewReportTransaction, NewTrainingDatasetPlan, OrderIntentInfo, PortfolioPlanInfo, PositionInfo,
     QuantModelRunModel, RecommendationAttributionInfo, RecommendationInfo,
     RecommendationReportInfo, ReconciliationInfo, TrainingDatasetInfo,
 };

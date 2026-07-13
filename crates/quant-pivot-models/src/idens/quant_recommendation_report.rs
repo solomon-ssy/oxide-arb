@@ -13,8 +13,8 @@ use crate::{
     },
     idens::{
         quant_account_snapshot::QuantAccountSnapshot, quant_equity_snapshot::QuantEquitySnapshot,
-        quant_market_selection::QuantMarketSelection, quant_model_version::QuantModelVersion,
-        quant_portfolio_plan::QuantPortfolioPlan,
+        quant_market_selection::QuantMarketSelection, quant_model_run::QuantModelRun,
+        quant_model_version::QuantModelVersion, quant_portfolio_plan::QuantPortfolioPlan,
         quant_report_data_quality_snapshot::QuantReportDataQualitySnapshot,
     },
     schema::{
@@ -34,11 +34,12 @@ pub enum QuantRecommendationReport {
     TriggerKind,
     TriggerKey,
     TriggerTime,
-    SourceDelaySecs,
-    AsOf,
+    KnowledgeLagSecs,
+    DecisionAt,
     HorizonSecs,
     RuntimeMode,
     RuntimeConfigVersionId,
+    ModelRunId,
     ModelVersionId,
     MarketSelectionId,
     PortfolioPlanId,
@@ -95,7 +96,7 @@ fn add_identity_columns(table: &mut TableCreateStatement) {
                 .not_null(),
         )
         .col(
-            ColumnDef::new(QuantRecommendationReport::SourceDelaySecs)
+            ColumnDef::new(QuantRecommendationReport::KnowledgeLagSecs)
                 .big_integer()
                 .not_null(),
         )
@@ -107,7 +108,7 @@ fn add_identity_columns(table: &mut TableCreateStatement) {
 fn add_runtime_columns(table: &mut TableCreateStatement) {
     table
         .col(
-            ColumnDef::new(QuantRecommendationReport::AsOf)
+            ColumnDef::new(QuantRecommendationReport::DecisionAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
@@ -122,6 +123,7 @@ fn add_runtime_columns(table: &mut TableCreateStatement) {
         .col(column::uuid_fk(
             QuantRecommendationReport::RuntimeConfigVersionId,
         ))
+        .col(column::uuid_null(QuantRecommendationReport::ModelRunId))
         .col(column::uuid_fk(QuantRecommendationReport::ModelVersionId))
         .col(column::uuid_fk(
             QuantRecommendationReport::MarketSelectionId,
@@ -191,6 +193,12 @@ fn add_lifecycle_columns(table: &mut TableCreateStatement) {
 fn add_foreign_keys(table: &mut TableCreateStatement) {
     table
         .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_model_run",
+            QuantRecommendationReport::ModelRunId,
+            QuantModelRun::Table,
+            QuantModelRun::ModelRunId,
+        ))
+        .foreign_key(&mut fk_restrict(
             "fk_quant_recommendation_report_model_version",
             QuantRecommendationReport::ModelVersionId,
             QuantModelVersion::Table,
@@ -258,6 +266,18 @@ pub fn indexes() -> Vec<IndexSpec> {
             "report trigger idempotency key",
         ),
         IndexSpec::sea_query(
+            "uq_quant_recommendation_report_model_run",
+            quant_recommendation_report_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("uq_quant_recommendation_report_model_run")
+                .table(QuantRecommendationReport::Table)
+                .col(QuantRecommendationReport::ModelRunId)
+                .unique()
+                .to_owned(),
+            "one committed report per serving model run",
+        ),
+        IndexSpec::sea_query(
             "idx_quant_recommendation_report_trigger_time",
             quant_recommendation_report_table_name,
             IndexBuildMode::Transactional,
@@ -270,38 +290,50 @@ pub fn indexes() -> Vec<IndexSpec> {
             "reports by trigger source and time",
         ),
         IndexSpec::sea_query(
-            "idx_quant_recommendation_report_kind_as_of",
+            "idx_quant_recommendation_report_kind_decision_at",
             quant_recommendation_report_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_recommendation_report_kind_as_of")
+                .name("idx_quant_recommendation_report_kind_decision_at")
                 .table(QuantRecommendationReport::Table)
                 .col(QuantRecommendationReport::ReportKind)
-                .col((QuantRecommendationReport::AsOf, IndexOrder::Desc))
+                .col((QuantRecommendationReport::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "reports by kind and recency",
         ),
         IndexSpec::sea_query(
-            "idx_quant_recommendation_report_status_as_of",
+            "idx_quant_recommendation_report_decision_at_id",
             quant_recommendation_report_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_recommendation_report_status_as_of")
+                .name("idx_quant_recommendation_report_decision_at_id")
+                .table(QuantRecommendationReport::Table)
+                .col(QuantRecommendationReport::DecisionAt)
+                .col(QuantRecommendationReport::RecommendationReportId)
+                .to_owned(),
+            "deterministic runtime full-parity report enumeration",
+        ),
+        IndexSpec::sea_query(
+            "idx_quant_recommendation_report_status_decision_at",
+            quant_recommendation_report_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_recommendation_report_status_decision_at")
                 .table(QuantRecommendationReport::Table)
                 .col(QuantRecommendationReport::Status)
-                .col((QuantRecommendationReport::AsOf, IndexOrder::Desc))
+                .col((QuantRecommendationReport::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "reports by lifecycle status",
         ),
         IndexSpec::sea_query(
-            "idx_quant_recommendation_report_model_as_of",
+            "idx_quant_recommendation_report_model_decision_at",
             quant_recommendation_report_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_recommendation_report_model_as_of")
+                .name("idx_quant_recommendation_report_model_decision_at")
                 .table(QuantRecommendationReport::Table)
                 .col(QuantRecommendationReport::ModelVersionId)
-                .col((QuantRecommendationReport::AsOf, IndexOrder::Desc))
+                .col((QuantRecommendationReport::DecisionAt, IndexOrder::Desc))
                 .to_owned(),
             "reports by model version",
         ),
@@ -322,6 +354,7 @@ pub fn indexes() -> Vec<IndexSpec> {
 
 pub fn dependencies() -> Vec<TableDependency> {
     vec![
+        TableDependency::foreign_key(quant_model_run_table_name),
         TableDependency::foreign_key(quant_model_version_table_name),
         TableDependency::foreign_key(quant_market_selection_table_name),
         TableDependency::foreign_key(quant_portfolio_plan_table_name),
@@ -345,6 +378,10 @@ fn quant_recommendation_report_table_name() -> String {
 
 fn quant_model_version_table_name() -> String {
     QuantModelVersion::Table.to_string()
+}
+
+fn quant_model_run_table_name() -> String {
+    QuantModelRun::Table.to_string()
 }
 
 fn quant_market_selection_table_name() -> String {

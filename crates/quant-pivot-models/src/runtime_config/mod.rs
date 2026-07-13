@@ -1,5 +1,5 @@
 //! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `9`).
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `10`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -37,7 +37,7 @@ use crate::types::SchemaVersion;
 /// migration; non-matching documents are rejected). Phase 11.4 hardening bumps
 /// to 9 for honest RankIC-weighted `RankNet` naming, `TopN` pseudo-portfolio knobs,
 /// and diagnostic `ndcg_k` under `research.training`.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(9);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(10);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -180,24 +180,24 @@ impl RuntimeConfig {
         masked.to_json()
     }
 
-    /// Canonical PIT source delay from enabled report schedules.
+    /// Canonical PIT knowledge lag from enabled report schedules.
     ///
-    /// Returns `None` when enabled schedules disagree on `source_delay_secs`.
+    /// Returns `None` when enabled schedules disagree on `knowledge_lag_secs`.
     #[must_use]
-    pub fn pit_source_delay_secs(&self) -> Option<u64> {
+    pub fn pit_knowledge_lag_secs(&self) -> Option<u64> {
         let delays: Vec<u64> = self
             .reports
             .schedules
             .iter()
             .filter(|schedule| schedule.enabled)
-            .map(|schedule| schedule.source_delay_secs)
+            .map(|schedule| schedule.knowledge_lag_secs)
             .collect();
         if delays.is_empty() {
             return self
                 .reports
                 .schedules
                 .first()
-                .map(|schedule| schedule.source_delay_secs);
+                .map(|schedule| schedule.knowledge_lag_secs);
         }
         let first = delays[0];
         if delays.iter().all(|delay| *delay == first) {
@@ -312,7 +312,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(9));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(10));
     }
 
     #[test]

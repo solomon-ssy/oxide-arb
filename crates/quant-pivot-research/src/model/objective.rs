@@ -162,7 +162,7 @@ impl RankingDiagnostics {
 }
 
 /// One reduced training row inside a same-`as_of` query group.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct SampleRow {
     /// Stable allocation key: `market_id:token_id` (never market-only).
     pub(crate) allocation_key: String,
@@ -184,9 +184,9 @@ impl SampleRow {
 /// the evaluator only needs the rows (pair loss / pseudo portfolio). The
 /// `[as_of, label_horizon_end]` interval is retained so trainer CV can apply
 /// the same label-horizon purge/embargo as CPCV (Phase 11.5).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct CrossSectionGroup {
-    pub(crate) as_of: chrono::DateTime<chrono::Utc>,
+    pub(crate) decision_at: chrono::DateTime<chrono::Utc>,
     /// Conservative upper bound of member rows' `TrainingLabel::matured_at`.
     pub(crate) label_horizon_end: chrono::DateTime<chrono::Utc>,
     pub(crate) rows: Vec<SampleRow>,
@@ -218,7 +218,7 @@ impl ObjectiveEvaluator {
         groups: &[CrossSectionGroup],
     ) -> QuantResult<ObjectiveComponentReport> {
         let (rank_loss, pair_count, rank_loss_group_count) = self.rank_loss(weights, groups)?;
-        let tail_penalty = self.tail_penalty(weights, groups);
+        let tail_penalty = self.tail_penalty(weights, groups)?;
         let turnover_penalty = self.turnover_penalty(weights, groups);
         let l2_penalty: Decimal = weights.iter().map(|w| *w * *w).sum();
         let total_loss = rank_loss
@@ -231,42 +231,54 @@ impl ObjectiveEvaluator {
             turnover_penalty,
             l2_penalty,
             total_loss,
-            group_count: groups.len() as u64,
+            group_count: u64::try_from(groups.len()).map_err(|error| {
+                ResearchError::ValidationMethodology {
+                    detail: format!("objective group count exceeds u64: {error}"),
+                }
+            })?,
             rank_loss_group_count,
             pair_count,
         })
     }
 
     /// Compute ranking diagnostics (Rank IC + NDCG@k) for a weight vector.
-    #[must_use]
     pub(crate) fn diagnostics(
         &self,
         weights: &[Decimal],
         groups: &[CrossSectionGroup],
-    ) -> RankingDiagnostics {
+    ) -> QuantResult<RankingDiagnostics> {
         if groups.is_empty() {
-            return RankingDiagnostics {
+            return Ok(RankingDiagnostics {
                 mean_rank_ic: Decimal::ZERO,
                 mean_ndcg_at_k: Decimal::ZERO,
                 ndcg_k: self.spec.ndcg_k,
                 group_count: 0,
-            };
+            });
         }
+        let ndcg_k = usize::try_from(self.spec.ndcg_k).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("objective ndcg_k exceeds usize: {error}"),
+            }
+        })?;
         let mut rank_ics = Vec::with_capacity(groups.len());
         let mut ndcgs = Vec::with_capacity(groups.len());
         for group in groups {
             let scores: Vec<Decimal> = group.rows.iter().map(|row| row.net(weights)).collect();
             let labels: Vec<Decimal> = group.rows.iter().map(|row| row.label).collect();
             rank_ics.push(stats::spearman(&scores, &labels));
-            ndcgs.push(ndcg_at_k(&scores, &labels, self.spec.ndcg_k as usize));
+            ndcgs.push(ndcg_at_k(&scores, &labels, ndcg_k)?);
         }
-        RankingDiagnostics {
+        Ok(RankingDiagnostics {
             mean_rank_ic: stats::mean(&rank_ics),
             mean_ndcg_at_k: stats::mean(&ndcgs),
             ndcg_k: self.spec.ndcg_k,
-            group_count: groups.len() as u64,
+            group_count: u64::try_from(groups.len()).map_err(|error| {
+                ResearchError::ValidationMethodology {
+                    detail: format!("ranking diagnostic group count exceeds u64: {error}"),
+                }
+            })?,
         }
-        .rounded()
+        .rounded())
     }
 
     fn rank_loss(
@@ -312,15 +324,27 @@ impl ObjectiveEvaluator {
                         decimal_to_f64("rank_loss.score_diff", (scores[i] - scores[j]) * sign)?;
                     let loss = ranknet_logistic_loss(score_diff)?;
                     group_loss += loss * pair_weight;
-                    group_pairs = group_pairs.saturating_add(1);
+                    group_pairs = group_pairs.checked_add(1).ok_or_else(|| {
+                        ResearchError::ValidationMethodology {
+                            detail: "rank-loss group pair count overflow".to_owned(),
+                        }
+                    })?;
                 }
             }
-            pair_count = pair_count.saturating_add(group_pairs);
+            pair_count = pair_count.checked_add(group_pairs).ok_or_else(|| {
+                ResearchError::ValidationMethodology {
+                    detail: "rank-loss total pair count overflow".to_owned(),
+                }
+            })?;
             if group_pairs > 0 {
                 group_losses.push(group_loss);
             }
         }
-        let rank_loss_group_count = group_losses.len() as u64;
+        let rank_loss_group_count = u64::try_from(group_losses.len()).map_err(|error| {
+            ResearchError::ValidationMethodology {
+                detail: format!("rank-loss group count exceeds u64: {error}"),
+            }
+        })?;
         if group_losses.is_empty() {
             return Ok((Decimal::ZERO, pair_count, rank_loss_group_count));
         }
@@ -331,9 +355,13 @@ impl ObjectiveEvaluator {
         ))
     }
 
-    fn tail_penalty(&self, weights: &[Decimal], groups: &[CrossSectionGroup]) -> Decimal {
+    fn tail_penalty(
+        &self,
+        weights: &[Decimal],
+        groups: &[CrossSectionGroup],
+    ) -> QuantResult<Decimal> {
         if groups.is_empty() {
-            return Decimal::ZERO;
+            return Ok(Decimal::ZERO);
         }
         let mut returns = Vec::with_capacity(groups.len());
         for group in groups {
@@ -348,9 +376,15 @@ impl ObjectiveEvaluator {
         }
         returns.sort();
         let raw = (Decimal::from(returns.len() as u64) * self.spec.tail_fraction).ceil();
-        let take = raw.to_usize().unwrap_or(1).max(1).min(returns.len());
+        let take = raw
+            .to_usize()
+            .ok_or_else(|| ResearchError::MatrixBuild {
+                detail: format!("tail sample count `{raw}` is outside usize range"),
+            })?
+            .max(1)
+            .min(returns.len());
         let tail_mean = stats::mean(&returns[..take]);
-        (-tail_mean).max(Decimal::ZERO)
+        Ok((-tail_mean).max(Decimal::ZERO))
     }
 
     fn turnover_penalty(&self, weights: &[Decimal], groups: &[CrossSectionGroup]) -> Decimal {
@@ -402,10 +436,19 @@ pub(crate) fn rank_ic_weighted_pair_weight(
 /// NDCG@k with graded relevance = `max(label, 0)` (bps-style labels).
 ///
 /// Ideal ordering sorts by label descending. Returns 0 when IDCG is 0.
-#[must_use]
-pub(crate) fn ndcg_at_k(scores: &[Decimal], labels: &[Decimal], k: usize) -> Decimal {
-    if scores.len() != labels.len() || scores.is_empty() || k == 0 {
-        return Decimal::ZERO;
+pub(crate) fn ndcg_at_k(scores: &[Decimal], labels: &[Decimal], k: usize) -> QuantResult<Decimal> {
+    if scores.len() != labels.len() {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!(
+                "NDCG score/label length mismatch: scores={}, labels={}",
+                scores.len(),
+                labels.len()
+            ),
+        }
+        .into());
+    }
+    if scores.is_empty() || k == 0 {
+        return Ok(Decimal::ZERO);
     }
     let take = k.min(scores.len());
     let mut by_score: Vec<(usize, Decimal)> = scores
@@ -418,43 +461,61 @@ pub(crate) fn ndcg_at_k(scores: &[Decimal], labels: &[Decimal], k: usize) -> Dec
         .iter()
         .map(|(idx, _)| labels[*idx].max(Decimal::ZERO))
         .collect();
-    let dcg = discounted_gain(&dcg_rels);
+    let dcg = discounted_gain(&dcg_rels)?;
     let mut ideal: Vec<Decimal> = labels
         .iter()
         .map(|label| (*label).max(Decimal::ZERO))
         .collect();
     ideal.sort_by(|a, b| b.cmp(a));
-    let idcg = discounted_gain(&ideal[..take]);
+    let idcg = discounted_gain(&ideal[..take])?;
     if idcg.is_zero() {
-        return Decimal::ZERO;
+        return Ok(Decimal::ZERO);
     }
-    (dcg / idcg).clamp(Decimal::ZERO, Decimal::ONE)
+    Ok((dcg / idcg).clamp(Decimal::ZERO, Decimal::ONE))
 }
 
-fn discounted_gain(relevances: &[Decimal]) -> Decimal {
+fn discounted_gain(relevances: &[Decimal]) -> QuantResult<Decimal> {
     let mut total = Decimal::ZERO;
     for (pos, rel) in relevances.iter().enumerate() {
         if rel.is_zero() {
             continue;
         }
         // log2(pos+2) = ln(pos+2)/ln(2)
-        let denom = decimal_log2(Decimal::from((pos + 2) as u64));
-        if denom.is_zero() {
-            continue;
-        }
+        let rank =
+            u64::try_from(pos + 2).map_err(|error| ResearchError::ValidationMethodology {
+                detail: format!("NDCG rank exceeds u64: {error}"),
+            })?;
+        let denom = decimal_log2(Decimal::from(rank))?;
         total += *rel / denom;
     }
-    total
+    Ok(total)
 }
 
-fn decimal_log2(value: Decimal) -> Decimal {
-    let Some(f) = value.to_f64() else {
-        return Decimal::ZERO;
-    };
+fn decimal_log2(value: Decimal) -> QuantResult<Decimal> {
+    let f = value
+        .to_f64()
+        .ok_or_else(|| ResearchError::ValidationMethodology {
+            detail: format!("NDCG logarithm input {value} is not representable as f64"),
+        })?;
     if f <= 0.0 {
-        return Decimal::ZERO;
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!("NDCG logarithm input must be positive, got {value}"),
+        }
+        .into());
     }
-    Decimal::from_f64(f.log2()).unwrap_or(Decimal::ZERO)
+    let log2 = f.log2();
+    if !log2.is_finite() || log2 <= 0.0 {
+        return Err(ResearchError::ValidationMethodology {
+            detail: format!("NDCG log2 produced invalid value {log2} from {value}"),
+        }
+        .into());
+    }
+    Decimal::from_f64(log2).ok_or_else(|| {
+        ResearchError::ValidationMethodology {
+            detail: format!("NDCG log2 value {log2} is not representable as Decimal"),
+        }
+        .into()
+    })
 }
 
 /// `TopN` score-ranked **equal-weight** pseudo allocations (token-keyed proxy).
@@ -579,7 +640,7 @@ mod tests {
     #[test]
     fn correct_pairwise_order_has_lower_loss_than_reversed_order() {
         let group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(1), dec!(10)),
@@ -594,7 +655,7 @@ mod tests {
             .evaluate(&[dec!(1)], std::slice::from_ref(&group))
             .expect("eval");
         let reversed_group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(0), dec!(10)),
@@ -619,7 +680,7 @@ mod tests {
     #[test]
     fn objective_breakdown_total_matches_weighted_components() {
         let group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(1), dec!(-100)),
@@ -646,15 +707,18 @@ mod tests {
         let labels = vec![dec!(30), dec!(20), dec!(10)];
         let perfect = vec![dec!(3), dec!(2), dec!(1)];
         let reversed = vec![dec!(1), dec!(2), dec!(3)];
-        assert_eq!(ndcg_at_k(&perfect, &labels, 3), Decimal::ONE);
-        assert!(ndcg_at_k(&reversed, &labels, 3) < ndcg_at_k(&perfect, &labels, 3));
-        assert!(ndcg_at_k(&perfect, &labels, 2) <= Decimal::ONE);
+        assert_eq!(ndcg_at_k(&perfect, &labels, 3).expect("ndcg"), Decimal::ONE);
+        assert!(
+            ndcg_at_k(&reversed, &labels, 3).expect("ndcg")
+                < ndcg_at_k(&perfect, &labels, 3).expect("ndcg")
+        );
+        assert!(ndcg_at_k(&perfect, &labels, 2).expect("ndcg") <= Decimal::ONE);
     }
 
     #[test]
     fn topn_pseudo_allocations_only_select_top_n_and_keep_token_keys_separate() {
         let group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m1:yes", dec!(3), dec!(10)),
@@ -672,7 +736,7 @@ mod tests {
     #[test]
     fn topn_pseudo_allocations_all_negative_scores_still_equal_weight() {
         let group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(-3), dec!(10)),
@@ -692,7 +756,7 @@ mod tests {
     fn rank_loss_group_count_excludes_all_tied_label_groups() {
         let groups = vec![
             CrossSectionGroup {
-                as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 rows: vec![
                     row("m:a", dec!(1), dec!(10)),
@@ -700,7 +764,7 @@ mod tests {
                 ],
             },
             CrossSectionGroup {
-                as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+                decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
                 rows: vec![row("m:c", dec!(1), dec!(5)), row("m:d", dec!(0), dec!(5))],
             },
@@ -718,7 +782,7 @@ mod tests {
     #[test]
     fn rank_ic_weighted_ranknet_differs_from_plain_pairwise() {
         let group = CrossSectionGroup {
-            as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            decision_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             label_horizon_end: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             rows: vec![
                 row("m:a", dec!(3), dec!(30)),
@@ -751,12 +815,12 @@ mod tests {
     fn ndcg_k_truncation_is_respected() {
         let labels = vec![dec!(40), dec!(30), dec!(20), dec!(10)];
         let scores = vec![dec!(4), dec!(3), dec!(2), dec!(1)];
-        let at_2 = ndcg_at_k(&scores, &labels, 2);
-        let at_4 = ndcg_at_k(&scores, &labels, 4);
+        let at_2 = ndcg_at_k(&scores, &labels, 2).expect("ndcg");
+        let at_4 = ndcg_at_k(&scores, &labels, 4).expect("ndcg");
         assert_eq!(at_2, Decimal::ONE);
         assert_eq!(at_4, Decimal::ONE);
         let reversed = vec![dec!(1), dec!(2), dec!(3), dec!(4)];
-        assert!(ndcg_at_k(&reversed, &labels, 2) < at_2);
+        assert!(ndcg_at_k(&reversed, &labels, 2).expect("ndcg") < at_2);
     }
 
     #[test]

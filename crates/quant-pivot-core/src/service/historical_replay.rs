@@ -12,32 +12,31 @@
 //! The function is pure orchestration over already-prefetched facts (served by
 //! [`HistoricalWindow`]); it never touches a live `BookStore`.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::market::registry::NegRiskLegSet,
+    domain::DecisionBoundary,
     enums::quant::DataQualityStatus,
-    runtime_config::{
-        DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, SmallCrossSectionPolicy,
-    },
-    types::{Price, Usd},
+    runtime_config::{DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig},
+    types::{MarketId, Price, Usd},
 };
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSourceWindows, FeatureVector,
-        MarketWindowSnapshot, PitView, ResolvedBook, TradeTapeWindowSnapshot,
+        MarketDecisionCapture, MarketWindowSnapshot, ResolvedBook, ResolvedMarketBundle,
+        TradeTapeWindowSnapshot,
     },
     model::FavoriteLongshotBiasTable,
-    pit::PitQueryEngine,
+    pit::PointInTimeSnapshotSource,
     selection::SelectedMarket,
 };
 
 use crate::prefetch::historical_window::{
-    Prefetched, ReplaySample, feature_window, selected_market, trade_tape_window,
+    Prefetched, ReplaySample, feature_window, replay_boundary, selected_market, trade_tape_window,
 };
 use quant_pivot_research::domain::build_domain_slice_inputs;
 
@@ -60,16 +59,16 @@ pub struct ReplayConfig {
 
 /// Per-call inputs for materializing one cross-section from a prefetched window.
 pub struct CrossSectionRequest<'a> {
-    /// Point-in-time engine resolving books/markets visible at `as_of`.
-    pub pit: &'a dyn PitQueryEngine,
+    /// Point-in-time engine resolving books/markets visible at `decision_at`.
+    pub pit: &'a dyn PointInTimeSnapshotSource,
     /// Prefetched facts backing the trailing feature windows.
     pub prefetched: &'a Prefetched,
-    /// Decision time to resolve the cross-section as of.
-    pub as_of: DateTime<Utc>,
-    /// `(market, token)` samples in this `as_of` group.
+    /// Frozen decision time for the replayed cross-section.
+    pub decision_at: DateTime<Utc>,
+    /// `(market, token)` samples in this decision-time group.
     pub group: &'a [ReplaySample],
     /// Source visibility delay applied to features.
-    pub source_delay: Duration,
+    pub knowledge_lag: Duration,
     /// Maximum trailing feature lookback.
     pub lookback: Duration,
 }
@@ -80,10 +79,15 @@ pub struct CrossSectionRequest<'a> {
 /// All four vectors are index-aligned (the `i`-th vector, market, entry mid, and
 /// outcome describe the same market).
 pub struct ReplayCrossSection {
-    /// Decision time the cross-section was resolved as of.
-    pub as_of: DateTime<Utc>,
+    /// Complete decision and source-visibility boundary used by every row.
+    pub boundary: DecisionBoundary,
     /// Resolved feature vectors that passed the data-quality bar.
     pub vectors: Vec<FeatureVector>,
+    /// Resolved vectors rejected by the data-quality/required-input bar. They
+    /// remain first-class replay evidence but never enter factors or models.
+    pub rejected_vectors: Vec<FeatureVector>,
+    /// Full decision captures for every resolved vector, including DQ rejects.
+    pub captures: HashMap<MarketId, MarketDecisionCapture>,
     /// Selection snapshots aligned with `vectors`.
     pub markets: Vec<SelectedMarket>,
     /// Entry mids (resolved book mid) aligned with `vectors`.
@@ -110,33 +114,23 @@ pub async fn materialize_cross_section(
     config: &ReplayConfig,
     request: &CrossSectionRequest<'_>,
 ) -> QuantResult<Option<ReplayCrossSection>> {
-    // Offline replay (training / backtest) shares the online engine entrypoint,
-    // but the `HistoricalQuantile` fallback needs a PIT-correct rolling factor
-    // history — which the online plane prefetches from persisted factor values.
-    // Reconstructing that offline without look-ahead is 11.6's job. Until then we
-    // fail closed rather than silently normalize offline with an empty history
-    // (which would produce indeterminate factors offline while the online plane
-    // scores them — a hidden train-serve skew). The default policy is
-    // `Indeterminate`, under which offline and online are byte-identical.
-    if config.factors.cross_section.small_cross_section_policy
-        == SmallCrossSectionPolicy::HistoricalQuantile
-    {
+    let decision_at = request.decision_at;
+    if request.knowledge_lag.subsec_nanos() != 0 {
         return Err(QuantError::config(
-            "offline replay does not support the HistoricalQuantile small-cross-section policy \
-             (PIT-correct offline factor history lands in 11.6); train and backtest under the \
-             Indeterminate policy to preserve training-serving parity",
+            "historical knowledge lag must be expressed in whole seconds",
         ));
     }
-
-    let as_of = request.as_of;
-    let (selected, windows, trade_windows) = cross_section_inputs(
-        request.group,
-        request.prefetched,
-        as_of,
-        request.source_delay,
-        request.lookback,
-        Duration::from_secs(config.features.structural.trade_tape_window_secs),
-    );
+    let boundary = replay_boundary(
+        decision_at,
+        request.knowledge_lag.as_secs(),
+        config.domain.crypto.availability_lag_secs,
+    )?;
+    let ReplayInputs {
+        selected,
+        windows,
+        trade_windows,
+        liquidity_caps,
+    } = resolve_replay_inputs(config, request, &boundary).await?;
     if selected.is_empty() {
         return Ok(None);
     }
@@ -153,142 +147,195 @@ pub async fn materialize_cross_section(
                     .linkages
                     .get(&market.market_id)
                     .map_or(&[][..], Vec::as_slice),
-                as_of,
+                &boundary,
                 &config.domain,
                 &request.prefetched.domain_observations,
             )
         })
-        .collect();
+        .collect::<QuantResult<Vec<_>>>()?;
 
-    let pit_view = PitView::Historical(request.pit);
     let resolve_futures = selected
         .iter()
         .zip(windows.iter())
         .zip(trade_windows.iter())
         .zip(domain_inputs.iter())
-        .map(|(((market, snapshot), trade_snapshot), domain)| {
-            // Neg-risk full-leg PIT (offline): enumerate the event's YES legs from
-            // the prefetched window and resolve each book at the same `as_of`
-            // through the same `resolve_book` the online plane uses — byte-identical.
-            let sibling = sibling_leg_set(market, request.prefetched);
-            async move {
-                builder
-                    .resolve_inputs(
-                        market,
-                        as_of,
-                        pit_view,
-                        FeatureSourceWindows {
-                            microstructure: snapshot,
-                            trade_tape: trade_snapshot,
-                            domain: domain.as_ref(),
-                        },
-                        &sibling,
-                        Usd::ZERO,
-                    )
-                    .await
-            }
-        });
+        .zip(liquidity_caps.iter())
+        .map(
+            |((((market, snapshot), trade_snapshot), domain), liquidity_cap)| {
+                let boundary = boundary.clone();
+                async move {
+                    builder
+                        .resolve_inputs(
+                            market,
+                            &boundary,
+                            request.pit,
+                            FeatureSourceWindows {
+                                microstructure: snapshot,
+                                trade_tape: trade_snapshot,
+                                domain: domain.as_ref(),
+                            },
+                            *liquidity_cap,
+                        )
+                        .await
+                }
+            },
+        );
     let bundles = try_join_all(resolve_futures).await?;
 
-    let vectors = builder.build_batch(&bundles, &[], &config.features, &config.data_quality);
+    let vectors = builder.build_batch(&bundles, &[], &config.features, &config.data_quality)?;
 
-    let mut kept_vectors = Vec::with_capacity(vectors.len());
-    let mut kept_markets = Vec::with_capacity(vectors.len());
-    let mut kept_entry_mids = Vec::with_capacity(vectors.len());
-    let mut dropped_insufficient = 0_u64;
-    for ((vector, bundle), market) in vectors.into_iter().zip(bundles.iter()).zip(selected.iter()) {
-        if vector.data_quality == DataQualityStatus::Insufficient {
-            dropped_insufficient += 1;
-            continue;
-        }
-        kept_entry_mids.push(bundle.inputs.book.as_ref().and_then(ResolvedBook::mid));
-        kept_markets.push(market.clone());
-        kept_vectors.push(vector);
-    }
-    if kept_vectors.is_empty() {
+    let partitioned = partition_feature_vectors(vectors, &bundles, &selected)?;
+    if partitioned.kept_vectors.is_empty() {
         return Ok(Some(ReplayCrossSection {
-            as_of,
+            boundary,
             vectors: Vec::new(),
+            rejected_vectors: partitioned.rejected_vectors,
+            captures: partitioned.captures,
             markets: Vec::new(),
             entry_mids: Vec::new(),
             outcomes: Vec::new(),
-            dropped_insufficient,
+            dropped_insufficient: partitioned.dropped_insufficient,
         }));
     }
 
-    FactorEngine::validate_batch_invariants(&kept_vectors)?;
-    let outcomes = engine.compute_all_batch(&kept_vectors, &config.factors)?;
+    FactorEngine::validate_batch_invariants(&partitioned.kept_vectors)?;
+    let outcomes = engine.compute_all_batch(&partitioned.kept_vectors, &config.factors)?;
 
     Ok(Some(ReplayCrossSection {
-        as_of,
-        vectors: kept_vectors,
-        markets: kept_markets,
-        entry_mids: kept_entry_mids,
+        boundary,
+        vectors: partitioned.kept_vectors,
+        rejected_vectors: partitioned.rejected_vectors,
+        captures: partitioned.captures,
+        markets: partitioned.kept_markets,
+        entry_mids: partitioned.kept_entry_mids,
         outcomes,
-        dropped_insufficient,
+        dropped_insufficient: partitioned.dropped_insufficient,
     }))
 }
 
-/// The neg-risk YES-leg set for a market's event from the prefetched window.
-///
-/// Mirrors `MarketRegistry::neg_risk_leg_set` (online): empty for binary /
-/// non-neg-risk markets; otherwise the neg-risk leg count with resolvable legs
-/// populated (`expected_legs` excludes non-neg-risk event members).
-fn sibling_leg_set(market: &SelectedMarket, prefetched: &Prefetched) -> NegRiskLegSet {
-    let Some(info) = prefetched.markets_by_id.get(&market.market_id) else {
-        return NegRiskLegSet::empty();
-    };
-    if !info.neg_risk {
-        return NegRiskLegSet::empty();
-    }
-    prefetched
-        .neg_risk_leg_sets
-        .get(&info.event_id)
-        .cloned()
-        .unwrap_or(NegRiskLegSet::empty())
+struct PartitionedFeatureVectors {
+    kept_vectors: Vec<FeatureVector>,
+    rejected_vectors: Vec<FeatureVector>,
+    captures: HashMap<MarketId, MarketDecisionCapture>,
+    kept_markets: Vec<SelectedMarket>,
+    kept_entry_mids: Vec<Option<Price>>,
+    dropped_insufficient: u64,
 }
 
-/// Build selected markets and trailing feature windows for one cross-section.
-fn cross_section_inputs(
-    group: &[ReplaySample],
-    prefetched: &Prefetched,
-    as_of: DateTime<Utc>,
-    source_delay: Duration,
-    lookback: Duration,
-    trade_lookback: Duration,
-) -> (
-    Vec<SelectedMarket>,
-    Vec<MarketWindowSnapshot>,
-    Vec<TradeTapeWindowSnapshot>,
-) {
-    let mut selected = Vec::with_capacity(group.len());
-    let mut windows = Vec::with_capacity(group.len());
-    let mut trade_windows = Vec::with_capacity(group.len());
-    for sample in group {
-        let Some(info) = prefetched.markets_by_id.get(&sample.market_id) else {
+fn partition_feature_vectors(
+    vectors: Vec<FeatureVector>,
+    bundles: &[ResolvedMarketBundle<'_>],
+    selected: &[SelectedMarket],
+) -> QuantResult<PartitionedFeatureVectors> {
+    let mut output = PartitionedFeatureVectors {
+        kept_vectors: Vec::with_capacity(vectors.len()),
+        rejected_vectors: Vec::new(),
+        captures: HashMap::with_capacity(vectors.len()),
+        kept_markets: Vec::with_capacity(vectors.len()),
+        kept_entry_mids: Vec::with_capacity(vectors.len()),
+        dropped_insufficient: 0,
+    };
+    for ((vector, bundle), market) in vectors.into_iter().zip(bundles).zip(selected) {
+        let mut capture = bundle.capture.clone();
+        capture.data_quality = vector.data_quality;
+        if output
+            .captures
+            .insert(vector.market_id.clone(), capture)
+            .is_some()
+        {
+            return Err(ResearchError::Determinism {
+                detail: format!(
+                    "replay cross-section contains duplicate market {}",
+                    vector.market_id
+                ),
+            }
+            .into());
+        }
+        if vector.data_quality == DataQualityStatus::Insufficient {
+            output.dropped_insufficient += 1;
+            output.rejected_vectors.push(vector);
+            continue;
+        }
+        output
+            .kept_entry_mids
+            .push(bundle.inputs.book.as_ref().and_then(ResolvedBook::mid));
+        output.kept_markets.push(market.clone());
+        output.kept_vectors.push(vector);
+    }
+    Ok(output)
+}
+
+struct ReplayInputs {
+    selected: Vec<SelectedMarket>,
+    windows: Vec<MarketWindowSnapshot>,
+    trade_windows: Vec<TradeTapeWindowSnapshot>,
+    liquidity_caps: Vec<Usd>,
+}
+
+async fn resolve_replay_inputs(
+    config: &ReplayConfig,
+    request: &CrossSectionRequest<'_>,
+    boundary: &DecisionBoundary,
+) -> QuantResult<ReplayInputs> {
+    let mut selected = Vec::with_capacity(request.group.len());
+    let mut windows = Vec::with_capacity(request.group.len());
+    let mut trade_windows = Vec::with_capacity(request.group.len());
+    let mut liquidity_caps = Vec::with_capacity(request.group.len());
+    for sample in request.group {
+        let Some(snapshot) = request
+            .pit
+            .market_snapshot_at(&sample.market_id, boundary)
+            .await?
+        else {
             continue;
         };
-        selected.push(selected_market(info));
+        if sample.token_id != snapshot.market.token_yes {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "replay schedule token {} does not match catalog YES token {} for market {}",
+                    sample.token_id, snapshot.market.token_yes, sample.market_id
+                ),
+            }
+            .into());
+        }
+        let liquidity_cap =
+            snapshot
+                .market
+                .liquidity_usd
+                .ok_or_else(|| ResearchError::PitResolution {
+                    detail: format!(
+                        "market {} has no catalog liquidity at decision {}",
+                        sample.market_id,
+                        boundary.decision_at()
+                    ),
+                })?;
+        selected.push(selected_market(snapshot.market.as_ref()));
         windows.push(feature_window(
             sample.token_id.clone(),
-            as_of,
-            source_delay,
-            lookback,
-            prefetched
+            boundary,
+            request.lookback,
+            request
+                .prefetched
                 .micro
                 .get(&sample.token_id)
                 .map_or(&[][..], Vec::as_slice),
-        ));
+        )?);
         trade_windows.push(trade_tape_window(
             sample.market_id.clone(),
-            as_of,
-            source_delay,
-            trade_lookback,
-            prefetched
+            boundary,
+            Duration::from_secs(config.features.structural.trade_tape_window_secs),
+            request
+                .prefetched
                 .trade_tape
                 .get(&sample.market_id)
                 .map_or(&[][..], Vec::as_slice),
-        ));
+        )?);
+        liquidity_caps.push(liquidity_cap);
     }
-    (selected, windows, trade_windows)
+    Ok(ReplayInputs {
+        selected,
+        windows,
+        trade_windows,
+        liquidity_caps,
+    })
 }

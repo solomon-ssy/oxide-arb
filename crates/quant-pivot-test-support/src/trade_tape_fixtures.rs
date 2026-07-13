@@ -152,7 +152,8 @@ impl TradeTapeBlockCursorRepository for LiveTradeTapeBlockCursorRepo {
             .map(|contract| TradeTapeBlockCursorInfo {
                 source: source.to_owned(),
                 contract_address: format!("{:#x}", contract.address),
-                last_finalized_block: i64::try_from(contract.bootstrap_block).unwrap_or(1),
+                last_finalized_block: i64::try_from(contract.bootstrap_block)
+                    .expect("fixture bootstrap block fits i64"),
                 last_log_index: 0,
                 head_lag_blocks: 0,
                 status: "live".to_owned(),
@@ -195,18 +196,22 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         self.inner
-            .microstructure_window(token_ids, from_ms, to_ms)
+            .microstructure_window(token_ids, from_ms, to_ms, decision_at_ms)
             .await
     }
 
     async fn book_snapshot_at(
         &self,
         token_id: &TokenId,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError> {
-        self.inner.book_snapshot_at(token_id, as_of_ms).await
+        self.inner
+            .book_snapshot_at(token_id, source_cutoff_ms, decision_at_ms)
+            .await
     }
 
     async fn book_snapshots_between(
@@ -214,18 +219,22 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError> {
         self.inner
-            .book_snapshots_between(token_ids, from_ms, to_ms)
+            .book_snapshots_between(token_ids, from_ms, to_ms, available_by_ms)
             .await
     }
 
     async fn resolution_at(
         &self,
         market_id: &MarketId,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError> {
-        self.inner.resolution_at(market_id, as_of_ms).await
+        self.inner
+            .resolution_at(market_id, source_cutoff_ms, decision_at_ms)
+            .await
     }
 
     async fn resolutions_between(
@@ -233,9 +242,10 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         self.inner
-            .resolutions_between(market_ids, from_ms, to_ms)
+            .resolutions_between(market_ids, from_ms, to_ms, decision_at_ms)
             .await
     }
 
@@ -244,9 +254,17 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         instrument_keys: Vec<DomainInstrumentKey>,
         from_ms: i64,
         to_ms: i64,
+        publish_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError> {
         self.inner
-            .domain_observations_between(instrument_keys, from_ms, to_ms)
+            .domain_observations_between(
+                instrument_keys,
+                from_ms,
+                to_ms,
+                publish_cutoff_ms,
+                decision_at_ms,
+            )
             .await
     }
 
@@ -254,10 +272,11 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         &self,
         instrument_key: &DomainInstrumentKey,
         metric: &str,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError> {
         self.inner
-            .domain_observation_at(instrument_key, metric, as_of_ms)
+            .domain_observation_at(instrument_key, metric, source_cutoff_ms, decision_at_ms)
             .await
     }
 
@@ -278,6 +297,7 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(market_ids
             .into_iter()
@@ -286,7 +306,11 @@ impl QuantFactReadRepository for ConfigurableFactRead {
                     .get(&market_id)
                     .into_iter()
                     .flatten()
-                    .filter(|row| row.event_time >= from_ms && row.event_time < to_ms)
+                    .filter(|row| {
+                        row.event_time >= from_ms
+                            && row.event_time < to_ms
+                            && row.ingestion_time <= decision_at_ms
+                    })
                     .cloned()
             })
             .collect())
@@ -297,10 +321,11 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
         bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         self.inner
-            .mid_price_series(token_ids, from_ms, to_ms, bucket_secs)
+            .mid_price_series(token_ids, from_ms, to_ms, decision_at_ms, bucket_secs)
             .await
     }
 
@@ -309,10 +334,11 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        available_by_ms: i64,
         minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
         self.inner
-            .microstructure_series(token_ids, from_ms, to_ms, minute)
+            .microstructure_series(token_ids, from_ms, to_ms, available_by_ms, minute)
             .await
     }
 
@@ -320,7 +346,10 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         &self,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
-        self.inner.observed_markets_between(from_ms, to_ms).await
+        self.inner
+            .observed_markets_between(from_ms, to_ms, decision_at_ms)
+            .await
     }
 }

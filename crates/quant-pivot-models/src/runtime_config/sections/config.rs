@@ -9,7 +9,7 @@ use crate::{
     },
     runtime_config::wire::{
         AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, EntryOrderPolicy,
-        ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily, FeatureNameRef,
+        ExecutionBreakerConfig, ExitMonitorPolicy, FactorWeights, FeatureFamily,
         FeatureStalenessPolicy, KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef,
         NeutralizeDimension, NotificationPolicies, PortfolioOptimizerConfig, RankLossKind,
         ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SettlementRedeemPolicy,
@@ -192,8 +192,6 @@ pub struct FeaturesConfig {
     pub feature_schema_version: SchemaVersion,
     /// Enabled feature family names.
     pub enabled_feature_families: Vec<FeatureFamily>,
-    /// Required feature names (each must exist in the active feature schema).
-    pub required_features: Vec<FeatureNameRef>,
     /// Bar aggregation windows in seconds.
     pub bar_windows_secs: Vec<u64>,
     /// Momentum feature-family windows and lags.
@@ -236,7 +234,7 @@ impl FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: SchemaVersion::new(5),
+            feature_schema_version: SchemaVersion::new(6),
             enabled_feature_families: vec![
                 FeatureFamily::MarketMetadata,
                 FeatureFamily::PriceBook,
@@ -245,7 +243,6 @@ impl Default for FeaturesConfig {
                 FeatureFamily::Structural,
                 FeatureFamily::Domain,
             ],
-            required_features: Vec::new(),
             bar_windows_secs: vec![60, 300, 900],
             momentum: MomentumFeaturesConfig::default(),
             volatility_windows_secs: vec![900, 3_600],
@@ -322,8 +319,6 @@ pub struct FactorCrossSectionConfig {
     pub min_size: u32,
     /// What to do below `min_size` (never a silent neutral).
     pub small_cross_section_policy: SmallCrossSectionPolicy,
-    /// Rolling lookback (seconds) for the `HistoricalQuantile` policy.
-    pub historical_lookback_secs: u64,
 }
 
 impl Default for FactorCrossSectionConfig {
@@ -331,7 +326,6 @@ impl Default for FactorCrossSectionConfig {
         Self {
             min_size: 5,
             small_cross_section_policy: SmallCrossSectionPolicy::Indeterminate,
-            historical_lookback_secs: 86_400,
         }
     }
 }
@@ -577,9 +571,10 @@ impl Default for CryptoCrossCheckConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CryptoDomainConfig {
-    /// Source visibility delay (seconds) applied to domain-observation PIT
-    /// reads: only rows with `event_time <= as_of - source_delay` are visible.
-    pub source_delay_secs: u64,
+    /// Source-specific publication/availability lag. The effective domain
+    /// cutoff is the earlier of the global knowledge cutoff and this lag from
+    /// the decision time.
+    pub availability_lag_secs: u64,
     /// Days of history the ingest worker backfills on bootstrap, applied as a
     /// uniform **time** lower bound (`now - backfill_days`) to every domain
     /// source's fetch window. For Binance (1m klines) this is exact: the
@@ -602,7 +597,7 @@ pub struct CryptoDomainConfig {
 impl Default for CryptoDomainConfig {
     fn default() -> Self {
         Self {
-            source_delay_secs: 5,
+            availability_lag_secs: 5,
             backfill_days: 90,
             momentum_window_secs: 3_600,
             volatility_window_secs: 3_600,
@@ -673,14 +668,6 @@ pub struct ModelCalibrationConfig {
     pub embargo_secs: u64,
     /// Two-sided confidence level for reliability-bin Wilson intervals.
     pub ci_confidence: DecimalString,
-    /// Hard gate switch for `GateId::CalibrationRequired` (Phase 11.3 §6):
-    /// when `true` (the production default), `Publish`/`AutoExecution` on a
-    /// Buy model requires a `Calibrated` return model — an uncalibrated
-    /// (`Heuristic`) artifact fails closed. Never disable outside a
-    /// deliberately-labeled cold-start bootstrap window; it exists as a
-    /// governed field (not a hard-coded `true`) purely so that window is an
-    /// auditable operator decision, not a code change.
-    pub require_for_publish: bool,
 }
 
 impl Default for ModelCalibrationConfig {
@@ -690,7 +677,6 @@ impl Default for ModelCalibrationConfig {
             min_samples_isotonic: 1_000,
             embargo_secs: 86_400,
             ci_confidence: DecimalString::new("0.95"),
-            require_for_publish: true,
         }
     }
 }
@@ -710,10 +696,10 @@ pub struct ModelConfig {
     /// Category-specific Buy-side model pointers (Phase 11.2.2 `ModelRouting`).
     ///
     /// A market whose category has a pointer here scores through that artifact
-    /// (which may consume the category's domain slice); categories without a
-    /// pointer — or whose artifact is unavailable — fall back to the generic
-    /// `active_model_version_id`. Governed exactly like the active/shadow
-    /// pointers (versioned config + activation audit).
+    /// (which may consume the category's domain slice); only categories without
+    /// a pointer use the generic `active_model_version_id`. A configured route
+    /// that cannot load, validate its exact scope, or infer fails the entire
+    /// report round. Governed exactly like the active/shadow pointers.
     pub category_model_pointers: BTreeMap<MarketCategory, ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalString,
@@ -799,8 +785,8 @@ pub struct QualityGateConfig {
     pub min_sample_count: u64,
     /// Minimum label coverage in `[0, 1]`.
     pub min_label_coverage: DecimalString,
-    /// Minimum critical-feature (build) coverage in `[0, 1]`.
-    pub min_critical_feature_coverage: DecimalString,
+    /// Minimum planned-sample materialization coverage in `[0, 1]`.
+    pub min_materialization_coverage: DecimalString,
     /// Maximum tolerated backtest drawdown in `[0, 1]`.
     pub max_drawdown: DecimalString,
     /// Minimum liquidity-exit feasibility in `[0, 1]` (auto-execution gate).
@@ -820,7 +806,7 @@ impl Default for QualityGateConfig {
         Self {
             min_sample_count: 500,
             min_label_coverage: DecimalString::new("0.70"),
-            min_critical_feature_coverage: DecimalString::new("0.95"),
+            min_materialization_coverage: DecimalString::new("0.95"),
             max_drawdown: DecimalString::new("0.30"),
             min_liquidity_exit_feasibility: DecimalString::new("0.90"),
             min_shadow_overlap_stability: DecimalString::new("0.60"),
@@ -845,17 +831,6 @@ pub struct TrainingConfig {
     pub max_book_staleness_ms: u64,
     /// Minimum forward top-1 depth (USD) for the `liquidity_exit_possible` label.
     pub min_exit_depth_usd: DecimalString,
-    /// Minimum book-derived liquidity (combined visible USD depth) a market must
-    /// show at an `as_of` to enter the point-in-time selection during an offline
-    /// dataset build.
-    ///
-    /// The offline plane has no Gamma `liquidity_usd`/`volume_24h` history, so the
-    /// online selection funnel is replayed with book depth as the liquidity proxy
-    /// (and the volume floor skipped). This is that depth floor — frozen with the
-    /// runtime config and captured in `dataset_hash` for reproducibility. It is a
-    /// book-depth quantity, deliberately distinct from the Gamma-calibrated online
-    /// `selection.min_liquidity_usd`.
-    pub min_selection_depth_usd: DecimalString,
 }
 
 impl Default for TrainingConfig {
@@ -863,7 +838,6 @@ impl Default for TrainingConfig {
         Self {
             max_book_staleness_ms: 300_000,
             min_exit_depth_usd: DecimalString::new("100"),
-            min_selection_depth_usd: DecimalString::new("500"),
         }
     }
 }
@@ -877,18 +851,6 @@ impl TrainingConfig {
             .parse::<Decimal>()
             .map(Usd::new)
             .map_err(|error| format!("training.min_exit_depth_usd is not a valid decimal: {error}"))
-    }
-
-    /// Resolve [`TrainingConfig::min_selection_depth_usd`] into a typed [`Usd`].
-    pub fn min_selection_depth_usd_typed(&self) -> Result<Usd, String> {
-        use rust_decimal::Decimal;
-        self.min_selection_depth_usd
-            .value
-            .parse::<Decimal>()
-            .map(Usd::new)
-            .map_err(|error| {
-                format!("training.min_selection_depth_usd is not a valid decimal: {error}")
-            })
     }
 }
 
@@ -943,8 +905,8 @@ pub struct ReportScheduleConfig {
     pub cadence: ScheduleCadence,
     /// `TopN` size for this schedule.
     pub top_n: u32,
-    /// Source delay in seconds.
-    pub source_delay_secs: u64,
+    /// Global knowledge lag in seconds.
+    pub knowledge_lag_secs: u64,
     /// Whether this schedule is enabled.
     pub enabled: bool,
 }
@@ -955,7 +917,7 @@ impl Default for ReportScheduleConfig {
             schedule_id: "default_interval".to_owned(),
             cadence: ScheduleCadence::default(),
             top_n: 20,
-            source_delay_secs: 10,
+            knowledge_lag_secs: 10,
             enabled: true,
         }
     }

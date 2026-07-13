@@ -1,6 +1,6 @@
 //! Health checker WS probe integration tests (Postgres testcontainer for pool wiring).
 
-use quant_pivot_api::ws::ShardHealthSummary;
+use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
 use quant_pivot_core::{
     governance::RuntimeModeHandle,
     infra::health_checker::{HealthChecker, HealthCheckerDeps},
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 fn checker_with(
     catalog: Arc<CatalogReadiness>,
-    ws: Arc<dyn quant_pivot_api::ws::WsShardHealthPort>,
+    ws: Arc<dyn WsShardHealthPort>,
     pg: Arc<PostgresPool>,
     deploy: &DeployConfig,
 ) -> HealthChecker {

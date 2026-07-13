@@ -86,7 +86,7 @@ pub struct ReportLifecycleEvent {
     pub report_kind: ReportKind,
     pub runtime_mode: QuantRuntimeMode,
     pub status: RecommendationReportStatus,
-    pub as_of: DateTime<Utc>,
+    pub decision_at: DateTime<Utc>,
     pub published_at: Option<DateTime<Utc>>,
     pub recommendation_count: u32,
     pub empty_reason: Option<EmptyReportReason>,
@@ -101,7 +101,7 @@ impl ReportLifecycleEvent {
         trigger_key: String,
         report_kind: ReportKind,
         runtime_mode: QuantRuntimeMode,
-        as_of: DateTime<Utc>,
+        decision_at: DateTime<Utc>,
     ) -> Self {
         Self {
             event: ReportEventKind::Started,
@@ -110,7 +110,7 @@ impl ReportLifecycleEvent {
             report_kind,
             runtime_mode,
             status: RecommendationReportStatus::Building,
-            as_of,
+            decision_at,
             published_at: None,
             recommendation_count: 0,
             empty_reason: None,
@@ -125,7 +125,7 @@ impl ReportLifecycleEvent {
         trigger_key: String,
         report_kind: ReportKind,
         runtime_mode: QuantRuntimeMode,
-        as_of: DateTime<Utc>,
+        decision_at: DateTime<Utc>,
         error_code: String,
         status_reason: String,
     ) -> Self {
@@ -136,7 +136,7 @@ impl ReportLifecycleEvent {
             report_kind,
             runtime_mode,
             status: RecommendationReportStatus::Failed,
-            as_of,
+            decision_at,
             published_at: None,
             recommendation_count: 0,
             empty_reason: None,
@@ -174,7 +174,7 @@ impl ReportLifecycleEvent {
         trigger_key: String,
         report_kind: ReportKind,
         runtime_mode: QuantRuntimeMode,
-        as_of: DateTime<Utc>,
+        decision_at: DateTime<Utc>,
         empty_reason: EmptyReportReason,
     ) -> Self {
         Self {
@@ -184,7 +184,7 @@ impl ReportLifecycleEvent {
             report_kind,
             runtime_mode,
             status: RecommendationReportStatus::PublishedEmpty,
-            as_of,
+            decision_at,
             published_at: None,
             recommendation_count: 0,
             empty_reason: Some(empty_reason),
@@ -201,7 +201,7 @@ impl ReportLifecycleEvent {
             report_kind: report.report_kind,
             runtime_mode: report.runtime_mode,
             status: report.status,
-            as_of: report.as_of,
+            decision_at: report.decision_at,
             published_at: report.published_at,
             recommendation_count: report.summary_json.published_recommendation_count,
             empty_reason: report.summary_json.empty_reason,
@@ -392,6 +392,8 @@ pub enum MaterializationRunKind {
     ModelCalibrationFit,
     /// Combinatorial Purged Cross-Validation + governed trial-grid run (Phase 11.5).
     CpcvBacktest,
+    /// Deterministic training/serving parity replay (Phase 11.6).
+    FeatureParity,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -423,6 +425,7 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::BiasTableFit => Self::BiasTableFit,
             ResearchJobKind::ModelCalibrationFit => Self::ModelCalibrationFit,
             ResearchJobKind::CpcvBacktest => Self::CpcvBacktest,
+            ResearchJobKind::FeatureParity => Self::FeatureParity,
         }
     }
 }
@@ -446,9 +449,7 @@ impl From<TrainingDatasetStatus> for MaterializationRunStatus {
                 Self::Failed
             }
             TrainingDatasetStatus::Planned | TrainingDatasetStatus::Building => Self::Running,
-            TrainingDatasetStatus::Built
-            | TrainingDatasetStatus::Ready
-            | TrainingDatasetStatus::Expired => Self::Completed,
+            TrainingDatasetStatus::Ready | TrainingDatasetStatus::Expired => Self::Completed,
         }
     }
 }

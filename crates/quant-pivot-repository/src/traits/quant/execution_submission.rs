@@ -6,7 +6,7 @@ use quant_pivot_models::{
         ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     enums::execution::ExitReason,
-    types::{ExecutionOrderId, OrderIntentId, Price},
+    types::{ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price},
 };
 
 /// Cross-table execution-submission transactions (Phase 05.4 — real money).
@@ -54,10 +54,12 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     /// capital (`Allocated -> Locked`), advance the intent (`AdmissionPending ->
     /// Submitted`), and advance the recommendation (`-> Executed`). The intent
     /// row is re-locked and its `AdmissionPending` claim re-verified inside this
-    /// txn.
+    /// txn. The exact clear parity generation is verified under the global
+    /// parity advisory lock in the same transaction.
     async fn create_entry_order_and_lock_capital(
         &self,
         order: NewExecutionOrder,
+        feature_parity_state_id: &FeatureParityStateId,
     ) -> Result<ExecutionOrderInfo, StorageError>;
 
     /// Apply the venue outcome in one txn: advance the entry state, settle the

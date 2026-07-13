@@ -32,6 +32,7 @@ pub trait QuantFactReadRepository: Send + Sync {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
 
     /// Microstructure buckets for `token_ids` whose `bucket_time` falls in
@@ -44,6 +45,7 @@ pub trait QuantFactReadRepository: Send + Sync {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        available_by_ms: i64,
         minute: bool,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
 
@@ -66,30 +68,54 @@ pub trait QuantFactReadRepository: Send + Sync {
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<TradeTapeRow>, StorageError>;
 
     /// Coarse mid-price series per token for correlation estimation: the last
     /// `mid_price_close` within each `bucket_secs` interval over
     /// `[from_ms, to_ms)` (epoch milliseconds), ordered by token then bucket.
-    /// Aggregated server-side so a multi-day lookback stays bounded. Used only by
-    /// the portfolio correlation estimator (off by default).
+    /// Only rows available by `decision_at_ms` participate. Aggregated
+    /// server-side so a multi-day lookback stays bounded. Used only by the
+    /// portfolio correlation estimator (off by default).
     async fn mid_price_series(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
         bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError>;
 
-    /// The freshest book snapshot for `token_id` published at or before
-    /// `as_of_ms` (epoch milliseconds), or `None` when none exists. Point-in-time
-    /// correct: `WHERE event_time <= as_of` with a stable
-    /// `event_time DESC, ingestion_time DESC, sequence DESC` tie-break.
+    /// The freshest book snapshot whose source-effective timestamp is at or
+    /// before `source_cutoff_ms` and whose ingestion timestamp is visible by
+    /// `decision_at_ms`, or `None` when none exists.
     async fn book_snapshot_at(
         &self,
         token_id: &TokenId,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<BookSnapshotRow>, StorageError>;
+
+    /// Freshest visible book per token at one source cutoff. Implementations
+    /// should override with one grouped query; the default preserves correctness
+    /// for test adapters.
+    async fn book_snapshots_at(
+        &self,
+        token_ids: Vec<TokenId>,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        let mut rows = Vec::with_capacity(token_ids.len());
+        for token_id in token_ids {
+            if let Some(row) = self
+                .book_snapshot_at(&token_id, source_cutoff_ms, decision_at_ms)
+                .await?
+            {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
 
     /// All book snapshots for `token_ids` with `event_time` in the inclusive
     /// range `[from_ms, to_ms]`, ordered by token then event time (with
@@ -100,30 +126,35 @@ pub trait QuantFactReadRepository: Send + Sync {
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
+        available_by_ms: i64,
     ) -> Result<Vec<BookSnapshotRow>, StorageError>;
 
-    /// The resolution in effect for `market_id` as of `as_of_ms` (the latest
-    /// settlement event with `resolved_at <= as_of`), or `None` when the market
-    /// had not resolved by then. Stable `resolved_at DESC, observed_at DESC,
-    /// sequence DESC` tie-break.
+    /// The latest resolution whose economic timestamp is at or before
+    /// `source_cutoff_ms` and whose writer observation is visible by
+    /// `decision_at_ms`, or `None` when no such row exists. Stable
+    /// `resolved_at DESC, observed_at DESC, sequence DESC` tie-break.
     async fn resolution_at(
         &self,
         market_id: &MarketId,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<MarketResolutionRow>, StorageError>;
 
     /// All settlement events for `market_ids` with `resolved_at` in the inclusive
-    /// range `[from_ms, to_ms]`, ordered by market then resolution time (with
-    /// tie-breakers). A batch prefetch for offline settlement labeling.
+    /// range `[from_ms, to_ms]` and observed by `decision_at_ms`, ordered by
+    /// market then resolution time (with tie-breakers). A batch prefetch for
+    /// offline settlement labeling.
     async fn resolutions_between(
         &self,
         market_ids: Vec<MarketId>,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<MarketResolutionRow>, StorageError>;
 
     /// Distinct market ids that had at least one book snapshot with `event_time`
-    /// in the inclusive range `[from_ms, to_ms]`.
+    /// in the inclusive range `[from_ms, to_ms]` and `ingestion_time` no later
+    /// than `decision_at_ms`.
     ///
     /// This is the **point-in-time honest** historical candidate set for
     /// offline dataset builds: a market is a candidate iff it was actually
@@ -135,6 +166,7 @@ pub trait QuantFactReadRepository: Send + Sync {
         &self,
         from_ms: i64,
         to_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError>;
 
     /// External domain observations for `instrument_keys` with `event_time` in
@@ -147,6 +179,8 @@ pub trait QuantFactReadRepository: Send + Sync {
         instrument_keys: Vec<DomainInstrumentKey>,
         from_ms: i64,
         to_ms: i64,
+        publish_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Vec<DomainObservationRow>, StorageError>;
 
     /// The freshest domain observation per `(instrument, metric)` at or before
@@ -157,6 +191,7 @@ pub trait QuantFactReadRepository: Send + Sync {
         &self,
         instrument_key: &DomainInstrumentKey,
         metric: &str,
-        as_of_ms: i64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
     ) -> Result<Option<DomainObservationRow>, StorageError>;
 }

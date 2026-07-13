@@ -1,6 +1,6 @@
 //! Frozen market-candidate projection consumed by the research selection plane.
 //!
-//! [`MarketCandidate`] is the decision-time (`as_of`) freeze of every fact a
+//! [`MarketCandidate`] is the decision-boundary freeze of every fact a
 //! market selector needs: registry metadata, Gamma liquidity/volume, live
 //! top-of-book prices and depth, and per-market data-quality measurements. It
 //! is a neutral, serializable value owned by `quant-pivot-models` so that the
@@ -46,6 +46,19 @@ pub enum DomainAvailability {
     Available,
 }
 
+/// Availability semantics of the live market-data connection at decision time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketDataHealth {
+    /// All required live shards were connected and traffic was current.
+    Healthy,
+    /// The live connection was degraded, so book age must be enforced.
+    Unhealthy,
+    /// The candidate came from durable replay; live connection health and
+    /// process-local ingest lag do not apply.
+    NotApplicable,
+}
+
 /// A decision-time freeze of one market's selection-relevant facts.
 ///
 /// Produced once per selection round by the core-side projector; the selector
@@ -58,7 +71,7 @@ pub struct MarketCandidate {
     pub event_id: EventId,
     /// Deterministic fee/selection category for this market.
     pub category: MarketCategory,
-    /// Registry lifecycle status at `observed_at`.
+    /// Registry lifecycle status at `decision_at`.
     pub status: MarketStatus,
     /// Primary (YES) outcome token.
     pub primary_token_id: TokenId,
@@ -81,23 +94,28 @@ pub struct MarketCandidate {
     ///
     /// `None` when no book has ever been published for the token.
     pub book_age_ms: Option<u64>,
-    /// Whether the primary token's book is crossed (`best_bid >= best_ask`).
-    pub crossed: bool,
-    /// Whether the primary token's book is empty (no bid or no ask).
-    pub empty: bool,
-    /// Whether market-data is healthy (traffic fresh + all shards connected) at
-    /// `observed_at` — a process-global reading shared by all candidates in a
-    /// round. While healthy, a quiet-but-valid aged book is still the venue truth
-    /// and is not treated as stale by selection (mirrors the data-quality plane).
-    pub connection_healthy: bool,
-    /// Worst observed ingest pipeline lag (enqueue→flush) at `observed_at`, ms.
+    /// Whether the primary token's book is crossed (`best_bid >= best_ask`), or
+    /// `None` when no book was resolved.
+    pub crossed: Option<bool>,
+    /// Whether the resolved primary-token book is one-sided/empty, or `None`
+    /// when no book was resolved.
+    pub empty: Option<bool>,
+    /// Live connection state at `decision_at`, or `NotApplicable` for durable
+    /// replay. This must never be fabricated as a healthy boolean.
+    pub market_data_health: MarketDataHealth,
+    /// Worst observed ingest pipeline lag (enqueue→flush) at `decision_at`, ms.
     ///
     /// This is a process-global measurement shared by all candidates in a round.
-    pub ingest_lag_ms: u64,
-    /// Domain-plane availability at `observed_at` (Phase 11.2.2 §3.8).
+    /// `None` only when [`MarketDataHealth::NotApplicable`].
+    pub ingest_lag_ms: Option<u64>,
+    /// Domain-plane availability at `decision_at` (Phase 11.2.2 §3.8).
     pub domain_availability: DomainAvailability,
-    /// The instant this candidate was frozen (equals the selection `as_of`).
-    pub observed_at: DateTime<Utc>,
+    /// The decision instant at which this candidate world was frozen.
+    ///
+    /// Source-effective and system-availability clocks belong to the durable
+    /// decision capture; this field must never be repurposed as metadata
+    /// freshness or populated from a source timestamp.
+    pub decision_at: DateTime<Utc>,
 }
 
 impl MarketCandidate {
