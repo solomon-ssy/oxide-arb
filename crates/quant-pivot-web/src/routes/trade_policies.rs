@@ -3,8 +3,9 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        FitTradePolicyRequest, JobSubmitContext, Paginated, ResearchJobView, TradePolicyDetailView,
-        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView, TradePolicyGovernanceRequest,
+        FitTradePolicyRequest, JobSubmitContext, Paginated, ResearchJobView,
+        TradePolicyAuditListQuery, TradePolicyDetailView, TradePolicyFitPreflightRequest,
+        TradePolicyFitPreflightView, TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest,
         TradePolicyListQuery, TradePolicySummaryView,
     },
     enums::{
@@ -53,6 +54,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             get,
         ),
         spec(
+            Method::GET,
+            "/research/trade-policies/{id}/audits",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            audits,
+        ),
+        spec(
             Method::POST,
             "/research/trade-policies/{id}/validate",
             Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
@@ -71,6 +78,19 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             retire,
         ),
     ]
+}
+
+pub async fn audits(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyArtifactId>,
+    query: web::Query<TradePolicyAuditListQuery>,
+) -> Result<WebResponse<Paginated<TradePolicyGovernanceAuditView>>, WebError> {
+    let page = state
+        .trade_policies
+        .page_audits(&id, query.into_inner())
+        .await?
+        .map(TradePolicyGovernanceAuditView::from);
+    Ok(WebResponse::ok(page))
 }
 
 pub async fn list(

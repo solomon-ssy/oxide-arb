@@ -214,7 +214,11 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             return Ok(None);
         };
 
-        Ok(Some(fresh_signal_from_candidate(candidate, &config)?))
+        Ok(Some(fresh_signal_from_candidate(
+            candidate,
+            &config,
+            &version.artifact_hash,
+        )?))
     }
 }
 
@@ -567,8 +571,10 @@ pub fn find_lot_candidate<'a>(
 fn fresh_signal_from_candidate(
     candidate: &SignalCandidate,
     config: &RuntimeConfig,
+    model_artifact_hash: &ContentHash,
 ) -> QuantResult<FreshSignal> {
     Ok(FreshSignal {
+        model_artifact_hash: model_artifact_hash.clone(),
         composite_score: candidate.composite_score,
         expected_return_bps: Bps::new(candidate.expected_return_bps),
         auto_exec_eligible: fresh_auto_exec_eligible(candidate, config)?,

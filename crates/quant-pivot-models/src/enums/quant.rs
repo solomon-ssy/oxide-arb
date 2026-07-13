@@ -772,27 +772,6 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// Which bet-structure `KellySizingModel::suggest` used to derive `f*`
-    /// (Phase 11.3 §4 redesign — audit provenance on `SizingPlan`).
-    @derive(Default)
-    pub enum SizingBetStructure {
-        /// `f* = (q - p) / (1 - p)`, `q` = calibrated `P(win)`, `p` =
-        /// executable market price — the payoff structure `E[r]` already
-        /// assumes (hold to resolution: win `(1-p)/p`, lose the stake). The
-        /// only bet structure reachable from a `Calibrated` return model.
-        #[default]
-        Resolution => "resolution",
-        /// Legacy TP/SL bet-structure recovery (`g = target_reward_multiple ×
-        /// downside`, `q` solved from `E[r]`/`downside`). Only reachable from
-        /// `HeuristicReturnModel`, which fail-closed gates block from every
-        /// production execution path (publish / semi-auto / auto-execution);
-        /// retained solely so a `ReportOnly` cold-start report can still show
-        /// an experimental size.
-        HeuristicTpSl => "heuristic_tp_sl",
-    }
-}
-
-wire_enum! {
     /// The cap that bound a recommendation's final size.
     ///
     /// `None` means no hard cap bound the size (it was limited only by the
@@ -854,6 +833,9 @@ wire_enum! {
         AvailableCashExhausted => "available_cash_exhausted",
         /// No candidate carried a positive signal.
         NoPositiveSignal => "no_positive_signal",
+        /// The active model has no calibrated probability and therefore cannot
+        /// produce a truthful capital plan.
+        ReturnModelUncalibrated => "return_model_uncalibrated",
         /// The system was degraded below the generation threshold (readiness
         /// gate not `Operational`, or the portfolio solver was unavailable).
         SystemDegraded => "system_degraded",
@@ -903,6 +885,8 @@ wire_enum! {
         /// The candidate's edge inputs were invalid (non-positive downside, or a
         /// degenerate win probability) — sizing refused to fabricate a bet.
         InvalidEdgeInputs => "invalid_edge_inputs",
+        /// The return model did not provide a calibrated win probability.
+        ReturnModelUncalibrated => "return_model_uncalibrated",
         /// The allocated size fell below `min_recommendation_usd`.
         BelowMinSize => "below_min_size",
         /// The total deployable budget room was exhausted.

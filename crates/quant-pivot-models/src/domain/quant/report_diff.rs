@@ -83,7 +83,9 @@ fn position_key(rec: &RecommendationInfo) -> PositionKey {
 }
 
 fn total_suggested(recs: &[RecommendationInfo]) -> Usd {
-    recs.iter().map(|rec| rec.sizing_plan.suggested_usd).sum()
+    recs.iter()
+        .filter_map(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd))
+        .sum()
 }
 
 /// Compute the diff of `compare` against `base`.
@@ -149,8 +151,9 @@ fn recommendation_delta(
     compare: Option<&RecommendationInfo>,
 ) -> RecommendationDelta {
     let anchor = base.or(compare).expect("at least one side present");
-    let base_usd = base.map(|rec| rec.sizing_plan.suggested_usd);
-    let compare_usd = compare.map(|rec| rec.sizing_plan.suggested_usd);
+    let base_usd = base.and_then(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd));
+    let compare_usd =
+        compare.and_then(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd));
     let delta = compare_usd.unwrap_or(Usd::ZERO) - base_usd.unwrap_or(Usd::ZERO);
     RecommendationDelta {
         market_id: anchor.market_id.clone(),

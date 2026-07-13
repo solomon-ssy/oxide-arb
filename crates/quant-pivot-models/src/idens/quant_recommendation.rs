@@ -40,10 +40,7 @@ pub enum QuantRecommendation {
     LiquidityScore,
     DataQualityScore,
     ModelScorePercentile,
-    EntryPlan,
-    SizingPlan,
-    ExitPlan,
-    RiskEnvelope,
+    TradePlan,
     FactorBreakdown,
     EvidenceRefs,
     ExecutionEligibility,
@@ -120,22 +117,7 @@ fn add_context_columns(table: &mut TableCreateStatement) {
 fn add_plan_columns(table: &mut TableCreateStatement) {
     table
         .col(
-            ColumnDef::new(QuantRecommendation::EntryPlan)
-                .json_binary()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendation::SizingPlan)
-                .json_binary()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendation::ExitPlan)
-                .json_binary()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendation::RiskEnvelope)
+            ColumnDef::new(QuantRecommendation::TradePlan)
                 .json_binary()
                 .not_null(),
         )

@@ -20,11 +20,11 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgCalibrationArtifactRepository, PgModelRegistryRepository, PgOrderIntentRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository, PgTradePolicyRepository,
     },
     traits::{
         CalibrationArtifactRepository, ModelRegistryRepository, OrderIntentRepository,
-        RecommendationReportRepository, RecommendationRepository,
+        RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{artifact::LocalArtifactStore, model::CalibrationArtifactLoader};
@@ -63,12 +63,13 @@ pub fn build_order_intent_service(
             as Arc<dyn RecommendationReportRepository>,
         intents: Arc::new(PgOrderIntentRepository::new(db.clone()))
             as Arc<dyn OrderIntentRepository>,
-        config,
         intent_lifecycle,
         dispatch_wake: DispatchWake::new(),
         metrics: Arc::new(MetricsHub::new()),
         model_registry: Arc::new(PgModelRegistryRepository::new(db.clone()))
             as Arc<dyn ModelRegistryRepository>,
+        trade_policies: Arc::new(PgTradePolicyRepository::new(db.clone()))
+            as Arc<dyn TradePolicyRepository>,
         artifact_store: Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(
             "qp_web_test_order_intent_{}_{}",
             std::process::id(),

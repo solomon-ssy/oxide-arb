@@ -68,7 +68,7 @@ pub struct ModelTrainingContract {
     pub target_label_horizon_secs: u64,
     /// Rolling validation fold count. Every fold fits its own transform.
     pub validation_folds: u32,
-    /// Required for triple-barrier and meta-label targets; absent for unrelated labels.
+    /// Required for executable policy-derived targets; absent for unrelated labels.
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
 }
 
@@ -98,11 +98,11 @@ impl ModelTrainingContract {
         }
         let requires_policy = matches!(
             self.target_label_name.as_str(),
-            "triple_barrier_touch" | "triple_barrier_return_bps" | "meta_label"
+            "triple_barrier_touch" | "triple_barrier_return_bps" | "policy_net_positive"
         );
         if requires_policy != self.trade_policy_artifact_id.is_some() {
             return Err(
-                "trade_policy_artifact_id is required exactly for triple-barrier/meta labels"
+                "trade_policy_artifact_id is required exactly for executable policy-derived labels"
                     .to_owned(),
             );
         }

@@ -180,13 +180,6 @@ pub struct SizingModelConfig {
     pub kelly_fraction: DecimalString,
     /// Maximum single-position size as a fraction of equity (`(0, 1]`).
     pub max_position_pct: DecimalString,
-    /// Target reward-to-risk multiple `R` (`> 0`): target gain = `R × downside`
-    /// for the exit plan's take-profit price (Phase 11.7 territory) **and**
-    /// for the legacy TP/SL bet-structure recovery a `HeuristicReturnModel`
-    /// candidate's Kelly sizing falls back to (cold-start bootstrap only — a
-    /// `Calibrated` candidate's Kelly fraction never reads this field; Phase
-    /// 11.3 §4 redesign).
-    pub target_reward_multiple: DecimalString,
     /// Confidence-driven shrinkage of the Kelly fraction (estimation
     /// uncertainty): `confidence` high → near fractional Kelly, low → compressed.
     pub confidence_weighting: ConfidenceSizeCurve,
@@ -199,7 +192,6 @@ impl Default for SizingModelConfig {
         Self {
             kelly_fraction: DecimalString::new("0.5"),
             max_position_pct: DecimalString::new("0.1"),
-            target_reward_multiple: DecimalString::new("2.0"),
             confidence_weighting: ConfidenceSizeCurve::Linear,
             drawdown_scaling: DrawdownMultiplierPolicy::Conservative,
         }

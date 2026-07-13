@@ -64,6 +64,21 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         ));
     }
 
+    let normalized_body = if fields.named.len() == 1 {
+        quote! {
+            Self {
+                #page_ident: self.#page_ident.normalized(),
+            }
+        }
+    } else {
+        quote! {
+            Self {
+                #page_ident: self.#page_ident.normalized(),
+                ..self
+            }
+        }
+    };
+
     Ok(quote! {
         impl #impl_generics crate::domain::pagination::sealed::Sealed for #name #ty_generics #where_clause {}
 
@@ -74,10 +89,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 
             #[must_use]
             fn normalized(self) -> Self {
-                Self {
-                    #page_ident: self.#page_ident.normalized(),
-                    ..self
-                }
+                #normalized_body
             }
         }
     })

@@ -21,7 +21,7 @@ use quant_pivot_repository::traits::{
     ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
     ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RuntimeConfigVersionRepository, SettlementRedeemRepository,
+    RuntimeConfigVersionRepository, SettlementRedeemRepository, TradePolicyRepository,
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
@@ -307,6 +307,7 @@ fn build_admission_builder(
         reports: Arc::clone(&repos.recommendation_report)
             as Arc<dyn RecommendationReportRepository>,
         model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+        trade_policies: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
         artifact_store: Arc::clone(&deps.research.artifact_store),
         calibration_loader: Arc::clone(&deps.research.calibration_loader),
         reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,

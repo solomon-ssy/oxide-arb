@@ -870,20 +870,6 @@ fn validate_sizing(sizing: &SizingModelConfig, report: &mut ConfigValidationRepo
         &sizing.max_position_pct,
         report,
     );
-    match sizing.target_reward_multiple.value.parse::<Decimal>() {
-        Ok(parsed) if parsed > Decimal::ZERO => {}
-        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
-            field: "portfolio.sizing.target_reward_multiple",
-            detail: format!("`{parsed}` must be > 0"),
-        }),
-        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
-            field: "portfolio.sizing.target_reward_multiple",
-            detail: format!(
-                "`{}` is not a valid decimal string",
-                sizing.target_reward_multiple.value
-            ),
-        }),
-    }
 }
 
 fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationReport) {

@@ -27,12 +27,9 @@
 //! `b = (1-p)/p` come from a market price rather than a bookmaker's line.
 //! `f* ≤ 0` (i.e. `q ≤ p`, no edge over the market) ⇒ **rejected**, never funded.
 //!
-//! `win_probability` is `None` only for the `HeuristicReturnModel` cold-start
-//! bootstrap (fail-closed gates already block it from every production
-//! execution path — see [`GateId::CalibrationRequired`](../../quant_pivot_research/gates/model_quality/index.html));
-//! that path keeps the legacy TP/SL bet-structure recovery (`g = R·l`, `q`
-//! solved from `E[r]`/`downside`) purely so a cold-start `ReportOnly` report can
-//! still show an experimental, clearly-labeled size ([`SizingBetStructure::HeuristicTpSl`]).
+//! `win_probability = None` is an uncalibrated model and is rejected before
+//! sizing. It never receives a heuristic TP/SL-derived probability or an
+//! actionable amount, including in `ReportOnly`.
 //!
 //! `confidence` is the model's **evidence quality**, *not* a calibrated
 //! probability, so it never stands in for `q` in either branch. Instead it
@@ -51,7 +48,7 @@
 
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    enums::quant::{BindingConstraint, RejectionReason, SizingBetStructure, SizingModelKind},
+    enums::quant::{BindingConstraint, RejectionReason, SizingModelKind},
     runtime_config::{
         ConfidenceSizeCurve, DrawdownMultiplierPolicy, KellySafetyConfig, SizingModelConfig,
     },
@@ -162,9 +159,8 @@ pub struct SizingSuggestion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizingProvenance {
     /// The raw, uncapped full-Kelly fraction, before any fractional-Kelly or
-    /// safety-layer shrink. Derived per `bet_structure` — `(q - p) / (1 - p)`
-    /// for `Resolution`, or the legacy `edge / (gain · loss)` recovery for
-    /// `HeuristicTpSl`.
+    /// safety-layer shrink. Derived as `(q - p) / (1 - p)` from the calibrated
+    /// resolution probability and executable market price.
     pub f_star: Decimal,
     /// The governed static fractional-Kelly constant (e.g. `0.5` for half-Kelly).
     pub kelly_fraction_config: Decimal,
@@ -184,8 +180,6 @@ pub struct SizingProvenance {
     /// The per-position equity cap (`max_position_pct`) `raw_fraction` was
     /// clamped against.
     pub position_cap_fraction: Decimal,
-    /// Which bet structure produced `f_star` (Phase 11.3 §4 redesign).
-    pub bet_structure: SizingBetStructure,
 }
 
 /// A position-sizing model (pure: no I/O, no clock, no mutable state).
@@ -227,8 +221,6 @@ pub struct KellySizingModel {
     kelly_fraction: Decimal,
     /// Hard per-position cap as a fraction of equity (`(0, 1]`).
     max_position_pct: Decimal,
-    /// Reward-to-risk multiple `R` (`> 0`): target gain = `R × downside`.
-    target_reward_multiple: Decimal,
     /// Confidence → shrinkage curve.
     confidence_weighting: ConfidenceSizeCurve,
     /// Drawdown scaling policy.
@@ -243,7 +235,6 @@ impl KellySizingModel {
     pub const fn new(
         kelly_fraction: Decimal,
         max_position_pct: Decimal,
-        target_reward_multiple: Decimal,
         confidence_weighting: ConfidenceSizeCurve,
         drawdown_scaling: DrawdownMultiplierPolicy,
         kelly_safety: KellySafetyParams,
@@ -251,7 +242,6 @@ impl KellySizingModel {
         Self {
             kelly_fraction,
             max_position_pct,
-            target_reward_multiple,
             confidence_weighting,
             drawdown_scaling,
             kelly_safety,
@@ -268,8 +258,12 @@ impl SizingModel for KellySizingModel {
         let bps = Decimal::from(BPS_PER_UNIT);
         let candidate = input.candidate;
 
-        let (f_star, edge, bet_structure) = if let Some(win_probability) = candidate.win_probability
-        {
+        let Some(win_probability) = candidate.win_probability else {
+            return Ok(SizingOutcome::Rejected(
+                RejectionReason::ReturnModelUncalibrated,
+            ));
+        };
+        let (f_star, edge) = {
             // Resolution bet structure (Phase 11.3 §4 redesign): `q` is the
             // *same* calibrated `P(win)` that produced `expected_return_bps`
             // (`E[r] = q·(1-p)/p − (1-q)`), so `f*` and `E[r]` always share
@@ -284,32 +278,7 @@ impl SizingModel for KellySizingModel {
             }
             let f_star = (q - market_price) / (Decimal::ONE - market_price);
             let edge = candidate.expected_return_bps / bps;
-            (f_star, edge, SizingBetStructure::Resolution)
-        } else {
-            // Legacy TP/SL bet-structure recovery — only reachable from
-            // `HeuristicReturnModel`, which fail-closed gates already block
-            // from every production execution path (publish / semi-auto /
-            // auto-execution). Retained purely so a cold-start `ReportOnly`
-            // report can still show an experimental, clearly-labeled size.
-            let loss = candidate.downside_bps / bps;
-            if loss <= Decimal::ZERO {
-                return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
-            }
-            let expected = candidate.expected_return_bps / bps;
-            let gain = self.target_reward_multiple * loss;
-            if gain <= Decimal::ZERO {
-                return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
-            }
-            // Recover the win probability from the bet structure, then
-            // re-derive the edge from the clamped `q` so a degenerate input
-            // cannot inflate it.
-            let q = ((expected + loss) / (gain + loss)).clamp(Decimal::ZERO, Decimal::ONE);
-            let edge = q * gain - (Decimal::ONE - q) * loss;
-            if edge <= Decimal::ZERO {
-                return Ok(SizingOutcome::Rejected(RejectionReason::NoPositiveSignal));
-            }
-            let f_star = edge / (gain * loss);
-            (f_star, edge, SizingBetStructure::HeuristicTpSl)
+            (f_star, edge)
         };
 
         let shrink = confidence_shrink(candidate.confidence.inner(), self.confidence_weighting);
@@ -358,7 +327,6 @@ impl SizingModel for KellySizingModel {
                 correlation_shrink: round(correlation_shrink),
                 raw_fraction: round(raw_fraction),
                 position_cap_fraction: round(self.max_position_pct),
-                bet_structure,
             }),
         })))
     }
@@ -385,10 +353,6 @@ pub fn sizing_model_from_config(
         parse_decimal(
             "portfolio.sizing.max_position_pct",
             &sizing.max_position_pct.value,
-        )?,
-        parse_decimal(
-            "portfolio.sizing.target_reward_multiple",
-            &sizing.target_reward_multiple.value,
         )?,
         sizing.confidence_weighting,
         sizing.drawdown_scaling,
@@ -499,9 +463,7 @@ mod tests {
     };
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{
-            BindingConstraint, OutcomeSide, RejectionReason, SizingBetStructure, SizingModelKind,
-        },
+        enums::quant::{BindingConstraint, OutcomeSide, RejectionReason, SizingModelKind},
         types::{MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId, Usd},
     };
     use rust_decimal::Decimal;
@@ -607,11 +569,10 @@ mod tests {
     }
 
     fn kelly() -> KellySizingModel {
-        // Half Kelly, 10% position cap, R = 2, linear confidence shrink, fixed dd.
+        // Half Kelly, 10% position cap, linear confidence shrink, fixed drawdown.
         KellySizingModel::new(
             dec!(0.5),
             dec!(0.1),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -643,10 +604,7 @@ mod tests {
         // edge_bps == expected_return_bps: Kelly's audit edge is the *same*
         // E[r] the calibrator produced, never a re-derived number.
         assert_eq!(s.edge_bps.expect("edge").inner(), dec!(200));
-        assert_eq!(
-            s.provenance.expect("provenance").bet_structure,
-            SizingBetStructure::Resolution
-        );
+        assert!(s.provenance.is_some());
     }
 
     #[test]
@@ -655,7 +613,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(1),
             dec!(1),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
@@ -718,34 +675,19 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_kelly_q_derived_from_expected_return_and_downside() {
-        // Legacy TP/SL recovery (win_probability=None): E[r]=0.005, l=0.01,
-        // R=3 -> g=0.03; q=(0.005+0.01)/(0.03+0.01)=0.375.
-        // edge = 0.375*0.03 - 0.625*0.01 = 0.005 (= E[r]).
-        let model = KellySizingModel::new(
-            dec!(0.5),
-            dec!(0.1),
-            dec!(3),
-            ConfidenceSizeCurve::Linear,
-            DrawdownMultiplierPolicy::Fixed,
-            kelly_safety(),
-        );
-        let s = sized(
-            model
-                .suggest(&SizingInput {
-                    candidate: &heuristic_candidate(dec!(50), dec!(100), dec!(1)),
-                    capital_base_usd: Usd::new(dec!(10000)),
-                    drawdown_state: DrawdownState::neutral(),
-                    edge_uncertainty_half_width: None,
-                    correlation: None,
-                })
-                .expect("suggest"),
-        );
-        // edge_bps == expected_return_bps (self-consistency of the derivation).
-        assert_eq!(s.edge_bps.expect("edge").inner(), dec!(50));
+    fn uncalibrated_return_model_rejects() {
+        let outcome = kelly()
+            .suggest(&SizingInput {
+                candidate: &heuristic_candidate(dec!(50), dec!(100), dec!(1)),
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+            })
+            .expect("suggest");
         assert_eq!(
-            s.provenance.expect("provenance").bet_structure,
-            SizingBetStructure::HeuristicTpSl
+            outcome,
+            SizingOutcome::Rejected(RejectionReason::ReturnModelUncalibrated)
         );
     }
 
@@ -765,7 +707,7 @@ mod tests {
             .expect("suggest");
         assert_eq!(
             outcome,
-            SizingOutcome::Rejected(RejectionReason::NoPositiveSignal)
+            SizingOutcome::Rejected(RejectionReason::ReturnModelUncalibrated)
         );
     }
 
@@ -783,7 +725,7 @@ mod tests {
             .expect("suggest");
         assert_eq!(
             outcome,
-            SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs)
+            SizingOutcome::Rejected(RejectionReason::ReturnModelUncalibrated)
         );
     }
 
@@ -795,7 +737,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -836,7 +777,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(1),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Step,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -873,7 +813,6 @@ mod tests {
         let fixed = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -881,7 +820,6 @@ mod tests {
         let conservative = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Conservative,
             kelly_safety(),
@@ -925,7 +863,6 @@ mod tests {
         let fixed = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -970,7 +907,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
@@ -998,7 +934,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Conservative,
             KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
@@ -1032,7 +967,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -1097,7 +1031,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Fixed,
             kelly_safety(),
@@ -1156,7 +1089,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Conservative,
             kelly_safety(),
@@ -1202,7 +1134,6 @@ mod tests {
         let model = KellySizingModel::new(
             dec!(0.5),
             dec!(0.9),
-            dec!(2),
             ConfidenceSizeCurve::Linear,
             DrawdownMultiplierPolicy::Conservative,
             KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.95)),
@@ -1228,18 +1159,13 @@ mod tests {
     }
 
     #[test]
-    fn return_model_has_no_300_500_constant_in_production_path() {
-        // Resolution path (`win_probability = Some`): `f*` depends only on
-        // calibrated `q` and market `p` — never on `target_reward_multiple`
-        // or the heuristic 300/500 bps constants that only feed the cold-start
-        // `HeuristicTpSl` branch (fail-closed from every production gate).
+    fn calibrated_return_model_uses_probability_and_market_price() {
         let candidate = resolution_candidate(dec!(200), dec!(500), dec!(1), dec!(0.7), dec!(0.4));
         let capital = Usd::new(dec!(10000));
-        let with_r2 = sized(
+        let suggestion = sized(
             KellySizingModel::new(
                 dec!(1),
                 dec!(1),
-                dec!(2),
                 ConfidenceSizeCurve::Linear,
                 DrawdownMultiplierPolicy::Fixed,
                 KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
@@ -1247,26 +1173,6 @@ mod tests {
             .suggest(&sizing_input(&candidate, capital))
             .expect("suggest"),
         );
-        let with_r99 = sized(
-            KellySizingModel::new(
-                dec!(1),
-                dec!(1),
-                dec!(99),
-                ConfidenceSizeCurve::Linear,
-                DrawdownMultiplierPolicy::Fixed,
-                KellySafetyParams::new(dec!(0), dec!(1), dec!(0.9)),
-            )
-            .suggest(&sizing_input(&candidate, capital))
-            .expect("suggest"),
-        );
-        assert_eq!(
-            with_r2.provenance.expect("provenance").f_star,
-            with_r99.provenance.expect("provenance").f_star,
-            "changing target_reward_multiple must not affect Resolution-path f*"
-        );
-        assert_eq!(
-            with_r2.provenance.expect("provenance").bet_structure,
-            SizingBetStructure::Resolution
-        );
+        assert_eq!(suggestion.provenance.expect("provenance").f_star, dec!(0.5));
     }
 }

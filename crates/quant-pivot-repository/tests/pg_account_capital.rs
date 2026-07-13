@@ -51,10 +51,12 @@ use quant_pivot_models::{
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, Usd,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
+        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
+        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
+        TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -362,8 +364,9 @@ async fn assert_recommendation_roundtrip(
         .await
         .expect("find recommendations");
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0].sizing_plan.suggested_usd, Usd::new(dec!(250)));
-    assert_eq!(recs[0].sizing_plan.sizing_model, SizingModelKind::Kelly);
+    let sizing = recs[0].trade_plan.sizing().expect("frozen sizing");
+    assert_eq!(sizing.suggested_usd, Usd::new(dec!(250)));
+    assert_eq!(sizing.sizing_model, SizingModelKind::Kelly);
 }
 
 async fn assert_reserved_capital_tracks_pending_intent(
@@ -1059,10 +1062,7 @@ fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
         liquidity_score: Probability::new(dec!(0.8)),
         data_quality_score: Probability::new(dec!(0.9)),
         model_score_percentile: Probability::new(dec!(0.75)),
-        entry_plan: entry_plan(),
-        sizing_plan: sizing_plan(Usd::new(dec!(250))),
-        exit_plan: exit_plan(),
-        risk_envelope: risk_envelope(),
+        trade_plan: trade_plan(Usd::new(dec!(250))),
         factor_breakdown: factor_breakdown(),
         evidence_refs: evidence_refs(),
         execution_eligibility: execution_eligibility(),
@@ -1106,7 +1106,6 @@ fn report_trigger_key(ids: &TxnIds) -> String {
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trade_policy: None,
         trigger: EntryTrigger::Immediate,
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.6)),
@@ -1145,13 +1144,11 @@ fn sizing_plan(suggested: Usd) -> SizingPlan {
         drawdown_shrink_applied: None,
         raw_fraction_applied: None,
         position_cap_fraction_applied: None,
-        bet_structure_applied: None,
     }
 }
 
 fn exit_plan() -> ExitPlan {
     ExitPlan {
-        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.8))),
         take_profit_pct: None,
         stop_loss_price: Some(Price::new(dec!(0.4))),
@@ -1169,6 +1166,35 @@ fn exit_plan() -> ExitPlan {
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
+    }
+}
+
+fn trade_plan(notional: Usd) -> RecommendationTradePlan {
+    let artifact_hash = content_hash('f');
+    let dimension = TradePolicyCohortDimension {
+        methodology_id: "fixture-v1".to_owned(),
+        methodology_hash: artifact_hash.clone(),
+        bucket_id: "fixture".to_owned(),
+    };
+    RecommendationTradePlan::Frozen {
+        policy: Box::new(TradePolicyCohortProvenance {
+            artifact_id: TradePolicyArtifactId::from_content_hash(&artifact_hash),
+            artifact_hash,
+            cohort_index: 0,
+            cohort_key: TradePolicyCohortKey {
+                category: MarketCategory::Politics,
+                horizon_secs: 86_400,
+                entry_price_min: Price::new(dec!(0.01)),
+                entry_price_max: Price::new(dec!(0.99)),
+                notional_tier: notional,
+                liquidity: dimension.clone(),
+                volatility: dimension,
+            },
+        }),
+        entry: entry_plan(),
+        sizing: Box::new(sizing_plan(notional)),
+        exit: Box::new(exit_plan()),
+        risk_envelope: Box::new(risk_envelope()),
     }
 }
 

@@ -7,7 +7,7 @@ use chrono::Utc;
 use quant_pivot_models::domain::OrderIntentPort;
 use quant_pivot_repository::traits::{
     FeatureParityRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository,
+    RecommendationRepository, TradePolicyRepository,
 };
 
 use super::AppContext;
@@ -40,11 +40,11 @@ impl AppContext {
             reports: Arc::clone(&repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
             intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
-            config: self.runtime_config(),
             metrics: Arc::clone(&self.infra.metrics),
             intent_lifecycle: Arc::clone(&self.intent_lifecycle),
             dispatch_wake: self.execution_wake(),
             model_registry: Arc::clone(&self.research.model_registry_repo),
+            trade_policies: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
             artifact_store: Arc::clone(&self.research.artifact_store),
             calibration_loader: Arc::clone(&self.research.calibration_loader),
             feature_parity_gate: Arc::new(

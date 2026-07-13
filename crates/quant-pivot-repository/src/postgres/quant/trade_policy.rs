@@ -5,7 +5,8 @@ use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         NewTradePolicyArtifact, NewTradePolicyGovernanceAudit, PageWindow, Paginated,
-        TradePolicyArtifactInfo, TradePolicyListQuery,
+        TradePolicyArtifactInfo, TradePolicyAuditListQuery, TradePolicyGovernanceAuditInfo,
+        TradePolicyListQuery,
     },
     entities::{quant_trade_policy_artifact, quant_trade_policy_governance_audit},
     enums::quant::TradePolicyStatus,
@@ -133,5 +134,24 @@ impl TradePolicyRepository for PgTradePolicyRepository {
             .map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(updated.into())
+    }
+
+    async fn page_audits(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        query: TradePolicyAuditListQuery,
+    ) -> Result<Paginated<TradePolicyGovernanceAuditInfo>, StorageError> {
+        paginate_mapped(
+            quant_trade_policy_governance_audit::Entity::find()
+                .filter(
+                    quant_trade_policy_governance_audit::Column::ArtifactId.eq(artifact_id.clone()),
+                )
+                .order_by_desc(quant_trade_policy_governance_audit::Column::CreatedAt)
+                .order_by_desc(quant_trade_policy_governance_audit::Column::AuditId),
+            &self.db,
+            PageWindow::from_query(&query),
+            Into::into,
+        )
+        .await
     }
 }

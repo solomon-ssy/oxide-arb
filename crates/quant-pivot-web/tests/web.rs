@@ -17,6 +17,8 @@ mod pg;
 mod redis;
 #[path = "common/repos.rs"]
 mod repos;
+#[path = "common/ui_e2e_server_impl.rs"]
+mod ui_e2e_server_impl;
 
 #[path = "web/account.rs"]
 mod account;

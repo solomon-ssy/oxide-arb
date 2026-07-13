@@ -305,7 +305,9 @@ pub fn default_labelers() -> Vec<Box<dyn Labeler>> {
         Box::new(SettlementOutcomeLabeler),
         Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::Touch)),
         Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::ReturnBps)),
-        Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::Meta)),
+        Box::new(TripleBarrierLabeler::new(
+            TripleBarrierLabelKind::PolicyNetPositive,
+        )),
     ]
 }
 
@@ -456,7 +458,7 @@ pub struct TrainingDatasetServiceDeps {
     /// requirements so offline selection genuinely mirrors the online
     /// funnel's `ModelFeatureUnavailable` gate (11.2.2 remediation R7).
     pub model_registry: Arc<dyn ModelRegistryRepository>,
-    /// Governed policy catalog used for executable barrier/meta labels.
+    /// Governed policy catalog used for executable policy-derived labels.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
 }
 
@@ -650,7 +652,7 @@ impl TrainingDatasetService {
                 id: artifact_id.to_string(),
             })?;
         if artifact.status != TradePolicyStatus::Published
-            || !artifact.payload_json.validation.passed
+            || !artifact.payload_json.is_publishable()
         {
             return Err(ResearchError::DatasetPlan {
                 detail: format!(
@@ -681,10 +683,10 @@ impl TrainingDatasetService {
         let training_not_before = artifact
             .payload_json
             .fit_contract
-            .fit_window_end
+            .pit_cutoff
             .checked_add_signed(ChronoDuration::seconds(embargo))
             .ok_or_else(|| ResearchError::DatasetPlan {
-                detail: "trade-policy fit window plus embargo overflows chrono".to_owned(),
+                detail: "trade-policy PIT cutoff plus embargo overflows chrono".to_owned(),
             })?;
         if request.window_start < training_not_before {
             return Err(ResearchError::DatasetPlan {
@@ -2288,38 +2290,16 @@ fn build_labels_for(
     Ok(labels)
 }
 
-fn select_triple_barrier_policy(
-    artifact: Option<&TradePolicyArtifactPayload>,
-    market: &SelectedMarket,
-    entry_price: Option<Price>,
-    horizon_secs: u64,
+const fn select_triple_barrier_policy(
+    _artifact: Option<&TradePolicyArtifactPayload>,
+    _market: &SelectedMarket,
+    _entry_price: Option<Price>,
+    _horizon_secs: u64,
 ) -> Option<TripleBarrierPolicy> {
-    let artifact = artifact?;
-    let entry_price = entry_price?;
-    let liquidity_tier = match market.liquidity_usd.map(Usd::inner) {
-        Some(value) if value >= Decimal::from(10_000) => "deep",
-        Some(value) if value >= Decimal::from(1_000) => "medium",
-        _ => "shallow",
-    };
-    artifact
-        .cohorts
-        .iter()
-        .filter(|cohort| {
-            cohort.key.category == market.category
-                && cohort.key.horizon_secs == horizon_secs
-                && entry_price >= cohort.key.entry_price_min
-                && (entry_price < cohort.key.entry_price_max
-                    || (cohort.key.entry_price_max == Price::ONE && entry_price == Price::ONE))
-                && cohort.key.liquidity_tier == liquidity_tier
-                && cohort.key.volatility_regime == "unclassified"
-                && cohort.executable_coverage >= artifact.fit_contract.minimum_executable_coverage
-                && cohort.lower_confidence_utility_bps > Decimal::ZERO
-        })
-        .min_by_key(|cohort| cohort.key.notional_tier)
-        .map(|cohort| TripleBarrierPolicy {
-            upper_bps: cohort.upper_barrier_bps.inner(),
-            lower_bps: cohort.lower_barrier_bps.inner(),
-        })
+    // Exact notional-tier and structural-regime selection is activated by
+    // 11.7.2. Returning no policy is the only truthful behavior until those
+    // serving inputs and the full-L2 simulator exist.
+    None
 }
 
 /// Accumulated examples + distinct markets from the historical spine, merged
@@ -2937,12 +2917,13 @@ fn attribution_labels(
             realized_pnl.inner(),
             matured_at,
         );
-        if !recommendation.sizing_plan.suggested_usd.is_zero() {
+        if let Some(sizing) = recommendation.trade_plan.sizing()
+            && !sizing.suggested_usd.is_zero()
+        {
             push_label(
                 &mut labels,
                 "realized_return_bps",
-                realized_pnl.inner() / recommendation.sizing_plan.suggested_usd.inner()
-                    * Decimal::from(10_000),
+                realized_pnl.inner() / sizing.suggested_usd.inner() * Decimal::from(10_000),
                 matured_at,
             );
         }

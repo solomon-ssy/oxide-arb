@@ -543,7 +543,6 @@ fn build_sizing_plan(
         drawdown_shrink_applied: item.suggestion.provenance.map(|p| p.drawdown_shrink),
         raw_fraction_applied: item.suggestion.provenance.map(|p| p.raw_fraction),
         position_cap_fraction_applied: item.suggestion.provenance.map(|p| p.position_cap_fraction),
-        bet_structure_applied: item.suggestion.provenance.map(|p| p.bet_structure),
     }
 }
 

@@ -5,11 +5,15 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        ExecutionOrderInfo, ExecutionOrderListQuery, Paginated, PositionListQuery, PositionSummary,
-        RecommendationAttributionInfo, ReconciliationInfo, ReconciliationListQuery,
-        SettlementRedeemDetail, SettlementRedeemListQuery, SettlementRedeemSummary,
+        ExecutionOrderInfo, ExecutionOrderListQuery, Paginated, PositionInfo, PositionListQuery,
+        PositionSummary, RecommendationAttributionInfo, ReconciliationInfo,
+        ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemListQuery,
+        SettlementRedeemSummary,
     },
-    types::{ExecutionOrderId, PositionId, RecommendationId, ReconciliationId, SettlementRedeemId},
+    types::{
+        ExecutionOrderId, OrderIntentId, PositionId, RecommendationId, ReconciliationId,
+        SettlementRedeemId,
+    },
 };
 
 #[async_trait]
@@ -30,6 +34,11 @@ pub trait ExecutionReadPort: Send + Sync {
     ) -> QuantResult<Paginated<PositionSummary>>;
 
     async fn get_position(&self, id: &PositionId) -> QuantResult<Option<PositionSummary>>;
+
+    async fn get_position_by_intent(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> QuantResult<Option<PositionInfo>>;
 
     async fn get_recommendation_attribution(
         &self,

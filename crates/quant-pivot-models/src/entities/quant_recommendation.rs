@@ -3,9 +3,9 @@
 use crate::{
     enums::quant::{OutcomeSide, RecommendationStatus},
     types::{
-        Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketContext,
-        MarketId, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, RiskEnvelope, SizingPlan, TokenId,
+        Bps, EventId, EvidenceRefs, ExecutionEligibility, MarketContext, MarketId, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, TokenId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -36,13 +36,7 @@ pub struct Model {
     pub data_quality_score: Probability,
     pub model_score_percentile: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub entry_plan: EntryPlan,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub sizing_plan: SizingPlan,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub exit_plan: ExitPlan,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub risk_envelope: RiskEnvelope,
+    pub trade_plan: RecommendationTradePlan,
     #[sea_orm(column_type = "JsonBinary")]
     pub factor_breakdown: RecommendationFactorBreakdown,
     #[sea_orm(column_type = "JsonBinary")]

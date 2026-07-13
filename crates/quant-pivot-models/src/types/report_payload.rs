@@ -31,7 +31,7 @@ use crate::{
         quant::{
             BindingConstraint, EmptyReportReason, ExitSettlementMode, FactorDirection,
             FillRequirement, IneligibilityReason, PriceComparison, QuantRuntimeMode, RedeemPolicy,
-            SizingBetStructure, SizingModelKind,
+            SizingModelKind,
         },
     },
     hashing::CanonicalDigest,
@@ -49,8 +49,6 @@ use crate::{
 /// When and how a recommendation becomes executable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct EntryPlan {
-    /// Published artifact/cohort that produced this executable plan.
-    pub trade_policy: Option<TradePolicyCohortProvenance>,
     /// The condition that arms venue submission.
     pub trigger: EntryTrigger,
     /// Venue execution policy, orthogonal to the trigger condition.
@@ -174,12 +172,6 @@ pub struct SizingPlan {
     /// `raw_fraction_applied` was clamped against.
     #[serde(default)]
     pub position_cap_fraction_applied: Option<Decimal>,
-    /// Which bet-structure produced `f_star_applied` (Phase 11.3 §4 redesign):
-    /// `Resolution` (calibrated `P(win)` + market price — the only structure
-    /// reachable in production) or `HeuristicTpSl` (cold-start bootstrap,
-    /// fenced off from execution by fail-closed gates).
-    #[serde(default)]
-    pub bet_structure_applied: Option<SizingBetStructure>,
 }
 
 // ── Exit plan (parent §10 "when / how much to sell") ─────────────────────────
@@ -187,8 +179,6 @@ pub struct SizingPlan {
 /// When and how a recommendation should be exited.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct ExitPlan {
-    /// Published artifact/cohort frozen with the exit strategy.
-    pub trade_policy: Option<TradePolicyCohortProvenance>,
     /// Take-profit price target.
     pub take_profit_price: Option<Price>,
     /// Take-profit as a percentage move.
@@ -223,6 +213,81 @@ pub struct TradePolicyCohortProvenance {
     pub artifact_hash: ContentHash,
     pub cohort_index: u32,
     pub cohort_key: TradePolicyCohortKey,
+}
+
+/// Why a recommendation has no executable capital/entry/exit plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePlanBlocker {
+    ModelPolicyBindingMissing,
+    ArtifactNotFound,
+    ArtifactNotPublished,
+    ArtifactHashMismatch,
+    ArtifactFormatUnsupported,
+    CohortNotFound,
+    NotionalTierUnavailable,
+    CohortCoverageInsufficient,
+    LiquidityInsufficient,
+    TickMismatch,
+    PriceOutsideVenueRange,
+    ReturnModelUncalibrated,
+}
+
+/// The single authoritative recommendation trade-plan contract.
+///
+/// `Unavailable` deliberately carries no amount, entry or exit fields: callers
+/// cannot accidentally execute a heuristic fallback. `Frozen` owns the only
+/// policy provenance used by intent admission and attribution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum RecommendationTradePlan {
+    Unavailable {
+        blockers: Vec<TradePlanBlocker>,
+    },
+    Frozen {
+        policy: Box<TradePolicyCohortProvenance>,
+        entry: EntryPlan,
+        sizing: Box<SizingPlan>,
+        exit: Box<ExitPlan>,
+        risk_envelope: Box<RiskEnvelope>,
+    },
+}
+
+impl RecommendationTradePlan {
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Frozen { .. })
+    }
+
+    #[must_use]
+    pub const fn sizing(&self) -> Option<&SizingPlan> {
+        match self {
+            Self::Frozen { sizing, .. } => Some(sizing),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn frozen(
+        &self,
+    ) -> Option<(
+        &TradePolicyCohortProvenance,
+        &EntryPlan,
+        &SizingPlan,
+        &ExitPlan,
+        &RiskEnvelope,
+    )> {
+        match self {
+            Self::Frozen {
+                policy,
+                entry,
+                sizing,
+                exit,
+                risk_envelope,
+            } => Some((policy, entry, sizing, exit, risk_envelope)),
+            Self::Unavailable { .. } => None,
+        }
+    }
 }
 
 /// One deterministic cumulative scale-out target.
@@ -606,6 +671,7 @@ jsonb_active!(
     SizingPlan,
     ExitPlan,
     RiskEnvelope,
+    RecommendationTradePlan,
     RecommendationFactorBreakdown,
     EvidenceRefs,
     ExecutionEligibility,

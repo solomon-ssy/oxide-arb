@@ -2,7 +2,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         NewTradePolicyArtifact, NewTradePolicyGovernanceAudit, Paginated, TradePolicyArtifactInfo,
-        TradePolicyListQuery,
+        TradePolicyAuditListQuery, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
     },
     enums::quant::TradePolicyStatus,
     types::TradePolicyArtifactId,
@@ -24,6 +24,12 @@ pub trait TradePolicyRepository: Send + Sync {
         &self,
         query: TradePolicyListQuery,
     ) -> Result<Paginated<TradePolicyArtifactInfo>, StorageError>;
+
+    async fn page_audits(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        query: TradePolicyAuditListQuery,
+    ) -> Result<Paginated<TradePolicyGovernanceAuditInfo>, StorageError>;
 
     async fn transition(
         &self,

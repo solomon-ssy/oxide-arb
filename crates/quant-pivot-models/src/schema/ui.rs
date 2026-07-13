@@ -1805,13 +1805,6 @@ fn portfolio_sizing_fields() -> Vec<FieldUiEntry> {
             "Maximum single-position size as a fraction of equity, in (0, 1]. A hard per-name sizing cap layered on top of Kelly.",
             "单仓规模占权益的最大比例，(0,1]。叠加在 Kelly 之上的单标的定量硬上限。",
         ),
-        decimal(
-            "portfolio.sizing.target_reward_multiple",
-            "Target reward multiple",
-            "目标盈亏倍数",
-            "Target reward-to-risk multiple R (> 0): target gain = R × downside for the exit plan's take-profit price, and for the legacy TP/SL Kelly fallback a cold-start Heuristic candidate uses (a Calibrated candidate's Kelly fraction never reads this — it uses the calibrated win probability directly).",
-            "目标盈亏比 R（>0）：用于止盈价 = R × 下行，以及冷启动 Heuristic 候选的遗留 TP/SL Kelly 兜底公式（Calibrated 候选的 Kelly 分数直接使用校准胜率，不读取该字段）。",
-        ),
         enum_select(
             "portfolio.sizing.confidence_weighting",
             "Confidence weighting",
@@ -1914,22 +1907,13 @@ fn execution_fields() -> Vec<FieldUiEntry> {
 }
 
 fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
-    vec![
-        secs(
-            "execution.semi_auto.approval_ttl_secs",
-            "Approval TTL",
-            "审批有效期",
-            "How long a pending semi-auto approval stays actionable before it expires. Shorter windows reduce stale-approval risk but demand faster operator response.",
-            "半自动待审批意图在过期前保持可操作的时长。窗口越短陈旧审批风险越小，但要求操作员更快响应。",
-        ),
-        boolean(
-            "execution.semi_auto.allow_size_reduction",
-            "Allow size reduction",
-            "允许减少下单规模",
-            "Whether an approver may reduce (never increase) the order size at approval time. On gives operators a manual risk-down lever.",
-            "审批人是否可在审批时下调（绝不上调）下单规模。开启为操作员提供一个手动降险的杠杆。",
-        ),
-    ]
+    vec![secs(
+        "execution.semi_auto.approval_ttl_secs",
+        "Approval TTL",
+        "审批有效期",
+        "How long a pending semi-auto approval stays actionable before it expires. Shorter windows reduce stale-approval risk but demand faster operator response.",
+        "半自动待审批意图在过期前保持可操作的时长。窗口越短陈旧审批风险越小，但要求操作员更快响应。",
+    )]
 }
 
 fn execution_auto_fields() -> Vec<FieldUiEntry> {
@@ -2870,7 +2854,6 @@ fn portfolio_section_children() -> Vec<SchemaNode> {
             fields_in_order(&[
                 "portfolio.sizing.kelly_fraction",
                 "portfolio.sizing.max_position_pct",
-                "portfolio.sizing.target_reward_multiple",
                 "portfolio.sizing.confidence_weighting",
                 "portfolio.sizing.drawdown_scaling",
             ]),
@@ -2942,10 +2925,7 @@ fn execution_children_head() -> Vec<SchemaNode> {
                     "半自动执行的操作员审批策略。",
                 ),
             ),
-            fields_in_order(&[
-                "execution.semi_auto.approval_ttl_secs",
-                "execution.semi_auto.allow_size_reduction",
-            ]),
+            fields_in_order(&["execution.semi_auto.approval_ttl_secs"]),
         ),
         subsection(
             section_spec(

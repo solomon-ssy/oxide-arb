@@ -38,12 +38,15 @@ use quant_pivot_models::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
         quant::QuantRuntimeMode,
     },
-    types::{Bps, Price, Probability, ThesisInvalidationPolicy},
+    types::{
+        Bps, ContentHash, ExitReinferenceObservation, ExitReinferenceVerdictKind, Price,
+        Probability, ThesisInvalidationPolicy,
+    },
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    execution::{ExitSignalContext, ExitSignalEvaluator, ExitSignalVerdict},
+    execution::{ExitSignalContext, ExitSignalEvaluation, ExitSignalEvaluator, ExitSignalVerdict},
     observability::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
     },
@@ -53,6 +56,7 @@ use crate::{
 /// A freshly re-inferred signal for one market at exit-evaluation time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FreshSignal {
+    pub model_artifact_hash: ContentHash,
     /// Fresh composite score.
     pub composite_score: Probability,
     /// Fresh expected return (basis points).
@@ -174,13 +178,13 @@ pub fn degradation_verdict(
 
 #[async_trait]
 impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<R> {
-    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict {
+    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation {
         let policy = self.config.current().execution.exit_monitor.clone();
         if !policy.signal_reinference.enabled {
             self.metrics.inc_exit_signal_reinference("disabled");
-            return ExitSignalVerdict::Indeterminate {
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Indeterminate {
                 detail: "signal re-inference disabled in config".to_owned(),
-            };
+            });
         }
 
         // Thesis-invalidation is a *forced* exit (ladder tier 5, fires even under
@@ -189,26 +193,25 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
         // positions, so re-inference never force-closes them (fail-safe hold).
         if ctx.intent.runtime_mode != QuantRuntimeMode::AutoExecution {
             self.metrics.inc_exit_signal_reinference("skipped_non_auto");
-            return ExitSignalVerdict::Indeterminate {
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Indeterminate {
                 detail: "thesis-invalidation forced exit applies to auto-execution intents only"
                     .to_owned(),
-            };
+            });
         }
 
         let entry_score = ctx.intent.exit_policy_json.entry_composite_score;
         let invalidation = &ctx.intent.exit_policy_json.thesis_invalidation;
 
-        let (verdict, fresh_composite) = match self
+        let (verdict, fresh) = match self
             .reinferer
             .reinfer(ctx.intent, ctx.lot, ctx.mark_price, ctx.now)
             .await
         {
             Ok(Some(fresh)) => {
                 self.metrics.inc_exit_signal_reinference("fresh");
-                let composite = Some(fresh.composite_score);
                 (
                     degradation_verdict(entry_score, &fresh, invalidation),
-                    composite,
+                    Some(fresh),
                 )
             }
             Ok(None) => {
@@ -238,14 +241,58 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
         self.audit(
             &ctx,
             &verdict,
-            fresh_composite,
+            fresh.as_ref().map(|signal| signal.composite_score),
             policy.signal_reinference.shadow_mode,
         );
 
-        if policy.signal_reinference.shadow_mode {
-            return suppress_shadow_verdict(&self.metrics, &verdict);
+        let observation = fresh.as_ref().and_then(|signal| {
+            let mark = ctx.mark_price?;
+            entry_score
+                .is_positive()
+                .then(|| ExitReinferenceObservation {
+                    observed_at: ctx.now,
+                    model_version_id: ctx.intent.model_version_id.clone(),
+                    model_artifact_hash: signal.model_artifact_hash.clone(),
+                    mark,
+                    score: signal.composite_score,
+                    score_retention: signal.composite_score.inner() / entry_score.inner(),
+                    expected_return_bps: signal.expected_return_bps,
+                    execution_eligible: signal.auto_exec_eligible,
+                    verdict: reinference_verdict_kind(&verdict),
+                    detail: reinference_verdict_detail(&verdict),
+                    shadow: policy.signal_reinference.shadow_mode,
+                })
+        });
+        let verdict = if policy.signal_reinference.shadow_mode {
+            suppress_shadow_verdict(&self.metrics, &verdict)
+        } else {
+            verdict
+        };
+        ExitSignalEvaluation {
+            verdict,
+            reinference: observation,
         }
-        verdict
+    }
+}
+
+const fn reinference_verdict_kind(verdict: &ExitSignalVerdict) -> ExitReinferenceVerdictKind {
+    match verdict {
+        ExitSignalVerdict::ThesisInvalidated { .. } => {
+            ExitReinferenceVerdictKind::ThesisInvalidated
+        }
+        ExitSignalVerdict::Holds | ExitSignalVerdict::OpportunisticSell { .. } => {
+            ExitReinferenceVerdictKind::Holds
+        }
+        ExitSignalVerdict::Indeterminate { .. } => ExitReinferenceVerdictKind::Indeterminate,
+    }
+}
+
+fn reinference_verdict_detail(verdict: &ExitSignalVerdict) -> String {
+    match verdict {
+        ExitSignalVerdict::ThesisInvalidated { detail }
+        | ExitSignalVerdict::OpportunisticSell { detail, .. }
+        | ExitSignalVerdict::Indeterminate { detail } => detail.clone(),
+        ExitSignalVerdict::Holds => "thesis holds".to_owned(),
     }
 }
 
@@ -272,7 +319,7 @@ fn suppress_shadow_verdict(metrics: &MetricsHub, verdict: &ExitSignalVerdict) ->
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::types::{Bps, Probability, ThesisInvalidationPolicy};
+    use quant_pivot_models::types::{Bps, ContentHash, Probability, ThesisInvalidationPolicy};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -281,6 +328,8 @@ mod tests {
 
     fn fresh(score: &str, ret_bps: i64, eligible: bool) -> FreshSignal {
         FreshSignal {
+            model_artifact_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+                .expect("hash"),
             composite_score: Probability::new(score.parse().unwrap()),
             expected_return_bps: Bps::new(Decimal::from(ret_bps)),
             auto_exec_eligible: eligible,

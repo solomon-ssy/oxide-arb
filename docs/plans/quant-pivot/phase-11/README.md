@@ -6,7 +6,7 @@
 > Tier 0/1 linkage、Binance 特征源、domain PIT、category 路由）；**11.4 已落地并完成生产级语义加固**
 >（`as_of` 横截面 LTR、`rank_ic_weighted_ranknet` 诚实命名、TopN **rank-equal** token 伪组合、
 > singleton 可观测丢弃、`rank_loss_group_count`、NDCG@k/Rank IC 诊断、argmin/Decimal→f64
-> fail-closed；全局 runtime schema 的当前版本统一见下方 11.6 状态）；
+> fail-closed；全局 runtime schema 的当前版本统一见下方权威版本账本）；
 > **11.5 已落地**（Buy 侧 CPCV/DSR/PBO/purge/trial-grid，见其文档头部"闭环加固"）；
 > **11.5.1 已落地**（Sell/Hold-vs-Exit lot 级 CPCV：`FoldRuntime`/`RankObservation` 泛化、
 > residual-shares 状态机 + 路径分叉停止、activity-only lot-native Sharpe/DSR/PBO、null baseline uplift、
@@ -17,7 +17,9 @@
 > 因此不建设旧库升级或数据搬运路径，W5 仅保留从空库初始化、重建 artifact、full parity、
 > governed acknowledge 与 canary 的首次环境激活；
 > **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。
-> 11.7 的契约/执行/UI 已落地但受 11.7.2 full-L2/fee/policy-validation 激活门禁阻断；
+> 11.7 的执行/control/operational contract 已收口；真实登录/RBAC/BookStore 状态驱动的受保护 UI/E2E
+> 与当前 golden 已通过，不以静态页面替代；仓库中不存在改造前历史截图，不伪造 before evidence。
+> 真实 Published research policy 与端到端激活仍受 11.7.2 full-L2/fee/policy-validation 门禁阻断；
 > 11.0/11.2.1/11.3/11.7.1/11.7.2/11.8–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
@@ -30,6 +32,21 @@
 > 兼容策略（逐条不可妥协，与全仓一致）：**零兼容、零 re-export、零向前兼容、零死语义**。
 > 删除旧启发式常量、删除"写了但从不 emit"的枚举值、删除静默填零路径。不追求最小变更/最小侵入/
 > 最小工作量;优先正确领域模型、语义精准、生产可维护性,必要时破坏式重构。
+
+## 权威版本账本（当前）
+
+本表是 Phase 11 唯一“当前版本”真相；11.0–11.6 文档中的版本只描述各子阶段完成时的历史波次。
+
+| Contract | 当前版本 | 下一位 owner |
+|---|---:|---|
+| Runtime config | **v11** | 11.9 首次加入 feedback 字段时 `v11 → v12` |
+| Feature schema | **v6** | 仅真实 schema 变更时 bump |
+| Dataset artifact | **v3** | 不双读旧 v2 |
+| Model artifact | **v3** | 不双读旧 v2 |
+| Trade policy artifact | **v1** | 11.7.2 在 v1 内补真实 research evidence，不制造 v2 |
+
+11.11 只能引用本账本在实施当时的值，不得复制一份“当前版本”。项目未生产部署，schema、ClickHouse
+表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact loader、JSONB 双读、alias 或 re-export。
 
 ## 0. 为什么单独开 Phase 11
 
@@ -92,9 +109,9 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.5 | Leakage-Aware Validation & Overfitting Control | 防过拟合方法论(买方 WeightedFactor/classical) — **已落地** (model_run FK + publish_path_set_id bind + trial fail-closed + classical purged CV + publish label-horizon rescan;Sell → 11.5.1) | 7, 9 | [11.5](11.5-leakage-aware-validation-and-overfitting.md) |
 | 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 — **已落地 + remediation**（residual-shares 状态机 + 路径分叉停止、activity-only DSR/PBO、null baseline uplift、Sell DD/tail 硬门禁；CPCV request 契约由 11.6 统一冻结） | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 决策时钟、PIT catalog、FeatureCell、frozen transform、运行期 parity/latch — **W0–W4/W6 与全部本地/容器门禁已完成；W5 空库首次激活待执行** | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
-| 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **契约/执行/UI 已落地，激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
+| 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.7.1 | Composable Entry Event Triggers | typed condition AST + PIT event provenance — **设计冻结、未实施，不预埋死语义** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
-| 11.7.2 | Executable L2 Policy Validation | 复用历史 ladder + PIT fee + policy CPCV/DSR/PBO，解除 artifact publish 激活阻断 — **设计冻结、待实施** | — (11.7 activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
+| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility + exact-tier + PIT fee + purged CPCV/uniqueness/DSR/PBO，产出首个真实 Published policy — **设计冻结、待实施** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
 | 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance — **设计冻结、尚未实施；未来 v11→v12** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |

@@ -39,7 +39,7 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    execution::{ExitSignalContext, ExitSignalEvaluator, ExitSignalVerdict},
+    execution::{ExitSignalContext, ExitSignalEvaluation, ExitSignalEvaluator, ExitSignalVerdict},
     observability::{
         exit_signal_fact_writer::ExitSignalEvaluationEventWriter, metrics_hub::MetricsHub,
     },
@@ -282,18 +282,18 @@ impl<S: OpportunisticSellScorer> OpportunisticSellSignalEvaluator<S> {
 
 #[async_trait]
 impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignalEvaluator<S> {
-    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict {
+    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation {
         let snapshot = self.config.current();
         let policy = snapshot.execution.exit_monitor.opportunistic_sell.clone();
         if !policy.enabled {
             self.metrics.inc_opportunistic_sell_eval("disabled");
-            return ExitSignalVerdict::Holds;
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
         // Opportunistic exits are auto-submitted advisory scale-outs; a human owns
         // the exit for non-auto-execution intents.
         if ctx.intent.runtime_mode != QuantRuntimeMode::AutoExecution {
             self.metrics.inc_opportunistic_sell_eval("skipped_non_auto");
-            return ExitSignalVerdict::Holds;
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
 
         // Resolve the active exit-model version up front so the enabled-path
@@ -308,7 +308,7 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             .fetch_score(&ctx, policy.shadow_mode, model_version_id.as_ref())
             .await
         else {
-            return ExitSignalVerdict::Holds;
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         };
 
         let signal_policy = SellSignalPolicy::try_from_runtime(&policy).unwrap_or_else(|error| {
@@ -337,7 +337,7 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
                 false,
             ));
             self.metrics.inc_opportunistic_sell_eval("hold");
-            return ExitSignalVerdict::Holds;
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
 
         // Shadow: record the would-be opportunistic exit, but never submit.
@@ -352,7 +352,7 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             ));
             self.metrics
                 .inc_opportunistic_sell_eval("shadow_would_sell");
-            return ExitSignalVerdict::Holds;
+            return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         }
 
         self.audit.write(audit_row(
@@ -365,7 +365,7 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
         ));
         self.metrics
             .inc_opportunistic_sell_eval("opportunistic_sell");
-        ExitSignalVerdict::OpportunisticSell {
+        ExitSignalEvaluation::verdict(ExitSignalVerdict::OpportunisticSell {
             target_cumulative_exit_pct: target,
             detail: format!(
                 "sell scorer: exit_alpha {} bps, p_exit {}, confidence {}",
@@ -373,7 +373,7 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
                 score.p_exit_better.inner(),
                 score.confidence.inner()
             ),
-        }
+        })
     }
 }
 

@@ -22,8 +22,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
         ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand,
-        EntryTriggerObservationView, OrderIntentListQuery, OrderIntentView, Paginated,
-        RejectIntentCommand,
+        EntryTriggerObservationView, ExitMonitorObservationView, OrderIntentListQuery,
+        OrderIntentView, Paginated, PositionInfo, RejectIntentCommand,
     },
     domain::{ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest},
     enums::{
@@ -111,7 +111,75 @@ pub async fn get(
         .ok_or_else(|| WebError::NotFound(format!("order intent not found: {id}")))?;
     let mut view = OrderIntentView::from(info);
     view.entry_trigger_observation = Some(entry_trigger_observation(&state, &view).await?);
+    if let Some(position) = state
+        .execution_read
+        .get_position_by_intent(&view.order_intent_id)
+        .await?
+    {
+        view.exit_monitor_observation =
+            Some(exit_monitor_observation(&state, &view, &position).await?);
+    }
     Ok(WebResponse::ok(view))
+}
+
+pub(crate) async fn exit_monitor_observation(
+    state: &AppState,
+    intent: &OrderIntentView,
+    position: &PositionInfo,
+) -> Result<ExitMonitorObservationView, WebError> {
+    let now = Utc::now();
+    let max_book_age_ms = state
+        .quant_reports
+        .find_recommendation(&intent.recommendation_id)
+        .await?
+        .and_then(|recommendation| {
+            recommendation
+                .trade_plan
+                .frozen()
+                .map(|(_, entry, _, _, _)| entry.max_book_age_ms)
+        })
+        .unwrap_or(0);
+    let snapshot = state
+        .market_data
+        .book_for_token(&intent.entry_order.token_id);
+    let current_executable_bid = snapshot
+        .as_deref()
+        .and_then(quant_pivot_models::domain::BookSnapshot::best_bid);
+    let book_observed_at = snapshot
+        .as_deref()
+        .and_then(|book| i64::try_from(book.timestamp_ms).ok())
+        .and_then(DateTime::from_timestamp_millis);
+    let book_age_ms = snapshot.as_deref().map(|book| {
+        let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(u64::MAX);
+        now_ms.saturating_sub(book.timestamp_ms)
+    });
+    let book_fresh = book_age_ms.is_some_and(|age| age <= max_book_age_ms);
+    let effective_stop = intent
+        .exit_policy
+        .effective_stop(position.avg_price, intent.peak_mark_price);
+    let next_scale_out = intent.exit_policy.next_scale_out(
+        &intent.scale_out_state,
+        position.shares,
+        current_executable_bid,
+        now,
+    );
+
+    Ok(ExitMonitorObservationView {
+        state: intent.exit_state,
+        reason: intent.exit_reason,
+        current_executable_bid,
+        book_observed_at,
+        book_age_ms,
+        book_fresh,
+        peak_mark: intent.peak_mark_price,
+        effective_stop,
+        next_scale_out,
+        cumulative_exited_shares: intent.scale_out_state.cumulative_exited_shares,
+        cumulative_exit_pct: intent.scale_out_state.cumulative_exit_pct(),
+        latest_reinference: intent.latest_reinference.clone(),
+        last_check_at: intent.last_signal_recheck_at,
+        next_check_at: intent.next_check_at,
+    })
 }
 
 async fn entry_trigger_observation(
@@ -125,7 +193,12 @@ async fn entry_trigger_observation(
         .await?;
     let max_book_age_ms = recommendation
         .as_ref()
-        .map_or(0, |row| row.entry_plan.max_book_age_ms);
+        .and_then(|row| {
+            row.trade_plan
+                .frozen()
+                .map(|(_, entry, _, _, _)| entry.max_book_age_ms)
+        })
+        .unwrap_or(0);
     let snapshot = state
         .market_data
         .book_for_token(&intent.entry_order.token_id);
@@ -279,10 +352,8 @@ pub async fn approve(
             operator_id,
             acting_role: acting_role.0.clone(),
             reason: request.reason.clone(),
-            override_shares: request.override_shares,
-            override_limit_price: request.override_limit_price,
-            max_allowed_usd: request.max_allowed_usd,
-            override_note: request.override_note.clone(),
+            override_amount: request.override_amount,
+            override_price: request.override_price,
         })
         .await?;
     let before_hash = canonical_state_hash(&before)?;
@@ -298,7 +369,8 @@ pub async fn approve(
         "acting_role": acting_role.0,
         "request_id": request_id.0,
         "reason": request.reason,
-        "override_note": request.override_note,
+        "override_amount": request.override_amount,
+        "override_price": request.override_price,
     }));
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
 }

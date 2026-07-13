@@ -65,6 +65,8 @@ fn candidate(
     expected_bps: Decimal,
     downside_bps: Decimal,
 ) -> SignalCandidate {
+    let entry_price = dec!(0.5);
+    let win_probability = entry_price * (Decimal::ONE + expected_bps / Decimal::from(10_000));
     SignalCandidate {
         signal_candidate_id: SignalCandidateId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
@@ -75,8 +77,8 @@ fn candidate(
         confidence: Probability::new(confidence),
         expected_return_bps: expected_bps,
         downside_bps,
-        win_probability: None,
-        entry_price_ref: Price::new(dec!(0.5)),
+        win_probability: Some(Probability::new(win_probability)),
+        entry_price_ref: Price::new(entry_price),
         suggested_horizon_secs: 3_600,
         factor_breakdown: Vec::new(),
         model_explanation: ModelExplanation {
@@ -127,7 +129,6 @@ const fn kelly() -> KellySizingModel {
     KellySizingModel::new(
         dec!(0.5),
         dec!(0.1),
-        dec!(2),
         ConfidenceSizeCurve::Linear,
         DrawdownMultiplierPolicy::Fixed,
         KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9)),
@@ -500,7 +501,6 @@ fn planner_consumes_real_drawdown_state() {
     let conservative = KellySizingModel::new(
         dec!(0.5),
         dec!(0.9),
-        dec!(2),
         ConfidenceSizeCurve::Linear,
         DrawdownMultiplierPolicy::Conservative,
         KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9)),
@@ -556,7 +556,6 @@ fn planner_deterministic_with_frozen_drawdown() {
     let conservative = KellySizingModel::new(
         dec!(0.5),
         dec!(0.9),
-        dec!(2),
         ConfidenceSizeCurve::Linear,
         DrawdownMultiplierPolicy::Conservative,
         KellySafetyParams::new(dec!(1), dec!(0.5), dec!(0.9)),

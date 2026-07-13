@@ -1451,6 +1451,7 @@ mod tests {
             next_check_at: None,
             peak_mark_price: None,
             last_signal_recheck_at: None,
+            latest_reinference_json: None,
             scale_out_state: ScaleOutState::default(),
             created_at: now,
             updated_at: now,

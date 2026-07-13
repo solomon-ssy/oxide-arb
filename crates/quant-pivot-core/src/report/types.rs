@@ -66,7 +66,7 @@ pub struct NotificationRecommendation {
     pub market_id: String,
     pub outcome_side: OutcomeSide,
     pub score: Probability,
-    pub suggested_usd: Usd,
+    pub suggested_usd: Option<Usd>,
 }
 
 /// Operator-facing notification payload for a committed report.

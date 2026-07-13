@@ -64,11 +64,11 @@ use quant_pivot_models::{
         ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
         RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
         RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
-        StructuralMonitorPort, SystemStatus, TradePolicyArtifactInfo, TradePolicyFitPreflightView,
-        TradePolicyListQuery, TradePolicyPort, TradeTapeCoverageView, TradeTapeSourceHealthView,
-        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
-        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
-        UpsertDomainSourceCursor, empty_catalog_page,
+        StructuralMonitorPort, SystemStatus, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
+        TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
+        TradePolicyPort, TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest,
+        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
+        TrainingDatasetPort, TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::{FeatureFamily, RuntimeConfig},
@@ -683,6 +683,14 @@ impl TradePolicyPort for MockTradePolicyPort {
         &self,
         query: TradePolicyListQuery,
     ) -> QuantResult<Paginated<TradePolicyArtifactInfo>> {
+        Ok(Paginated::empty(query.page.page, query.page.size))
+    }
+
+    async fn page_audits(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        query: TradePolicyAuditListQuery,
+    ) -> QuantResult<Paginated<TradePolicyGovernanceAuditInfo>> {
         Ok(Paginated::empty(query.page.page, query.page.size))
     }
 

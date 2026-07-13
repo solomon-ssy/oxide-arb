@@ -1383,9 +1383,9 @@ curl -sS -X POST "$BASE/api/quant/reports/run" \
 
 ### 9.3 买多少
 
-以 `sizing_plan.suggested_usd` 和 `sizing_plan.shares` 为上限。生产 Kelly 使用校准 `P(win)` 与市场价
-`p` 直接计算 `f* = (q − p) / (1 − p)`（Phase 11.3）；`sizing_plan` 瀑布图审计各收缩阶段。
-未校准 return model 仅 `ReportOnly` 实验展示，禁止 publish / semi-auto / auto intent 创建。
+只有 `trade_plan.kind = frozen` 才存在可操作 sizing，并以 `trade_plan.sizing.suggested_usd` 与
+`suggested_shares` 为上限。生产 Kelly 使用校准 `P(win)` 与市场价 `p` 直接计算
+`f* = (q − p) / (1 − p)`（Phase 11.3）。未校准 return model 生成 `Unavailable`，没有金额，也不能创建 intent。
 
 计算链路：
 
@@ -1400,13 +1400,10 @@ flowchart LR
     G --> H["suggested_usd / shares"]
 ```
 
-人工审批时只能：
-
-- 使用 `suggested_usd` 原值；
-- 降低 shares；
-- 降低 limit price；
-- 设置更低 `max_allowed_usd`；
-- 拒绝交易。
+人工审批时只能拒绝，或以 tagged `override_amount` 缩小冻结 USD/shares，并以 side-aware
+`override_price` 收紧价格边界：BUY 不得提高，SELL 不得降低。USD price-only override 不改变冻结 spend；
+Shares override 按最终 `shares × price` 原子重算资本预留。审批即 Arm，条件满足且重新准入通过后系统可
+自动提交真实订单；审批弹窗必须明确确认该授权。
 
 不能因为主观看好而放大仓位。若要改变 sizing 逻辑，必须新建 runtime-config 版本并重新生成报告。
 
@@ -1492,10 +1489,13 @@ curl -sS -X POST "$BASE/api/quant/intents/$INTENT_ID/approve" \
   -H "Content-Type: application/json" \
   -d '{
     "reason": "book fresh and depth sufficient; approve with smaller notional",
-    "max_allowed_usd": "25",
-    "override_note": "reduced because market spread widened near approval"
+    "override_amount": { "unit": "usd", "value": "25" },
+    "override_price": "0.55"
   }' | jq .
 ```
+
+`override_amount.unit` 必须与 intent 冻结 `entry_order.amount.unit` 完全一致；省略 override 即按冻结值审批。
+审批成功后不会再出现第二个 Submit 操作。
 
 拒绝：
 

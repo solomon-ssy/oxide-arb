@@ -15,8 +15,8 @@ use crate::{
     enums::{
         common::Side,
         execution::{
-            ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, PositionLedgerState,
-            VenueOrderStatus,
+            ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind, OrderTypeKind,
+            PositionLedgerState, VenueOrderStatus,
         },
         quant::{
             ApprovalStatus, EntryTriggerState, ExecutionOrderState, OrderIntentStatus,
@@ -25,9 +25,9 @@ use crate::{
     },
     types::{
         AttributionDetail, ContentHash, EntryOrderSpec, EntryOutcome, EntryTrigger,
-        ExecutionOrderId, ExitOutcome, ExitPolicySpec, MarketId, ModelVersionId, OrderId,
-        OrderIntentId, PositionId, Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState,
-        Shares, TokenId, Usd,
+        ExecutionOrderId, ExitOutcome, ExitPolicySpec, ExitReinferenceObservation, MarketId,
+        ModelVersionId, NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId,
+        Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -67,6 +67,15 @@ pub struct OrderIntentView {
     /// Ephemeral live-book projection computed at read time; never persisted per tick.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_trigger_observation: Option<EntryTriggerObservationView>,
+    pub exit_state: ExitState,
+    pub exit_reason: Option<ExitReason>,
+    pub next_check_at: Option<DateTime<Utc>>,
+    pub peak_mark_price: Option<Price>,
+    pub last_signal_recheck_at: Option<DateTime<Utc>>,
+    pub latest_reinference: Option<ExitReinferenceObservation>,
+    /// Read-time projection for a filled lot; absent before the entry fills.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_monitor_observation: Option<ExitMonitorObservationView>,
     pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -100,6 +109,13 @@ impl From<OrderIntentInfo> for OrderIntentView {
             trigger_last_observed_at: info.trigger_last_observed_at,
             trigger_ready_at: info.trigger_ready_at,
             entry_trigger_observation: None,
+            exit_state: info.exit_state,
+            exit_reason: info.exit_reason,
+            next_check_at: info.next_check_at,
+            peak_mark_price: info.peak_mark_price,
+            last_signal_recheck_at: info.last_signal_recheck_at,
+            latest_reinference: info.latest_reinference_json,
+            exit_monitor_observation: None,
             scale_out_state: info.scale_out_state,
             created_at: info.created_at,
             updated_at: info.updated_at,
@@ -117,6 +133,25 @@ pub struct EntryTriggerObservationView {
     pub condition_satisfied: bool,
     pub confirmation_remaining_secs: Option<u64>,
     pub admission_blocker: Option<String>,
+}
+
+/// Authoritative read-time projection of one lot's governed exit monitor.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExitMonitorObservationView {
+    pub state: ExitState,
+    pub reason: Option<ExitReason>,
+    pub current_executable_bid: Option<Price>,
+    pub book_observed_at: Option<DateTime<Utc>>,
+    pub book_age_ms: Option<u64>,
+    pub book_fresh: bool,
+    pub peak_mark: Option<Price>,
+    pub effective_stop: Option<Price>,
+    pub next_scale_out: Option<NextScaleOutProjection>,
+    pub cumulative_exited_shares: Shares,
+    pub cumulative_exit_pct: Option<rust_decimal::Decimal>,
+    pub latest_reinference: Option<ExitReinferenceObservation>,
+    pub last_check_at: Option<DateTime<Utc>>,
+    pub next_check_at: Option<DateTime<Utc>>,
 }
 
 /// Outbound projection of an execution order (the result of a submission).
@@ -226,6 +261,13 @@ impl From<PositionSummary> for PositionView {
             closed_at: info.closed_at,
         }
     }
+}
+
+/// Strong detail response: lot truth plus its associated exit-monitor projection.
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionDetailView {
+    pub position: PositionView,
+    pub exit_monitor_observation: ExitMonitorObservationView,
 }
 
 /// Outbound projection of the final WORM recommendation attribution.
@@ -352,17 +394,14 @@ pub struct CreateIntentRequest {
 
 /// Inbound body for `POST /quant/intents/{id}/approve`.
 ///
-/// Approval may only narrow the order: `override_shares` / `override_limit_price`
-/// must be ≤ the frozen entry, and `max_allowed_usd` caps the notional.
+/// Approval may only narrow the frozen tagged amount and side-aware price.
 #[derive(Debug, Clone, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct ApproveIntentRequest {
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
-    pub override_shares: Option<Shares>,
-    pub override_limit_price: Option<Price>,
-    pub max_allowed_usd: Option<Usd>,
-    #[validate(length(min = 1, max = 512))]
-    pub override_note: Option<String>,
+    pub override_amount: Option<OrderAmount>,
+    pub override_price: Option<Price>,
 }
 
 /// Inbound body for `POST /quant/intents/{id}/reject`.

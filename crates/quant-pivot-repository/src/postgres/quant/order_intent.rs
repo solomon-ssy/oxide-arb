@@ -48,12 +48,10 @@ use sea_orm::{
 };
 
 /// Statuses a TTL sweep may expire.
-const EXPIRABLE_STATUSES: [OrderIntentStatus; 5] = [
+const EXPIRABLE_STATUSES: [OrderIntentStatus; 3] = [
     OrderIntentStatus::PendingApproval,
     OrderIntentStatus::Approved,
     OrderIntentStatus::ApprovedByPolicy,
-    OrderIntentStatus::AdmissionPending,
-    OrderIntentStatus::AdmissionRejected,
 ];
 
 /// Singleton row id for `system_kill_switch`.
@@ -235,7 +233,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         reason: String,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent(&txn, intent_id).await?;
+        let row = load_intent_for_update(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::Rejected, intent_id)?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Rejected);
@@ -253,7 +251,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         reason: String,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent(&txn, intent_id).await?;
+        let row = load_intent_for_update(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::Cancelled, intent_id)?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Cancelled);
@@ -270,12 +268,20 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent(&txn, intent_id).await?;
+        let row = load_intent_for_update(&txn, intent_id).await?;
+        if row.status == OrderIntentStatus::Expired {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(row.into());
+        }
         validate_intent_transition(row.status, OrderIntentStatus::Expired, intent_id)?;
         let before_info: OrderIntentInfo = row.clone().into();
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Expired);
         active.status_reason = ActiveValue::Set(Some("intent expired".to_owned()));
+        active.entry_trigger_state = ActiveValue::Set(EntryTriggerState::Expired);
+        active.trigger_confirming_since = ActiveValue::Set(None);
+        active.trigger_last_observed_at = ActiveValue::Set(None);
+        active.trigger_ready_at = ActiveValue::Set(None);
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
         release_capital(&txn, intent_id, "expired".to_owned()).await?;
         let after_info: OrderIntentInfo = intent_model.clone().into();
@@ -744,10 +750,15 @@ pub fn validate_intent_transition(
             OrderIntentStatus::PendingApproval,
             OrderIntentStatus::Approved
                 | OrderIntentStatus::Rejected
+                | OrderIntentStatus::Cancelled
+                | OrderIntentStatus::Expired
                 | OrderIntentStatus::Invalidated,
         ) | (
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy,
-            OrderIntentStatus::AdmissionPending,
+            OrderIntentStatus::AdmissionPending
+                | OrderIntentStatus::Cancelled
+                | OrderIntentStatus::Expired
+                | OrderIntentStatus::Invalidated,
         ) | (
             // `AdmissionPending -> Approved/ApprovedByPolicy` releases the claim
             // on a transient admission defer so the dispatcher retries (05.4).
@@ -766,12 +777,6 @@ pub fn validate_intent_transition(
         ) | (
             OrderIntentStatus::PartiallyFilled,
             OrderIntentStatus::Filled | OrderIntentStatus::Failed | OrderIntentStatus::Cancelled
-        ) | (
-            _,
-            OrderIntentStatus::Cancelled
-                | OrderIntentStatus::Failed
-                | OrderIntentStatus::Expired
-                | OrderIntentStatus::Invalidated,
         )
     );
     if valid {

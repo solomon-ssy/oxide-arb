@@ -28,7 +28,7 @@
 
 | Section | 字段 | 说明 |
 |---|---|---|
-| `[polymarket]` | `clob_base_url`, `clob_ws_url`, `chain_id` | CLOB/WS endpoint、链 id（必须 137） |
+| `[polymarket]` | `clob_base_url`, `clob_ws_url`, `order_post_timeout_ms`, `chain_id` | CLOB/WS endpoint、单次订单 POST 硬超时、链 id（必须 137） |
 | `[polymarket.onchain]` | `rpc_url`, `rpc_timeout_ms` | Polygon JSON-RPC；`rpc_timeout_ms` 是 CTF oracle/redeem 的硬超时（reqwest 默认无超时） |
 | `[polymarket.relayer]` | `base_url`, `api_key`, `api_key_address`, `request_timeout_ms` | proxy/gnosis_safe 的 gasless money-moving；EOA 忽略 |
 | `[polymarket.fees]` | `exponent`, `unknown_category_rate`, `category_rates{}` | fee = C×feeRate×p×(1−p)^exponent |
@@ -59,6 +59,7 @@
 - `quant.account.funder`：`eoa` 必须等于 signer EOA 派生地址；`proxy`/`gnosis_safe` 必须等于 CREATE2 推导地址（启动校验）。
 - `proxy`/`gnosis_safe` 在升级到 order-submitting mode 时 preflight 硬要求 `[polymarket.relayer].api_key` + `api_key_address`。
 - `polymarket.onchain.rpc_timeout_ms` 已接线进 alloy provider 的 reqwest client：redeem/oracle 调用超时即失败，绝不无限挂起。
+- `polymarket.order_post_timeout_ms` 只约束单次资金订单 POST：超时归类为 Ambiguous 并进入 reconciliation，绝不自动重试。
 
 ## 2. Runtime Config v7
 
@@ -145,7 +146,7 @@ Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs
 
 `semi_auto`, `auto_execution`, `entry_order_policy`, `exit_monitor`, `kill_switch`, `capital`, `reconciliation`, `settlement_redeem`, `attribution`, `breaker`。
 
-- `semi_auto`：`approval_ttl_secs`、`allow_size_reduction`。
+- `semi_auto`：只保留 `approval_ttl_secs`。审批 downscale 是单位安全的领域动作，不是可漂移策略开关。
 - `auto_execution`：`enabled`、`max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence`。
 - `entry_order_policy`：`max_slippage_bps`、`allow_market_orders`、`min_entry_book_depth_usd`（**v10 从 `data_quality.min_book_depth_usd` 迁移正名**；冻结进 `entry_plan.min_depth_usd`，准入 `LiquidityDepthCheck` 消费）。
 - `exit_monitor`：`enabled`、`monitor_secs`、`signal_recheck_secs`、`signal_reinference{enabled, shadow_mode}`。

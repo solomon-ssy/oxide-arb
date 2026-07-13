@@ -22,6 +22,7 @@ use quant_pivot_test_support::{
     pg::setup_pg,
     report_pipeline_harness::{HarnessOptions, MARKET_ID, ReportPipelineHarness},
 };
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 #[tokio::test]
@@ -300,45 +301,49 @@ async fn evidence_refs_and_rank_scores_populated() {
     );
 }
 
+async fn neutral_kelly_fraction(collateral: Usd) -> Decimal {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let harness = ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions {
+            collateral,
+            ..HarnessOptions::default()
+        },
+    )
+    .await;
+    let report = harness
+        .lifecycle
+        .run_ad_hoc(AdHocReportRequest {
+            request_id: "drawdown-neutral-baseline".to_owned(),
+            trigger_time: Utc::now(),
+            top_n: Some(5),
+            knowledge_lag_secs: Some(0),
+        })
+        .await
+        .expect("neutral drawdown baseline report");
+    let recommendations = harness
+        .recommendation_repo
+        .find_by_report(&report.recommendation_report_id)
+        .await
+        .expect("load neutral recommendations");
+    recommendations
+        .iter()
+        .find(|recommendation| recommendation.market_id.as_str() == MARKET_ID)
+        .expect("neutral baseline must publish primary market recommendation")
+        .trade_plan
+        .sizing()
+        .expect("frozen sizing")
+        .kelly_fraction_applied
+        .expect("neutral kelly fraction")
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn report_persists_real_drawdown_from_equity_history() {
     let collateral = Usd::new(dec!(8000));
     let peak = Usd::new(dec!(10000));
-
-    let neutral_kelly = {
-        let (pool, _container) = setup_pg().await;
-        let db = pool.connection().clone();
-        let harness = ReportPipelineHarness::bootstrap(
-            &db,
-            HarnessOptions {
-                collateral,
-                ..HarnessOptions::default()
-            },
-        )
-        .await;
-        let report = harness
-            .lifecycle
-            .run_ad_hoc(AdHocReportRequest {
-                request_id: "drawdown-neutral-baseline".to_owned(),
-                trigger_time: Utc::now(),
-                top_n: Some(5),
-                knowledge_lag_secs: Some(0),
-            })
-            .await
-            .expect("neutral drawdown baseline report");
-        let recs = harness
-            .recommendation_repo
-            .find_by_report(&report.recommendation_report_id)
-            .await
-            .expect("load neutral recommendations");
-        recs.iter()
-            .find(|rec| rec.market_id.as_str() == MARKET_ID)
-            .expect("neutral baseline must publish primary market recommendation")
-            .sizing_plan
-            .kelly_fraction_applied
-            .expect("neutral kelly fraction")
-    };
+    let neutral_kelly = neutral_kelly_fraction(collateral).await;
 
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
@@ -400,7 +405,9 @@ async fn report_persists_real_drawdown_from_equity_history() {
         .find(|rec| rec.market_id.as_str() == MARKET_ID)
         .expect("drawdown report must publish primary market recommendation");
     let drawdown_kelly = drawdown_rec
-        .sizing_plan
+        .trade_plan
+        .sizing()
+        .expect("frozen sizing")
         .kelly_fraction_applied
         .expect("drawdown kelly fraction");
 

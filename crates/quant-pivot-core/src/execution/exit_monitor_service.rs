@@ -188,10 +188,13 @@ impl ExitMonitorService {
         // re-inference thesis context); a missing one is non-fatal.
         // Same per-book staleness ceiling as admission `#7` (`BookFreshnessCheck`):
         // frozen `entry_plan.max_book_age_ms` when available, else live config.
-        let max_book_age_ms = recommendation.map_or_else(
-            || self.deps.config.current().data_quality.max_book_age_ms,
-            |rec| rec.entry_plan.max_book_age_ms,
-        );
+        let max_book_age_ms = recommendation
+            .and_then(|rec| {
+                rec.trade_plan
+                    .frozen()
+                    .map(|(_, entry, _, _, _)| entry.max_book_age_ms)
+            })
+            .unwrap_or(0);
         let (mark_price, book_fresh, market_abnormal) =
             classify_book(snapshot.as_deref(), now_ms, max_book_age_ms)?;
 
@@ -223,11 +226,21 @@ impl ExitMonitorService {
             kill_switch: self.deps.kill_switch.current(),
             emergency_policy,
             peak_mark_price,
-            signal,
+            signal: signal.verdict.clone(),
             scale_out_state: intent.scale_out_state.clone(),
             min_opportunistic_clip_pct,
             now,
         };
+
+        self.touch_lot_monitor(
+            &intent.order_intent_id,
+            monitor_secs,
+            now,
+            peak_mark_price,
+            did_recheck,
+            signal.reinference,
+        )
+        .await?;
 
         match decide_exit(&input) {
             ExitDecision::SubmitExitOrder {
@@ -251,16 +264,7 @@ impl ExitMonitorService {
                     .mark_exit_manual(&intent.order_intent_id, reason)
                     .await?;
             }
-            ExitDecision::Hold => {
-                self.touch_lot_monitor(
-                    &intent.order_intent_id,
-                    monitor_secs,
-                    now,
-                    peak_mark_price,
-                    did_recheck,
-                )
-                .await?;
-            }
+            ExitDecision::Hold => {}
         }
         Ok(())
     }
@@ -298,6 +302,7 @@ impl ExitMonitorService {
         now: DateTime<Utc>,
         peak_mark_price: Option<Price>,
         did_recheck: bool,
+        latest_reinference: Option<quant_pivot_models::types::ExitReinferenceObservation>,
     ) -> QuantResult<()> {
         let next_check_at =
             now + Duration::seconds(i64::try_from(monitor_secs).unwrap_or(i64::MAX));
@@ -309,6 +314,7 @@ impl ExitMonitorService {
                 next_check_at,
                 peak_mark_price,
                 last_recheck,
+                latest_reinference,
             )
             .await?;
         Ok(())
@@ -330,7 +336,7 @@ struct ExitSignalResolve<'a> {
 async fn resolve_exit_signal(
     signal: &dyn ExitSignalEvaluator,
     input: ExitSignalResolve<'_>,
-) -> (ExitSignalVerdict, bool) {
+) -> (crate::execution::ExitSignalEvaluation, bool) {
     let ExitSignalResolve {
         intent,
         lot,
@@ -344,7 +350,7 @@ async fn resolve_exit_signal(
         .last_signal_recheck_at
         .is_none_or(|last| now - last >= recheck);
     if recheck_due && book_fresh && !market_abnormal {
-        let verdict = signal
+        let evaluation = signal
             .evaluate(ExitSignalContext {
                 intent,
                 lot,
@@ -352,9 +358,12 @@ async fn resolve_exit_signal(
                 now,
             })
             .await;
-        (verdict, true)
+        (evaluation, true)
     } else {
-        (ExitSignalVerdict::Holds, false)
+        (
+            crate::execution::ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds),
+            false,
+        )
     }
 }
 

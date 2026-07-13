@@ -201,7 +201,8 @@ pub struct QuantRecommendationEventRow {
     pub side: ChOutcomeSide,
     pub score: ChProbability,
     pub risk_adjusted_score: ChProbability,
-    pub suggested_usd: ChUsd,
+    pub trade_plan_available: bool,
+    pub suggested_usd: Option<ChUsd>,
     pub valid_until: i64,
     pub status: ChRecommendationStatus,
 }

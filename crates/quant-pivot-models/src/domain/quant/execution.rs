@@ -18,9 +18,9 @@ use crate::{
         },
     },
     types::{
-        ContentHash, EntryOrderSpec, EntryTrigger, ExecutionOrderId, ExitPolicySpec, MarketId,
-        ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
-        ScaleOutState, Shares, TokenId, Usd,
+        ContentHash, EntryOrderSpec, EntryTrigger, ExecutionOrderId, ExitPolicySpec,
+        ExitReinferenceObservation, MarketId, ModelVersionId, OrderId, OrderIntentId, Price,
+        RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -61,6 +61,7 @@ pub struct OrderIntentInfo {
     pub next_check_at: Option<DateTime<Utc>>,
     pub peak_mark_price: Option<Price>,
     pub last_signal_recheck_at: Option<DateTime<Utc>>,
+    pub latest_reinference_json: Option<ExitReinferenceObservation>,
     pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -73,7 +74,7 @@ info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
     admission_trace_ref, entry_trigger_json, entry_order_json, exit_policy_json, risk_envelope_hash,
     expires_at, entry_trigger_state, trigger_confirming_since, trigger_last_observed_at,
     trigger_ready_at, exit_state, exit_reason, next_check_at, peak_mark_price,
-    last_signal_recheck_at, scale_out_state, created_at, updated_at,
+    last_signal_recheck_at, latest_reinference_json, scale_out_state, created_at, updated_at,
 });
 
 /// Insert payload for `quant_order_intent`.
@@ -228,7 +229,10 @@ pub fn evaluate_intent_approval_invalidation(
     if intent_config_version_id != active_config_version_id {
         return Some(ApprovalInvalidation::RuntimeConfigChanged);
     }
-    if *intent_risk_envelope_hash != rec.risk_envelope.envelope_hash {
+    let Some((_, _, _, _, risk_envelope)) = rec.trade_plan.frozen() else {
+        return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
+    };
+    if *intent_risk_envelope_hash != risk_envelope.envelope_hash {
         return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
     }
     None

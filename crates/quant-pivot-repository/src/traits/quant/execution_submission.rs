@@ -6,7 +6,10 @@ use quant_pivot_models::{
         ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     enums::execution::ExitReason,
-    types::{ExecutionOrderId, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price},
+    types::{
+        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
+        PendingScaleOut, Price,
+    },
 };
 
 /// Cross-table execution-submission transactions (Phase 05.4 — real money).
@@ -103,6 +106,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         next_check_at: DateTime<Utc>,
         peak_mark_price: Option<Price>,
         last_signal_recheck_at: Option<DateTime<Utc>>,
+        latest_reinference: Option<ExitReinferenceObservation>,
     ) -> Result<(), StorageError>;
 
     /// Apply the exit venue outcome in one txn (Phase 05.6): advance the exit

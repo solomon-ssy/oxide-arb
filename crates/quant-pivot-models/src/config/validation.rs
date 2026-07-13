@@ -24,6 +24,12 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: format!("must be Polygon chain id {POLYGON_CHAIN_ID}"),
         });
     }
+    if deploy.polymarket.order_post_timeout_ms == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.order_post_timeout_ms",
+            detail: "must be > 0 so an ambiguous order POST cannot hang indefinitely".into(),
+        });
+    }
 
     if deploy.polymarket.fees.exponent <= Decimal::ZERO {
         report.errors.push(ConfigValidationError::InvalidValue {
@@ -281,6 +287,13 @@ mod tests {
     fn wrong_chain_id_is_fatal() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.chain_id = 1;
+        assert!(validate_deploy_common(&deploy).has_errors());
+    }
+
+    #[test]
+    fn zero_order_post_timeout_is_fatal() {
+        let mut deploy = DeployConfig::default();
+        deploy.polymarket.order_post_timeout_ms = 0;
         assert!(validate_deploy_common(&deploy).has_errors());
     }
 

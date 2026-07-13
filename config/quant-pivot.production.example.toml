@@ -39,6 +39,10 @@ clob_base_url = "https://clob.polymarket.com"
 # Purpose: CLOB market-data WebSocket URL (books, ticks).
 # Impact: the entire real-time data pipeline. Default shown.
 clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+# Purpose: hard timeout for the single money-changing POST /order attempt.
+# Impact: timeout is Ambiguous and enters reconciliation; it is never retried.
+# Default: 15000.
+order_post_timeout_ms = 15000
 # Purpose: EVM chain id. Impact: order signing domain + on-chain reads.
 # Caution: must be Polygon (137) — any other value is fatal at startup.
 # Default: 137.

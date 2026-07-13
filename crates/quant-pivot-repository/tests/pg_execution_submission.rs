@@ -14,23 +14,25 @@ use quant_pivot_error::storage::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalReconcileSettlement, CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalReconcileSettlement,
+        CapitalSettlement, EntryTriggerTransition, ExitLedgerWrite, NewAccountSnapshot,
         NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
         NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
         NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
         NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
-        NewRuntimeConfigVersion, PositionExit, PositionFill, ReconciliationLedgerWrite,
-        SubmissionLedgerWrite,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, PositionExit, PositionFill,
+        ReconciliationLedgerWrite, SubmissionLedgerWrite, UpsertKillSwitchState,
     },
     entities::{
-        quant_execution_order, quant_feature_parity_state, quant_order_intent, quant_recommendation,
+        operation_log, quant_execution_order, quant_feature_parity_state, quant_order_intent,
+        quant_recommendation,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
-            OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
-            VenueOrderStatus,
+            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
+            OrderIntentKind, OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind,
+            ReconciliationResult, VenueOrderStatus,
         },
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         market::MarketStatus,
@@ -44,7 +46,7 @@ use quant_pivot_models::{
             RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
-        runtime_config::RuntimeConfigVersionSource,
+        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     types::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
@@ -57,25 +59,28 @@ use quant_pivot_models::{
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, Usd,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigActivationId,
+        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgEventRepository, PgExecutionSubmissionRepository,
-        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgOrderIntentRepository, PgPositionRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgRuntimeConfigVersionRepository,
+        PgKillSwitchStateRepository, PgMarketRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgOrderIntentRepository,
+        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgReconciliationRepository, PgRuntimeConfigVersionRepository,
     },
     traits::{
         CapitalAllocationRepository, EventRepository, ExecutionSubmissionRepository,
-        MarketRepository, MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
-        OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+        KillSwitchStateRepository, MarketRepository, MarketSelectionRepository,
+        ModelRegistryRepository, ModelRunRepository, OrderIntentRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+        RuntimeConfigVersionRepository,
     },
 };
 use quant_pivot_test_support::{
@@ -116,6 +121,245 @@ async fn claim_guards_against_double_submit() {
         second.is_err(),
         "a second concurrent claim must fail (intent no longer submittable)",
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    seed_approval_governance(&db, &ids.runtime_config_version).await;
+
+    let intent_id = OrderIntentId::from_v7();
+    PgOrderIntentRepository::new(db.clone())
+        .create_with_allocation(
+            new_pending_intent_with_id(&ids, intent_id.clone()),
+            new_allocation_for(&ids, intent_id.clone()),
+        )
+        .await
+        .expect("create pending intent");
+
+    let mut first_entry = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&intent_id)
+        .await
+        .expect("load pending intent")
+        .expect("pending intent")
+        .entry_order_json;
+    let mut second_entry = first_entry.clone();
+    first_entry.amount = OrderAmount::Shares(Shares::new(dec!(80)));
+    second_entry.amount = OrderAmount::Shares(Shares::new(dec!(70)));
+
+    let first_repo = PgOrderIntentRepository::new(db.clone());
+    let second_repo = PgOrderIntentRepository::new(db.clone());
+    let now = Utc::now();
+    let (first, second) = tokio::join!(
+        first_repo.approve(
+            &intent_id,
+            ApproveOrderIntent {
+                approved_by: uuid::Uuid::now_v7(),
+                approval_reason: "first concurrent approval".to_owned(),
+                approved_at: now,
+            },
+            Some(first_entry),
+            Some(Usd::new(dec!(48))),
+            now,
+        ),
+        second_repo.approve(
+            &intent_id,
+            ApproveOrderIntent {
+                approved_by: uuid::Uuid::now_v7(),
+                approval_reason: "second concurrent approval".to_owned(),
+                approved_at: now,
+            },
+            Some(second_entry),
+            Some(Usd::new(dec!(42))),
+            now,
+        ),
+    );
+
+    let (expected_amount, expected_allocation) = match (&first, &second) {
+        (Ok(ApproveOrderIntentOutcome::Approved(_)), Err(StorageError::StateConflict { .. })) => (
+            OrderAmount::Shares(Shares::new(dec!(80))),
+            Usd::new(dec!(48)),
+        ),
+        (Err(StorageError::StateConflict { .. }), Ok(ApproveOrderIntentOutcome::Approved(_))) => (
+            OrderAmount::Shares(Shares::new(dec!(70))),
+            Usd::new(dec!(42)),
+        ),
+        other => panic!("exactly one concurrent approval must win: {other:?}"),
+    };
+
+    let intent = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&intent_id)
+        .await
+        .expect("load approved intent")
+        .expect("approved intent");
+    assert_eq!(intent.status, OrderIntentStatus::Approved);
+    assert_eq!(intent.approval_status, ApprovalStatus::Approved);
+    assert_eq!(intent.entry_order_json.amount, expected_amount);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital lookup")
+        .expect("capital row");
+    assert_eq!(capital.state, CapitalAllocationState::Allocated);
+    assert_eq!(capital.allocated_usd, expected_allocation);
+    assert_eq!(capital.released_usd, Usd::ZERO);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn expiry_is_atomic_and_idempotent_across_trigger_capital_and_audit() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let intents = PgOrderIntentRepository::new(db.clone());
+    let now = Utc::now();
+
+    intents
+        .transition_entry_trigger(
+            &intent_id,
+            EntryTriggerTransition {
+                state: EntryTriggerState::Confirming,
+                confirming_since: Some(now),
+                last_observed_at: Some(now),
+                ready_at: None,
+            },
+        )
+        .await
+        .expect("seed confirming trigger state");
+
+    let expired = intents
+        .expire(&intent_id, intent_expiry_operation_log(&intent_id, "first"))
+        .await
+        .expect("expire intent");
+    assert_eq!(expired.status, OrderIntentStatus::Expired);
+    assert_eq!(expired.entry_trigger_state, EntryTriggerState::Expired);
+    assert_eq!(expired.trigger_confirming_since, None);
+    assert_eq!(expired.trigger_last_observed_at, None);
+    assert_eq!(expired.trigger_ready_at, None);
+
+    let repeated = intents
+        .expire(
+            &intent_id,
+            intent_expiry_operation_log(&intent_id, "repeated"),
+        )
+        .await
+        .expect("repeat expiry is idempotent");
+    assert_eq!(repeated.status, OrderIntentStatus::Expired);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital lookup")
+        .expect("capital row");
+    assert_eq!(capital.state, CapitalAllocationState::Released);
+    assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
+
+    let expiry_audits = operation_log::Entity::find()
+        .all(&db)
+        .await
+        .expect("operation log lookup")
+        .into_iter()
+        .filter(|row| row.action == "quant.intent.expire.test")
+        .collect::<Vec<_>>();
+    assert_eq!(expiry_audits.len(), 1, "expiry audit must be WORM once");
+    let intent_id_text = intent_id.to_string();
+    assert_eq!(
+        expiry_audits[0].resource_id.as_deref(),
+        Some(intent_id_text.as_str())
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn expiry_and_cancel_race_has_one_terminal_owner() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+
+    let cancel_ids = seed_report_fixture(&db).await;
+    let cancel_intent = seed_approved_intent(&db, &cancel_ids).await;
+    let expire_repo = PgOrderIntentRepository::new(db.clone());
+    let cancel_repo = PgOrderIntentRepository::new(db.clone());
+    let (expire_result, cancel_result) = tokio::join!(
+        expire_repo.expire(
+            &cancel_intent,
+            intent_expiry_operation_log(&cancel_intent, "cancel-race"),
+        ),
+        cancel_repo.cancel(&cancel_intent, "operator cancelled before claim".to_owned()),
+    );
+    assert_eq!(
+        usize::from(expire_result.is_ok()) + usize::from(cancel_result.is_ok()),
+        1,
+        "expiry and cancel must not both own the terminal transition"
+    );
+    let cancel_race_state = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&cancel_intent)
+        .await
+        .expect("cancel-race lookup")
+        .expect("cancel-race intent");
+    assert!(matches!(
+        cancel_race_state.status,
+        OrderIntentStatus::Expired | OrderIntentStatus::Cancelled
+    ));
+    let cancel_race_capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&cancel_intent)
+        .await
+        .expect("cancel-race capital lookup")
+        .expect("cancel-race capital");
+    assert_eq!(cancel_race_capital.state, CapitalAllocationState::Released);
+    assert_eq!(cancel_race_capital.released_usd, Usd::new(NOTIONAL));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn expiry_and_submission_claim_race_has_one_owner() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let claim_ids = seed_report_fixture(&db).await;
+    let claim_intent = seed_approved_intent(&db, &claim_ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let expire_repo = PgOrderIntentRepository::new(db.clone());
+    let (claim_result, expire_result) = tokio::join!(
+        submission.claim_for_submission(&claim_intent, Utc::now()),
+        expire_repo.expire(
+            &claim_intent,
+            intent_expiry_operation_log(&claim_intent, "claim-race"),
+        ),
+    );
+    assert_eq!(
+        usize::from(claim_result.is_ok()) + usize::from(expire_result.is_ok()),
+        1,
+        "expiry and the real submission claim must not both win"
+    );
+    let claim_race_state = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&claim_intent)
+        .await
+        .expect("claim-race lookup")
+        .expect("claim-race intent");
+    assert!(matches!(
+        claim_race_state.status,
+        OrderIntentStatus::AdmissionPending | OrderIntentStatus::Expired
+    ));
+    let claim_race_capital = PgCapitalAllocationRepository::new(db)
+        .find_by_intent(&claim_intent)
+        .await
+        .expect("claim-race capital lookup")
+        .expect("claim-race capital");
+    match claim_race_state.status {
+        OrderIntentStatus::AdmissionPending => {
+            assert_eq!(claim_race_capital.state, CapitalAllocationState::Allocated);
+            assert_eq!(claim_race_capital.released_usd, Usd::ZERO);
+        }
+        OrderIntentStatus::Expired => {
+            assert_eq!(claim_race_capital.state, CapitalAllocationState::Released);
+            assert_eq!(claim_race_capital.released_usd, Usd::new(NOTIONAL));
+        }
+        status => panic!("unexpected claim-race status {status:?}"),
+    }
 }
 
 #[tokio::test]
@@ -735,7 +979,7 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
             entry_reference_price: Price::new(dec!(0.6)),
             entry_composite_score: Probability::new(dec!(0.8)),
         },
-        risk_envelope_hash: content_hash('e'),
+        risk_envelope_hash: content_hash('f'),
         expires_at: Utc::now() + chrono::Duration::hours(1),
         entry_trigger_state: EntryTriggerState::NotRequired,
         trigger_confirming_since: None,
@@ -1334,7 +1578,7 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                     entry_reference_price: Price::new(dec!(0.6)),
                     entry_composite_score: Probability::new(dec!(0.8)),
                 },
-                risk_envelope_hash: content_hash('e'),
+                risk_envelope_hash: content_hash('f'),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
                 entry_trigger_state: EntryTriggerState::NotRequired,
                 trigger_confirming_since: None,
@@ -1431,6 +1675,37 @@ async fn seed_market_catalog(db: &sea_orm::DatabaseConnection, event_id: &str, m
         ))
         .await
         .expect("seed market");
+}
+
+async fn seed_approval_governance(
+    db: &sea_orm::DatabaseConnection,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+) {
+    PgRuntimeConfigVersionRepository::new(db.clone())
+        .activate_version(NewRuntimeConfigActivation {
+            runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
+            runtime_config_version_id: runtime_config_version_id.clone(),
+            activated_at: Utc::now(),
+            activated_by: "concurrent-approval-test".to_owned(),
+            reason: "activate intent runtime contract".to_owned(),
+            activation_kind: RuntimeConfigActivationKind::Initial,
+            previous_runtime_config_version_id: None,
+            rollback_target_version_id: None,
+            audit_event_id: None,
+        })
+        .await
+        .expect("activate runtime config");
+    PgKillSwitchStateRepository::new(db.clone())
+        .upsert(UpsertKillSwitchState {
+            id: 1,
+            state: KillSwitchState::Closed,
+            changed_by: "concurrent-approval-test".to_owned(),
+            reason: "allow governed entry".to_owned(),
+            requires_operator_ack: false,
+            changed_at: Utc::now(),
+        })
+        .await
+        .expect("seed closed kill switch");
 }
 
 async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigVersionId {
@@ -1556,6 +1831,7 @@ struct TxnIds {
 fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
     let report = report_row(ids, equity_snapshot_id.clone());
+    let decision_at = report.decision_at;
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
     NewReportTransaction {
         feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
@@ -1566,7 +1842,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         equity_snapshot: report_equity_snapshot(ids, &equity_snapshot_id),
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
-            decision_at: Utc::now(),
+            decision_at,
             runtime_config_version_id: ids.runtime_config_version.clone(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
         },
@@ -1665,10 +1941,7 @@ fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
         liquidity_score: Probability::new(dec!(0.8)),
         data_quality_score: Probability::new(dec!(0.9)),
         model_score_percentile: Probability::new(dec!(0.75)),
-        entry_plan: entry_plan(),
-        sizing_plan: sizing_plan(),
-        exit_plan: exit_plan(),
-        risk_envelope: risk_envelope(),
+        trade_plan: trade_plan(),
         factor_breakdown: factor_breakdown(),
         evidence_refs: evidence_refs(),
         execution_eligibility: execution_eligibility(),
@@ -1692,6 +1965,32 @@ fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
         http_method: "SYSTEM".to_owned(),
         http_path: "/test/quant/report".to_owned(),
         http_status: 201,
+        outcome: OperationOutcome::Success,
+        client_ip: None,
+        user_agent: None,
+        latency_ms: 0,
+        detail: serde_json::json!({ "test": true }),
+        before_hash: None,
+        after_hash: None,
+        governance_audit_event_id: None,
+        governance_audit_sequence: None,
+    }
+}
+
+fn intent_expiry_operation_log(intent_id: &OrderIntentId, request_suffix: &str) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: format!("intent-expiry-test:{intent_id}:{request_suffix}"),
+        actor_user_id: None,
+        actor_username: Some("system".to_owned()),
+        acting_role: Some("test".to_owned()),
+        category: OperationCategory::Other,
+        action: "quant.intent.expire.test".to_owned(),
+        resource_type: Some(ResourceType::OrderIntent),
+        resource_id: Some(intent_id.to_string()),
+        http_method: "SYSTEM".to_owned(),
+        http_path: "/test/quant/intents/expire".to_owned(),
+        http_status: 200,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,
@@ -1736,7 +2035,6 @@ fn new_account_snapshot() -> NewAccountSnapshot {
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trade_policy: None,
         trigger: EntryTrigger::Immediate,
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.6)),
@@ -1775,13 +2073,11 @@ fn sizing_plan() -> SizingPlan {
         drawdown_shrink_applied: None,
         raw_fraction_applied: None,
         position_cap_fraction_applied: None,
-        bet_structure_applied: None,
     }
 }
 
 fn exit_plan() -> ExitPlan {
     ExitPlan {
-        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.8))),
         take_profit_pct: None,
         stop_loss_price: Some(Price::new(dec!(0.4))),
@@ -1799,6 +2095,35 @@ fn exit_plan() -> ExitPlan {
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
+    }
+}
+
+fn trade_plan() -> RecommendationTradePlan {
+    let artifact_hash = content_hash('f');
+    let dimension = TradePolicyCohortDimension {
+        methodology_id: "fixture-v1".to_owned(),
+        methodology_hash: artifact_hash.clone(),
+        bucket_id: "fixture".to_owned(),
+    };
+    RecommendationTradePlan::Frozen {
+        policy: Box::new(TradePolicyCohortProvenance {
+            artifact_id: TradePolicyArtifactId::from_content_hash(&artifact_hash),
+            artifact_hash,
+            cohort_index: 0,
+            cohort_key: TradePolicyCohortKey {
+                category: MarketCategory::Politics,
+                horizon_secs: 86_400,
+                entry_price_min: Price::new(dec!(0.01)),
+                entry_price_max: Price::new(dec!(0.99)),
+                notional_tier: Usd::new(NOTIONAL),
+                liquidity: dimension.clone(),
+                volatility: dimension,
+            },
+        }),
+        entry: entry_plan(),
+        sizing: Box::new(sizing_plan()),
+        exit: Box::new(exit_plan()),
+        risk_envelope: Box::new(risk_envelope()),
     }
 }
 

@@ -1,5 +1,6 @@
 ---
 source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
+assertion_line: 12
 expression: non_empty_topn_report()
 ---
 {
@@ -100,81 +101,103 @@ expression: non_empty_topn_report()
       "liquidity_score": "0.8",
       "data_quality_score": "0.9",
       "model_score_percentile": "0.75",
-      "entry_plan": {
-        "trade_policy": null,
-        "trigger": {
-          "kind": "immediate"
+      "trade_plan": {
+        "kind": "frozen",
+        "policy": {
+          "artifact_id": "a8f80211-bf62-5e7b-acd9-54e24dfe89df",
+          "artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+          "cohort_index": 0,
+          "cohort_key": {
+            "category": "politics",
+            "horizon_secs": 86400,
+            "entry_price_min": "0.01",
+            "entry_price_max": "0.99",
+            "notional_tier": "250",
+            "liquidity": {
+              "methodology_id": "fixture-v1",
+              "methodology_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+              "bucket_id": "fixture"
+            },
+            "volatility": {
+              "methodology_id": "fixture-v1",
+              "methodology_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+              "bucket_id": "fixture"
+            }
+          }
         },
-        "order_policy": {
-          "kind": "passive",
-          "limit_price": "0.43",
-          "post_only": true
+        "entry": {
+          "trigger": {
+            "kind": "immediate"
+          },
+          "order_policy": {
+            "kind": "passive",
+            "limit_price": "0.43",
+            "post_only": true
+          },
+          "max_slippage_bps": "50",
+          "valid_from": "2023-11-14T22:13:20Z",
+          "valid_until": "2023-11-14T23:13:20Z",
+          "min_depth_usd": "100",
+          "max_book_age_ms": 2000,
+          "cancel_if_not_triggered": true,
+          "entry_reason": "limit entry at edge"
         },
-        "max_slippage_bps": "50",
-        "valid_from": "2023-11-14T22:13:20Z",
-        "valid_until": "2023-11-14T23:13:20Z",
-        "min_depth_usd": "100",
-        "max_book_age_ms": 2000,
-        "cancel_if_not_triggered": true,
-        "entry_reason": "limit entry at edge"
-      },
-      "sizing_plan": {
-        "suggested_usd": "300",
-        "suggested_shares": "500",
-        "max_usd": "500",
-        "min_usd": "10",
-        "portfolio_weight_pct": "0.05",
-        "market_exposure_after_usd": "300",
-        "event_exposure_after_usd": "300",
-        "category_exposure_after_usd": "300",
-        "binding_constraint": "kelly_cap",
-        "sizing_reason": "half-kelly capped",
-        "sizing_model": "kelly",
-        "edge_bps": "120",
-        "kelly_fraction_applied": "0.5",
-        "edge_uncertainty_shrink_applied": null,
-        "correlation_shrink_applied": null,
-        "f_star_applied": "1.0",
-        "kelly_fraction_config_applied": "0.5",
-        "confidence_shrink_applied": "1.0",
-        "drawdown_shrink_applied": "1.0",
-        "raw_fraction_applied": "0.5",
-        "position_cap_fraction_applied": "0.05",
-        "bet_structure_applied": "resolution"
-      },
-      "exit_plan": {
-        "trade_policy": null,
-        "take_profit_price": "0.7",
-        "take_profit_pct": "0.6",
-        "stop_loss_price": "0.3",
-        "stop_loss_pct": "0.3",
-        "time_exit_at": null,
-        "max_hold_secs": 86400,
-        "scale_out_targets": [],
-        "trailing_stop": null,
-        "thesis_invalidation": {
-          "min_score_retention": "0.6",
-          "min_expected_return_bps": "0",
-          "require_execution_eligibility": true
+        "sizing": {
+          "suggested_usd": "300",
+          "suggested_shares": "500",
+          "max_usd": "500",
+          "min_usd": "10",
+          "portfolio_weight_pct": "0.05",
+          "market_exposure_after_usd": "300",
+          "event_exposure_after_usd": "300",
+          "category_exposure_after_usd": "300",
+          "binding_constraint": "kelly_cap",
+          "sizing_reason": "half-kelly capped",
+          "sizing_model": "kelly",
+          "edge_bps": "120",
+          "kelly_fraction_applied": "0.5",
+          "edge_uncertainty_shrink_applied": null,
+          "correlation_shrink_applied": null,
+          "f_star_applied": "1.0",
+          "kelly_fraction_config_applied": "0.5",
+          "confidence_shrink_applied": "1.0",
+          "drawdown_shrink_applied": "1.0",
+          "raw_fraction_applied": "0.5",
+          "position_cap_fraction_applied": "0.05"
         },
-        "settlement_mode": "hold_to_resolution",
-        "redeem_policy": "manual",
-        "manual_review_at": null,
-        "exit_reason": "tp/sl"
-      },
-      "risk_envelope": {
-        "max_loss_usd": "120",
-        "max_slippage_bps": "50",
-        "max_position_usd": "500",
-        "max_market_exposure_usd": "500",
-        "max_event_exposure_usd": "750",
-        "max_category_exposure_usd": "1500",
-        "requires_approval": true,
-        "auto_execution_allowed": false,
-        "risk_notes": [
-          "thin book"
-        ],
-        "envelope_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+        "exit": {
+          "take_profit_price": "0.7",
+          "take_profit_pct": "0.6",
+          "stop_loss_price": "0.3",
+          "stop_loss_pct": "0.3",
+          "time_exit_at": null,
+          "max_hold_secs": 86400,
+          "scale_out_targets": [],
+          "trailing_stop": null,
+          "thesis_invalidation": {
+            "min_score_retention": "0.6",
+            "min_expected_return_bps": "0",
+            "require_execution_eligibility": true
+          },
+          "settlement_mode": "hold_to_resolution",
+          "redeem_policy": "manual",
+          "manual_review_at": null,
+          "exit_reason": "tp/sl"
+        },
+        "risk_envelope": {
+          "max_loss_usd": "120",
+          "max_slippage_bps": "50",
+          "max_position_usd": "500",
+          "max_market_exposure_usd": "500",
+          "max_event_exposure_usd": "750",
+          "max_category_exposure_usd": "1500",
+          "requires_approval": true,
+          "auto_execution_allowed": false,
+          "risk_notes": [
+            "thin book"
+          ],
+          "envelope_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+        }
       },
       "factor_breakdown": [
         {
@@ -249,81 +272,103 @@ expression: non_empty_topn_report()
       "liquidity_score": "0.8",
       "data_quality_score": "0.9",
       "model_score_percentile": "0.75",
-      "entry_plan": {
-        "trade_policy": null,
-        "trigger": {
-          "kind": "immediate"
+      "trade_plan": {
+        "kind": "frozen",
+        "policy": {
+          "artifact_id": "a8f80211-bf62-5e7b-acd9-54e24dfe89df",
+          "artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+          "cohort_index": 0,
+          "cohort_key": {
+            "category": "politics",
+            "horizon_secs": 86400,
+            "entry_price_min": "0.01",
+            "entry_price_max": "0.99",
+            "notional_tier": "250",
+            "liquidity": {
+              "methodology_id": "fixture-v1",
+              "methodology_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+              "bucket_id": "fixture"
+            },
+            "volatility": {
+              "methodology_id": "fixture-v1",
+              "methodology_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+              "bucket_id": "fixture"
+            }
+          }
         },
-        "order_policy": {
-          "kind": "passive",
-          "limit_price": "0.43",
-          "post_only": true
+        "entry": {
+          "trigger": {
+            "kind": "immediate"
+          },
+          "order_policy": {
+            "kind": "passive",
+            "limit_price": "0.43",
+            "post_only": true
+          },
+          "max_slippage_bps": "50",
+          "valid_from": "2023-11-14T22:13:20Z",
+          "valid_until": "2023-11-14T23:13:20Z",
+          "min_depth_usd": "100",
+          "max_book_age_ms": 2000,
+          "cancel_if_not_triggered": true,
+          "entry_reason": "limit entry at edge"
         },
-        "max_slippage_bps": "50",
-        "valid_from": "2023-11-14T22:13:20Z",
-        "valid_until": "2023-11-14T23:13:20Z",
-        "min_depth_usd": "100",
-        "max_book_age_ms": 2000,
-        "cancel_if_not_triggered": true,
-        "entry_reason": "limit entry at edge"
-      },
-      "sizing_plan": {
-        "suggested_usd": "200",
-        "suggested_shares": "500",
-        "max_usd": "500",
-        "min_usd": "10",
-        "portfolio_weight_pct": "0.05",
-        "market_exposure_after_usd": "200",
-        "event_exposure_after_usd": "200",
-        "category_exposure_after_usd": "200",
-        "binding_constraint": "kelly_cap",
-        "sizing_reason": "half-kelly capped",
-        "sizing_model": "kelly",
-        "edge_bps": "120",
-        "kelly_fraction_applied": "0.5",
-        "edge_uncertainty_shrink_applied": null,
-        "correlation_shrink_applied": null,
-        "f_star_applied": "1.0",
-        "kelly_fraction_config_applied": "0.5",
-        "confidence_shrink_applied": "1.0",
-        "drawdown_shrink_applied": "1.0",
-        "raw_fraction_applied": "0.5",
-        "position_cap_fraction_applied": "0.05",
-        "bet_structure_applied": "resolution"
-      },
-      "exit_plan": {
-        "trade_policy": null,
-        "take_profit_price": "0.7",
-        "take_profit_pct": "0.6",
-        "stop_loss_price": "0.3",
-        "stop_loss_pct": "0.3",
-        "time_exit_at": null,
-        "max_hold_secs": 86400,
-        "scale_out_targets": [],
-        "trailing_stop": null,
-        "thesis_invalidation": {
-          "min_score_retention": "0.6",
-          "min_expected_return_bps": "0",
-          "require_execution_eligibility": true
+        "sizing": {
+          "suggested_usd": "200",
+          "suggested_shares": "500",
+          "max_usd": "500",
+          "min_usd": "10",
+          "portfolio_weight_pct": "0.05",
+          "market_exposure_after_usd": "200",
+          "event_exposure_after_usd": "200",
+          "category_exposure_after_usd": "200",
+          "binding_constraint": "kelly_cap",
+          "sizing_reason": "half-kelly capped",
+          "sizing_model": "kelly",
+          "edge_bps": "120",
+          "kelly_fraction_applied": "0.5",
+          "edge_uncertainty_shrink_applied": null,
+          "correlation_shrink_applied": null,
+          "f_star_applied": "1.0",
+          "kelly_fraction_config_applied": "0.5",
+          "confidence_shrink_applied": "1.0",
+          "drawdown_shrink_applied": "1.0",
+          "raw_fraction_applied": "0.5",
+          "position_cap_fraction_applied": "0.05"
         },
-        "settlement_mode": "hold_to_resolution",
-        "redeem_policy": "manual",
-        "manual_review_at": null,
-        "exit_reason": "tp/sl"
-      },
-      "risk_envelope": {
-        "max_loss_usd": "120",
-        "max_slippage_bps": "50",
-        "max_position_usd": "500",
-        "max_market_exposure_usd": "500",
-        "max_event_exposure_usd": "750",
-        "max_category_exposure_usd": "1500",
-        "requires_approval": true,
-        "auto_execution_allowed": false,
-        "risk_notes": [
-          "thin book"
-        ],
-        "envelope_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+        "exit": {
+          "take_profit_price": "0.7",
+          "take_profit_pct": "0.6",
+          "stop_loss_price": "0.3",
+          "stop_loss_pct": "0.3",
+          "time_exit_at": null,
+          "max_hold_secs": 86400,
+          "scale_out_targets": [],
+          "trailing_stop": null,
+          "thesis_invalidation": {
+            "min_score_retention": "0.6",
+            "min_expected_return_bps": "0",
+            "require_execution_eligibility": true
+          },
+          "settlement_mode": "hold_to_resolution",
+          "redeem_policy": "manual",
+          "manual_review_at": null,
+          "exit_reason": "tp/sl"
+        },
+        "risk_envelope": {
+          "max_loss_usd": "120",
+          "max_slippage_bps": "50",
+          "max_position_usd": "500",
+          "max_market_exposure_usd": "500",
+          "max_event_exposure_usd": "750",
+          "max_category_exposure_usd": "1500",
+          "requires_approval": true,
+          "auto_execution_allowed": false,
+          "risk_notes": [
+            "thin book"
+          ],
+          "envelope_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+        }
       },
       "factor_breakdown": [
         {

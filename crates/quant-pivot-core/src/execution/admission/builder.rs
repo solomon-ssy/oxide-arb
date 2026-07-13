@@ -26,6 +26,7 @@ use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ExecutionOrderRepository, MarketRepository,
     ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
     RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+    TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -51,6 +52,7 @@ pub struct AdmissionInputBuilderDeps {
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
+    pub trade_policies: Arc<dyn TradePolicyRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Re-verifies a bound `model_score` calibrator's liveness (hash + `active`)
     /// at submit time — the enum tag alone (`ReturnModelSpec::Calibrated`) only
@@ -118,6 +120,19 @@ impl AdmissionInputBuilder {
         let fetched = self
             .fetch_parallel_sources(&recommendation, intent, budget_total_usd, now)
             .await?;
+        let model_version =
+            fetched
+                .model_version
+                .as_ref()
+                .ok_or_else(|| ExecutionError::IntentDenied {
+                    reason: "intent model version no longer exists".to_owned(),
+                })?;
+        crate::execution::require_frozen_trade_policy(
+            deps.trade_policies.as_ref(),
+            model_version,
+            &recommendation,
+        )
+        .await?;
         let model_state = self.resolve_model_state(fetched.model_version).await?;
         let exposure = AdmissionExposureState {
             has_blocking_inflight: fetched.has_blocking_inflight,

@@ -62,7 +62,9 @@ impl AdmissionCheck for RecommendationFreshnessCheck {
                 .with_threshold(rec.valid_until.to_rfc3339())
                 .with_actual(input.now.to_rfc3339());
         }
-        let entry = &rec.entry_plan;
+        let Some((_, entry, _, _, _)) = rec.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
         if input.now < entry.valid_from {
             return AdmissionCheckTrace::defer(self.id(), "entry window not open yet")
                 .with_threshold(entry.valid_from.to_rfc3339())
@@ -211,7 +213,10 @@ impl AdmissionCheck for BookFreshnessCheck {
             )
             .with_actual(book.timestamp_ms.to_string());
         };
-        let max = input.recommendation.entry_plan.max_book_age_ms;
+        let Some((_, entry, _, _, _)) = input.recommendation.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
+        let max = entry.max_book_age_ms;
         if age_ms > max {
             return AdmissionCheckTrace::defer(self.id(), "book snapshot stale")
                 .with_threshold(max.to_string())
@@ -272,8 +277,7 @@ impl AdmissionCheck for EntryTriggerCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        let entry = &input.recommendation.entry_plan;
-        match &entry.trigger {
+        match &input.intent.entry_trigger_json {
             EntryTrigger::Immediate => {
                 AdmissionCheckTrace::pass(self.id(), "immediate entry trigger")
             }
@@ -319,7 +323,10 @@ impl AdmissionCheck for RiskEnvelopeHashCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        match input.recommendation.risk_envelope.canonical_hash() {
+        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
+        match risk_envelope.canonical_hash() {
             Ok(recomputed) => {
                 if recomputed == input.intent.risk_envelope_hash {
                     AdmissionCheckTrace::pass(self.id(), "risk envelope hash matches intent anchor")
@@ -463,7 +470,10 @@ impl AdmissionCheck for MarketExposureCheck {
             .get(&input.recommendation.market_id)
             .copied()
             .unwrap_or(Usd::ZERO);
-        let cap = input.recommendation.risk_envelope.max_market_exposure_usd;
+        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
+        let cap = risk_envelope.max_market_exposure_usd;
         exposure_trace(self.id(), "market", current, input.order_notional(), cap)
     }
 }
@@ -485,7 +495,10 @@ impl AdmissionCheck for EventExposureCheck {
             .get(&input.recommendation.event_id)
             .copied()
             .unwrap_or(Usd::ZERO);
-        let cap = input.recommendation.risk_envelope.max_event_exposure_usd;
+        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
+        let cap = risk_envelope.max_event_exposure_usd;
         exposure_trace(self.id(), "event", current, input.order_notional(), cap)
     }
 }
@@ -507,7 +520,10 @@ impl AdmissionCheck for CategoryExposureCheck {
             .get(&input.recommendation.identity.category)
             .copied()
             .unwrap_or(Usd::ZERO);
-        let cap = input.recommendation.risk_envelope.max_category_exposure_usd;
+        let Some((_, _, _, _, risk_envelope)) = input.recommendation.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
+        let cap = risk_envelope.max_category_exposure_usd;
         exposure_trace(self.id(), "category", current, input.order_notional(), cap)
     }
 }
@@ -554,7 +570,10 @@ impl AdmissionCheck for LiquidityDepthCheck {
                 .with_actual(fillable.to_string());
         }
         let visible = book.ask_notional_up_to(spec.limit_price);
-        let min_depth = input.recommendation.entry_plan.min_depth_usd;
+        let Some((_, entry, _, _, _)) = input.recommendation.trade_plan.frozen() else {
+            return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
+        };
+        let min_depth = entry.min_depth_usd;
         if visible < min_depth {
             return AdmissionCheckTrace::defer(self.id(), "visible depth below minimum")
                 .with_threshold(min_depth.to_string())

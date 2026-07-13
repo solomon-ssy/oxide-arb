@@ -23,8 +23,8 @@ use quant_pivot_models::{
     types::{
         BookSnapshotRef, Bps, EligibilitySummary, EntryOrderPolicy, EntryPlan, EntryTrigger,
         EquitySnapshotId, EvidenceRefs, ExecutionEligibility, ExitPlan, Price, RecommendationId,
-        RecommendationReportId, ReportSummary, ScaleOutTarget, ThesisInvalidationPolicy,
-        TrailingStopPolicy, Usd,
+        RecommendationReportId, RecommendationTradePlan, ReportSummary, ScaleOutTarget,
+        ThesisInvalidationPolicy, TrailingStopPolicy, Usd,
     },
 };
 
@@ -141,7 +141,6 @@ fn evidence_refs() -> EvidenceRefs {
 
 fn limit_entry_plan() -> EntryPlan {
     EntryPlan {
-        trade_policy: None,
         trigger: EntryTrigger::PriceCondition {
             comparison: PriceComparison::AtOrBelow,
             threshold: Price::new(dec!(0.42)),
@@ -164,7 +163,6 @@ fn limit_entry_plan() -> EntryPlan {
 
 fn immediate_entry_plan() -> EntryPlan {
     EntryPlan {
-        trade_policy: None,
         trigger: EntryTrigger::Immediate,
         order_policy: EntryOrderPolicy::Aggressive {
             worst_price: Price::new(dec!(0.43)),
@@ -182,7 +180,6 @@ fn immediate_entry_plan() -> EntryPlan {
 
 fn partial_exit_plan() -> ExitPlan {
     ExitPlan {
-        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.7))),
         take_profit_pct: Some(dec!(0.6)),
         stop_loss_price: Some(Price::new(dec!(0.3))),
@@ -300,7 +297,9 @@ pub fn recommendation_limit_entry() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    rec.entry_plan = limit_entry_plan();
+    if let RecommendationTradePlan::Frozen { entry, .. } = &mut rec.trade_plan {
+        *entry = limit_entry_plan();
+    }
     view(rec)
 }
 
@@ -315,7 +314,9 @@ pub fn recommendation_immediate_entry() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    rec.entry_plan = immediate_entry_plan();
+    if let RecommendationTradePlan::Frozen { entry, .. } = &mut rec.trade_plan {
+        *entry = immediate_entry_plan();
+    }
     view(rec)
 }
 
@@ -330,7 +331,9 @@ pub fn recommendation_partial_exits() -> QuantRecommendationView {
         OutcomeSide::Yes,
         Usd::new(dec!(250)),
     );
-    rec.exit_plan = partial_exit_plan();
+    if let RecommendationTradePlan::Frozen { exit, .. } = &mut rec.trade_plan {
+        **exit = partial_exit_plan();
+    }
     view(rec)
 }
 

@@ -205,7 +205,8 @@ fn push_demo_ck_rows(record: &DemoSeedRecord, now: i64, batches: &mut DemoCkFact
         side: ChOutcomeSide::Yes,
         score: ChProbability::from(dec!(0.72)),
         risk_adjusted_score: ChProbability::from(dec!(0.68)),
-        suggested_usd: ChUsd::from(Usd::new(EXECUTION_NOTIONAL)),
+        trade_plan_available: true,
+        suggested_usd: Some(ChUsd::from(Usd::new(EXECUTION_NOTIONAL))),
         valid_until: now + 86_400,
         status: ChRecommendationStatus::IntentCreated,
     });
@@ -432,7 +433,7 @@ async fn configure_waiting_price_trigger(db: &DatabaseConnection, intent_id: &Or
     active.entry_trigger_json = ActiveValue::Set(EntryTrigger::PriceCondition {
         comparison: PriceComparison::AtOrAbove,
         threshold: Price::new(dec!(0.61)),
-        confirmation_secs: 30,
+        confirmation_secs: 2,
         max_observation_gap_ms: 2_000,
     });
     active.entry_trigger_state = ActiveValue::Set(EntryTriggerState::Waiting);
@@ -1315,6 +1316,7 @@ async fn seed_diff_report(
         model_run: infra.model_run_id.clone(),
         market_selection: market_selection_id,
         runtime_config_version: infra.runtime_config_version_id.clone(),
+        trade_policy: infra.trade_policy.clone(),
         market: primary.0.to_owned(),
         event: primary.1.to_owned(),
         token: primary.2.to_owned(),
@@ -1376,6 +1378,7 @@ async fn seed_custom_report(
         model_run: infra.model_run_id.clone(),
         market_selection: market_selection_id,
         runtime_config_version: infra.runtime_config_version_id.clone(),
+        trade_policy: infra.trade_policy.clone(),
         market: format!("{DEMO_TAG}-mkt-{slug}"),
         event: format!("{DEMO_TAG}-evt-{slug}"),
         token: format!("{DEMO_TAG}-token-{slug}"),

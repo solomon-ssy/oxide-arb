@@ -137,7 +137,9 @@ fn notification_body(report: &RecommendationReportInfo, n: &ReportNotificationPa
             market = rec.market_id,
             side = rec.outcome_side.as_str(),
             score = rec.score,
-            usd = rec.suggested_usd,
+            usd = rec
+                .suggested_usd
+                .map_or_else(|| "unavailable".to_owned(), |value| value.to_string()),
         );
     }
     for warning in &n.warnings {
@@ -178,13 +180,13 @@ mod tests {
                     market_id: "0xA".to_owned(),
                     outcome_side: OutcomeSide::Yes,
                     score: Probability::new(dec!(0.71)),
-                    suggested_usd: Usd::new(dec!(300)),
+                    suggested_usd: Some(Usd::new(dec!(300))),
                 },
                 NotificationRecommendation {
                     market_id: "0xB".to_owned(),
                     outcome_side: OutcomeSide::No,
                     score: Probability::new(dec!(0.66)),
-                    suggested_usd: Usd::new(dec!(200)),
+                    suggested_usd: Some(Usd::new(dec!(200))),
                 },
             ],
             warnings: vec!["thin book".to_owned()],

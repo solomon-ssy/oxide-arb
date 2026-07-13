@@ -5,8 +5,9 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        FitTradePolicyRequest, Paginated, TradePolicyArtifactInfo, TradePolicyFitPreflightRequest,
-        TradePolicyFitPreflightView, TradePolicyListQuery,
+        FitTradePolicyRequest, Paginated, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
+        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+        TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
     },
     enums::quant::TradePolicyStatus,
     types::TradePolicyArtifactId,
@@ -30,6 +31,12 @@ pub trait TradePolicyPort: Send + Sync {
         &self,
         query: TradePolicyListQuery,
     ) -> QuantResult<Paginated<TradePolicyArtifactInfo>>;
+
+    async fn page_audits(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        query: TradePolicyAuditListQuery,
+    ) -> QuantResult<Paginated<TradePolicyGovernanceAuditInfo>>;
 
     async fn transition(
         &self,

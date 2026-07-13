@@ -42,7 +42,10 @@ use quant_pivot_models::{
         quant::ExitSettlementMode,
     },
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
-    types::{ExitPolicySpec, PendingScaleOut, Price, ScaleOutState, Shares, TokenId},
+    types::{
+        ExitPolicySpec, ExitReinferenceObservation, PendingScaleOut, Price, ScaleOutState, Shares,
+        TokenId,
+    },
 };
 use rust_decimal::Decimal;
 
@@ -127,6 +130,23 @@ pub enum ExitSignalVerdict {
     Indeterminate { detail: String },
 }
 
+/// Signal verdict plus the latest governed reinference observation, if one ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitSignalEvaluation {
+    pub verdict: ExitSignalVerdict,
+    pub reinference: Option<ExitReinferenceObservation>,
+}
+
+impl ExitSignalEvaluation {
+    #[must_use]
+    pub const fn verdict(verdict: ExitSignalVerdict) -> Self {
+        Self {
+            verdict,
+            reinference: None,
+        }
+    }
+}
+
 /// Context handed to the model-driven exit-signal evaluator.
 #[derive(Clone, Copy)]
 pub struct ExitSignalContext<'a> {
@@ -150,7 +170,7 @@ pub trait ExitSignalEvaluator: Send + Sync {
     /// Evaluate the model-driven exit signal for one lot. Must be side-effect
     /// free and fail-safe (return [`ExitSignalVerdict::Indeterminate`] rather
     /// than erroring when it cannot evaluate).
-    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict;
+    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation;
 }
 
 /// Composes thesis-invalidation re-inference (Phase 06.0) with opportunistic
@@ -185,15 +205,17 @@ impl CompositeExitSignalEvaluator {
 
 #[async_trait]
 impl ExitSignalEvaluator for CompositeExitSignalEvaluator {
-    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalVerdict {
+    async fn evaluate(&self, ctx: ExitSignalContext<'_>) -> ExitSignalEvaluation {
         // Only when the thesis still holds does opportunistic scoring get a say;
         // `ThesisInvalidated` (forced exit) and `Indeterminate` (thesis validity
         // unknown / re-inference disabled) short-circuit unchanged — as does a
         // stray `OpportunisticSell`, which re-inference never emits.
-        match self.reinference.evaluate(ctx).await {
-            ExitSignalVerdict::Holds => self.opportunistic.evaluate(ctx).await,
-            other => other,
+        let mut reinference = self.reinference.evaluate(ctx).await;
+        if reinference.verdict == ExitSignalVerdict::Holds {
+            let opportunistic = self.opportunistic.evaluate(ctx).await;
+            reinference.verdict = opportunistic.verdict;
         }
+        reinference
     }
 }
 
@@ -265,27 +287,6 @@ pub struct ExitMonitorInput {
 /// Basis-point denominator for percentage conversions.
 fn bps_fraction(bps: Decimal) -> Decimal {
     bps / Decimal::from(10_000)
-}
-
-/// The effective stop-loss floor: the tightest (highest) of the configured
-/// absolute stop, the percentage stop (relative to the lot cost basis), and the
-/// trailing stop (relative to the peak mark). `None` when no stop is configured.
-fn effective_stop(policy: &ExitPolicySpec, avg_price: Price, peak: Option<Price>) -> Option<Price> {
-    let mut stop = policy.stop_loss_price;
-    if let Some(pct) = policy.stop_loss_pct {
-        let from_pct = avg_price * (Decimal::ONE - pct);
-        stop = Some(stop.map_or(from_pct, |s| s.max(from_pct)));
-    }
-    if let (Some(trailing), Some(peak)) = (&policy.trailing_stop, peak) {
-        let armed = trailing
-            .activation_price
-            .is_none_or(|activation| peak >= activation);
-        if armed {
-            let trail = peak * (Decimal::ONE - bps_fraction(trailing.trail_bps.inner()));
-            stop = Some(stop.map_or(trail, |s| s.max(trail)));
-        }
-    }
-    stop
 }
 
 /// The take-profit target: the earliest (lowest) of the configured absolute and
@@ -400,7 +401,7 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
     // 4. Stop-loss (with trailing folded into the effective stop).
     if let (Some(mark), Some(stop)) = (
         input.mark_price,
-        effective_stop(policy, lot.avg_price, input.peak_mark_price),
+        policy.effective_stop(lot.avg_price, input.peak_mark_price),
     ) && mark <= stop
     {
         return submit_or_manual(input, ExitReason::StopLoss, shares, Some(mark));
@@ -552,32 +553,17 @@ fn submit_or_manual_with_target(
 /// The next due scale-out target's share quantity and stable id, if any target is
 /// currently active, not yet settled, and the mark satisfies its trigger.
 fn next_scale_out_shares(input: &ExitMonitorInput) -> Option<(Shares, PendingScaleOut)> {
-    let mark = input.mark_price?;
-    for target in &input.exit_policy.scale_out_targets {
-        if input.scale_out_state.contains(&target.target_id) {
-            continue;
-        }
-        let active = target.valid_after.is_none_or(|after| input.now >= after)
-            && target.valid_until.is_none_or(|until| input.now <= until);
-        if !active {
-            continue;
-        }
-        let min_ok = target.min_price.is_none_or(|min| mark >= min);
-        if min_ok && mark >= target.trigger_price {
-            let shares = input
-                .scale_out_state
-                .delta_to_target(target.target_cumulative_exit_pct)
-                .min(input.lot.shares);
-            if shares.is_positive() {
-                return Some((
-                    shares,
-                    PendingScaleOut {
-                        target_id: Some(target.target_id.clone()),
-                        target_cumulative_exit_pct: target.target_cumulative_exit_pct,
-                    },
-                ));
-            }
-        }
-    }
-    None
+    let projection = input.exit_policy.next_scale_out(
+        &input.scale_out_state,
+        input.lot.shares,
+        input.mark_price,
+        input.now,
+    )?;
+    Some((
+        projection.delta_shares,
+        PendingScaleOut {
+            target_id: Some(projection.target_id),
+            target_cumulative_exit_pct: projection.target_cumulative_exit_pct,
+        },
+    ))
 }

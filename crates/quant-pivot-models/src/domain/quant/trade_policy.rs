@@ -61,3 +61,33 @@ pub struct NewTradePolicyGovernanceAudit {
     pub actor_id: Uuid,
     pub reason: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::quant_trade_policy_governance_audit::Entity")]
+pub struct TradePolicyGovernanceAuditInfo {
+    pub audit_id: TradePolicyGovernanceAuditId,
+    pub artifact_id: TradePolicyArtifactId,
+    pub action: TradePolicyGovernanceAction,
+    pub from_status: TradePolicyStatus,
+    pub to_status: TradePolicyStatus,
+    pub content_hash: ContentHash,
+    pub actor_id: Uuid,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    TradePolicyGovernanceAuditInfo,
+    crate::entities::quant_trade_policy_governance_audit::Model,
+    {
+        audit_id,
+        artifact_id,
+        action,
+        from_status,
+        to_status,
+        content_hash,
+        actor_id,
+        reason,
+        created_at,
+    }
+);

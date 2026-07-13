@@ -6,8 +6,9 @@ use crate::{
         quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryOrderSpec, EntryTrigger, ExitPolicySpec, ModelVersionId, OrderIntentId,
-        Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState,
+        ContentHash, EntryOrderSpec, EntryTrigger, ExitPolicySpec, ExitReinferenceObservation,
+        ModelVersionId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
+        ScaleOutState,
     },
 };
 use chrono::{DateTime, Utc};
@@ -54,6 +55,8 @@ pub struct Model {
     pub next_check_at: Option<DateTime<Utc>>,
     pub peak_mark_price: Option<Price>,
     pub last_signal_recheck_at: Option<DateTime<Utc>>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub latest_reinference_json: Option<ExitReinferenceObservation>,
     #[sea_orm(column_type = "JsonBinary")]
     pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,

@@ -41,7 +41,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository,
+    RecommendationRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -56,7 +56,6 @@ use crate::{
     },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
-    runtime_config::RuntimeConfigStore,
     service::feature_integrity::FeatureParityGatePort,
 };
 
@@ -97,7 +96,6 @@ pub struct OrderIntentServiceDeps {
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
-    pub config: Arc<RuntimeConfigStore>,
     pub metrics: Arc<MetricsHub>,
     /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
@@ -106,6 +104,8 @@ pub struct OrderIntentServiceDeps {
     /// Model registry (calibration-state recheck at `SemiAuto`/`AutoExecution`
     /// intent-creation time — Phase 11.3 closed-loop hardening).
     pub model_registry: Arc<dyn ModelRegistryRepository>,
+    /// Governance source used to re-verify the frozen policy at intent creation.
+    pub trade_policies: Arc<dyn TradePolicyRepository>,
     /// Content-addressed model artifact store (calibration recheck).
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Deep calibrator resolution (calibration recheck), the same shared
@@ -125,11 +125,11 @@ pub struct CoreOrderIntentService {
     recommendations: Arc<dyn RecommendationRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
     intents: Arc<dyn OrderIntentRepository>,
-    config: Arc<RuntimeConfigStore>,
     metrics: Arc<MetricsHub>,
     lifecycle: Arc<IntentLifecyclePublisher>,
     dispatch_wake: DispatchWake,
     model_registry: Arc<dyn ModelRegistryRepository>,
+    trade_policies: Arc<dyn TradePolicyRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     calibration_loader: Arc<dyn CalibrationArtifactLoader>,
     feature_parity_gate: Arc<dyn FeatureParityGatePort>,
@@ -146,11 +146,11 @@ impl CoreOrderIntentService {
             recommendations: deps.recommendations,
             reports: deps.reports,
             intents: deps.intents,
-            config: deps.config,
             metrics: deps.metrics,
             lifecycle: deps.intent_lifecycle,
             dispatch_wake: deps.dispatch_wake,
             model_registry: deps.model_registry,
+            trade_policies: deps.trade_policies,
             artifact_store: deps.artifact_store,
             calibration_loader: deps.calibration_loader,
             feature_parity_gate: deps.feature_parity_gate,
@@ -179,6 +179,25 @@ impl CoreOrderIntentService {
         .await
     }
 
+    async fn ensure_trade_policy_still_executable(
+        &self,
+        recommendation: &RecommendationInfo,
+    ) -> QuantResult<()> {
+        let version = self
+            .model_registry
+            .find_model_version_by_id(&recommendation.evidence_refs.model_version_id)
+            .await?
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "recommendation model version no longer exists".to_owned(),
+            })?;
+        crate::execution::require_frozen_trade_policy(
+            self.trade_policies.as_ref(),
+            &version,
+            recommendation,
+        )
+        .await
+    }
+
     /// Create an intent from a recommendation at `now` (mode-gated, atomic with
     /// the capital reservation).
     pub async fn create_at(
@@ -198,15 +217,16 @@ impl CoreOrderIntentService {
             mode,
             QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution
         ) {
+            self.ensure_trade_policy_still_executable(&rec).await?;
             self.ensure_return_model_still_calibrated(&rec.evidence_refs.model_version_id)
                 .await?;
         }
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let entry = project_entry_order_spec(&rec, now)?;
-        let exit = project_exit_policy_spec(&rec, entry.limit_price);
+        let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
         let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
         let (new_intent, allocation) =
-            compose_create_rows(&rec, &report, mode, resolved, entry, exit);
+            compose_create_rows(&rec, &report, mode, resolved, entry, exit)?;
 
         let intent = self
             .intents
@@ -300,14 +320,8 @@ impl CoreOrderIntentService {
             .into());
         }
 
-        let allow_downscale = self
-            .config
-            .current()
-            .execution
-            .semi_auto
-            .allow_size_reduction;
         let (entry_override, allocated_override) =
-            resolve_downscale(&command, &intent.entry_order_json, allow_downscale)?;
+            resolve_downscale(&command, &intent.entry_order_json)?;
         let approval = ApproveOrderIntent {
             approved_by: command.operator_id,
             approval_reason: approval_reason(&command),
@@ -570,9 +584,15 @@ fn compose_create_rows(
     resolved: ResolvedPolicy,
     entry: EntryOrderSpec,
     exit: ExitPolicySpec,
-) -> (NewOrderIntent, NewCapitalAllocation) {
+) -> Result<(NewOrderIntent, NewCapitalAllocation), ExecutionError> {
     let intent_id = OrderIntentId::from_v7();
-    let planned_usd = rec.sizing_plan.suggested_usd;
+    let (_, entry_plan, _, _, risk_envelope) =
+        rec.trade_plan
+            .frozen()
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "recommendation trade plan is unavailable".to_owned(),
+            })?;
+    let planned_usd = entry.notional();
     let intent = NewOrderIntent {
         order_intent_id: intent_id.clone(),
         recommendation_id: rec.recommendation_id.clone(),
@@ -589,13 +609,13 @@ fn compose_create_rows(
         policy_hash: resolved.policy_hash,
         status_reason: None,
         admission_trace_ref: None,
-        entry_trigger_json: rec.entry_plan.trigger.clone(),
+        entry_trigger_json: entry_plan.trigger.clone(),
         entry_order_json: entry,
         exit_policy_json: exit,
-        risk_envelope_hash: rec.risk_envelope.envelope_hash.clone(),
+        risk_envelope_hash: risk_envelope.envelope_hash.clone(),
         expires_at: resolved.expires_at,
         entry_trigger_state: if matches!(resolved.status, OrderIntentStatus::ApprovedByPolicy) {
-            armed_trigger_state(&rec.entry_plan.trigger)
+            armed_trigger_state(&entry_plan.trigger)
         } else {
             EntryTriggerState::NotRequired
         },
@@ -615,7 +635,7 @@ fn compose_create_rows(
         released_usd: Usd::ZERO,
         reason: "intent created".to_owned(),
     };
-    (intent, allocation)
+    Ok((intent, allocation))
 }
 
 const fn armed_trigger_state(trigger: &EntryTrigger) -> EntryTriggerState {
@@ -706,7 +726,12 @@ fn project_entry_order_spec(
 ) -> Result<EntryOrderSpec, ExecutionError> {
     const GTD_MIN_EFFECTIVE_LIFETIME_SECS: i64 = 120;
     const GTD_SECURITY_BUFFER_SECS: i64 = 60;
-    let (limit_price, order_type, amount, post_only) = match rec.entry_plan.order_policy {
+    let Some((_, entry_plan, sizing, _, _)) = rec.trade_plan.frozen() else {
+        return Err(ExecutionError::IntentDenied {
+            reason: "recommendation trade plan is unavailable".to_owned(),
+        });
+    };
+    let (limit_price, order_type, amount, post_only) = match entry_plan.order_policy {
         EntryOrderPolicy::Aggressive {
             worst_price,
             fill_requirement,
@@ -718,7 +743,7 @@ fn project_entry_order_spec(
             (
                 worst_price,
                 order_type,
-                OrderAmount::Usd(rec.sizing_plan.suggested_usd),
+                OrderAmount::Usd(sizing.suggested_usd),
                 false,
             )
         }
@@ -731,20 +756,18 @@ fn project_entry_order_spec(
                     reason: "passive entry policy must be post-only".to_owned(),
                 });
             }
-            if rec.entry_plan.valid_until - now < Duration::seconds(GTD_MIN_EFFECTIVE_LIFETIME_SECS)
-            {
+            if entry_plan.valid_until - now < Duration::seconds(GTD_MIN_EFFECTIVE_LIFETIME_SECS) {
                 return Err(ExecutionError::IntentDenied {
                     reason: "passive entry has less than 120 seconds of effective GTD lifetime"
                         .to_owned(),
                 });
             }
-            let wire_expiration = rec
-                .entry_plan
+            let wire_expiration = entry_plan
                 .valid_until
                 .checked_add_signed(Duration::seconds(GTD_SECURITY_BUFFER_SECS))
                 .ok_or_else(|| ExecutionError::TimeConversion {
                     field: "entry_plan.valid_until",
-                    value: rec.entry_plan.valid_until.to_string(),
+                    value: entry_plan.valid_until.to_string(),
                     detail: "GTD security buffer overflows timestamp".to_owned(),
                 })?;
             let expiration = u64::try_from(wire_expiration.timestamp()).map_err(|error| {
@@ -757,7 +780,7 @@ fn project_entry_order_spec(
             (
                 limit_price,
                 OrderType::Gtd { expiration },
-                OrderAmount::Shares(rec.sizing_plan.suggested_shares),
+                OrderAmount::Shares(sizing.suggested_shares),
                 true,
             )
         }
@@ -769,8 +792,8 @@ fn project_entry_order_spec(
         post_only,
         limit_price,
         amount,
-        max_slippage_bps: rec.entry_plan.max_slippage_bps,
-        valid_until: rec.entry_plan.valid_until,
+        max_slippage_bps: entry_plan.max_slippage_bps,
+        valid_until: entry_plan.valid_until,
     })
 }
 
@@ -784,9 +807,13 @@ fn project_entry_order_spec(
 fn project_exit_policy_spec(
     rec: &RecommendationInfo,
     entry_reference_price: Price,
-) -> ExitPolicySpec {
-    let exit = &rec.exit_plan;
-    ExitPolicySpec {
+) -> Result<ExitPolicySpec, ExecutionError> {
+    let Some((_, _, _, exit, _)) = rec.trade_plan.frozen() else {
+        return Err(ExecutionError::IntentDenied {
+            reason: "recommendation trade plan is unavailable".to_owned(),
+        });
+    };
+    Ok(ExitPolicySpec {
         take_profit_price: exit.take_profit_price,
         take_profit_pct: exit.take_profit_pct,
         stop_loss_price: exit.stop_loss_price,
@@ -801,7 +828,7 @@ fn project_exit_policy_spec(
         manual_review_at: exit.manual_review_at,
         entry_reference_price,
         entry_composite_score: rec.composite_score,
-    }
+    })
 }
 
 fn execution_time_conversion(
@@ -822,59 +849,56 @@ fn execution_time_conversion(
 fn resolve_downscale(
     command: &ApproveIntentCommand,
     frozen: &EntryOrderSpec,
-    allow_downscale: bool,
 ) -> Result<(Option<EntryOrderSpec>, Option<Usd>), ExecutionError> {
-    if command.override_shares.is_none()
-        && command.override_limit_price.is_none()
-        && command.max_allowed_usd.is_none()
-    {
+    if command.override_amount.is_none() && command.override_price.is_none() {
         return Ok((None, None));
     }
-    if !allow_downscale {
+    let new_amount = match (frozen.amount, command.override_amount) {
+        (current, None) => current,
+        (OrderAmount::Usd(current), Some(OrderAmount::Usd(value)))
+            if value.is_positive() && value <= current =>
+        {
+            OrderAmount::Usd(value)
+        }
+        (OrderAmount::Shares(current), Some(OrderAmount::Shares(value)))
+            if value.is_positive() && value <= current =>
+        {
+            OrderAmount::Shares(value)
+        }
+        (OrderAmount::Usd(_), Some(OrderAmount::Shares(_)))
+        | (OrderAmount::Shares(_), Some(OrderAmount::Usd(_))) => {
+            return Err(ExecutionError::IntentDenied {
+                reason: "approval amount unit must match the frozen order amount".to_owned(),
+            });
+        }
+        (_, Some(_)) => {
+            return Err(ExecutionError::IntentDenied {
+                reason: "approval amount must be positive and cannot exceed the frozen amount"
+                    .to_owned(),
+            });
+        }
+    };
+    let new_limit = command.override_price.unwrap_or(frozen.limit_price);
+    let price_widens_risk = match frozen.side {
+        Side::Buy => new_limit > frozen.limit_price,
+        Side::Sell => new_limit < frozen.limit_price,
+    };
+    if price_widens_risk {
         return Err(ExecutionError::IntentDenied {
-            reason: "size reduction is disabled by config".to_owned(),
-        });
-    }
-
-    let frozen_shares = frozen.projected_shares();
-    let new_shares = command.override_shares.unwrap_or(frozen_shares);
-    let new_limit = command.override_limit_price.unwrap_or(frozen.limit_price);
-
-    if new_shares > frozen_shares {
-        return Err(ExecutionError::IntentDenied {
-            reason: "approval cannot increase order size".to_owned(),
-        });
-    }
-    if new_limit > frozen.limit_price {
-        return Err(ExecutionError::IntentDenied {
-            reason: "approval cannot raise the limit price above the recommendation".to_owned(),
-        });
-    }
-
-    let new_notional = new_shares * new_limit;
-    if let Some(cap) = command.max_allowed_usd
-        && new_notional > cap
-    {
-        return Err(ExecutionError::IntentDenied {
-            reason: format!("approved notional {new_notional} exceeds max_allowed_usd {cap}"),
+            reason: "approval price override cannot widen the frozen side-aware price bound"
+                .to_owned(),
         });
     }
 
     let mut entry = frozen.clone();
     entry.limit_price = new_limit;
-    entry.amount = match frozen.amount {
-        OrderAmount::Usd(_) => OrderAmount::Usd(new_notional),
-        OrderAmount::Shares(_) => OrderAmount::Shares(new_shares),
-    };
+    entry.amount = new_amount;
+    let new_notional = entry.notional();
     Ok((Some(entry), Some(new_notional)))
 }
 
-/// Combine the approval reason with the optional operator override note.
 fn approval_reason(command: &ApproveIntentCommand) -> String {
-    command.override_note.as_ref().map_or_else(
-        || command.reason.clone(),
-        |note| format!("{}; note: {note}", command.reason),
-    )
+    command.reason.clone()
 }
 
 /// Build the WORM operation-log row written inside a background-origin intent
@@ -924,8 +948,10 @@ mod tests {
             },
         },
         types::{
-            Bps, ContentHash, EntryOrderPolicy, EntryOrderSpec, OrderAmount, OrderIntentId, Price,
-            RecommendationId, RecommendationReportId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+            Bps, ContentHash, EntryOrderPolicy, EntryOrderSpec, EntryPlan, ExitPlan, OrderAmount,
+            OrderIntentId, Price, RecommendationId, RecommendationReportId,
+            RecommendationTradePlan, RiskEnvelope, RuntimeConfigVersionId, Shares, SizingPlan,
+            TokenId, Usd,
         },
     };
     use quant_pivot_test_support::report_fixtures;
@@ -957,16 +983,46 @@ mod tests {
         }
     }
 
+    fn entry(rec: &RecommendationInfo) -> &EntryPlan {
+        match &rec.trade_plan {
+            RecommendationTradePlan::Frozen { entry, .. } => entry,
+            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
+        }
+    }
+
+    fn entry_mut(rec: &mut RecommendationInfo) -> &mut EntryPlan {
+        match &mut rec.trade_plan {
+            RecommendationTradePlan::Frozen { entry, .. } => entry,
+            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
+        }
+    }
+
+    fn sizing(rec: &RecommendationInfo) -> &SizingPlan {
+        rec.trade_plan.sizing().expect("fixture frozen sizing")
+    }
+
+    fn exit(rec: &RecommendationInfo) -> &ExitPlan {
+        match &rec.trade_plan {
+            RecommendationTradePlan::Frozen { exit, .. } => exit,
+            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
+        }
+    }
+
+    fn risk(rec: &RecommendationInfo) -> &RiskEnvelope {
+        match &rec.trade_plan {
+            RecommendationTradePlan::Frozen { risk_envelope, .. } => risk_envelope,
+            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
+        }
+    }
+
     fn approve_command() -> ApproveIntentCommand {
         ApproveIntentCommand {
             order_intent_id: OrderIntentId::from_v7(),
             operator_id: Uuid::nil(),
             acting_role: "operator".to_owned(),
             reason: "ok".to_owned(),
-            override_shares: None,
-            override_limit_price: None,
-            max_allowed_usd: None,
-            override_note: None,
+            override_amount: None,
+            override_price: None,
         }
     }
 
@@ -974,17 +1030,17 @@ mod tests {
     fn entry_projection_is_gtd_for_resting_limit() {
         let mut rec = rec();
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
-        rec.entry_plan.valid_until = now + Duration::minutes(10);
+        entry_mut(&mut rec).valid_until = now + Duration::minutes(10);
         let spec = project_entry_order_spec(&rec, now).expect("projection");
         assert_eq!(spec.token_id, rec.token_id);
         assert_eq!(spec.side, Side::Buy);
-        assert_eq!(spec.projected_shares(), rec.sizing_plan.suggested_shares);
+        assert_eq!(spec.projected_shares(), sizing(&rec).suggested_shares);
         assert!(spec.post_only);
         assert_eq!(
             spec.order_type,
             OrderType::Gtd {
                 expiration: u64::try_from(
-                    (rec.entry_plan.valid_until + Duration::seconds(60)).timestamp()
+                    (entry(&rec).valid_until + Duration::seconds(60)).timestamp()
                 )
                 .expect("timestamp"),
             }
@@ -994,34 +1050,34 @@ mod tests {
     #[test]
     fn aggressive_all_or_nothing_entry_projects_to_fok_usd() {
         let mut rec = rec();
-        rec.entry_plan.order_policy = EntryOrderPolicy::Aggressive {
+        entry_mut(&mut rec).order_policy = EntryOrderPolicy::Aggressive {
             worst_price: Price::new(dec!(0.60)),
             fill_requirement: FillRequirement::AllOrNothing,
         };
         let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fok);
         assert!(!spec.post_only);
-        assert_eq!(spec.amount, OrderAmount::Usd(rec.sizing_plan.suggested_usd));
+        assert_eq!(spec.amount, OrderAmount::Usd(sizing(&rec).suggested_usd));
     }
 
     #[test]
     fn aggressive_partial_entry_projects_to_fak_usd() {
         let mut rec = rec();
-        rec.entry_plan.order_policy = EntryOrderPolicy::Aggressive {
+        entry_mut(&mut rec).order_policy = EntryOrderPolicy::Aggressive {
             worst_price: Price::new(dec!(0.60)),
             fill_requirement: FillRequirement::AllowPartial,
         };
         let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fak);
         assert!(!spec.post_only);
-        assert_eq!(spec.amount, OrderAmount::Usd(rec.sizing_plan.suggested_usd));
+        assert_eq!(spec.amount, OrderAmount::Usd(sizing(&rec).suggested_usd));
     }
 
     #[test]
     fn passive_entry_rejects_effective_lifetime_below_two_minutes() {
         let mut rec = rec();
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
-        rec.entry_plan.valid_until = now + Duration::seconds(119);
+        entry_mut(&mut rec).valid_until = now + Duration::seconds(119);
         assert!(matches!(
             project_entry_order_spec(&rec, now),
             Err(ExecutionError::IntentDenied { .. })
@@ -1031,7 +1087,7 @@ mod tests {
     #[test]
     fn passive_entry_rejects_non_post_only_policy() {
         let mut rec = rec();
-        rec.entry_plan.order_policy = EntryOrderPolicy::Passive {
+        entry_mut(&mut rec).order_policy = EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.60)),
             post_only: false,
         };
@@ -1045,10 +1101,12 @@ mod tests {
     #[test]
     fn exit_projection_drops_full_exit_nodes() {
         let rec = rec();
-        let exit = project_exit_policy_spec(&rec, Price::new(dec!(0.60)));
-        assert_eq!(exit.take_profit_price, rec.exit_plan.take_profit_price);
+        let projected =
+            project_exit_policy_spec(&rec, Price::new(dec!(0.60))).expect("exit projection");
+        assert_eq!(projected.take_profit_price, exit(&rec).take_profit_price);
         assert!(
-            exit.scale_out_targets
+            projected
+                .scale_out_targets
                 .iter()
                 .all(|target| target.target_cumulative_exit_pct < dec!(1))
         );
@@ -1056,8 +1114,7 @@ mod tests {
 
     #[test]
     fn downscale_noop_without_overrides() {
-        let (entry, alloc) =
-            resolve_downscale(&approve_command(), &frozen_entry(), true).expect("noop");
+        let (entry, alloc) = resolve_downscale(&approve_command(), &frozen_entry()).expect("noop");
         assert!(entry.is_none());
         assert!(alloc.is_none());
     }
@@ -1065,8 +1122,8 @@ mod tests {
     #[test]
     fn downscale_reduces_shares_and_notional() {
         let mut cmd = approve_command();
-        cmd.override_shares = Some(Shares::new(dec!(50)));
-        let (entry, alloc) = resolve_downscale(&cmd, &frozen_entry(), true).expect("downscale");
+        cmd.override_amount = Some(OrderAmount::Shares(Shares::new(dec!(50))));
+        let (entry, alloc) = resolve_downscale(&cmd, &frozen_entry()).expect("downscale");
         let entry = entry.expect("entry override");
         assert_eq!(entry.amount, OrderAmount::Shares(Shares::new(dec!(50))));
         assert_eq!(alloc, Some(Usd::new(dec!(30)))); // 50 * 0.60
@@ -1075,30 +1132,47 @@ mod tests {
     #[test]
     fn downscale_rejects_widening_size() {
         let mut cmd = approve_command();
-        cmd.override_shares = Some(Shares::new(dec!(200)));
-        assert!(resolve_downscale(&cmd, &frozen_entry(), true).is_err());
+        cmd.override_amount = Some(OrderAmount::Shares(Shares::new(dec!(200))));
+        assert!(resolve_downscale(&cmd, &frozen_entry()).is_err());
     }
 
     #[test]
     fn downscale_rejects_raising_limit() {
         let mut cmd = approve_command();
-        cmd.override_limit_price = Some(Price::new(dec!(0.70)));
-        assert!(resolve_downscale(&cmd, &frozen_entry(), true).is_err());
+        cmd.override_price = Some(Price::new(dec!(0.70)));
+        assert!(resolve_downscale(&cmd, &frozen_entry()).is_err());
     }
 
     #[test]
-    fn downscale_rejected_when_disabled() {
+    fn usd_price_only_override_preserves_frozen_spend() {
         let mut cmd = approve_command();
-        cmd.override_shares = Some(Shares::new(dec!(50)));
-        assert!(resolve_downscale(&cmd, &frozen_entry(), false).is_err());
+        cmd.override_price = Some(Price::new(dec!(0.55)));
+        let mut frozen = frozen_entry();
+        frozen.amount = OrderAmount::Usd(Usd::new(dec!(60)));
+        let (entry, allocation) = resolve_downscale(&cmd, &frozen).expect("tighten USD order");
+        assert_eq!(
+            entry.expect("override").amount,
+            OrderAmount::Usd(Usd::new(dec!(60)))
+        );
+        assert_eq!(allocation, Some(Usd::new(dec!(60))));
     }
 
     #[test]
-    fn downscale_rejects_exceeding_max_allowed() {
+    fn sell_price_override_cannot_lower_frozen_bound() {
         let mut cmd = approve_command();
-        cmd.override_shares = Some(Shares::new(dec!(50)));
-        cmd.max_allowed_usd = Some(Usd::new(dec!(10))); // 50 * 0.60 = 30 > 10
-        assert!(resolve_downscale(&cmd, &frozen_entry(), true).is_err());
+        cmd.override_price = Some(Price::new(dec!(0.50)));
+        let mut frozen = frozen_entry();
+        frozen.side = Side::Sell;
+        assert!(resolve_downscale(&cmd, &frozen).is_err());
+        cmd.override_price = Some(Price::new(dec!(0.70)));
+        assert!(resolve_downscale(&cmd, &frozen).is_ok());
+    }
+
+    #[test]
+    fn downscale_rejects_amount_unit_mismatch() {
+        let mut cmd = approve_command();
+        cmd.override_amount = Some(OrderAmount::Usd(Usd::new(dec!(10))));
+        assert!(resolve_downscale(&cmd, &frozen_entry()).is_err());
     }
 
     #[test]
@@ -1111,7 +1185,7 @@ mod tests {
             RecommendationReportStatus::Published,
         );
         let version = RuntimeConfigVersionId::from_v7();
-        let hash = rec.risk_envelope.envelope_hash.clone();
+        let hash = risk(&rec).envelope_hash.clone();
         assert!(
             evaluate_intent_approval_invalidation(
                 &rec,
@@ -1183,7 +1257,7 @@ mod tests {
     #[test]
     fn gtd_projection_rejects_security_buffer_overflow() {
         let mut rec = rec();
-        rec.entry_plan.valid_until = DateTime::<Utc>::MAX_UTC;
+        entry_mut(&mut rec).valid_until = DateTime::<Utc>::MAX_UTC;
         assert!(matches!(
             project_entry_order_spec(&rec, DateTime::<Utc>::MAX_UTC - Duration::seconds(120)),
             Err(ExecutionError::TimeConversion {
@@ -1258,7 +1332,7 @@ mod tests {
             RecommendationReportStatus::Published,
         );
         let version = RuntimeConfigVersionId::from_v7();
-        let hash = rec.risk_envelope.envelope_hash.clone();
+        let hash = risk(&rec).envelope_hash.clone();
 
         // recommendation expired
         let mut expired = rec.clone();
@@ -1308,7 +1382,7 @@ mod tests {
 
         // risk envelope hash mismatch: a stored hash differing from the rec's.
         let stored_hash = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
-        assert_ne!(stored_hash, rec.risk_envelope.envelope_hash);
+        assert_ne!(stored_hash, risk(&rec).envelope_hash);
         assert_eq!(
             evaluate_intent_approval_invalidation(
                 &rec,

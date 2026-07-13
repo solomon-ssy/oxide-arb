@@ -24,8 +24,7 @@ use quant_pivot_models::{
             AccountSource, BindingConstraint, ExitSettlementMode, FactorDirection,
             FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason, OutcomeSide,
             QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportKind, ReportTriggerKind, ResearchJobKind, ResearchJobStatus, SizingBetStructure,
-            SizingModelKind,
+            ReportKind, ReportTriggerKind, ResearchJobKind, ResearchJobStatus, SizingModelKind,
         },
     },
     types::{
@@ -35,9 +34,10 @@ use quant_pivot_models::{
         FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext, MarketId,
         MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, ResearchJobId,
-        RiskEnvelope, RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan,
-        ThesisInvalidationPolicy, TokenId, Usd,
+        RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
+        ReportSummary, ResearchJobId, RiskEnvelope, RuntimeConfigVersionId, Shares,
+        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
     },
 };
 use std::str::FromStr;
@@ -223,10 +223,13 @@ pub fn recommendation(
         liquidity_score: Probability::new(dec!(0.8)),
         data_quality_score: Probability::new(dec!(0.9)),
         model_score_percentile: Probability::new(dec!(0.75)),
-        entry_plan: entry_plan(),
-        sizing_plan: sizing_plan(suggested_usd),
-        exit_plan: exit_plan(),
-        risk_envelope: risk_envelope(),
+        trade_plan: RecommendationTradePlan::Frozen {
+            policy: Box::new(trade_policy_provenance()),
+            entry: entry_plan(),
+            sizing: Box::new(sizing_plan(suggested_usd)),
+            exit: Box::new(exit_plan()),
+            risk_envelope: Box::new(risk_envelope()),
+        },
         factor_breakdown: factor_breakdown(),
         evidence_refs: evidence_refs(),
         execution_eligibility: execution_eligibility(),
@@ -239,7 +242,6 @@ pub fn recommendation(
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trade_policy: None,
         trigger: EntryTrigger::Immediate,
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.43)),
@@ -278,13 +280,11 @@ fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
         drawdown_shrink_applied: Some(dec!(1.0)),
         raw_fraction_applied: Some(dec!(0.5)),
         position_cap_fraction_applied: Some(dec!(0.05)),
-        bet_structure_applied: Some(SizingBetStructure::Resolution),
     }
 }
 
 fn exit_plan() -> ExitPlan {
     ExitPlan {
-        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.7))),
         take_profit_pct: Some(dec!(0.6)),
         stop_loss_price: Some(Price::new(dec!(0.3))),
@@ -302,6 +302,29 @@ fn exit_plan() -> ExitPlan {
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
+    }
+}
+
+fn trade_policy_provenance() -> TradePolicyCohortProvenance {
+    let artifact_hash = content_hash();
+    let dimension = TradePolicyCohortDimension {
+        methodology_id: "fixture-v1".to_owned(),
+        methodology_hash: artifact_hash.clone(),
+        bucket_id: "fixture".to_owned(),
+    };
+    TradePolicyCohortProvenance {
+        artifact_id: TradePolicyArtifactId::from_content_hash(&artifact_hash),
+        artifact_hash,
+        cohort_index: 0,
+        cohort_key: TradePolicyCohortKey {
+            category: MarketCategory::Politics,
+            horizon_secs: 86_400,
+            entry_price_min: Price::new(dec!(0.01)),
+            entry_price_max: Price::new(dec!(0.99)),
+            notional_tier: Usd::new(dec!(250)),
+            liquidity: dimension.clone(),
+            volatility: dimension,
+        },
     }
 }
 

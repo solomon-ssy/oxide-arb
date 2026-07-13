@@ -2,7 +2,7 @@
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
-    domain::{Paginated, PositionListQuery, PositionView},
+    domain::{OrderIntentView, Paginated, PositionDetailView, PositionListQuery, PositionView},
     enums::rbac::{Operation, ResourceType},
     types::PositionId,
 };
@@ -46,11 +46,28 @@ async fn list_positions(
 async fn get_position(
     state: web::Data<AppState>,
     id: web::Path<PositionId>,
-) -> Result<WebResponse<PositionView>, WebError> {
-    let info = state
+) -> Result<WebResponse<PositionDetailView>, WebError> {
+    let summary = state
         .execution_read
         .get_position(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("position not found: {id}")))?;
-    Ok(WebResponse::ok(PositionView::from(info)))
+    let intent = state
+        .order_intents
+        .find(&summary.position.order_intent_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!(
+                "order intent not found: {}",
+                summary.position.order_intent_id
+            ))
+        })?;
+    let intent_view = OrderIntentView::from(intent);
+    let exit_monitor_observation =
+        super::quant_intents::exit_monitor_observation(&state, &intent_view, &summary.position)
+            .await?;
+    Ok(WebResponse::ok(PositionDetailView {
+        position: PositionView::from(summary),
+        exit_monitor_observation,
+    }))
 }

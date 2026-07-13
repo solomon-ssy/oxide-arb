@@ -117,7 +117,7 @@ pub struct ModelArtifactHeader {
     pub feature_schema_hash: ContentHash,
     /// Factor-schema hash the artifact was trained/built against.
     pub factor_schema_hash: ContentHash,
-    /// Trade policy frozen into triple-barrier/meta training, when applicable.
+    /// Trade policy frozen into executable policy-derived training, when applicable.
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
 }

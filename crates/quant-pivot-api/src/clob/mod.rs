@@ -27,7 +27,7 @@ use polymarket_client_sdk_v2::{
     clob::{
         Client as SdkClient, Config as SdkConfig,
         types::{
-            Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide,
+            Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide, SignableOrder,
             request::{BalanceAllowanceRequest, OrderBookSummaryRequest, TradesRequest},
             response::PostOrderResponse,
         },
@@ -49,18 +49,59 @@ use quant_pivot_models::{
     types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
-use std::{convert::TryFrom, str::FromStr, sync::Arc};
+use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
+
+/// Stage reached by a single-attempt money-changing order submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderSubmissionStage {
+    Prepare,
+    Sign,
+    Post,
+}
+
+/// Stage-aware order error. Only `Post` failures can be execution-ambiguous.
+#[derive(Debug, thiserror::Error)]
+#[error("order submission failed during {stage:?}: {source}")]
+pub struct OrderSubmissionError {
+    pub stage: OrderSubmissionStage,
+    #[source]
+    pub source: ApiError,
+}
+
+impl OrderSubmissionError {
+    const fn prepare(source: ApiError) -> Self {
+        Self {
+            stage: OrderSubmissionStage::Prepare,
+            source,
+        }
+    }
+
+    const fn sign(source: ApiError) -> Self {
+        Self {
+            stage: OrderSubmissionStage::Sign,
+            source,
+        }
+    }
+
+    const fn post(source: ApiError) -> Self {
+        Self {
+            stage: OrderSubmissionStage::Post,
+            source,
+        }
+    }
+}
 
 /// Polymarket CLOB REST client backed by the official SDK.
 ///
 /// Created via [`ClobClient::connect`] which performs async SDK authentication.
-/// All methods enforce per-endpoint rate limiting via [`governor`] and
-/// retry transient errors via [`retry_with_policy`](retry::retry_with_policy).
+/// All methods enforce per-endpoint rate limiting. Read endpoints and idempotent
+/// cancellation may retry through [`retry_with_policy`](retry::retry_with_policy);
+/// money-changing `POST /order` is always a single bounded attempt.
 pub struct ClobClient {
     sdk: Arc<SdkClient<Authenticated<Normal>>>,
     signer: Arc<OrderSigner>,
+    order_post_timeout: Duration,
     rate_limiter: RateLimiter,
-    order_retry_policy: RetryPolicy,
     on_book_level_rejected: Option<BookLevelRejectHook>,
 }
 
@@ -240,16 +281,10 @@ impl ClobClient {
         Ok(Self {
             sdk: Arc::new(sdk),
             signer,
+            order_post_timeout: Duration::from_millis(config.order_post_timeout_ms),
             rate_limiter: RateLimiter::new(),
-            order_retry_policy: RetryPolicy::clob_default(),
             on_book_level_rejected: None,
         })
-    }
-
-    #[must_use]
-    pub const fn with_order_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
-        self.order_retry_policy = retry_policy;
-        self
     }
 
     /// Attach a hook invoked when REST book ingest rejects an invalid level.
@@ -259,11 +294,7 @@ impl ClobClient {
         self
     }
 
-    fn retry_policy_for_order(
-        &self,
-        order_type: OrderType,
-        post_only: bool,
-    ) -> Result<RetryPolicy, ApiError> {
+    fn validate_order_semantics(order_type: OrderType, post_only: bool) -> Result<(), ApiError> {
         if post_only && !matches!(order_type, OrderType::Gtc | OrderType::Gtd { .. }) {
             return Err(ApiError::Clob {
                 endpoint: "POST /order".to_owned(),
@@ -272,117 +303,139 @@ impl ClobClient {
                 retryable: false,
             });
         }
-        Ok(match order_type {
-            OrderType::Fok | OrderType::Fak => RetryPolicy::no_retry(),
-            OrderType::Gtc | OrderType::Gtd { expiration: _ } => self.order_retry_policy,
-        })
+        Ok(())
+    }
+
+    async fn build_unsigned_order(
+        &self,
+        req: &OrderRequest,
+        token_id: U256,
+        order_side: SdkSide,
+    ) -> Result<SignableOrder, OrderSubmissionError> {
+        let price = req.price.inner();
+        let order_amount = req.amount;
+        let post_only = req.post_only;
+        match req.order_type {
+            OrderType::Fok | OrderType::Fak => {
+                let amount = sdk_amount(order_amount).map_err(OrderSubmissionError::prepare)?;
+                let order_type = if matches!(req.order_type, OrderType::Fok) {
+                    SdkOrderType::FOK
+                } else {
+                    SdkOrderType::FAK
+                };
+                self.sdk
+                    .market_order()
+                    .token_id(token_id)
+                    .order_type(order_type)
+                    .price(price)
+                    .amount(amount)
+                    .side(order_side)
+                    .build()
+                    .await
+                    .map_err(|error| {
+                        OrderSubmissionError::prepare(ApiError::from(sdk_error::SdkClobError(
+                            &error,
+                        )))
+                    })
+            }
+            OrderType::Gtd { expiration } => {
+                let expiration = ToPrimitive::to_i64(&expiration)
+                    .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0))
+                    .ok_or_else(|| {
+                        OrderSubmissionError::prepare(ApiError::Clob {
+                            endpoint: "POST /order".to_owned(),
+                            code: "invalid_gtd_expiration".to_owned(),
+                            message: format!("GTD expiration {expiration} is not representable"),
+                            retryable: false,
+                        })
+                    })?;
+                let shares =
+                    limit_order_shares(order_amount).map_err(OrderSubmissionError::prepare)?;
+                self.sdk
+                    .limit_order()
+                    .token_id(token_id)
+                    .order_type(SdkOrderType::GTD)
+                    .expiration(expiration)
+                    .price(price)
+                    .size(shares)
+                    .side(order_side)
+                    .post_only(post_only)
+                    .build()
+                    .await
+                    .map_err(|error| {
+                        OrderSubmissionError::prepare(ApiError::from(sdk_error::SdkClobError(
+                            &error,
+                        )))
+                    })
+            }
+            OrderType::Gtc => {
+                let shares =
+                    limit_order_shares(order_amount).map_err(OrderSubmissionError::prepare)?;
+                self.sdk
+                    .limit_order()
+                    .token_id(token_id)
+                    .order_type(SdkOrderType::GTC)
+                    .price(price)
+                    .size(shares)
+                    .side(order_side)
+                    .post_only(post_only)
+                    .build()
+                    .await
+                    .map_err(|error| {
+                        OrderSubmissionError::prepare(ApiError::from(sdk_error::SdkClobError(
+                            &error,
+                        )))
+                    })
+            }
+        }
     }
 
     /// Place an order on the CLOB.
     #[tracing::instrument(skip(self, req), fields(market_id = %req.market_id, side = %req.side))]
-    pub async fn place_order(&self, req: &OrderRequest) -> Result<OrderResponse, ApiError> {
+    pub async fn place_order(
+        &self,
+        req: &OrderRequest,
+    ) -> Result<OrderResponse, OrderSubmissionError> {
         self.rate_limiter.acquire("POST /order").await;
 
         let sdk = Arc::clone(&self.sdk);
         let signer = Arc::clone(&self.signer);
-        let token_id = WireTokenId::try_from(&req.token_id)?.0;
+        let token_id = WireTokenId::try_from(&req.token_id)
+            .map_err(OrderSubmissionError::prepare)?
+            .0;
         let order_side = SdkSide::from(ClobSide::from(req.side));
-        let price = req.price.inner();
         let order_amount = req.amount;
         let order_type = req.order_type;
         let post_only = req.post_only;
-        let retry_policy = self.retry_policy_for_order(order_type, post_only)?;
+        Self::validate_order_semantics(order_type, post_only)
+            .map_err(OrderSubmissionError::prepare)?;
 
         let submitted_at = chrono::Utc::now();
+        let unsigned = self.build_unsigned_order(req, token_id, order_side).await?;
 
-        retry::retry_with_policy(&retry_policy, || {
-            let sdk = Arc::clone(&sdk);
-            let signer = Arc::clone(&signer);
-            async move {
-                let unsigned = match order_type {
-                    OrderType::Fok => {
-                        let amount = sdk_amount(order_amount)?;
-                        sdk.market_order()
-                            .token_id(token_id)
-                            .order_type(SdkOrderType::FOK)
-                            .price(price)
-                            .amount(amount)
-                            .side(order_side)
-                            .build()
-                            .await
-                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
-                    }
-                    OrderType::Fak => {
-                        let amount = sdk_amount(order_amount)?;
-                        sdk.market_order()
-                            .token_id(token_id)
-                            .order_type(SdkOrderType::FAK)
-                            .price(price)
-                            .amount(amount)
-                            .side(order_side)
-                            .build()
-                            .await
-                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
-                    }
-                    OrderType::Gtd { expiration } => {
-                        let exp = ToPrimitive::to_i64(&expiration)
-                            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-                            .ok_or_else(|| ApiError::Clob {
-                                endpoint: "POST /order".to_owned(),
-                                code: "invalid_gtd_expiration".to_owned(),
-                                message: format!(
-                                    "GTD expiration {expiration} is not representable"
-                                ),
-                                retryable: false,
-                            })?;
-                        let share_qty = limit_order_shares(order_amount)?;
-                        sdk.limit_order()
-                            .token_id(token_id)
-                            .order_type(SdkOrderType::GTD)
-                            .expiration(exp)
-                            .price(price)
-                            .size(share_qty)
-                            .side(order_side)
-                            .post_only(post_only)
-                            .build()
-                            .await
-                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
-                    }
-                    OrderType::Gtc => {
-                        let share_qty = limit_order_shares(order_amount)?;
-                        sdk.limit_order()
-                            .token_id(token_id)
-                            .order_type(SdkOrderType::GTC)
-                            .price(price)
-                            .size(share_qty)
-                            .side(order_side)
-                            .post_only(post_only)
-                            .build()
-                            .await
-                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
-                    }
-                };
+        let signed_order = sdk
+            .sign(signer.inner(), unsigned)
+            .await
+            .map_err(|e| OrderSubmissionError::sign(ApiError::from(sdk_error::SdkClobError(&e))))?;
 
-                let signed_order = sdk
-                    .sign(signer.inner(), unsigned)
-                    .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+        let resp = tokio::time::timeout(self.order_post_timeout, sdk.post_order(signed_order))
+            .await
+            .map_err(|_| {
+                OrderSubmissionError::post(ApiError::Timeout {
+                    operation: "POST /order".to_owned(),
+                    elapsed_ms: u64::try_from(self.order_post_timeout.as_millis())
+                        .unwrap_or(u64::MAX),
+                })
+            })?
+            .map_err(|e| OrderSubmissionError::post(ApiError::from(sdk_error::SdkClobError(&e))))?;
 
-                let resp = sdk
-                    .post_order(signed_order)
-                    .await
-                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
-
-                Ok(map_post_order_response(
-                    req,
-                    order_type,
-                    order_amount,
-                    submitted_at,
-                    &resp,
-                ))
-            }
-        })
-        .await
+        Ok(map_post_order_response(
+            req,
+            order_type,
+            order_amount,
+            submitted_at,
+            &resp,
+        ))
     }
 
     /// Cancel a single order by ID.
@@ -694,12 +747,13 @@ impl ClobClient {
     pub fn from_sdk_for_test(
         sdk: Arc<SdkClient<Authenticated<Normal>>>,
         signer: Arc<OrderSigner>,
+        order_post_timeout: Duration,
     ) -> Self {
         Self {
             sdk,
             signer,
+            order_post_timeout,
             rate_limiter: RateLimiter::new(),
-            order_retry_policy: RetryPolicy::clob_default(),
             on_book_level_rejected: None,
         }
     }

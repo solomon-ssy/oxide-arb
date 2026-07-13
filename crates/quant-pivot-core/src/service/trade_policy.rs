@@ -1,33 +1,29 @@
 //! Trade-policy artifact fitting, catalog reads, and governed transitions.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         FitTradePolicyRequest, NewTradePolicyArtifact, NewTradePolicyGovernanceAudit, Paginated,
-        TradePolicyArtifactInfo, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
-        TradePolicyListQuery, TradePolicyPort, TrainingDatasetInfo,
+        TradePolicyArtifactInfo, TradePolicyAuditListQuery, TradePolicyFitPreflightRequest,
+        TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
+        TradePolicyPort, TrainingDatasetInfo,
     },
-    enums::{
-        common::MarketCategory,
-        quant::{TradePolicyGovernanceAction, TradePolicyStatus, TrainingDatasetStatus},
-    },
+    enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus, TrainingDatasetStatus},
     types::{
-        Bps, ContentHash, EntryOrderTemplate, EntryTriggerTemplate, Price, ScaleOutTemplate,
-        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TradePolicyCohort, TradePolicyCohortKey, TradePolicyExecutionEvidence,
-        TradePolicyGovernanceAuditId, TradePolicyValidation, Usd,
+        ContentHash, TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TradePolicyEvidenceGap, TradePolicyExecutionEvidence,
+        TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence, TradePolicyValidationEvidence,
     },
 };
 use quant_pivot_repository::traits::{TradePolicyRepository, TrainingDatasetRepository};
 use quant_pivot_research::{
     artifact::ArtifactStore,
     hashing::ResearchHasher,
-    training::{MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS, TrainingExample},
+    training::{TrainingExample, TrainingLabel},
 };
-use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::service::training_dataset::{
@@ -150,6 +146,23 @@ impl TradePolicyPort for TradePolicyService {
         if !raw_trajectory_labels_present {
             messages.push("source dataset has no materialized trajectory samples".to_owned());
         }
+        let pit_cutoff_valid = request.contract.fit_window_end <= request.contract.pit_cutoff;
+        if !pit_cutoff_valid {
+            messages.push("fit window ends after the PIT cutoff".to_owned());
+        }
+        let (labels_matured_by_cutoff, labels_excluded_after_cutoff) =
+            if source_dataset_ready && fit_window_contained {
+                if let Some(dataset) = dataset.as_ref() {
+                    let materialization = require_dataset_materialization(dataset)?;
+                    let bytes = self.artifacts.get(materialization.parquet_uri).await?;
+                    let examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
+                    label_cutoff_counts(&request.contract, &examples)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            };
         let full_l2_trajectory_present = false;
         let fee_model_present = false;
         messages.push(
@@ -165,6 +178,7 @@ impl TradePolicyPort for TradePolicyService {
             && raw_trajectory_labels_present
             && fit_window_contained
             && runtime_config_matches
+            && pit_cutoff_valid
             && full_l2_trajectory_present
             && fee_model_present;
         Ok(TradePolicyFitPreflightView {
@@ -173,6 +187,9 @@ impl TradePolicyPort for TradePolicyService {
             raw_trajectory_labels_present: raw_trajectory_labels_present.into(),
             fit_window_contained: fit_window_contained.into(),
             runtime_config_matches: runtime_config_matches.into(),
+            pit_cutoff_valid: pit_cutoff_valid.into(),
+            labels_matured_by_cutoff,
+            labels_excluded_after_cutoff,
             full_l2_trajectory_present: full_l2_trajectory_present.into(),
             fee_model_present: fee_model_present.into(),
             publishable_input: publishable_input.into(),
@@ -230,6 +247,17 @@ impl TradePolicyPort for TradePolicyService {
         self.policies.page(query).await.map_err(Into::into)
     }
 
+    async fn page_audits(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        query: TradePolicyAuditListQuery,
+    ) -> QuantResult<Paginated<TradePolicyGovernanceAuditInfo>> {
+        self.policies
+            .page_audits(artifact_id, query)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn transition(
         &self,
         artifact_id: &TradePolicyArtifactId,
@@ -245,16 +273,14 @@ impl TradePolicyPort for TradePolicyService {
                     entity: "trade_policy_artifact",
                     id: artifact_id.to_string(),
                 })?;
+        let publication_blockers = current.payload_json.publication_blockers();
         if matches!(
             target,
             TradePolicyStatus::Validated | TradePolicyStatus::Published
-        ) && !current.payload_json.publication_blockers().is_empty()
+        ) && !publication_blockers.is_empty()
         {
             return Err(ResearchError::ValidationMethodology {
-                detail: format!(
-                    "trade policy is not publishable: {}",
-                    current.payload_json.publication_blockers().join("; ")
-                ),
+                detail: format!("trade policy is not publishable: {publication_blockers:?}"),
             }
             .into());
         }
@@ -290,25 +316,6 @@ impl TradePolicyPort for TradePolicyService {
     }
 }
 
-#[derive(Default)]
-struct CohortSamples {
-    category: Option<MarketCategory>,
-    horizon_secs: u64,
-    price_bucket: u8,
-    liquidity_tier: String,
-    favorable: Vec<Decimal>,
-    adverse: Vec<Decimal>,
-    candidate_count: u64,
-}
-
-type CohortGroups = HashMap<(MarketCategory, u64, u8, String), CohortSamples>;
-
-struct CohortBuild {
-    cohorts: Vec<TradePolicyCohort>,
-    candidate_count: u64,
-    executable_count: u64,
-}
-
 fn fit_payload(
     request: &FitTradePolicyRequest,
     examples: &[TrainingExample],
@@ -316,225 +323,176 @@ fn fit_payload(
     feature_schema_hash: &ContentHash,
     label_schema_hash: &ContentHash,
 ) -> QuantResult<TradePolicyArtifactPayload> {
-    let (grouped, eligible) = group_cohort_samples(request, examples);
-    let cohort_build = build_cohorts(request, grouped)?;
-    let coverage = Decimal::from(cohort_build.executable_count)
-        / Decimal::from(cohort_build.candidate_count.max(eligible).max(1));
-    let validation = degraded_validation(request, coverage);
+    let projection = examples
+        .iter()
+        .filter(|example| {
+            let at = example.decision_at();
+            at >= request.contract.fit_window_start && at < request.contract.fit_window_end
+        })
+        .filter_map(|example| {
+            let labels = example
+                .labels
+                .iter()
+                .filter(|label| {
+                    label_visible_at_cutoff(
+                        &request.contract,
+                        example.decision_at(),
+                        label.matured_at,
+                    )
+                })
+                .collect::<Vec<_>>();
+            (!labels.is_empty()).then_some(PitFitSampleProjection {
+                market_id: example.market_id.as_str(),
+                token_id: example.token_id.as_str(),
+                decision_at: example.decision_at(),
+                labels,
+            })
+        })
+        .collect::<Vec<_>>();
+    let filtered_sample_count =
+        u64::try_from(projection.len()).map_err(|_| ResearchError::DatasetBuild {
+            detail: "PIT-filtered sample count exceeds u64".to_owned(),
+        })?;
+    let (labels_matured_by_cutoff, labels_excluded_after_cutoff) =
+        label_cutoff_counts(&request.contract, examples);
+    let filtered_sample_hash = ResearchHasher::canonical(&projection)?;
     Ok(TradePolicyArtifactPayload {
         format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
         fit_contract: request.contract.clone(),
         source_dataset_hash: source_dataset_hash.clone(),
         feature_schema_hash: feature_schema_hash.clone(),
         label_schema_hash: label_schema_hash.clone(),
-        fill_simulator_version: "top-of-book-degraded-v1".to_owned(),
-        fee_model_hash: ResearchHasher::canonical(&"fees-not-applied")?,
-        execution_evidence: degraded_execution_evidence(eligible),
-        cohorts: cohort_build.cohorts,
-        validation,
+        fill_simulator_version: "unavailable-until-11.7.2".to_owned(),
+        pit_cutoff_evidence: Some(TradePolicyPitCutoffEvidence {
+            filtered_sample_count,
+            labels_matured_by_cutoff,
+            labels_excluded_after_cutoff,
+            filtered_sample_hash,
+        }),
+        execution_evidence: degraded_execution_evidence(filtered_sample_count),
+        cohorts: Vec::new(),
+        validation: TradePolicyValidationEvidence {
+            trial_ledger_hash: None,
+            cpcv_path_count: None,
+            deflated_sharpe_ratio: None,
+            probability_of_backtest_overfitting: None,
+            effective_sample_size: None,
+            ambiguous_touch_rate: None,
+            depth_failure_rate: None,
+        },
     })
 }
 
-fn group_cohort_samples(
-    request: &FitTradePolicyRequest,
+#[derive(serde::Serialize)]
+struct PitFitSampleProjection<'a> {
+    market_id: &'a str,
+    token_id: &'a str,
+    decision_at: chrono::DateTime<chrono::Utc>,
+    labels: Vec<&'a TrainingLabel>,
+}
+
+fn label_cutoff_counts(
+    contract: &quant_pivot_models::types::TradePolicyFitContract,
     examples: &[TrainingExample],
-) -> (CohortGroups, u64) {
-    let mut grouped = CohortGroups::new();
-    let mut eligible = 0_u64;
+) -> (u64, u64) {
+    let mut matured = 0_u64;
+    let mut excluded = 0_u64;
     for example in examples.iter().filter(|example| {
         let at = example.decision_at();
-        at >= request.contract.fit_window_start && at < request.contract.fit_window_end
+        at >= contract.fit_window_start && at < contract.fit_window_end
     }) {
-        let Some(capture) = &example.decision_capture else {
-            continue;
-        };
-        let Some(entry) = capture.market_context.best_ask else {
-            continue;
-        };
-        eligible += 1;
-        let price_bucket = ((entry.inner() * Decimal::from(10)).floor())
-            .try_into()
-            .unwrap_or(9_u8)
-            .min(9);
-        let liquidity_tier = liquidity_tier(example.selected_market.liquidity_usd);
-        for mfe in example
-            .labels
-            .iter()
-            .filter(|label| label.label_name == MAX_FAVORABLE_EXCURSION_BPS)
-        {
-            let key = (
-                example.selected_market.category,
-                mfe.horizon_secs,
-                price_bucket,
-                liquidity_tier.to_owned(),
-            );
-            let cohort = grouped.entry(key).or_default();
-            cohort.category = Some(example.selected_market.category);
-            cohort.horizon_secs = mfe.horizon_secs;
-            cohort.price_bucket = price_bucket;
-            liquidity_tier.clone_into(&mut cohort.liquidity_tier);
-            cohort.favorable.push(mfe.value.max(Decimal::ZERO));
-            cohort.candidate_count += 1;
-        }
-        for mae in example
-            .labels
-            .iter()
-            .filter(|label| label.label_name == MAX_ADVERSE_EXCURSION_BPS)
-        {
-            let key = (
-                example.selected_market.category,
-                mae.horizon_secs,
-                price_bucket,
-                liquidity_tier.to_owned(),
-            );
-            let cohort = grouped.entry(key).or_default();
-            cohort.adverse.push(mae.value.abs());
+        for label in &example.labels {
+            if label_visible_at_cutoff(contract, example.decision_at(), label.matured_at) {
+                matured += 1;
+            } else {
+                excluded += 1;
+            }
         }
     }
-    (grouped, eligible)
+    (matured, excluded)
 }
 
-fn build_cohorts(
-    request: &FitTradePolicyRequest,
-    grouped: CohortGroups,
-) -> QuantResult<CohortBuild> {
-    let mut cohorts = Vec::new();
-    let mut candidate_count = 0_u64;
-    let mut executable_count = 0_u64;
-    for mut samples in grouped.into_values() {
-        let executable = samples.favorable.len().min(samples.adverse.len());
-        if executable == 0 {
-            continue;
-        }
-        let upper = quantile(&mut samples.favorable, 7, 10).max(Decimal::ONE);
-        let lower = quantile(&mut samples.adverse, 8, 10).max(Decimal::ONE);
-        candidate_count += samples.candidate_count;
-        executable_count += executable as u64;
-        for notional_tier in &request.contract.notional_tiers {
-            cohorts.push(build_cohort(
-                request,
-                &samples,
-                *notional_tier,
-                executable,
-                upper,
-                lower,
-            )?);
-        }
-    }
-    Ok(CohortBuild {
-        cohorts,
-        candidate_count,
-        executable_count,
-    })
-}
-
-fn build_cohort(
-    request: &FitTradePolicyRequest,
-    samples: &CohortSamples,
-    notional_tier: Usd,
-    executable: usize,
-    upper: Decimal,
-    lower: Decimal,
-) -> QuantResult<TradePolicyCohort> {
-    let category = samples
-        .category
-        .ok_or_else(|| ResearchError::DatasetBuild {
-            detail: "trade-policy cohort lost category identity".to_owned(),
-        })?;
-    let bucket_min = Decimal::from(samples.price_bucket) / Decimal::from(10);
-    let bucket_max = Decimal::from(samples.price_bucket + 1) / Decimal::from(10);
-    let coverage = Decimal::from(executable as u64) / Decimal::from(samples.candidate_count.max(1));
-    let scale_out_targets = if request.contract.maximum_scale_out_targets == 0 {
-        Vec::new()
-    } else {
-        vec![ScaleOutTemplate {
-            target_id: "empirical_1".to_owned(),
-            trigger_return_bps: Bps::new(upper * Decimal::new(6, 1)),
-            target_cumulative_exit_pct: Decimal::new(5, 1),
-        }]
-    };
-    Ok(TradePolicyCohort {
-        key: TradePolicyCohortKey {
-            category,
-            horizon_secs: samples.horizon_secs,
-            entry_price_min: Price::new(bucket_min),
-            entry_price_max: Price::new(bucket_max.min(Decimal::ONE)),
-            notional_tier,
-            liquidity_tier: samples.liquidity_tier.clone(),
-            volatility_regime: "unclassified".to_owned(),
-        },
-        entry_trigger: EntryTriggerTemplate::Immediate,
-        entry_order: EntryOrderTemplate::Passive { post_only: true },
-        upper_barrier_bps: Bps::new(upper),
-        lower_barrier_bps: Bps::new(lower),
-        vertical_barrier_secs: samples.horizon_secs,
-        scale_out_targets,
-        trailing_stop: None,
-        min_score_retention: Decimal::new(6, 1),
-        min_expected_return_bps: Bps::ZERO,
-        require_execution_eligibility: true,
-        sample_count: samples.candidate_count,
-        executable_sample_count: executable as u64,
-        executable_coverage: coverage,
-        lower_confidence_utility_bps: upper - lower,
-        parent_cohort_index: None,
-    })
-}
-
-fn degraded_validation(
-    request: &FitTradePolicyRequest,
-    coverage: Decimal,
-) -> TradePolicyValidation {
-    let mut failure_reasons = Vec::new();
-    if coverage < request.contract.minimum_executable_coverage {
-        failure_reasons.push(format!(
-            "executable coverage {coverage} is below required {}",
-            request.contract.minimum_executable_coverage
-        ));
-    }
-    failure_reasons
-        .push("CPCV/DSR/PBO evidence is not yet attached; artifact remains Draft".to_owned());
-    TradePolicyValidation {
-        cpcv_path_count: 0,
-        deflated_sharpe_ratio: Decimal::ZERO,
-        probability_of_backtest_overfitting: Decimal::ONE,
-        executable_coverage: coverage,
-        passed: false,
-        failure_reasons,
-    }
+fn label_visible_at_cutoff(
+    contract: &quant_pivot_models::types::TradePolicyFitContract,
+    decision_at: chrono::DateTime<chrono::Utc>,
+    matured_at: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    decision_at >= contract.fit_window_start
+        && decision_at < contract.fit_window_end
+        && matured_at <= contract.pit_cutoff
 }
 
 fn degraded_execution_evidence(eligible: u64) -> TradePolicyExecutionEvidence {
     TradePolicyExecutionEvidence {
-        entry_basis: "decision_best_ask".to_owned(),
-        exit_basis: "forward_best_bid".to_owned(),
+        entry_basis: None,
+        exit_basis: None,
         full_l2_sample_count: 0,
         degraded_top_of_book_sample_count: eligible,
-        full_l2_coverage: Decimal::ZERO,
-        fees_included: false,
-        degradation_reasons: vec![
-            "historical artifact contains top-of-book observations without complete ladders"
-                .to_owned(),
-            "venue fees were not applied to raw MFE/MAE trajectory labels".to_owned(),
+        full_l2_coverage: None,
+        fee_model_hash: None,
+        gaps: vec![
+            TradePolicyEvidenceGap::FullL2EntryUnavailable,
+            TradePolicyEvidenceGap::FullL2ExitUnavailable,
+            TradePolicyEvidenceGap::PitFeeModelUnavailable,
+            TradePolicyEvidenceGap::TrialLedgerUnavailable,
+            TradePolicyEvidenceGap::CpcvUnavailable,
+            TradePolicyEvidenceGap::AmbiguousTouchEvidenceUnavailable,
+            TradePolicyEvidenceGap::DepthFailureEvidenceUnavailable,
         ],
     }
 }
 
-fn liquidity_tier(liquidity: Option<Usd>) -> &'static str {
-    match liquidity.map(Usd::inner) {
-        Some(value) if value >= Decimal::from(10_000) => "deep",
-        Some(value) if value >= Decimal::from(1_000) => "medium",
-        _ => "shallow",
-    }
-}
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::types::{
+        Bps, RuntimeConfigVersionId, TradePolicyFitContract, TradePolicyQualityGate,
+        TrainingDatasetId, Usd,
+    };
+    use rust_decimal_macros::dec;
 
-fn quantile(values: &mut [Decimal], numerator: usize, denominator: usize) -> Decimal {
-    values.sort_unstable();
-    let index = values
-        .len()
-        .saturating_mul(numerator)
-        .div_ceil(denominator)
-        .saturating_sub(1)
-        .min(values.len().saturating_sub(1));
-    values.get(index).copied().unwrap_or(Decimal::ZERO)
+    use super::label_visible_at_cutoff;
+
+    fn contract() -> TradePolicyFitContract {
+        let start = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
+        let end = start + Duration::days(10);
+        TradePolicyFitContract {
+            source_dataset_id: TrainingDatasetId::from_v7(),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            fit_window_start: start,
+            fit_window_end: end,
+            pit_cutoff: end + Duration::days(2),
+            embargo_secs: 86_400,
+            notional_tiers: vec![Usd::new(dec!(25))],
+            maximum_scale_out_targets: 3,
+            quality_gate: TradePolicyQualityGate {
+                min_cohort_samples: 100,
+                min_executable_coverage: dec!(0.8),
+                min_full_l2_coverage: dec!(0.8),
+                min_cpcv_paths: 16,
+                min_deflated_sharpe_ratio: dec!(0.1),
+                max_probability_of_backtest_overfitting: dec!(0.2),
+                max_ambiguous_touch_rate: dec!(0.01),
+                max_depth_failure_rate: dec!(0.05),
+                min_lower_confidence_utility_bps: Bps::new(dec!(1)),
+            },
+        }
+    }
+
+    #[test]
+    fn decision_inside_fit_window_with_label_maturing_after_cutoff_is_excluded() {
+        let contract = contract();
+        let decision_at = contract.fit_window_end - Duration::hours(1);
+
+        assert!(!label_visible_at_cutoff(
+            &contract,
+            decision_at,
+            contract.pit_cutoff + Duration::seconds(1),
+        ));
+        assert!(label_visible_at_cutoff(
+            &contract,
+            decision_at,
+            contract.pit_cutoff,
+        ));
+    }
 }

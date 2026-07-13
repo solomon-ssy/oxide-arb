@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_api::{clob::ClobClient, fees::FeeCalculator};
+use quant_pivot_api::{
+    clob::{ClobClient, OrderSubmissionError, OrderSubmissionStage},
+    fees::FeeCalculator,
+};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
     domain::{OrderRequest, OrderResponse},
@@ -147,6 +150,15 @@ impl From<ApiError> for VenueOutcome {
     }
 }
 
+impl From<&OrderSubmissionError> for VenueOutcome {
+    fn from(error: &OrderSubmissionError) -> Self {
+        match error.stage {
+            OrderSubmissionStage::Prepare | OrderSubmissionStage::Sign => Self::Rejected,
+            OrderSubmissionStage::Post => Self::from(&error.source),
+        }
+    }
+}
+
 /// Result of a venue submission (always returned — never an error).
 #[derive(Debug, Clone)]
 pub struct VenueSubmitResult {
@@ -177,7 +189,7 @@ impl VenueSubmitResult {
         }
     }
 
-    fn from_error(error: &ApiError, submitted_at: DateTime<Utc>) -> Self {
+    fn from_error(error: &OrderSubmissionError, submitted_at: DateTime<Utc>) -> Self {
         Self {
             outcome: error.into(),
             venue_order_id: None,

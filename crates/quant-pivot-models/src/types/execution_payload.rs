@@ -21,8 +21,8 @@ use crate::{
     },
     jsonb_active,
     types::{
-        Bps, Price, Probability, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
-        TrailingStopPolicy, Usd,
+        Bps, ContentHash, ModelVersionId, Price, Probability, ScaleOutTarget, Shares,
+        ThesisInvalidationPolicy, TokenId, TrailingStopPolicy, Usd,
     },
 };
 
@@ -33,6 +33,31 @@ use crate::{
 pub enum OrderAmount {
     Usd(Usd),
     Shares(Shares),
+}
+
+/// Persisted classification of the latest governed thesis re-inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitReinferenceVerdictKind {
+    Holds,
+    ThesisInvalidated,
+    Indeterminate,
+}
+
+/// Latest re-inference evidence persisted on the intent at the governed cadence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct ExitReinferenceObservation {
+    pub observed_at: DateTime<Utc>,
+    pub model_version_id: ModelVersionId,
+    pub model_artifact_hash: ContentHash,
+    pub mark: Price,
+    pub score: Probability,
+    pub score_retention: Decimal,
+    pub expected_return_bps: Bps,
+    pub execution_eligible: bool,
+    pub verdict: ExitReinferenceVerdictKind,
+    pub detail: String,
+    pub shadow: bool,
 }
 
 impl OrderAmount {
@@ -51,6 +76,15 @@ impl OrderAmount {
             Self::Usd(_) => None,
         }
     }
+}
+
+/// Exact next cumulative scale-out projection shared by monitor and read APIs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextScaleOutProjection {
+    pub target_id: String,
+    pub trigger_price: Price,
+    pub target_cumulative_exit_pct: Decimal,
+    pub delta_shares: Shares,
 }
 
 /// The concrete entry order an approved intent will submit to the venue.
@@ -143,6 +177,58 @@ pub struct ExitPolicySpec {
     pub entry_composite_score: Probability,
 }
 
+impl ExitPolicySpec {
+    /// Tightest absolute, percentage, or armed trailing stop.
+    #[must_use]
+    pub fn effective_stop(&self, avg_price: Price, peak: Option<Price>) -> Option<Price> {
+        let mut stop = self.stop_loss_price;
+        if let Some(pct) = self.stop_loss_pct {
+            let from_pct = avg_price * (Decimal::ONE - pct);
+            stop = Some(stop.map_or(from_pct, |value| value.max(from_pct)));
+        }
+        if let (Some(trailing), Some(peak)) = (&self.trailing_stop, peak)
+            && trailing
+                .activation_price
+                .is_none_or(|activation| peak >= activation)
+        {
+            let trail = peak * (Decimal::ONE - trailing.trail_bps.inner() / Decimal::from(10_000));
+            stop = Some(stop.map_or(trail, |value| value.max(trail)));
+        }
+        stop
+    }
+
+    /// First active, unsettled scale-out target and its exact incremental shares.
+    #[must_use]
+    pub fn next_scale_out(
+        &self,
+        state: &ScaleOutState,
+        remaining_shares: Shares,
+        mark: Option<Price>,
+        now: DateTime<Utc>,
+    ) -> Option<NextScaleOutProjection> {
+        let mark = mark?;
+        self.scale_out_targets.iter().find_map(|target| {
+            if state.contains(&target.target_id)
+                || target.valid_after.is_some_and(|after| now < after)
+                || target.valid_until.is_some_and(|until| now > until)
+                || target.min_price.is_some_and(|minimum| mark < minimum)
+                || mark < target.trigger_price
+            {
+                return None;
+            }
+            let delta_shares = state
+                .delta_to_target(target.target_cumulative_exit_pct)
+                .min(remaining_shares);
+            delta_shares.is_positive().then(|| NextScaleOutProjection {
+                target_id: target.target_id.clone(),
+                trigger_price: target.trigger_price,
+                target_cumulative_exit_pct: target.target_cumulative_exit_pct,
+                delta_shares,
+            })
+        })
+    }
+}
+
 /// One in-flight cumulative scale-out target.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingScaleOut {
@@ -201,9 +287,23 @@ impl ScaleOutState {
         let target = denominator.inner() * target_pct;
         Shares::new((target - self.cumulative_exited_shares.inner()).max(Decimal::ZERO))
     }
+
+    #[must_use]
+    pub fn cumulative_exit_pct(&self) -> Option<Decimal> {
+        let denominator = self.denominator_shares?;
+        denominator.is_positive().then(|| {
+            (self.cumulative_exited_shares.inner() / denominator.inner())
+                .clamp(Decimal::ZERO, Decimal::ONE)
+        })
+    }
 }
 
-jsonb_active!(EntryOrderSpec, ExitPolicySpec, ScaleOutState);
+jsonb_active!(
+    EntryOrderSpec,
+    ExitPolicySpec,
+    ExitReinferenceObservation,
+    ScaleOutState
+);
 
 #[cfg(test)]
 mod tests {

@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS quant_recommendation_event
     side Enum8('yes' = 1, 'no' = 2),
     score Decimal64(8),
     risk_adjusted_score Decimal64(8),
-    suggested_usd Decimal128(18),
+    trade_plan_available Bool,
+    suggested_usd Nullable(Decimal128(18)),
     valid_until DateTime64(3, 'UTC'),
     status Enum8('published' = 1, 'revoked' = 2, 'expired' = 3, 'intent_created' = 4, 'executed' = 5, 'attributed' = 6)
 )

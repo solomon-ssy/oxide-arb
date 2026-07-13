@@ -6,15 +6,14 @@ use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
-use quant_pivot_api::{clob::ClobClient, infra::retry::RetryPolicy, keystore::OrderSigner};
+use quant_pivot_api::{clob::ClobClient, keystore::OrderSigner};
 use quant_pivot_models::{
     domain::order::OrderRequest,
     enums::common::{OrderType, Side},
     types::{MarketId, Price, Shares, TokenId, Usd, execution_payload::OrderAmount},
 };
 use rust_decimal_macros::dec;
-use std::str::FromStr as _;
-use std::sync::Arc;
+use std::{str::FromStr as _, sync::Arc, time::Duration};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path, query_param},
@@ -122,19 +121,15 @@ pub async fn test_sdk_client(server: &MockServer) -> Arc<SdkClient<Authenticated
 }
 
 pub async fn test_clob_client(server: &MockServer) -> ClobClient {
-    let sdk = test_sdk_client(server).await;
-    ClobClient::from_sdk_for_test(sdk, test_signer()).with_order_retry_policy(fast_retry_policy())
+    test_clob_client_with_order_timeout(server, Duration::from_secs(15)).await
 }
 
-const fn fast_retry_policy() -> RetryPolicy {
-    RetryPolicy {
-        max_attempts: Some(2),
-        initial_interval_ms: 1,
-        max_interval_ms: 1,
-        randomization_factor: 0.0,
-        multiplier: 1.0,
-        max_elapsed_time_ms: None,
-    }
+pub async fn test_clob_client_with_order_timeout(
+    server: &MockServer,
+    order_post_timeout: Duration,
+) -> ClobClient {
+    let sdk = test_sdk_client(server).await;
+    ClobClient::from_sdk_for_test(sdk, test_signer(), order_post_timeout)
 }
 
 pub fn test_order_request(order_type: OrderType) -> OrderRequest {

@@ -15,7 +15,7 @@ use async_trait::async_trait;
 
 use crate::{
     domain::{ExecutionOrderInfo, OrderIntentInfo, OrderIntentListQuery, Paginated},
-    types::{OrderIntentId, Price, RecommendationId, Shares, Usd},
+    types::{OrderAmount, OrderIntentId, Price, RecommendationId},
 };
 use quant_pivot_error::QuantResult;
 use uuid::Uuid;
@@ -36,26 +36,16 @@ pub struct CreateIntentCommand {
 
 /// Approve a `PendingApproval` intent.
 ///
-/// Approval may only **narrow** the order: `override_shares` (≤ frozen shares)
-/// and `override_limit_price` (≤ recommendation limit) reduce the entry, and the
-/// reserved capital is shrunk to match in the same transaction. Widening or
-/// loosening any bound is rejected. `max_allowed_usd`, when present, caps the
-/// resulting notional. Approval is refused outright if any invalidation
-/// condition is met at approval time (fail-closed).
+/// Approval may only **narrow** the tagged amount and side-aware price. The
+/// reserved capital is atomically shrunk to the final frozen order notional.
 #[derive(Debug, Clone)]
 pub struct ApproveIntentCommand {
     pub order_intent_id: OrderIntentId,
     pub operator_id: Uuid,
     pub acting_role: String,
     pub reason: String,
-    /// Optional downscaled share quantity (must be ≤ the frozen entry shares).
-    pub override_shares: Option<Shares>,
-    /// Optional downscaled limit price (must be ≤ the frozen entry limit).
-    pub override_limit_price: Option<Price>,
-    /// Optional hard cap on the approved notional.
-    pub max_allowed_usd: Option<Usd>,
-    /// Optional free-form operator note recorded in the operation log.
-    pub override_note: Option<String>,
+    pub override_amount: Option<OrderAmount>,
+    pub override_price: Option<Price>,
 }
 
 /// Reject a `PendingApproval` intent and release its reserved capital.

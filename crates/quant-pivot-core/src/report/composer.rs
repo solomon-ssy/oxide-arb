@@ -15,9 +15,8 @@ use quant_pivot_models::{
         common::{MarketCategory, TickSize},
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EmptyReportReason, ExitSettlementMode, IneligibilityReason, PriceComparison,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportKind,
+            EmptyReportReason, IneligibilityReason, PriceComparison, QuantRuntimeMode,
+            RecommendationReportStatus, RecommendationStatus, ReportKind,
         },
         rbac::ResourceType,
     },
@@ -31,9 +30,9 @@ use quant_pivot_models::{
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope,
-        RuntimeConfigVersionId, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
-        TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
+        RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary,
+        RiskEnvelope, RuntimeConfigVersionId, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
+        TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
     },
 };
 use quant_pivot_research::{
@@ -43,12 +42,9 @@ use quant_pivot_research::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use super::{
-    entry_plan::derive_entry_plan,
-    types::{
-        ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
-        ReportTrigger,
-    },
+use super::types::{
+    ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
+    ReportTrigger,
 };
 
 /// Inputs required to compose one report artifact.
@@ -309,7 +305,7 @@ fn report_notification(
                 market_id: rec.market_id.to_string(),
                 outcome_side: rec.outcome_side,
                 score: rec.composite_score,
-                suggested_usd: rec.sizing_plan.suggested_usd,
+                suggested_usd: rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd),
             })
             .collect(),
         warnings: summary.warnings.clone(),
@@ -344,7 +340,11 @@ fn compose_recommendation(
         &candidate.market_id,
     )?;
     let compose_context = resolve_compose_context(candidate, input)?;
-    let policy = resolve_recommendation_policy(planned, capture, input, horizon_secs);
+    let policy = if input.return_model_calibrated {
+        resolve_recommendation_policy(planned, capture, input, horizon_secs)
+    } else {
+        Err(vec![TradePlanBlocker::ReturnModelUncalibrated])
+    };
     let mut auto_gate = calibrated_auto_execution_gate(
         candidate,
         planned.rank,
@@ -352,7 +352,7 @@ fn compose_recommendation(
         input.runtime_config,
         input.return_model_calibrated,
     )?;
-    if policy.is_none() {
+    if policy.is_err() {
         auto_gate.allowed = false;
         if !auto_gate
             .reasons
@@ -372,7 +372,6 @@ fn compose_recommendation(
         capture,
         input,
         compose_context,
-        horizon_secs,
         valid_until,
         data_quality_snapshot_ref,
         auto_gate: &auto_gate,
@@ -449,16 +448,19 @@ fn resolve_recommendation_policy(
     capture: &MarketDecisionCapture,
     input: &ComposeReportInput<'_>,
     horizon_secs: u64,
-) -> Option<ResolvedRecommendationPolicy> {
-    let artifact = input.trade_policy?;
+) -> Result<ResolvedRecommendationPolicy, Vec<TradePlanBlocker>> {
+    let Some(artifact) = input.trade_policy else {
+        return Err(vec![TradePlanBlocker::ModelPolicyBindingMissing]);
+    };
     let (entry_price, worst_ask_price) =
-        ask_vwap_for_usd(&capture.book.asks, planned.sizing.suggested_usd)?;
+        ask_vwap_for_usd(&capture.book.asks, planned.sizing.suggested_usd)
+            .ok_or_else(|| vec![TradePlanBlocker::LiquidityInsufficient])?;
     let liquidity_tier = match capture.market_context.depth_usd.inner() {
         value if value >= Decimal::from(10_000) => "deep",
         value if value >= Decimal::from(1_000) => "medium",
         _ => "shallow",
     };
-    let (cohort_index, cohort) = artifact
+    let candidates = artifact
         .payload_json
         .cohorts
         .iter()
@@ -466,29 +468,43 @@ fn resolve_recommendation_policy(
         .filter(|(_, cohort)| {
             cohort.key.category == capture.identity.category
                 && cohort.key.horizon_secs == horizon_secs
-                && cohort.key.notional_tier >= planned.sizing.suggested_usd
-                && cohort.key.liquidity_tier == liquidity_tier
-                && cohort.key.volatility_regime == "unclassified"
+                && cohort.key.notional_tier == planned.sizing.suggested_usd
+                && cohort.key.liquidity.bucket_id == liquidity_tier
                 && entry_price >= cohort.key.entry_price_min
                 && (entry_price < cohort.key.entry_price_max
                     || (cohort.key.entry_price_max == Price::ONE && entry_price == Price::ONE))
-                && cohort.executable_coverage
-                    >= artifact
-                        .payload_json
-                        .fit_contract
-                        .minimum_executable_coverage
-                && cohort.lower_confidence_utility_bps > Decimal::ZERO
         })
-        .min_by_key(|(_, cohort)| cohort.key.notional_tier)?;
-    let cohort_index = u32::try_from(cohort_index).ok()?;
-    Some(ResolvedRecommendationPolicy {
+        .collect::<Vec<_>>();
+    let [(cohort_index, cohort)] = candidates.as_slice() else {
+        return Err(vec![TradePlanBlocker::CohortNotFound]);
+    };
+    if cohort.executable_coverage
+        < artifact
+            .payload_json
+            .fit_contract
+            .quality_gate
+            .min_executable_coverage
+        || cohort.lower_confidence_utility_bps
+            < Some(
+                artifact
+                    .payload_json
+                    .fit_contract
+                    .quality_gate
+                    .min_lower_confidence_utility_bps,
+            )
+    {
+        return Err(vec![TradePlanBlocker::CohortCoverageInsufficient]);
+    }
+    let cohort_index = u32::try_from(*cohort_index)
+        .map_err(|_| vec![TradePlanBlocker::ArtifactFormatUnsupported])?;
+    Ok(ResolvedRecommendationPolicy {
         provenance: TradePolicyCohortProvenance {
             artifact_id: artifact.artifact_id.clone(),
             artifact_hash: artifact.content_hash.clone(),
             cohort_index,
             cohort_key: cohort.key.clone(),
         },
-        cohort: cohort.clone(),
+        cohort: (*cohort).clone(),
         executable_entry_price: entry_price,
         worst_ask_price,
     })
@@ -525,18 +541,11 @@ fn ask_vwap_for_usd(
 }
 
 fn policy_entry_plan(
-    candidate: &SignalCandidate,
     published_at: DateTime<Utc>,
     valid_until: DateTime<Utc>,
-    config: &RuntimeConfig,
     tick_size: TickSize,
-    policy: Option<&ResolvedRecommendationPolicy>,
-) -> QuantResult<EntryPlan> {
-    let Some(policy) = policy else {
-        let mut plan = derive_entry_plan(candidate, published_at, valid_until, config)?;
-        align_entry_plan_to_tick(&mut plan, tick_size);
-        return Ok(plan);
-    };
+    policy: &ResolvedRecommendationPolicy,
+) -> EntryPlan {
     let trigger = match policy.cohort.entry_trigger {
         EntryTriggerTemplate::Immediate => EntryTrigger::Immediate,
         EntryTriggerTemplate::PriceOffset {
@@ -560,7 +569,7 @@ fn policy_entry_plan(
     };
     let order_policy = match policy.cohort.entry_order {
         EntryOrderTemplate::Passive { post_only } => EntryOrderPolicy::Passive {
-            limit_price: candidate.entry_price_ref,
+            limit_price: policy.executable_entry_price,
             post_only,
         },
         EntryOrderTemplate::Aggressive { fill_requirement } => EntryOrderPolicy::Aggressive {
@@ -568,55 +577,36 @@ fn policy_entry_plan(
             fill_requirement,
         },
     };
-    let mut plan = derive_entry_plan(candidate, published_at, valid_until, config)?;
-    plan.trade_policy = Some(policy.provenance.clone());
-    plan.trigger = trigger;
-    plan.order_policy = order_policy;
-    plan.min_depth_usd = policy.cohort.key.notional_tier;
-    plan.entry_reason = format!(
-        "published trade policy {} cohort {}",
-        policy.provenance.artifact_id, policy.provenance.cohort_index
-    );
+    let mut plan = EntryPlan {
+        trigger,
+        order_policy,
+        max_slippage_bps: policy.cohort.max_slippage_bps,
+        valid_from: published_at,
+        valid_until,
+        min_depth_usd: policy.cohort.key.notional_tier,
+        max_book_age_ms: policy.cohort.max_book_age_ms,
+        cancel_if_not_triggered: true,
+        entry_reason: format!(
+            "published trade policy {} cohort {}",
+            policy.provenance.artifact_id, policy.provenance.cohort_index
+        ),
+    };
     align_entry_plan_to_tick(&mut plan, tick_size);
-    Ok(plan)
+    plan
 }
 
 fn policy_exit_plan(
-    candidate: &SignalCandidate,
     as_of: DateTime<Utc>,
-    config: &RuntimeConfig,
-    horizon_secs: u64,
-    time_to_resolution_secs: Option<u64>,
     tick_size: TickSize,
-    policy: Option<&ResolvedRecommendationPolicy>,
+    policy: &ResolvedRecommendationPolicy,
 ) -> QuantResult<ExitPlan> {
-    let mut plan = exit_plan(
-        candidate,
-        as_of,
-        config,
-        horizon_secs,
-        time_to_resolution_secs,
-    )?;
-    let Some(policy) = policy else {
-        align_exit_plan_to_tick(&mut plan, tick_size);
-        return Ok(plan);
-    };
     let entry = policy.executable_entry_price.inner();
     let upper_factor =
         Decimal::ONE + policy.cohort.upper_barrier_bps.inner() / Decimal::from(10_000);
     let lower_factor =
         Decimal::ONE - policy.cohort.lower_barrier_bps.inner() / Decimal::from(10_000);
-    plan.trade_policy = Some(policy.provenance.clone());
-    plan.take_profit_price = Some(bounded_price(entry * upper_factor));
-    plan.take_profit_pct = Some(upper_factor - Decimal::ONE);
-    plan.stop_loss_price = Some(bounded_price(entry * lower_factor));
-    plan.stop_loss_pct = Some(Decimal::ONE - lower_factor);
-    plan.max_hold_secs = Some(policy.cohort.vertical_barrier_secs);
-    plan.time_exit_at = Some(instant_plus_secs(
-        as_of,
-        policy.cohort.vertical_barrier_secs,
-    )?);
-    plan.scale_out_targets = policy
+    let time_exit_at = instant_plus_secs(as_of, policy.cohort.vertical_barrier_secs)?;
+    let scale_out_targets = policy
         .cohort
         .scale_out_targets
         .iter()
@@ -628,11 +618,11 @@ fn policy_exit_plan(
             target_cumulative_exit_pct: target.target_cumulative_exit_pct,
             min_price: None,
             valid_after: None,
-            valid_until: plan.time_exit_at,
+            valid_until: Some(time_exit_at),
             reason: format!("trade policy cohort {}", policy.provenance.cohort_index),
         })
         .collect();
-    plan.trailing_stop = policy
+    let trailing_stop = policy
         .cohort
         .trailing_stop
         .as_ref()
@@ -644,15 +634,28 @@ fn policy_exit_plan(
                         + trailing.activation_return_bps.inner() / Decimal::from(10_000)),
             )),
         });
-    plan.thesis_invalidation = ThesisInvalidationPolicy {
-        min_score_retention: policy.cohort.min_score_retention,
-        min_expected_return_bps: policy.cohort.min_expected_return_bps,
-        require_execution_eligibility: policy.cohort.require_execution_eligibility,
+    let mut plan = ExitPlan {
+        take_profit_price: Some(bounded_price(entry * upper_factor)),
+        take_profit_pct: Some(upper_factor - Decimal::ONE),
+        stop_loss_price: Some(bounded_price(entry * lower_factor)),
+        stop_loss_pct: Some(Decimal::ONE - lower_factor),
+        time_exit_at: Some(time_exit_at),
+        max_hold_secs: Some(policy.cohort.vertical_barrier_secs),
+        scale_out_targets,
+        trailing_stop,
+        thesis_invalidation: ThesisInvalidationPolicy {
+            min_score_retention: policy.cohort.min_score_retention,
+            min_expected_return_bps: policy.cohort.min_expected_return_bps,
+            require_execution_eligibility: policy.cohort.require_execution_eligibility,
+        },
+        settlement_mode: policy.cohort.settlement_mode,
+        redeem_policy: policy.cohort.redeem_policy,
+        manual_review_at: None,
+        exit_reason: format!(
+            "published trade policy {} cohort {}",
+            policy.provenance.artifact_id, policy.provenance.cohort_index
+        ),
     };
-    plan.exit_reason = format!(
-        "published trade policy {} cohort {}",
-        policy.provenance.artifact_id, policy.provenance.cohort_index
-    );
     align_exit_plan_to_tick(&mut plan, tick_size);
     Ok(plan)
 }
@@ -753,12 +756,11 @@ struct NewRecommendationAssembly<'a> {
     capture: &'a MarketDecisionCapture,
     input: &'a ComposeReportInput<'a>,
     compose_context: ComposeRecommendationContext,
-    horizon_secs: u64,
     valid_until: DateTime<Utc>,
     data_quality_snapshot_ref: &'a ReportDataQualitySnapshotId,
     auto_gate: &'a AutoExecutionGate,
     risk_envelope: RiskEnvelope,
-    policy: Option<ResolvedRecommendationPolicy>,
+    policy: Result<ResolvedRecommendationPolicy, Vec<TradePlanBlocker>>,
 }
 
 fn build_new_recommendation(
@@ -771,30 +773,33 @@ fn build_new_recommendation(
         capture,
         input,
         compose_context,
-        horizon_secs,
         valid_until,
         data_quality_snapshot_ref,
         auto_gate,
         risk_envelope,
         policy,
     } = assembly;
-    let entry_plan = policy_entry_plan(
-        candidate,
-        input.published_at,
-        valid_until,
-        input.runtime_config,
-        capture.market_context.tick_size,
-        policy.as_ref(),
-    )?;
-    let exit_plan = policy_exit_plan(
-        candidate,
-        input.decision_at,
-        input.runtime_config,
-        horizon_secs,
-        capture.market_context.time_to_resolution_secs,
-        capture.market_context.tick_size,
-        policy.as_ref(),
-    )?;
+    let trade_policy_available = policy.is_ok();
+    let trade_plan = match policy {
+        Ok(policy) => {
+            let entry = policy_entry_plan(
+                input.published_at,
+                valid_until,
+                capture.market_context.tick_size,
+                &policy,
+            );
+            let exit =
+                policy_exit_plan(input.decision_at, capture.market_context.tick_size, &policy)?;
+            RecommendationTradePlan::Frozen {
+                policy: Box::new(policy.provenance),
+                entry,
+                sizing: Box::new(planned.sizing.clone()),
+                exit: Box::new(exit),
+                risk_envelope: Box::new(risk_envelope),
+            }
+        }
+        Err(blockers) => RecommendationTradePlan::Unavailable { blockers },
+    };
     Ok(NewRecommendation {
         recommendation_id: RecommendationId::from_v7(),
         recommendation_report_id: report_id.clone(),
@@ -822,10 +827,7 @@ fn build_new_recommendation(
         liquidity_score: candidate.liquidity_score,
         data_quality_score: candidate.data_quality_score,
         model_score_percentile: candidate.model_score_percentile,
-        entry_plan,
-        sizing_plan: planned.sizing.clone(),
-        exit_plan,
-        risk_envelope,
+        trade_plan,
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
             signal_candidate_id: candidate.signal_candidate_id.clone(),
@@ -841,7 +843,7 @@ fn build_new_recommendation(
         execution_eligibility: execution_eligibility(
             auto_gate,
             input.return_model_calibrated,
-            policy.is_some(),
+            trade_policy_available,
         ),
         valid_from: input.published_at,
         valid_until,
@@ -868,100 +870,6 @@ fn compose_risk_envelope(
         );
     }
     risk_envelope
-}
-
-fn exit_plan(
-    candidate: &SignalCandidate,
-    as_of: DateTime<Utc>,
-    config: &RuntimeConfig,
-    horizon_secs: u64,
-    time_to_resolution_secs: Option<u64>,
-) -> QuantResult<ExitPlan> {
-    let loss = Bps::new(candidate.downside_bps)
-        .to_fraction()
-        .max(Decimal::ZERO);
-    let reward_multiple = parse_decimal(
-        "portfolio.sizing.target_reward_multiple",
-        &config.portfolio.sizing.target_reward_multiple.value,
-    )?;
-    let gain = reward_multiple * loss;
-    let take_profit_price = Price::new(
-        (candidate.entry_price_ref.inner() * (Decimal::ONE + gain))
-            .clamp(Decimal::ZERO, Decimal::ONE),
-    );
-    let stop_loss_price = Price::new(
-        (candidate.entry_price_ref.inner() * (Decimal::ONE - loss))
-            .clamp(Decimal::ZERO, Decimal::ONE),
-    );
-    let time_exit_at = instant_plus_secs(as_of, horizon_secs)?;
-
-    // Origination of the hold-to-resolution + auto-redeem lifecycle: when the
-    // market resolves within the governed window, forcing an on-book time-exit
-    // would just pay spread/slippage moments before settlement on a position
-    // about to pay 0/1. Holding to resolution and redeeming the CTF payout is
-    // strictly better. The protective stop-loss is retained either way (05.6
-    // still honors it on hold-to-resolution lots); only the take-profit and the
-    // time-exit are dropped when holding. `RedeemPolicy::Auto` is a pure config
-    // decision frozen on the intent — the settlement worker remains the
-    // authoritative gate that fails closed (topology / neg-risk / balance).
-    let redeem = &config.execution.settlement_redeem;
-    let hold_to_resolution = redeem.hold_to_resolution_enabled
-        && time_to_resolution_secs.is_some_and(|ttr| ttr <= redeem.hold_to_resolution_within_secs);
-
-    let (take_profit_price, take_profit_pct, time_exit_at, max_hold_secs) = if hold_to_resolution {
-        (None, None, None, None)
-    } else {
-        (
-            Some(take_profit_price),
-            Some(gain),
-            Some(time_exit_at),
-            Some(horizon_secs),
-        )
-    };
-    let (settlement_mode, redeem_policy) = if hold_to_resolution {
-        let redeem_policy = if redeem.enabled {
-            RedeemPolicy::Auto
-        } else {
-            RedeemPolicy::Manual
-        };
-        (ExitSettlementMode::HoldToResolution, redeem_policy)
-    } else {
-        (
-            ExitSettlementMode::ExitBeforeResolution,
-            RedeemPolicy::Manual,
-        )
-    };
-
-    Ok(ExitPlan {
-        trade_policy: None,
-        take_profit_price,
-        take_profit_pct,
-        // The protective stop-loss is the single full-exit scalar that survives
-        // into hold-to-resolution; `partial_exit_nodes` is reserved for genuine
-        // *scaled* exits (`sell_pct < 1`), so the Kelly structure carries none.
-        stop_loss_price: Some(stop_loss_price),
-        stop_loss_pct: Some(loss),
-        time_exit_at,
-        max_hold_secs,
-        scale_out_targets: Vec::new(),
-        trailing_stop: None,
-        thesis_invalidation: ThesisInvalidationPolicy {
-            min_score_retention: Decimal::new(6, 1),
-            min_expected_return_bps: Bps::ZERO,
-            require_execution_eligibility: true,
-        },
-        settlement_mode,
-        redeem_policy,
-        manual_review_at: None,
-        exit_reason: format!(
-            "Kelly bet structure: downside={} bps, target_reward_multiple={}, target_gain={}%, settlement={}; model headline: {}",
-            candidate.downside_bps,
-            reward_multiple,
-            (gain * Decimal::from(100)).round_dp(4),
-            settlement_mode.as_str(),
-            candidate.model_explanation.headline
-        ),
-    })
 }
 
 fn factor_breakdown(candidate: &SignalCandidate) -> RecommendationFactorBreakdown {
@@ -1126,18 +1034,21 @@ fn report_summary(
     let mut category_allocation: BTreeMap<MarketCategory, Usd> = BTreeMap::new();
     let mut event_allocation: BTreeMap<EventId, Usd> = BTreeMap::new();
     for rec in recommendations {
+        let Some(sizing) = rec.trade_plan.sizing() else {
+            continue;
+        };
         *category_allocation
             .entry(rec.identity.category)
-            .or_default() += rec.sizing_plan.suggested_usd;
-        *event_allocation.entry(rec.event_id.clone()).or_default() += rec.sizing_plan.suggested_usd;
+            .or_default() += sizing.suggested_usd;
+        *event_allocation.entry(rec.event_id.clone()).or_default() += sizing.suggested_usd;
     }
     let total_suggested_usd = recommendations
         .iter()
-        .map(|rec| rec.sizing_plan.suggested_usd)
+        .filter_map(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd))
         .sum();
     let max_single_recommendation_usd = recommendations
         .iter()
-        .map(|rec| rec.sizing_plan.suggested_usd)
+        .filter_map(|rec| rec.trade_plan.sizing().map(|sizing| sizing.suggested_usd))
         .max()
         .unwrap_or(Usd::ZERO);
     let average_score = average_probability(
@@ -1299,7 +1210,11 @@ fn recommendation_events(
                 side: rec.outcome_side.into(),
                 score: ChProbability::from(rec.composite_score),
                 risk_adjusted_score: ChProbability::from(rec.risk_adjusted_score),
-                suggested_usd: ChUsd::from(rec.sizing_plan.suggested_usd),
+                trade_plan_available: rec.trade_plan.is_available(),
+                suggested_usd: rec
+                    .trade_plan
+                    .sizing()
+                    .map(|sizing| ChUsd::from(sizing.suggested_usd)),
                 valid_until: rec.valid_until.timestamp_millis(),
                 status: rec.status.into(),
             })
@@ -1470,8 +1385,8 @@ mod tests {
         enums::{
             common::TickSize,
             quant::{
-                AccountSource, BindingConstraint, EmptyReportReason, ExitSettlementMode,
-                IneligibilityReason, OutcomeSide, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
+                AccountSource, BindingConstraint, EmptyReportReason, IneligibilityReason,
+                OutcomeSide, QuantRuntimeMode, SizingModelKind,
             },
         },
         runtime_config::RuntimeConfig,
@@ -1493,7 +1408,7 @@ mod tests {
     use super::{
         ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer, TickDirection,
         actionable_valid_until, auto_execution_gate, effective_horizon_from, empty_plan_for_report,
-        entry_window_secs, execution_eligibility, exit_plan, tick_aligned_price,
+        entry_window_secs, execution_eligibility, tick_aligned_price,
     };
     use crate::report::{composer::compute_aggregate_exposure_cap_usd, types::ReportTrigger};
 
@@ -1675,73 +1590,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn exit_plan_uses_reward_multiple_not_expected_return_for_take_profit() {
-        let as_of = Utc
-            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
-            .single()
-            .expect("valid time");
-        let mut config = RuntimeConfig::default();
-        config.portfolio.sizing.target_reward_multiple.value = "2.0".to_owned();
-
-        let plan = exit_plan(&candidate(), as_of, &config, 3_600, None).expect("exit plan");
-
-        assert_eq!(plan.stop_loss_pct, Some(dec!(0.1)));
-        assert_eq!(plan.take_profit_pct, Some(dec!(0.20)));
-        assert_eq!(
-            plan.stop_loss_price.expect("stop loss price").inner(),
-            dec!(0.45)
-        );
-        assert_eq!(
-            plan.take_profit_price.expect("take profit price").inner(),
-            dec!(0.600)
-        );
-        assert!(plan.scale_out_targets.is_empty());
-        assert_eq!(plan.time_exit_at, Some(as_of + Duration::seconds(3_600)));
-        assert_eq!(
-            plan.settlement_mode,
-            ExitSettlementMode::ExitBeforeResolution
-        );
-        assert_eq!(plan.redeem_policy, RedeemPolicy::Manual);
-    }
-
-    #[test]
-    fn exit_plan_holds_to_resolution_and_auto_redeems_near_resolution() {
-        let as_of = Utc
-            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
-            .single()
-            .expect("valid time");
-        let mut config = RuntimeConfig::default();
-        config.execution.settlement_redeem.enabled = true;
-        config
-            .execution
-            .settlement_redeem
-            .hold_to_resolution_enabled = true;
-        config
-            .execution
-            .settlement_redeem
-            .hold_to_resolution_within_secs = 86_400;
-
-        // Market resolves in 1h, inside the 24h hold window.
-        let plan = exit_plan(&candidate(), as_of, &config, 3_600, Some(3_600)).expect("exit plan");
-
-        assert_eq!(plan.settlement_mode, ExitSettlementMode::HoldToResolution);
-        assert_eq!(plan.redeem_policy, RedeemPolicy::Auto);
-        // Take-profit and time-exit are dropped; the protective stop-loss stays.
-        assert_eq!(plan.take_profit_price, None);
-        assert_eq!(plan.time_exit_at, None);
-        assert_eq!(plan.max_hold_secs, None);
-        assert!(plan.stop_loss_price.is_some());
-
-        // Far-from-resolution markets keep the on-book exit ladder.
-        let far = exit_plan(&candidate(), as_of, &config, 3_600, Some(200_000)).expect("exit plan");
-        assert_eq!(
-            far.settlement_mode,
-            ExitSettlementMode::ExitBeforeResolution
-        );
-        assert_eq!(far.redeem_policy, RedeemPolicy::Manual);
-    }
-
     fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
         SizingPlan {
             suggested_usd,
@@ -1765,7 +1613,6 @@ mod tests {
             drawdown_shrink_applied: None,
             raw_fraction_applied: None,
             position_cap_fraction_applied: None,
-            bet_structure_applied: None,
         }
     }
 
@@ -1840,7 +1687,6 @@ mod tests {
                 drawdown_shrink_applied: None,
                 raw_fraction_applied: None,
                 position_cap_fraction_applied: None,
-                bet_structure_applied: None,
             },
             risk_envelope: RiskEnvelope {
                 max_loss_usd: Usd::new(dec!(120)),

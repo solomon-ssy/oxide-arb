@@ -525,7 +525,7 @@ impl DefaultReportBuilder {
                     })?;
                 let computed_hash = ResearchHasher::canonical(&policy.payload_json)?;
                 if policy.status != TradePolicyStatus::Published
-                    || !policy.payload_json.validation.passed
+                    || !policy.payload_json.is_publishable()
                     || &policy.content_hash != expected_hash
                     || computed_hash != policy.content_hash
                 {
@@ -1123,16 +1123,23 @@ fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Usd> {
 /// (04.2 §4 step 8). Each reason has an independent, non-collapsed trigger:
 ///
 /// 1. `SolverUnavailable` (no solver could produce a plan) -> `SystemDegraded`;
-/// 2. any `BudgetExhausted` -> `PortfolioBudgetExhausted`;
-/// 3. any `AvailableCashExhausted` -> `AvailableCashExhausted` (distinct from
+/// 2. any `ReturnModelUncalibrated` -> `ReturnModelUncalibrated`;
+/// 3. any `BudgetExhausted` -> `PortfolioBudgetExhausted`;
+/// 4. any `AvailableCashExhausted` -> `AvailableCashExhausted` (distinct from
 ///    "no signal" so operators can tell "out of cash" from "no edge");
-/// 4. otherwise -> `NoPositiveSignal`.
+/// 5. otherwise -> `NoPositiveSignal`.
 fn empty_reason_from_planner_rejections(
     rejected: &[RejectedCandidate],
     solver_status: OptimizerSolverStatus,
 ) -> EmptyReportReason {
     if solver_status == OptimizerSolverStatus::SolverUnavailable {
         return EmptyReportReason::SystemDegraded;
+    }
+    if rejected
+        .iter()
+        .any(|rejected| matches!(rejected.reason, RejectionReason::ReturnModelUncalibrated))
+    {
+        return EmptyReportReason::ReturnModelUncalibrated;
     }
     if rejected
         .iter()
@@ -1194,6 +1201,17 @@ mod tests {
                 OptimizerSolverStatus::Optimal
             ),
             EmptyReportReason::AvailableCashExhausted
+        );
+    }
+
+    #[test]
+    fn empty_reason_exposes_uncalibrated_return_model() {
+        assert_eq!(
+            empty_reason_from_planner_rejections(
+                &[rejected(RejectionReason::ReturnModelUncalibrated)],
+                OptimizerSolverStatus::Optimal
+            ),
+            EmptyReportReason::ReturnModelUncalibrated
         );
     }
 

@@ -1055,15 +1055,12 @@ pub struct ExecutionConfig {
 pub struct SemiAutoConfig {
     /// Approval time-to-live in seconds.
     pub approval_ttl_secs: u64,
-    /// Whether approvers may reduce order size.
-    pub allow_size_reduction: bool,
 }
 
 impl Default for SemiAutoConfig {
     fn default() -> Self {
         Self {
             approval_ttl_secs: 900,
-            allow_size_reduction: true,
         }
     }
 }

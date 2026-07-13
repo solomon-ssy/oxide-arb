@@ -57,6 +57,7 @@ pub enum QuantOrderIntent {
     NextCheckAt,
     PeakMarkPrice,
     LastSignalRecheckAt,
+    LatestReinferenceJson,
     ScaleOutState,
     CreatedAt,
     UpdatedAt,
@@ -181,6 +182,11 @@ fn add_exit_columns(stmt: &mut TableCreateStatement) {
     .col(
         ColumnDef::new(QuantOrderIntent::LastSignalRecheckAt)
             .timestamp_with_time_zone()
+            .null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::LatestReinferenceJson)
+            .json_binary()
             .null(),
     )
     .col(

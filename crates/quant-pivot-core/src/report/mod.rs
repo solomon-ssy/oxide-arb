@@ -2,7 +2,6 @@
 
 mod builder;
 mod composer;
-mod entry_plan;
 mod lifecycle;
 mod publisher;
 mod readiness;

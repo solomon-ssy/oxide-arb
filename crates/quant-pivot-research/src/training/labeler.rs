@@ -35,7 +35,7 @@ pub const SETTLEMENT_OUTCOME: LabelName = LabelName::from_static("settlement_out
 pub const TRIPLE_BARRIER_TOUCH: LabelName = LabelName::from_static("triple_barrier_touch");
 pub const TRIPLE_BARRIER_RETURN_BPS: LabelName =
     LabelName::from_static("triple_barrier_return_bps");
-pub const META_LABEL: LabelName = LabelName::from_static("meta_label");
+pub const POLICY_NET_POSITIVE: LabelName = LabelName::from_static("policy_net_positive");
 /// `hold_vs_exit_alpha_bps`: bps advantage of exiting now (simulated fill @ t)
 /// over holding through the lot's terminal outcome (Phase 06.1).
 pub const HOLD_VS_EXIT_ALPHA_BPS: LabelName = LabelName::from_static("hold_vs_exit_alpha_bps");
@@ -68,7 +68,11 @@ pub fn label_names_for_sources(
     if sources.contains(&TrainingSampleSource::HistoricalPit) {
         labels.extend(label_names());
         if include_trade_policy_labels {
-            labels.extend([TRIPLE_BARRIER_TOUCH, TRIPLE_BARRIER_RETURN_BPS, META_LABEL]);
+            labels.extend([
+                TRIPLE_BARRIER_TOUCH,
+                TRIPLE_BARRIER_RETURN_BPS,
+                POLICY_NET_POSITIVE,
+            ]);
         }
     }
     if sources.contains(&TrainingSampleSource::LiveAttribution) {
@@ -123,7 +127,7 @@ impl TripleBarrierPolicy {
 pub enum TripleBarrierLabelKind {
     Touch,
     ReturnBps,
-    Meta,
+    PolicyNetPositive,
 }
 
 /// First-touch labeler using executable best-bid observations.
@@ -143,7 +147,7 @@ impl Labeler for TripleBarrierLabeler {
         match self.kind {
             TripleBarrierLabelKind::Touch => TRIPLE_BARRIER_TOUCH,
             TripleBarrierLabelKind::ReturnBps => TRIPLE_BARRIER_RETURN_BPS,
-            TripleBarrierLabelKind::Meta => META_LABEL,
+            TripleBarrierLabelKind::PolicyNetPositive => POLICY_NET_POSITIVE,
         }
     }
 
@@ -228,7 +232,7 @@ impl TripleBarrierLabeler {
         let value = match self.kind {
             TripleBarrierLabelKind::Touch => touch,
             TripleBarrierLabelKind::ReturnBps => return_value,
-            TripleBarrierLabelKind::Meta => {
+            TripleBarrierLabelKind::PolicyNetPositive => {
                 if return_value > Decimal::ZERO {
                     Decimal::ONE
                 } else {
@@ -760,7 +764,7 @@ mod tests {
         let market = MarketId::new("m");
         let token = TokenId::new("t");
         let window = forward(vec![sample(20, "0.50", "0.56", "0.44")], 120, None);
-        let out = TripleBarrierLabeler::new(TripleBarrierLabelKind::Meta)
+        let out = TripleBarrierLabeler::new(TripleBarrierLabelKind::PolicyNetPositive)
             .build_label(&barrier_input(&market, &token, &window));
         assert!(matches!(
             out,

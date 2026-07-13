@@ -16,6 +16,9 @@ pub struct PolymarketConfig {
     /// CLOB market-data WebSocket URL.
     /// Default: `wss://ws-subscriptions-clob.polymarket.com/ws/market`.
     pub clob_ws_url: String,
+    /// Hard timeout for the single `POST /order` attempt, in milliseconds.
+    /// A timeout is ambiguous and must be reconciled; it is never retried.
+    pub order_post_timeout_ms: u64,
     /// EVM chain ID; must be Polygon (`137`) — validated at startup.
     pub chain_id: u64,
     /// On-chain (Polygon RPC) parameters.
@@ -31,6 +34,7 @@ impl Default for PolymarketConfig {
         Self {
             clob_base_url: default_clob_url(),
             clob_ws_url: default_clob_ws_url(),
+            order_post_timeout_ms: default_order_post_timeout(),
             chain_id: default_chain_id(),
             onchain: OnchainConfig::default(),
             relayer: RelayerConfig::default(),
@@ -47,6 +51,9 @@ fn default_clob_ws_url() -> String {
 }
 const fn default_chain_id() -> u64 {
     137
+}
+const fn default_order_post_timeout() -> u64 {
+    15_000
 }
 
 /// On-chain interaction parameters (Polygon RPC).

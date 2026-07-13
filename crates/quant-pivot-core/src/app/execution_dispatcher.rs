@@ -289,9 +289,13 @@ fn evaluate_armed_intent(
     let best_ask = snapshot
         .as_deref()
         .and_then(quant_pivot_models::domain::BookSnapshot::best_ask);
-    let book_fresh = snapshot.as_deref().is_some_and(|book| {
-        now_ms.saturating_sub(book.timestamp_ms) <= recommendation.entry_plan.max_book_age_ms
-    });
+    let max_book_age_ms = recommendation
+        .trade_plan
+        .frozen()
+        .map_or(0, |(_, entry, _, _, _)| entry.max_book_age_ms);
+    let book_fresh = snapshot
+        .as_deref()
+        .is_some_and(|book| now_ms.saturating_sub(book.timestamp_ms) <= max_book_age_ms);
     let evaluation = evaluate_entry_trigger(trigger, state, progress, best_ask, book_fresh, now);
     if evaluation.transition.is_some() {
         tracing::debug!(%intent_id, ?state, "entry trigger transitioned");

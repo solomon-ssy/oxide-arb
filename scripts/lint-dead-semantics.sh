@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Dead-semantics gate (Phase 11.0) — enforce "zero dead semantics" on enum values.
+# Dead-semantics gate (Phase 11) — enforce live/pending/deleted semantics.
 #
 # Two checks:
 #   A. Regression guard — symbols deleted in Phase 11.0 must never re-enter
@@ -17,9 +17,44 @@ SRC_GLOBS=(crates/*/src)
 ERRORS=0
 
 echo "=== Checking deleted dead-semantic symbols do not reappear ==="
-DELETED='BindingConstraint::ManualCap|CapitalAllocationState::Planned|ChCapitalAllocationState::Planned|EmptyReportReason::ModelQualityGateFailed|EmptyReportReason::RuntimeModeDisabled|EmptyReason\b'
+DELETED='BindingConstraint::ManualCap|CapitalAllocationState::Planned|ChCapitalAllocationState::Planned|EmptyReportReason::ModelQualityGateFailed|EmptyReportReason::RuntimeModeDisabled|EmptyReason\b|SizingBetStructure|HeuristicTpSl|EntryTriggerKind|PartialExitNode|SignalInvalidationRule|ExecutedPartialExitNodes|OpportunisticExitState|ExitTriggerKind|override_shares|override_limit_price|max_allowed_usd|target_reward_multiple|order_retry_policy|set_order_retry|\bmeta_label\b|MetaLabel'
 if rg -n -P "$DELETED" "${SRC_GLOBS[@]}" --glob '!**/tests/**' 2>/dev/null; then
     echo "ERROR: a symbol deleted in Phase 11.0 reappeared in production src (see lint-dead-semantics.sh)"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking Phase 11.7 live semantics have production producers and consumers ==="
+require_live() {
+    local symbol="$1"
+    local producer_pattern="$2"
+    local consumer_pattern="$3"
+    if ! rg -q -P "$producer_pattern" "${SRC_GLOBS[@]}" --glob '!**/tests/**'; then
+        echo "ERROR: live semantic '$symbol' has no production producer"
+        ERRORS=$((ERRORS + 1))
+    fi
+    if ! rg -q -P "$consumer_pattern" "${SRC_GLOBS[@]}" --glob '!**/tests/**'; then
+        echo "ERROR: live semantic '$symbol' has no production consumer"
+        ERRORS=$((ERRORS + 1))
+    fi
+}
+
+require_live 'EntryTriggerState::Expired' \
+    'EntryTriggerState::Expired' \
+    'entry_trigger_state'
+require_live 'FAK' \
+    'OrderType::Fak' \
+    'OrderType::Fak|OrderTypeKind::Fak'
+require_live 'policy_net_positive' \
+    'TripleBarrierLabelKind::PolicyNetPositive' \
+    'policy_net_positive'
+require_live 'RecommendationTradePlan' \
+    'RecommendationTradePlan::Unavailable' \
+    'RecommendationTradePlan::Frozen'
+
+echo "=== Checking deleted Phase 11.7 wire fields do not remain in the active UI ==="
+if rg -n -P 'recommendation\.(entry_plan|sizing_plan|exit_plan|risk_envelope)|record\.sizing_plan|override_shares|override_limit_price|max_allowed_usd|\bmeta_label\b' \
+    ui/packages/types/src ui/apps/web-antdv-next/src --glob '!**/locales/**' 2>/dev/null; then
+    echo "ERROR: a deleted Phase 11.7 UI/wire semantic reappeared"
     ERRORS=$((ERRORS + 1))
 fi
 

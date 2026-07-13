@@ -77,7 +77,11 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
         }
 
         // 3. The risk envelope must be usable (positive caps).
-        let envelope = &recommendation.risk_envelope;
+        let Some((_, _, _, _, envelope)) = recommendation.trade_plan.frozen() else {
+            return Ok(IntentPolicyDecision::Denied {
+                reason: ModeDenialReason::RecommendationIneligible,
+            });
+        };
         if envelope.max_position_usd <= Usd::ZERO || envelope.max_loss_usd <= Usd::ZERO {
             return Ok(IntentPolicyDecision::Denied {
                 reason: ModeDenialReason::RiskEnvelopeInvalid,
@@ -126,7 +130,9 @@ mod tests {
             quant::{OutcomeSide, QuantRuntimeMode},
         },
         runtime_config::RuntimeConfig,
-        types::{RecommendationId, RecommendationReportId, Usd},
+        types::{
+            RecommendationId, RecommendationReportId, RecommendationTradePlan, RiskEnvelope, Usd,
+        },
     };
     use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
@@ -145,6 +151,13 @@ mod tests {
 
     fn gate(config: RuntimeConfig) -> DefaultRuntimeModeGate {
         DefaultRuntimeModeGate::new(Arc::new(RuntimeConfigStore::new(config)))
+    }
+
+    fn risk_envelope(rec: &mut RecommendationInfo) -> &mut RiskEnvelope {
+        match &mut rec.trade_plan {
+            RecommendationTradePlan::Frozen { risk_envelope, .. } => risk_envelope,
+            RecommendationTradePlan::Unavailable { .. } => panic!("fixture must be frozen"),
+        }
     }
 
     #[tokio::test]
@@ -203,7 +216,8 @@ mod tests {
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::AutoExecution];
         rec.execution_eligibility.ineligibility_reasons = Vec::new();
         rec.execution_eligibility.auto_policy_id = Some("policy-7".to_owned());
-        rec.risk_envelope.auto_execution_allowed = true;
+        risk_envelope(&mut rec).auto_execution_allowed = true;
+        let expected_hash = risk_envelope(&mut rec).envelope_hash.clone();
         let decision = gate
             .evaluate_intent_policy(QuantRuntimeMode::AutoExecution, &rec)
             .await
@@ -215,7 +229,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(policy_id, "policy-7");
-                assert_eq!(policy_hash, Some(rec.risk_envelope.envelope_hash.clone()));
+                assert_eq!(policy_hash, Some(expected_hash));
             }
             other => panic!("expected ApprovedByPolicy, got {other:?}"),
         }
@@ -230,7 +244,7 @@ mod tests {
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::AutoExecution];
         rec.execution_eligibility.ineligibility_reasons = Vec::new();
         rec.execution_eligibility.auto_policy_id = Some("policy-7".to_owned());
-        rec.risk_envelope.auto_execution_allowed = false;
+        risk_envelope(&mut rec).auto_execution_allowed = false;
         let decision = gate
             .evaluate_intent_policy(QuantRuntimeMode::AutoExecution, &rec)
             .await
@@ -248,7 +262,7 @@ mod tests {
         let gate = gate(RuntimeConfig::default());
         let mut rec = rec();
         rec.execution_eligibility.eligible_modes = vec![QuantRuntimeMode::SemiAuto];
-        rec.risk_envelope.max_position_usd = Usd::ZERO;
+        risk_envelope(&mut rec).max_position_usd = Usd::ZERO;
         let decision = gate
             .evaluate_intent_policy(QuantRuntimeMode::SemiAuto, &rec)
             .await

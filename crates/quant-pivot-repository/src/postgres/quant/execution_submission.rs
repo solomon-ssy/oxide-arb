@@ -38,8 +38,8 @@ use quant_pivot_models::{
         quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
     },
     types::{
-        ExecutionOrderId, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price,
-        RecommendationId, ReconciliationId,
+        ExecutionOrderId, ExitReinferenceObservation, FeatureParityStateId, OrderIntentId,
+        PendingScaleOut, Price, RecommendationId, ReconciliationId,
     },
 };
 use sea_orm::{
@@ -304,6 +304,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         next_check_at: DateTime<Utc>,
         peak_mark_price: Option<Price>,
         last_signal_recheck_at: Option<DateTime<Utc>>,
+        latest_reinference: Option<ExitReinferenceObservation>,
     ) -> Result<(), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let intent = load_intent_for_update(&txn, intent_id).await?;
@@ -318,6 +319,9 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
         if let Some(recheck) = last_signal_recheck_at {
             active.last_signal_recheck_at = ActiveValue::Set(Some(recheck));
+        }
+        if let Some(observation) = latest_reinference {
+            active.latest_reinference_json = ActiveValue::Set(Some(observation));
         }
         active.update(&txn).await.map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;

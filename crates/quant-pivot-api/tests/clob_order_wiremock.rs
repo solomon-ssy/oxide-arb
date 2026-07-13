@@ -4,12 +4,15 @@ mod clob_wiremock;
 
 use clob_wiremock::{
     mount_clob_requirements, mount_derive_api_key, mount_post_order, test_clob_client,
-    test_order_request, test_token_id,
+    test_clob_client_with_order_timeout, test_order_request, test_token_id,
 };
+use quant_pivot_api::clob::OrderSubmissionStage;
+use quant_pivot_error::api::ApiError;
 use quant_pivot_models::enums::{
     common::{OrderType, TickSize},
     execution::VenueOrderStatus,
 };
+use std::time::Duration;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -67,7 +70,7 @@ async fn fak_buy_uses_usd_amount_and_is_never_retried() {
 }
 
 #[tokio::test]
-async fn fak_ambiguous_http_failure_is_attempted_once() {
+async fn every_order_type_is_attempted_once_on_ambiguous_http_failure() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
     let token_id = test_token_id();
@@ -75,15 +78,59 @@ async fn fak_ambiguous_http_failure_is_attempted_once() {
     Mock::given(method("POST"))
         .and(path("/order"))
         .respond_with(ResponseTemplate::new(503).set_body_string("venue unavailable"))
-        .expect(1)
+        .expect(4)
         .mount(&server)
         .await;
     let client = test_clob_client(&server).await;
 
-    assert!(
-        client
-            .place_order(&test_order_request(OrderType::Fak))
+    let expiration =
+        u64::try_from(chrono::Utc::now().timestamp()).expect("positive timestamp") + 300;
+    for order_type in [
+        OrderType::Fok,
+        OrderType::Fak,
+        OrderType::Gtc,
+        OrderType::Gtd { expiration },
+    ] {
+        assert!(
+            client
+                .place_order(&test_order_request(order_type))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_order_type_is_attempted_once_on_post_timeout() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    let token_id = test_token_id();
+    mount_clob_requirements(&server, &token_id).await;
+    Mock::given(method("POST"))
+        .and(path("/order"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(200))
+                .set_body_string(r#"{"success":true}"#),
+        )
+        .expect(4)
+        .mount(&server)
+        .await;
+    let client = test_clob_client_with_order_timeout(&server, Duration::from_millis(25)).await;
+
+    let expiration =
+        u64::try_from(chrono::Utc::now().timestamp()).expect("positive timestamp") + 300;
+    for order_type in [
+        OrderType::Fok,
+        OrderType::Fak,
+        OrderType::Gtc,
+        OrderType::Gtd { expiration },
+    ] {
+        let error = client
+            .place_order(&test_order_request(order_type))
             .await
-            .is_err()
-    );
+            .expect_err("delayed response must time out");
+        assert_eq!(error.stage, OrderSubmissionStage::Post);
+        assert!(matches!(error.source, ApiError::Timeout { .. }));
+    }
 }

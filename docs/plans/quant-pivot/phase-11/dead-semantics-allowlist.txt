@@ -1,4 +1,4 @@
-# Dead-semantics allowlist — registered-pending enum variants.
+# Dead-semantics registry — pending enum variants only.
 #
 # Every entry here is an enum variant that is DECLARED but not yet CONSTRUCTED in
 # production `src/` (excluding tests). Each is tolerated ONLY because it has a
@@ -11,10 +11,6 @@
 # Format (whitespace-separated): <Type::Variant>  <owner-phase>  <reason...>
 # Lines starting with '#' and blank lines are ignored.
 
-# Reserved / always-empty structural fields tracked here for the record. These are
-# NOT enforced by the variant reference scan (they are constructed as empty in the
-# composer today) but their real population is owned by the phase noted:
-#   RuntimeConfig.research             phase-11.4/11.5  reserved v11 section; fields added later
-#   RuntimeConfig.feedback             phase-11.9  reserved v11 section; fields added later
-#   json_schema/fields.rs is_empty_closed_object skip (walk_schema ~135-141 + helper ~164-175)
-#                                      phase-11.9  MUST DELETE when FeedbackConfig gets fields (11.0 temp)
+# There are currently no registered-pending enum variants. Structural config
+# plans are documented by their owning phase and must not appear in production
+# contracts until implemented; they are not allowlisted here.

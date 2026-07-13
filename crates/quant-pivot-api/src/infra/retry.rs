@@ -10,7 +10,6 @@
 
 use backoff::{ExponentialBackoff, backoff::Backoff};
 use quant_pivot_error::api::ApiError;
-use quant_pivot_models::enums::common::OrderType;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, future::Future, time::Duration};
 
@@ -119,15 +118,6 @@ impl RetryPolicy {
             randomization_factor: 0.20,
             multiplier: 2.0,
             max_elapsed_time_ms: None,
-        }
-    }
-
-    /// Retry policy for a CLOB order type (FOK is never retried).
-    #[must_use]
-    pub const fn for_order_type(order_type: OrderType) -> Self {
-        match order_type {
-            OrderType::Fok | OrderType::Fak => Self::no_retry(),
-            OrderType::Gtc | OrderType::Gtd { expiration: _ } => Self::clob_default(),
         }
     }
 

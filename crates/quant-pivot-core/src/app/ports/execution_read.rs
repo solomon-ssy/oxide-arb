@@ -6,12 +6,15 @@ use async_trait::async_trait;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionReadPort, Paginated,
+        ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionReadPort, Paginated, PositionInfo,
         PositionListQuery, PositionSummary, RecommendationAttributionInfo, ReconciliationInfo,
         ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemListQuery,
         SettlementRedeemSummary,
     },
-    types::{ExecutionOrderId, PositionId, RecommendationId, ReconciliationId, SettlementRedeemId},
+    types::{
+        ExecutionOrderId, OrderIntentId, PositionId, RecommendationId, ReconciliationId,
+        SettlementRedeemId,
+    },
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, ExecutionOrderRepository, PositionRepository, ReconciliationRepository,
@@ -73,6 +76,16 @@ impl ExecutionReadPort for CoreExecutionReadPort {
 
     async fn get_position(&self, id: &PositionId) -> QuantResult<Option<PositionSummary>> {
         self.positions.find_by_id(id).await.map_err(Into::into)
+    }
+
+    async fn get_position_by_intent(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> QuantResult<Option<PositionInfo>> {
+        self.positions
+            .find_by_intent(intent_id)
+            .await
+            .map_err(Into::into)
     }
 
     async fn get_recommendation_attribution(
