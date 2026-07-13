@@ -251,7 +251,7 @@ actix-web = "4"
 actix-cors = "0.7"
 actix-files = "0.6"
 actix-ws = "0.4"
-tracing-actix-web = "0.7"
+tracing-actix-web = { version = "0.7", default-features = false }
 
 # Dynamic RBAC authorization engine
 casbin = { version = "2", features = ["runtime-tokio"] }

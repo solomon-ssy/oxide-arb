@@ -19,6 +19,7 @@ pub mod extractors;
 pub mod jwt;
 pub mod middleware;
 pub mod readiness;
+mod request_tracing;
 pub mod response;
 pub mod routes;
 pub mod state;
@@ -72,7 +73,7 @@ pub async fn spawn_web_server(
         let static_config = app_config.clone();
         App::new()
             .app_data(data.clone())
-            .wrap(TracingLogger::default())
+            .wrap(TracingLogger::<request_tracing::HttpRootSpanBuilder>::new())
             .wrap(cors_from(&app_config))
             .wrap(from_fn(middleware::request_id))
             // Outermost: observes the final status + inner-injected attributes.

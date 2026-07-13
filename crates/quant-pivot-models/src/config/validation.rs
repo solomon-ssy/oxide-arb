@@ -92,12 +92,21 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "max_subscriptions_per_connection, engine_max_subscription_tokens, engine_subscription_window_hours must be > 0".into(),
         });
     }
+    validate_market_data(deploy, &mut report);
+
+    report
+}
+
+fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
     if deploy.market_data.gamma.page_size == 0
         || deploy.market_data.gamma.full_sync_interval_secs == 0
+        || deploy.market_data.gamma.catalog_visibility_guard_secs == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.gamma",
-            detail: "page_size and full_sync_interval_secs must be > 0".into(),
+            detail:
+                "page_size, full_sync_interval_secs, and catalog_visibility_guard_secs must be > 0"
+                    .into(),
         });
     }
     if deploy.market_data.gamma.page_size > 500 {
@@ -106,8 +115,31 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "must be <= 500 (Gamma /events/keyset limit)".into(),
         });
     }
-
-    report
+    let catalog_visibility_guard_ms = deploy
+        .market_data
+        .gamma
+        .catalog_visibility_guard_secs
+        .saturating_mul(1_000);
+    if deploy.db.postgres.lock_timeout_ms > 0
+        && catalog_visibility_guard_ms >= deploy.db.postgres.lock_timeout_ms
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.gamma.catalog_visibility_guard_secs",
+            detail: "must be lower than db.postgres.lock_timeout_ms".into(),
+        });
+    }
+    if deploy.market_data.trade_tape_on_chain.max_blocks_per_tick == 0
+        || deploy
+            .market_data
+            .trade_tape_on_chain
+            .max_blocks_per_request
+            == 0
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.trade_tape_on_chain",
+            detail: "max_blocks_per_tick and max_blocks_per_request must be > 0".into(),
+        });
+    }
 }
 
 fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
@@ -249,6 +281,24 @@ mod tests {
     fn wrong_chain_id_is_fatal() {
         let mut deploy = DeployConfig::default();
         deploy.polymarket.chain_id = 1;
+        assert!(validate_deploy_common(&deploy).has_errors());
+    }
+
+    #[test]
+    fn zero_trade_tape_block_range_is_fatal() {
+        let mut deploy = DeployConfig::default();
+        deploy
+            .market_data
+            .trade_tape_on_chain
+            .max_blocks_per_request = 0;
+        assert!(validate_deploy_common(&deploy).has_errors());
+    }
+
+    #[test]
+    fn catalog_visibility_guard_must_fit_postgres_lock_timeout() {
+        let mut deploy = DeployConfig::default();
+        deploy.market_data.gamma.catalog_visibility_guard_secs = 5;
+        deploy.db.postgres.lock_timeout_ms = 5_000;
         assert!(validate_deploy_common(&deploy).has_errors());
     }
 

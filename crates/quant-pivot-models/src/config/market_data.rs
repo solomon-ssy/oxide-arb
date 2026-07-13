@@ -83,6 +83,9 @@ pub struct GammaConfig {
     pub full_sync_interval_secs: u64,
     /// Page size for catalog pagination. Default: `100`.
     pub page_size: u32,
+    /// Safety margin (seconds) between catalog finalize commit and logical
+    /// `available_at` / `committed_at` visibility. Default: `2`.
+    pub catalog_visibility_guard_secs: u64,
 }
 
 impl Default for GammaConfig {
@@ -91,6 +94,7 @@ impl Default for GammaConfig {
             base_url: default_gamma_url(),
             full_sync_interval_secs: default_gamma_full_sync_interval(),
             page_size: default_gamma_page_size(),
+            catalog_visibility_guard_secs: default_gamma_catalog_visibility_guard_secs(),
         }
     }
 }
@@ -103,6 +107,9 @@ const fn default_gamma_full_sync_interval() -> u64 {
 }
 const fn default_gamma_page_size() -> u32 {
     100
+}
+const fn default_gamma_catalog_visibility_guard_secs() -> u64 {
+    2
 }
 
 /// Polymarket Data API configuration (keyless positions reads).
@@ -153,6 +160,8 @@ pub struct TradeTapeOnChainConfig {
     pub confirmations: u64,
     /// Maximum blocks scanned per contract per tick. Default: 2000.
     pub max_blocks_per_tick: u64,
+    /// Maximum inclusive block range sent in one `eth_getLogs` request. Default: 2000.
+    pub max_blocks_per_request: u64,
     /// Maximum rows written per `ClickHouse` batch. Default: 1000.
     pub batch_size: usize,
 }
@@ -164,6 +173,7 @@ impl Default for TradeTapeOnChainConfig {
             poll_secs: 30,
             confirmations: 12,
             max_blocks_per_tick: 2_000,
+            max_blocks_per_request: 2_000,
             batch_size: 1_000,
         }
     }

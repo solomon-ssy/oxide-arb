@@ -114,6 +114,7 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
             "gamma": {
                 "base_url": deploy.market_data.gamma.base_url,
                 "full_sync_interval_secs": deploy.market_data.gamma.full_sync_interval_secs,
+                "catalog_visibility_guard_secs": deploy.market_data.gamma.catalog_visibility_guard_secs,
                 "page_size": deploy.market_data.gamma.page_size,
             },
         },

@@ -4,6 +4,7 @@
 //! [`PgRepositories::wire`] constructs each repository exactly once; downstream
 //! bundles and services [`Arc::clone`] the shared instances.
 
+use quant_pivot_models::config::GammaConfig;
 use quant_pivot_repository::postgres::{
     PgAccountSnapshotRepository, PgAttributionRepository, PgBacktestPathSetRepository,
     PgBacktestReportRepository, PgBasisAlertRepository, PgCalibrationArtifactRepository,
@@ -75,8 +76,9 @@ pub struct PgRepositories {
 impl PgRepositories {
     /// Construct every shared repository from the connected pool (boot-only).
     #[must_use]
-    pub fn wire(pg: &PostgresPool) -> Self {
+    pub fn wire(pg: &PostgresPool, gamma: &GammaConfig) -> Self {
         let db = pg.connection().clone();
+        let catalog_visibility_guard_secs = gamma.catalog_visibility_guard_secs;
         Self {
             runtime_config: arc_repo(&db, PgRuntimeConfigVersionRepository::new),
             system_runtime_state: arc_repo(&db, PgSystemRuntimeStateRepository::new),
@@ -84,7 +86,9 @@ impl PgRepositories {
             operation_log: arc_repo(&db, PgOperationLogRepository::new),
             market: arc_repo(&db, PgMarketRepository::new),
             event: arc_repo(&db, PgEventRepository::new),
-            catalog_version: arc_repo(&db, PgCatalogVersionRepository::new),
+            catalog_version: arc_repo(&db, |db| {
+                PgCatalogVersionRepository::new(db, catalog_visibility_guard_secs)
+            }),
             order_intent: arc_repo(&db, PgOrderIntentRepository::new),
             execution_submission: arc_repo(&db, PgExecutionSubmissionRepository::new),
             execution_order: arc_repo(&db, PgExecutionOrderRepository::new),

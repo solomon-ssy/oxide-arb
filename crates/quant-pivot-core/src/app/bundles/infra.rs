@@ -163,7 +163,7 @@ async fn connect_persistence(
         redis.clone(),
         &deploy.cache.redis.key_prefix,
     ));
-    let repos = PgRepositories::wire(&pg);
+    let repos = PgRepositories::wire(&pg, &deploy.market_data.gamma);
     let ingest_lag_tracker = Arc::new(IngestPipelineLagTracker::new());
     let ch_write_manager = Arc::new(ChWriteManager::new(
         deploy.db.clickhouse.max_concurrent_inserts,

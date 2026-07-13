@@ -158,13 +158,19 @@ impl TradeTapeWorker {
         }
 
         let end_block = resume_block
-            .saturating_add(self.config.max_blocks_per_tick)
+            .saturating_add(self.config.max_blocks_per_tick.saturating_sub(1))
             .min(safe_head);
-        let fetched_logs = self
-            .log_client
-            .fetch_order_filled_logs(contract.address, contract.topic, resume_block, end_block)
-            .await
-            .map_err(|error| QuantError::Rpc(error.into()))?;
+        let mut fetched_logs = Vec::new();
+        for (from_block, to_block) in
+            block_ranges(resume_block, end_block, self.config.max_blocks_per_request)
+        {
+            fetched_logs.extend(
+                self.log_client
+                    .fetch_order_filled_logs(contract.address, contract.topic, from_block, to_block)
+                    .await
+                    .map_err(|error| QuantError::Rpc(error.into()))?,
+            );
+        }
 
         let market_for_token = |token_id: &TokenId| self.market_registry.market_for_token(token_id);
 
@@ -257,6 +263,27 @@ fn resume_point(cursor: Option<&TradeTapeBlockCursorInfo>, bootstrap_block: u64)
     })
 }
 
+/// Split an inclusive scan window into provider-compatible inclusive ranges.
+fn block_ranges(from_block: u64, to_block: u64, max_blocks: u64) -> Vec<(u64, u64)> {
+    if from_block > to_block {
+        return Vec::new();
+    }
+    let max_blocks = max_blocks.max(1);
+    let mut ranges = Vec::new();
+    let mut start = from_block;
+    loop {
+        let end = start
+            .saturating_add(max_blocks.saturating_sub(1))
+            .min(to_block);
+        ranges.push((start, end));
+        if end == to_block {
+            break;
+        }
+        start = end.saturating_add(1);
+    }
+    ranges
+}
+
 /// Whether a fetched log lies strictly after the persisted checkpoint.
 #[must_use]
 fn should_process_log(
@@ -342,6 +369,16 @@ mod tests {
     #[test]
     fn resume_point_bootstraps_from_contract_block() {
         assert_eq!(resume_point(None, 57_000_000), (57_000_000, -1));
+    }
+
+    #[test]
+    fn block_ranges_respect_inclusive_provider_limit() {
+        assert_eq!(
+            block_ranges(100, 124, 10),
+            vec![(100, 109), (110, 119), (120, 124)]
+        );
+        assert_eq!(block_ranges(7, 7, 10), vec![(7, 7)]);
+        assert!(block_ranges(8, 7, 10).is_empty());
     }
 
     #[test]

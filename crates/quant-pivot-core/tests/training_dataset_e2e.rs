@@ -21,6 +21,7 @@ use quant_pivot_models::{
         BookMicrostructureRow, BookSnapshotRow, ChDecimal64, ChPrice, ChSchemaVersion, ChUsd,
         DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
+    config::GammaConfig,
     domain::{
         CatalogCommit, CompleteTrainingDatasetBuild, CryptoSubject, DecisionBoundary,
         DecisionSource, EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
@@ -757,10 +758,13 @@ async fn seed_catalog_with_category(
     category: MarketCategory,
 ) {
     let context = CatalogSeedContext::new(window_start);
-    PgCatalogVersionRepository::new(db.clone())
-        .commit(durable_catalog_commit(&context, category))
-        .await
-        .expect("seed durable catalog");
+    PgCatalogVersionRepository::new(
+        db.clone(),
+        GammaConfig::default().catalog_visibility_guard_secs,
+    )
+    .commit(durable_catalog_commit(&context, category))
+    .await
+    .expect("seed durable catalog");
 
     MarketEntity::update_many()
         .col_expr(
@@ -850,7 +854,10 @@ fn service_with_selection_and_linkage(
     TrainingDatasetService::new(
         TrainingDatasetServiceDeps {
             fact_read,
-            catalog_repo: Arc::new(PgCatalogVersionRepository::new(db.clone())),
+            catalog_repo: Arc::new(PgCatalogVersionRepository::new(
+                db.clone(),
+                GammaConfig::default().catalog_visibility_guard_secs,
+            )),
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
@@ -1508,7 +1515,10 @@ async fn dataset_builder_rejects_future_features() {
         leak_ms: 5_000,
         catalog: Arc::new(DurablePitSource::new(
             fact_read as Arc<dyn QuantFactReadRepository>,
-            Arc::new(PgCatalogVersionRepository::new(db.clone())),
+            Arc::new(PgCatalogVersionRepository::new(
+                db.clone(),
+                GammaConfig::default().catalog_visibility_guard_secs,
+            )),
         )),
     };
     let err = svc

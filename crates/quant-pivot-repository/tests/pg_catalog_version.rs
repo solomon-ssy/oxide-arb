@@ -3,6 +3,7 @@
 use chrono::{Duration, TimeZone, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
+    config::GammaConfig,
     domain::{
         CatalogCommit, CatalogSnapshotInfo, CatalogSyncFailureStage, DecisionClock,
         NewCatalogSyncBatch, NewEventCatalogVersion, NewFailedCatalogSyncBatch,
@@ -32,7 +33,8 @@ const MARKET_B: &str = "0xbatch-catalog-b";
 #[ignore = "requires Docker"]
 async fn correction_is_invisible_until_its_availability_time() {
     let (pool, _container) = setup_pg().await;
-    let repo = PgCatalogVersionRepository::new(pool.connection().clone());
+    let guard = GammaConfig::default().catalog_visibility_guard_secs;
+    let repo = PgCatalogVersionRepository::new(pool.connection().clone(), guard);
     let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 0, 0, 0).unwrap();
 
     let original_batch = repo
@@ -102,7 +104,8 @@ async fn correction_is_invisible_until_its_availability_time() {
 #[ignore = "requires Docker"]
 async fn batch_snapshot_observes_one_exact_event_revision_and_membership() {
     let (pool, _container) = setup_pg().await;
-    let repo = PgCatalogVersionRepository::new(pool.connection().clone());
+    let guard = GammaConfig::default().catalog_visibility_guard_secs;
+    let repo = PgCatalogVersionRepository::new(pool.connection().clone(), guard);
     let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 1, 0, 0).unwrap();
 
     let original = membership_commit(10, t0, t0, "original");
@@ -174,7 +177,8 @@ async fn batch_snapshot_observes_one_exact_event_revision_and_membership() {
 #[ignore = "requires Docker"]
 async fn batch_snapshot_rejects_decisions_before_catalog_coverage() {
     let (pool, _container) = setup_pg().await;
-    let repo = PgCatalogVersionRepository::new(pool.connection().clone());
+    let guard = GammaConfig::default().catalog_visibility_guard_secs;
+    let repo = PgCatalogVersionRepository::new(pool.connection().clone(), guard);
     let coverage_start = Utc.with_ymd_and_hms(2026, 7, 10, 2, 0, 0).unwrap();
 
     let batch = repo
@@ -220,7 +224,11 @@ async fn concurrent_batch_reads_never_observe_a_torn_catalog_commit() {
     const READER_COUNT: usize = 24;
 
     let (pool, _container) = setup_pg().await;
-    let repo = Arc::new(PgCatalogVersionRepository::new(pool.connection().clone()));
+    let guard = GammaConfig::default().catalog_visibility_guard_secs;
+    let repo = Arc::new(PgCatalogVersionRepository::new(
+        pool.connection().clone(),
+        guard,
+    ));
     let t0 = Utc.with_ymd_and_hms(2026, 7, 10, 3, 0, 0).unwrap();
     repo.commit(membership_commit(30, t0, t0, "original"))
         .await
@@ -278,7 +286,8 @@ async fn concurrent_batch_reads_never_observe_a_torn_catalog_commit() {
 #[ignore = "requires Docker"]
 async fn failed_attempt_is_audited_but_never_creates_catalog_coverage() {
     let (pool, _container) = setup_pg().await;
-    let repo = PgCatalogVersionRepository::new(pool.connection().clone());
+    let guard = GammaConfig::default().catalog_visibility_guard_secs;
+    let repo = PgCatalogVersionRepository::new(pool.connection().clone(), guard);
     let started_at = Utc::now();
     let failure = repo
         .record_failure(NewFailedCatalogSyncBatch {

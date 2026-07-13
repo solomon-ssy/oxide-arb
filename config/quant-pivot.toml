@@ -132,6 +132,11 @@ full_sync_interval_secs = 300
 # Purpose: catalog pagination page size. Impact: sync request count.
 # Default: 100.
 page_size = 100
+# Purpose: safety margin (seconds) between catalog finalize commit and logical
+# available_at visibility during Gamma sync. Larger values tolerate slower full
+# sync finalization; catalog becomes readable later after each commit.
+# Default: 2. Must remain below db.postgres.lock_timeout_ms.
+catalog_visibility_guard_secs = 2
 
 [market_data.data_api]
 # Purpose: Data API base URL for keyless venue position reads
@@ -153,6 +158,10 @@ poll_secs = 30
 confirmations = 12
 # Purpose: max blocks scanned per contract per tick. Default: 2000.
 max_blocks_per_tick = 2000
+# Purpose: maximum inclusive block range per eth_getLogs request. Providers
+# may enforce lower limits; keep the per-tick budget independent from it.
+# Default: 2000.
+max_blocks_per_request = 2000
 # Purpose: ClickHouse batch size. Default: 1000.
 batch_size = 1000
 

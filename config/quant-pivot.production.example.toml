@@ -131,6 +131,9 @@ full_sync_interval_secs = 300
 # Purpose: catalog pagination page size. Impact: sync request count.
 # Default: 100.
 page_size = 100
+# Purpose: catalog visibility guard (seconds). Default: 2.
+# Must remain below db.postgres.lock_timeout_ms.
+catalog_visibility_guard_secs = 2
 
 [market_data.data_api]
 # Keyless venue positions (GET /positions?user=<funder>) for the report capital base.

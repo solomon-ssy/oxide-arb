@@ -1,7 +1,10 @@
 //! Atomic Gamma catalog ledger writer and bitemporal reader.
 
 use crate::{
-    postgres::catalog::{event::PgEventRepository, market::PgMarketRepository},
+    postgres::{
+        catalog::{event::PgEventRepository, market::PgMarketRepository},
+        write::insert_many_chunked,
+    },
     traits::{CatalogVersionRepository, EventRepository, MarketRepository},
 };
 use quant_pivot_error::storage::StorageError;
@@ -10,34 +13,42 @@ use quant_pivot_models::{
         CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogSyncFailureStage,
         CatalogSyncStatus, CatalogWindowInfo, DecisionBoundary, DecisionSource,
         EventCatalogVersionInfo, EventRegistryInfo, MarketCatalogVersionInfo, NewCatalogSyncBatch,
-        NewEventCatalogVersion, NewFailedCatalogSyncBatch, NewMarketCatalogVersion,
+        NewEventCatalogVersion, NewFailedCatalogSyncBatch, NewMarketCatalogVersion, UpsertEvent,
+        UpsertMarket,
     },
     entities::{catalog_sync_batch, event_catalog_version, market_catalog_version},
     types::{CatalogSyncBatchId, EventCatalogVersionId, EventId, MarketId},
 };
 use sea_orm::{
-    AccessMode, ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait,
-    DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, EntityTrait, IntoActiveModel,
-    IsolationLevel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait, RuntimeErr,
-    Statement, TransactionTrait, sea_query::Expr,
+    AccessMode, ActiveModelTrait,
+    ActiveValue::Set,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
+    EntityTrait, IntoActiveModel, IsolationLevel, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, RuntimeErr, Statement, TransactionTrait,
+    sea_query::Expr,
+    sqlx::{PgConnection, Postgres, pool::PoolConnection, postgres::PgAdvisoryLockGuard},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 const CATALOG_VISIBILITY_LOCK: &str = "quant-pivot/catalog-ledger-visibility/v1";
-const CATALOG_VISIBILITY_GUARD: chrono::Duration = chrono::Duration::seconds(2);
+const MAX_CATALOG_VISIBILITY_ATTEMPTS: usize = 3;
 const MAX_FAILURE_DETAIL_BYTES: usize = 2_048;
 
 /// Postgres implementation of the immutable catalog ledger.
 pub struct PgCatalogVersionRepository {
     db: DatabaseConnection,
     visibility_lock: sea_orm::sqlx::postgres::PgAdvisoryLock,
+    visibility_guard: chrono::Duration,
 }
 
 impl PgCatalogVersionRepository {
-    pub fn new(db: DatabaseConnection) -> Self {
+    pub fn new(db: DatabaseConnection, catalog_visibility_guard_secs: u64) -> Self {
         Self {
             db,
             visibility_lock: sea_orm::sqlx::postgres::PgAdvisoryLock::new(CATALOG_VISIBILITY_LOCK),
+            visibility_guard: chrono::Duration::seconds(
+                i64::try_from(catalog_visibility_guard_secs).unwrap_or(i64::MAX),
+            ),
         }
     }
 
@@ -65,6 +76,21 @@ impl PgCatalogVersionRepository {
         .await
         .map_err(StorageError::from)?;
         Ok(txn)
+    }
+
+    async fn acquire_visibility_guard(
+        &self,
+    ) -> Result<PgAdvisoryLockGuard<'_, PoolConnection<Postgres>>, StorageError> {
+        let connection = self
+            .db
+            .get_postgres_connection_pool()
+            .acquire()
+            .await
+            .map_err(|error| StorageError::Database(DbErr::Conn(RuntimeErr::SqlxError(error))))?;
+        self.visibility_lock
+            .acquire(connection)
+            .await
+            .map_err(|error| StorageError::Database(DbErr::Conn(RuntimeErr::SqlxError(error))))
     }
 
     async fn fail_abandoned_preparations(&self) -> Result<(), StorageError> {
@@ -127,6 +153,37 @@ impl PgCatalogVersionRepository {
         active.failure_detail = Set(Some(bounded_failure_detail(detail)));
         active.update(&self.db).await.map_err(StorageError::from)
     }
+
+    async fn finalize_catalog_commit(
+        &self,
+        batch_id: &CatalogSyncBatchId,
+        current_events: Vec<UpsertEvent>,
+        current_markets: Vec<UpsertMarket>,
+    ) -> Result<(catalog_sync_batch::Model, chrono::DateTime<chrono::Utc>), StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let event_repo = PgEventRepository::with_txn(&txn);
+        if !current_events.is_empty() {
+            event_repo.upsert_batch(current_events).await?;
+        }
+        let market_repo = PgMarketRepository::with_txn(&txn);
+        if !current_markets.is_empty() {
+            market_repo.upsert_batch(current_markets).await?;
+        }
+
+        let visible_at = database_clock(&txn).await? + self.visibility_guard;
+        finalize_version_visibility(&txn, batch_id, visible_at).await?;
+        let batch_model = finalize_batch(&txn, batch_id, visible_at).await?;
+        if let Err(error) = txn.commit().await {
+            self.fail_batch(
+                batch_id,
+                CatalogSyncFailureStage::Persist,
+                &format!("catalog finalization transaction failed: {error}"),
+            )
+            .await?;
+            return Err(StorageError::from(error));
+        }
+        Ok((batch_model, visible_at))
+    }
 }
 
 #[async_trait::async_trait]
@@ -140,52 +197,54 @@ impl CatalogVersionRepository for PgCatalogVersionRepository {
             market_versions,
         } = commit;
 
-        let connection = self
-            .db
-            .get_postgres_connection_pool()
-            .acquire()
-            .await
-            .map_err(|error| StorageError::Database(DbErr::Conn(RuntimeErr::SqlxError(error))))?;
-        let mut visibility_guard = self
-            .visibility_lock
-            .acquire(connection)
-            .await
-            .map_err(|error| StorageError::Database(DbErr::Conn(RuntimeErr::SqlxError(error))))?;
+        let mut visibility_guard = self.acquire_visibility_guard().await?;
         self.fail_abandoned_preparations().await?;
 
         let batch_id =
             persist_catalog_preparation(&self.db, batch, event_versions, market_versions).await?;
 
-        let finalize_txn = self.db.begin().await.map_err(StorageError::from)?;
-        let event_repo = PgEventRepository::with_txn(&finalize_txn);
-        if !current_events.is_empty() {
-            event_repo.upsert_batch(current_events).await?;
-        }
-        let market_repo = PgMarketRepository::with_txn(&finalize_txn);
-        if !current_markets.is_empty() {
-            market_repo.upsert_batch(current_markets).await?;
-        }
-
-        let visible_at = database_clock(&finalize_txn).await? + CATALOG_VISIBILITY_GUARD;
-        finalize_version_visibility(&finalize_txn, &batch_id, visible_at).await?;
-        let batch_model = finalize_batch(&finalize_txn, &batch_id, visible_at).await?;
-        if let Err(error) = finalize_txn.commit().await {
-            self.fail_batch(
-                &batch_id,
-                CatalogSyncFailureStage::Persist,
-                &format!("catalog finalization transaction failed: {error}"),
-            )
+        let (mut batch_model, mut visible_at) = self
+            .finalize_catalog_commit(&batch_id, current_events, current_markets)
             .await?;
-            return Err(StorageError::from(error));
-        }
 
-        let observed_after_commit =
-            sea_orm::sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
-                "SELECT clock_timestamp()",
-            )
-            .fetch_one(&mut *visibility_guard)
-            .await
-            .map_err(|error| StorageError::Database(DbErr::Query(RuntimeErr::SqlxError(error))))?;
+        let mut observed_after_commit = connection_clock(&mut visibility_guard).await?;
+        let mut visibility_attempt = 1_usize;
+        while observed_after_commit >= visible_at
+            && visibility_attempt < MAX_CATALOG_VISIBILITY_ATTEMPTS
+        {
+            visibility_attempt += 1;
+            tracing::warn!(
+                batch_id = %batch_id,
+                visibility_attempt,
+                %observed_after_commit,
+                %visible_at,
+                "catalog commit exceeded visibility guard; rescheduling boundary"
+            );
+            match reschedule_catalog_visibility(&self.db, &batch_id, self.visibility_guard).await {
+                Ok((rescheduled_batch, rescheduled_visible_at)) => {
+                    batch_model = rescheduled_batch;
+                    visible_at = rescheduled_visible_at;
+                }
+                Err(error) => {
+                    self.fail_batch(
+                        &batch_id,
+                        CatalogSyncFailureStage::CommitVisibility,
+                        &format!("catalog visibility reschedule failed: {error}"),
+                    )
+                    .await?;
+                    visibility_guard
+                        .release_now()
+                        .await
+                        .map_err(|release_error| {
+                            StorageError::Database(DbErr::Conn(RuntimeErr::SqlxError(
+                                release_error,
+                            )))
+                        })?;
+                    return Err(error);
+                }
+            }
+            observed_after_commit = connection_clock(&mut visibility_guard).await?;
+        }
         if observed_after_commit >= visible_at {
             self.fail_batch(
                 &batch_id,
@@ -651,24 +710,18 @@ async fn persist_catalog_preparation(
         .await
         .map_err(StorageError::from)?;
     if !event_versions.is_empty() {
-        event_catalog_version::Entity::insert_many(
-            event_versions
-                .into_iter()
-                .map(IntoActiveModel::into_active_model),
+        insert_many_chunked::<event_catalog_version::Entity, NewEventCatalogVersion>(
+            &txn,
+            event_versions,
         )
-        .exec(&txn)
-        .await
-        .map_err(StorageError::from)?;
+        .await?;
     }
     if !market_versions.is_empty() {
-        market_catalog_version::Entity::insert_many(
-            market_versions
-                .into_iter()
-                .map(IntoActiveModel::into_active_model),
+        insert_many_chunked::<market_catalog_version::Entity, NewMarketCatalogVersion>(
+            &txn,
+            market_versions,
         )
-        .exec(&txn)
-        .await
-        .map_err(StorageError::from)?;
+        .await?;
     }
     txn.commit().await.map_err(StorageError::from)?;
     Ok(batch_id)
@@ -690,6 +743,15 @@ where
     })?
     .try_get("", "current_time")
     .map_err(StorageError::from)
+}
+
+async fn connection_clock(
+    connection: &mut PgConnection,
+) -> Result<chrono::DateTime<chrono::Utc>, StorageError> {
+    sea_orm::sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(connection)
+        .await
+        .map_err(|error| StorageError::Database(DbErr::Query(RuntimeErr::SqlxError(error))))
 }
 
 async fn finalize_version_visibility<C>(
@@ -748,6 +810,37 @@ where
     active.status = Set(CatalogSyncStatus::Committed.as_str().to_owned());
     active.committed_at = Set(Some(visible_at));
     active.update(db).await.map_err(StorageError::from)
+}
+
+async fn reschedule_catalog_visibility(
+    db: &DatabaseConnection,
+    batch_id: &CatalogSyncBatchId,
+    visibility_guard: chrono::Duration,
+) -> Result<(catalog_sync_batch::Model, chrono::DateTime<chrono::Utc>), StorageError> {
+    let txn = db.begin().await.map_err(StorageError::from)?;
+    let visible_at = database_clock(&txn).await? + visibility_guard;
+    finalize_version_visibility(&txn, batch_id, visible_at).await?;
+    let model = catalog_sync_batch::Entity::find_by_id(batch_id.clone())
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "catalog_sync_batch",
+            id: batch_id.to_string(),
+        })?;
+    if model.status != CatalogSyncStatus::Committed.as_str() {
+        return Err(StorageError::IllegalTransition {
+            entity: "catalog_sync_batch",
+            id: Some(batch_id.to_string()),
+            from: model.status,
+            to: CatalogSyncStatus::Committed.as_str().to_owned(),
+        });
+    }
+    let mut active = model.into_active_model();
+    active.committed_at = Set(Some(visible_at));
+    let batch_model = active.update(&txn).await.map_err(StorageError::from)?;
+    txn.commit().await.map_err(StorageError::from)?;
+    Ok((batch_model, visible_at))
 }
 
 fn bounded_failure_detail(detail: &str) -> String {
