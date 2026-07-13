@@ -525,14 +525,10 @@ pub(crate) fn runtime_decision_boundary(
     let knowledge_lag_secs = config.pit_knowledge_lag_secs().ok_or_else(|| {
         QuantError::config("enabled report schedules disagree on knowledge_lag_secs")
     })?;
-    DecisionClock::new(knowledge_lag_secs)
-        .boundary(decision_at)?
-        .with_source_cutoff(DecisionSource::Microstructure, 0)?
-        .with_source_cutoff(DecisionSource::TradeTape, 0)?
-        .with_source_cutoff(
-            DecisionSource::DomainCrypto,
-            config.domain.crypto.availability_lag_secs,
-        )
+    DecisionClock::new(knowledge_lag_secs).serving_boundary(
+        decision_at,
+        config.domain.crypto.availability_lag_secs,
+    )
 }
 
 pub(crate) fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<Usd>> {
@@ -829,8 +825,25 @@ mod tests {
             decision_at - ChronoDuration::seconds(10)
         );
         assert_eq!(
+            boundary.cutoff_for(DecisionSource::Catalog),
+            decision_at - ChronoDuration::seconds(10)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Book),
+            decision_at - ChronoDuration::seconds(10)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::TradeTape),
+            decision_at - ChronoDuration::seconds(10)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Linkage),
+            decision_at - ChronoDuration::seconds(10)
+        );
+        assert_eq!(
             boundary.cutoff_for(DecisionSource::DomainCrypto),
             decision_at - ChronoDuration::seconds(30)
         );
+        assert_eq!(boundary.per_source_cutoffs().len(), 6);
     }
 }

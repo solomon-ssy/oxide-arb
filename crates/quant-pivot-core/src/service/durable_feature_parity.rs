@@ -2158,17 +2158,10 @@ pub(crate) fn report_decision_boundary(
             report.recommendation_report_id, report.knowledge_lag_secs
         ))
     })?;
-    DecisionClock::new(knowledge_lag_secs)
-        .boundary(report.decision_at)?
-        .with_source_cutoff(DecisionSource::Catalog, 0)?
-        .with_source_cutoff(DecisionSource::Book, 0)?
-        .with_source_cutoff(DecisionSource::Microstructure, 0)?
-        .with_source_cutoff(DecisionSource::TradeTape, 0)?
-        .with_source_cutoff(DecisionSource::Linkage, 0)?
-        .with_source_cutoff(
-            DecisionSource::DomainCrypto,
-            config.domain.crypto.availability_lag_secs,
-        )
+    DecisionClock::new(knowledge_lag_secs).serving_boundary(
+        report.decision_at,
+        config.domain.crypto.availability_lag_secs,
+    )
 }
 
 fn boundary_from_report_features(

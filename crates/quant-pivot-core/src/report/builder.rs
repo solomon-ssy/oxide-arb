@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, DecisionSource, ModelVersionInfo,
+        DecisionBoundary, DecisionClock, ModelVersionInfo,
         RuntimeConfigVersionInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
@@ -453,17 +453,10 @@ impl DefaultReportBuilder {
     async fn prepare_context(&self, request: &BuildReportRequest) -> QuantResult<BuildContext> {
         let (version, config) = self.load_config(request).await?;
         let knowledge_lag_secs = resolve_knowledge_lag(request, &config)?;
-        let boundary = DecisionClock::new(knowledge_lag_secs)
-            .boundary(request.trigger_time)?
-            .with_source_cutoff(DecisionSource::Catalog, 0)?
-            .with_source_cutoff(DecisionSource::Book, 0)?
-            .with_source_cutoff(DecisionSource::Microstructure, 0)?
-            .with_source_cutoff(DecisionSource::TradeTape, 0)?
-            .with_source_cutoff(DecisionSource::Linkage, 0)?
-            .with_source_cutoff(
-                DecisionSource::DomainCrypto,
-                config.domain.crypto.availability_lag_secs,
-            )?;
+        let boundary = DecisionClock::new(knowledge_lag_secs).serving_boundary(
+            request.trigger_time,
+            config.domain.crypto.availability_lag_secs,
+        )?;
         let top_n = resolve_top_n(request, &config)?;
         let active = self
             .deps

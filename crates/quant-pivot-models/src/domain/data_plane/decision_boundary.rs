@@ -172,6 +172,25 @@ impl DecisionClock {
         boundary.validate()?;
         Ok(boundary)
     }
+
+    /// Build the canonical serving/replay boundary with every governed source
+    /// cutoff frozen once from `decision_at`.
+    ///
+    /// Report generation, exit re-inference, parity replay, and offline replay
+    /// must all use this constructor so persisted `per_source_cutoffs` agree.
+    pub fn serving_boundary(
+        self,
+        decision_at: DateTime<Utc>,
+        domain_crypto_lag_secs: u64,
+    ) -> QuantResult<DecisionBoundary> {
+        self.boundary(decision_at)?
+            .with_source_cutoff(DecisionSource::Catalog, 0)?
+            .with_source_cutoff(DecisionSource::Book, 0)?
+            .with_source_cutoff(DecisionSource::Microstructure, 0)?
+            .with_source_cutoff(DecisionSource::TradeTape, 0)?
+            .with_source_cutoff(DecisionSource::Linkage, 0)?
+            .with_source_cutoff(DecisionSource::DomainCrypto, domain_crypto_lag_secs)
+    }
 }
 
 fn checked_duration(seconds: u64, field: &'static str) -> QuantResult<Duration> {
@@ -243,6 +262,40 @@ mod tests {
     fn rejects_unrepresentable_lag() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         assert!(DecisionClock::new(u64::MAX).boundary(decision_at).is_err());
+    }
+
+    #[test]
+    fn serving_boundary_registers_every_governed_source() {
+        let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let boundary = DecisionClock::new(120)
+            .serving_boundary(decision_at, 300)
+            .expect("serving boundary");
+
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Catalog),
+            decision_at - Duration::seconds(120)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Book),
+            decision_at - Duration::seconds(120)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Microstructure),
+            decision_at - Duration::seconds(120)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::TradeTape),
+            decision_at - Duration::seconds(120)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::Linkage),
+            decision_at - Duration::seconds(120)
+        );
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::DomainCrypto),
+            decision_at - Duration::seconds(300)
+        );
+        assert_eq!(boundary.per_source_cutoffs().len(), 6);
     }
 
     #[test]

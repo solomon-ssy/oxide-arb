@@ -437,14 +437,7 @@ pub fn replay_boundary(
     knowledge_lag_secs: u64,
     domain_crypto_lag_secs: u64,
 ) -> QuantResult<DecisionBoundary> {
-    DecisionClock::new(knowledge_lag_secs)
-        .boundary(decision_at)?
-        .with_source_cutoff(DecisionSource::Catalog, 0)?
-        .with_source_cutoff(DecisionSource::Book, 0)?
-        .with_source_cutoff(DecisionSource::Microstructure, 0)?
-        .with_source_cutoff(DecisionSource::TradeTape, 0)?
-        .with_source_cutoff(DecisionSource::Linkage, 0)?
-        .with_source_cutoff(DecisionSource::DomainCrypto, domain_crypto_lag_secs)
+    DecisionClock::new(knowledge_lag_secs).serving_boundary(decision_at, domain_crypto_lag_secs)
 }
 
 fn decode_catalog_markets(catalog: &CatalogWindowInfo) -> QuantResult<Vec<MarketRegistryInfo>> {
