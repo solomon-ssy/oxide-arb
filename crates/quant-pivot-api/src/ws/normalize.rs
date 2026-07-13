@@ -38,7 +38,7 @@ pub fn normalize_ws_message(
         WsMessage::Book(book) => vec![book_update_to_event(&book, ws_ingress, on_level_rejected)],
         WsMessage::PriceChange(pc) => price_change_events(&pc, ws_ingress, on_level_rejected),
         WsMessage::BestBidAsk(bba) => vec![best_bid_ask_event(&bba, ws_ingress)],
-        WsMessage::TickSizeChange(tsc) => vec![tick_size_event(&tsc, ws_ingress)],
+        WsMessage::TickSizeChange(tsc) => tick_size_events(&tsc, ws_ingress),
         WsMessage::LastTradePrice(ltp) => vec![last_trade_event(&ltp, ws_ingress)],
         WsMessage::MarketResolved(mr) => vec![market_resolved_event(&mr, ws_ingress)],
         _ => Vec::new(),
@@ -174,13 +174,31 @@ fn best_bid_ask_event(bba: &BestBidAsk, ws_ingress: Instant) -> PipelineEvent {
     }
 }
 
-fn tick_size_event(tsc: &TickSizeChange, ws_ingress: Instant) -> PipelineEvent {
-    PipelineEvent::TickSizeChange {
+fn tick_size_events(tsc: &TickSizeChange, ws_ingress: Instant) -> Vec<PipelineEvent> {
+    let Ok(old_tick) = TickSize::try_from(tsc.old_tick_size) else {
+        tracing::warn!(
+            asset_id = %tsc.asset_id,
+            old_tick = %tsc.old_tick_size,
+            new_tick = %tsc.new_tick_size,
+            "dropping WS tick-size change with unsupported old tick"
+        );
+        return Vec::new();
+    };
+    let Ok(new_tick) = TickSize::try_from(tsc.new_tick_size) else {
+        tracing::warn!(
+            asset_id = %tsc.asset_id,
+            old_tick = %tsc.old_tick_size,
+            new_tick = %tsc.new_tick_size,
+            "dropping WS tick-size change with unsupported new tick"
+        );
+        return Vec::new();
+    };
+    vec![PipelineEvent::TickSizeChange {
         asset_id: intern_u256(tsc.asset_id),
-        old_tick: TickSize::try_from(tsc.old_tick_size).unwrap_or(TickSize::Hundredth),
-        new_tick: TickSize::try_from(tsc.new_tick_size).unwrap_or(TickSize::Hundredth),
+        old_tick,
+        new_tick,
         trace: ingress_trace(ws_ingress, 0),
-    }
+    }]
 }
 
 fn last_trade_event(ltp: &LastTradePrice, ws_ingress: Instant) -> PipelineEvent {
@@ -224,6 +242,62 @@ mod tests {
     use quant_pivot_models::domain::pipeline::PipelineEvent;
     use rust_decimal_macros::dec;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn maps_tick_size_change_for_half_and_quarter_cent() {
+        let tsc = TickSizeChange::builder()
+            .asset_id(U256::from(7_u64))
+            .market(B256::ZERO)
+            .old_tick_size(dec!(0.01))
+            .new_tick_size(dec!(0.005))
+            .timestamp(1_700_000_000_000)
+            .build();
+        let events = normalize_ws_message(WsMessage::TickSizeChange(tsc), Instant::now(), None);
+        match &events[..] {
+            [
+                PipelineEvent::TickSizeChange {
+                    old_tick, new_tick, ..
+                },
+            ] => {
+                assert_eq!(*old_tick, TickSize::Hundredth);
+                assert_eq!(*new_tick, TickSize::HalfCent);
+            }
+            other => panic!("expected TickSizeChange, got {other:?}"),
+        }
+
+        let tsc = TickSizeChange::builder()
+            .asset_id(U256::from(7_u64))
+            .market(B256::ZERO)
+            .old_tick_size(dec!(0.005))
+            .new_tick_size(dec!(0.0025))
+            .timestamp(1_700_000_000_000)
+            .build();
+        let events = normalize_ws_message(WsMessage::TickSizeChange(tsc), Instant::now(), None);
+        match &events[..] {
+            [
+                PipelineEvent::TickSizeChange {
+                    old_tick, new_tick, ..
+                },
+            ] => {
+                assert_eq!(*old_tick, TickSize::HalfCent);
+                assert_eq!(*new_tick, TickSize::QuarterCent);
+            }
+            other => panic!("expected TickSizeChange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drops_tick_size_change_with_unsupported_tick_without_hundredth_fallback() {
+        let tsc = TickSizeChange::builder()
+            .asset_id(U256::from(7_u64))
+            .market(B256::ZERO)
+            .old_tick_size(dec!(0.01))
+            .new_tick_size(dec!(0.00001))
+            .timestamp(1_700_000_000_000)
+            .build();
+        let events = normalize_ws_message(WsMessage::TickSizeChange(tsc), Instant::now(), None);
+        assert!(events.is_empty());
+    }
 
     #[test]
     fn maps_market_resolved_event() {

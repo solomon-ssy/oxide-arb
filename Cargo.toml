@@ -135,7 +135,7 @@ paste = "1"
 # ── Phase 1: Data Access Layer Dependencies ──────────────────────────────────
 
 # Polymarket SDK (official v2 — CLOB, WS, Gamma, CTF, signing)
-polymarket_client_sdk_v2 = { version = "0.5", features = [
+polymarket_client_sdk_v2 = { version = "0.6", features = [
   "clob",
   "ws",
   "gamma",
@@ -144,8 +144,8 @@ polymarket_client_sdk_v2 = { version = "0.5", features = [
   "heartbeats",
 ] }
 
-# Ethereum / Polygon (aligned with SDK's alloy ^1.6)
-alloy = { version = "1.6", features = [
+# Ethereum / Polygon (aligned with SDK's alloy ^1.6.3; pin 1.8 for clarity)
+alloy = { version = "1.8", features = [
   "provider-http",
   "signer-local",
   "sol-types",

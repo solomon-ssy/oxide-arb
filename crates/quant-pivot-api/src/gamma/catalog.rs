@@ -106,6 +106,8 @@ pub enum CatalogMarketReject {
     NotBinary { token_count: usize },
     #[error("invalid binary token pair: {reason}")]
     InvalidTokenPair { reason: String },
+    #[error("unsupported tick size: {value}")]
+    UnsupportedTickSize { value: String },
 }
 
 impl CatalogMarketReject {
@@ -117,6 +119,7 @@ impl CatalogMarketReject {
             Self::MissingClobTokenIds => "missing_clob_token_ids",
             Self::NotBinary { .. } => "not_binary",
             Self::InvalidTokenPair { .. } => "invalid_token_pair",
+            Self::UnsupportedTickSize { .. } => "unsupported_tick_size",
         }
     }
 }
@@ -199,11 +202,14 @@ impl TryFrom<WireMarket> for CatalogMarket {
         };
 
         let tokens = zip_tokens([yes_id, no_id], wire.outcomes.as_slice());
-        let tick_size = wire
-            .order_price_min_tick_size
-            .map_or(TickSize::Hundredth, |decimal| {
-                TickSize::try_from(decimal).unwrap_or(TickSize::Hundredth)
-            });
+        let tick_size = match wire.order_price_min_tick_size {
+            None => TickSize::Hundredth,
+            Some(decimal) => TickSize::try_from(decimal).map_err(|_| {
+                CatalogMarketReject::UnsupportedTickSize {
+                    value: decimal.normalize().to_string(),
+                }
+            })?,
+        };
         let end_date = wire.end_date();
         let closed = wire.closed.unwrap_or(false);
         let status = market_status_from_wire(closed, wire.active.unwrap_or(true));
@@ -320,7 +326,7 @@ mod tests {
     use crate::gamma::wire::{WireEvent, WireMarket};
     use quant_pivot_models::{
         enums::{
-            common::MarketCategory,
+            common::{MarketCategory, TickSize},
             market::{EventStatus, MarketStatus},
         },
         types::Usd,
@@ -398,6 +404,54 @@ mod tests {
         assert!(matches!(
             err,
             CatalogMarketReject::NotBinary { token_count: 3 }
+        ));
+    }
+
+    #[test]
+    fn half_and_quarter_cent_tick_sizes_are_accepted() {
+        let half: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xhalf",
+                "question": "?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "orderPriceMinTickSize": "0.005"
+            }"#,
+        )
+        .expect("wire market");
+        let market = CatalogMarket::try_from(half).expect("half cent");
+        assert_eq!(market.tick_size, TickSize::HalfCent);
+
+        let quarter: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xquarter",
+                "question": "?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "orderPriceMinTickSize": "0.0025"
+            }"#,
+        )
+        .expect("wire market");
+        let market = CatalogMarket::try_from(quarter).expect("quarter cent");
+        assert_eq!(market.tick_size, TickSize::QuarterCent);
+    }
+
+    #[test]
+    fn unsupported_tick_size_is_rejected_without_hundredth_fallback() {
+        let wire: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xabc",
+                "question": "?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "orderPriceMinTickSize": "0.00001"
+            }"#,
+        )
+        .expect("wire market");
+        let err = CatalogMarket::try_from(wire).expect_err("reject");
+        assert!(matches!(
+            err,
+            CatalogMarketReject::UnsupportedTickSize { .. }
         ));
     }
 

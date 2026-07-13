@@ -414,6 +414,8 @@ pg_enum! {
     pub enum TickSize {
         Tenth => "0.1",
         Hundredth => "0.01",
+        HalfCent => "0.005",
+        QuarterCent => "0.0025",
         Thousandth => "0.001",
         TenThousandth => "0.0001",
     }
@@ -426,6 +428,8 @@ impl TickSize {
         match self {
             Self::Tenth => dec!(0.1),
             Self::Hundredth => dec!(0.01),
+            Self::HalfCent => dec!(0.005),
+            Self::QuarterCent => dec!(0.0025),
             Self::Thousandth => dec!(0.001),
             Self::TenThousandth => dec!(0.0001),
         }
@@ -443,6 +447,7 @@ impl TryFrom<Decimal> for TickSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn category_set_from_slugs_collects_every_match_and_ignores_unknowns() {
@@ -468,6 +473,55 @@ mod tests {
 
         let set = CategorySet::from_slugs(["sports", "geopolitics"]);
         assert_eq!(set.fee_category(), MarketCategory::Sports);
+    }
+
+    #[test]
+    fn tick_size_parses_polymarket_labels_including_half_and_quarter_cent() {
+        assert_eq!(TickSize::from_str("0.1").expect("tenth"), TickSize::Tenth);
+        assert_eq!(
+            TickSize::from_str("0.01").expect("hundredth"),
+            TickSize::Hundredth
+        );
+        assert_eq!(
+            TickSize::from_str("0.005").expect("half cent"),
+            TickSize::HalfCent
+        );
+        assert_eq!(
+            TickSize::from_str("0.0025").expect("quarter cent"),
+            TickSize::QuarterCent
+        );
+        assert_eq!(
+            TickSize::from_str("0.001").expect("thousandth"),
+            TickSize::Thousandth
+        );
+        assert_eq!(
+            TickSize::from_str("0.0001").expect("ten thousandth"),
+            TickSize::TenThousandth
+        );
+        assert!(TickSize::from_str("0.00001").is_err());
+    }
+
+    #[test]
+    fn tick_size_try_from_decimal_and_as_decimal_round_trip() {
+        for tick in [
+            TickSize::Tenth,
+            TickSize::Hundredth,
+            TickSize::HalfCent,
+            TickSize::QuarterCent,
+            TickSize::Thousandth,
+            TickSize::TenThousandth,
+        ] {
+            let decimal = tick.as_decimal();
+            assert_eq!(TickSize::try_from(decimal).expect("round-trip"), tick);
+        }
+        assert_eq!(
+            TickSize::try_from(dec!(0.005)).expect("half cent"),
+            TickSize::HalfCent
+        );
+        assert_eq!(
+            TickSize::try_from(dec!(0.0025)).expect("quarter cent"),
+            TickSize::QuarterCent
+        );
     }
 
     #[test]
