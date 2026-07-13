@@ -5,7 +5,7 @@
 
 use schemars::JsonSchema;
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_factor_family",
     @derive(JsonSchema)
     pub enum FactorFamily {
@@ -28,7 +28,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_factor_definition_scope",
     pub enum FactorDefinitionScope {
         Generic => "generic",
@@ -38,7 +38,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// The normalization **method** a factor's raw value is mapped through.
     ///
     /// This is the factor's semantic contract (persisted in the definition JSON
@@ -66,7 +66,7 @@ impl FactorNormalization {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_normalization_source",
     /// How a factor's normalized score was derived (audit + analytics).
     @derive(JsonSchema)
@@ -81,7 +81,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_factor_value_state",
     /// The authoritative outcome state of a persisted factor value — orthogonal
     /// to `indeterminate_reason` (which is populated only for `Indeterminate`).
@@ -104,7 +104,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_factor_indeterminate_reason",
     /// Why a factor produced **no** normalized score (never a silent neutral).
     @derive(JsonSchema)

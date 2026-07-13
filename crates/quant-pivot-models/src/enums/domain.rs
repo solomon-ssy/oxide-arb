@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 
 use crate::enums::common::MarketCategory;
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_domain_family",
     /// An external vertical served by the domain plane.
     ///
@@ -45,7 +45,7 @@ impl DomainFamily {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_resolver_tier",
     /// Which layer of the market-linkage resolver produced a linkage record.
     ///
@@ -68,7 +68,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_linkage_status",
     /// Lifecycle state of a frozen market → external-subject linkage record.
     @derive(JsonSchema)
@@ -82,7 +82,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// The metric dimension of one long-format domain observation.
     ///
     /// Only metrics that are actually persisted **and consumed by a feature**
@@ -101,7 +101,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Kline interval of an ingested candle series.
     ///
     /// Only intervals the ingest plane actually pulls exist here; expansion is

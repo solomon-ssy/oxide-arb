@@ -1335,7 +1335,7 @@ mod tests {
             runtime::ModelFamily,
             trainer::train_weighted,
         },
-        training::{LabelName, TrainingExample, TrainingLabel},
+        training::{LabelName, TrainingExample, TrainingLabel, fixtures},
     };
 
     fn hash(seed: &str) -> ContentHash {
@@ -1381,7 +1381,7 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
-            selected_market: crate::training::fixtures::selected_market(
+            selected_market: fixtures::selected_market(
                 &MarketId::new(format!("0x{idx}")),
                 &TokenId::new("yes"),
                 MarketCategory::Sports,

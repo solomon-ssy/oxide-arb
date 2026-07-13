@@ -1,6 +1,6 @@
 //! Enums for the append-only general operation log (`operation_log`).
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_operation_category",
     pub enum OperationCategory {
         Auth => "auth",
@@ -16,7 +16,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_operation_outcome",
     pub enum OperationOutcome {
         Success => "success",

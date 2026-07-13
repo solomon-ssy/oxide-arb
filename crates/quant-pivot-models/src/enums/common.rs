@@ -12,7 +12,7 @@ use std::{
 };
 use thiserror::Error;
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_side",
     pub enum Side {
         Buy => "BUY",
@@ -55,7 +55,7 @@ pub enum OrderType {
     Gtd { expiration: u64 },
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Staleness classification for market-data snapshots.
     ///
     /// Variants are ordered from freshest to most stale. The derived `Ord`
@@ -160,7 +160,7 @@ impl Display for AlertLevel {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_market_category",
     /// Polymarket event category for fee-rate lookup and opportunity scoring.
     @derive(PartialOrd, Ord, schemars::JsonSchema)
@@ -407,7 +407,7 @@ impl FromStr for MarketCategory {
 #[error("invalid tick size: {0}")]
 pub struct TickSizeParseError(pub String);
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_tick_size",
     @from_str(trim)
     @from_str(err = TickSizeParseError)

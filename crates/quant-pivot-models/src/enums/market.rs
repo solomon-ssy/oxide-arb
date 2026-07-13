@@ -1,6 +1,6 @@
 //! Market lifecycle enums for the data pipeline.
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_market_status",
     pub enum MarketStatus {
         Discovered => "discovered",
@@ -13,7 +13,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_event_status",
     pub enum EventStatus {
         Active => "active",

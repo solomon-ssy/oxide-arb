@@ -2836,8 +2836,14 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::{MarketSelectionMemberInfo, ReportDataQualitySnapshotInfo},
-        enums::{common::MarketCategory, market::MarketStatus, quant::RecommendationReportStatus},
-        types::{FeatureVectorId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId, Usd},
+        enums::{
+            common::MarketCategory,
+            market::MarketStatus,
+            quant::{RecommendationReportStatus, ReportKind},
+        },
+        types::{
+            EventId, FeatureVectorId, ReportDataQualityTokens, TokenDataQualityRecord, TokenId, Usd,
+        },
     };
     use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
@@ -2959,7 +2965,7 @@ mod tests {
         let report_id = RecommendationReportId::from_v7();
         let mut report = report_fixtures::report(
             report_id,
-            quant_pivot_models::enums::quant::ReportKind::TopN,
+            ReportKind::TopN,
             RecommendationReportStatus::PublishedEmpty,
         );
         report.model_run_id = None;
@@ -2967,7 +2973,7 @@ mod tests {
         let member = MarketSelectionMemberInfo {
             market_selection_id: report.market_selection_id.clone(),
             market_id: MarketId::new("0xreal"),
-            event_id: quant_pivot_models::types::EventId::new("event-real"),
+            event_id: EventId::new("event-real"),
             category: MarketCategory::Politics,
             status: MarketStatus::Active,
             primary_token_id: TokenId::new("token-real"),

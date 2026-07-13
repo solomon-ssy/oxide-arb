@@ -96,6 +96,7 @@ pub fn validate_category_scope_weights(
 mod tests {
     use super::super::FactorWeight;
     use super::{infer_training_category_scope, validate_category_scope_weights};
+    use crate::training::fixtures;
     use crate::{
         factors::names::{DOMAIN_CRYPTO_STRIKE_PRESSURE, LIQUIDITY_DEPTH},
         features::{
@@ -130,7 +131,7 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new("m"),
             token_id: TokenId::new("t"),
-            selected_market: crate::training::fixtures::selected_market(
+            selected_market: fixtures::selected_market(
                 &MarketId::new("m"),
                 &TokenId::new("t"),
                 category,

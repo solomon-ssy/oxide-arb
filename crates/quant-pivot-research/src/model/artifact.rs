@@ -1619,12 +1619,17 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use crate::{
-        factors::names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
+        factors::{
+            FrozenReferenceQuantiles,
+            names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
+        },
         features::FeatureName,
-        model::artifact::{CalibratedReturnModel, FactorWeight, HeuristicReturnModel},
-        model::calibrator::{IsotonicKnot, MonotoneMapping, ResolvedCalibration},
-        model::reliability::{ReliabilityBin, ReliabilityReport},
-        model::runtime::ModelFamily,
+        model::{
+            artifact::{CalibratedReturnModel, FactorWeight, HeuristicReturnModel},
+            calibrator::{IsotonicKnot, MonotoneMapping, ResolvedCalibration},
+            reliability::{ReliabilityBin, ReliabilityReport},
+            runtime::ModelFamily,
+        },
     };
 
     fn hash(seed: &str) -> ContentHash {
@@ -1666,7 +1671,7 @@ mod tests {
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
             factor_cross_section: FactorCrossSectionConfig::default(),
-            frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
+            frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
             objective_report: None,
             category_scope: None,
         }

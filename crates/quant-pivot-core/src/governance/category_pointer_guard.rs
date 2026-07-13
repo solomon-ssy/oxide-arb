@@ -128,7 +128,9 @@ mod tests {
             ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, SchemaVersion,
         },
     };
-    use quant_pivot_repository::traits::ModelRegistryRepository;
+    use quant_pivot_repository::traits::{
+        CompensateRollbackModelVersionCommit, ModelRegistryRepository, RollbackModelVersionCommit,
+    };
     use quant_pivot_research::{
         artifact::{ArtifactStore, LocalArtifactStore},
         factors::{FrozenReferenceQuantiles, names},
@@ -226,13 +228,13 @@ mod tests {
         }
         async fn rollback_to_retired_predecessor(
             &self,
-            _commit: quant_pivot_repository::traits::RollbackModelVersionCommit<'_>,
+            _commit: RollbackModelVersionCommit<'_>,
         ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
             unimplemented!()
         }
         async fn compensate_failed_rollback(
             &self,
-            _commit: quant_pivot_repository::traits::CompensateRollbackModelVersionCommit<'_>,
+            _commit: CompensateRollbackModelVersionCommit<'_>,
         ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
             unimplemented!()
         }

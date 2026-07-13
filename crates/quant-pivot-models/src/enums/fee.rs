@@ -1,6 +1,6 @@
 //! Fee authority enums.
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_fee_source",
     pub enum FeeSource {
         ClobMarketInfo => "clob_market_info",

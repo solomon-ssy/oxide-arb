@@ -42,7 +42,7 @@ use statrs::distribution::{ContinuousCDF, StudentsT};
 
 use crate::{
     hashing::ResearchHasher,
-    stats::{count_f64, wilson_interval, wilson_z},
+    stats::{self, count_f64, wilson_interval, wilson_z},
 };
 
 /// Decimal scale for every `f64`-derived statistic entering the artifact (Wilson
@@ -520,7 +520,7 @@ fn curve_ic(samples: &[&BiasSample], curve: &[PriceBiasBin]) -> Decimal {
     // Decimal-domain throughout — no f64 round-trip needed (unlike the
     // t-test significance check below, which crosses `f64` only for the
     // Student-t inverse-CDF, which has no closed Decimal form).
-    crate::stats::pearson(&xs, &ys).round_dp(STAT_SCALE)
+    stats::pearson(&xs, &ys).round_dp(STAT_SCALE)
 }
 
 /// Whether a correlation `ic` over `n` paired samples is significant: it must
@@ -568,7 +568,7 @@ fn ic_is_significant(
 
 #[cfg(test)]
 mod tests {
-    use crate::model::CategoryBiasCurve;
+    use crate::{hashing::ResearchHasher, model::CategoryBiasCurve};
 
     use super::{BiasFitConfig, BiasSample, BiasTableCanonical, FavoriteLongshotBiasTable};
     use chrono::{TimeZone, Utc};
@@ -588,7 +588,7 @@ mod tests {
     }
 
     fn split_hash() -> ContentHash {
-        crate::hashing::ResearchHasher::canonical(&"calibration-split").unwrap()
+        ResearchHasher::canonical(&"calibration-split").unwrap()
     }
 
     fn config() -> BiasFitConfig {
@@ -731,7 +731,7 @@ mod tests {
         let by_category: BTreeMap<MarketCategory, CategoryBiasCurve> = BTreeMap::new();
         let fit_window = window();
         let calibration_split_hash = split_hash();
-        let content_hash = crate::hashing::ResearchHasher::canonical(&BiasTableCanonical {
+        let content_hash = ResearchHasher::canonical(&BiasTableCanonical {
             fit_window: &fit_window,
             calibration_split_hash: &calibration_split_hash,
             by_category: &by_category,

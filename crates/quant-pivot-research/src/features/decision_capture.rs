@@ -31,6 +31,7 @@ use crate::{
         resolved::{ResolvedBook, ResolvedMarketContext},
         value::EvidenceSourceRef,
     },
+    hashing::ResearchHasher,
     pit::ResolvedMarketSnapshot,
     selection::SelectedMarket,
 };
@@ -142,7 +143,7 @@ impl MarketDecisionCapture {
     }
 
     pub fn evidence_hash(&self) -> QuantResult<ContentHash> {
-        crate::hashing::ResearchHasher::canonical(&self.evidence())
+        ResearchHasher::canonical(&self.evidence())
     }
 }
 

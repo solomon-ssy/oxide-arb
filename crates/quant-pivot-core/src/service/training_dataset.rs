@@ -248,7 +248,7 @@ impl KeepRateGrid {
         })
     }
 
-    fn boundary(self, index: u32) -> QuantResult<quant_pivot_models::domain::DecisionBoundary> {
+    fn boundary(self, index: u32) -> QuantResult<DecisionBoundary> {
         if index >= self.slices {
             return Err(ResearchError::DatasetPlan {
                 detail: format!(
@@ -2897,7 +2897,7 @@ fn decision_book_quote_price(book: &DecisionBook) -> Option<Price> {
 async fn decision_book_at(
     pit: &dyn PointInTimeSnapshotSource,
     token_id: &TokenId,
-    boundary: &quant_pivot_models::domain::DecisionBoundary,
+    boundary: &DecisionBoundary,
     micro: &[BookMicrostructureRow],
 ) -> QuantResult<(Option<DecisionBook>, Option<BookFidelity>)> {
     if let Some(snapshot) = pit.book_at_boundary(token_id, boundary).await?
@@ -2929,7 +2929,7 @@ async fn decision_book_at(
 fn peak_mark_to(
     micro: &[BookMicrostructureRow],
     opened_at: DateTime<Utc>,
-    boundary: &quant_pivot_models::domain::DecisionBoundary,
+    boundary: &DecisionBoundary,
 ) -> Option<Price> {
     let start = opened_at.timestamp_millis();
     let end = boundary
@@ -2955,7 +2955,7 @@ fn peak_mark_to(
 /// Share depth is the top-of-book USD depth divided by the best bid.
 fn microstructure_fallback(
     micro: &[BookMicrostructureRow],
-    boundary: &quant_pivot_models::domain::DecisionBoundary,
+    boundary: &DecisionBoundary,
 ) -> Option<(Price, Shares)> {
     let cutoff_ms = boundary
         .cutoff_for(DecisionSource::Microstructure)

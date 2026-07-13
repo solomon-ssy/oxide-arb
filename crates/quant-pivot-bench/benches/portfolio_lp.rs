@@ -2,7 +2,10 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use quant_pivot_models::{
-    enums::{common::MarketCategory, quant::OutcomeSide},
+    enums::{
+        common::MarketCategory,
+        quant::{OutcomeSide, PortfolioSolverKind},
+    },
     types::{
         EventId, ExposureBreakdown, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
         TokenId, Usd,
@@ -92,7 +95,7 @@ fn bench_portfolio_lp(c: &mut Criterion) {
     for mode in [("milp", true), ("relaxation", false)] {
         let (label, integer_inclusion) = mode;
         let allocator = LinearProgrammingPortfolioAllocator::new(OptimizerConfig {
-            solver: quant_pivot_models::enums::quant::PortfolioSolverKind::Microlp,
+            solver: PortfolioSolverKind::Microlp,
             integer_inclusion,
             lambda: Decimal::ZERO,
         });

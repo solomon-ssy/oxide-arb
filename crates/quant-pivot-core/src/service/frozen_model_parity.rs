@@ -30,9 +30,10 @@ use quant_pivot_research::{
     factors::FrozenReferenceQuantiles,
     hashing::ResearchHasher,
     model::{
-        ClassicalModelArtifact, ClassicalOutputSemantics, LabelSelector, ModelArtifact,
-        SellScorerArtifact, WeightedFactorModelArtifact, fit_frozen_reference_quantiles,
-        load_hash_verified_artifact, model_input_contract_hash, weighted_training_input_hash,
+        ClassicalKind, ClassicalModelArtifact, ClassicalOutputSemantics, LabelSelector,
+        ModelArtifact, SellScorerArtifact, WeightedFactorModelArtifact,
+        fit_frozen_reference_quantiles, load_hash_verified_artifact, model_input_contract_hash,
+        weighted_training_input_hash,
     },
     training::{LabelName, RETURN_TO_HORIZON, SETTLEMENT_OUTCOME, TrainingExample},
 };
@@ -537,15 +538,12 @@ fn verify_classical_artifact_binding(
         .into());
     }
     let target = spec.training_contract.target_label_name.as_str();
-    let target_semantics = if artifact.kind
-        == quant_pivot_research::model::ClassicalKind::LogisticRegression
+    let target_semantics = if artifact.kind == ClassicalKind::LogisticRegression
         && target == SETTLEMENT_OUTCOME.as_str()
     {
         ClassicalOutputSemantics::SettlementProbability
-    } else if !matches!(
-        artifact.kind,
-        quant_pivot_research::model::ClassicalKind::LogisticRegression
-    ) && target == RETURN_TO_HORIZON.as_str()
+    } else if !matches!(artifact.kind, ClassicalKind::LogisticRegression)
+        && target == RETURN_TO_HORIZON.as_str()
         && spec.training_contract.target_label_horizon_secs == prediction_horizon_secs
     {
         ClassicalOutputSemantics::ForwardReturnBps

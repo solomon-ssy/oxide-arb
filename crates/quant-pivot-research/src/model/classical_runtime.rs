@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{ModelSerializationFormat, OutcomeSide},
     hashing::CanonicalDigest,
@@ -27,6 +27,7 @@ use smartcore::linalg::basic::matrix::DenseMatrix;
 use crate::{
     features::{FeatureCell, FeatureCellState, FeatureName},
     model::{
+        CLASSICAL_CRATE_NAME,
         artifact::{ClassicalModelArtifact, ClassicalOutputSemantics},
         classical::{CLASSICAL_CRATE_VERSION, SmartcoreModel},
         runtime::{
@@ -80,13 +81,12 @@ impl ClassicalRuntime {
     /// and [`ResearchError::Serialization`] on a decode failure.
     pub fn load(artifact: ClassicalModelArtifact, model_bytes: &[u8]) -> QuantResult<Self> {
         artifact.validate()?;
-        if artifact.crate_name != crate::model::classical::CLASSICAL_CRATE_NAME {
+        if artifact.crate_name != CLASSICAL_CRATE_NAME {
             return Err(ResearchError::RuntimeUnavailable {
                 family: artifact.kind.to_string(),
                 detail: format!(
                     "classical crate name mismatch: artifact `{}`, runtime `{}`",
-                    artifact.crate_name,
-                    crate::model::classical::CLASSICAL_CRATE_NAME
+                    artifact.crate_name, CLASSICAL_CRATE_NAME
                 ),
             }
             .into());
@@ -752,7 +752,7 @@ fn checked_div(label: &str, numerator: Decimal, denominator: Decimal) -> QuantRe
         .ok_or_else(|| inference_error(format!("{label} is undefined or overflowed")))
 }
 
-fn inference_error(detail: impl Into<String>) -> quant_pivot_error::QuantError {
+fn inference_error(detail: impl Into<String>) -> QuantError {
     ResearchError::Inference {
         detail: detail.into(),
     }
@@ -813,6 +813,7 @@ mod tests {
             FeatureCell, FeatureName, FeatureStaleness, FeatureUnit, FeatureValue, FeatureValueKind,
         },
         model::{
+            ModelInputAuditState, SignalWarning,
             artifact::{
                 ClassicalModelArtifact, ClassicalOutputSemantics, ModelArtifactHeader,
                 ScoreMultiplierSpec, SubstitutionConfidenceRules, model_input_contract_hash,
@@ -1037,7 +1038,7 @@ mod tests {
             "serving evidence must preserve the exact estimator input bytes"
         );
         assert!(out.input_audit.iter().all(|row| {
-            let state_matches = row.raw_state == crate::model::ModelInputAuditState::Observed;
+            let state_matches = row.raw_state == ModelInputAuditState::Observed;
             let contract_matches = row.input_contract_hash == output.input_contract_hash;
             let transform_matches = row.transform_hash == output.input_transform_hash;
             let training_input_matches = row.training_input_hash == output.training_input_hash;
@@ -1060,7 +1061,7 @@ mod tests {
         assert!(bull.liquidity_score.inner() > Decimal::ZERO);
         assert_eq!(bull.data_quality_score.inner(), Decimal::ONE);
         assert!(bull.rejection_warnings.iter().any(|warning| {
-            matches!(warning, crate::model::SignalWarning::Other(detail) if detail.starts_with("shadow_only:"))
+            matches!(warning, SignalWarning::Other(detail) if detail.starts_with("shadow_only:"))
         }));
     }
 

@@ -2,9 +2,13 @@
 
 use crate::{
     domain::{SettlementRedeemInfo, SettlementRedeemLotInfo, pagination::PageRequest},
-    enums::{execution::SettlementRedeemState, quant::ExecutionWalletKind, quant::OutcomeSide},
+    enums::{
+        execution::SettlementRedeemState,
+        quant::{ExecutionWalletKind, OutcomeSide},
+    },
     types::{
-        MarketId, OrderIntentId, PositionId, SettlementRedeemId, SettlementRedeemLotId, Shares, Usd,
+        MarketId, OrderIntentId, PositionId, SettlementRedeemId, SettlementRedeemLotId, Shares,
+        TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -19,7 +23,7 @@ pub struct SettlementRedeemLotView {
     pub settlement_redeem_id: SettlementRedeemId,
     pub position_id: PositionId,
     pub order_intent_id: OrderIntentId,
-    pub token_id: crate::types::TokenId,
+    pub token_id: TokenId,
     pub side: OutcomeSide,
     pub shares_redeemed: Shares,
     pub cost_basis_usd: Usd,

@@ -83,7 +83,10 @@ fn topological_order(reverse: bool) -> Vec<&'static TableSpec> {
 #[cfg(test)]
 mod tests {
     use super::{create_order, drop_order};
-    use crate::schema::catalog;
+    use crate::{
+        schema::{catalog, table::TableLifecycle, trigger::TriggerKind},
+        seed::system_kill_switch::SYSTEM_KILL_SWITCH_SEED,
+    };
 
     #[test]
     fn drop_order_is_reverse_create_order() {
@@ -195,14 +198,11 @@ mod tests {
         let reconciliation = tables
             .get("quant_reconciliation")
             .expect("quant_reconciliation registered");
-        assert_eq!(
-            reconciliation.lifecycle,
-            crate::schema::table::TableLifecycle::Ledger
-        );
+        assert_eq!(reconciliation.lifecycle, TableLifecycle::Ledger);
         assert!(
             (reconciliation.triggers)()
                 .iter()
-                .all(|trigger| trigger.kind != crate::schema::trigger::TriggerKind::AppendOnly),
+                .all(|trigger| trigger.kind != TriggerKind::AppendOnly),
             "quant_reconciliation is a mutable ledger summary and must not be WORM"
         );
 
@@ -213,7 +213,7 @@ mod tests {
         assert!(
             seeds
                 .iter()
-                .any(|seed| seed.id == crate::seed::system_kill_switch::SYSTEM_KILL_SWITCH_SEED.id),
+                .any(|seed| seed.id == SYSTEM_KILL_SWITCH_SEED.id),
             "system_kill_switch must register the Closed bootstrap seed"
         );
     }

@@ -1,6 +1,6 @@
 //! Model family taxonomy persisted on `quant_model_spec.model_family`.
 
-crate::wire_enum! {
+wire_enum! {
     /// Classical ML model kind (smartcore-backed).
     pub enum ClassicalKind {
         RandomForest => "random_forest",
@@ -11,8 +11,7 @@ crate::wire_enum! {
         ElasticNet => "elastic_net",
     }
 }
-
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_model_family",
     pub enum ModelFamily {
         WeightedFactor => "weighted_factor",

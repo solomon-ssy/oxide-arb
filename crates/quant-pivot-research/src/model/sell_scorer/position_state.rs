@@ -2,7 +2,7 @@
 //! offline Sell-scorer training (Phase 06.1).
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -161,7 +161,7 @@ fn checked_difference(label: &str, left: Decimal, right: Decimal) -> QuantResult
         .ok_or_else(|| position_state_error(format!("{label} subtraction overflow")))
 }
 
-fn position_state_error(detail: impl Into<String>) -> quant_pivot_error::QuantError {
+fn position_state_error(detail: impl Into<String>) -> QuantError {
     ResearchError::FactorComputation {
         detail: format!("position state: {}", detail.into()),
     }

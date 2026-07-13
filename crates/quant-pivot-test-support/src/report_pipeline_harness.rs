@@ -46,12 +46,13 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        BasisAlertInfo, BasisAlertListQuery, CoreEventPublisher, MarketLinkageInfo,
-        MarketLinkageListQuery, NewAccountSnapshot, NewBasisAlert, NewEquitySnapshot,
-        NewFeatureParityState, NewMarketLinkage, NewMarketSelection, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, Paginated, RecommendationInfo, RecommendationReportInfo,
+        BasisAlertInfo, BasisAlertListQuery, CoreEventPublisher, DecisionBoundary,
+        MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot, NewBasisAlert,
+        NewEquitySnapshot, NewFeatureParityState, NewMarketLinkage, NewMarketSelection,
+        NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, Paginated, RecommendationInfo,
+        RecommendationReportInfo,
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -257,7 +258,7 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
     async fn valid_at(
         &self,
         _market_id: &MarketId,
-        _boundary: &quant_pivot_models::domain::DecisionBoundary,
+        _boundary: &DecisionBoundary,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
         Ok(None)
     }
@@ -265,7 +266,7 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
     async fn valid_at_for_markets(
         &self,
         _market_ids: &[MarketId],
-        _boundary: &quant_pivot_models::domain::DecisionBoundary,
+        _boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }
@@ -280,7 +281,7 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
     async fn ledger_for_markets(
         &self,
         _market_ids: &[MarketId],
-        _end_boundary: &quant_pivot_models::domain::DecisionBoundary,
+        _end_boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }

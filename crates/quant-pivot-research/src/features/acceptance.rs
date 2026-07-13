@@ -34,7 +34,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-use crate::features::names::structural::NEGRISK_LEG_ASK_SUM;
+use crate::features::names::structural::{NEGRISK_LEG_ASK_SUM, NEGRISK_LEG_COUNT};
 use crate::{
     features::{
         FeatureBuildInput, FeatureBuilder, MarketWindowSnapshot, MicrostructureBucket,
@@ -904,7 +904,7 @@ fn feature_event_writer_emits_every_cell_state_with_full_audit_context() {
         ),
     );
     vector.generic.insert(
-        crate::features::names::structural::NEGRISK_LEG_COUNT,
+        NEGRISK_LEG_COUNT,
         FeatureCell::not_applicable(NullReason::NotApplicable),
     );
     let boundary = DecisionClock::new(30)

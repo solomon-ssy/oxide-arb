@@ -377,6 +377,7 @@ impl FactorComputer for BetaRegimeFactor {
 mod tests {
     use super::{DomainFactorRegistry, crypto_domain_factors};
     use crate::factors::value::RawFactorEligibility;
+    use crate::features::NullReason;
     use crate::features::{
         DomainFeatureSlice, FeatureCell, FeatureStaleness, FeatureValue, FeatureVector,
         names::{domain_crypto, market as market_names},
@@ -498,11 +499,11 @@ mod tests {
         let mut values = BTreeMap::new();
         values.insert(
             domain_crypto::DISTANCE_TO_STRIKE,
-            FeatureCell::not_applicable(crate::features::NullReason::NotApplicable),
+            FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         values.insert(
             domain_crypto::TIME_TO_OBSERVATION,
-            FeatureCell::not_applicable(crate::features::NullReason::NotApplicable),
+            FeatureCell::not_applicable(NullReason::NotApplicable),
         );
         let slice = DomainFeatureSlice {
             family: DomainFamily::Crypto,

@@ -26,6 +26,7 @@ use validator::Validate;
 use crate::{
     domain::{TrainingDatasetInfo, pagination::PageRequest},
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
+    half_open_window_request,
     types::{
         ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId, RuntimeConfigVersionId,
         SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
@@ -81,7 +82,7 @@ pub struct BuildTrainingDatasetRequest {
     pub training_dataset_id: Option<TrainingDatasetId>,
 }
 
-crate::half_open_window_request!(BuildTrainingDatasetRequest);
+half_open_window_request!(BuildTrainingDatasetRequest);
 
 const fn default_feature_schema_version() -> SchemaVersion {
     SchemaVersion::FIRST

@@ -12,6 +12,7 @@ use std::{error::Error, fmt};
 
 use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
+use quant_pivot_models::domain::RuntimeConfigVersionInfo;
 use quant_pivot_models::{
     domain::{NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigPort},
     enums::{
@@ -538,7 +539,7 @@ async fn resolve_or_create_config_version(
     config: &RuntimeConfig,
     reason: &str,
     activated_by: &str,
-) -> QuantResult<quant_pivot_models::domain::RuntimeConfigVersionInfo> {
+) -> QuantResult<RuntimeConfigVersionInfo> {
     let config_json = config.to_json();
     let config_hash = CanonicalDigest::content_hash_json(&config_json)?;
     match deps.runtime_config_repo.load_by_hash(&config_hash).await? {

@@ -1,13 +1,13 @@
 //! Execution-layer Postgres enums (`quant_order_intent`, `quant_execution_order`).
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_order_intent_kind",
     pub enum OrderIntentKind {
         Buy => "buy",
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_execution_order_phase",
     pub enum ExecutionOrderPhase {
         Entry => "entry",
@@ -15,7 +15,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_order_type_kind",
     pub enum OrderTypeKind {
         Fok => "fok",
@@ -24,7 +24,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_venue_order_status",
     pub enum VenueOrderStatus {
         Filled => "filled",
@@ -36,7 +36,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_capital_allocation_state",
     pub enum CapitalAllocationState {
         Allocated => "allocated",
@@ -47,7 +47,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_position_ledger_state",
     pub enum PositionLedgerState {
         Open => "open",
@@ -62,7 +62,7 @@ impl PositionLedgerState {
     pub const ATTRIBUTION_READY: [Self; 2] = [Self::Closed, Self::Settled];
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_settlement_redeem_state",
     pub enum SettlementRedeemState {
         Pending => "pending",
@@ -73,7 +73,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_reconciliation_result",
     pub enum ReconciliationResult {
         /// Enqueued, not yet reconciled (truth not yet observed). The honest
@@ -102,7 +102,7 @@ impl ReconciliationResult {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_kill_switch_state",
     pub enum KillSwitchState {
         Closed => "closed",
@@ -163,7 +163,7 @@ impl KillSwitchState {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_exit_state",
     pub enum ExitState {
         NotStarted => "not_started",
@@ -177,7 +177,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     pub enum AdmissionOutcome {
         Allow => "allow",
         Deny => "deny",
@@ -185,7 +185,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     pub enum AdmissionCheckId {
         IntentState => "intent_state",
         RecommendationFreshness => "recommendation_freshness",
@@ -217,7 +217,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     pub enum ReconciliationEvidenceKind {
         ClobOrderStatus => "clob_order_status",
         ClobTrades => "clob_trades",
@@ -228,7 +228,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_exit_reason",
     /// Why a position lot exited (persisted on `quant_order_intent.exit_reason`).
     pub enum ExitReason {
@@ -250,7 +250,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     pub enum ModeDenialReason {
         ReportOnly => "report_only",
         RecommendationIneligible => "recommendation_ineligible",
@@ -260,7 +260,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     pub enum ApprovalInvalidation {
         RecommendationExpired => "recommendation_expired",
         ReportRevoked => "report_revoked",

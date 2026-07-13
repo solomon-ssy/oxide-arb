@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::DecisionSource,
+    enums::feature::EvidenceSourceKind,
     types::{MarketId, TokenId},
 };
 use serde::{Deserialize, Serialize};
@@ -161,24 +162,25 @@ pub fn assert_no_future_leakage(examples: &[TrainingExample]) -> QuantResult<()>
     Ok(())
 }
 
-const fn evidence_decision_source(
-    source: crate::features::EvidenceSourceKind,
-) -> Option<DecisionSource> {
+const fn evidence_decision_source(source: EvidenceSourceKind) -> Option<DecisionSource> {
     match source {
-        crate::features::EvidenceSourceKind::Book => Some(DecisionSource::Book),
-        crate::features::EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
-        crate::features::EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
-        crate::features::EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
-        crate::features::EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
-        crate::features::EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
-        crate::features::EvidenceSourceKind::Derived => None,
+        EvidenceSourceKind::Book => Some(DecisionSource::Book),
+        EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
+        EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
+        EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
+        EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
+        EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
+        EvidenceSourceKind::Derived => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector};
+    use crate::{
+        features::{EvidenceSourceKind, EvidenceSourceRef, FeatureVector},
+        training::fixtures,
+    };
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::DecisionClock,
@@ -203,7 +205,7 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new("m"),
             token_id: TokenId::new("t"),
-            selected_market: crate::training::fixtures::selected_market(
+            selected_market: fixtures::selected_market(
                 &MarketId::new("m"),
                 &TokenId::new("t"),
                 MarketCategory::Sports,

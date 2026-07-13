@@ -72,8 +72,8 @@ use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, In
 
 use crate::{
     execution_pg_seed::{
-        EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig, SharedDemoInfra,
-        build_custom_report_transaction, close_position_full, demo_recommendation,
+        self, EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig,
+        SharedDemoInfra, build_custom_report_transaction, close_position_full, demo_recommendation,
         entry_execution_order, fill_entry_lot, report_operation_log, seed_approved_intent,
         seed_manual_approved_intent, seed_pending_intent, seed_report_on_infra,
         seed_shared_demo_infra,
@@ -490,7 +490,7 @@ async fn seed_partial(
                 capital: CapitalSettlement::SettlePartial {
                     spent_usd: partial_cost,
                 },
-                fill: Some(crate::execution_pg_seed::position_fill_public(
+                fill: Some(execution_pg_seed::position_fill_public(
                     &ids,
                     &intent_id,
                     Shares::new(dec!(50)),
@@ -1053,7 +1053,7 @@ fn filled_reconciliation_write(
         capital: CapitalReconcileSettlement::Settle {
             spent_usd: Usd::new(EXECUTION_NOTIONAL),
         },
-        fill: Some(crate::execution_pg_seed::position_fill_public(
+        fill: Some(execution_pg_seed::position_fill_public(
             ids,
             intent_id,
             Shares::new(dec!(100)),

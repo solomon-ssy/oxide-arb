@@ -274,6 +274,7 @@ mod tests {
     use crate::{
         domain::DomainObservationWindow,
         features::{
+            FeatureName, RawFeature,
             domain::{DomainComputeCtx, DomainFeatureBuilder},
             names::domain_crypto as names,
             value::{EvidenceSourceRef, FeatureValue, NullReason},
@@ -387,10 +388,7 @@ mod tests {
         }
     }
 
-    fn find<'a>(
-        features: &'a [crate::features::builder::RawFeature],
-        name: &crate::features::value::FeatureName,
-    ) -> &'a crate::features::builder::RawFeature {
+    fn find<'a>(features: &'a [RawFeature], name: &FeatureName) -> &'a RawFeature {
         features
             .iter()
             .find(|feature| &feature.name == name)

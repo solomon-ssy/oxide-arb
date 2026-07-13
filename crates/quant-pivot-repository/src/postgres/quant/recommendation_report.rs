@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        FeatureParityJobParams, NewOperationLog, NewRecommendationReport, NewReportFeatureParity,
-        NewReportTransaction, PageWindow, Paginated, QuantReportListQuery,
-        RecommendationReportInfo,
+        FeatureParityJobParams, NewOperationLog, NewRecommendationReport,
+        NewReportDataQualitySnapshot, NewReportFeatureParity, NewReportTransaction, PageWindow,
+        Paginated, QuantReportListQuery, RecommendationReportInfo, ReportDataQualitySnapshotInfo,
     },
     entities::{
         operation_log, quant_account_snapshot, quant_feature_parity_run, quant_portfolio_plan,
@@ -23,7 +23,9 @@ use quant_pivot_models::{
         RecommendationStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
     },
     schema::column,
-    types::{FeatureParityStateId, ModelRunId, RecommendationReportId},
+    types::{
+        FeatureParityStateId, ModelRunId, RecommendationReportId, ReportDataQualitySnapshotId,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
@@ -107,7 +109,7 @@ fn validate_sampled_feature_parity(
 
 fn validate_report_data_quality(
     report: &NewRecommendationReport,
-    dq: &quant_pivot_models::domain::NewReportDataQualitySnapshot,
+    dq: &NewReportDataQualitySnapshot,
 ) -> Result<(), StorageError> {
     let wrong_snapshot = dq.report_data_quality_snapshot_id != report.data_quality_snapshot_ref;
     let wrong_decision = dq.decision_at != report.decision_at;
@@ -270,12 +272,11 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     async fn find_data_quality_snapshot(
         &self,
         report_id: &RecommendationReportId,
-    ) -> Result<Option<quant_pivot_models::domain::ReportDataQualitySnapshotInfo>, StorageError>
-    {
+    ) -> Result<Option<ReportDataQualitySnapshotInfo>, StorageError> {
         let Some(snapshot_id) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
             .select_only()
             .column(quant_recommendation_report::Column::DataQualitySnapshotRef)
-            .into_tuple::<quant_pivot_models::types::ReportDataQualitySnapshotId>()
+            .into_tuple::<ReportDataQualitySnapshotId>()
             .one(&self.db)
             .await
             .map_err(StorageError::from)?

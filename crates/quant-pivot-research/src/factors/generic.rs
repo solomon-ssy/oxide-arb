@@ -41,7 +41,7 @@ use crate::{
         },
     },
     features::{
-        FeatureName, FeatureValue, FeatureVector,
+        self, FeatureCellState, FeatureName, FeatureValue, FeatureVector,
         names::{book, market, micro, ts},
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -369,8 +369,7 @@ impl FactorComputer for DataQualityFactor {
             .filter(|(_, cell)| {
                 matches!(
                     cell.state,
-                    crate::features::FeatureCellState::Missing
-                        | crate::features::FeatureCellState::NotApplicable
+                    FeatureCellState::Missing | FeatureCellState::NotApplicable
                 )
             })
             .count();
@@ -422,7 +421,7 @@ impl FactorComputer for DataQualityFactor {
 
 /// Extract a numeric value from a present feature value.
 pub(super) fn extract_decimal(value: &FeatureValue) -> Option<Decimal> {
-    crate::features::feature_scalar(value)
+    features::feature_scalar(value)
 }
 
 /// Map an aggregate data-quality status to a `[0, 1]` confidence / score.

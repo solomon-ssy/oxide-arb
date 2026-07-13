@@ -458,7 +458,10 @@ mod tests {
             BacktestInputs, BacktestMarketMeta, BacktestRequest, BacktestTick, Backtester,
             MarketOutcome, PortfolioCaps,
         },
-        factors::{FactorExplanation, FactorValue, NormalizedFactor, names::MOMENTUM_ROC},
+        factors::{
+            FactorExplanation, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
+            names::MOMENTUM_ROC,
+        },
         model::{
             ReturnModelSpec,
             artifact::{
@@ -503,7 +506,7 @@ mod tests {
                 substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
                 return_model: ReturnModelSpec::heuristic_default(),
                 factor_cross_section: FactorCrossSectionConfig::default(),
-                frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
+                frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
                 objective_report: None,
                 category_scope: None,
             },

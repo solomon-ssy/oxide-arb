@@ -302,7 +302,7 @@ mod tests {
 
     use crate::{
         artifact::{ArtifactStore, LocalArtifactStore},
-        factors::names,
+        factors::{FrozenReferenceQuantiles, names},
         model::{
             artifact::{
                 FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec,
@@ -374,7 +374,7 @@ mod tests {
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
             factor_cross_section: FactorCrossSectionConfig::default(),
-            frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
+            frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
             objective_report: None,
             category_scope: None,
         }))

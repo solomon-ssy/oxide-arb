@@ -45,7 +45,7 @@ use quant_pivot_core::{
     },
 };
 use quant_pivot_error::{control::ControlError, storage::StorageError};
-use quant_pivot_models::domain::{RuntimeConfigPort, StructuralMonitorPort};
+use quant_pivot_models::domain::{DecisionClock, RuntimeConfigPort, StructuralMonitorPort};
 use quant_pivot_models::runtime_config::FeatureFamily;
 use quant_pivot_models::{
     clickhouse::{
@@ -476,7 +476,7 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
     feature_pipeline
         .run(FeaturePipelineRequest {
             included: &included,
-            boundary: quant_pivot_models::domain::DecisionClock::new(0)
+            boundary: DecisionClock::new(0)
                 .boundary(harness.as_of)
                 .expect("decision boundary"),
             features: &features,

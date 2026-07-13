@@ -344,7 +344,8 @@ mod tests {
     use crate::{
         artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
         training::{
-            DatasetHashContract, TrainingDatasetArtifact, dataset_source_fingerprint,
+            DatasetHashContract, TrainingDatasetArtifact, TrainingExample,
+            dataset_source_fingerprint,
             fixtures::{bind_capture_to_boundary, example},
         },
     };
@@ -358,7 +359,7 @@ mod tests {
         },
     };
 
-    fn manifest(examples: &[crate::training::TrainingExample]) -> DatasetManifest {
+    fn manifest(examples: &[TrainingExample]) -> DatasetManifest {
         let hash = |seed: char| {
             ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
         };

@@ -22,8 +22,8 @@ use quant_pivot_models::{
         DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
     },
     domain::{
-        CatalogCommit, CompleteTrainingDatasetBuild, CryptoSubject, DecisionSource,
-        EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
+        CatalogCommit, CompleteTrainingDatasetBuild, CryptoSubject, DecisionBoundary,
+        DecisionSource, EventRegistryInfo, GroundingProof, JobProgressSink, LinkageOutcome,
         MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogSyncBatch,
         NewEventCatalogVersion, NewMarketCatalogVersion, NewMarketLinkage, NewModelSpec,
         NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan, NoopProgressSink,
@@ -416,7 +416,7 @@ impl PointInTimeSnapshotSource for LeakyPitEngine {
     async fn book_at_boundary(
         &self,
         token_id: &TokenId,
-        boundary: &quant_pivot_models::domain::DecisionBoundary,
+        boundary: &DecisionBoundary,
     ) -> QuantResult<Option<BookSnapshotAt>> {
         if token_id != &self.token_id {
             return Ok(None);
@@ -450,14 +450,14 @@ impl PointInTimeSnapshotSource for LeakyPitEngine {
     async fn market_snapshot_at(
         &self,
         market_id: &MarketId,
-        boundary: &quant_pivot_models::domain::DecisionBoundary,
+        boundary: &DecisionBoundary,
     ) -> QuantResult<Option<ResolvedMarketSnapshot>> {
         self.catalog.market_snapshot_at(market_id, boundary).await
     }
 
     async fn market_snapshots_at_boundary(
         &self,
-        boundary: &quant_pivot_models::domain::DecisionBoundary,
+        boundary: &DecisionBoundary,
     ) -> QuantResult<Vec<ResolvedMarketSnapshot>> {
         self.catalog.market_snapshots_at_boundary(boundary).await
     }

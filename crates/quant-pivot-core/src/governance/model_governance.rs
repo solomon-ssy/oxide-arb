@@ -80,6 +80,7 @@ use crate::{
     runtime_config::RuntimeConfigStore,
     service::{
         feature_integrity::FeatureParityGatePort, frozen_model_parity::FrozenModelParityService,
+        training_dataset,
     },
 };
 
@@ -164,15 +165,13 @@ impl ModelGovernanceService {
 
     /// Re-scan a frozen dataset Parquet for point-in-time leakage (Phase 11.5 #9).
     async fn rescan_leakage(&self, dataset: &TrainingDatasetInfo) -> QuantResult<LeakageFindings> {
-        let materialization =
-            crate::service::training_dataset::require_dataset_materialization(dataset)?;
+        let materialization = training_dataset::require_dataset_materialization(dataset)?;
         let bytes = self
             .deps
             .artifact_store
             .get(materialization.parquet_uri)
             .await?;
-        let examples =
-            crate::service::training_dataset::verify_frozen_dataset_artifact(dataset, &bytes)?;
+        let examples = training_dataset::verify_frozen_dataset_artifact(dataset, &bytes)?;
         scan_future_leakage(&examples)
     }
 
@@ -1342,8 +1341,7 @@ impl ModelGovernanceService {
         let Some(dataset) = self.deps.dataset_repo.find_by_id(dataset_id).await? else {
             return Ok(DatasetCoverage::default());
         };
-        let materialization =
-            crate::service::training_dataset::require_dataset_materialization(&dataset)?;
+        let materialization = training_dataset::require_dataset_materialization(&dataset)?;
         Ok(materialization.coverage.clone())
     }
 

@@ -13,7 +13,10 @@ use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::QuantFeatureEventRow,
     domain::{DecisionBoundary, DecisionSource, FeatureVectorInfo},
-    enums::clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
+    enums::{
+        clickhouse::{ChFeatureCellState, ChFeatureSourceKind, ChFeatureValueKind},
+        feature::EvidenceSourceKind,
+    },
     types::{FeatureVectorId, MarketId, RuntimeConfigVersionId, TokenId},
 };
 use serde::Serialize;
@@ -341,7 +344,7 @@ fn validate_cell(
     name: &str,
     cell: &FeatureCell,
     expected_kind: FeatureValueKind,
-    expected_source: crate::features::EvidenceSourceKind,
+    expected_source: EvidenceSourceKind,
     boundary: &DecisionBoundary,
 ) -> QuantResult<()> {
     let valid_shape = match cell.state {
@@ -437,17 +440,15 @@ fn validate_cell(
     Ok(())
 }
 
-const fn decision_source(
-    evidence_source: crate::features::EvidenceSourceKind,
-) -> Option<DecisionSource> {
+const fn decision_source(evidence_source: EvidenceSourceKind) -> Option<DecisionSource> {
     match evidence_source {
-        crate::features::EvidenceSourceKind::Book => Some(DecisionSource::Book),
-        crate::features::EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
-        crate::features::EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
-        crate::features::EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
-        crate::features::EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
-        crate::features::EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
-        crate::features::EvidenceSourceKind::Derived => None,
+        EvidenceSourceKind::Book => Some(DecisionSource::Book),
+        EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
+        EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
+        EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
+        EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
+        EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
+        EvidenceSourceKind::Derived => None,
     }
 }
 

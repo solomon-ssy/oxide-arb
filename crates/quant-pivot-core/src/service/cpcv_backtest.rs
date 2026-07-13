@@ -69,6 +69,8 @@ use quant_pivot_research::{
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
+#[cfg(feature = "ml-classical")]
+use crate::service::model_training;
 use crate::service::{
     backtest::frozen_ticks,
     historical_replay::ReplayConfig,
@@ -1357,7 +1359,7 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
             .cloned()
             .collect();
 
-        let matrix = crate::service::model_training::build_classical_matrix(
+        let matrix = model_training::build_classical_matrix(
             &fold_examples,
             &self.template.label,
             &self.template.schema,
@@ -1378,7 +1380,7 @@ impl FoldModelSource for ClassicalFoldSource<'_> {
 
         let mut header = self.template.header_template.clone();
         header.model_version_id = ModelVersionId::from_v7();
-        let output_semantics = crate::service::model_training::classical_output_semantics(
+        let output_semantics = model_training::classical_output_semantics(
             self.template.kind,
             &self.template.label,
             self.template.prediction_horizon_secs,

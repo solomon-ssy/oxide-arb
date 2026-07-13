@@ -40,8 +40,8 @@ use quant_pivot_models::{
         BuildTrainingDatasetRequest, CalibrationArtifactFitPort, CalibrationArtifactInfo,
         CalibrationArtifactListQuery, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
         CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand, DataQualityPort,
-        DataQualitySnapshot, DomainSourceCursorInfo, ExecutionOrderInfo, ExecutionReadPort,
-        ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
+        DataQualitySnapshot, DecisionBoundary, DomainSourceCursorInfo, ExecutionOrderInfo,
+        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
         FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
         FactorDefinitionListQuery, FactorGovernancePort, FeatureContractEntryView,
         FeatureContractView, FeatureIntegrityActionContext, FeatureIntegrityLatchView,
@@ -1394,7 +1394,7 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
     async fn valid_at(
         &self,
         _market_id: &MarketId,
-        _boundary: &quant_pivot_models::domain::DecisionBoundary,
+        _boundary: &DecisionBoundary,
     ) -> Result<Option<MarketLinkageInfo>, StorageError> {
         Ok(None)
     }
@@ -1402,7 +1402,7 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
     async fn valid_at_for_markets(
         &self,
         _market_ids: &[MarketId],
-        _boundary: &quant_pivot_models::domain::DecisionBoundary,
+        _boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }
@@ -1417,7 +1417,7 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
     async fn ledger_for_markets(
         &self,
         _market_ids: &[MarketId],
-        _end_boundary: &quant_pivot_models::domain::DecisionBoundary,
+        _end_boundary: &DecisionBoundary,
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }

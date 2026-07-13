@@ -1,6 +1,6 @@
 //! Quant-pivot runtime and report domain enums.
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_quant_runtime_mode",
     /// Governed runtime mode for report generation and optional execution.
     @derive(Default, schemars::JsonSchema)
@@ -47,7 +47,7 @@ impl QuantRuntimeMode {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_report_kind",
     /// Recommendation report category.
     @derive(Default)
@@ -59,7 +59,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_report_trigger_kind",
     /// Stable report-generation trigger source.
     @derive(Default)
@@ -70,7 +70,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_recommendation_report_status",
     /// Publication lifecycle state for a recommendation report.
     @derive(Default)
@@ -85,7 +85,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_recommendation_status",
     /// Lifecycle state for a single recommendation.
     @derive(Default)
@@ -130,7 +130,7 @@ impl RecommendationStatus {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_outcome_side",
     /// Which binary-market outcome token a recommendation opens a position in.
     ///
@@ -160,7 +160,7 @@ impl OutcomeSide {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// How an entry plan becomes executable.
     @derive(Default)
     pub enum EntryTriggerKind {
@@ -174,7 +174,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// How an exit plan leaves a recommendation.
     @derive(Default)
     pub enum ExitTriggerKind {
@@ -188,7 +188,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_order_intent_status",
     /// Governed execution-intent lifecycle state.
     @derive(Default)
@@ -294,7 +294,7 @@ impl OrderIntentStatus {
     ];
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_approval_status",
     /// Human or policy approval state attached to an order intent.
     @derive(Default)
@@ -308,7 +308,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_publication_status",
     /// Publication lifecycle for model specs, model versions, and factor definitions.
     @derive(Default)
@@ -340,7 +340,7 @@ impl PublicationStatus {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_model_governance_action",
     /// Model-governance action recorded in the `quant_model_governance_audit`
     /// trail. Append-only wire labels — never rename an existing value.
@@ -359,7 +359,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_data_quality_status",
     /// Point-in-time data quality classification.
     @derive(Default)
@@ -373,7 +373,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_factor_direction",
     /// Factor contribution direction.
     @derive(Default)
@@ -399,7 +399,7 @@ impl FactorDirection {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_training_dataset_status",
     /// Frozen training-dataset lifecycle state (ledger).
     ///
@@ -418,7 +418,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_research_job_kind",
     /// The kind of long-running research task a durable job carries.
     ///
@@ -441,7 +441,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_research_job_status",
     /// Durable research-job lifecycle state.
     ///
@@ -474,7 +474,7 @@ impl ResearchJobStatus {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_feature_parity_run_kind",
     /// Scope that caused a deterministic feature-parity replay.
     pub enum FeatureParityRunKind {
@@ -483,7 +483,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_feature_parity_run_status",
     /// Durable lifecycle of one parity replay.
     @derive(Default)
@@ -506,7 +506,7 @@ impl FeatureParityRunStatus {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_feature_parity_latch_state",
     /// Governed admission latch state. Absence of a row is treated as open.
     pub enum FeatureParityLatchState {
@@ -515,7 +515,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_feature_parity_state_transition",
     /// Why a new append-only latch-state row exists.
     pub enum FeatureParityStateTransition {
@@ -525,7 +525,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Deterministic layer compared by one parity event.
     pub enum FeatureParityStage {
         Selection => "selection",
@@ -539,7 +539,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Row-level result recorded in the parity event fact stream.
     pub enum FeatureParityEventStatus {
         Matched => "matched",
@@ -548,7 +548,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Explicit state carried by feature evidence; absence is never a value.
     @derive(PartialOrd, Ord)
     pub enum FeatureCellState {
@@ -559,7 +559,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Stable machine code recorded on a research job's `error_json.code`.
     ///
     /// A wire-only enum (lives inside the `error_json` JSONB payload, not a
@@ -576,7 +576,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_model_run_kind",
     /// Model run purpose.
     @derive(Default)
@@ -593,7 +593,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_model_run_status",
     /// Model run terminal or in-flight status.
     @derive(Default)
@@ -606,7 +606,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_model_run_error_code",
     /// Stable, queryable failure taxonomy for a terminal [`ModelRunStatus::Failed`]
     /// run. Append-only wire labels — never rename an existing value.
@@ -623,7 +623,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Serialization format of a stored model artifact's bytes.
     ///
     /// The weighted-factor body serializes to canonical JSON; a classical
@@ -639,7 +639,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_execution_order_state",
     /// Internal execution order state.
     @derive(Default)
@@ -679,7 +679,7 @@ impl ExecutionOrderState {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_recommendation_outcome",
     /// Recommendation attribution outcome.
     @derive(Default)
@@ -694,7 +694,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_recommendation_attribution_outcome",
     /// Terminal, WORM attribution outcome for a recommendation.
     @derive(Default)
@@ -708,7 +708,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_account_source",
     /// Capital-base provenance for a report's sizing.
     ///
@@ -723,7 +723,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Position-sizing model that produced a recommendation's size.
     @derive(Default)
     pub enum SizingModelKind {
@@ -733,7 +733,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Which bet-structure `KellySizingModel::suggest` used to derive `f*`
     /// (Phase 11.3 §4 redesign — audit provenance on `SizingPlan`).
     @derive(Default)
@@ -754,7 +754,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// The cap that bound a recommendation's final size.
     ///
     /// `None` means no hard cap bound the size (it was limited only by the
@@ -797,7 +797,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Why a report could not publish any recommendation (empty report).
     ///
     /// Every variant has an independent producer in the report builder — there
@@ -822,7 +822,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Why a recommendation is ineligible for execution in a given mode.
     @derive(Default)
     pub enum IneligibilityReason {
@@ -850,7 +850,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Why a candidate was dropped during portfolio planning (not published).
     ///
     /// The planner records one reason per rejected candidate; the report rolls
@@ -887,7 +887,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_calibration_kind",
     /// Which empirical calibration artifact family a
     /// [`crate::types::CalibrationArtifactId`] belongs to (Phase 11.3 §3.4).
@@ -906,7 +906,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// The fitting method a `ModelScore` `ProbabilityCalibrator` used.
     @derive(Default, schemars::JsonSchema)
     pub enum CalibrationMethod {
@@ -920,7 +920,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// The source a `Calibrated` return model's downside (bps) is read from.
     ///
     /// A single variant today (`MfeMae`): the system's Kelly/TP-SL structure
@@ -938,7 +938,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_dataset_purpose",
     /// What a `TrainingDataset` row's materialized examples are used for
     /// (Phase 11.3 §0/§4).
@@ -956,7 +956,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Whether an open lot should leave the market before resolution or be held
     /// until the CTF payout vector is available.
     @derive(Default)
@@ -969,7 +969,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Whether a resolved hold-to-resolution lot is redeemed by the system or
     /// left for an operator.
     @derive(Default)
@@ -982,7 +982,7 @@ crate::wire_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_execution_wallet_kind",
     /// Polymarket wallet shape used by money-moving on-chain actions.
     ///
@@ -1005,7 +1005,7 @@ crate::pg_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// LP solver backend that produced a portfolio plan's allocation.
     @derive(Default, schemars::JsonSchema)
     pub enum PortfolioSolverKind {
@@ -1017,7 +1017,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Which LP solve mode produced the allocation.
     @derive(Default)
     pub enum PortfolioSolveMode {
@@ -1030,7 +1030,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Terminal status of the portfolio optimizer for one plan (observability of
     /// which solve path actually produced the allocation).
     @derive(Default)
@@ -1050,7 +1050,7 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+wire_enum! {
     /// Provenance of the correlation clusters used for the correlation-exposure cap.
     @derive(Default)
     pub enum CorrelationSource {

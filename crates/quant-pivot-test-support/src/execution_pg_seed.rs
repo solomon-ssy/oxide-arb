@@ -69,6 +69,8 @@ use rust_decimal_macros::dec;
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 use uuid::Uuid;
 
+use crate::{report_fixtures, seeded_uuid};
+
 /// shares (100) * `limit_price` (0.6).
 pub const EXECUTION_NOTIONAL: Decimal = dec!(60);
 
@@ -374,7 +376,7 @@ pub async fn seed_manual_approved_intent(
         .approve(
             &intent_id,
             ApproveOrderIntent {
-                approved_by: crate::seeded_uuid("ui-demo-operator"),
+                approved_by: seeded_uuid("ui-demo-operator"),
                 approval_reason: "ui-demo-seed".to_owned(),
                 approved_at: Utc::now(),
             },
@@ -919,7 +921,7 @@ fn build_report_transaction_inner(
         expired_at: None,
         status_reason: None,
     };
-    let sampled_feature_parity = crate::report_fixtures::sampled_parity(&report);
+    let sampled_feature_parity = report_fixtures::sampled_parity(&report);
     NewReportTransaction {
         feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
         account_snapshot: NewAccountSnapshot {

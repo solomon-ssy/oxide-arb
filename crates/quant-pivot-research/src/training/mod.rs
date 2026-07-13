@@ -49,7 +49,7 @@ use quant_pivot_models::{
         DecisionBoundary, DecisionSource, ExitTrainingLotRow, LotExitEventRow,
         market::book::BookLevel,
     },
-    enums::quant::DatasetPurpose,
+    enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
     types::{
         ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
         ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId, SchemaVersion,
@@ -659,17 +659,15 @@ fn validate_example_capture(example: &TrainingExample) -> QuantResult<()> {
     Ok(())
 }
 
-const fn decision_source_for_evidence(
-    source: crate::features::EvidenceSourceKind,
-) -> Option<DecisionSource> {
+const fn decision_source_for_evidence(source: EvidenceSourceKind) -> Option<DecisionSource> {
     match source {
-        crate::features::EvidenceSourceKind::Book => Some(DecisionSource::Book),
-        crate::features::EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
-        crate::features::EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
-        crate::features::EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
-        crate::features::EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
-        crate::features::EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
-        crate::features::EvidenceSourceKind::Derived => None,
+        EvidenceSourceKind::Book => Some(DecisionSource::Book),
+        EvidenceSourceKind::GammaMetadata => Some(DecisionSource::Catalog),
+        EvidenceSourceKind::ClickHouseFact => Some(DecisionSource::Microstructure),
+        EvidenceSourceKind::TradeTape => Some(DecisionSource::TradeTape),
+        EvidenceSourceKind::DomainExternal => Some(DecisionSource::DomainCrypto),
+        EvidenceSourceKind::Linkage => Some(DecisionSource::Linkage),
+        EvidenceSourceKind::Derived => None,
     }
 }
 
@@ -862,8 +860,11 @@ impl From<&ExitTrainingLotRow> for LotTerminalSnapshot {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::{LabelName, TrainingExample, TrainingLabel};
-    use crate::features::{
-        CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, FeatureVector,
+    use crate::{
+        features::{
+            CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, FeatureVector,
+        },
+        selection::SelectedMarket,
     };
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
@@ -885,8 +886,8 @@ pub(crate) mod fixtures {
         market_id: &MarketId,
         token_id: &TokenId,
         category: MarketCategory,
-    ) -> crate::selection::SelectedMarket {
-        crate::selection::SelectedMarket {
+    ) -> SelectedMarket {
+        SelectedMarket {
             market_id: market_id.clone(),
             event_id: EventId::new(format!("event:{}", market_id.as_str())),
             category,

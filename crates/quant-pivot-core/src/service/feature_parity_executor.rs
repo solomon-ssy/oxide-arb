@@ -33,9 +33,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::observability::{
-    alert_dispatcher::{Alert, AlertDispatcher},
-    metrics_hub::MetricsHub,
+use crate::{
+    observability::{
+        alert_dispatcher::{Alert, AlertDispatcher},
+        metrics_hub::MetricsHub,
+    },
+    report::ReportLifecycleService,
 };
 use quant_pivot_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
 
@@ -172,7 +175,7 @@ trait ReportContainmentPort: Send + Sync {
 }
 
 #[async_trait]
-impl ReportContainmentPort for crate::report::ReportLifecycleService {
+impl ReportContainmentPort for ReportLifecycleService {
     async fn revoke_and_cascade(
         &self,
         report_id: &RecommendationReportId,
@@ -219,7 +222,7 @@ pub struct ReportFeatureParityIncidentResponse {
 impl ReportFeatureParityIncidentResponse {
     #[must_use]
     pub fn new(
-        reports: Arc<crate::report::ReportLifecycleService>,
+        reports: Arc<ReportLifecycleService>,
         report_repo: Arc<dyn RecommendationReportRepository>,
         alerts: Arc<AlertDispatcher>,
         metrics: Arc<MetricsHub>,

@@ -889,7 +889,13 @@ mod tests {
             NewRuntimeConfigActivation, NewRuntimeConfigVersion, ResearchJobInfo,
             RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
         },
-        enums::{quant::FeatureParityStateTransition, runtime_config::RuntimeConfigVersionSource},
+        enums::{
+            quant::{
+                EmptyReportReason, FeatureParityStateTransition, RecommendationReportStatus,
+                ReportKind,
+            },
+            runtime_config::RuntimeConfigVersionSource,
+        },
         types::{
             ModelVersionId, RecommendationReportId, RuntimeConfigActivationId, SchemaVersion,
             TrainingDatasetId,
@@ -1209,9 +1215,7 @@ mod tests {
         )
     }
 
-    fn new_report(
-        info: quant_pivot_models::domain::RecommendationReportInfo,
-    ) -> NewRecommendationReport {
+    fn new_report(info: RecommendationReportInfo) -> NewRecommendationReport {
         NewRecommendationReport {
             recommendation_report_id: info.recommendation_report_id,
             report_kind: info.report_kind,
@@ -1255,8 +1259,8 @@ mod tests {
         );
         let mut info = report_fixtures::report(
             RecommendationReportId::from_v7(),
-            quant_pivot_models::enums::quant::ReportKind::TopN,
-            quant_pivot_models::enums::quant::RecommendationReportStatus::PublishedEmpty,
+            ReportKind::TopN,
+            RecommendationReportStatus::PublishedEmpty,
         );
         info.runtime_config_version_id = runtime_config_version_id.clone();
         info.model_run_id = None;
@@ -1264,8 +1268,7 @@ mod tests {
             "scheduled:default_interval:{}",
             info.trigger_time.to_rfc3339()
         );
-        info.summary_json.empty_reason =
-            Some(quant_pivot_models::enums::quant::EmptyReportReason::EmptySelection);
+        info.summary_json.empty_reason = Some(EmptyReportReason::EmptySelection);
         let report = new_report(info);
 
         let parity = coordinator

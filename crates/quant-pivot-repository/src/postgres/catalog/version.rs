@@ -13,7 +13,7 @@ use quant_pivot_models::{
         NewEventCatalogVersion, NewFailedCatalogSyncBatch, NewMarketCatalogVersion,
     },
     entities::{catalog_sync_batch, event_catalog_version, market_catalog_version},
-    types::{EventCatalogVersionId, EventId, MarketId},
+    types::{CatalogSyncBatchId, EventCatalogVersionId, EventId, MarketId},
 };
 use sea_orm::{
     AccessMode, ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait,
@@ -94,7 +94,7 @@ impl PgCatalogVersionRepository {
 
     async fn fail_batch(
         &self,
-        batch_id: &quant_pivot_models::types::CatalogSyncBatchId,
+        batch_id: &CatalogSyncBatchId,
         stage: CatalogSyncFailureStage,
         detail: &str,
     ) -> Result<catalog_sync_batch::Model, StorageError> {
@@ -623,7 +623,7 @@ async fn persist_catalog_preparation(
     batch: NewCatalogSyncBatch,
     event_versions: Vec<NewEventCatalogVersion>,
     market_versions: Vec<NewMarketCatalogVersion>,
-) -> Result<quant_pivot_models::types::CatalogSyncBatchId, StorageError> {
+) -> Result<CatalogSyncBatchId, StorageError> {
     let batch_id = batch.catalog_sync_batch_id.clone();
     let preparing = catalog_sync_batch::ActiveModel {
         catalog_sync_batch_id: Set(batch.catalog_sync_batch_id),
@@ -694,7 +694,7 @@ where
 
 async fn finalize_version_visibility<C>(
     db: &C,
-    batch_id: &quant_pivot_models::types::CatalogSyncBatchId,
+    batch_id: &CatalogSyncBatchId,
     visible_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), StorageError>
 where
@@ -722,7 +722,7 @@ where
 
 async fn finalize_batch<C>(
     db: &C,
-    batch_id: &quant_pivot_models::types::CatalogSyncBatchId,
+    batch_id: &CatalogSyncBatchId,
     visible_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<catalog_sync_batch::Model, StorageError>
 where

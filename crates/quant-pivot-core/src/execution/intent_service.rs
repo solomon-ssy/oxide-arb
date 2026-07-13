@@ -1247,7 +1247,10 @@ mod tests {
                 CalibrationArtifactId, ContentHash, ModelInputContract, ModelSpecId, ModelVersionId,
             },
         };
-        use quant_pivot_repository::traits::ModelRegistryRepository;
+        use quant_pivot_repository::traits::{
+            CompensateRollbackModelVersionCommit, ModelRegistryRepository,
+            RollbackModelVersionCommit,
+        };
         use quant_pivot_research::factors::FrozenReferenceQuantiles;
         use quant_pivot_research::{
             artifact::{ArtifactStore, LocalArtifactStore},
@@ -1350,13 +1353,13 @@ mod tests {
             }
             async fn rollback_to_retired_predecessor(
                 &self,
-                _commit: quant_pivot_repository::traits::RollbackModelVersionCommit<'_>,
+                _commit: RollbackModelVersionCommit<'_>,
             ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }
             async fn compensate_failed_rollback(
                 &self,
-                _commit: quant_pivot_repository::traits::CompensateRollbackModelVersionCommit<'_>,
+                _commit: CompensateRollbackModelVersionCommit<'_>,
             ) -> Result<(ModelVersionInfo, ModelVersionInfo), StorageError> {
                 unimplemented!("not exercised by the calibration recheck tests")
             }

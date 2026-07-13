@@ -434,12 +434,14 @@ mod tests {
         SellNullBaseline, replay_lot_null_baseline,
     };
     use crate::{
-        features::FeatureVector,
+        features::{FeatureName, FeatureVector},
         model::{
             LabelSelector, PositionStateFeatures, SellScore, SellScoreInput, SellScorerRuntime,
             SellSignalPolicy, position_state_signed,
         },
-        training::{HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel},
+        training::{
+            HOLD_VS_EXIT_ALPHA_BPS, LotTrainingContext, TrainingExample, TrainingLabel, fixtures,
+        },
     };
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_error::QuantResult;
@@ -474,7 +476,7 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: market_id.clone(),
             token_id: token_id.clone(),
-            selected_market: crate::training::fixtures::selected_market(
+            selected_market: fixtures::selected_market(
                 &market_id,
                 &token_id,
                 MarketCategory::Sports,
@@ -541,7 +543,7 @@ mod tests {
         fn feature_schema_hash(&self) -> ContentHash {
             ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash")
         }
-        fn required_features(&self) -> Vec<crate::features::FeatureName> {
+        fn required_features(&self) -> Vec<FeatureName> {
             Vec::new()
         }
         fn score(&self, _input: &SellScoreInput) -> QuantResult<SellScore> {

@@ -98,6 +98,8 @@ fn ground_one(
 
 #[cfg(test)]
 mod tests {
+    use crate::linkage;
+
     use super::validate_manual_override;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -137,7 +139,7 @@ mod tests {
     }
 
     fn instrument_key() -> DomainInstrumentKey {
-        crate::linkage::rule_for_alias("btc")
+        linkage::rule_for_alias("btc")
             .expect("btc rule")
             .instrument_key()
     }

@@ -38,7 +38,7 @@ use crate::{
         },
     },
     features::{
-        FeatureName, FeatureValue, FeatureVector, NullReason,
+        self, FeatureCellState, FeatureName, FeatureValue, FeatureVector, NullReason,
         names::{book as book_names, market as market_names, structural as feat},
     },
     model::FavoriteLongshotBiasTable,
@@ -531,12 +531,12 @@ fn negrisk_outcome(
     min_legs: u32,
 ) -> NegRiskOutcome {
     match features.cell(value_name) {
-        Some(cell) if cell.state == crate::features::FeatureCellState::NotApplicable => {
+        Some(cell) if cell.state == FeatureCellState::NotApplicable => {
             NegRiskOutcome::NotApplicable
         }
         Some(cell) if cell.reason == Some(NullReason::LegBookMissing) => NegRiskOutcome::LegMissing,
         Some(cell) if cell.value().is_some() => {
-            let Some(decimal) = cell.value().and_then(crate::features::feature_scalar) else {
+            let Some(decimal) = cell.value().and_then(features::feature_scalar) else {
                 return NegRiskOutcome::LegMissing;
             };
             let Some(legs) = read(features, &feat::NEGRISK_LEG_COUNT) else {

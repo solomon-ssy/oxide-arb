@@ -992,7 +992,10 @@ pub fn probe_matrix_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::{FeatureCell, FeatureStaleness, FeatureValue, FeatureVector, NullReason};
+    use crate::{
+        features::{FeatureCell, FeatureStaleness, FeatureValue, FeatureVector, NullReason},
+        training::fixtures,
+    };
     use chrono::{Duration, TimeZone};
     use quant_pivot_models::{
         domain::DecisionClock,
@@ -1045,7 +1048,7 @@ mod tests {
             example_id: TrainingExampleId::from_v7(),
             market_id: MarketId::new(format!("m{offset}")),
             token_id: TokenId::new(format!("t{offset}")),
-            selected_market: crate::training::fixtures::selected_market(
+            selected_market: fixtures::selected_market(
                 &MarketId::new(format!("m{offset}")),
                 &TokenId::new(format!("t{offset}")),
                 MarketCategory::Sports,

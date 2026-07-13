@@ -16,6 +16,7 @@ use validator::Validate;
 use crate::{
     domain::{CalibrationArtifactInfo, pagination::PageRequest},
     enums::quant::{CalibrationKind, CalibrationMethod, DownsideSource},
+    half_open_window_request,
     types::{CalibrationArtifactId, ContentHash, ModelVersionId, TrainingDatasetId},
 };
 
@@ -36,7 +37,7 @@ pub struct FitBiasTableRequest {
     pub reason: String,
 }
 
-crate::half_open_window_request!(FitBiasTableRequest);
+half_open_window_request!(FitBiasTableRequest);
 
 /// Inbound body for `POST /research/calibration-artifacts/fit-model-calibrator`.
 ///

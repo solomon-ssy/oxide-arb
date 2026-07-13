@@ -45,7 +45,7 @@ const GAIN_CANDIDATES: [f64; 9] = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0
 #[derive(Debug, Clone)]
 pub struct TrainSellScorerRequest {
     /// Frozen, point-in-time exit-decision training examples.
-    pub examples: Vec<crate::training::TrainingExample>,
+    pub examples: Vec<TrainingExample>,
     /// Supervised target label (`hold_vs_exit_alpha_bps`).
     pub label: LabelSelector,
     /// Initial weights / candidate factor set (market + position-state).

@@ -10,7 +10,7 @@
 
 use crate::{
     features::{
-        FeatureBuildInput, FeatureBuilder, FeatureVector,
+        CatalogDecisionRef, FeatureBuildInput, FeatureBuilder, FeatureVector,
         decision_capture::{
             ResolvedMarketBundle, book_snapshot_ref_from_resolved,
             market_decision_capture_from_resolved,
@@ -33,7 +33,7 @@ use crate::{
             FeatureValue, NullReason,
         },
     },
-    pit::PointInTimeSnapshotSource,
+    pit::{PointInTimeSnapshotSource, ResolvedMarketSnapshot},
     selection::SelectedMarket,
 };
 use async_trait::async_trait;
@@ -285,7 +285,7 @@ async fn resolve_selected_catalog_snapshot(
     pit: &dyn PointInTimeSnapshotSource,
     market: &SelectedMarket,
     boundary: &DecisionBoundary,
-) -> QuantResult<crate::pit::ResolvedMarketSnapshot> {
+) -> QuantResult<ResolvedMarketSnapshot> {
     let catalog_cutoff = boundary.cutoff_for(DecisionSource::Catalog);
     let snapshot = pit
         .market_snapshot_at(&market.market_id, boundary)
@@ -407,7 +407,7 @@ impl ConfiguredFeatureBuilder {
         let (secondary_book, secondary_book_snapshot_ref) =
             resolve_secondary_book(pit, market, boundary).await?;
         let snapshot = resolve_selected_catalog_snapshot(pit, market, boundary).await?;
-        let catalog = crate::features::CatalogDecisionRef::from(&snapshot);
+        let catalog = CatalogDecisionRef::from(&snapshot);
         let capture_market = ResolvedMarketContext::from(snapshot.context);
         let registry = snapshot.market;
         let snapshot_sibling = snapshot.neg_risk_leg_set;

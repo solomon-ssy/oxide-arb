@@ -28,7 +28,10 @@ use quant_pivot_models::{
     },
     enums::quant::{EmptyReportReason, FeatureParityStage, RecommendationReportStatus, ReportKind},
     runtime_config::RuntimeConfig,
-    types::{FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId, RecommendationReportId},
+    types::{
+        FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId, RecommendationReportId,
+        TokenDataQualityRecord,
+    },
 };
 use quant_pivot_repository::traits::{
     FeatureRepository, OrderIntentRepository, RecommendationReportRepository,
@@ -786,7 +789,7 @@ fn latest_feature_cells(rows: Vec<QuantFeatureEventRow>) -> Vec<QuantFeatureEven
 
 fn validate_pre_inference_vector(
     report: &RecommendationReportInfo,
-    token: &quant_pivot_models::types::TokenDataQualityRecord,
+    token: &TokenDataQualityRecord,
     info: &FeatureVectorInfo,
     rows: &[QuantFeatureEventRow],
     boundary: &DecisionBoundary,
@@ -1108,7 +1111,7 @@ fn non_empty_count<T>(rows: &[T], entity: &'static str) -> QuantResult<Option<u6
 mod diagnostics_tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        domain::DecisionClock,
+        domain::{DecisionBoundary, DecisionClock},
         enums::quant::{EmptyReportReason, FeatureParityStage},
         types::ModelRunId,
     };
@@ -1117,7 +1120,7 @@ mod diagnostics_tests {
         model_run_diagnostics, pre_inference_selection_diagnostics, report_diagnostics_execution,
     };
 
-    fn boundary() -> quant_pivot_models::domain::DecisionBoundary {
+    fn boundary() -> DecisionBoundary {
         DecisionClock::new(30)
             .boundary(
                 Utc.with_ymd_and_hms(2026, 7, 12, 12, 0, 0)

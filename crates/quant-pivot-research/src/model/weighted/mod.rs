@@ -41,7 +41,7 @@ use quant_pivot_models::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
-    factors::{FactorName, NormalizedFactor},
+    factors::{FactorName, FrozenReferenceQuantiles, NormalizedFactor},
     features::FeatureName,
     model::{
         artifact::WeightedFactorModelArtifact,
@@ -407,7 +407,7 @@ impl QuantModelRuntime for WeightedFactorRuntime {
         Some(&self.artifact.factor_cross_section)
     }
 
-    fn frozen_reference_quantiles(&self) -> Option<&crate::factors::FrozenReferenceQuantiles> {
+    fn frozen_reference_quantiles(&self) -> Option<&FrozenReferenceQuantiles> {
         Some(&self.artifact.frozen_reference_quantiles)
     }
 
@@ -554,7 +554,7 @@ mod tests {
 
     use crate::{
         factors::{
-            FactorExplanation, FactorName, FactorValue, NormalizedFactor,
+            FactorExplanation, FactorName, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
             names::{LIQUIDITY_DEPTH, MOMENTUM_ROC},
         },
         model::{
@@ -627,7 +627,7 @@ mod tests {
             substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
             return_model: ReturnModelSpec::heuristic_default(),
             factor_cross_section: FactorCrossSectionConfig::default(),
-            frozen_reference_quantiles: crate::factors::FrozenReferenceQuantiles::empty(),
+            frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
             objective_report: None,
             category_scope: None,
         }

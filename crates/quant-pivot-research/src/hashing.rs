@@ -26,8 +26,14 @@ use serde::Serialize;
 
 use crate::{
     factors::FactorSet,
-    features::{FeatureCell, FeatureName, FeatureSchema, FeatureSpec, FeatureValue, FeatureVector},
-    model::ModelArtifact,
+    features::{
+        FeatureCell, FeatureName, FeatureSchema, FeatureSpec, FeatureStaleness, FeatureValue,
+        FeatureVector,
+    },
+    model::{
+        ModelArtifact,
+        artifact::{MODEL_ARTIFACT_FORMAT_VERSION, StoredModelArtifactRef},
+    },
     selection::ModelFeatureRequirements,
     training::LabelName,
 };
@@ -79,7 +85,7 @@ fn quantized_for_hash(
             let mut projected = cell.clone();
             projected.value = projected.value.as_ref().map(quantize_value_for_hash);
             projected.evidence = None;
-            projected.staleness = crate::features::FeatureStaleness::Unknown;
+            projected.staleness = FeatureStaleness::Unknown;
             (name.clone(), projected)
         })
         .collect()
@@ -231,8 +237,8 @@ impl ResearchHasher {
 
     /// Canonical hash of a serialized model artifact.
     pub fn model_artifact(artifact: &ModelArtifact) -> QuantResult<ContentHash> {
-        Self::canonical(&crate::model::artifact::StoredModelArtifactRef {
-            format_version: crate::model::artifact::MODEL_ARTIFACT_FORMAT_VERSION,
+        Self::canonical(&StoredModelArtifactRef {
+            format_version: MODEL_ARTIFACT_FORMAT_VERSION,
             artifact,
         })
     }

@@ -50,10 +50,10 @@ use quant_pivot_models::{
     },
     types::{
         BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
-        DatasetManifest, EventId, FactorDefinitionId, MarketId, ModelSpecId, ModelVersionId,
-        Probability, RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
-        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
-        default_sample_sources,
+        DatasetManifest, EventId, FactorDefinitionId, MarketId, ModelInputContract, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, Probability, RuntimeConfigVersionId, SchemaVersion,
+        TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
+        TrainingSampleSources, Usd, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
@@ -83,6 +83,7 @@ use quant_pivot_research::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact,
         ModelRuntimeFactoryBuilder, TrainingObjectiveSpec,
     },
+    selection::SelectedMarket,
     training::{
         DatasetHashContract, DatasetParquetCodec, LabelName, TrainingDatasetArtifact,
         TrainingExample, TrainingLabel, dataset_manifest_hash, dataset_source_fingerprint,
@@ -206,7 +207,7 @@ fn examples() -> Vec<TrainingExample> {
                 example_id: TrainingExampleId::from_v7(),
                 market_id: market.clone(),
                 token_id: token.clone(),
-                selected_market: quant_pivot_research::selection::SelectedMarket {
+                selected_market: SelectedMarket {
                     market_id: market,
                     event_id: EventId::new(EVENT_ID),
                     category: MarketCategory::Politics,
@@ -365,11 +366,8 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            input_contract: quant_pivot_models::types::ModelInputContract::single_required(
-                "book.mid",
-            ),
-            training_contract: quant_pivot_models::types::ModelTrainingContract::settlement_default(
-            ),
+            input_contract: ModelInputContract::single_required("book.mid"),
+            training_contract: ModelTrainingContract::settlement_default(),
             status: PublicationStatus::Published,
         })
         .await
@@ -600,7 +598,7 @@ fn weighted_train_input(
         training_dataset_id: dataset_id,
         runtime_config_version_id: rc_id,
         model_family: ModelFamily::WeightedFactor,
-        input_contract: quant_pivot_models::types::ModelInputContract::single_required("book.mid"),
+        input_contract: ModelInputContract::single_required("book.mid"),
         label: LabelSelector {
             name: settlement(),
             horizon_secs: 0,

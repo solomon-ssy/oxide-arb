@@ -46,7 +46,7 @@ pub mod casbin {
     pub const SECTIONS: [&str; 2] = [PTYPE_POLICY, PTYPE_GROUPING];
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_user_status",
     pub enum UserStatus {
         Active => "active",
@@ -54,7 +54,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_role_kind",
     pub enum RoleKind {
         Builtin => "builtin",
@@ -62,7 +62,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_role_status",
     pub enum RoleStatus {
         Enabled => "enabled",
@@ -70,7 +70,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_menu_kind",
     pub enum MenuKind {
         Directory => "directory",
@@ -79,7 +79,7 @@ crate::pg_enum! {
     }
 }
 
-crate::pg_enum! {
+pg_enum! {
     type_name = "qp_resource_type",
     @no_from_str
     pub enum ResourceType {

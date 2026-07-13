@@ -6,8 +6,7 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, ModelVersionInfo,
-        RuntimeConfigVersionInfo,
+        DecisionBoundary, DecisionClock, ModelVersionInfo, RuntimeConfigVersionInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
     enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},

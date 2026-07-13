@@ -1,5 +1,8 @@
 //! Chainlink on-chain aggregator source (`AggregatorV3` `eth_call`).
 //!
+//! Round ids are composite `uint80` values (`phase_id << 64 | aggregator_round_id`)
+//! and are handled via [`round_id::RoundId`] — never narrowed to `u64`.
+//!
 //! **Current oracle plane (11.2.2):** this module reads **Chainlink Data Feeds**
 //! on Polygon — on-chain `AggregatorV3` rounds pushed by deviation/heartbeat
 //! rules. Polymarket crypto up/down markets settle against **Chainlink Data
@@ -24,6 +27,9 @@ use alloy::{
     sol,
     transports::http::Http,
 };
+
+mod round_id;
+
 use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, rpc::RpcError};
 use quant_pivot_models::{
@@ -33,6 +39,7 @@ use quant_pivot_models::{
     types::{ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId},
 };
 use reqwest::Client as ReqwestClient;
+use round_id::{backscan_start, gap_recovery_floor, is_missing_round_reason, prev};
 use rust_decimal::Decimal;
 use url::Url;
 
@@ -201,7 +208,7 @@ impl ChainlinkAggregatorSource {
                 reason: error.to_string(),
             })
         })?;
-        let latest_round = latest.roundId.to::<u64>();
+        let latest_round = latest.roundId;
         let floor_round = gap_recovery_floor(latest_round, self.config.max_incremental_gap_rounds);
 
         let mut observations = Vec::new();
@@ -221,20 +228,30 @@ impl ChainlinkAggregatorSource {
                 break;
             }
             observations.push(observation);
-            if round_id <= floor_round || round_id <= 1 {
+            if round_id <= floor_round {
                 break;
             }
-            round_id -= 1;
-            let round = contract
-                .getRoundData(alloy::primitives::Uint::<80, 2>::from(round_id))
-                .call()
-                .await
-                .map_err(|error| {
-                    QuantError::Rpc(RpcError::CallFailed {
+            let Some(prev_round) = prev(round_id) else {
+                break;
+            };
+            round_id = prev_round;
+            let round = match contract.getRoundData(round_id).call().await {
+                Ok(round) => round,
+                Err(error) => {
+                    let reason = error.to_string();
+                    if is_missing_round_reason(&reason) {
+                        tracing::debug!(
+                            round_id = %round_id,
+                            "chainlink incremental backscan stopped at missing round"
+                        );
+                        break;
+                    }
+                    return Err(QuantError::Rpc(RpcError::CallFailed {
                         method: "chainlink_getRoundData".into(),
-                        reason: error.to_string(),
-                    })
-                })?;
+                        reason,
+                    }));
+                }
+            };
             answer = round.answer;
             updated_at = round.updatedAt;
         }
@@ -256,21 +273,34 @@ impl ChainlinkAggregatorSource {
                 reason: error.to_string(),
             })
         })?;
-        let latest_round = latest.roundId.to::<u64>();
-        let backscan = u64::from(self.config.max_round_backscan);
-        let start_round = latest_round.saturating_sub(backscan).max(1);
+        let latest_round = latest.roundId;
+        let floor_round = backscan_start(latest_round, self.config.max_round_backscan);
         let mut observations = Vec::new();
-        for round_id in start_round..=latest_round {
-            let round = contract
-                .getRoundData(alloy::primitives::Uint::<80, 2>::from(round_id))
-                .call()
-                .await
-                .map_err(|error| {
-                    QuantError::Rpc(RpcError::CallFailed {
+        let mut round_id = latest_round;
+        loop {
+            let round = match contract.getRoundData(round_id).call().await {
+                Ok(round) => round,
+                Err(error) => {
+                    let reason = error.to_string();
+                    if round_id == latest_round {
+                        return Err(QuantError::Rpc(RpcError::CallFailed {
+                            method: "chainlink_getRoundData".into(),
+                            reason,
+                        }));
+                    }
+                    if is_missing_round_reason(&reason) {
+                        tracing::debug!(
+                            round_id = %round_id,
+                            "chainlink bootstrap backscan stopped at missing round"
+                        );
+                        break;
+                    }
+                    return Err(QuantError::Rpc(RpcError::CallFailed {
                         method: "chainlink_getRoundData".into(),
-                        reason: error.to_string(),
-                    })
-                })?;
+                        reason,
+                    }));
+                }
+            };
             if let Some(observation) = self
                 .observation_from_round_fields(feed, address, round.answer, round.updatedAt)
                 .await?
@@ -279,18 +309,17 @@ impl ChainlinkAggregatorSource {
             {
                 observations.push(observation);
             }
+            if round_id <= floor_round {
+                break;
+            }
+            let Some(prev_round) = prev(round_id) else {
+                break;
+            };
+            round_id = prev_round;
         }
         observations.sort_by_key(|row| row.observed_at);
         Ok(observations)
     }
-}
-
-/// The oldest round id an incremental gap-recovery walk may visit: `gap_cap`
-/// rounds back from `latest_round`, clamped to round `1` (round ids are
-/// 1-based; there is no round `0`).
-const fn gap_recovery_floor(latest_round: u64, gap_cap: u32) -> u64 {
-    let floor = latest_round.saturating_sub(gap_cap as u64);
-    if floor < 1 { 1 } else { floor }
 }
 
 fn scale_answer(answer: I256, decimals: u8) -> QuantResult<Decimal> {
@@ -334,16 +363,29 @@ impl DomainDataSource for ChainlinkAggregatorSource {
 
 #[cfg(test)]
 mod tests {
-    use super::gap_recovery_floor;
+    use super::round_id::{ONE, RoundId, gap_recovery_floor};
+
+    fn phase_one_round(aggregator_round: u64) -> RoundId {
+        (RoundId::from(1_u64) << 64) + RoundId::from(aggregator_round)
+    }
 
     #[test]
-    fn floor_is_bounded_by_gap_cap() {
-        assert_eq!(gap_recovery_floor(1_000, 100), 900);
+    fn floor_is_bounded_by_gap_cap_in_phase_zero() {
+        assert_eq!(
+            gap_recovery_floor(RoundId::from(1_000_u64), 100),
+            RoundId::from(900_u64)
+        );
+    }
+
+    #[test]
+    fn floor_supports_phase_one_round_ids() {
+        let latest = phase_one_round(3_684_024);
+        assert_eq!(gap_recovery_floor(latest, 100), phase_one_round(3_683_924));
     }
 
     #[test]
     fn floor_clamps_to_round_one_near_genesis() {
-        assert_eq!(gap_recovery_floor(50, 100), 1);
-        assert_eq!(gap_recovery_floor(0, 100), 1);
+        assert_eq!(gap_recovery_floor(RoundId::from(50_u64), 100), ONE);
+        assert_eq!(gap_recovery_floor(ONE, 100), ONE);
     }
 }

@@ -20,6 +20,8 @@ use quant_pivot_macros::{StrId, UuidId};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::types::ContentHash;
+
 // ── External string identifiers (Arc<str>) ───────────────────────────────
 
 /// Polymarket `condition_id` identifying a market.
@@ -132,7 +134,7 @@ impl FactorDefinitionId {
     /// domain. The namespace is permanent: changing it would break immutable
     /// revision identity and artifact references.
     #[must_use]
-    pub fn from_definition_hash(definition_hash: &crate::types::ContentHash) -> Self {
+    pub fn from_definition_hash(definition_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x7c9e_6a55_3f1b_4d2a_8e0f_1c2d_3e4f_5a6b);
         Self::new(Uuid::new_v5(
             &NAMESPACE,
@@ -231,7 +233,7 @@ impl FeatureParityEventId {
     /// Retrying a parity attempt for the same run/evidence key must replace the
     /// prior `ClickHouse` row rather than append a second logical comparison.
     #[must_use]
-    pub fn from_evidence_hash(evidence_hash: &crate::types::ContentHash) -> Self {
+    pub fn from_evidence_hash(evidence_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x6f5d_35d2_946a_4dc5_8eed_9b67_83b8_79ec);
         Self::new(Uuid::new_v5(&NAMESPACE, evidence_hash.as_str().as_bytes()))
     }

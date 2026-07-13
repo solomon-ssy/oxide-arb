@@ -22,9 +22,8 @@ use quant_pivot_core::service::{
     feature_integrity::FeatureParityGatePort,
     frozen_model_parity::{FrozenModelParityDeps, FrozenModelParityService},
 };
-use quant_pivot_error::control::ControlError;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
-use quant_pivot_models::domain::{DecisionClock, TimeWindow};
+use quant_pivot_error::{control::ControlError, governance::GovernanceError};
 use quant_pivot_models::enums::quant::DatasetPurpose;
 use quant_pivot_models::runtime_config::FactorCrossSectionConfig;
 use quant_pivot_models::types::{
@@ -58,6 +57,10 @@ use quant_pivot_models::{
         ShadowComparisonId, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSources,
         default_sample_sources,
     },
+};
+use quant_pivot_models::{
+    domain::{DecisionClock, TimeWindow},
+    types::FeatureParityRunId,
 };
 use quant_pivot_repository::{
     postgres::{
@@ -174,10 +177,10 @@ impl FeatureParityGatePort for ClearFeatureParityGate {
 
     async fn trip_integrity_failure(
         &self,
-        source_run_id: &quant_pivot_models::types::FeatureParityRunId,
+        source_run_id: &FeatureParityRunId,
         _action: &'static str,
         reason: String,
-    ) -> QuantResult<quant_pivot_models::types::FeatureParityRunId> {
+    ) -> QuantResult<FeatureParityRunId> {
         self.parity
             .record_integrity_failure_and_open_latch(source_run_id, reason)
             .await
@@ -2103,9 +2106,7 @@ async fn rollback_quality_gate_failure_persists_report_without_half_switching() 
         .expect_err("rollback must run today's publish gate");
     assert!(matches!(
         error,
-        QuantError::Governance(
-            quant_pivot_error::governance::GovernanceError::QualityGateFailed { .. }
-        )
+        QuantError::Governance(GovernanceError::QualityGateFailed { .. })
     ));
 
     let current = registry
