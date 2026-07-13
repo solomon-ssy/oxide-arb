@@ -20,7 +20,7 @@ use quant_pivot_repository::traits::{
     AttributionRepository, CalibrationArtifactRepository, CatalogVersionRepository,
     FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
     ModelRegistryRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    RuntimeConfigVersionRepository, TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -53,6 +53,7 @@ pub struct CoreTrainingDatasetPort {
     fee_calculator: Arc<FeeCalculator>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
+    trade_policy_repo: Arc<dyn TradePolicyRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     bias_table_repo: Arc<dyn CalibrationArtifactRepository>,
     /// Deploy guard: hard cap on the deterministic historical spine.
@@ -88,6 +89,7 @@ impl CoreTrainingDatasetPort {
             fee_calculator: Arc::clone(&research.fee_calculator),
             linkage_repo: Arc::clone(&research.market_linkage_repo),
             model_registry: Arc::clone(&research.model_registry_repo),
+            trade_policy_repo: Arc::clone(&research.trade_policy_repo),
             runtime_config,
             bias_table_repo,
             max_spine_samples,
@@ -126,6 +128,7 @@ impl CoreTrainingDatasetPort {
                 fee_calculator: Arc::clone(&self.fee_calculator),
                 linkage_repo: Arc::clone(&self.linkage_repo),
                 model_registry: Arc::clone(&self.model_registry),
+                trade_policy_repo: Arc::clone(&self.trade_policy_repo),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,

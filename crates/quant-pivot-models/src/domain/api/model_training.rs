@@ -20,7 +20,8 @@ use crate::{
     domain::{ModelVersionInfo, pagination::PageRequest},
     enums::quant::PublicationStatus,
     types::{
-        BacktestPathSetId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId, TrainingDatasetId,
+        BacktestPathSetId, ContentHash, ModelRunId, ModelSpecId, ModelVersionId,
+        TradePolicyArtifactId, TrainingDatasetId,
     },
 };
 
@@ -75,6 +76,8 @@ pub struct TrainedModelView {
     pub version: i32,
     pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<TrainingDatasetId>,
+    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
+    pub trade_policy_hash: Option<ContentHash>,
     /// CPCV path set bound for publish quality gates (`None` until bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish_path_set_id: Option<BacktestPathSetId>,
@@ -118,6 +121,8 @@ impl From<ModelVersionInfo> for TrainedModelView {
             version: info.version,
             artifact_hash: info.artifact_hash,
             training_dataset_id: info.training_dataset_id,
+            trade_policy_artifact_id: info.trade_policy_artifact_id,
+            trade_policy_hash: info.trade_policy_hash,
             publish_path_set_id: info.publish_path_set_id,
             publication_status: info.publication_status.as_str().to_owned(),
             metrics: info.metrics_json,

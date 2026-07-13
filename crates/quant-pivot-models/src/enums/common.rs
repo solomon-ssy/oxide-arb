@@ -49,6 +49,9 @@ impl Side {
 pub enum OrderType {
     /// Fill-or-Kill: must fill entirely and immediately, or cancel. Never retried.
     Fok,
+    /// Fill-and-Kill: fill immediately as much as possible and cancel the remainder.
+    /// Never retried because a partial venue fill is a valid terminal outcome.
+    Fak,
     /// Good-Till-Cancelled: rests on the book until filled or manually cancelled.
     Gtc,
     /// Good-Till-Date: rests on the book until `expiration` (unix timestamp).

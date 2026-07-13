@@ -20,6 +20,7 @@ pub mod report_payload;
 pub mod research_job_payload;
 pub mod selection;
 pub mod settlement_payload;
+pub mod trade_policy;
 pub mod training;
 
 pub use account::*;
@@ -44,4 +45,5 @@ pub use report_payload::*;
 pub use research_job_payload::*;
 pub use selection::*;
 pub use settlement_payload::*;
+pub use trade_policy::*;
 pub use training::*;

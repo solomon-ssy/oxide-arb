@@ -161,30 +161,32 @@ impl OutcomeSide {
 }
 
 wire_enum! {
-    /// How an entry plan becomes executable.
-    @derive(Default)
-    pub enum EntryTriggerKind {
-        #[default]
-        Immediate => "immediate",
-        LimitPrice => "limit_price",
-        Breakout => "breakout",
-        Pullback => "pullback",
-        TimeWindow => "time_window",
-        DataEvent => "data_event",
+    /// Comparator for a typed price entry condition.
+    pub enum PriceComparison {
+        AtOrAbove => "at_or_above",
+        AtOrBelow => "at_or_below",
     }
 }
 
 wire_enum! {
-    /// How an exit plan leaves a recommendation.
+    /// Venue fill semantics required by an aggressive entry.
+    pub enum FillRequirement {
+        AllOrNothing => "all_or_nothing",
+        AllowPartial => "allow_partial",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_entry_trigger_state",
+    /// Durable state of an approved, armed entry condition.
     @derive(Default)
-    pub enum ExitTriggerKind {
+    pub enum EntryTriggerState {
         #[default]
-        TakeProfit => "take_profit",
-        StopLoss => "stop_loss",
-        TimeExit => "time_exit",
-        TrailingStop => "trailing_stop",
-        SignalInvalidation => "signal_invalidation",
-        Manual => "manual",
+        NotRequired => "not_required",
+        Waiting => "waiting",
+        Confirming => "confirming",
+        Ready => "ready",
+        Expired => "expired",
     }
 }
 
@@ -323,6 +325,40 @@ pg_enum! {
     }
 }
 
+pg_enum! {
+    type_name = "qp_trade_policy_status",
+    /// Governance lifecycle of a content-addressed trade policy artifact.
+    @derive(Default)
+    pub enum TradePolicyStatus {
+        #[default]
+        Draft => "draft",
+        Validated => "validated",
+        Published => "published",
+        Retired => "retired",
+    }
+}
+
+impl TradePolicyStatus {
+    #[must_use]
+    pub const fn allows_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Draft, Self::Validated)
+                | (Self::Validated, Self::Published)
+                | (Self::Published, Self::Retired)
+        )
+    }
+}
+
+pg_enum! {
+    type_name = "qp_trade_policy_governance_action",
+    pub enum TradePolicyGovernanceAction {
+        Validate => "validate",
+        Publish => "publish",
+        Retire => "retire",
+    }
+}
+
 impl PublicationStatus {
     /// Returns whether transitioning from `self` to `next` is allowed by the
     /// model publication state machine.
@@ -438,6 +474,8 @@ pg_enum! {
         CpcvBacktest => "cpcv_backtest",
         /// Deterministic training/serving feature replay (Phase 11.6).
         FeatureParity => "feature_parity",
+        /// Fit a governed executable entry/exit policy artifact (Phase 11.7).
+        TradePolicyFit => "trade_policy_fit",
     }
 }
 
@@ -847,6 +885,8 @@ wire_enum! {
         /// per Phase 11.3 §8: `SemiAuto`/`AutoExecution` never build an intent
         /// off an uncalibrated return estimate.
         ReturnModelUncalibrated => "return_model_uncalibrated",
+        /// `ModelVersion` has no hash-verified Published policy or no executable cohort.
+        TradePolicyUnavailable => "trade_policy_unavailable",
     }
 }
 

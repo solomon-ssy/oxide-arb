@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
-use crate::jsonb_active;
+use crate::{jsonb_active, types::TradePolicyArtifactId};
 
 /// Whether a raw feature may be imputed by the fitted model-input transform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +68,8 @@ pub struct ModelTrainingContract {
     pub target_label_horizon_secs: u64,
     /// Rolling validation fold count. Every fold fits its own transform.
     pub validation_folds: u32,
+    /// Required for triple-barrier and meta-label targets; absent for unrelated labels.
+    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
 }
 
 jsonb_active!(ModelTrainingContract);
@@ -80,6 +82,7 @@ impl ModelTrainingContract {
             target_label_name: "settlement_outcome".to_owned(),
             target_label_horizon_secs: 0,
             validation_folds: 3,
+            trade_policy_artifact_id: None,
         }
     }
 
@@ -92,6 +95,16 @@ impl ModelTrainingContract {
         }
         if !(2..=20).contains(&self.validation_folds) {
             return Err("validation_folds must be in 2..=20".to_owned());
+        }
+        let requires_policy = matches!(
+            self.target_label_name.as_str(),
+            "triple_barrier_touch" | "triple_barrier_return_bps" | "meta_label"
+        );
+        if requires_policy != self.trade_policy_artifact_id.is_some() {
+            return Err(
+                "trade_policy_artifact_id is required exactly for triple-barrier/meta labels"
+                    .to_owned(),
+            );
         }
         Ok(())
     }

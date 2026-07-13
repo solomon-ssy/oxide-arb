@@ -22,9 +22,10 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
-        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, PageWindow, Paginated,
-        RecommendationInfo, RecommendationReportInfo, evaluate_intent_approval_invalidation,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, EntryTriggerTransition,
+        NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
+        OrderIntentListQuery, PageWindow, Paginated, RecommendationInfo, RecommendationReportInfo,
+        evaluate_intent_approval_invalidation,
     },
     entities::{
         operation_log, quant_capital_allocation, quant_order_intent, quant_recommendation,
@@ -33,11 +34,11 @@ use quant_pivot_models::{
     },
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
-        quant::{ApprovalStatus, OrderIntentStatus, RecommendationStatus},
+        quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, RecommendationStatus},
     },
     types::{
-        EntryOrderSpec, ExecutedPartialExitNodes, OrderIntentId, RecommendationId,
-        RecommendationReportId, RuntimeConfigVersionId, Usd,
+        EntryOrderSpec, EntryTrigger, OrderIntentId, RecommendationId, RecommendationReportId,
+        RuntimeConfigVersionId, ScaleOutState, Usd,
     },
 };
 use sea_orm::{
@@ -156,8 +157,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             rec_active.update(&txn).await.map_err(StorageError::from)?;
         }
         let mut intent_active = intent.into_active_model();
-        intent_active.executed_partial_exit_node_ids =
-            ActiveValue::Set(ExecutedPartialExitNodes::default());
+        intent_active.scale_out_state = ActiveValue::Set(ScaleOutState::default());
         let intent_model = quant_order_intent::Entity::insert(intent_active)
             .exec_with_returning(&txn)
             .await
@@ -214,6 +214,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             ));
         }
 
+        let trigger_state = armed_trigger_state(&row.entry_trigger_json);
         let intent_model = apply_approval(
             &txn,
             intent_id,
@@ -221,6 +222,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             approval,
             entry_override,
             allocated_override,
+            trigger_state,
         )
         .await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -345,6 +347,36 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             Into::into,
         )
         .await
+    }
+
+    async fn transition_entry_trigger(
+        &self,
+        intent_id: &OrderIntentId,
+        transition: EntryTriggerTransition,
+    ) -> Result<OrderIntentInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = load_intent_for_update(&txn, intent_id).await?;
+        if !matches!(
+            row.status,
+            OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
+        ) {
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                format!(
+                    "entry trigger cannot transition while intent is {}",
+                    row.status.as_str()
+                ),
+            ));
+        }
+        let mut active = row.into_active_model();
+        active.entry_trigger_state = ActiveValue::Set(transition.state);
+        active.trigger_confirming_since = ActiveValue::Set(transition.confirming_since);
+        active.trigger_last_observed_at = ActiveValue::Set(transition.last_observed_at);
+        active.trigger_ready_at = ActiveValue::Set(transition.ready_at);
+        let updated = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated.into())
     }
 
     async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError> {
@@ -605,6 +637,7 @@ async fn apply_approval(
     approval: ApproveOrderIntent,
     entry_override: Option<EntryOrderSpec>,
     allocated_override: Option<Usd>,
+    trigger_state: EntryTriggerState,
 ) -> Result<quant_order_intent::Model, StorageError> {
     let mut active = row.into_active_model();
     active.status = ActiveValue::Set(OrderIntentStatus::Approved);
@@ -612,6 +645,10 @@ async fn apply_approval(
     active.approved_by = ActiveValue::Set(Some(approval.approved_by));
     active.approval_reason = ActiveValue::Set(Some(approval.approval_reason));
     active.approved_at = ActiveValue::Set(Some(approval.approved_at));
+    active.entry_trigger_state = ActiveValue::Set(trigger_state);
+    active.trigger_confirming_since = ActiveValue::Set(None);
+    active.trigger_last_observed_at = ActiveValue::Set(None);
+    active.trigger_ready_at = ActiveValue::Set(None);
     if let Some(entry) = entry_override {
         active.entry_order_json = ActiveValue::Set(entry);
     }
@@ -652,6 +689,13 @@ async fn apply_approval(
     }
 
     Ok(intent_model)
+}
+
+const fn armed_trigger_state(trigger: &EntryTrigger) -> EntryTriggerState {
+    match trigger {
+        EntryTrigger::Immediate => EntryTriggerState::NotRequired,
+        EntryTrigger::PriceCondition { .. } => EntryTriggerState::Waiting,
+    }
 }
 
 /// Invalidate an intent and release capital. When `validate_transition` is true

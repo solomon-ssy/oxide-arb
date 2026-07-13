@@ -44,6 +44,8 @@ fn new_version(model_spec_id: ModelSpecId, seed: char) -> NewModelVersion {
         version: 0,
         artifact_hash: content_hash(seed),
         training_dataset_id: None,
+        trade_policy_artifact_id: None,
+        trade_policy_hash: None,
         publish_path_set_id: None,
         metrics_json: serde_json::json!({}),
         training_objective_json: serde_json::json!({"kind": "not_trained"}),

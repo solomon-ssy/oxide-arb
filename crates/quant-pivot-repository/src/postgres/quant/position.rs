@@ -491,7 +491,7 @@ fn resolve_entry_shares(
     intent: &quant_order_intent::Model,
     orders: &[quant_execution_order::Model],
 ) -> Option<Shares> {
-    if let Some(shares) = intent.opportunistic_exit_state.denominator_shares {
+    if let Some(shares) = intent.scale_out_state.denominator_shares {
         return Some(shares);
     }
     filled_entry_order(orders).map(|order| order.shares)

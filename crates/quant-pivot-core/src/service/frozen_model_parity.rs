@@ -850,6 +850,8 @@ mod tests {
             version: 1,
             artifact_hash: hash('b'),
             training_dataset_id: Some(training_dataset_id.clone()),
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({}),

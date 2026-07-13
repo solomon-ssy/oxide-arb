@@ -7,9 +7,10 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionClock, ModelVersionInfo, RuntimeConfigVersionInfo,
+        TradePolicyArtifactInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
-    enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
+    enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason, TradePolicyStatus},
     runtime_config::RuntimeConfig,
     types::{
         Bps, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
@@ -18,11 +19,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     MarketSelectionRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
+    TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::PortfolioCaps,
     features::MarketDecisionCapture,
+    hashing::ResearchHasher,
     model::{
         CalibrationArtifactLoader, ResolvedCalibration, SignalCandidate,
         load_hash_verified_artifact,
@@ -72,6 +75,7 @@ pub struct ReportBuilderDeps {
     pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     pub artifact_store: Arc<dyn ArtifactStore>,
     pub calibration_loader: Arc<dyn CalibrationArtifactLoader>,
+    pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
     pub market_selector: Arc<dyn MarketSelector>,
     pub market_selection_repo: Arc<dyn MarketSelectionRepository>,
     pub candidate_provider: Arc<MarketCandidateProvider>,
@@ -99,6 +103,7 @@ struct BuildContext {
     active: ActiveModelRequirements,
     return_model_calibrated: bool,
     resolved_calibration: Option<ResolvedCalibration>,
+    trade_policy: Option<TradePolicyArtifactInfo>,
 }
 
 struct EmptyComposeInput<'a> {
@@ -468,7 +473,7 @@ impl DefaultReportBuilder {
                 decision_at: boundary.decision_at(),
             })
             .await?;
-        let (return_model_calibrated, resolved_calibration) =
+        let (return_model_calibrated, resolved_calibration, trade_policy) =
             self.resolve_calibration_state(&active.version).await?;
 
         Ok(BuildContext {
@@ -479,6 +484,7 @@ impl DefaultReportBuilder {
             active,
             return_model_calibrated,
             resolved_calibration,
+            trade_policy,
         })
     }
 
@@ -492,12 +498,56 @@ impl DefaultReportBuilder {
     async fn resolve_calibration_state(
         &self,
         version: &ModelVersionInfo,
-    ) -> QuantResult<(bool, Option<ResolvedCalibration>)> {
+    ) -> QuantResult<(
+        bool,
+        Option<ResolvedCalibration>,
+        Option<TradePolicyArtifactInfo>,
+    )> {
         let artifact = load_hash_verified_artifact(&self.deps.artifact_store, version).await?;
         let resolved =
             resolve_return_model_calibration(self.deps.calibration_loader.as_ref(), &artifact)
                 .await?;
-        Ok((resolved.is_some(), resolved))
+        let header = artifact.header();
+        let trade_policy = match (
+            header.trade_policy_artifact_id.as_ref(),
+            header.trade_policy_hash.as_ref(),
+        ) {
+            (None, None) => None,
+            (Some(artifact_id), Some(expected_hash)) => {
+                let policy = self
+                    .deps
+                    .trade_policy_repo
+                    .find(artifact_id)
+                    .await?
+                    .ok_or_else(|| ReportError::InvariantViolation {
+                        stage: "model_policy_binding",
+                        detail: format!("model references missing trade policy {artifact_id}"),
+                    })?;
+                let computed_hash = ResearchHasher::canonical(&policy.payload_json)?;
+                if policy.status != TradePolicyStatus::Published
+                    || !policy.payload_json.validation.passed
+                    || &policy.content_hash != expected_hash
+                    || computed_hash != policy.content_hash
+                {
+                    return Err(ReportError::InvariantViolation {
+                        stage: "model_policy_binding",
+                        detail: format!(
+                            "trade policy {artifact_id} is not Published, quality-gated, and hash-consistent"
+                        ),
+                    }
+                    .into());
+                }
+                Some(policy)
+            }
+            _ => {
+                return Err(ReportError::InvariantViolation {
+                    stage: "model_policy_binding",
+                    detail: "model artifact must bind trade policy ID and hash together".to_owned(),
+                }
+                .into());
+            }
+        };
+        Ok((resolved.is_some(), resolved, trade_policy))
     }
 
     async fn build_selection(
@@ -760,6 +810,7 @@ impl DefaultReportBuilder {
             empty: None,
             top_n: input.context.top_n,
             return_model_calibrated: input.context.return_model_calibrated,
+            trade_policy: input.context.trade_policy.as_ref(),
         })
     }
 
@@ -837,6 +888,7 @@ impl DefaultReportBuilder {
             empty: Some(input.empty),
             top_n: input.context.top_n,
             return_model_calibrated: input.context.return_model_calibrated,
+            trade_policy: input.context.trade_policy.as_ref(),
         })
     }
 }

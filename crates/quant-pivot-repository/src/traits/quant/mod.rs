@@ -33,6 +33,7 @@ mod reserved_capital;
 mod selection;
 mod settlement_redeem;
 mod shadow_comparison;
+mod trade_policy;
 mod trade_tape_block_cursor;
 
 pub use account_snapshot::*;
@@ -68,4 +69,5 @@ pub use reserved_capital::*;
 pub use selection::*;
 pub use settlement_redeem::*;
 pub use shadow_comparison::*;
+pub use trade_policy::*;
 pub use trade_tape_block_cursor::*;

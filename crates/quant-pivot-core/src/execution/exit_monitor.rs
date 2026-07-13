@@ -21,7 +21,7 @@
 //! 6. time exit
 //! 7. manual review checkpoint (frozen `manual_review_at`)
 //! 8. take-profit
-//! 9. partial-exit node (each node fires at most once)
+//! 9. cumulative scale-out target (each target settles at most once)
 //! 10. opportunistic Sell (advisory; Phase 6 model)
 //! 11. hold
 //!
@@ -39,10 +39,10 @@ use quant_pivot_models::{
     enums::{
         common::{OrderType, Side},
         execution::{ExitReason, KillSwitchState},
-        quant::{ExitSettlementMode, ExitTriggerKind},
+        quant::ExitSettlementMode,
     },
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
-    types::{ExitPolicySpec, OpportunisticExitState, PartialExitNode, Price, Shares, TokenId},
+    types::{ExitPolicySpec, PendingScaleOut, Price, ScaleOutState, Shares, TokenId},
 };
 use rust_decimal::Decimal;
 
@@ -113,9 +113,8 @@ pub enum ExitSignalVerdict {
     ThesisInvalidated { detail: String },
     /// The thesis still holds, but the model ranks selling now as advantageous
     /// (advisory, lowest non-hold tier). `target_cumulative_exit_pct` is the
-    /// desired cumulative fraction of the lot's opportunistic denominator (the
-    /// entry-filled shares frozen at first evaluation); the ladder sells only the
-    /// incremental delta beyond what opportunistic exits already realized.
+    /// desired cumulative fraction of the shared entry-filled denominator; the
+    /// ladder sells only the incremental delta beyond all settled scale-outs.
     OpportunisticSell {
         target_cumulative_exit_pct: Decimal,
         detail: String,
@@ -222,13 +221,9 @@ pub enum ExitDecision {
     SubmitExitOrder {
         reason: ExitReason,
         order: ExitOrderSpec,
-        /// Set when the trigger is a scaled partial-exit node (for one-shot tracking).
-        partial_exit_node_id: Option<String>,
-        /// Set for an opportunistic-Sell exit: the frozen entry-filled-shares
-        /// denominator to persist so cumulative-fraction tracking stays stable
-        /// across ticks. The dispatcher adds the *actual* filled shares to the
-        /// lot's cumulative opportunistic total.
-        opportunistic_denominator: Option<Shares>,
+        /// Stable deterministic target id; opportunistic cumulative targets use
+        /// no id and advance through the same cumulative filled-share state.
+        pending_scale_out: Option<PendingScaleOut>,
     },
     /// Route to manual operator handling (fail-closed: no auto submission).
     RequireManualReview { reason: ExitReason },
@@ -258,12 +253,9 @@ pub struct ExitMonitorInput {
     pub peak_mark_price: Option<Price>,
     /// Pre-resolved model-driven exit signal (`Holds` when not due/evaluated).
     pub signal: ExitSignalVerdict,
-    /// Partial-exit node ids already settled on this lot (one-shot nodes).
-    pub executed_partial_exit_node_ids: Vec<String>,
-    /// Per-lot opportunistic scale-out state (frozen denominator + cumulative
-    /// shares already opportunistically sold), for idempotent delta sells.
-    pub opportunistic_exit_state: OpportunisticExitState,
-    /// Minimum incremental fraction (of the opportunistic denominator) worth
+    /// Unified cumulative state for deterministic and opportunistic scale-outs.
+    pub scale_out_state: ScaleOutState,
+    /// Minimum incremental fraction (of the shared entry-filled denominator) worth
     /// submitting; smaller deltas hold to avoid dust exits / fee churn.
     pub min_opportunistic_clip_pct: Decimal,
     /// Evaluation time.
@@ -352,8 +344,7 @@ fn submit_or_manual(
         Some(limit) if shares.is_positive() => ExitDecision::SubmitExitOrder {
             reason,
             order: sell_order(&input.lot.token_id, shares, limit, OrderType::Gtc),
-            partial_exit_node_id: None,
-            opportunistic_denominator: None,
+            pending_scale_out: None,
         },
         _ => ExitDecision::RequireManualReview { reason },
     }
@@ -381,8 +372,7 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
                     ExitDecision::SubmitExitOrder {
                         reason: ExitReason::KillSwitchEmergency,
                         order: sell_order(&lot.token_id, shares, limit, OrderType::Fok),
-                        partial_exit_node_id: None,
-                        opportunistic_denominator: None,
+                        pending_scale_out: None,
                     }
                 }
                 // Cannot price the liquidation → fail closed to manual.
@@ -456,14 +446,14 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
         return submit_or_manual(input, ExitReason::TakeProfit, shares, Some(target));
     }
 
-    // 9. Partial-exit node due (each node fires at most once).
-    if let Some((node_shares, node_id)) = next_partial_exit_shares(input) {
-        return submit_or_manual_with_node(
+    // 9. Deterministic cumulative scale-out target.
+    if let Some((target_shares, pending)) = next_scale_out_shares(input) {
+        return submit_or_manual_with_target(
             input,
             ExitReason::PartialExit,
-            node_shares,
+            target_shares,
             input.mark_price,
-            Some(node_id),
+            pending,
         );
     }
 
@@ -476,9 +466,8 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
         ..
     } = &input.signal
     {
-        if let Some((delta, denominator)) = opportunistic_delta(input, *target_cumulative_exit_pct)
-        {
-            return submit_or_manual_opportunistic(input, delta, denominator);
+        if let Some(delta) = opportunistic_delta(input, *target_cumulative_exit_pct) {
+            return submit_or_manual_opportunistic(input, delta, *target_cumulative_exit_pct);
         }
         return ExitDecision::Hold;
     }
@@ -492,15 +481,14 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
 /// (`record_submission_result`) to venue-confirmed shares; without it the ladder
 /// fail-closes to hold. The delta is capped at the shares still open, and held
 /// when below the min clip.
-fn opportunistic_delta(input: &ExitMonitorInput, target_pct: Decimal) -> Option<(Shares, Shares)> {
-    let state = &input.opportunistic_exit_state;
+fn opportunistic_delta(input: &ExitMonitorInput, target_pct: Decimal) -> Option<Shares> {
+    let state = &input.scale_out_state;
     let denominator = state.denominator_shares?;
     if !denominator.is_positive() {
         return None;
     }
     let target = target_pct.clamp(Decimal::ZERO, Decimal::ONE);
-    let desired = denominator.inner() * target;
-    let delta = desired - state.cumulative_sold_shares.inner();
+    let delta = state.delta_to_target(target).inner();
     let min_clip = denominator.inner() * input.min_opportunistic_clip_pct;
     if delta <= Decimal::ZERO || delta < min_clip {
         return None;
@@ -510,7 +498,7 @@ fn opportunistic_delta(input: &ExitMonitorInput, target_pct: Decimal) -> Option<
     if sell <= Decimal::ZERO {
         return None;
     }
-    Some((Shares::new(sell), denominator))
+    Some(Shares::new(sell))
 }
 
 /// Submit-or-manual for an opportunistic exit, carrying the frozen denominator
@@ -518,7 +506,7 @@ fn opportunistic_delta(input: &ExitMonitorInput, target_pct: Decimal) -> Option<
 fn submit_or_manual_opportunistic(
     input: &ExitMonitorInput,
     shares: Shares,
-    denominator: Shares,
+    target_cumulative_exit_pct: Decimal,
 ) -> ExitDecision {
     if !input.kill_switch.allows_auto_exit() {
         return ExitDecision::RequireManualReview {
@@ -529,8 +517,10 @@ fn submit_or_manual_opportunistic(
         Some(limit) if shares.is_positive() => ExitDecision::SubmitExitOrder {
             reason: ExitReason::Opportunistic,
             order: sell_order(&input.lot.token_id, shares, limit, OrderType::Gtc),
-            partial_exit_node_id: None,
-            opportunistic_denominator: Some(denominator),
+            pending_scale_out: Some(PendingScaleOut {
+                target_id: None,
+                target_cumulative_exit_pct,
+            }),
         },
         _ => ExitDecision::RequireManualReview {
             reason: ExitReason::Opportunistic,
@@ -538,13 +528,13 @@ fn submit_or_manual_opportunistic(
     }
 }
 
-/// Like [`submit_or_manual`] but carries the partial-exit node id when submitting.
-fn submit_or_manual_with_node(
+/// Like [`submit_or_manual`] but carries the deterministic target id.
+fn submit_or_manual_with_target(
     input: &ExitMonitorInput,
     reason: ExitReason,
     shares: Shares,
     limit: Option<Price>,
-    partial_exit_node_id: Option<String>,
+    pending_scale_out: PendingScaleOut,
 ) -> ExitDecision {
     if !input.kill_switch.allows_auto_exit() {
         return ExitDecision::RequireManualReview { reason };
@@ -553,47 +543,41 @@ fn submit_or_manual_with_node(
         Some(limit) if shares.is_positive() => ExitDecision::SubmitExitOrder {
             reason,
             order: sell_order(&input.lot.token_id, shares, limit, OrderType::Gtc),
-            partial_exit_node_id,
-            opportunistic_denominator: None,
+            pending_scale_out: Some(pending_scale_out),
         },
         _ => ExitDecision::RequireManualReview { reason },
     }
 }
 
-/// The next due partial-exit node's share quantity and stable id, if any node is
+/// The next due scale-out target's share quantity and stable id, if any target is
 /// currently active, not yet settled, and the mark satisfies its trigger.
-fn next_partial_exit_shares(input: &ExitMonitorInput) -> Option<(Shares, String)> {
-    let lot = &input.lot;
+fn next_scale_out_shares(input: &ExitMonitorInput) -> Option<(Shares, PendingScaleOut)> {
     let mark = input.mark_price?;
-    for node in &input.exit_policy.partial_exit_nodes {
-        if input.executed_partial_exit_node_ids.contains(&node.node_id) {
+    for target in &input.exit_policy.scale_out_targets {
+        if input.scale_out_state.contains(&target.target_id) {
             continue;
         }
-        let active = node.valid_after.is_none_or(|after| input.now >= after)
-            && node.valid_until.is_none_or(|until| input.now <= until);
+        let active = target.valid_after.is_none_or(|after| input.now >= after)
+            && target.valid_until.is_none_or(|until| input.now <= until);
         if !active {
             continue;
         }
-        let min_ok = node.min_price.is_none_or(|min| mark >= min);
-        if min_ok && partial_trigger_met(node, mark, input.now) {
-            let node_shares = (lot.shares * node.sell_pct).min(lot.shares);
-            if node_shares.is_positive() {
-                return Some((node_shares, node.node_id.clone()));
+        let min_ok = target.min_price.is_none_or(|min| mark >= min);
+        if min_ok && mark >= target.trigger_price {
+            let shares = input
+                .scale_out_state
+                .delta_to_target(target.target_cumulative_exit_pct)
+                .min(input.lot.shares);
+            if shares.is_positive() {
+                return Some((
+                    shares,
+                    PendingScaleOut {
+                        target_id: Some(target.target_id.clone()),
+                        target_cumulative_exit_pct: target.target_cumulative_exit_pct,
+                    },
+                ));
             }
         }
     }
     None
-}
-
-/// Whether a partial-exit node's trigger condition is satisfied at `mark`.
-fn partial_trigger_met(node: &PartialExitNode, mark: Price, now: DateTime<Utc>) -> bool {
-    let value = node.trigger_value;
-    match node.trigger_kind {
-        ExitTriggerKind::TakeProfit => mark.inner() >= value,
-        ExitTriggerKind::StopLoss | ExitTriggerKind::TrailingStop => mark.inner() <= value,
-        ExitTriggerKind::TimeExit => now.timestamp() >= value.try_into().unwrap_or(i64::MAX),
-        // Signal/manual nodes are not price-evaluable here; the ladder's
-        // model/manual tiers own them.
-        ExitTriggerKind::SignalInvalidation | ExitTriggerKind::Manual => false,
-    }
 }

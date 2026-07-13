@@ -1252,8 +1252,8 @@ mod tests {
     use quant_pivot_models::enums::common::{OrderType, Side};
     use quant_pivot_models::enums::execution::OrderIntentKind;
     use quant_pivot_models::types::{
-        Bps, ContentHash, ExecutedPartialExitNodes, ModelVersionId, OpportunisticExitState,
-        Probability, RecommendationId, RuntimeConfigVersionId,
+        Bps, ContentHash, ModelVersionId, OrderAmount, Probability, RecommendationId,
+        RuntimeConfigVersionId, ScaleOutState, ThesisInvalidationPolicy,
     };
     use quant_pivot_models::{
         domain::OrderIntentInfo,
@@ -1262,11 +1262,13 @@ mod tests {
             execution::ExitState,
             market::MarketStatus,
             quant::{
-                AccountSource, ApprovalStatus, ExitSettlementMode, OrderIntentStatus,
-                QuantRuntimeMode, RedeemPolicy,
+                AccountSource, ApprovalStatus, EntryTriggerState, ExitSettlementMode,
+                OrderIntentStatus, QuantRuntimeMode, RedeemPolicy,
             },
         },
-        types::{EntryOrderSpec, EventId, ExitPolicySpec, OrderIntentId, PositionId, Price},
+        types::{
+            EntryOrderSpec, EntryTrigger, EventId, ExitPolicySpec, OrderIntentId, PositionId, Price,
+        },
     };
     use rust_decimal_macros::dec;
 
@@ -1407,12 +1409,14 @@ mod tests {
             policy_hash: None,
             status_reason: None,
             admission_trace_ref: None,
+            entry_trigger_json: EntryTrigger::Immediate,
             entry_order_json: EntryOrderSpec {
                 token_id: TokenId::new("111"),
                 side: Side::Buy,
                 order_type: OrderType::Gtc,
+                post_only: false,
                 limit_price: Price::new(dec!(0.5)),
-                shares: Shares::new(dec!(1)),
+                amount: OrderAmount::Shares(Shares::new(dec!(1))),
                 max_slippage_bps: Bps::new(dec!(50)),
                 valid_until: now + chrono::Duration::hours(1),
             },
@@ -1424,8 +1428,12 @@ mod tests {
                 time_exit_at: None,
                 max_hold_secs: None,
                 trailing_stop: None,
-                signal_invalidation_rules: Vec::new(),
-                partial_exit_nodes: Vec::new(),
+                thesis_invalidation: ThesisInvalidationPolicy {
+                    min_score_retention: dec!(0.6),
+                    min_expected_return_bps: Bps::ZERO,
+                    require_execution_eligibility: true,
+                },
+                scale_out_targets: Vec::new(),
                 settlement_mode: ExitSettlementMode::HoldToResolution,
                 redeem_policy: RedeemPolicy::Auto,
                 manual_review_at: None,
@@ -1434,14 +1442,16 @@ mod tests {
             },
             risk_envelope_hash: test_content_hash(b'e'),
             expires_at: now + chrono::Duration::hours(1),
+            entry_trigger_state: EntryTriggerState::NotRequired,
+            trigger_confirming_since: None,
+            trigger_last_observed_at: None,
+            trigger_ready_at: None,
             exit_state: ExitState::Monitoring,
             exit_reason: None,
             next_check_at: None,
             peak_mark_price: None,
             last_signal_recheck_at: None,
-            executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
-            pending_partial_exit_node_id: None,
-            opportunistic_exit_state: OpportunisticExitState::default(),
+            scale_out_state: ScaleOutState::default(),
             created_at: now,
             updated_at: now,
         }

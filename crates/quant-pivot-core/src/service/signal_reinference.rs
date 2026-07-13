@@ -38,7 +38,7 @@ use quant_pivot_models::{
         clickhouse::{ChExitSignalEvaluatorKind, ChExitSignalVerdict},
         quant::QuantRuntimeMode,
     },
-    types::{Bps, Price, Probability},
+    types::{Bps, Price, Probability, ThesisInvalidationPolicy},
 };
 use rust_decimal::Decimal;
 
@@ -143,14 +143,14 @@ impl<R> ReinferenceSignalEvaluator<R> {
 pub fn degradation_verdict(
     entry_composite_score: Probability,
     fresh: &FreshSignal,
-    invalidation_ratio: Decimal,
+    policy: &ThesisInvalidationPolicy,
 ) -> ExitSignalVerdict {
-    if !fresh.auto_exec_eligible {
+    if policy.require_execution_eligibility && !fresh.auto_exec_eligible {
         return ExitSignalVerdict::ThesisInvalidated {
             detail: "market no longer auto-execution eligible".to_owned(),
         };
     }
-    if fresh.expected_return_bps.inner() <= Decimal::ZERO {
+    if fresh.expected_return_bps < policy.min_expected_return_bps {
         return ExitSignalVerdict::ThesisInvalidated {
             detail: format!(
                 "expected return collapsed to {} bps",
@@ -158,13 +158,13 @@ pub fn degradation_verdict(
             ),
         };
     }
-    let floor = entry_composite_score.inner() * invalidation_ratio;
+    let floor = entry_composite_score.inner() * policy.min_score_retention;
     if fresh.composite_score.inner() < floor {
         return ExitSignalVerdict::ThesisInvalidated {
             detail: format!(
                 "composite score {} fell below {}% of entry {}",
                 fresh.composite_score.inner(),
-                (invalidation_ratio * Decimal::from(100)).normalize(),
+                (policy.min_score_retention * Decimal::from(100)).normalize(),
                 entry_composite_score.inner()
             ),
         };
@@ -195,24 +195,8 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
             };
         }
 
-        let invalidation_ratio = match policy.signal_invalidation_ratio.value.parse::<Decimal>() {
-            Ok(ratio) => ratio,
-            Err(error) => {
-                // A malformed ratio must never silently become the most
-                // aggressive floor (1.0). Fail-safe to hold; config validation
-                // rejects this at load, so this only guards a corrupted snapshot.
-                self.metrics.inc_exit_signal_reinference("error");
-                tracing::warn!(
-                    %error,
-                    value = %policy.signal_invalidation_ratio.value,
-                    "signal_invalidation_ratio is not a valid decimal; holding (fail-safe)"
-                );
-                return ExitSignalVerdict::Indeterminate {
-                    detail: "signal_invalidation_ratio misconfigured".to_owned(),
-                };
-            }
-        };
         let entry_score = ctx.intent.exit_policy_json.entry_composite_score;
+        let invalidation = &ctx.intent.exit_policy_json.thesis_invalidation;
 
         let (verdict, fresh_composite) = match self
             .reinferer
@@ -223,7 +207,7 @@ impl<R: ExitSignalReinferer> ExitSignalEvaluator for ReinferenceSignalEvaluator<
                 self.metrics.inc_exit_signal_reinference("fresh");
                 let composite = Some(fresh.composite_score);
                 (
-                    degradation_verdict(entry_score, &fresh, invalidation_ratio),
+                    degradation_verdict(entry_score, &fresh, invalidation),
                     composite,
                 )
             }
@@ -288,7 +272,7 @@ fn suppress_shadow_verdict(metrics: &MetricsHub, verdict: &ExitSignalVerdict) ->
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::types::{Bps, Probability};
+    use quant_pivot_models::types::{Bps, Probability, ThesisInvalidationPolicy};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
@@ -303,12 +287,20 @@ mod tests {
         }
     }
 
+    fn policy() -> ThesisInvalidationPolicy {
+        ThesisInvalidationPolicy {
+            min_score_retention: dec!(0.6),
+            min_expected_return_bps: Bps::new(Decimal::ONE),
+            require_execution_eligibility: true,
+        }
+    }
+
     #[test]
     fn ineligible_invalidates() {
         let v = degradation_verdict(
             Probability::new(dec!(0.8)),
             &fresh("0.79", 100, false),
-            dec!(0.6),
+            &policy(),
         );
         assert!(matches!(v, ExitSignalVerdict::ThesisInvalidated { .. }));
     }
@@ -318,7 +310,7 @@ mod tests {
         let v = degradation_verdict(
             Probability::new(dec!(0.8)),
             &fresh("0.79", 0, true),
-            dec!(0.6),
+            &policy(),
         );
         assert!(matches!(v, ExitSignalVerdict::ThesisInvalidated { .. }));
     }
@@ -329,7 +321,7 @@ mod tests {
         let v = degradation_verdict(
             Probability::new(dec!(0.8)),
             &fresh("0.40", 100, true),
-            dec!(0.6),
+            &policy(),
         );
         assert!(matches!(v, ExitSignalVerdict::ThesisInvalidated { .. }));
     }
@@ -339,7 +331,7 @@ mod tests {
         let v = degradation_verdict(
             Probability::new(dec!(0.8)),
             &fresh("0.70", 100, true),
-            dec!(0.6),
+            &policy(),
         );
         assert_eq!(v, ExitSignalVerdict::Holds);
     }

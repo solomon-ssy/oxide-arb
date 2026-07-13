@@ -36,9 +36,9 @@ use quant_pivot_models::{
     domain::{
         BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
         CalibrationArtifactFitPort, CpcvBacktestJobParams, CpcvBacktestPort,
-        FeatureParityExecutionPort, FeatureParityJobParams, JobProgressSink,
+        FeatureParityExecutionPort, FeatureParityJobParams, FitTradePolicyRequest, JobProgressSink,
         ModelCalibrationFitJobParams, ModelCalibrationFitPort, ModelTrainJobParams,
-        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress,
+        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress, TradePolicyPort,
         TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
@@ -46,7 +46,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::traits::{
     CalibrationArtifactRepository, FactWriter, RecommendationReportRepository,
-    RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    RuntimeConfigVersionRepository, ServingEvidenceRepository, TradePolicyRepository,
 };
 use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
@@ -65,10 +65,10 @@ use super::{
 };
 use crate::service::{
     feature_parity_executor::ReportFeatureParityIncidentResponse,
-    model_calibration_fit::ModelCalibrationFitService,
+    model_calibration_fit::ModelCalibrationFitService, trade_policy::TradePolicyService,
 };
 
-const ALL_KINDS: [ResearchJobKind; 7] = [
+const ALL_KINDS: [ResearchJobKind; 8] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
@@ -76,6 +76,7 @@ const ALL_KINDS: [ResearchJobKind; 7] = [
     ResearchJobKind::BiasTableFit,
     ResearchJobKind::ModelCalibrationFit,
     ResearchJobKind::FeatureParity,
+    ResearchJobKind::TradePolicyFit,
 ];
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
@@ -98,6 +99,7 @@ struct ResearchJobExecutor {
     bias_tables: Arc<dyn CalibrationArtifactFitPort>,
     model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
     feature_parity: Arc<dyn FeatureParityExecutionPort>,
+    trade_policies: Arc<dyn TradePolicyPort>,
 }
 
 /// Synchronous progress sink handed to the offline service: a lock-free channel
@@ -226,6 +228,14 @@ impl ResearchJobExecutor {
                     coverage: None,
                 })
             }
+            ResearchJobKind::TradePolicyFit => {
+                let request: FitTradePolicyRequest = from_params(&job.params_json)?;
+                let view = self.trade_policies.fit(request).await?;
+                Ok(JobOutcome {
+                    result_ref: Some(view.artifact_id.as_uuid()),
+                    coverage: None,
+                })
+            }
         }
     }
 }
@@ -326,6 +336,11 @@ impl AppContext {
                     Duration::from_secs(config.poll_secs.max(1)),
                 ),
             ) as Arc<dyn FeatureParityExecutionPort>,
+            trade_policies: Arc::new(TradePolicyService::new(
+                Arc::clone(&self.research.training_dataset_repo),
+                Arc::clone(&self.research.artifact_store),
+                Arc::clone(&self.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+            )),
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
             run_worker(engine, executor, config, token).await;

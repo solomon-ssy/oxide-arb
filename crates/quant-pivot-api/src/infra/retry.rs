@@ -126,7 +126,7 @@ impl RetryPolicy {
     #[must_use]
     pub const fn for_order_type(order_type: OrderType) -> Self {
         match order_type {
-            OrderType::Fok => Self::no_retry(),
+            OrderType::Fok | OrderType::Fak => Self::no_retry(),
             OrderType::Gtc | OrderType::Gtd { expiration: _ } => Self::clob_default(),
         }
     }

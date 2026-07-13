@@ -2,7 +2,7 @@
 //! offline Sell-scorer training (Phase 06.1).
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -49,30 +49,39 @@ pub struct LotStateInput {
 pub fn position_state_features(input: LotStateInput) -> QuantResult<PositionStateFeatures> {
     let avg = input.avg_price;
     if avg <= Decimal::ZERO {
-        return Err(position_state_error(format!(
-            "lot average price must be positive, got {avg}"
-        )));
+        return Err(ResearchError::FactorComputation {
+            detail: format!("position state: lot average price must be positive, got {avg}"),
+        }
+        .into());
     }
     if input.max_hold_secs == 0 {
-        return Err(position_state_error("max_hold_secs must be positive"));
+        return Err(ResearchError::FactorComputation {
+            detail: "position state: max_hold_secs must be positive".to_owned(),
+        }
+        .into());
     }
     let elapsed = (input.now - input.opened_at).num_seconds();
     if elapsed < 0 {
-        return Err(position_state_error(format!(
-            "lot opened_at {} is after decision_at {}",
-            input.opened_at, input.now
-        )));
+        return Err(ResearchError::FactorComputation {
+            detail: format!(
+                "position state: lot opened_at {} is after decision_at {}",
+                input.opened_at, input.now
+            ),
+        }
+        .into());
     }
     let mark = input.mark;
     if mark.is_some_and(|value| value <= Decimal::ZERO) {
-        return Err(position_state_error(
-            "mark price must be positive when present",
-        ));
+        return Err(ResearchError::FactorComputation {
+            detail: "position state: mark price must be positive when present".to_owned(),
+        }
+        .into());
     }
     if input.peak_mark.is_some_and(|value| value <= Decimal::ZERO) {
-        return Err(position_state_error(
-            "peak mark price must be positive when present",
-        ));
+        return Err(ResearchError::FactorComputation {
+            detail: "position state: peak mark price must be positive when present".to_owned(),
+        }
+        .into());
     }
     let unrealized_pnl_pct = mark
         .map(|mark| {
@@ -153,19 +162,18 @@ fn clamp_signed(value: Decimal) -> Decimal {
 fn checked_ratio(label: &str, numerator: Decimal, denominator: Decimal) -> QuantResult<Decimal> {
     numerator
         .checked_div(denominator)
-        .ok_or_else(|| position_state_error(format!("{label} ratio is undefined or overflowed")))
+        .ok_or_else(|| ResearchError::FactorComputation {
+            detail: format!("position state: {label} ratio is undefined or overflowed"),
+        })
+        .map_err(Into::into)
 }
 
 fn checked_difference(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
     left.checked_sub(right)
-        .ok_or_else(|| position_state_error(format!("{label} subtraction overflow")))
-}
-
-fn position_state_error(detail: impl Into<String>) -> QuantError {
-    ResearchError::FactorComputation {
-        detail: format!("position state: {}", detail.into()),
-    }
-    .into()
+        .ok_or_else(|| ResearchError::FactorComputation {
+            detail: format!("position state: {label} subtraction overflow"),
+        })
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

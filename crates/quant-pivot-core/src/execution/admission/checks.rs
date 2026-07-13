@@ -4,13 +4,13 @@
 
 use quant_pivot_models::{
     enums::{
+        common::OrderType,
         execution::AdmissionCheckId,
-        quant::{
-            EntryTriggerKind, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
-        },
+        quant::{OrderIntentStatus, PriceComparison, QuantRuntimeMode, RecommendationReportStatus},
     },
-    types::{Bps, Price, Shares, Usd},
+    types::{Bps, EntryTrigger, Price, Shares, Usd},
 };
+use rust_decimal::Decimal;
 
 use super::{AdmissionCheck, AdmissionCheckTrace, AdmissionInput, VenueHealth};
 
@@ -223,12 +223,47 @@ impl AdmissionCheck for BookFreshnessCheck {
     }
 }
 
+// 7a ─────────────────────────────────────────────────────────────────────────
+/// Venue tick/NegRisk metadata must agree with the frozen registry, and the
+/// signed entry price must be representable on that tick grid.
+pub(super) struct VenueMetadataCheck;
+
+impl AdmissionCheck for VenueMetadataCheck {
+    fn id(&self) -> AdmissionCheckId {
+        AdmissionCheckId::VenueMetadata
+    }
+
+    fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        let metadata = input.venue_metadata;
+        if metadata.registry_tick_size != metadata.venue_tick_size {
+            return AdmissionCheckTrace::deny(self.id(), "registry/venue tick-size mismatch")
+                .with_threshold(metadata.registry_tick_size.as_str())
+                .with_actual(metadata.venue_tick_size.as_str());
+        }
+        if metadata.registry_neg_risk != metadata.venue_neg_risk {
+            return AdmissionCheckTrace::deny(self.id(), "registry/venue NegRisk mismatch")
+                .with_threshold(metadata.registry_neg_risk.to_string())
+                .with_actual(metadata.venue_neg_risk.to_string());
+        }
+        let tick = metadata.registry_tick_size.as_decimal();
+        let price = input.intent.entry_order_json.limit_price.inner();
+        if price < tick || price > Decimal::ONE - tick || !(price / tick).fract().is_zero() {
+            return AdmissionCheckTrace::deny(
+                self.id(),
+                "entry limit price is outside the venue tick grid",
+            )
+            .with_threshold(tick.to_string())
+            .with_actual(price.to_string());
+        }
+        AdmissionCheckTrace::pass(self.id(), "venue metadata and entry tick grid match")
+    }
+}
+
 // 8 ──────────────────────────────────────────────────────────────────────────
 /// The entry trigger condition is satisfied (untriggered → defer).
 ///
-/// Phase 4 publishes only [`EntryTriggerKind::Immediate`] and
-/// [`EntryTriggerKind::LimitPrice`] via [`derive_entry_plan`](crate::report::entry_plan::derive_entry_plan).
-/// Any other kind is a hard deny (fail closed — not an infinite defer loop).
+/// Confirmation is owned by the durable trigger worker; admission rechecks the
+/// current price condition immediately before the money-changing claim.
 pub(super) struct EntryTriggerCheck;
 
 impl AdmissionCheck for EntryTriggerCheck {
@@ -238,40 +273,35 @@ impl AdmissionCheck for EntryTriggerCheck {
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
         let entry = &input.recommendation.entry_plan;
-        match entry.trigger_kind {
-            EntryTriggerKind::Immediate => {
+        match &entry.trigger {
+            EntryTrigger::Immediate => {
                 AdmissionCheckTrace::pass(self.id(), "immediate entry trigger")
             }
-            EntryTriggerKind::LimitPrice => {
-                let Some(trigger) = entry.trigger_price else {
-                    return AdmissionCheckTrace::deny(
-                        self.id(),
-                        "limit trigger has no trigger price",
-                    );
-                };
+            EntryTrigger::PriceCondition {
+                comparison,
+                threshold,
+                ..
+            } => {
                 let Some(book) = &input.book else {
                     return AdmissionCheckTrace::defer(self.id(), "no book to evaluate trigger");
                 };
                 let Some(best_ask) = book.best_ask() else {
                     return AdmissionCheckTrace::defer(self.id(), "ask side empty");
                 };
-                if best_ask <= trigger {
-                    AdmissionCheckTrace::pass(self.id(), "limit trigger satisfied")
-                        .with_threshold(trigger.to_string())
+                let satisfied = match comparison {
+                    PriceComparison::AtOrAbove => best_ask >= *threshold,
+                    PriceComparison::AtOrBelow => best_ask <= *threshold,
+                };
+                if satisfied {
+                    AdmissionCheckTrace::pass(self.id(), "price condition satisfied")
+                        .with_threshold(threshold.to_string())
                         .with_actual(best_ask.to_string())
                 } else {
-                    AdmissionCheckTrace::defer(self.id(), "limit trigger not yet satisfied")
-                        .with_threshold(trigger.to_string())
+                    AdmissionCheckTrace::defer(self.id(), "price condition is no longer satisfied")
+                        .with_threshold(threshold.to_string())
                         .with_actual(best_ask.to_string())
                 }
             }
-            other => AdmissionCheckTrace::deny(
-                self.id(),
-                format!(
-                    "entry trigger kind {} is not supported for execution (Phase 4 publishes immediate and limit_price only)",
-                    other.as_str()
-                ),
-            ),
         }
     }
 }
@@ -516,10 +546,11 @@ impl AdmissionCheck for LiquidityDepthCheck {
             return AdmissionCheckTrace::deny(self.id(), "no book snapshot for token");
         };
         let spec = &input.intent.entry_order_json;
+        let required_shares = spec.projected_shares();
         let fillable = book.ask_depth_up_to(spec.limit_price);
-        if fillable < spec.shares {
+        if fillable < required_shares && !matches!(spec.order_type, OrderType::Fak) {
             return AdmissionCheckTrace::defer(self.id(), "insufficient ask depth to fill size")
-                .with_threshold(spec.shares.to_string())
+                .with_threshold(required_shares.to_string())
                 .with_actual(fillable.to_string());
         }
         let visible = book.ask_notional_up_to(spec.limit_price);
@@ -549,7 +580,8 @@ impl AdmissionCheck for SlippageCheck {
             return AdmissionCheckTrace::deny(self.id(), "no book snapshot for token");
         };
         let spec = &input.intent.entry_order_json;
-        if spec.shares <= Shares::ZERO {
+        let projected_shares = spec.projected_shares();
+        if projected_shares <= Shares::ZERO {
             return AdmissionCheckTrace::deny(self.id(), "non-positive order size");
         }
         let Some(best_ask) = book.best_ask() else {
@@ -557,7 +589,7 @@ impl AdmissionCheck for SlippageCheck {
         };
 
         // Walk the asks at or below the limit, accumulating fill cost.
-        let mut remaining = spec.shares;
+        let mut remaining = projected_shares;
         let mut cost = Usd::ZERO;
         for level in book.asks.iter() {
             if remaining <= Shares::ZERO {
@@ -576,14 +608,18 @@ impl AdmissionCheck for SlippageCheck {
             cost += take * price;
             remaining -= take;
         }
-        if remaining > Shares::ZERO {
+        if remaining > Shares::ZERO && !matches!(spec.order_type, OrderType::Fak) {
             return AdmissionCheckTrace::defer(
                 self.id(),
                 "insufficient depth at or below limit to estimate fill",
             );
         }
 
-        let vwap = Price::new(cost.inner() / spec.shares.inner());
+        let filled = projected_shares - remaining;
+        if filled <= Shares::ZERO {
+            return AdmissionCheckTrace::defer(self.id(), "no executable shares at limit");
+        }
+        let vwap = Price::new(cost.inner() / filled.inner());
         let Some(slippage) = Bps::spread(vwap, best_ask) else {
             return AdmissionCheckTrace::deny(self.id(), "degenerate best-ask price");
         };

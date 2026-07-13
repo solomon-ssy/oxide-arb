@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 10),
+# They live in the versioned runtime configuration (schema_version = 11),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -242,6 +242,8 @@ model_train_concurrency = 1
 backtest_concurrency = 2
 # Deterministic feature-parity replays are I/O and CPU intensive; serialize.
 feature_parity_concurrency = 1
+# Executable policy fits are artifact-heavy and deterministic; serialize.
+trade_policy_fit_concurrency = 1
 # Lease TTL (seconds): a lease not renewed within this window is reclaimable by
 # the boot recovery sweep. Default: 90.
 lease_ttl_secs = 90

@@ -8,7 +8,10 @@ use sea_orm::{
 
 use crate::{
     enums::quant::PublicationStatus,
-    idens::{quant_model_spec::QuantModelSpec, quant_training_dataset::QuantTrainingDataset},
+    idens::{
+        quant_model_spec::QuantModelSpec, quant_trade_policy_artifact::QuantTradePolicyArtifact,
+        quant_training_dataset::QuantTrainingDataset,
+    },
     schema::{
         column,
         dependency::TableDependency,
@@ -26,6 +29,8 @@ pub enum QuantModelVersion {
     Version,
     ArtifactHash,
     TrainingDatasetId,
+    TradePolicyArtifactId,
+    TradePolicyHash,
     /// Explicit CPCV path set the publish/promote quality gate must evaluate
     /// (Phase 11.5 remediation). `NULL` means no publish candidate is bound —
     /// the gate fails `CpcvRequired` rather than silently reading "latest".
@@ -56,6 +61,12 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(column::uuid_null(QuantModelVersion::TrainingDatasetId))
+        .col(column::uuid_null(QuantModelVersion::TradePolicyArtifactId))
+        .col(
+            ColumnDef::new(QuantModelVersion::TradePolicyHash)
+                .text()
+                .null(),
+        )
         .col(column::uuid_null(QuantModelVersion::PublishPathSetId))
         .col(
             ColumnDef::new(QuantModelVersion::MetricsJson)
@@ -91,6 +102,19 @@ pub fn table() -> TableCreateStatement {
                 .name("fk_quant_model_version_spec")
                 .from(QuantModelVersion::Table, QuantModelVersion::ModelSpecId)
                 .to(QuantModelSpec::Table, QuantModelSpec::ModelSpecId)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_quant_model_version_trade_policy")
+                .from(
+                    QuantModelVersion::Table,
+                    QuantModelVersion::TradePolicyArtifactId,
+                )
+                .to(
+                    QuantTradePolicyArtifact::Table,
+                    QuantTradePolicyArtifact::ArtifactId,
+                )
                 .on_delete(ForeignKeyAction::Restrict),
         )
         .foreign_key(
@@ -158,6 +182,7 @@ pub fn indexes() -> Vec<IndexSpec> {
 pub fn dependencies() -> Vec<TableDependency> {
     vec![
         TableDependency::foreign_key(quant_model_spec_table_name),
+        TableDependency::foreign_key(quant_trade_policy_artifact_table_name),
         TableDependency::foreign_key(quant_training_dataset_table_name),
     ]
 }
@@ -176,4 +201,8 @@ fn quant_model_spec_table_name() -> String {
 
 fn quant_training_dataset_table_name() -> String {
     QuantTrainingDataset::Table.to_string()
+}
+
+fn quant_trade_policy_artifact_table_name() -> String {
+    QuantTradePolicyArtifact::Table.to_string()
 }

@@ -1987,13 +1987,6 @@ fn execution_entry_policy_fields() -> Vec<FieldUiEntry> {
             "Maximum tolerated entry-order slippage (basis points), frozen onto each recommendation's entry plan and enforced by admission. Tighter caps reduce cost but increase unfilled entries.",
             "入场订单可容忍的最大滑点（基点），冻结到每条建议的入场计划并由准入强制。收紧可降低成本但会增加未成交入场。",
         ),
-        boolean(
-            "execution.entry_order_policy.allow_market_orders",
-            "Allow market orders",
-            "允许市价单",
-            "Whether entry may use marketable (immediate) order types. On fills faster at the risk of more slippage; off uses limit entries only.",
-            "入场是否可使用可立即成交（市价）订单类型。开启成交更快但滑点风险更高；关闭仅用限价入场。",
-        ),
         usd(
             "execution.entry_order_policy.min_entry_book_depth_usd",
             "Minimum entry book depth",
@@ -2066,14 +2059,6 @@ fn execution_exit_monitor_fields() -> Vec<FieldUiEntry> {
             "信号重算间隔",
             "Minimum seconds between heavier model re-inference checks for one lot. Larger values reduce inference cost but slow thesis-invalidation detection.",
             "对单个持仓两次较重的模型再推理检查之间的最小间隔（秒）。调大降低推理成本，但会减慢逻辑失效的发现。",
-        )
-        .visible_when(enabled("execution.exit_monitor.enabled")),
-        ratio_half_open(
-            "execution.exit_monitor.signal_invalidation_ratio",
-            "Signal invalidation ratio",
-            "信号失效比率",
-            "Fresh composite score below entry_score × this ratio invalidates the thesis, in (0, 1]. Lower is more tolerant of drift; near 1 forces exits on tiny degradation.",
-            "当最新综合分低于 入场分 × 该比率 时判定逻辑失效，(0,1]。调低对漂移更宽容；接近 1 会在轻微退化时就强制退出。",
         )
         .visible_when(enabled("execution.exit_monitor.enabled")),
     ];
@@ -2994,7 +2979,6 @@ fn execution_children_head() -> Vec<SchemaNode> {
             ),
             fields_in_order(&[
                 "execution.entry_order_policy.max_slippage_bps",
-                "execution.entry_order_policy.allow_market_orders",
                 "execution.entry_order_policy.min_entry_book_depth_usd",
             ]),
         ),
@@ -3161,7 +3145,6 @@ fn exit_monitor_subsection() -> SchemaNode {
         "execution.exit_monitor.enabled",
         "execution.exit_monitor.monitor_secs",
         "execution.exit_monitor.signal_recheck_secs",
-        "execution.exit_monitor.signal_invalidation_ratio",
     ]);
     children.push(subsection(
         section_spec(

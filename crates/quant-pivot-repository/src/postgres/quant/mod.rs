@@ -30,6 +30,7 @@ mod research_job;
 mod reserved_capital;
 mod settlement_redeem;
 mod shadow_comparison;
+mod trade_policy;
 mod trade_tape_block_cursor;
 
 pub use {
@@ -50,6 +51,6 @@ pub use {
     recommendation_report::PgRecommendationReportRepository,
     reconciliation::PgReconciliationRepository, research_job::PgResearchJobRepository,
     reserved_capital::PgReservedCapitalRepository, settlement_redeem::PgSettlementRedeemRepository,
-    shadow_comparison::PgShadowComparisonRepository,
+    shadow_comparison::PgShadowComparisonRepository, trade_policy::PgTradePolicyRepository,
     trade_tape_block_cursor::PgTradeTapeBlockCursorRepository,
 };

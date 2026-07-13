@@ -19,8 +19,8 @@ use quant_pivot_repository::postgres::{
     PgResearchJobRepository, PgReservedCapitalRepository, PgRoleMenuRepository,
     PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
     PgSettlementRedeemRepository, PgShadowComparisonRepository, PgSystemRuntimeStateRepository,
-    PgTradeTapeBlockCursorRepository, PgTrainingDatasetRepository, PgUserRepository,
-    PgUserRoleRepository, arc_repo,
+    PgTradePolicyRepository, PgTradeTapeBlockCursorRepository, PgTrainingDatasetRepository,
+    PgUserRepository, PgUserRoleRepository, arc_repo,
 };
 use quant_pivot_storage::postgres::PostgresPool;
 use std::sync::Arc;
@@ -50,6 +50,7 @@ pub struct PgRepositories {
     pub feature_parity: Arc<PgFeatureParityRepository>,
     pub factor: Arc<PgFactorRepository>,
     pub calibration_artifact: Arc<PgCalibrationArtifactRepository>,
+    pub trade_policy: Arc<PgTradePolicyRepository>,
     pub model_run: Arc<PgModelRunRepository>,
     pub model_registry: Arc<PgModelRegistryRepository>,
     pub shadow_comparison: Arc<PgShadowComparisonRepository>,
@@ -105,6 +106,7 @@ impl PgRepositories {
             feature_parity: arc_repo(&db, PgFeatureParityRepository::new),
             factor: arc_repo(&db, PgFactorRepository::new),
             calibration_artifact: arc_repo(&db, PgCalibrationArtifactRepository::new),
+            trade_policy: arc_repo(&db, PgTradePolicyRepository::new),
             model_run: arc_repo(&db, PgModelRunRepository::new),
             model_registry: arc_repo(&db, PgModelRegistryRepository::new),
             shadow_comparison: arc_repo(&db, PgShadowComparisonRepository::new),

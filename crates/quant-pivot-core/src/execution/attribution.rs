@@ -21,8 +21,8 @@ use quant_pivot_models::{
     enums::{
         execution::{ExecutionOrderPhase, ExitReason, PositionLedgerState},
         quant::{
-            ExecutionOrderState, ExitTriggerKind, OrderIntentStatus,
-            RecommendationAttributionOutcome, RecommendationOutcome,
+            ExecutionOrderState, OrderIntentStatus, RecommendationAttributionOutcome,
+            RecommendationOutcome,
         },
     },
     types::{AttributionDetail, Bps, EntryOutcome, ExitOutcome, Price, RecommendationId, Usd},
@@ -451,31 +451,13 @@ fn exit_outcome(
     ExitOutcome {
         exit_price,
         exit_shares,
-        exit_trigger: intent.exit_reason.map(exit_trigger_kind),
+        exit_trigger: intent.exit_reason,
         exit_compliance: order.is_some()
             || outcome == RecommendationAttributionOutcome::FilledSettled,
         settlement_outcome: Some(realized_settlement_outcome(position.realized_pnl_usd)),
         exited_at: position
             .closed_at
             .or_else(|| order.and_then(|row| row.filled_at)),
-    }
-}
-
-const fn exit_trigger_kind(reason: ExitReason) -> ExitTriggerKind {
-    match reason {
-        ExitReason::TakeProfit => ExitTriggerKind::TakeProfit,
-        ExitReason::StopLoss => ExitTriggerKind::StopLoss,
-        ExitReason::TimeExit => ExitTriggerKind::TimeExit,
-        ExitReason::SignalInvalidated => ExitTriggerKind::SignalInvalidation,
-        ExitReason::Manual
-        | ExitReason::PartialExit
-        | ExitReason::Opportunistic
-        | ExitReason::SettlementHold
-        | ExitReason::ResolutionRedeem
-        | ExitReason::KillSwitchEmergency
-        | ExitReason::RiskEnvelopeBreached
-        | ExitReason::MarketAbnormal
-        | ExitReason::DataStale => ExitTriggerKind::Manual,
     }
 }
 

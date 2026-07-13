@@ -192,6 +192,14 @@ pub fn market_context_from_resolved(
         time_to_resolution_secs,
         market_status: market.status,
         neg_risk: market.neg_risk,
+        tick_size: registry
+            .ok_or_else(|| ResearchError::PitResolution {
+                detail: format!(
+                    "market {} has no tick-size registry metadata",
+                    selected.market_id
+                ),
+            })?
+            .tick_size,
         fee_rate,
     })
 }
@@ -502,58 +510,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn book_snapshot_ref_hash_is_stable() {
-        let book = sample_book();
-        let first = book_snapshot_ref_from_resolved(&book).expect("hash");
-        let second = book_snapshot_ref_from_resolved(&book).expect("hash");
-        assert_eq!(first, second);
-        assert!(first.canonical_string().starts_with("book:ch:"));
-    }
-
-    #[test]
-    fn market_context_materializes_core_fields() {
-        let as_of = Utc::now();
-        let book = sample_book();
-        let market = ResolvedMarketContext {
-            market_id: MarketId::new("0xm"),
-            effective_at: as_of,
-            available_at: as_of,
-            status: MarketStatus::Active,
-            neg_risk: false,
-            end_date: None,
-            created_at: Some(as_of),
-        };
-        let selected = SelectedMarket {
-            market_id: MarketId::new("0xm"),
-            event_id: EventId::new("evt"),
-            category: MarketCategory::Sports,
-            primary_token_id: TokenId::new("123"),
-            secondary_token_id: None,
-            liquidity_usd: Some(Usd::new(dec!(5000))),
-            volume_24h_usd: Some(Usd::new(dec!(1000))),
-            source_refs: Vec::new(),
-        };
-        let ctx =
-            market_context_from_resolved(as_of, &book, &market, &selected, None).expect("context");
-        assert_eq!(ctx.depth_usd, book.visible_liquidity_usd());
-        assert!(ctx.spread_bps.is_some());
-        assert_eq!(ctx.volume_24h_usd, selected.volume_24h_usd);
-    }
-
-    #[test]
-    fn identity_reads_registry_outcome() {
-        let selected = SelectedMarket {
-            market_id: MarketId::new("0xm"),
-            event_id: EventId::new("evt"),
-            category: MarketCategory::Politics,
-            primary_token_id: TokenId::new("yes-token"),
-            secondary_token_id: Some(TokenId::new("no-token")),
-            liquidity_usd: None,
-            volume_24h_usd: None,
-            source_refs: Vec::new(),
-        };
-        let registry = MarketRegistryInfo {
+    fn sample_registry() -> MarketRegistryInfo {
+        MarketRegistryInfo {
             market_id: MarketId::new("0xm"),
             event_id: EventId::new("evt"),
             token_yes: TokenId::new("yes-token"),
@@ -589,7 +547,63 @@ mod tests {
             resolved_at: None,
             created_at: Some(Utc::now()),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn book_snapshot_ref_hash_is_stable() {
+        let book = sample_book();
+        let first = book_snapshot_ref_from_resolved(&book).expect("hash");
+        let second = book_snapshot_ref_from_resolved(&book).expect("hash");
+        assert_eq!(first, second);
+        assert!(first.canonical_string().starts_with("book:ch:"));
+    }
+
+    #[test]
+    fn market_context_materializes_core_fields() {
+        let as_of = Utc::now();
+        let book = sample_book();
+        let market = ResolvedMarketContext {
+            market_id: MarketId::new("0xm"),
+            effective_at: as_of,
+            available_at: as_of,
+            status: MarketStatus::Active,
+            neg_risk: false,
+            end_date: None,
+            created_at: Some(as_of),
         };
+        let selected = SelectedMarket {
+            market_id: MarketId::new("0xm"),
+            event_id: EventId::new("evt"),
+            category: MarketCategory::Sports,
+            primary_token_id: TokenId::new("123"),
+            secondary_token_id: None,
+            liquidity_usd: Some(Usd::new(dec!(5000))),
+            volume_24h_usd: Some(Usd::new(dec!(1000))),
+            source_refs: Vec::new(),
+        };
+        let registry = sample_registry();
+        let ctx = market_context_from_resolved(as_of, &book, &market, &selected, Some(&registry))
+            .expect("context");
+        assert_eq!(ctx.depth_usd, book.visible_liquidity_usd());
+        assert!(ctx.spread_bps.is_some());
+        assert_eq!(ctx.volume_24h_usd, selected.volume_24h_usd);
+        assert_eq!(ctx.tick_size, TickSize::Hundredth);
+    }
+
+    #[test]
+    fn identity_reads_registry_outcome() {
+        let selected = SelectedMarket {
+            market_id: MarketId::new("0xm"),
+            event_id: EventId::new("evt"),
+            category: MarketCategory::Politics,
+            primary_token_id: TokenId::new("yes-token"),
+            secondary_token_id: Some(TokenId::new("no-token")),
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        };
+        let registry = sample_registry();
         let identity =
             recommendation_identity_from_resolved(&selected, Some(&registry)).expect("identity");
         assert_eq!(identity.question, "Will it happen?");

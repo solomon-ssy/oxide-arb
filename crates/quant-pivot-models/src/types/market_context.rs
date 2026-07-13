@@ -5,7 +5,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    enums::market::MarketStatus,
+    enums::{common::TickSize, market::MarketStatus},
     jsonb_active,
     types::{Bps, Price, Usd},
 };
@@ -23,6 +23,7 @@ pub struct MarketContext {
     pub time_to_resolution_secs: Option<u64>,
     pub market_status: MarketStatus,
     pub neg_risk: bool,
+    pub tick_size: TickSize,
     pub fee_rate: Option<Decimal>,
 }
 

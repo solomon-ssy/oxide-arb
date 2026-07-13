@@ -6,7 +6,7 @@ use quant_pivot_models::{
         ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     enums::execution::ExitReason,
-    types::{ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price},
+    types::{ExecutionOrderId, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price},
 };
 
 /// Cross-table execution-submission transactions (Phase 05.4 — real money).
@@ -81,7 +81,7 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         &self,
         order: NewExecutionOrder,
         exit_reason: ExitReason,
-        partial_exit_node_id: Option<String>,
+        pending_scale_out: Option<PendingScaleOut>,
     ) -> Result<ExecutionOrderInfo, StorageError>;
 
     /// Route a lot to manual exit handling (`exit_state = ManualRequired`,

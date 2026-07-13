@@ -64,7 +64,7 @@ use quant_pivot_repository::{
         PgAttributionRepository, PgCatalogVersionRepository, PgFeatureRepository,
         PgMarketLinkageRepository, PgMarketRepository, PgMarketSelectionRepository,
         PgModelRegistryRepository, PgPositionRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgRuntimeConfigVersionRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         CatalogVersionRepository, MarketLinkageRepository, ModelRegistryRepository,
@@ -147,6 +147,8 @@ fn ledger_manifest(
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: training_dataset_id.clone(),
         model_spec_id: model_spec_id.clone(),
+        trade_policy_artifact_id: None,
+        trade_policy_hash: None,
         runtime_config_version_id: runtime_config_version_id.clone(),
         window_start,
         window_end,
@@ -869,6 +871,7 @@ fn service_with_selection_and_linkage(
             fee_calculator: Arc::new(FeeCalculator::new()),
             linkage_repo,
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
+            trade_policy_repo: Arc::new(PgTradePolicyRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features,
@@ -1669,6 +1672,9 @@ async fn plan_build_reuses_training_dataset_id() {
             lot_samples: plan_a.lot_samples.clone(),
             exit_training_lots: plan_a.exit_training_lots.clone(),
             label_names: plan_a.label_names.clone(),
+            trade_policy_artifact_id: plan_a.trade_policy_artifact_id.clone(),
+            trade_policy_hash: plan_a.trade_policy_hash.clone(),
+            trade_policy: plan_a.trade_policy.clone(),
         })
         .await
         .expect("build");
@@ -1904,6 +1910,8 @@ async fn model_version_training_dataset_id_is_typed() {
             version: 2,
             artifact_hash: hash,
             training_dataset_id: Some(dataset_id.clone()),
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),

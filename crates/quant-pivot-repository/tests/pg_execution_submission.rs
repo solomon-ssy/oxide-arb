@@ -37,7 +37,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerKind,
+            AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
@@ -48,18 +48,19 @@ use quant_pivot_models::{
     },
     types::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
-        ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec,
-        EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId,
-        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderPolicy,
+        EntryOrderSpec, EntryPlan, EntryTrigger, EquitySnapshotId, EventId, EvidenceRefs,
+        ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown,
+        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
+        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId, PendingScaleOut,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
         ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
         RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TokenId, Usd,
+        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -703,12 +704,14 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
         policy_hash: None,
         status_reason: None,
         admission_trace_ref: None,
+        entry_trigger_json: EntryTrigger::Immediate,
         entry_order_json: EntryOrderSpec {
             token_id: TokenId::new("token-1"),
             side: Side::Buy,
             order_type: OrderType::Gtc,
+            post_only: false,
             limit_price: Price::new(dec!(0.6)),
-            shares: Shares::new(dec!(100)),
+            amount: OrderAmount::Shares(Shares::new(dec!(100))),
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now() + chrono::Duration::hours(1),
         },
@@ -720,8 +723,12 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
             time_exit_at: None,
             max_hold_secs: None,
             trailing_stop: None,
-            signal_invalidation_rules: Vec::new(),
-            partial_exit_nodes: Vec::new(),
+            thesis_invalidation: ThesisInvalidationPolicy {
+                min_score_retention: dec!(0.6),
+                min_expected_return_bps: Bps::ZERO,
+                require_execution_eligibility: true,
+            },
+            scale_out_targets: Vec::new(),
             settlement_mode: ExitSettlementMode::ExitBeforeResolution,
             redeem_policy: RedeemPolicy::Manual,
             manual_review_at: None,
@@ -730,6 +737,10 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
         },
         risk_envelope_hash: content_hash('e'),
         expires_at: Utc::now() + chrono::Duration::hours(1),
+        entry_trigger_state: EntryTriggerState::NotRequired,
+        trigger_confirming_since: None,
+        trigger_last_observed_at: None,
+        trigger_ready_at: None,
     }
 }
 
@@ -1292,12 +1303,14 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 policy_hash: None,
                 status_reason: None,
                 admission_trace_ref: None,
+                entry_trigger_json: EntryTrigger::Immediate,
                 entry_order_json: EntryOrderSpec {
                     token_id: TokenId::new("token-1"),
                     side: Side::Buy,
                     order_type: OrderType::Gtc,
+                    post_only: false,
                     limit_price: Price::new(dec!(0.6)),
-                    shares: Shares::new(dec!(100)),
+                    amount: OrderAmount::Shares(Shares::new(dec!(100))),
                     max_slippage_bps: Bps::new(dec!(50)),
                     valid_until: Utc::now() + chrono::Duration::hours(1),
                 },
@@ -1309,8 +1322,12 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                     time_exit_at: None,
                     max_hold_secs: None,
                     trailing_stop: None,
-                    signal_invalidation_rules: Vec::new(),
-                    partial_exit_nodes: Vec::new(),
+                    thesis_invalidation: ThesisInvalidationPolicy {
+                        min_score_retention: dec!(0.6),
+                        min_expected_return_bps: Bps::ZERO,
+                        require_execution_eligibility: true,
+                    },
+                    scale_out_targets: Vec::new(),
                     settlement_mode: ExitSettlementMode::ExitBeforeResolution,
                     redeem_policy: RedeemPolicy::Manual,
                     manual_review_at: None,
@@ -1319,6 +1336,10 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 },
                 risk_envelope_hash: content_hash('e'),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
+                entry_trigger_state: EntryTriggerState::NotRequired,
+                trigger_confirming_since: None,
+                trigger_last_observed_at: None,
+                trigger_ready_at: None,
             },
             NewCapitalAllocation {
                 capital_allocation_id: CapitalAllocationId::from_v7(),
@@ -1458,6 +1479,8 @@ async fn seed_model_version(
             version: 1,
             artifact_hash: content_hash('a'),
             training_dataset_id: None,
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
@@ -1713,9 +1736,12 @@ fn new_account_snapshot() -> NewAccountSnapshot {
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger_kind: EntryTriggerKind::Immediate,
-        trigger_price: None,
-        limit_price: Some(Price::new(dec!(0.6))),
+        trade_policy: None,
+        trigger: EntryTrigger::Immediate,
+        order_policy: EntryOrderPolicy::Passive {
+            limit_price: Price::new(dec!(0.6)),
+            post_only: true,
+        },
         max_slippage_bps: Bps::new(dec!(50)),
         valid_from: Utc::now(),
         valid_until: Utc::now() + chrono::Duration::hours(1),
@@ -1755,15 +1781,20 @@ fn sizing_plan() -> SizingPlan {
 
 fn exit_plan() -> ExitPlan {
     ExitPlan {
+        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.8))),
         take_profit_pct: None,
         stop_loss_price: Some(Price::new(dec!(0.4))),
         stop_loss_pct: None,
         time_exit_at: None,
         max_hold_secs: Some(86_400),
-        partial_exit_nodes: Vec::new(),
+        scale_out_targets: Vec::new(),
         trailing_stop: None,
-        signal_invalidation_rules: Vec::new(),
+        thesis_invalidation: ThesisInvalidationPolicy {
+            min_score_retention: dec!(0.6),
+            min_expected_return_bps: Bps::ZERO,
+            require_execution_eligibility: true,
+        },
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
@@ -1824,6 +1855,7 @@ const fn market_context() -> MarketContext {
         time_to_resolution_secs: Some(86_400),
         market_status: MarketStatus::Active,
         neg_risk: false,
+        tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
         fee_rate: None,
     }
 }
@@ -1927,7 +1959,7 @@ async fn fill_entry_lot(
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn entry_fill_freezes_opportunistic_denominator() {
+async fn entry_fill_freezes_scale_out_denominator() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
@@ -1943,7 +1975,7 @@ async fn entry_fill_freezes_opportunistic_denominator() {
         .expect("find intent")
         .expect("intent row");
     assert_eq!(
-        intent.opportunistic_exit_state.denominator_shares,
+        intent.scale_out_state.denominator_shares,
         Some(Shares::new(dec!(100)))
     );
 }
@@ -2026,7 +2058,6 @@ async fn exit_full_releases_capital_with_realized_pnl() {
                 fully_exited: true,
                 revert_to_open: false,
                 reconciliation: None,
-                opportunistic_advance: None,
             },
         )
         .await
@@ -2063,7 +2094,10 @@ async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
         .create_exit_order_and_mark_closing(
             exit_order(&intent_id, &ids, dec!(40), dec!(0.70)),
             ExitReason::PartialExit,
-            Some("tp1".to_owned()),
+            Some(PendingScaleOut {
+                target_id: Some("tp1".to_owned()),
+                target_cumulative_exit_pct: dec!(0.4),
+            }),
         )
         .await
         .expect("exit order");
@@ -2092,7 +2126,6 @@ async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
                 fully_exited: false,
                 revert_to_open: false,
                 reconciliation: None,
-                opportunistic_advance: None,
             },
         )
         .await
@@ -2119,8 +2152,8 @@ async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
         .await
         .expect("intent")
         .expect("row");
-    assert!(intent.executed_partial_exit_node_ids.contains("tp1"));
-    assert!(intent.pending_partial_exit_node_id.is_none());
+    assert!(intent.scale_out_state.contains("tp1"));
+    assert!(intent.scale_out_state.pending_target.is_none());
 }
 
 #[tokio::test]

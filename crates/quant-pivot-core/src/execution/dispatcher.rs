@@ -124,7 +124,7 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         }
 
         // 3–7. Admission gate, write-ahead, venue call, and ledger settle.
-        let recommendation = self.evaluate_admission(intent_id, &intent, now).await?;
+        let recommendation = Box::pin(self.evaluate_admission(intent_id, &intent, now)).await?;
         let feature_parity_state_id = match self
             .deps
             .feature_parity_gate
@@ -318,6 +318,7 @@ fn defer_reason(decision: &AdmissionDecision) -> String {
 pub(crate) const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
     match order_type {
         OrderType::Fok => OrderTypeKind::Fok,
+        OrderType::Fak => OrderTypeKind::Fak,
         OrderType::Gtc => OrderTypeKind::Gtc,
         OrderType::Gtd { .. } => OrderTypeKind::Gtd,
     }
@@ -342,7 +343,7 @@ pub(crate) fn gtd_expiration_at(
                     detail: "timestamp is outside the chrono range".to_owned(),
                 })
         }
-        OrderType::Fok | OrderType::Gtc => Ok(None),
+        OrderType::Fok | OrderType::Fak | OrderType::Gtc => Ok(None),
     }
 }
 
@@ -361,8 +362,8 @@ fn build_new_execution_order(
         side: spec.side,
         order_type: order_type_kind(&spec.order_type),
         price: spec.limit_price,
-        shares: spec.shares,
-        cost_usd: spec.shares * spec.limit_price,
+        shares: spec.projected_shares(),
+        cost_usd: spec.notional(),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -380,9 +381,9 @@ fn build_venue_order(recommendation: &RecommendationInfo, spec: &EntryOrderSpec)
         token_id: spec.token_id.clone(),
         side: spec.side,
         price: spec.limit_price,
-        shares: spec.shares,
+        amount: spec.amount,
         order_type: spec.order_type,
-        neg_risk: recommendation.market_context.neg_risk,
+        post_only: spec.post_only,
         category: recommendation.identity.category,
     }
 }

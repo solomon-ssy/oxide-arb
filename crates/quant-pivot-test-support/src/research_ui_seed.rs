@@ -37,7 +37,7 @@ use quant_pivot_repository::{
         ModelRegistryRepository, ModelRunRepository, TrainingDatasetRepository,
     },
 };
-use quant_pivot_research::training::dataset_manifest_hash;
+use quant_pivot_research::{hashing::ResearchHasher, training::dataset_manifest_hash};
 use rust_decimal_macros::dec;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
@@ -383,6 +383,8 @@ async fn seed_training_dataset_scenario(
                 format_version: DATASET_ARTIFACT_FORMAT_VERSION,
                 training_dataset_id: dataset_id.clone(),
                 model_spec_id: model_spec_id.clone(),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
                 runtime_config_version_id: runtime_config_version_id.clone(),
                 window_start,
                 window_end: window_start + ChronoDuration::days(7),
@@ -511,6 +513,8 @@ async fn create_model_version(
             version,
             artifact_hash: content_hash(&format!("artifact-research-{artifact_seed}")),
             training_dataset_id,
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json,
             training_objective_json: serde_json::json!({
@@ -836,17 +840,7 @@ async fn seed_factor(
 }
 
 fn content_hash(seed: &str) -> ContentHash {
-    let mut hex = seed.as_bytes().iter().fold(String::new(), |mut acc, byte| {
-        use std::fmt::Write as _;
-        let _ = write!(acc, "{byte:02x}");
-        acc
-    });
-    if hex.len() > 64 {
-        hex.truncate(64);
-    } else {
-        hex.push_str(&"0".repeat(64usize.saturating_sub(hex.len())));
-    }
-    ContentHash::parse(format!("blake3:{hex}")).expect("hash")
+    ResearchHasher::canonical(&seed).expect("canonical demo hash")
 }
 
 fn demo_metrics(

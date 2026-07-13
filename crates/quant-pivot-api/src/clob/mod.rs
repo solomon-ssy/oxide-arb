@@ -40,13 +40,13 @@ use quant_pivot_models::{
     domain::{
         BookLevel,
         book::{OrderbookSide, QuantBookSnapshot},
-        order::{OrderAmount, OrderRequest, OrderResponse},
+        order::{OrderRequest, OrderResponse},
     },
     enums::{
-        common::{OrderType, Side},
+        common::{OrderType, Side, TickSize},
         execution::VenueOrderStatus,
     },
-    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 use std::{convert::TryFrom, str::FromStr, sync::Arc};
@@ -62,6 +62,13 @@ pub struct ClobClient {
     rate_limiter: RateLimiter,
     order_retry_policy: RetryPolicy,
     on_book_level_rejected: Option<BookLevelRejectHook>,
+}
+
+/// Venue-owned order metadata re-read immediately before admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VenueOrderMetadata {
+    pub tick_size: TickSize,
+    pub neg_risk: bool,
 }
 
 fn push_rest_level(
@@ -160,6 +167,42 @@ fn map_post_order_response(
 }
 
 impl ClobClient {
+    /// Read the SDK's authoritative tick-size and `NegRisk` metadata for a token.
+    ///
+    /// The official SDK caches these endpoints and also consumes them while
+    /// building the signed order. Admission compares this view with the frozen
+    /// registry before allowing a money-changing claim.
+    pub async fn order_metadata(&self, token_id: &TokenId) -> Result<VenueOrderMetadata, ApiError> {
+        let token_id = WireTokenId::try_from(token_id)?.0;
+        let (tick, neg_risk) = tokio::try_join!(
+            async {
+                self.sdk
+                    .tick_size(token_id)
+                    .await
+                    .map_err(|error| ApiError::from(sdk_error::SdkClobError(&error)))
+            },
+            async {
+                self.sdk
+                    .neg_risk(token_id)
+                    .await
+                    .map_err(|error| ApiError::from(sdk_error::SdkClobError(&error)))
+            }
+        )?;
+        let tick_size =
+            TickSize::try_from(tick.minimum_tick_size.as_decimal()).map_err(|error| {
+                ApiError::Clob {
+                    endpoint: "GET /tick-size".to_owned(),
+                    code: "unsupported_tick_size".to_owned(),
+                    message: error.to_string(),
+                    retryable: false,
+                }
+            })?;
+        Ok(VenueOrderMetadata {
+            tick_size,
+            neg_risk: neg_risk.neg_risk,
+        })
+    }
+
     /// Authenticate with Polymarket CLOB and create a connected client.
     ///
     /// The [`WalletTopology`] binds the venue signature type and the money-holding
@@ -216,6 +259,25 @@ impl ClobClient {
         self
     }
 
+    fn retry_policy_for_order(
+        &self,
+        order_type: OrderType,
+        post_only: bool,
+    ) -> Result<RetryPolicy, ApiError> {
+        if post_only && !matches!(order_type, OrderType::Gtc | OrderType::Gtd { .. }) {
+            return Err(ApiError::Clob {
+                endpoint: "POST /order".to_owned(),
+                code: "invalid_post_only_order_type".to_owned(),
+                message: "post-only is valid only for GTC/GTD limit orders".to_owned(),
+                retryable: false,
+            });
+        }
+        Ok(match order_type {
+            OrderType::Fok | OrderType::Fak => RetryPolicy::no_retry(),
+            OrderType::Gtc | OrderType::Gtd { expiration: _ } => self.order_retry_policy,
+        })
+    }
+
     /// Place an order on the CLOB.
     #[tracing::instrument(skip(self, req), fields(market_id = %req.market_id, side = %req.side))]
     pub async fn place_order(&self, req: &OrderRequest) -> Result<OrderResponse, ApiError> {
@@ -228,12 +290,10 @@ impl ClobClient {
         let price = req.price.inner();
         let order_amount = req.amount;
         let order_type = req.order_type;
+        let post_only = req.post_only;
+        let retry_policy = self.retry_policy_for_order(order_type, post_only)?;
 
         let submitted_at = chrono::Utc::now();
-        let retry_policy = match order_type {
-            OrderType::Fok => RetryPolicy::no_retry(),
-            OrderType::Gtc | OrderType::Gtd { expiration: _ } => self.order_retry_policy,
-        };
 
         retry::retry_with_policy(&retry_policy, || {
             let sdk = Arc::clone(&sdk);
@@ -252,10 +312,29 @@ impl ClobClient {
                             .await
                             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
                     }
+                    OrderType::Fak => {
+                        let amount = sdk_amount(order_amount)?;
+                        sdk.market_order()
+                            .token_id(token_id)
+                            .order_type(SdkOrderType::FAK)
+                            .price(price)
+                            .amount(amount)
+                            .side(order_side)
+                            .build()
+                            .await
+                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
+                    }
                     OrderType::Gtd { expiration } => {
                         let exp = ToPrimitive::to_i64(&expiration)
                             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
-                            .unwrap_or_else(chrono::Utc::now);
+                            .ok_or_else(|| ApiError::Clob {
+                                endpoint: "POST /order".to_owned(),
+                                code: "invalid_gtd_expiration".to_owned(),
+                                message: format!(
+                                    "GTD expiration {expiration} is not representable"
+                                ),
+                                retryable: false,
+                            })?;
                         let share_qty = limit_order_shares(order_amount)?;
                         sdk.limit_order()
                             .token_id(token_id)
@@ -264,6 +343,7 @@ impl ClobClient {
                             .price(price)
                             .size(share_qty)
                             .side(order_side)
+                            .post_only(post_only)
                             .build()
                             .await
                             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
@@ -276,6 +356,7 @@ impl ClobClient {
                             .price(price)
                             .size(share_qty)
                             .side(order_side)
+                            .post_only(post_only)
                             .build()
                             .await
                             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?

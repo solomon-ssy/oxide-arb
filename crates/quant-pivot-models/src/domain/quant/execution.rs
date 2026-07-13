@@ -13,14 +13,14 @@ use crate::{
             OrderTypeKind, VenueOrderStatus,
         },
         quant::{
-            ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
-            RecommendationReportStatus,
+            ApprovalStatus, EntryTriggerState, ExecutionOrderState, OrderIntentStatus,
+            QuantRuntimeMode, RecommendationReportStatus,
         },
     },
     types::{
-        ContentHash, EntryOrderSpec, ExecutedPartialExitNodes, ExecutionOrderId, ExitPolicySpec,
-        MarketId, ModelVersionId, OpportunisticExitState, OrderId, OrderIntentId, Price,
-        RecommendationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        ContentHash, EntryOrderSpec, EntryTrigger, ExecutionOrderId, ExitPolicySpec, MarketId,
+        ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
+        ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -47,18 +47,21 @@ pub struct OrderIntentInfo {
     pub policy_hash: Option<ContentHash>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
+    pub entry_trigger_json: EntryTrigger,
     pub entry_order_json: EntryOrderSpec,
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+    pub entry_trigger_state: EntryTriggerState,
+    pub trigger_confirming_since: Option<DateTime<Utc>>,
+    pub trigger_last_observed_at: Option<DateTime<Utc>>,
+    pub trigger_ready_at: Option<DateTime<Utc>>,
     pub exit_state: ExitState,
     pub exit_reason: Option<ExitReason>,
     pub next_check_at: Option<DateTime<Utc>>,
     pub peak_mark_price: Option<Price>,
     pub last_signal_recheck_at: Option<DateTime<Utc>>,
-    pub executed_partial_exit_node_ids: ExecutedPartialExitNodes,
-    pub pending_partial_exit_node_id: Option<String>,
-    pub opportunistic_exit_state: OpportunisticExitState,
+    pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -67,10 +70,10 @@ info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
     order_intent_id, recommendation_id, runtime_mode, runtime_config_version_id,
     model_version_id, intent_kind, status, approval_status, approved_by,
     approval_reason, approved_at, policy_id, policy_hash, status_reason,
-    admission_trace_ref, entry_order_json, exit_policy_json, risk_envelope_hash,
-    expires_at, exit_state, exit_reason, next_check_at, peak_mark_price,
-    last_signal_recheck_at, executed_partial_exit_node_ids, pending_partial_exit_node_id,
-    opportunistic_exit_state, created_at, updated_at,
+    admission_trace_ref, entry_trigger_json, entry_order_json, exit_policy_json, risk_envelope_hash,
+    expires_at, entry_trigger_state, trigger_confirming_since, trigger_last_observed_at,
+    trigger_ready_at, exit_state, exit_reason, next_check_at, peak_mark_price,
+    last_signal_recheck_at, scale_out_state, created_at, updated_at,
 });
 
 /// Insert payload for `quant_order_intent`.
@@ -92,10 +95,24 @@ pub struct NewOrderIntent {
     pub policy_hash: Option<ContentHash>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
+    pub entry_trigger_json: EntryTrigger,
     pub entry_order_json: EntryOrderSpec,
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+    pub entry_trigger_state: EntryTriggerState,
+    pub trigger_confirming_since: Option<DateTime<Utc>>,
+    pub trigger_last_observed_at: Option<DateTime<Utc>>,
+    pub trigger_ready_at: Option<DateTime<Utc>>,
+}
+
+/// Atomic durable update emitted only when an entry-trigger state changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryTriggerTransition {
+    pub state: EntryTriggerState,
+    pub confirming_since: Option<DateTime<Utc>>,
+    pub last_observed_at: Option<DateTime<Utc>>,
+    pub ready_at: Option<DateTime<Utc>>,
 }
 
 /// Approval transition payload for an order intent.
@@ -304,18 +321,4 @@ pub struct ExitLedgerWrite {
     pub revert_to_open: bool,
     /// Reconciliation row to enqueue (`None` for a resting `Open` exit order).
     pub reconciliation: Option<NewReconciliation>,
-    /// Opportunistic-Sell cumulative advance to persist on the intent (Phase
-    /// 06.1). Present only for an opportunistic exit fill: freezes the
-    /// denominator (if unset) and adds the *actual* filled shares to the lot's
-    /// cumulative opportunistically-sold total, in the same transaction as the
-    /// position exit — so repeated ticks never re-sell the same fraction.
-    pub opportunistic_advance: Option<OpportunisticExitAdvance>,
-}
-
-/// The opportunistic-Sell cumulative-fraction advance recorded on an exit fill.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpportunisticExitAdvance {
-    /// The frozen entry-filled-shares denominator the target fraction is measured
-    /// against (persisted on first opportunistic exit, then stable).
-    pub denominator_shares: Shares,
 }

@@ -322,7 +322,9 @@ async fn mark_intent_redeemed(
     let mut active = intent.into_active_model();
     active.exit_state = ActiveValue::Set(ExitState::Exited);
     active.exit_reason = ActiveValue::Set(Some(ExitReason::ResolutionRedeem));
-    active.pending_partial_exit_node_id = ActiveValue::Set(None);
+    let mut scale_out_state = active.scale_out_state.take().unwrap_or_default();
+    scale_out_state.pending_target = None;
+    active.scale_out_state = ActiveValue::Set(scale_out_state);
     active
         .update(db)
         .await

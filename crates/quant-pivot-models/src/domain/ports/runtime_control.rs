@@ -123,6 +123,11 @@ pub trait RuntimeConfigPort: Send + Sync {
 
 #[async_trait]
 pub trait MarketDataPort: Send + Sync {
+    /// Load one token's current immutable L2 snapshot.
+    fn book_for_token(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
+        self.book(token_id, token_id).0
+    }
+
     fn book(
         &self,
         yes_token: &TokenId,

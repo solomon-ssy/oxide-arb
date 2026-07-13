@@ -9,28 +9,31 @@ use quant_pivot_models::{
     domain::{
         NewAccountSnapshot, NewEquitySnapshot, NewOperationLog, NewPortfolioPlan,
         NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
-        NewReportTransaction,
+        NewReportTransaction, TradePolicyArtifactInfo,
     },
     enums::{
-        common::MarketCategory,
+        common::{MarketCategory, TickSize},
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EmptyReportReason, ExitSettlementMode, IneligibilityReason, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
+            EmptyReportReason, ExitSettlementMode, IneligibilityReason, PriceComparison,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
+            ReportKind,
         },
         rbac::ResourceType,
     },
     hashing::canonical_state_hash,
     runtime_config::RuntimeConfig,
     types::{
-        Bps, ConfidenceSummary, EligibilitySummary, EventId, EvidenceRefs, EvidenceRefsInput,
+        Bps, ConfidenceSummary, EligibilitySummary, EntryOrderPolicy, EntryOrderTemplate,
+        EntryPlan, EntryTrigger, EntryTriggerTemplate, EventId, EvidenceRefs, EvidenceRefsInput,
         ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId,
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OperationLogId,
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
         RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope,
-        RuntimeConfigVersionId, SizingPlan, Usd,
+        RuntimeConfigVersionId, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
+        TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
     },
 };
 use quant_pivot_research::{
@@ -77,6 +80,7 @@ pub struct ComposeReportInput<'a> {
     pub empty: Option<EmptyReportContext>,
     pub top_n: u32,
     pub return_model_calibrated: bool,
+    pub trade_policy: Option<&'a TradePolicyArtifactInfo>,
 }
 
 /// Converts builder/planner output into persistence rows and post-commit events.
@@ -340,13 +344,25 @@ fn compose_recommendation(
         &candidate.market_id,
     )?;
     let compose_context = resolve_compose_context(candidate, input)?;
-    let auto_gate = calibrated_auto_execution_gate(
+    let policy = resolve_recommendation_policy(planned, capture, input, horizon_secs);
+    let mut auto_gate = calibrated_auto_execution_gate(
         candidate,
         planned.rank,
         &planned.sizing,
         input.runtime_config,
         input.return_model_calibrated,
     )?;
+    if policy.is_none() {
+        auto_gate.allowed = false;
+        if !auto_gate
+            .reasons
+            .contains(&IneligibilityReason::TradePolicyUnavailable)
+        {
+            auto_gate
+                .reasons
+                .push(IneligibilityReason::TradePolicyUnavailable);
+        }
+    }
     let risk_envelope = compose_risk_envelope(planned, candidate, &auto_gate);
 
     let assembly = NewRecommendationAssembly {
@@ -361,6 +377,7 @@ fn compose_recommendation(
         data_quality_snapshot_ref,
         auto_gate: &auto_gate,
         risk_envelope,
+        policy,
     };
     build_new_recommendation(assembly)
 }
@@ -419,6 +436,294 @@ struct ComposeRecommendationContext {
     model_run_id: ModelRunId,
 }
 
+#[derive(Clone)]
+struct ResolvedRecommendationPolicy {
+    provenance: TradePolicyCohortProvenance,
+    cohort: TradePolicyCohort,
+    executable_entry_price: Price,
+    worst_ask_price: Price,
+}
+
+fn resolve_recommendation_policy(
+    planned: &PlannedRecommendation,
+    capture: &MarketDecisionCapture,
+    input: &ComposeReportInput<'_>,
+    horizon_secs: u64,
+) -> Option<ResolvedRecommendationPolicy> {
+    let artifact = input.trade_policy?;
+    let (entry_price, worst_ask_price) =
+        ask_vwap_for_usd(&capture.book.asks, planned.sizing.suggested_usd)?;
+    let liquidity_tier = match capture.market_context.depth_usd.inner() {
+        value if value >= Decimal::from(10_000) => "deep",
+        value if value >= Decimal::from(1_000) => "medium",
+        _ => "shallow",
+    };
+    let (cohort_index, cohort) = artifact
+        .payload_json
+        .cohorts
+        .iter()
+        .enumerate()
+        .filter(|(_, cohort)| {
+            cohort.key.category == capture.identity.category
+                && cohort.key.horizon_secs == horizon_secs
+                && cohort.key.notional_tier >= planned.sizing.suggested_usd
+                && cohort.key.liquidity_tier == liquidity_tier
+                && cohort.key.volatility_regime == "unclassified"
+                && entry_price >= cohort.key.entry_price_min
+                && (entry_price < cohort.key.entry_price_max
+                    || (cohort.key.entry_price_max == Price::ONE && entry_price == Price::ONE))
+                && cohort.executable_coverage
+                    >= artifact
+                        .payload_json
+                        .fit_contract
+                        .minimum_executable_coverage
+                && cohort.lower_confidence_utility_bps > Decimal::ZERO
+        })
+        .min_by_key(|(_, cohort)| cohort.key.notional_tier)?;
+    let cohort_index = u32::try_from(cohort_index).ok()?;
+    Some(ResolvedRecommendationPolicy {
+        provenance: TradePolicyCohortProvenance {
+            artifact_id: artifact.artifact_id.clone(),
+            artifact_hash: artifact.content_hash.clone(),
+            cohort_index,
+            cohort_key: cohort.key.clone(),
+        },
+        cohort: cohort.clone(),
+        executable_entry_price: entry_price,
+        worst_ask_price,
+    })
+}
+
+fn ask_vwap_for_usd(
+    asks: &[quant_pivot_models::domain::market::book::BookLevel],
+    target: Usd,
+) -> Option<(Price, Price)> {
+    if !target.is_positive() {
+        return None;
+    }
+    let mut remaining = target.inner();
+    let mut shares = Decimal::ZERO;
+    let mut worst = None;
+    for level in asks {
+        if remaining <= Decimal::ZERO {
+            break;
+        }
+        let price = level.price_decimal();
+        if !price.is_positive() || !level.size_decimal().is_positive() {
+            continue;
+        }
+        let available_usd = price.inner() * level.size_decimal().inner();
+        let spend = available_usd.min(remaining);
+        shares += spend / price.inner();
+        remaining -= spend;
+        worst = Some(price);
+    }
+    if remaining > Decimal::ZERO || shares <= Decimal::ZERO {
+        return None;
+    }
+    Some((Price::new(target.inner() / shares), worst?))
+}
+
+fn policy_entry_plan(
+    candidate: &SignalCandidate,
+    published_at: DateTime<Utc>,
+    valid_until: DateTime<Utc>,
+    config: &RuntimeConfig,
+    tick_size: TickSize,
+    policy: Option<&ResolvedRecommendationPolicy>,
+) -> QuantResult<EntryPlan> {
+    let Some(policy) = policy else {
+        let mut plan = derive_entry_plan(candidate, published_at, valid_until, config)?;
+        align_entry_plan_to_tick(&mut plan, tick_size);
+        return Ok(plan);
+    };
+    let trigger = match policy.cohort.entry_trigger {
+        EntryTriggerTemplate::Immediate => EntryTrigger::Immediate,
+        EntryTriggerTemplate::PriceOffset {
+            comparison,
+            threshold_offset_bps,
+            confirmation_secs,
+            max_observation_gap_ms,
+        } => {
+            let offset = threshold_offset_bps.inner() / Decimal::from(10_000);
+            let factor = match comparison {
+                PriceComparison::AtOrAbove => Decimal::ONE + offset,
+                PriceComparison::AtOrBelow => Decimal::ONE - offset,
+            };
+            EntryTrigger::PriceCondition {
+                comparison,
+                threshold: bounded_price(policy.executable_entry_price.inner() * factor),
+                confirmation_secs,
+                max_observation_gap_ms,
+            }
+        }
+    };
+    let order_policy = match policy.cohort.entry_order {
+        EntryOrderTemplate::Passive { post_only } => EntryOrderPolicy::Passive {
+            limit_price: candidate.entry_price_ref,
+            post_only,
+        },
+        EntryOrderTemplate::Aggressive { fill_requirement } => EntryOrderPolicy::Aggressive {
+            worst_price: policy.worst_ask_price,
+            fill_requirement,
+        },
+    };
+    let mut plan = derive_entry_plan(candidate, published_at, valid_until, config)?;
+    plan.trade_policy = Some(policy.provenance.clone());
+    plan.trigger = trigger;
+    plan.order_policy = order_policy;
+    plan.min_depth_usd = policy.cohort.key.notional_tier;
+    plan.entry_reason = format!(
+        "published trade policy {} cohort {}",
+        policy.provenance.artifact_id, policy.provenance.cohort_index
+    );
+    align_entry_plan_to_tick(&mut plan, tick_size);
+    Ok(plan)
+}
+
+fn policy_exit_plan(
+    candidate: &SignalCandidate,
+    as_of: DateTime<Utc>,
+    config: &RuntimeConfig,
+    horizon_secs: u64,
+    time_to_resolution_secs: Option<u64>,
+    tick_size: TickSize,
+    policy: Option<&ResolvedRecommendationPolicy>,
+) -> QuantResult<ExitPlan> {
+    let mut plan = exit_plan(
+        candidate,
+        as_of,
+        config,
+        horizon_secs,
+        time_to_resolution_secs,
+    )?;
+    let Some(policy) = policy else {
+        align_exit_plan_to_tick(&mut plan, tick_size);
+        return Ok(plan);
+    };
+    let entry = policy.executable_entry_price.inner();
+    let upper_factor =
+        Decimal::ONE + policy.cohort.upper_barrier_bps.inner() / Decimal::from(10_000);
+    let lower_factor =
+        Decimal::ONE - policy.cohort.lower_barrier_bps.inner() / Decimal::from(10_000);
+    plan.trade_policy = Some(policy.provenance.clone());
+    plan.take_profit_price = Some(bounded_price(entry * upper_factor));
+    plan.take_profit_pct = Some(upper_factor - Decimal::ONE);
+    plan.stop_loss_price = Some(bounded_price(entry * lower_factor));
+    plan.stop_loss_pct = Some(Decimal::ONE - lower_factor);
+    plan.max_hold_secs = Some(policy.cohort.vertical_barrier_secs);
+    plan.time_exit_at = Some(instant_plus_secs(
+        as_of,
+        policy.cohort.vertical_barrier_secs,
+    )?);
+    plan.scale_out_targets = policy
+        .cohort
+        .scale_out_targets
+        .iter()
+        .map(|target| ScaleOutTarget {
+            target_id: target.target_id.clone(),
+            trigger_price: bounded_price(
+                entry * (Decimal::ONE + target.trigger_return_bps.inner() / Decimal::from(10_000)),
+            ),
+            target_cumulative_exit_pct: target.target_cumulative_exit_pct,
+            min_price: None,
+            valid_after: None,
+            valid_until: plan.time_exit_at,
+            reason: format!("trade policy cohort {}", policy.provenance.cohort_index),
+        })
+        .collect();
+    plan.trailing_stop = policy
+        .cohort
+        .trailing_stop
+        .as_ref()
+        .map(|trailing| TrailingStopPolicy {
+            trail_bps: trailing.trail_bps,
+            activation_price: Some(bounded_price(
+                entry
+                    * (Decimal::ONE
+                        + trailing.activation_return_bps.inner() / Decimal::from(10_000)),
+            )),
+        });
+    plan.thesis_invalidation = ThesisInvalidationPolicy {
+        min_score_retention: policy.cohort.min_score_retention,
+        min_expected_return_bps: policy.cohort.min_expected_return_bps,
+        require_execution_eligibility: policy.cohort.require_execution_eligibility,
+    };
+    plan.exit_reason = format!(
+        "published trade policy {} cohort {}",
+        policy.provenance.artifact_id, policy.provenance.cohort_index
+    );
+    align_exit_plan_to_tick(&mut plan, tick_size);
+    Ok(plan)
+}
+
+#[derive(Clone, Copy)]
+enum TickDirection {
+    Down,
+    Up,
+}
+
+fn align_entry_plan_to_tick(plan: &mut EntryPlan, tick_size: TickSize) {
+    if let EntryTrigger::PriceCondition {
+        comparison,
+        threshold,
+        ..
+    } = &mut plan.trigger
+    {
+        let direction = match comparison {
+            PriceComparison::AtOrAbove => TickDirection::Up,
+            PriceComparison::AtOrBelow => TickDirection::Down,
+        };
+        *threshold = tick_aligned_price(threshold.inner(), tick_size, direction);
+    }
+    match &mut plan.order_policy {
+        EntryOrderPolicy::Passive { limit_price, .. } => {
+            *limit_price = tick_aligned_price(limit_price.inner(), tick_size, TickDirection::Down);
+        }
+        EntryOrderPolicy::Aggressive { worst_price, .. } => {
+            *worst_price = tick_aligned_price(worst_price.inner(), tick_size, TickDirection::Up);
+        }
+    }
+}
+
+fn align_exit_plan_to_tick(plan: &mut ExitPlan, tick_size: TickSize) {
+    for price in [
+        plan.take_profit_price.as_mut(),
+        plan.stop_loss_price.as_mut(),
+        plan.trailing_stop
+            .as_mut()
+            .and_then(|trailing| trailing.activation_price.as_mut()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *price = tick_aligned_price(price.inner(), tick_size, TickDirection::Up);
+    }
+    for target in &mut plan.scale_out_targets {
+        target.trigger_price =
+            tick_aligned_price(target.trigger_price.inner(), tick_size, TickDirection::Up);
+        if let Some(min_price) = target.min_price.as_mut() {
+            *min_price = tick_aligned_price(min_price.inner(), tick_size, TickDirection::Up);
+        }
+    }
+}
+
+fn tick_aligned_price(value: Decimal, tick_size: TickSize, direction: TickDirection) -> Price {
+    let tick = tick_size.as_decimal();
+    let min = tick;
+    let max = Decimal::ONE - tick;
+    let units = value.clamp(min, max) / tick;
+    let rounded_units = match direction {
+        TickDirection::Down => units.floor(),
+        TickDirection::Up => units.ceil(),
+    };
+    Price::new((rounded_units * tick).clamp(min, max))
+}
+
+fn bounded_price(value: Decimal) -> Price {
+    Price::new(value.clamp(Decimal::new(1, 4), Decimal::new(9_999, 4)))
+}
+
 fn calibrated_auto_execution_gate(
     candidate: &SignalCandidate,
     rank: u32,
@@ -453,6 +758,7 @@ struct NewRecommendationAssembly<'a> {
     data_quality_snapshot_ref: &'a ReportDataQualitySnapshotId,
     auto_gate: &'a AutoExecutionGate,
     risk_envelope: RiskEnvelope,
+    policy: Option<ResolvedRecommendationPolicy>,
 }
 
 fn build_new_recommendation(
@@ -470,7 +776,25 @@ fn build_new_recommendation(
         data_quality_snapshot_ref,
         auto_gate,
         risk_envelope,
+        policy,
     } = assembly;
+    let entry_plan = policy_entry_plan(
+        candidate,
+        input.published_at,
+        valid_until,
+        input.runtime_config,
+        capture.market_context.tick_size,
+        policy.as_ref(),
+    )?;
+    let exit_plan = policy_exit_plan(
+        candidate,
+        input.decision_at,
+        input.runtime_config,
+        horizon_secs,
+        capture.market_context.time_to_resolution_secs,
+        capture.market_context.tick_size,
+        policy.as_ref(),
+    )?;
     Ok(NewRecommendation {
         recommendation_id: RecommendationId::from_v7(),
         recommendation_report_id: report_id.clone(),
@@ -498,20 +822,9 @@ fn build_new_recommendation(
         liquidity_score: candidate.liquidity_score,
         data_quality_score: candidate.data_quality_score,
         model_score_percentile: candidate.model_score_percentile,
-        entry_plan: derive_entry_plan(
-            candidate,
-            input.published_at,
-            valid_until,
-            input.runtime_config,
-        )?,
+        entry_plan,
         sizing_plan: planned.sizing.clone(),
-        exit_plan: exit_plan(
-            candidate,
-            input.decision_at,
-            input.runtime_config,
-            horizon_secs,
-            capture.market_context.time_to_resolution_secs,
-        )?,
+        exit_plan,
         risk_envelope,
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
@@ -525,7 +838,11 @@ fn build_new_recommendation(
             factor_definition_versions: factor_definition_versions(candidate),
             data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
         }),
-        execution_eligibility: execution_eligibility(auto_gate, input.return_model_calibrated),
+        execution_eligibility: execution_eligibility(
+            auto_gate,
+            input.return_model_calibrated,
+            policy.is_some(),
+        ),
         valid_from: input.published_at,
         valid_until,
         status: RecommendationStatus::Published,
@@ -616,6 +933,7 @@ fn exit_plan(
     };
 
     Ok(ExitPlan {
+        trade_policy: None,
         take_profit_price,
         take_profit_pct,
         // The protective stop-loss is the single full-exit scalar that survives
@@ -625,9 +943,13 @@ fn exit_plan(
         stop_loss_pct: Some(loss),
         time_exit_at,
         max_hold_secs,
-        partial_exit_nodes: Vec::new(),
+        scale_out_targets: Vec::new(),
         trailing_stop: None,
-        signal_invalidation_rules: Vec::new(),
+        thesis_invalidation: ThesisInvalidationPolicy {
+            min_score_retention: Decimal::new(6, 1),
+            min_expected_return_bps: Bps::ZERO,
+            require_execution_eligibility: true,
+        },
         settlement_mode,
         redeem_policy,
         manual_review_at: None,
@@ -686,12 +1008,13 @@ struct AutoExecutionGate {
 fn execution_eligibility(
     gate: &AutoExecutionGate,
     return_model_calibrated: bool,
+    trade_policy_available: bool,
 ) -> ExecutionEligibility {
     let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly];
-    if return_model_calibrated {
+    if return_model_calibrated && trade_policy_available {
         eligible_modes.push(QuantRuntimeMode::SemiAuto);
     }
-    if gate.allowed && return_model_calibrated {
+    if gate.allowed && return_model_calibrated && trade_policy_available {
         eligible_modes.push(QuantRuntimeMode::AutoExecution);
     }
     let mut reasons = if gate.allowed {
@@ -707,8 +1030,8 @@ fn execution_eligibility(
         eligible_modes,
         uncalibrated_watermark: reasons.contains(&IneligibilityReason::ReturnModelUncalibrated),
         ineligibility_reasons: reasons,
-        approval_required: !gate.allowed || !return_model_calibrated,
-        auto_policy_id: (gate.allowed && return_model_calibrated)
+        approval_required: !gate.allowed || !return_model_calibrated || !trade_policy_available,
+        auto_policy_id: (gate.allowed && return_model_calibrated && trade_policy_available)
             .then(|| "runtime_config.execution.auto_execution".to_owned()),
     }
 }
@@ -1144,9 +1467,12 @@ mod tests {
     use quant_pivot_error::{QuantError, report::ReportError};
     use quant_pivot_models::{
         domain::quant::{NewAccountSnapshot, NewEquitySnapshot, NewReportDataQualitySnapshot},
-        enums::quant::{
-            AccountSource, BindingConstraint, EmptyReportReason, ExitSettlementMode,
-            IneligibilityReason, OutcomeSide, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
+        enums::{
+            common::TickSize,
+            quant::{
+                AccountSource, BindingConstraint, EmptyReportReason, ExitSettlementMode,
+                IneligibilityReason, OutcomeSide, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
+            },
         },
         runtime_config::RuntimeConfig,
         types::{
@@ -1165,9 +1491,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer,
+        ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer, TickDirection,
         actionable_valid_until, auto_execution_gate, effective_horizon_from, empty_plan_for_report,
-        entry_window_secs, execution_eligibility, exit_plan,
+        entry_window_secs, execution_eligibility, exit_plan, tick_aligned_price,
     };
     use crate::report::{composer::compute_aggregate_exposure_cap_usd, types::ReportTrigger};
 
@@ -1179,6 +1505,26 @@ mod tests {
         assert_eq!(effective_horizon_from(86_400, Some(1_800), 7_200), 1_800);
         // No resolution wall: use the (uncapped) model horizon.
         assert_eq!(effective_horizon_from(3_600, None, 7_200), 3_600);
+    }
+
+    #[test]
+    fn tick_rounding_is_directional_and_bounded() {
+        assert_eq!(
+            tick_aligned_price(dec!(0.603), TickSize::Hundredth, TickDirection::Down),
+            Price::new(dec!(0.60))
+        );
+        assert_eq!(
+            tick_aligned_price(dec!(0.603), TickSize::Hundredth, TickDirection::Up),
+            Price::new(dec!(0.61))
+        );
+        assert_eq!(
+            tick_aligned_price(Decimal::ZERO, TickSize::Hundredth, TickDirection::Down),
+            Price::new(dec!(0.01))
+        );
+        assert_eq!(
+            tick_aligned_price(Decimal::ONE, TickSize::Hundredth, TickDirection::Up),
+            Price::new(dec!(0.99))
+        );
     }
 
     #[test]
@@ -1350,9 +1696,7 @@ mod tests {
             plan.take_profit_price.expect("take profit price").inner(),
             dec!(0.600)
         );
-        // The scalar TP/SL/time-exit fields are the single source of truth; the
-        // full Kelly exit carries no (scaled) partial nodes.
-        assert!(plan.partial_exit_nodes.is_empty());
+        assert!(plan.scale_out_targets.is_empty());
         assert_eq!(plan.time_exit_at, Some(as_of + Duration::seconds(3_600)));
         assert_eq!(
             plan.settlement_mode,
@@ -1438,7 +1782,7 @@ mod tests {
         assert!(!gate.allowed);
         assert_eq!(gate.reasons, vec![IneligibilityReason::LowConfidence]);
 
-        let eligibility = execution_eligibility(&gate, true);
+        let eligibility = execution_eligibility(&gate, true, true);
         assert!(eligibility.is_eligible(QuantRuntimeMode::ReportOnly));
         assert!(eligibility.is_eligible(QuantRuntimeMode::SemiAuto));
         assert!(!eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
@@ -1467,7 +1811,7 @@ mod tests {
         assert!(gate.allowed);
         assert!(gate.reasons.is_empty());
 
-        let eligibility = execution_eligibility(&gate, true);
+        let eligibility = execution_eligibility(&gate, true, true);
         assert!(eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
     }
 
@@ -1609,6 +1953,7 @@ mod tests {
             empty: None,
             top_n: 5,
             return_model_calibrated: true,
+            trade_policy: None,
         });
 
         assert!(matches!(

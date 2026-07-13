@@ -19,8 +19,10 @@ mod planner;
 
 pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LiquidityExitLabeler,
-    MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, RETURN_TO_HORIZON,
-    ReturnToHorizonLabeler, SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, label_names,
+    MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS, META_LABEL, MaxAdverseExcursionLabeler,
+    MaxFavorableExcursionLabeler, RETURN_TO_HORIZON, ReturnToHorizonLabeler, SETTLEMENT_OUTCOME,
+    SettlementOutcomeLabeler, TRIPLE_BARRIER_RETURN_BPS, TRIPLE_BARRIER_TOUCH,
+    TripleBarrierLabelKind, TripleBarrierLabeler, TripleBarrierPolicy, label_names,
     label_names_for_sources,
 };
 pub use leakage::{
@@ -53,8 +55,8 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
         ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId, SchemaVersion,
-        Shares, TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
-        default_sample_sources,
+        Shares, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
+        TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -200,6 +202,13 @@ pub struct DatasetPlan {
     pub exit_training_lots: Vec<ExitTrainingLotRow>,
     /// Labels this dataset materializes (one logical name; horizons fan out).
     pub label_names: Vec<LabelName>,
+    /// Published trade-policy binding used to derive executable barrier labels.
+    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
+    /// Content hash verified when the plan was resolved.
+    pub trade_policy_hash: Option<ContentHash>,
+    /// Immutable policy payload used by pure label construction.
+    #[serde(skip)]
+    pub trade_policy: Option<TradePolicyArtifactPayload>,
 }
 
 // ── Labels ───────────────────────────────────────────────────────────────
@@ -245,6 +254,10 @@ pub enum MissingLabelReason {
     NoForwardData,
     /// No forward price could be read at the horizon.
     NoExitPrice,
+    /// A coarse bucket crossed both horizontal barriers, so first touch is unknowable.
+    AmbiguousBarrierTouch,
+    /// No published, quality-gated policy cohort matched this sample.
+    NoTradePolicyCohort,
 }
 
 /// The outcome of building one label for one sample.
@@ -285,6 +298,8 @@ pub struct ForwardSample {
     pub best_bid_high: Option<Price>,
     /// Lowest best-bid in the bucket (adverse exit floor for a long).
     pub best_bid_low: Option<Price>,
+    /// Closing best bid used for an executable vertical-barrier return.
+    pub best_bid_close: Option<Price>,
     /// Top-1 visible depth in the bucket, USD.
     pub top1_depth_usd: Option<Usd>,
 }
@@ -329,12 +344,14 @@ pub struct LabelBuildInput<'a> {
     pub yes_token_id: &'a TokenId,
     /// Frozen decision time the label is anchored at.
     pub decision_at: DateTime<Utc>,
-    /// Entry reference mid price at `decision_at` (from the PIT book), if quoted.
-    pub entry_mid: Option<Price>,
+    /// Executable entry price at `decision_at` (ask-side fill basis), if quoted.
+    pub entry_price: Option<Price>,
     /// Forward horizon, in seconds, the label looks ahead to.
     pub horizon_secs: u64,
     /// Minimum USD depth required for a "liquidity exit possible" label.
     pub min_exit_depth_usd: Usd,
+    /// Cohort-selected horizontal barriers for executable policy labels.
+    pub triple_barrier_policy: Option<TripleBarrierPolicy>,
     /// Pre-fetched forward observations + settlement for this sample.
     pub forward: &'a ForwardWindow,
     /// Hold-vs-exit lot context (`ExitDecision` rows only).
@@ -1002,6 +1019,7 @@ pub(crate) mod fixtures {
                 time_to_resolution_secs: None,
                 market_status: MarketStatus::Active,
                 neg_risk: false,
+                tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
                 fee_rate: None,
             },
             data_quality: example.feature_vector.data_quality,

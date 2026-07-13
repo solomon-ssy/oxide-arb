@@ -452,6 +452,8 @@ async fn seed_dataset(
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: dataset_id.clone(),
         model_spec_id: model_spec_id.clone(),
+        trade_policy_artifact_id: None,
+        trade_policy_hash: None,
         runtime_config_version_id: rc_id.clone(),
         window_start,
         window_end,

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     enums::quant::{ModelSerializationFormat, OutcomeSide},
     hashing::CanonicalDigest,
@@ -551,9 +551,10 @@ fn project_forward_return(
 ) -> QuantResult<Option<ClassicalEconomicProjection>> {
     let yes_entry = row.context.yes_price.inner();
     if yes_entry <= Decimal::ZERO || yes_entry > Decimal::ONE {
-        return Err(inference_error(format!(
-            "classical YES entry price must be within (0, 1], got {yes_entry}"
-        )));
+        return Err(ResearchError::Inference {
+            detail: format!("classical YES entry price must be within (0, 1], got {yes_entry}"),
+        }
+        .into());
     }
     let growth = checked_add(
         "classical forward-return growth",
@@ -596,9 +597,12 @@ fn project_settlement_probability(
     row: &InferenceMatrixRow,
 ) -> QuantResult<Option<ClassicalEconomicProjection>> {
     if !(Decimal::ZERO..=Decimal::ONE).contains(&yes_probability) {
-        return Err(inference_error(format!(
-            "logistic classical prediction must be within [0, 1], got {yes_probability}"
-        )));
+        return Err(ResearchError::Inference {
+            detail: format!(
+                "logistic classical prediction must be within [0, 1], got {yes_probability}"
+            ),
+        }
+        .into());
     }
     let yes = expected_settlement_projection(
         OutcomeSide::Yes,
@@ -636,9 +640,12 @@ fn expected_settlement_projection(
 ) -> QuantResult<Option<ClassicalEconomicProjection>> {
     let price = entry_price.inner();
     if price <= Decimal::ZERO || price > Decimal::ONE {
-        return Err(inference_error(format!(
-            "classical {outcome_side} entry price must be within (0, 1], got {price}"
-        )));
+        return Err(ResearchError::Inference {
+            detail: format!(
+                "classical {outcome_side} entry price must be within (0, 1], got {price}"
+            ),
+        }
+        .into());
     }
     let gross_multiple = checked_div(
         "classical settlement expected gross multiple",
@@ -693,9 +700,10 @@ fn stronger_projection(
 
 fn return_bps(entry: Decimal, exit: Decimal) -> QuantResult<Decimal> {
     if entry <= Decimal::ZERO {
-        return Err(inference_error(
-            "classical return projection requires a positive entry price",
-        ));
+        return Err(ResearchError::Inference {
+            detail: "classical return projection requires a positive entry price".to_owned(),
+        }
+        .into());
     }
     let change = checked_sub("classical projected price change", exit, entry)?;
     let fraction = checked_div("classical projected return fraction", change, entry)?;
@@ -709,9 +717,10 @@ fn return_bps(entry: Decimal, exit: Decimal) -> QuantResult<Decimal> {
 
 fn bounded_edge_strength(expected_return_bps: Decimal) -> QuantResult<Decimal> {
     if expected_return_bps <= Decimal::ZERO {
-        return Err(inference_error(
-            "classical candidate requires a positive projected return",
-        ));
+        return Err(ResearchError::Inference {
+            detail: "classical candidate requires a positive projected return".to_owned(),
+        }
+        .into());
     }
     let denominator = checked_add(
         "classical edge-strength denominator",
@@ -733,30 +742,35 @@ fn checked_product(label: &str, values: &[Decimal]) -> QuantResult<Decimal> {
 
 fn checked_add(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
     left.checked_add(right)
-        .ok_or_else(|| inference_error(format!("{label} overflow")))
+        .ok_or_else(|| ResearchError::Inference {
+            detail: format!("{label} overflow"),
+        })
+        .map_err(Into::into)
 }
 
 fn checked_sub(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
     left.checked_sub(right)
-        .ok_or_else(|| inference_error(format!("{label} overflow")))
+        .ok_or_else(|| ResearchError::Inference {
+            detail: format!("{label} overflow"),
+        })
+        .map_err(Into::into)
 }
 
 fn checked_mul(label: &str, left: Decimal, right: Decimal) -> QuantResult<Decimal> {
     left.checked_mul(right)
-        .ok_or_else(|| inference_error(format!("{label} overflow")))
+        .ok_or_else(|| ResearchError::Inference {
+            detail: format!("{label} overflow"),
+        })
+        .map_err(Into::into)
 }
 
 fn checked_div(label: &str, numerator: Decimal, denominator: Decimal) -> QuantResult<Decimal> {
     numerator
         .checked_div(denominator)
-        .ok_or_else(|| inference_error(format!("{label} is undefined or overflowed")))
-}
-
-fn inference_error(detail: impl Into<String>) -> QuantError {
-    ResearchError::Inference {
-        detail: detail.into(),
-    }
-    .into()
+        .ok_or_else(|| ResearchError::Inference {
+            detail: format!("{label} is undefined or overflowed"),
+        })
+        .map_err(Into::into)
 }
 
 fn clamp_unit(value: Decimal) -> Probability {
@@ -909,6 +923,8 @@ mod tests {
                 model_family: ModelFamily::from_classical(ClassicalKind::RandomForest),
                 feature_schema_hash: hash("feat"),
                 factor_schema_hash: hash("fac"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             artifact_id: ModelArtifactId::from_v7(),
             kind: output.kind,

@@ -19,6 +19,7 @@ pg_enum! {
     type_name = "qp_order_type_kind",
     pub enum OrderTypeKind {
         Fok => "fok",
+        Fak => "fak",
         Gtc => "gtc",
         Gtd => "gtd",
     }
@@ -194,6 +195,7 @@ wire_enum! {
         ModelPublication => "model_publication",
         DataQuality => "data_quality",
         BookFreshness => "book_freshness",
+        VenueMetadata => "venue_metadata",
         EntryTrigger => "entry_trigger",
         RiskEnvelopeHash => "risk_envelope_hash",
         CapitalBudget => "capital_budget",

@@ -37,18 +37,19 @@ use quant_pivot_models::{
             SettlementRedeemState, VenueOrderStatus,
         },
         quant::{
-            ExecutionOrderState, ExecutionWalletKind, ExitSettlementMode, OrderIntentStatus,
-            OutcomeSide, RecommendationAttributionOutcome, RedeemPolicy,
+            EntryTriggerState, ExecutionOrderState, ExecutionWalletKind, ExitSettlementMode,
+            OrderIntentStatus, OutcomeSide, PriceComparison, RecommendationAttributionOutcome,
+            RedeemPolicy,
         },
     },
     types::{
-        AccountSnapshotId, AttributionDetail, CapitalAllocationId, EntryOutcome, ExecutionOrderId,
-        ExitOutcome, MarketId, MarketSelectionId, OrderId, OrderIntentId, PortfolioPlanId,
-        PositionId, Price, RecommendationId, RecommendationReportId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        RuntimeConfigVersionId, SettlementBalanceEvidence, SettlementPayoutVector,
-        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId,
-        SettlementTokenBalance, Shares, TokenId, Usd,
+        AccountSnapshotId, AttributionDetail, CapitalAllocationId, EntryOutcome, EntryTrigger,
+        ExecutionOrderId, ExitOutcome, MarketId, MarketSelectionId, OrderId, OrderIntentId,
+        PortfolioPlanId, PositionId, Price, RecommendationId, RecommendationReportId,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        ReportDataQualitySnapshotId, RuntimeConfigVersionId, SettlementBalanceEvidence,
+        SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets,
+        SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -391,6 +392,7 @@ async fn seed_pending_a(
     let ids = seed_report(db, infra, "pending-a").await;
     let mut record = base_record("pending-a", &ids);
     let intent_id = seed_pending_intent(db, &ids).await;
+    configure_waiting_price_trigger(db, &intent_id).await;
     attach_intent_meta(db, &mut record, intent_id).await;
     record
 }
@@ -415,8 +417,30 @@ async fn seed_approved(
     let ids = seed_report(db, infra, "approved").await;
     let mut record = base_record("approved", &ids);
     let intent_id = seed_manual_approved_intent(db, &ids).await;
+    configure_waiting_price_trigger(db, &intent_id).await;
     attach_intent_meta(db, &mut record, intent_id).await;
     record
+}
+
+async fn configure_waiting_price_trigger(db: &DatabaseConnection, intent_id: &OrderIntentId) {
+    let row = quant_order_intent::Entity::find_by_id(intent_id.clone())
+        .one(db)
+        .await
+        .expect("load approved demo intent")
+        .expect("approved demo intent exists");
+    let mut active = row.into_active_model();
+    active.entry_trigger_json = ActiveValue::Set(EntryTrigger::PriceCondition {
+        comparison: PriceComparison::AtOrAbove,
+        threshold: Price::new(dec!(0.61)),
+        confirmation_secs: 30,
+        max_observation_gap_ms: 2_000,
+    });
+    active.entry_trigger_state = ActiveValue::Set(EntryTriggerState::Waiting);
+    active.trigger_confirming_since = ActiveValue::Set(None);
+    active.trigger_last_observed_at = ActiveValue::Set(None);
+    active.trigger_ready_at = ActiveValue::Set(None);
+    active.updated_at = ActiveValue::Set(Utc::now());
+    active.update(db).await.expect("arm demo price trigger");
 }
 
 async fn seed_approved_policy(

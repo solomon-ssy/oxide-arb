@@ -364,8 +364,6 @@ pub struct FactorWeights {
 pub struct EntryOrderPolicy {
     /// Maximum allowed entry-order slippage in basis points.
     pub max_slippage_bps: u32,
-    /// Whether entry orders may use marketable order types.
-    pub allow_market_orders: bool,
     /// Minimum visible book depth (USD) required at entry. Frozen onto every
     /// recommendation's `EntryPlan.min_depth_usd` at report build and enforced
     /// by execution admission (`LiquidityDepthCheck`): an intent is deferred
@@ -378,7 +376,6 @@ impl Default for EntryOrderPolicy {
     fn default() -> Self {
         Self {
             max_slippage_bps: 50,
-            allow_market_orders: false,
             min_entry_book_depth_usd: DecimalString::new("0"),
         }
     }
@@ -460,11 +457,11 @@ impl Default for OpportunisticSellPolicy {
     }
 }
 
-/// Exit-monitor cadence, signal-degradation threshold, and re-inference policy.
+/// Exit-monitor cadence and re-inference policy.
 ///
 /// Price/time/trailing tiers run every `monitor_secs`; model re-inference runs
-/// at most every `signal_recheck_secs` per lot. A fresh composite score below
-/// `entry_composite_score × signal_invalidation_ratio` invalidates the thesis.
+/// at most every `signal_recheck_secs` per lot. Invalidation thresholds are
+/// frozen in the intent's published trade-policy artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExitMonitorPolicy {
@@ -474,9 +471,6 @@ pub struct ExitMonitorPolicy {
     pub monitor_secs: u64,
     /// Minimum seconds between signal re-inference checks for one lot.
     pub signal_recheck_secs: u64,
-    /// Fresh composite-score fraction of the entry score below which the thesis
-    /// is treated as invalidated (signal-degradation re-inference).
-    pub signal_invalidation_ratio: DecimalString,
     /// Model-backed thesis-invalidation re-inference (Phase 06.0).
     pub signal_reinference: ExitSignalReinferencePolicy,
     /// Opportunistic-Sell advisory scale-out (Phase 06.1).
@@ -489,7 +483,6 @@ impl Default for ExitMonitorPolicy {
             enabled: true,
             monitor_secs: 10,
             signal_recheck_secs: 60,
-            signal_invalidation_ratio: DecimalString::new("0.6"),
             signal_reinference: ExitSignalReinferencePolicy::default(),
             opportunistic_sell: OpportunisticSellPolicy::default(),
         }

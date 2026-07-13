@@ -148,7 +148,10 @@ Schedule（`ReportScheduleConfig`）：`schedule_id`, `cadence`（`interval_secs
 - `semi_auto`：`approval_ttl_secs`、`allow_size_reduction`。
 - `auto_execution`：`enabled`、`max_orders_per_report`、`max_total_usd_per_report`、`min_score`、`min_confidence`。
 - `entry_order_policy`：`max_slippage_bps`、`allow_market_orders`、`min_entry_book_depth_usd`（**v10 从 `data_quality.min_book_depth_usd` 迁移正名**；冻结进 `entry_plan.min_depth_usd`，准入 `LiquidityDepthCheck` 消费）。
-- `exit_monitor`：`enabled`、`monitor_secs`、`signal_recheck_secs`、`signal_invalidation_ratio`、`signal_reinference{enabled, shadow_mode}`。
+- `exit_monitor`：`enabled`、`monitor_secs`、`signal_recheck_secs`、`signal_reinference{enabled, shadow_mode}`。
+  thesis invalidation、barrier、trailing 和 scale-out 阈值来自 intent 冻结的 `TradePolicyArtifact`，不允许
+  runtime 覆盖。11.5.1 遗留 opportunistic Sell 策略字段在 11.7.2 完成冻结迁移前只允许 shadow，
+  不属于可激活的生产策略来源。
 - `capital`：`max_reserved_usd`、`max_open_intents`（**v7 起真正生效**，见 §3.3）。
 - `reconciliation`：`enabled`、`interval_secs`、`stale_open_secs`。
 - `settlement_redeem`：`enabled`、`interval_secs`、`batch_size`、`max_attempts`、`retry_backoff_secs`、`confirmation_blocks`、`allow_during_emergency`、`hold_to_resolution_enabled`、`hold_to_resolution_within_secs`。

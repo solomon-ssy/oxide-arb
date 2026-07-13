@@ -11,10 +11,11 @@ use quant_pivot_error::{
 use quant_pivot_models::{
     domain::{
         BacktestJobParams, BiasTableFitJobParams, BuildTrainingDatasetRequest,
-        CpcvBacktestJobParams, FitBiasTableRequest, FitModelCalibratorRequest, JobSubmitContext,
-        ModelCalibrationFitJobParams, ModelTrainJobParams, NewResearchJob, Paginated,
-        ResearchJobError, ResearchJobInfo, ResearchJobListQuery, ResearchJobPort, ResearchJobView,
-        RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest,
+        CpcvBacktestJobParams, FitBiasTableRequest, FitModelCalibratorRequest,
+        FitTradePolicyRequest, JobSubmitContext, ModelCalibrationFitJobParams, ModelTrainJobParams,
+        NewResearchJob, Paginated, ResearchJobError, ResearchJobInfo, ResearchJobListQuery,
+        ResearchJobPort, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
+        TrainModelRequest,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
@@ -236,6 +237,24 @@ impl ResearchJobPort for CoreResearchJobPort {
             params,
             None,
             Some(runtime_config_version_id),
+            None,
+            &ctx,
+        );
+        self.enqueue(job).await
+    }
+
+    async fn enqueue_trade_policy_fit(
+        &self,
+        request: FitTradePolicyRequest,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        let runtime_config_version_id = Some(request.contract.runtime_config_version_id.clone());
+        let params = to_params(&request)?;
+        let job = self.new_job(
+            ResearchJobKind::TradePolicyFit,
+            params,
+            None,
+            runtime_config_version_id,
             None,
             &ctx,
         );

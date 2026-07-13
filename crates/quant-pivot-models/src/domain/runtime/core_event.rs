@@ -394,6 +394,8 @@ pub enum MaterializationRunKind {
     CpcvBacktest,
     /// Deterministic training/serving parity replay (Phase 11.6).
     FeatureParity,
+    /// Executable trade-policy fit (Phase 11.7).
+    TradePolicyFit,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -426,6 +428,7 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::ModelCalibrationFit => Self::ModelCalibrationFit,
             ResearchJobKind::CpcvBacktest => Self::CpcvBacktest,
             ResearchJobKind::FeatureParity => Self::FeatureParity,
+            ResearchJobKind::TradePolicyFit => Self::TradePolicyFit,
         }
     }
 }

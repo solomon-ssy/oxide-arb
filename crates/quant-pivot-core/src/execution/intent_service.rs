@@ -27,13 +27,16 @@ use quant_pivot_models::{
         common::{OrderType, Side},
         execution::{ApprovalInvalidation, CapitalAllocationState, OrderIntentKind},
         operation_log::{OperationCategory, OperationOutcome},
-        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus},
+        quant::{
+            ApprovalStatus, EntryTriggerState, FillRequirement, OrderIntentStatus,
+            QuantRuntimeMode, RecommendationReportStatus,
+        },
         rbac::ResourceType,
     },
-    runtime_config::EntryOrderPolicy,
     types::{
-        CapitalAllocationId, ContentHash, EntryOrderSpec, ExitPolicySpec, ModelVersionId,
-        OperationLogId, OrderIntentId, Price, RecommendationId, RecommendationReportId, Usd,
+        CapitalAllocationId, ContentHash, EntryOrderPolicy, EntryOrderSpec, EntryTrigger,
+        ExitPolicySpec, ModelVersionId, OperationLogId, OrderAmount, OrderIntentId, Price,
+        RecommendationId, RecommendationReportId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -44,7 +47,6 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{CalibrationArtifactLoader, load_hash_verified_artifact},
 };
-use rust_decimal::Decimal;
 
 use crate::{
     execution::{
@@ -200,8 +202,7 @@ impl CoreOrderIntentService {
                 .await?;
         }
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
-        let config = self.config.current();
-        let entry = project_entry_order_spec(&rec, &config.execution.entry_order_policy)?;
+        let entry = project_entry_order_spec(&rec, now)?;
         let exit = project_exit_policy_spec(&rec, entry.limit_price);
         let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
         let (new_intent, allocation) =
@@ -329,6 +330,9 @@ impl CoreOrderIntentService {
                     approved.intent_kind.as_str(),
                 );
                 self.publish(&approved, IntentEventKind::Approved, now);
+                // Approval is the operator's final authorization: it arms the
+                // durable trigger worker and may result in a later submission.
+                self.dispatch_wake.wake();
                 Ok(approved)
             }
             ApproveOrderIntentOutcome::Invalidated(invalidated, reason) => {
@@ -585,10 +589,19 @@ fn compose_create_rows(
         policy_hash: resolved.policy_hash,
         status_reason: None,
         admission_trace_ref: None,
+        entry_trigger_json: rec.entry_plan.trigger.clone(),
         entry_order_json: entry,
         exit_policy_json: exit,
         risk_envelope_hash: rec.risk_envelope.envelope_hash.clone(),
         expires_at: resolved.expires_at,
+        entry_trigger_state: if matches!(resolved.status, OrderIntentStatus::ApprovedByPolicy) {
+            armed_trigger_state(&rec.entry_plan.trigger)
+        } else {
+            EntryTriggerState::NotRequired
+        },
+        trigger_confirming_since: None,
+        trigger_last_observed_at: None,
+        trigger_ready_at: None,
     };
     let allocation = NewCapitalAllocation {
         capital_allocation_id: CapitalAllocationId::from_v7(),
@@ -603,6 +616,13 @@ fn compose_create_rows(
         reason: "intent created".to_owned(),
     };
     (intent, allocation)
+}
+
+const fn armed_trigger_state(trigger: &EntryTrigger) -> EntryTriggerState {
+    match trigger {
+        EntryTrigger::Immediate => EntryTriggerState::NotRequired,
+        EntryTrigger::PriceCondition { .. } => EntryTriggerState::Waiting,
+    }
 }
 
 /// Map a mode-gate decision to the frozen intent fields, or the closing error.
@@ -682,37 +702,73 @@ fn resolve_policy(
 /// [`EntryOrderSpec`] frozen on the intent.
 fn project_entry_order_spec(
     rec: &RecommendationInfo,
-    policy: &EntryOrderPolicy,
+    now: DateTime<Utc>,
 ) -> Result<EntryOrderSpec, ExecutionError> {
-    let limit_price = rec
-        .entry_plan
-        .limit_price
-        .or(rec.entry_plan.trigger_price)
-        .ok_or_else(|| ExecutionError::IntentDenied {
-            reason: format!(
-                "recommendation {} has no entry limit price",
-                rec.recommendation_id
-            ),
-        })?;
-    let order_type = if policy.allow_market_orders {
-        OrderType::Fok
-    } else {
-        let expiration =
-            u64::try_from(rec.entry_plan.valid_until.timestamp()).map_err(|error| {
+    const GTD_MIN_EFFECTIVE_LIFETIME_SECS: i64 = 120;
+    const GTD_SECURITY_BUFFER_SECS: i64 = 60;
+    let (limit_price, order_type, amount, post_only) = match rec.entry_plan.order_policy {
+        EntryOrderPolicy::Aggressive {
+            worst_price,
+            fill_requirement,
+        } => {
+            let order_type = match fill_requirement {
+                FillRequirement::AllOrNothing => OrderType::Fok,
+                FillRequirement::AllowPartial => OrderType::Fak,
+            };
+            (
+                worst_price,
+                order_type,
+                OrderAmount::Usd(rec.sizing_plan.suggested_usd),
+                false,
+            )
+        }
+        EntryOrderPolicy::Passive {
+            limit_price,
+            post_only,
+        } => {
+            if !post_only {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "passive entry policy must be post-only".to_owned(),
+                });
+            }
+            if rec.entry_plan.valid_until - now < Duration::seconds(GTD_MIN_EFFECTIVE_LIFETIME_SECS)
+            {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "passive entry has less than 120 seconds of effective GTD lifetime"
+                        .to_owned(),
+                });
+            }
+            let wire_expiration = rec
+                .entry_plan
+                .valid_until
+                .checked_add_signed(Duration::seconds(GTD_SECURITY_BUFFER_SECS))
+                .ok_or_else(|| ExecutionError::TimeConversion {
+                    field: "entry_plan.valid_until",
+                    value: rec.entry_plan.valid_until.to_string(),
+                    detail: "GTD security buffer overflows timestamp".to_owned(),
+                })?;
+            let expiration = u64::try_from(wire_expiration.timestamp()).map_err(|error| {
                 execution_time_conversion(
                     "entry_plan.valid_until",
-                    &rec.entry_plan.valid_until.timestamp(),
+                    &wire_expiration.timestamp(),
                     &error,
                 )
             })?;
-        OrderType::Gtd { expiration }
+            (
+                limit_price,
+                OrderType::Gtd { expiration },
+                OrderAmount::Shares(rec.sizing_plan.suggested_shares),
+                true,
+            )
+        }
     };
     Ok(EntryOrderSpec {
         token_id: rec.token_id.clone(),
         side: Side::Buy,
         order_type,
+        post_only,
         limit_price,
-        shares: rec.sizing_plan.suggested_shares,
+        amount,
         max_slippage_bps: rec.entry_plan.max_slippage_bps,
         valid_until: rec.entry_plan.valid_until,
     })
@@ -738,13 +794,8 @@ fn project_exit_policy_spec(
         time_exit_at: exit.time_exit_at,
         max_hold_secs: exit.max_hold_secs,
         trailing_stop: exit.trailing_stop.clone(),
-        signal_invalidation_rules: exit.signal_invalidation_rules.clone(),
-        partial_exit_nodes: exit
-            .partial_exit_nodes
-            .iter()
-            .filter(|node| node.sell_pct < Decimal::ONE)
-            .cloned()
-            .collect(),
+        thesis_invalidation: exit.thesis_invalidation.clone(),
+        scale_out_targets: exit.scale_out_targets.clone(),
         settlement_mode: exit.settlement_mode,
         redeem_policy: exit.redeem_policy,
         manual_review_at: exit.manual_review_at,
@@ -785,10 +836,11 @@ fn resolve_downscale(
         });
     }
 
-    let new_shares = command.override_shares.unwrap_or(frozen.shares);
+    let frozen_shares = frozen.projected_shares();
+    let new_shares = command.override_shares.unwrap_or(frozen_shares);
     let new_limit = command.override_limit_price.unwrap_or(frozen.limit_price);
 
-    if new_shares > frozen.shares {
+    if new_shares > frozen_shares {
         return Err(ExecutionError::IntentDenied {
             reason: "approval cannot increase order size".to_owned(),
         });
@@ -809,8 +861,11 @@ fn resolve_downscale(
     }
 
     let mut entry = frozen.clone();
-    entry.shares = new_shares;
     entry.limit_price = new_limit;
+    entry.amount = match frozen.amount {
+        OrderAmount::Usd(_) => OrderAmount::Usd(new_notional),
+        OrderAmount::Shares(_) => OrderAmount::Shares(new_shares),
+    };
     Ok((Some(entry), Some(new_notional)))
 }
 
@@ -856,7 +911,7 @@ mod tests {
         project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
     };
     use crate::execution::mode_gate::IntentPolicyDecision;
-    use chrono::{Duration, TimeZone, Utc};
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
         domain::{ApproveIntentCommand, RecommendationInfo, evaluate_intent_approval_invalidation},
@@ -864,14 +919,13 @@ mod tests {
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
             quant::{
-                ApprovalStatus, OrderIntentStatus, OutcomeSide, RecommendationReportStatus,
-                ReportKind,
+                ApprovalStatus, FillRequirement, OrderIntentStatus, OutcomeSide,
+                RecommendationReportStatus, ReportKind,
             },
         },
-        runtime_config::EntryOrderPolicy,
         types::{
-            Bps, ContentHash, EntryOrderSpec, OrderIntentId, Price, RecommendationId,
-            RecommendationReportId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+            Bps, ContentHash, EntryOrderPolicy, EntryOrderSpec, OrderAmount, OrderIntentId, Price,
+            RecommendationId, RecommendationReportId, RuntimeConfigVersionId, Shares, TokenId, Usd,
         },
     };
     use quant_pivot_test_support::report_fixtures;
@@ -895,8 +949,9 @@ mod tests {
             token_id: TokenId::new("token-1"),
             side: Side::Buy,
             order_type: OrderType::Gtc,
+            post_only: false,
             limit_price: Price::new(dec!(0.60)),
-            shares: Shares::new(dec!(100)),
+            amount: OrderAmount::Shares(Shares::new(dec!(100))),
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now(),
         }
@@ -917,26 +972,74 @@ mod tests {
 
     #[test]
     fn entry_projection_is_gtd_for_resting_limit() {
-        let rec = rec();
-        let policy = EntryOrderPolicy {
-            allow_market_orders: false,
-            ..EntryOrderPolicy::default()
-        };
-        let spec = project_entry_order_spec(&rec, &policy).expect("projection");
+        let mut rec = rec();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
+        rec.entry_plan.valid_until = now + Duration::minutes(10);
+        let spec = project_entry_order_spec(&rec, now).expect("projection");
         assert_eq!(spec.token_id, rec.token_id);
         assert_eq!(spec.side, Side::Buy);
-        assert_eq!(spec.shares, rec.sizing_plan.suggested_shares);
-        assert!(matches!(spec.order_type, OrderType::Gtd { .. }));
+        assert_eq!(spec.projected_shares(), rec.sizing_plan.suggested_shares);
+        assert!(spec.post_only);
+        assert_eq!(
+            spec.order_type,
+            OrderType::Gtd {
+                expiration: u64::try_from(
+                    (rec.entry_plan.valid_until + Duration::seconds(60)).timestamp()
+                )
+                .expect("timestamp"),
+            }
+        );
     }
 
     #[test]
-    fn entry_projection_is_fok_when_market_orders_allowed() {
-        let policy = EntryOrderPolicy {
-            allow_market_orders: true,
-            ..EntryOrderPolicy::default()
+    fn aggressive_all_or_nothing_entry_projects_to_fok_usd() {
+        let mut rec = rec();
+        rec.entry_plan.order_policy = EntryOrderPolicy::Aggressive {
+            worst_price: Price::new(dec!(0.60)),
+            fill_requirement: FillRequirement::AllOrNothing,
         };
-        let spec = project_entry_order_spec(&rec(), &policy).expect("projection");
+        let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fok);
+        assert!(!spec.post_only);
+        assert_eq!(spec.amount, OrderAmount::Usd(rec.sizing_plan.suggested_usd));
+    }
+
+    #[test]
+    fn aggressive_partial_entry_projects_to_fak_usd() {
+        let mut rec = rec();
+        rec.entry_plan.order_policy = EntryOrderPolicy::Aggressive {
+            worst_price: Price::new(dec!(0.60)),
+            fill_requirement: FillRequirement::AllowPartial,
+        };
+        let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
+        assert_eq!(spec.order_type, OrderType::Fak);
+        assert!(!spec.post_only);
+        assert_eq!(spec.amount, OrderAmount::Usd(rec.sizing_plan.suggested_usd));
+    }
+
+    #[test]
+    fn passive_entry_rejects_effective_lifetime_below_two_minutes() {
+        let mut rec = rec();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
+        rec.entry_plan.valid_until = now + Duration::seconds(119);
+        assert!(matches!(
+            project_entry_order_spec(&rec, now),
+            Err(ExecutionError::IntentDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn passive_entry_rejects_non_post_only_policy() {
+        let mut rec = rec();
+        rec.entry_plan.order_policy = EntryOrderPolicy::Passive {
+            limit_price: Price::new(dec!(0.60)),
+            post_only: false,
+        };
+        assert!(matches!(
+            project_entry_order_spec(&rec, Utc::now()),
+            Err(ExecutionError::IntentDenied { reason })
+                if reason == "passive entry policy must be post-only"
+        ));
     }
 
     #[test]
@@ -944,8 +1047,11 @@ mod tests {
         let rec = rec();
         let exit = project_exit_policy_spec(&rec, Price::new(dec!(0.60)));
         assert_eq!(exit.take_profit_price, rec.exit_plan.take_profit_price);
-        // Fixture has no partial nodes; full-exit nodes (sell_pct == 1) are never carried.
-        assert!(exit.partial_exit_nodes.iter().all(|n| n.sell_pct < dec!(1)));
+        assert!(
+            exit.scale_out_targets
+                .iter()
+                .all(|target| target.target_cumulative_exit_pct < dec!(1))
+        );
     }
 
     #[test]
@@ -962,7 +1068,7 @@ mod tests {
         cmd.override_shares = Some(Shares::new(dec!(50)));
         let (entry, alloc) = resolve_downscale(&cmd, &frozen_entry(), true).expect("downscale");
         let entry = entry.expect("entry override");
-        assert_eq!(entry.shares, Shares::new(dec!(50)));
+        assert_eq!(entry.amount, OrderAmount::Shares(Shares::new(dec!(50))));
         assert_eq!(alloc, Some(Usd::new(dec!(30)))); // 50 * 0.60
     }
 
@@ -1075,15 +1181,11 @@ mod tests {
     }
 
     #[test]
-    fn gtd_projection_rejects_pre_epoch_expiration() {
+    fn gtd_projection_rejects_security_buffer_overflow() {
         let mut rec = rec();
-        rec.entry_plan.valid_until = Utc.timestamp_opt(-1, 0).single().expect("timestamp");
-        let policy = EntryOrderPolicy {
-            allow_market_orders: false,
-            ..EntryOrderPolicy::default()
-        };
+        rec.entry_plan.valid_until = DateTime::<Utc>::MAX_UTC;
         assert!(matches!(
-            project_entry_order_spec(&rec, &policy),
+            project_entry_order_spec(&rec, DateTime::<Utc>::MAX_UTC - Duration::seconds(120)),
             Err(ExecutionError::TimeConversion {
                 field: "entry_plan.valid_until",
                 ..
@@ -1432,6 +1534,8 @@ mod tests {
                     .expect("hash"),
                 factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
                     .expect("hash"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             }
         }
 
@@ -1487,6 +1591,8 @@ mod tests {
                 version: 1,
                 artifact_hash: digest,
                 training_dataset_id: None,
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
                 publish_path_set_id: None,
                 metrics_json: serde_json::json!({}),
                 training_objective_json: serde_json::json!({"kind": "not_trained"}),

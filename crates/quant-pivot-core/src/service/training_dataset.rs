@@ -44,7 +44,10 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, Side},
         fee::FeeLiquidityRole,
-        quant::{DatasetPurpose, RecommendationAttributionOutcome, TrainingDatasetStatus},
+        quant::{
+            DatasetPurpose, RecommendationAttributionOutcome, TradePolicyStatus,
+            TrainingDatasetStatus,
+        },
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -54,14 +57,16 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetFeatureStateCounts,
         DatasetManifest, FeatureVectorId, MarketId, MarketSelectionId, ModelInputContract,
-        ModelSpecId, Price, RecommendationId, Shares, TokenId, TrainingDatasetId,
-        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
+        ModelSpecId, Price, RecommendationId, Shares, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
+        TrainingSampleSource, TrainingSampleSources, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, CatalogVersionRepository, FeatureRepository, MarketLinkageRepository,
     MarketRepository, MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, TrainingDatasetRepository,
+    QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -88,8 +93,9 @@ use quant_pivot_research::{
         LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
         MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
         SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
-        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
-        count_samples, dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
+        TrainingDatasetPlanner, TrainingExample, TrainingLabel, TripleBarrierLabelKind,
+        TripleBarrierLabeler, TripleBarrierPolicy, assert_no_future_leakage, count_samples,
+        dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
         plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
     },
 };
@@ -297,6 +303,9 @@ pub fn default_labelers() -> Vec<Box<dyn Labeler>> {
         Box::new(MaxAdverseExcursionLabeler),
         Box::new(LiquidityExitLabeler),
         Box::new(SettlementOutcomeLabeler),
+        Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::Touch)),
+        Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::ReturnBps)),
+        Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::Meta)),
     ]
 }
 
@@ -447,6 +456,8 @@ pub struct TrainingDatasetServiceDeps {
     /// requirements so offline selection genuinely mirrors the online
     /// funnel's `ModelFeatureUnavailable` gate (11.2.2 remediation R7).
     pub model_registry: Arc<dyn ModelRegistryRepository>,
+    /// Governed policy catalog used for executable barrier/meta labels.
+    pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
 }
 
 /// Deploy + frozen-config bundle for wiring [`TrainingDatasetService`].
@@ -511,6 +522,7 @@ pub struct TrainingDatasetService {
     fee_calculator: Arc<FeeCalculator>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
+    trade_policy_repo: Arc<dyn TradePolicyRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     domain: DomainConfig,
@@ -561,6 +573,7 @@ impl TrainingDatasetService {
             fee_calculator: deps.fee_calculator,
             linkage_repo: deps.linkage_repo,
             model_registry: deps.model_registry,
+            trade_policy_repo: deps.trade_policy_repo,
             features: config.features,
             factors: config.factors,
             domain: config.domain,
@@ -601,6 +614,91 @@ impl TrainingDatasetService {
             })?;
         Ok(ModelFeatureRequirements::from_input_contract(
             &spec.input_contract,
+        ))
+    }
+
+    async fn resolve_trade_policy_binding(
+        &self,
+        request: &DatasetPlanRequest,
+    ) -> QuantResult<(
+        Option<TradePolicyArtifactId>,
+        Option<ContentHash>,
+        Option<TradePolicyArtifactPayload>,
+    )> {
+        let spec = self
+            .model_registry
+            .find_model_spec_by_id(&request.model_spec_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_model_spec",
+                id: request.model_spec_id.to_string(),
+            })?;
+        spec.training_contract
+            .validate()
+            .map_err(|detail| ResearchError::DatasetPlan { detail })?;
+        let Some(artifact_id) = spec.training_contract.trade_policy_artifact_id else {
+            return Ok((None, None, None));
+        };
+        let artifact = self
+            .trade_policy_repo
+            .find(&artifact_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_trade_policy_artifact",
+                id: artifact_id.to_string(),
+            })?;
+        if artifact.status != TradePolicyStatus::Published
+            || !artifact.payload_json.validation.passed
+        {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "trade policy {} must be Published with passing validation",
+                    artifact.artifact_id
+                ),
+            }
+            .into());
+        }
+        let computed_hash = ResearchHasher::canonical(&artifact.payload_json)?;
+        if computed_hash != artifact.content_hash
+            || TradePolicyArtifactId::from_content_hash(&computed_hash) != artifact.artifact_id
+        {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "trade policy {} content hash or content-addressed id does not verify",
+                    artifact.artifact_id
+                ),
+            }
+            .into());
+        }
+        let embargo =
+            i64::try_from(artifact.payload_json.fit_contract.embargo_secs).map_err(|error| {
+                ResearchError::DatasetPlan {
+                    detail: format!("trade-policy embargo does not fit chrono seconds: {error}"),
+                }
+            })?;
+        let training_not_before = artifact
+            .payload_json
+            .fit_contract
+            .fit_window_end
+            .checked_add_signed(ChronoDuration::seconds(embargo))
+            .ok_or_else(|| ResearchError::DatasetPlan {
+                detail: "trade-policy fit window plus embargo overflows chrono".to_owned(),
+            })?;
+        if request.window_start < training_not_before {
+            return Err(ResearchError::DatasetPlan {
+                detail: format!(
+                    "dataset window starts at {} before policy-fit embargo ends at {training_not_before}",
+                    request.window_start
+                ),
+            }
+            .into());
+        }
+        Ok((
+            Some(artifact.artifact_id),
+            Some(artifact.content_hash),
+            Some(artifact.payload_json),
         ))
     }
 
@@ -940,6 +1038,8 @@ fn stride_sample<'a>(candidates: &[&'a MarketInfo], limit: usize) -> Vec<&'a Mar
 impl TrainingDatasetPlanner for TrainingDatasetService {
     async fn plan(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
         require_half_open_dataset_window(request.window_start, request.window_end)?;
+        let (trade_policy_artifact_id, trade_policy_hash, trade_policy) =
+            self.resolve_trade_policy_binding(&request).await?;
         // Point-in-time candidate selection: markets observed (had a book) in the
         // window whose fee-dominant category is in the enabled set (mirrors the
         // online [`CategoryFilter`]; per-`as_of` liquidity/data-quality eligibility
@@ -973,7 +1073,8 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             .training_dataset_id
             .clone()
             .unwrap_or_else(TrainingDatasetId::from_v7);
-        let label_names = label_names_for_sources(&request.sample_sources);
+        let label_names =
+            label_names_for_sources(&request.sample_sources, trade_policy_artifact_id.is_some());
         Ok(DatasetPlan {
             request,
             training_dataset_id,
@@ -981,6 +1082,9 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             lot_samples,
             exit_training_lots,
             label_names,
+            trade_policy_artifact_id,
+            trade_policy_hash,
+            trade_policy,
         })
     }
 }
@@ -1318,6 +1422,7 @@ impl TrainingDatasetService {
             selection: self.selection.clone(),
             model_requirements,
             labelers: Arc::clone(&self.labelers),
+            trade_policy: plan.trade_policy.clone(),
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: self.bias_table.as_ref().map(Arc::clone),
             context: ReplayContext::new(plan, &self.features)?,
@@ -1351,6 +1456,7 @@ impl TrainingDatasetService {
             selection: &self.selection,
             model_requirements,
             labelers: &self.labelers,
+            trade_policy: plan.trade_policy.as_ref(),
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: &self.bias_table,
             context: ReplayContext::new(plan, &self.features)?,
@@ -1662,10 +1768,11 @@ impl TrainingDatasetService {
                 labelers: input.labelers,
                 market,
                 as_of: input.sample.decision_at,
-                entry_mid,
+                entry_price: entry_mid,
                 request: input.request,
                 forward: &forward,
                 exit_decision: Some(&evidence.label_context),
+                trade_policy: None,
             },
             self.min_exit_depth_usd,
             sink.coverage,
@@ -1995,6 +2102,8 @@ impl TrainingDatasetService {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: plan.training_dataset_id.clone(),
             model_spec_id: plan.request.model_spec_id.clone(),
+            trade_policy_artifact_id: plan.trade_policy_artifact_id.clone(),
+            trade_policy_hash: plan.trade_policy_hash.clone(),
             runtime_config_version_id: plan.request.runtime_config_version_id.clone(),
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
@@ -2137,14 +2246,21 @@ fn build_labels_for(
             vec![0]
         };
         for horizon_secs in horizons {
+            let triple_barrier_policy = select_triple_barrier_policy(
+                params.trade_policy,
+                params.market,
+                params.entry_price,
+                horizon_secs,
+            );
             let input = LabelBuildInput {
                 market_id: &params.market.market_id,
                 token_id: &params.market.primary_token_id,
                 yes_token_id: &params.market.primary_token_id,
                 decision_at: params.as_of,
-                entry_mid: params.entry_mid,
+                entry_price: params.entry_price,
                 horizon_secs,
                 min_exit_depth_usd,
+                triple_barrier_policy,
                 forward: params.forward,
                 exit_decision: params.exit_decision,
             };
@@ -2170,6 +2286,40 @@ fn build_labels_for(
         }
     }
     Ok(labels)
+}
+
+fn select_triple_barrier_policy(
+    artifact: Option<&TradePolicyArtifactPayload>,
+    market: &SelectedMarket,
+    entry_price: Option<Price>,
+    horizon_secs: u64,
+) -> Option<TripleBarrierPolicy> {
+    let artifact = artifact?;
+    let entry_price = entry_price?;
+    let liquidity_tier = match market.liquidity_usd.map(Usd::inner) {
+        Some(value) if value >= Decimal::from(10_000) => "deep",
+        Some(value) if value >= Decimal::from(1_000) => "medium",
+        _ => "shallow",
+    };
+    artifact
+        .cohorts
+        .iter()
+        .filter(|cohort| {
+            cohort.key.category == market.category
+                && cohort.key.horizon_secs == horizon_secs
+                && entry_price >= cohort.key.entry_price_min
+                && (entry_price < cohort.key.entry_price_max
+                    || (cohort.key.entry_price_max == Price::ONE && entry_price == Price::ONE))
+                && cohort.key.liquidity_tier == liquidity_tier
+                && cohort.key.volatility_regime == "unclassified"
+                && cohort.executable_coverage >= artifact.fit_contract.minimum_executable_coverage
+                && cohort.lower_confidence_utility_bps > Decimal::ZERO
+        })
+        .min_by_key(|cohort| cohort.key.notional_tier)
+        .map(|cohort| TripleBarrierPolicy {
+            upper_bps: cohort.upper_barrier_bps.inner(),
+            lower_bps: cohort.lower_barrier_bps.inner(),
+        })
 }
 
 /// Accumulated examples + distinct markets from the historical spine, merged
@@ -2205,6 +2355,7 @@ struct HistoricalSpineParams<'a> {
     /// Target `ModelSpec`'s resolved feature requirements (R7).
     model_requirements: ModelFeatureRequirements,
     labelers: &'a [Box<dyn Labeler>],
+    trade_policy: Option<&'a TradePolicyArtifactPayload>,
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
     bias_table: &'a Option<Arc<FavoriteLongshotBiasTable>>,
@@ -2229,6 +2380,7 @@ struct HistoricalSpineInputs {
     /// Target `ModelSpec`'s resolved feature requirements (R7).
     model_requirements: ModelFeatureRequirements,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
+    trade_policy: Option<TradePolicyArtifactPayload>,
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
@@ -2260,6 +2412,7 @@ fn run_historical_spine_blocking(
             selection: &inputs.selection,
             model_requirements: inputs.model_requirements,
             labelers: &inputs.labelers,
+            trade_policy: inputs.trade_policy.as_ref(),
             min_exit_depth_usd: inputs.min_exit_depth_usd,
             bias_table: &inputs.bias_table,
             context: inputs.context,
@@ -2358,6 +2511,7 @@ async fn run_historical_spine(
                 prefetched: params.prefetched,
                 request: params.request,
                 max_horizon_secs: params.context.max_horizon_secs,
+                trade_policy: params.trade_policy,
             },
             params.labelers,
             params.min_exit_depth_usd,
@@ -2440,7 +2594,11 @@ fn append_historical_examples(
 ) -> QuantResult<()> {
     for (index, vector) in input.cross_section.vectors.iter().enumerate() {
         let market = &input.cross_section.markets[index];
-        let entry_mid = input.cross_section.entry_mids[index];
+        let entry_price = input
+            .cross_section
+            .captures
+            .get(&market.market_id)
+            .and_then(|capture| capture.market_context.best_ask);
         let outcome = &input.cross_section.outcomes[index];
         let factor_values = match &outcome.eligibility {
             FactorEligibility::Eligible => outcome
@@ -2471,10 +2629,11 @@ fn append_historical_examples(
                 labelers,
                 market,
                 as_of: input.cross_section.boundary.decision_at(),
-                entry_mid,
+                entry_price,
                 request: input.request,
                 forward: &forward,
                 exit_decision: None,
+                trade_policy: input.trade_policy,
             },
             min_exit_depth_usd,
             sink.coverage,
@@ -2989,6 +3148,7 @@ struct CrossSectionAppendInput<'a> {
     prefetched: &'a Prefetched,
     request: &'a DatasetPlanRequest,
     max_horizon_secs: u64,
+    trade_policy: Option<&'a TradePolicyArtifactPayload>,
 }
 
 /// The post-spine tail shared by both build paths: point-in-time source,
@@ -3004,10 +3164,11 @@ struct LabelBuildParams<'a> {
     labelers: &'a [Box<dyn Labeler>],
     market: &'a SelectedMarket,
     as_of: DateTime<Utc>,
-    entry_mid: Option<Price>,
+    entry_price: Option<Price>,
     request: &'a DatasetPlanRequest,
     forward: &'a ForwardWindow,
     exit_decision: Option<&'a ExitDecisionLabelContext>,
+    trade_policy: Option<&'a TradePolicyArtifactPayload>,
 }
 
 struct ExitDecisionAppendInput<'a> {

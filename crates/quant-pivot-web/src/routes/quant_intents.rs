@@ -10,13 +10,6 @@
 //! | POST | `/quant/intents/{id}/approve` | `order_intent:approve` (governed) | Approve a pending intent |
 //! | POST | `/quant/intents/{id}/reject` | `order_intent:reject` (governed) | Reject a pending intent |
 //! | POST | `/quant/intents/{id}/cancel` | `order_intent:cancel` (governed) | Cancel a not-yet-submitted intent |
-//! | POST | `/quant/intents/{id}/submit` | `order_intent:submit` (governed) | Submit an approved intent to the venue |
-//!
-//! Submit is the real-money path (Phase 05.4): it claims the intent, runs the
-//! 20-check admission engine, and on `allow` signs + posts the order to the CLOB,
-//! settling capital + position. Admission deny / non-submittable → 409; transient
-//! defer → 503 (intent stays submittable). An unconfirmed venue response settles
-//! as `ambiguous` (capital held, reconciled) and still returns `200`.
 //!
 //! Create is mode-gated: `report_only` is rejected (409), `semi_auto` yields a
 //! `PendingApproval` intent, `auto_execution` yields `ApprovedByPolicy`. Approve
@@ -25,22 +18,22 @@
 //! transition and are recorded in the operation log.
 
 use actix_web::{http::Method, web};
+use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
-        ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, ExecutionOrderView,
-        OrderIntentListQuery, OrderIntentView, Paginated, RejectIntentCommand,
+        ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand,
+        EntryTriggerObservationView, OrderIntentListQuery, OrderIntentView, Paginated,
+        RejectIntentCommand,
     },
-    domain::{
-        ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest,
-        SubmitIntentRequest,
-    },
+    domain::{ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest},
     enums::{
-        execution::VenueOrderStatus,
+        common::Side,
         operation_log::OperationCategory,
+        quant::{OrderIntentStatus, PriceComparison},
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::OrderIntentId,
+    types::{EntryTrigger, OrderIntentId, Price},
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -94,12 +87,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             Rule::ActingRoleGoverned(ResourceType::OrderIntent, Operation::Cancel),
             cancel,
         ),
-        spec(
-            Method::POST,
-            "/quant/intents/{id}/submit",
-            Rule::ActingRoleGoverned(ResourceType::OrderIntent, Operation::Submit),
-            submit,
-        ),
     ]
 }
 
@@ -122,7 +109,111 @@ pub async fn get(
         .find(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("order intent not found: {id}")))?;
-    Ok(WebResponse::ok(OrderIntentView::from(info)))
+    let mut view = OrderIntentView::from(info);
+    view.entry_trigger_observation = Some(entry_trigger_observation(&state, &view).await?);
+    Ok(WebResponse::ok(view))
+}
+
+async fn entry_trigger_observation(
+    state: &AppState,
+    intent: &OrderIntentView,
+) -> Result<EntryTriggerObservationView, WebError> {
+    let now = Utc::now();
+    let recommendation = state
+        .quant_reports
+        .find_recommendation(&intent.recommendation_id)
+        .await?;
+    let max_book_age_ms = recommendation
+        .as_ref()
+        .map_or(0, |row| row.entry_plan.max_book_age_ms);
+    let snapshot = state
+        .market_data
+        .book_for_token(&intent.entry_order.token_id);
+    let current_price = snapshot
+        .as_deref()
+        .and_then(|book| match intent.entry_order.side {
+            Side::Buy => book.best_ask(),
+            Side::Sell => book.best_bid(),
+        });
+    let book_observed_at = snapshot
+        .as_deref()
+        .and_then(|book| i64::try_from(book.timestamp_ms).ok())
+        .and_then(DateTime::from_timestamp_millis);
+    let book_age_ms = snapshot.as_deref().map(|book| {
+        let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(u64::MAX);
+        now_ms.saturating_sub(book.timestamp_ms)
+    });
+    let book_fresh = book_age_ms.is_some_and(|age| age <= max_book_age_ms);
+    let condition_satisfied =
+        trigger_condition_satisfied(&intent.entry_trigger, current_price, book_fresh);
+    let confirmation_remaining_secs =
+        confirmation_remaining_secs(&intent.entry_trigger, intent.trigger_confirming_since, now);
+    let admission_blocker = intent
+        .status_reason
+        .clone()
+        .or_else(|| {
+            (intent.status == OrderIntentStatus::PendingApproval)
+                .then(|| "approval_required".to_owned())
+        })
+        .or_else(|| {
+            recommendation
+                .is_none()
+                .then(|| "recommendation_unavailable".to_owned())
+        })
+        .or_else(|| snapshot.is_none().then(|| "book_unavailable".to_owned()))
+        .or_else(|| (!book_fresh).then(|| "book_stale".to_owned()))
+        .or_else(|| (!condition_satisfied).then(|| "entry_condition_not_satisfied".to_owned()));
+
+    Ok(EntryTriggerObservationView {
+        current_price,
+        book_observed_at,
+        book_age_ms,
+        book_fresh,
+        condition_satisfied,
+        confirmation_remaining_secs,
+        admission_blocker,
+    })
+}
+
+fn trigger_condition_satisfied(
+    trigger: &EntryTrigger,
+    current_price: Option<Price>,
+    book_fresh: bool,
+) -> bool {
+    if !book_fresh {
+        return false;
+    }
+    match trigger {
+        EntryTrigger::Immediate => true,
+        EntryTrigger::PriceCondition {
+            comparison,
+            threshold,
+            ..
+        } => current_price.is_some_and(|price| match comparison {
+            PriceComparison::AtOrAbove => price >= *threshold,
+            PriceComparison::AtOrBelow => price <= *threshold,
+        }),
+    }
+}
+
+fn confirmation_remaining_secs(
+    trigger: &EntryTrigger,
+    confirming_since: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<u64> {
+    let EntryTrigger::PriceCondition {
+        confirmation_secs, ..
+    } = trigger
+    else {
+        return None;
+    };
+    let confirming_since = confirming_since?;
+    let elapsed = now
+        .signed_duration_since(confirming_since)
+        .num_seconds()
+        .max(0);
+    let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
+    Some(confirmation_secs.saturating_sub(elapsed))
 }
 
 /// `POST /api/quant/intents` — create an intent from a recommendation.
@@ -300,46 +391,6 @@ pub async fn cancel(
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
 }
 
-/// `POST /api/quant/intents/{id}/submit` — submit an approved intent to the venue.
-pub async fn submit(
-    state: web::Data<AppState>,
-    id: web::Path<OrderIntentId>,
-    acting_role: ActingRole,
-    request_id: RequestId,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<SubmitIntentRequest>,
-) -> Result<WebResponse<ExecutionOrderView>, WebError> {
-    let intent_id = id.into_inner();
-    let request = body.into_inner();
-    let before = state
-        .order_intents
-        .find(&intent_id)
-        .await?
-        .ok_or_else(|| WebError::NotFound(format!("order intent not found: {intent_id}")))?;
-    let order = state
-        .execution_submit
-        .submit_if_admitted(&intent_id)
-        .await?;
-    let after = state.order_intents.find(&intent_id).await?.ok_or_else(|| {
-        WebError::NotFound(format!("order intent not found after submit: {intent_id}"))
-    })?;
-    let before_hash = canonical_state_hash(&before)?;
-    let after_hash = canonical_state_hash(&after)?;
-    op_ctx.set_action(OperationCategory::Governance, "quant.intent.submit");
-    op_ctx.set_resource(ResourceType::OrderIntent, intent_id.to_string());
-    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
-    op_ctx.set_detail(serde_json::json!({
-        "order_intent_id": intent_id.to_string(),
-        "execution_order_id": order.execution_order_id.to_string(),
-        "state": order.state.as_str(),
-        "venue_status": order.venue_status.map(VenueOrderStatus::as_str),
-        "acting_role": acting_role.0,
-        "request_id": request_id.0,
-        "reason": request.reason,
-    }));
-    Ok(WebResponse::ok(ExecutionOrderView::from(order)))
-}
-
 /// Parse the authenticated actor's stable user id into a UUID for `approved_by`.
 fn actor_uuid(actor: &AuthedActor) -> Result<Uuid, WebError> {
     Uuid::parse_str(&actor.claims.sub)
@@ -350,4 +401,58 @@ fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
     CanonicalDigest::content_hash_json(state)
         .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        enums::quant::PriceComparison,
+        types::{EntryTrigger, Price},
+    };
+    use rust_decimal_macros::dec;
+
+    use super::{confirmation_remaining_secs, trigger_condition_satisfied};
+
+    #[test]
+    fn price_condition_requires_a_fresh_executable_price() {
+        let trigger = EntryTrigger::PriceCondition {
+            comparison: PriceComparison::AtOrAbove,
+            threshold: Price::new(dec!(0.60)),
+            confirmation_secs: 10,
+            max_observation_gap_ms: 2_000,
+        };
+        assert!(trigger_condition_satisfied(
+            &trigger,
+            Some(Price::new(dec!(0.61))),
+            true,
+        ));
+        assert!(!trigger_condition_satisfied(
+            &trigger,
+            Some(Price::new(dec!(0.61))),
+            false,
+        ));
+    }
+
+    #[test]
+    fn confirmation_countdown_saturates_at_zero() {
+        let trigger = EntryTrigger::PriceCondition {
+            comparison: PriceComparison::AtOrBelow,
+            threshold: Price::new(dec!(0.40)),
+            confirmation_secs: 10,
+            max_observation_gap_ms: 2_000,
+        };
+        let start = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid test instant");
+        assert_eq!(
+            confirmation_remaining_secs(&trigger, Some(start), start + Duration::seconds(4)),
+            Some(6),
+        );
+        assert_eq!(
+            confirmation_remaining_secs(&trigger, Some(start), start + Duration::seconds(12)),
+            Some(0),
+        );
+    }
 }

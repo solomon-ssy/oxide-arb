@@ -343,6 +343,14 @@ impl CpcvBacktestService {
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
             factor_schema_hash: materialization.factor_schema_hash.clone(),
+            trade_policy_artifact_id: dataset
+                .manifest_json
+                .as_ref()
+                .and_then(|manifest| manifest.trade_policy_artifact_id.clone()),
+            trade_policy_hash: dataset
+                .manifest_json
+                .as_ref()
+                .and_then(|manifest| manifest.trade_policy_hash.clone()),
         };
         progress.report(ResearchJobProgress::with_total(
             "frozen_input_ticks",
@@ -585,6 +593,14 @@ impl CpcvBacktestService {
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
             factor_schema_hash: materialization.factor_schema_hash.clone(),
+            trade_policy_artifact_id: dataset
+                .manifest_json
+                .as_ref()
+                .and_then(|manifest| manifest.trade_policy_artifact_id.clone()),
+            trade_policy_hash: dataset
+                .manifest_json
+                .as_ref()
+                .and_then(|manifest| manifest.trade_policy_hash.clone()),
         };
         let fold_template = Arc::new(FoldTemplate::Sell(SellFoldTemplate {
             sequences: Arc::clone(&sequences),
@@ -2400,6 +2416,8 @@ mod tests {
                 model_family: ModelFamily::HoldVsExitWeighted,
                 feature_schema_hash: content_hash_seed(1),
                 factor_schema_hash: content_hash_seed(2),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             base_objective: TrainingObjectiveSpec::default(),
             prediction_horizon_secs: 86_400,

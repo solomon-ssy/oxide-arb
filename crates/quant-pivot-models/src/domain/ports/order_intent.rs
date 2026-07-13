@@ -105,7 +105,7 @@ pub trait OrderIntentPort: Send + Sync {
 ///
 /// Dependency-inversion boundary between the HTTP handler / auto worker and the
 /// core `CoreExecutionDispatcher`. Submission claims the intent (row-locked),
-/// runs the 20-check admission engine, and — on `allow` — signs and posts the
+/// runs the 24-check admission engine, and — on `allow` — signs and posts the
 /// order to the venue, settling capital + position in one transaction.
 #[async_trait]
 pub trait ExecutionSubmitPort: Send + Sync {

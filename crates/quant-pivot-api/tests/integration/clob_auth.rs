@@ -3,12 +3,12 @@
 use quant_pivot_api::{clob::ClobClient, keystore::Keystore, wallet::WalletTopology};
 use quant_pivot_models::{
     config::{KeysConfig, PolymarketConfig},
-    domain::order::{OrderAmount, OrderRequest},
+    domain::order::OrderRequest,
     enums::{
         common::{OrderType, Side},
         execution::VenueOrderStatus,
     },
-    types::{MarketId, Price, TokenId, Usd},
+    types::{MarketId, Price, TokenId, Usd, execution_payload::OrderAmount},
 };
 use rust_decimal_macros::dec;
 use std::env::var;
@@ -41,7 +41,7 @@ async fn fok_order_sign_and_submit() {
         amount: OrderAmount::Usd(Usd::new(dec!(5))),
         price: Price::new(dec!(0.01)),
         order_type: OrderType::Fok,
-        neg_risk: false,
+        post_only: false,
     };
 
     let resp = client.place_order(&req).await;

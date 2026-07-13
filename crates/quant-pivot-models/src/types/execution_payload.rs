@@ -21,10 +21,37 @@ use crate::{
     },
     jsonb_active,
     types::{
-        Bps, PartialExitNode, Price, Probability, Shares, SignalInvalidationRule, TokenId,
-        TrailingStop,
+        Bps, Price, Probability, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
+        TrailingStopPolicy, Usd,
     },
 };
+
+/// Tagged venue amount. Aggressive BUY orders spend USD; resting orders and
+/// SELL orders use an exact share quantity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "unit", content = "value")]
+pub enum OrderAmount {
+    Usd(Usd),
+    Shares(Shares),
+}
+
+impl OrderAmount {
+    #[must_use]
+    pub const fn as_usd(self) -> Option<Usd> {
+        match self {
+            Self::Usd(value) => Some(value),
+            Self::Shares(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_shares(self) -> Option<Shares> {
+        match self {
+            Self::Shares(value) => Some(value),
+            Self::Usd(_) => None,
+        }
+    }
+}
 
 /// The concrete entry order an approved intent will submit to the venue.
 ///
@@ -39,14 +66,39 @@ pub struct EntryOrderSpec {
     pub side: Side,
     /// Time-in-force / order type.
     pub order_type: OrderType,
+    /// Whether venue admission must reject immediately marketable placement.
+    pub post_only: bool,
     /// Hard limit price for the order.
     pub limit_price: Price,
-    /// Share quantity to submit.
-    pub shares: Shares,
+    /// Venue amount with side/order-type semantics frozen at intent creation.
+    pub amount: OrderAmount,
     /// Maximum tolerated slippage from the reference price.
     pub max_slippage_bps: Bps,
     /// Latest time the order may be submitted.
     pub valid_until: DateTime<Utc>,
+}
+
+impl EntryOrderSpec {
+    /// Conservative share projection used by pre-submit depth and ledger checks.
+    #[must_use]
+    pub fn projected_shares(&self) -> Shares {
+        match self.amount {
+            OrderAmount::Shares(shares) => shares,
+            OrderAmount::Usd(usd) if self.limit_price.is_positive() => {
+                Shares::new(usd.inner() / self.limit_price.inner())
+            }
+            OrderAmount::Usd(_) => Shares::ZERO,
+        }
+    }
+
+    /// Maximum capital this frozen order can consume.
+    #[must_use]
+    pub fn notional(&self) -> Usd {
+        match self.amount {
+            OrderAmount::Usd(usd) => usd,
+            OrderAmount::Shares(shares) => shares * self.limit_price,
+        }
+    }
 }
 
 /// The exit policy an approved intent freezes after the entry fills.
@@ -72,11 +124,11 @@ pub struct ExitPolicySpec {
     /// Maximum holding period in seconds (relative to the lot's open time).
     pub max_hold_secs: Option<u64>,
     /// Optional trailing-stop policy (folded into the effective stop-loss).
-    pub trailing_stop: Option<TrailingStop>,
-    /// Conditions that invalidate the thesis (audit context for re-inference).
-    pub signal_invalidation_rules: Vec<SignalInvalidationRule>,
-    /// Scaled partial-exit nodes (empty for a single full exit).
-    pub partial_exit_nodes: Vec<PartialExitNode>,
+    pub trailing_stop: Option<TrailingStopPolicy>,
+    /// Machine-evaluable thesis invalidation thresholds.
+    pub thesis_invalidation: ThesisInvalidationPolicy,
+    /// Monotone cumulative scale-out targets.
+    pub scale_out_targets: Vec<ScaleOutTarget>,
     /// Whether the lot exits before resolution or holds through resolution.
     pub settlement_mode: ExitSettlementMode,
     /// Whether a resolved hold-to-resolution lot is redeemed automatically.
@@ -91,60 +143,111 @@ pub struct ExitPolicySpec {
     pub entry_composite_score: Probability,
 }
 
-/// Partial-exit node ids whose tranches have **settled** on this intent lot.
-///
-/// Each `PartialExitNode::node_id` fires at most once; pending in-flight exits
-/// are tracked separately on the intent row (`pending_partial_exit_node_id`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
-pub struct ExecutedPartialExitNodes {
-    /// Stable node ids already reduced on the lot (append-only, deduped).
-    pub node_ids: Vec<String>,
+/// One in-flight cumulative scale-out target.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingScaleOut {
+    /// Deterministic target id; opportunistic cumulative targets have no id.
+    pub target_id: Option<String>,
+    /// Desired cumulative exit fraction of the frozen entry-filled denominator.
+    pub target_cumulative_exit_pct: Decimal,
 }
 
-impl ExecutedPartialExitNodes {
-    /// Whether `node_id` has already settled.
-    #[must_use]
-    pub fn contains(&self, node_id: &str) -> bool {
-        self.node_ids.iter().any(|id| id == node_id)
-    }
-
-    /// Record a settled node id (no-op when already present).
-    pub fn record(&mut self, node_id: &str) {
-        if !self.contains(node_id) {
-            self.node_ids.push(node_id.to_owned());
-        }
-    }
-}
-
-/// Per-lot opportunistic-Sell scale-out state (Phase 06.1).
-///
-/// The Sell scorer emits a **target cumulative exit fraction** of the lot's
-/// entry-filled shares. `denominator_shares` freezes that base at the first
-/// opportunistic evaluation so the target is always measured against a fixed
-/// quantity — immune to later reductions from stop-loss / take-profit / partial
-/// nodes. `cumulative_sold_shares` is the monotonically accumulated total already
-/// sold via opportunistic exits, so the ladder only ever submits the incremental
-/// delta and repeated ticks at the same target never churn the position.
+/// Unified scale-out state for deterministic and opportunistic partial exits.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
-pub struct OpportunisticExitState {
-    /// Frozen entry-filled-shares denominator (set once, on first evaluation).
+pub struct ScaleOutState {
+    /// Frozen entry-filled denominator shared by every scale-out source.
     pub denominator_shares: Option<Shares>,
-    /// Cumulative shares already opportunistically sold on this lot (monotonic).
-    pub cumulative_sold_shares: Shares,
+    /// Cumulative settled partial exits relative to the denominator.
+    pub cumulative_exited_shares: Shares,
+    /// Stable target ids already settled (append-only, deduplicated).
+    pub settled_target_ids: Vec<String>,
+    /// Cumulative target currently submitted to the venue, if any.
+    pub pending_target: Option<PendingScaleOut>,
 }
 
-impl OpportunisticExitState {
-    /// Record an additional `filled` opportunistic exit (accumulates, never
-    /// resets). Idempotency is the caller's responsibility (delta computation).
-    pub fn record_sold(&mut self, filled: Shares) {
-        self.cumulative_sold_shares =
-            Shares::new(self.cumulative_sold_shares.inner() + filled.inner());
+impl ScaleOutState {
+    /// Whether `target_id` has already settled.
+    #[must_use]
+    pub fn contains(&self, target_id: &str) -> bool {
+        self.settled_target_ids.iter().any(|id| id == target_id)
+    }
+
+    /// Record a settled scale-out delta and close a deterministic target only
+    /// after its cumulative fraction has actually been reached.
+    pub fn record(&mut self, filled: Shares) {
+        self.cumulative_exited_shares =
+            Shares::new(self.cumulative_exited_shares.inner() + filled.inner());
+        if let (Some(denominator), Some(pending)) =
+            (self.denominator_shares, self.pending_target.as_ref())
+        {
+            let reached = self.cumulative_exited_shares.inner()
+                >= denominator.inner() * pending.target_cumulative_exit_pct;
+            if reached
+                && let Some(target_id) = pending.target_id.as_deref()
+                && !self.contains(target_id)
+            {
+                self.settled_target_ids.push(target_id.to_owned());
+            }
+        }
+        self.pending_target = None;
+    }
+
+    /// Shares needed to reach `target_pct`, or zero when already satisfied.
+    #[must_use]
+    pub fn delta_to_target(&self, target_pct: Decimal) -> Shares {
+        let Some(denominator) = self.denominator_shares else {
+            return Shares::ZERO;
+        };
+        let target = denominator.inner() * target_pct;
+        Shares::new((target - self.cumulative_exited_shares.inner()).max(Decimal::ZERO))
     }
 }
 
-jsonb_active!(
-    EntryOrderSpec,
-    ExitPolicySpec,
-    ExecutedPartialExitNodes,
-    OpportunisticExitState
-);
+jsonb_active!(EntryOrderSpec, ExitPolicySpec, ScaleOutState);
+
+#[cfg(test)]
+mod tests {
+    use rust_decimal_macros::dec;
+
+    use super::{PendingScaleOut, ScaleOutState};
+    use crate::types::Shares;
+
+    #[test]
+    fn partial_fill_does_not_settle_target_before_cumulative_goal() {
+        let mut state = ScaleOutState {
+            denominator_shares: Some(Shares::new(dec!(100))),
+            pending_target: Some(PendingScaleOut {
+                target_id: Some("tp1".to_owned()),
+                target_cumulative_exit_pct: dec!(0.5),
+            }),
+            ..ScaleOutState::default()
+        };
+
+        state.record(Shares::new(dec!(20)));
+
+        assert!(!state.contains("tp1"));
+        assert_eq!(state.delta_to_target(dec!(0.5)), Shares::new(dec!(30)));
+    }
+
+    #[test]
+    fn deterministic_and_opportunistic_fills_share_one_monotonic_denominator() {
+        let mut state = ScaleOutState {
+            denominator_shares: Some(Shares::new(dec!(100))),
+            pending_target: Some(PendingScaleOut {
+                target_id: None,
+                target_cumulative_exit_pct: dec!(0.2),
+            }),
+            ..ScaleOutState::default()
+        };
+        state.record(Shares::new(dec!(20)));
+        state.pending_target = Some(PendingScaleOut {
+            target_id: Some("tp1".to_owned()),
+            target_cumulative_exit_pct: dec!(0.5),
+        });
+        state.record(Shares::new(dec!(30)));
+
+        assert!(state.contains("tp1"));
+        assert_eq!(state.cumulative_exited_shares, Shares::new(dec!(50)));
+        assert_eq!(state.delta_to_target(dec!(0.5)), Shares::ZERO);
+    }
+}

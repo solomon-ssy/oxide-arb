@@ -105,7 +105,7 @@ impl ExecutionBundle {
         let exit_monitor_health = deps.governance.exit_monitor_health.clone();
 
         // Stateless admission: input builder (breaker venue-health + exit-monitor
-        // seams) + the 20-check engine.
+        // seams) + the 24-check engine.
         let admission_builder =
             build_admission_builder(deps, &breaker, exit_monitor_health.clone());
         let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&infra.metrics)));
@@ -318,6 +318,7 @@ fn build_admission_builder(
             as Arc<dyn RuntimeConfigVersionRepository>,
         account_factory: Arc::clone(&deps.account.provider_factory),
         book_store: Arc::clone(&deps.data.book_store),
+        clob: Arc::clone(&deps.clob),
         data_quality: Arc::clone(&deps.data.data_quality) as Arc<dyn DataQualityPort>,
         config: Arc::clone(&deps.governance.runtime_config),
         runtime_mode: deps.governance.runtime_mode.clone(),

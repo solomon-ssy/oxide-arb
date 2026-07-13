@@ -57,6 +57,7 @@ pub mod runtime_config;
 pub mod settlement_redeems;
 pub mod structural_monitor;
 pub mod system;
+pub mod trade_policies;
 pub mod training_datasets;
 pub mod users;
 pub mod version;
@@ -95,6 +96,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(research_models::route_specs());
     specs.extend(research_jobs::route_specs());
     specs.extend(calibration_artifacts::route_specs());
+    specs.extend(trade_policies::route_specs());
     specs.extend(market_linkages::route_specs());
     specs.extend(basis_alerts::route_specs());
     specs.extend(domain_sources::route_specs());

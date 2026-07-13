@@ -31,6 +31,7 @@ expression: recommendation_not_auto_eligible()
     "time_to_resolution_secs": 86400,
     "market_status": "active",
     "neg_risk": false,
+    "tick_size": "0.01",
     "fee_rate": null
   },
   "rank_before_portfolio": 1,
@@ -38,9 +39,15 @@ expression: recommendation_not_auto_eligible()
   "data_quality_score": "0.9",
   "model_score_percentile": "0.75",
   "entry_plan": {
-    "trigger_kind": "limit_price",
-    "trigger_price": "0.42",
-    "limit_price": "0.43",
+    "trade_policy": null,
+    "trigger": {
+      "kind": "immediate"
+    },
+    "order_policy": {
+      "kind": "passive",
+      "limit_price": "0.43",
+      "post_only": true
+    },
     "max_slippage_bps": "50",
     "valid_from": "2023-11-14T22:13:20Z",
     "valid_until": "2023-11-14T23:13:20Z",
@@ -74,15 +81,20 @@ expression: recommendation_not_auto_eligible()
     "bet_structure_applied": "resolution"
   },
   "exit_plan": {
+    "trade_policy": null,
     "take_profit_price": "0.7",
     "take_profit_pct": "0.6",
     "stop_loss_price": "0.3",
     "stop_loss_pct": "0.3",
     "time_exit_at": null,
     "max_hold_secs": 86400,
-    "partial_exit_nodes": [],
+    "scale_out_targets": [],
     "trailing_stop": null,
-    "signal_invalidation_rules": [],
+    "thesis_invalidation": {
+      "min_score_retention": "0.6",
+      "min_expected_return_bps": "0",
+      "require_execution_eligibility": true
+    },
     "settlement_mode": "hold_to_resolution",
     "redeem_policy": "manual",
     "manual_review_at": null,

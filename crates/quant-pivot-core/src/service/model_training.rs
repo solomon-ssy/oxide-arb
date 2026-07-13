@@ -364,6 +364,14 @@ impl ModelTrainerService {
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
             factor_schema_hash: materialization.factor_schema_hash.clone(),
+            trade_policy_artifact_id: dataset
+                .manifest_json
+                .as_ref()
+                .and_then(|manifest| manifest.trade_policy_artifact_id.clone()),
+            trade_policy_hash: dataset
+                .manifest_json
+                .as_ref()
+                .and_then(|manifest| manifest.trade_policy_hash.clone()),
         };
 
         let (artifact, metrics_json, training_objective_json) =
@@ -384,6 +392,8 @@ impl ModelTrainerService {
             };
 
         let metrics_json = attach_artifact_diagnostics(metrics_json, &artifact)?;
+        let trade_policy_artifact_id = artifact.header().trade_policy_artifact_id.clone();
+        let trade_policy_hash = artifact.header().trade_policy_hash.clone();
         let artifact_hash = artifact.content_hash()?;
         let key = ModelArtifact::artifact_key(&artifact_hash)?;
         self.deps
@@ -405,6 +415,8 @@ impl ModelTrainerService {
                 version,
                 artifact_hash,
                 training_dataset_id: Some(input.training_dataset_id.clone()),
+                trade_policy_artifact_id,
+                trade_policy_hash,
                 publish_path_set_id: None,
                 metrics_json,
                 training_objective_json,

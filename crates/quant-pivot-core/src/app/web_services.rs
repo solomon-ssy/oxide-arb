@@ -24,14 +24,14 @@ use crate::{
     prefetch::feature_window::FeatureWindowProvider,
     service::{
         feature_integrity::FeatureIntegrityService,
-        model_calibration_fit::ModelCalibrationFitService,
+        model_calibration_fit::ModelCalibrationFitService, trade_policy::TradePolicyService,
     },
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::domain::{
     CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
     FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog,
-    OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort,
+    OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort, TradePolicyPort,
 };
 use quant_pivot_repository::{
     clickhouse::ChFeatureParityEventRepository,
@@ -43,7 +43,7 @@ use quant_pivot_repository::{
         PositionRepository, RecommendationReportRepository, RecommendationRepository,
         ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
         RuntimeConfigVersionRepository, ServingEvidenceRepository, SettlementRedeemRepository,
-        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+        TradePolicyRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -165,6 +165,7 @@ async fn build_app_state(
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
             as Arc<dyn ModelCalibrationFitPort>,
+        trade_policies: build_trade_policy_port(ctx),
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
         domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
             as Arc<dyn DomainSourceCursorRepository>,
@@ -204,10 +205,17 @@ async fn build_app_state(
             Arc::clone(&ctx.governance.applicator) as Arc<dyn RuntimeConfigPort>,
         )),
         execution_read: execution.execution_read,
-        execution_submit: ctx.execution_dispatcher(),
         reconciliation: execution.reconciliation,
         execution_recovery: execution.execution_recovery,
     })
+}
+
+fn build_trade_policy_port(ctx: &AppContext) -> Arc<dyn TradePolicyPort> {
+    Arc::new(TradePolicyService::new(
+        Arc::clone(&ctx.research.training_dataset_repo),
+        Arc::clone(&ctx.research.artifact_store),
+        Arc::clone(&ctx.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+    ))
 }
 
 fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {

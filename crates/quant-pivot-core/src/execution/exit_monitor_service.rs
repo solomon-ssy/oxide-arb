@@ -195,8 +195,6 @@ impl ExitMonitorService {
         let (mark_price, book_fresh, market_abnormal) =
             classify_book(snapshot.as_deref(), now_ms, max_book_age_ms)?;
 
-        let neg_risk = recommendation.is_some_and(|rec| rec.market_context.neg_risk);
-
         // Fold the current mark into the trailing peak.
         let peak_mark_price = max_price(intent.peak_mark_price, mark_price);
 
@@ -226,8 +224,7 @@ impl ExitMonitorService {
             emergency_policy,
             peak_mark_price,
             signal,
-            executed_partial_exit_node_ids: intent.executed_partial_exit_node_ids.node_ids.clone(),
-            opportunistic_exit_state: intent.opportunistic_exit_state.clone(),
+            scale_out_state: intent.scale_out_state.clone(),
             min_opportunistic_clip_pct,
             now,
         };
@@ -236,8 +233,7 @@ impl ExitMonitorService {
             ExitDecision::SubmitExitOrder {
                 reason,
                 order,
-                partial_exit_node_id,
-                opportunistic_denominator,
+                pending_scale_out,
             } => {
                 self.deps
                     .dispatcher
@@ -245,9 +241,7 @@ impl ExitMonitorService {
                         lot: lot.clone(),
                         reason,
                         order,
-                        partial_exit_node_id,
-                        opportunistic_denominator,
-                        neg_risk,
+                        pending_scale_out,
                     })
                     .await?;
             }

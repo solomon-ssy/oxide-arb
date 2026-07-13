@@ -10,9 +10,9 @@ use quant_pivot_error::QuantResult;
 
 use crate::{
     domain::{
-        BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest, Paginated,
-        ResearchJobListQuery, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
-        TrainModelRequest,
+        BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest,
+        FitTradePolicyRequest, Paginated, ResearchJobListQuery, ResearchJobView,
+        RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest,
     },
     types::{ModelVersionId, ResearchJobId, RuntimeConfigVersionId},
 };
@@ -81,6 +81,13 @@ pub trait ResearchJobPort: Send + Sync {
         &self,
         request: FitModelCalibratorRequest,
         runtime_config_version_id: RuntimeConfigVersionId,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView>;
+
+    /// Enqueue a governed executable trade-policy fit (Phase 11.7).
+    async fn enqueue_trade_policy_fit(
+        &self,
+        request: FitTradePolicyRequest,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 

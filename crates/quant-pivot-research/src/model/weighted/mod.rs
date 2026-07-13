@@ -607,6 +607,8 @@ mod tests {
                 model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: hash("aa"),
                 factor_schema_hash: hash("bb"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             training_dataset_hash: hash("cc"),
             training_input_hash: hash("dd"),

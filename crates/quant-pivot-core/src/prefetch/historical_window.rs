@@ -672,6 +672,7 @@ fn forward_sample(row: &BookMicrostructureRow, at: DateTime<Utc>) -> ForwardSamp
         mid_close: row.mid_price_close.map(ChPrice::to_price),
         best_bid_high: row.best_bid_high.map(ChPrice::to_price),
         best_bid_low: row.best_bid_low.map(ChPrice::to_price),
+        best_bid_close: row.best_bid_close.map(ChPrice::to_price),
         top1_depth_usd: row.top1_depth_usd_avg.map(ChUsd::to_usd),
     }
 }

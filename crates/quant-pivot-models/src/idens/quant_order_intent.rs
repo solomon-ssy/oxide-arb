@@ -10,7 +10,7 @@ use sea_orm::{
 use crate::{
     enums::{
         execution::{ExitReason, ExitState, OrderIntentKind},
-        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
+        quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
     },
     idens::{
         quant_model_version::QuantModelVersion, quant_recommendation::QuantRecommendation,
@@ -43,18 +43,21 @@ pub enum QuantOrderIntent {
     PolicyHash,
     StatusReason,
     AdmissionTraceRef,
+    EntryTriggerJson,
     EntryOrderJson,
     ExitPolicyJson,
     RiskEnvelopeHash,
     ExpiresAt,
+    EntryTriggerState,
+    TriggerConfirmingSince,
+    TriggerLastObservedAt,
+    TriggerReadyAt,
     ExitState,
     ExitReason,
     NextCheckAt,
     PeakMarkPrice,
     LastSignalRecheckAt,
-    ExecutedPartialExitNodeIds,
-    PendingPartialExitNodeId,
-    OpportunisticExitState,
+    ScaleOutState,
     CreatedAt,
     UpdatedAt,
 }
@@ -78,8 +81,19 @@ pub fn table() -> TableCreateStatement {
         ))
         .col(column::pg_enum::<ApprovalStatus>(
             QuantOrderIntent::ApprovalStatus,
-        ))
-        .col(column::uuid_null(QuantOrderIntent::ApprovedBy))
+        ));
+    add_approval_columns(&mut stmt);
+    add_frozen_policy_columns(&mut stmt);
+    add_trigger_columns(&mut stmt);
+    add_exit_columns(&mut stmt);
+    stmt.col(timestamp_with_write_default(QuantOrderIntent::CreatedAt))
+        .col(timestamp_with_write_default(QuantOrderIntent::UpdatedAt));
+    add_foreign_keys(&mut stmt);
+    stmt
+}
+
+fn add_approval_columns(stmt: &mut TableCreateStatement) {
+    stmt.col(column::uuid_null(QuantOrderIntent::ApprovedBy))
         .col(
             ColumnDef::new(QuantOrderIntent::ApprovalReason)
                 .text()
@@ -92,73 +106,91 @@ pub fn table() -> TableCreateStatement {
         )
         .col(ColumnDef::new(QuantOrderIntent::PolicyId).text().null())
         .col(ColumnDef::new(QuantOrderIntent::PolicyHash).text().null())
-        .col(ColumnDef::new(QuantOrderIntent::StatusReason).text().null())
-        .col(
-            ColumnDef::new(QuantOrderIntent::AdmissionTraceRef)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::EntryOrderJson)
-                .json_binary()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::ExitPolicyJson)
-                .json_binary()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::RiskEnvelopeHash)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::ExpiresAt)
-                .timestamp_with_time_zone()
-                .not_null(),
-        )
-        .col(column::pg_enum_default::<ExitState>(
-            QuantOrderIntent::ExitState,
-            &ExitState::NotStarted,
-        ))
-        .col(column::pg_enum_null::<ExitReason>(
-            QuantOrderIntent::ExitReason,
-        ))
-        .col(
-            ColumnDef::new(QuantOrderIntent::NextCheckAt)
-                .timestamp_with_time_zone()
-                .null(),
-        )
-        .col(column::price_null(QuantOrderIntent::PeakMarkPrice))
-        .col(
-            ColumnDef::new(QuantOrderIntent::LastSignalRecheckAt)
-                .timestamp_with_time_zone()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::ExecutedPartialExitNodeIds)
-                .json_binary()
-                .not_null()
-                .default(Expr::cust("'{\"node_ids\": []}'::jsonb")),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::PendingPartialExitNodeId)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::OpportunisticExitState)
-                .json_binary()
-                .not_null()
-                .default(Expr::cust(
-                    "'{\"denominator_shares\": null, \"cumulative_sold_shares\": \"0\"}'::jsonb",
-                )),
-        )
-        .col(timestamp_with_write_default(QuantOrderIntent::CreatedAt))
-        .col(timestamp_with_write_default(QuantOrderIntent::UpdatedAt));
-    add_foreign_keys(&mut stmt);
-    stmt
+        .col(ColumnDef::new(QuantOrderIntent::StatusReason).text().null());
+}
+
+fn add_frozen_policy_columns(stmt: &mut TableCreateStatement) {
+    stmt.col(
+        ColumnDef::new(QuantOrderIntent::AdmissionTraceRef)
+            .text()
+            .null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::EntryTriggerJson)
+            .json_binary()
+            .not_null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::EntryOrderJson)
+            .json_binary()
+            .not_null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::ExitPolicyJson)
+            .json_binary()
+            .not_null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::RiskEnvelopeHash)
+            .text()
+            .not_null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::ExpiresAt)
+            .timestamp_with_time_zone()
+            .not_null(),
+    );
+}
+
+fn add_trigger_columns(stmt: &mut TableCreateStatement) {
+    stmt.col(column::pg_enum_default::<EntryTriggerState>(
+        QuantOrderIntent::EntryTriggerState,
+        &EntryTriggerState::NotRequired,
+    ))
+    .col(
+        ColumnDef::new(QuantOrderIntent::TriggerConfirmingSince)
+            .timestamp_with_time_zone()
+            .null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::TriggerLastObservedAt)
+            .timestamp_with_time_zone()
+            .null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::TriggerReadyAt)
+            .timestamp_with_time_zone()
+            .null(),
+    );
+}
+
+fn add_exit_columns(stmt: &mut TableCreateStatement) {
+    stmt.col(column::pg_enum_default::<ExitState>(
+        QuantOrderIntent::ExitState,
+        &ExitState::NotStarted,
+    ))
+    .col(column::pg_enum_null::<ExitReason>(
+        QuantOrderIntent::ExitReason,
+    ))
+    .col(
+        ColumnDef::new(QuantOrderIntent::NextCheckAt)
+            .timestamp_with_time_zone()
+            .null(),
+    )
+    .col(column::price_null(QuantOrderIntent::PeakMarkPrice))
+    .col(
+        ColumnDef::new(QuantOrderIntent::LastSignalRecheckAt)
+            .timestamp_with_time_zone()
+            .null(),
+    )
+    .col(
+        ColumnDef::new(QuantOrderIntent::ScaleOutState)
+            .json_binary()
+            .not_null()
+            .default(Expr::cust(
+                "'{\"denominator_shares\": null, \"cumulative_exited_shares\": \"0\", \"settled_target_ids\": [], \"pending_target\": null}'::jsonb",
+            )),
+    );
 }
 
 /// The three governed references an order intent freezes (recommendation,

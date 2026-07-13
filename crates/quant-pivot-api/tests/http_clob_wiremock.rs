@@ -96,9 +96,11 @@ fn fast_http_client() -> reqwest::Client {
 }
 
 #[test]
-fn fok_orders_use_no_retry_policy() {
-    let policy = RetryPolicy::for_order_type(OrderType::Fok);
-    assert_eq!(policy.max_attempts, Some(0));
+fn fok_and_fak_orders_use_no_retry_policy() {
+    for order_type in [OrderType::Fok, OrderType::Fak] {
+        let policy = RetryPolicy::for_order_type(order_type);
+        assert_eq!(policy.max_attempts, Some(0));
+    }
 
     let gtc = RetryPolicy::for_order_type(OrderType::Gtc);
     assert_eq!(gtc.max_attempts, Some(3));

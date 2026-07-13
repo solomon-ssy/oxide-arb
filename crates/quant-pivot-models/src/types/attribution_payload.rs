@@ -16,7 +16,7 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    enums::quant::{ExitTriggerKind, RecommendationOutcome},
+    enums::{execution::ExitReason, quant::RecommendationOutcome},
     jsonb_active,
     types::{Bps, Price, Shares},
 };
@@ -44,7 +44,7 @@ pub struct ExitOutcome {
     /// Realized exited share quantity, when exited.
     pub exit_shares: Option<Shares>,
     /// Which exit trigger fired (take-profit / stop-loss / time / …).
-    pub exit_trigger: Option<ExitTriggerKind>,
+    pub exit_trigger: Option<ExitReason>,
     /// Whether the realized exit complied with the planned exit policy.
     pub exit_compliance: bool,
     /// Terminal settlement outcome for the position.

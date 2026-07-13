@@ -3,11 +3,11 @@
 use crate::{
     enums::{
         execution::{ExitReason, ExitState, OrderIntentKind},
-        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
+        quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryOrderSpec, ExecutedPartialExitNodes, ExitPolicySpec, ModelVersionId,
-        OpportunisticExitState, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
+        ContentHash, EntryOrderSpec, EntryTrigger, ExitPolicySpec, ModelVersionId, OrderIntentId,
+        Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState,
     },
 };
 use chrono::{DateTime, Utc};
@@ -38,22 +38,24 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub admission_trace_ref: Option<String>,
     #[sea_orm(column_type = "JsonBinary")]
+    pub entry_trigger_json: EntryTrigger,
+    #[sea_orm(column_type = "JsonBinary")]
     pub entry_order_json: EntryOrderSpec,
     #[sea_orm(column_type = "JsonBinary")]
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+    pub entry_trigger_state: EntryTriggerState,
+    pub trigger_confirming_since: Option<DateTime<Utc>>,
+    pub trigger_last_observed_at: Option<DateTime<Utc>>,
+    pub trigger_ready_at: Option<DateTime<Utc>>,
     pub exit_state: ExitState,
     pub exit_reason: Option<ExitReason>,
     pub next_check_at: Option<DateTime<Utc>>,
     pub peak_mark_price: Option<Price>,
     pub last_signal_recheck_at: Option<DateTime<Utc>>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub executed_partial_exit_node_ids: ExecutedPartialExitNodes,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub pending_partial_exit_node_id: Option<String>,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub opportunistic_exit_state: OpportunisticExitState,
+    pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -44,6 +44,8 @@ mod selection;
 mod settlement;
 #[allow(clippy::needless_update)] // NewShadowComparison omits DB-managed created_at
 mod shadow;
+#[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
+mod trade_policy;
 
 pub use account::*;
 pub use attribution::*;
@@ -74,3 +76,4 @@ pub use research_job::*;
 pub use selection::*;
 pub use settlement::*;
 pub use shadow::*;
+pub use trade_policy::*;

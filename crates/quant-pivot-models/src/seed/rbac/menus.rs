@@ -387,12 +387,6 @@ fn build_execution(t: &mut MenuTree) {
         "Cancel Intent",
         perm(ResourceType::OrderIntent, Operation::Cancel),
     );
-    t.button(
-        &intents,
-        "order_intent:submit",
-        "Submit Intent",
-        perm(ResourceType::OrderIntent, Operation::Submit),
-    );
     t.page(PageSpec {
         parent: &execution,
         name: "execution-orders",
@@ -477,6 +471,37 @@ fn build_research_model_specs(t: &mut MenuTree, research: &MenuId) {
     );
 }
 
+/// Governed trade-policy fitting and publication workbench.
+fn build_research_trade_policies(t: &mut MenuTree, research: &MenuId) {
+    let trade_policies = t.page(PageSpec {
+        parent: research,
+        name: "research-trade-policies",
+        title: "page.menu.researchTradePolicies",
+        path: "/research/trade-policies",
+        component: "research/trade-policies/index",
+        permission_code: Some(perm(ResourceType::Materialization, Operation::Read)),
+        icon: "lucide:route",
+    });
+    t.button(
+        &trade_policies,
+        "materialization:create",
+        "Fit / Validate Trade Policy",
+        perm(ResourceType::Materialization, Operation::Create),
+    );
+    t.button(
+        &trade_policies,
+        "publication:publish",
+        "Publish Trade Policy",
+        perm(ResourceType::Publication, Operation::Publish),
+    );
+    t.button(
+        &trade_policies,
+        "publication:retire",
+        "Retire Trade Policy",
+        perm(ResourceType::Publication, Operation::Retire),
+    );
+}
+
 /// Research plane: real catalog pages backing the operator workbench —
 /// training-dataset ledger, trained-model registry, backtest reports, and factor
 /// governance. Each page pages a `GET /research/*` list endpoint (10.5 §2);
@@ -490,6 +515,7 @@ fn build_research(t: &mut MenuTree) {
         "lucide:flask-conical",
     );
     build_research_model_specs(t, &research);
+    build_research_trade_policies(t, &research);
     let datasets = t.page(PageSpec {
         parent: &research,
         name: "research-datasets",

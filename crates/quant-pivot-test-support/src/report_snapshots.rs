@@ -17,14 +17,14 @@ use quant_pivot_models::{
         api::{QuantRecommendationView, QuantReportDetailView, RecommendationViewContext},
     },
     enums::quant::{
-        EmptyReportReason, EntryTriggerKind, ExitSettlementMode, ExitTriggerKind,
-        IneligibilityReason, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
-        RedeemPolicy, ReportKind,
+        EmptyReportReason, ExitSettlementMode, FillRequirement, IneligibilityReason, OutcomeSide,
+        PriceComparison, QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
     },
     types::{
-        BookSnapshotRef, Bps, EligibilitySummary, EntryPlan, EquitySnapshotId, EvidenceRefs,
-        ExecutionEligibility, ExitPlan, PartialExitNode, Price, RecommendationId,
-        RecommendationReportId, ReportSummary, TrailingStop, Usd,
+        BookSnapshotRef, Bps, EligibilitySummary, EntryOrderPolicy, EntryPlan, EntryTrigger,
+        EquitySnapshotId, EvidenceRefs, ExecutionEligibility, ExitPlan, Price, RecommendationId,
+        RecommendationReportId, ReportSummary, ScaleOutTarget, ThesisInvalidationPolicy,
+        TrailingStopPolicy, Usd,
     },
 };
 
@@ -141,9 +141,17 @@ fn evidence_refs() -> EvidenceRefs {
 
 fn limit_entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger_kind: EntryTriggerKind::LimitPrice,
-        trigger_price: Some(Price::new(dec!(0.42))),
-        limit_price: Some(Price::new(dec!(0.42))),
+        trade_policy: None,
+        trigger: EntryTrigger::PriceCondition {
+            comparison: PriceComparison::AtOrBelow,
+            threshold: Price::new(dec!(0.42)),
+            confirmation_secs: 30,
+            max_observation_gap_ms: 2_000,
+        },
+        order_policy: EntryOrderPolicy::Passive {
+            limit_price: Price::new(dec!(0.42)),
+            post_only: true,
+        },
         max_slippage_bps: Bps::new(dec!(50)),
         valid_from: at(1_700_000_000),
         valid_until: at(1_700_003_600),
@@ -156,9 +164,12 @@ fn limit_entry_plan() -> EntryPlan {
 
 fn immediate_entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger_kind: EntryTriggerKind::Immediate,
-        trigger_price: None,
-        limit_price: Some(Price::new(dec!(0.43))),
+        trade_policy: None,
+        trigger: EntryTrigger::Immediate,
+        order_policy: EntryOrderPolicy::Aggressive {
+            worst_price: Price::new(dec!(0.43)),
+            fill_requirement: FillRequirement::AllowPartial,
+        },
         max_slippage_bps: Bps::new(dec!(50)),
         valid_from: at(1_700_000_000),
         valid_until: at(1_700_003_600),
@@ -171,27 +182,31 @@ fn immediate_entry_plan() -> EntryPlan {
 
 fn partial_exit_plan() -> ExitPlan {
     ExitPlan {
+        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.7))),
         take_profit_pct: Some(dec!(0.6)),
         stop_loss_price: Some(Price::new(dec!(0.3))),
         stop_loss_pct: Some(dec!(0.3)),
         time_exit_at: None,
         max_hold_secs: Some(86_400),
-        partial_exit_nodes: vec![PartialExitNode {
-            node_id: "tp1".to_owned(),
-            trigger_kind: ExitTriggerKind::TakeProfit,
-            trigger_value: dec!(0.6),
-            sell_pct: dec!(0.5),
+        scale_out_targets: vec![ScaleOutTarget {
+            target_id: "tp1".to_owned(),
+            trigger_price: Price::new(dec!(0.6)),
+            target_cumulative_exit_pct: dec!(0.5),
             min_price: Some(Price::new(dec!(0.55))),
             valid_after: None,
             valid_until: None,
             reason: "scale out at first target".to_owned(),
         }],
-        trailing_stop: Some(TrailingStop {
+        trailing_stop: Some(TrailingStopPolicy {
             trail_bps: Bps::new(dec!(300)),
             activation_price: Some(Price::new(dec!(0.6))),
         }),
-        signal_invalidation_rules: Vec::new(),
+        thesis_invalidation: ThesisInvalidationPolicy {
+            min_score_retention: dec!(0.6),
+            min_expected_return_bps: Bps::ZERO,
+            require_execution_eligibility: true,
+        },
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,

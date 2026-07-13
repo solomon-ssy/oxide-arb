@@ -42,6 +42,8 @@ pub struct ResearchJobsConfig {
     pub cpcv_backtest_concurrency: usize,
     /// Per-kind cap for deterministic feature-parity replay.
     pub feature_parity_concurrency: usize,
+    /// Per-kind cap for executable trade-policy fits.
+    pub trade_policy_fit_concurrency: usize,
     /// Lease time-to-live: a lease not renewed within this window is reclaimable.
     pub lease_ttl_secs: i64,
     /// How often a running job renews its lease + emits a liveness heartbeat.
@@ -79,6 +81,7 @@ impl Default for ResearchJobsConfig {
             model_calibration_fit_concurrency: 1,
             cpcv_backtest_concurrency: 1,
             feature_parity_concurrency: 1,
+            trade_policy_fit_concurrency: 1,
             lease_ttl_secs: 90,
             heartbeat_secs: 30,
             poll_secs: 3,
@@ -104,6 +107,7 @@ impl ResearchJobsConfig {
             ResearchJobKind::ModelCalibrationFit => self.model_calibration_fit_concurrency,
             ResearchJobKind::CpcvBacktest => self.cpcv_backtest_concurrency,
             ResearchJobKind::FeatureParity => self.feature_parity_concurrency,
+            ResearchJobKind::TradePolicyFit => self.trade_policy_fit_concurrency,
         }
     }
 }

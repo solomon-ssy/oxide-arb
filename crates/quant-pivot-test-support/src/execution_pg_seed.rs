@@ -26,29 +26,31 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EmptyReportReason, EntryTriggerKind,
+            AccountSource, ApprovalStatus, BindingConstraint, EmptyReportReason, EntryTriggerState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
-            FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
-            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
+            FeatureParityStateTransition, FillRequirement, ModelRunKind, ModelRunStatus,
+            OrderIntentStatus, OutcomeSide, PublicationStatus, QuantRuntimeMode,
+            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
+            ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
-        ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec,
-        EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId,
-        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderPolicy,
+        EntryOrderSpec, EntryPlan, EntryTrigger, EquitySnapshotId, EventId, EvidenceRefs,
+        ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown,
+        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
+        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
+        ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
         ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
         RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TokenId, Usd,
+        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -154,12 +156,23 @@ impl ReportBuildOptions {
 
 /// Seed runtime config + model registry once; reuse for many reports.
 pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra {
-    if let Some(infra) = find_existing_demo_infra(db).await {
+    let runtime_config_repo = PgRuntimeConfigVersionRepository::new(db.clone());
+    let runtime_config_version_id = match runtime_config_repo
+        .load_current()
+        .await
+        .expect("load active runtime config for demo seed")
+    {
+        Some(active) => active.runtime_config_version_id,
+        None => {
+            seed_runtime_config_named(db, "ui-demo-seed", "ui demo fixture", content_hash('8'))
+                .await
+        }
+    };
+
+    if let Some(infra) = find_existing_demo_infra(db, &runtime_config_version_id).await {
         return infra;
     }
 
-    let runtime_config_version_id =
-        seed_runtime_config_named(db, "ui-demo-seed", "ui demo fixture", content_hash('8')).await;
     let (model_version_id, model_run_id) =
         seed_model_version_named(db, &runtime_config_version_id, "ui-demo-seed-model").await;
     SharedDemoInfra {
@@ -170,7 +183,10 @@ pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra 
     }
 }
 
-async fn find_existing_demo_infra(db: &DatabaseConnection) -> Option<SharedDemoInfra> {
+async fn find_existing_demo_infra(
+    db: &DatabaseConnection,
+    active_runtime_config_version_id: &RuntimeConfigVersionId,
+) -> Option<SharedDemoInfra> {
     use quant_pivot_models::entities::{quant_model_run, quant_model_spec, quant_model_version};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
@@ -187,6 +203,10 @@ async fn find_existing_demo_infra(db: &DatabaseConnection) -> Option<SharedDemoI
         .ok()??;
     let run = quant_model_run::Entity::find()
         .filter(quant_model_run::Column::ModelVersionId.eq(version.model_version_id.clone()))
+        .filter(
+            quant_model_run::Column::RuntimeConfigVersionId
+                .eq(active_runtime_config_version_id.clone()),
+        )
         .order_by_desc(quant_model_run::Column::StartedAt)
         .one(db)
         .await
@@ -499,7 +519,6 @@ pub async fn close_position_full(
                 fully_exited: true,
                 revert_to_open: false,
                 reconciliation: None,
-                opportunistic_advance: None,
             },
         )
         .await
@@ -568,12 +587,14 @@ fn new_order_intent(
         policy_hash: None,
         status_reason: None,
         admission_trace_ref: None,
+        entry_trigger_json: EntryTrigger::Immediate,
         entry_order_json: EntryOrderSpec {
             token_id: TokenId::new(&ids.token),
             side: Side::Buy,
-            order_type: OrderType::Gtc,
+            order_type: OrderType::Fak,
+            post_only: false,
             limit_price: Price::new(dec!(0.6)),
-            shares: Shares::new(dec!(100)),
+            amount: OrderAmount::Usd(Usd::new(EXECUTION_NOTIONAL)),
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now() + chrono::Duration::hours(1),
         },
@@ -585,8 +606,12 @@ fn new_order_intent(
             time_exit_at: None,
             max_hold_secs: None,
             trailing_stop: None,
-            signal_invalidation_rules: Vec::new(),
-            partial_exit_nodes: Vec::new(),
+            thesis_invalidation: ThesisInvalidationPolicy {
+                min_score_retention: dec!(0.6),
+                min_expected_return_bps: Bps::ZERO,
+                require_execution_eligibility: true,
+            },
+            scale_out_targets: Vec::new(),
             settlement_mode: ExitSettlementMode::ExitBeforeResolution,
             redeem_policy: RedeemPolicy::Manual,
             manual_review_at: None,
@@ -595,6 +620,10 @@ fn new_order_intent(
         },
         risk_envelope_hash: content_hash('e'),
         expires_at: Utc::now() + chrono::Duration::hours(1),
+        entry_trigger_state: EntryTriggerState::NotRequired,
+        trigger_confirming_since: None,
+        trigger_last_observed_at: None,
+        trigger_ready_at: None,
     }
 }
 
@@ -632,7 +661,7 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewE
         market_id: MarketId::new(&ids.market),
         token_id: TokenId::new(&ids.token),
         side: Side::Buy,
-        order_type: OrderTypeKind::Gtc,
+        order_type: OrderTypeKind::Fak,
         price: Price::new(dec!(0.6)),
         shares: Shares::new(dec!(100)),
         cost_usd: Usd::new(EXECUTION_NOTIONAL),
@@ -789,31 +818,50 @@ async fn seed_model_version_named(
     rc_id: &RuntimeConfigVersionId,
     model_name: &str,
 ) -> (ModelVersionId, ModelRunId) {
+    use quant_pivot_models::entities::quant_model_spec;
+    use sea_orm::{ColumnTrait, QueryFilter};
+
     let registry = PgModelRegistryRepository::new(db.clone());
-    let model_spec_id = ModelSpecId::from_v7();
-    registry
-        .create_model_spec(NewModelSpec {
-            model_spec_id: model_spec_id.clone(),
-            name: model_name.to_owned(),
-            model_family: ModelFamily::WeightedFactor,
-            prediction_horizon_secs: 86_400,
-            feature_schema_version: SchemaVersion::FIRST,
-            label_schema_version: SchemaVersion::FIRST,
-            spec_json: serde_json::json!({}),
-            input_contract: ModelInputContract::single_required("book.mid"),
-            training_contract: ModelTrainingContract::settlement_default(),
-            status: PublicationStatus::Published,
-        })
+    let model_spec_id = if let Some(existing) = quant_model_spec::Entity::find()
+        .filter(quant_model_spec::Column::Name.eq(model_name))
+        .one(db)
         .await
-        .expect("model spec");
+        .expect("find demo model spec")
+    {
+        existing.model_spec_id
+    } else {
+        let model_spec_id = ModelSpecId::from_v7();
+        registry
+            .create_model_spec(NewModelSpec {
+                model_spec_id: model_spec_id.clone(),
+                name: model_name.to_owned(),
+                model_family: ModelFamily::WeightedFactor,
+                prediction_horizon_secs: 86_400,
+                feature_schema_version: SchemaVersion::FIRST,
+                label_schema_version: SchemaVersion::FIRST,
+                spec_json: serde_json::json!({}),
+                input_contract: ModelInputContract::single_required("book.mid"),
+                training_contract: ModelTrainingContract::settlement_default(),
+                status: PublicationStatus::Published,
+            })
+            .await
+            .expect("model spec");
+        model_spec_id
+    };
+    let version = registry
+        .next_version_for_spec(&model_spec_id)
+        .await
+        .expect("next demo model version");
     let model_version_id = ModelVersionId::from_v7();
     registry
         .create_model_version(NewModelVersion {
             model_version_id: model_version_id.clone(),
             model_spec_id,
-            version: 1,
+            version,
             artifact_hash: content_hash('a'),
             training_dataset_id: None,
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
@@ -999,9 +1047,12 @@ fn new_account_snapshot(ids: &ExecutionTxnIds) -> NewAccountSnapshot {
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger_kind: EntryTriggerKind::Immediate,
-        trigger_price: None,
-        limit_price: Some(Price::new(dec!(0.6))),
+        trade_policy: None,
+        trigger: EntryTrigger::Immediate,
+        order_policy: EntryOrderPolicy::Aggressive {
+            worst_price: Price::new(dec!(0.6)),
+            fill_requirement: FillRequirement::AllOrNothing,
+        },
         max_slippage_bps: Bps::new(dec!(50)),
         valid_from: Utc::now(),
         valid_until: Utc::now() + chrono::Duration::hours(1),
@@ -1041,15 +1092,20 @@ fn sizing_plan() -> SizingPlan {
 
 fn exit_plan() -> ExitPlan {
     ExitPlan {
+        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.8))),
         take_profit_pct: None,
         stop_loss_price: Some(Price::new(dec!(0.4))),
         stop_loss_pct: None,
         time_exit_at: None,
         max_hold_secs: Some(86_400),
-        partial_exit_nodes: Vec::new(),
+        scale_out_targets: Vec::new(),
         trailing_stop: None,
-        signal_invalidation_rules: Vec::new(),
+        thesis_invalidation: ThesisInvalidationPolicy {
+            min_score_retention: dec!(0.6),
+            min_expected_return_bps: Bps::ZERO,
+            require_execution_eligibility: true,
+        },
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
@@ -1110,6 +1166,7 @@ const fn market_context() -> MarketContext {
         time_to_resolution_secs: Some(86_400),
         market_status: MarketStatus::Active,
         neg_risk: false,
+        tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
         fee_rate: None,
     }
 }

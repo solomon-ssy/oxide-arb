@@ -25,5 +25,6 @@ pub mod opportunistic_sell;
 pub mod pit_selection;
 pub mod signal_reinference;
 pub mod system_status_nudge;
+pub mod trade_policy;
 pub mod training_dataset;
 pub mod ws_subscription;

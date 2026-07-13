@@ -20,6 +20,7 @@ pub mod research_catalog;
 pub mod research_job;
 pub mod runtime_control;
 pub mod structural_monitor;
+pub mod trade_policy;
 pub mod training_dataset;
 
 pub use account_read::*;
@@ -42,4 +43,5 @@ pub use research_catalog::*;
 pub use research_job::*;
 pub use runtime_control::*;
 pub use structural_monitor::*;
+pub use trade_policy::*;
 pub use training_dataset::*;

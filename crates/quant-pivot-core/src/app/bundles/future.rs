@@ -63,6 +63,7 @@ impl ReportBundle {
             runtime_config_repo: Arc::clone(&runtime_config_repo),
             artifact_store: Arc::clone(&deps.research.artifact_store),
             calibration_loader: Arc::clone(&deps.research.calibration_loader),
+            trade_policy_repo: Arc::clone(&deps.research.trade_policy_repo),
             market_selector: Arc::clone(&deps.research.market_selector),
             market_selection_repo: Arc::clone(&deps.research.market_selection_repo),
             candidate_provider: Arc::clone(&deps.research.candidate_provider),

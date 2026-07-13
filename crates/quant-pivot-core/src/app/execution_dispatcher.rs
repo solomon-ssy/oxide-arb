@@ -7,33 +7,39 @@
 //! spawned task; multi-replica leader election is Phase 8+ (the row lock keeps it
 //! safe regardless of replica count).
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
         ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation, OrderIntentListQuery,
-        PageRequest,
+        PageRequest, RecommendationInfo,
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult},
-        quant::{OrderIntentStatus, QuantRuntimeMode},
+        quant::{EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
     },
-    types::{ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId},
+    types::{
+        EntryTrigger, OrderIntentId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId,
+    },
 };
 use quant_pivot_repository::traits::{
-    ExecutionSubmissionRepository, OrderIntentRepository, ReconciliationRepository,
+    ExecutionSubmissionRepository, OrderIntentRepository, RecommendationRepository,
+    ReconciliationRepository,
 };
 
 use super::AppContext;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
+    execution::{ConfirmationProgress, evaluate_entry_trigger},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::periodic_task::PeriodicTask,
+    ingest::book_store::BookStore,
 };
 
-/// Max `ApprovedByPolicy` intents pulled per auto-dispatch pass.
+/// Max armed intents pulled per dispatch pass.
 const AUTO_DISPATCH_BATCH: u64 = 64;
 /// Max dangling orders handed to reconciliation per boot recovery pass.
 const RECOVER_DANGLING_LIMIT: u64 = 1_024;
@@ -72,14 +78,19 @@ impl AppContext {
     }
 
     fn register_auto_dispatch_worker(&self, runner: &mut AppRunner) {
-        let dispatcher = self.execution_dispatcher();
-        let intents: Arc<dyn OrderIntentRepository> =
-            Arc::clone(&self.infra.repos.order_intent) as Arc<dyn OrderIntentRepository>;
         let submission = Arc::clone(&self.execution.submission);
         let reconciliation: Arc<dyn ReconciliationRepository> =
             Arc::clone(&self.infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
-        let runtime_mode = self.runtime_mode();
-        let kill_switch = self.kill_switch_handle();
+        let worker = ArmedDispatchWorker {
+            dispatcher: self.execution_dispatcher(),
+            intents: Arc::clone(&self.infra.repos.order_intent) as Arc<dyn OrderIntentRepository>,
+            recommendations: Arc::clone(&self.infra.repos.recommendation)
+                as Arc<dyn RecommendationRepository>,
+            book_store: Arc::clone(&self.data.book_store),
+            reconciliation: Arc::clone(&reconciliation),
+            runtime_mode: self.runtime_mode(),
+            kill_switch: self.kill_switch_handle(),
+        };
         let wake = self.execution_wake();
         let poll = Duration::from_secs(self.config.quant.workers.execution_dispatch_secs);
         runner.spawn(TaskId::ExecutionDispatcher, move |token| async move {
@@ -90,6 +101,7 @@ impl AppContext {
             // retry with backoff until it succeeds; the submit loop is not
             // entered (so nothing is auto-submitted) until recovery is durably
             // done. The report plane runs independently and is unaffected.
+            let mut confirmation = HashMap::new();
             loop {
                 match recover_dangling_orders(&submission, &reconciliation, RECOVER_DANGLING_LIMIT)
                     .await
@@ -128,20 +140,22 @@ impl AppContext {
                     () = wake.wait() => {}
                     () = tokio::time::sleep(poll) => {}
                 }
-                if let Err(error) = auto_dispatch_pass(
-                    &dispatcher,
-                    &intents,
-                    &reconciliation,
-                    &runtime_mode,
-                    &kill_switch,
-                )
-                .await
-                {
+                if let Err(error) = armed_dispatch_pass(&worker, &mut confirmation).await {
                     tracing::warn!(%error, "auto-execution dispatch pass failed");
                 }
             }
         });
     }
+}
+
+struct ArmedDispatchWorker {
+    dispatcher: Arc<dyn ExecutionSubmitPort>,
+    intents: Arc<dyn OrderIntentRepository>,
+    recommendations: Arc<dyn RecommendationRepository>,
+    book_store: Arc<BookStore>,
+    reconciliation: Arc<dyn ReconciliationRepository>,
+    runtime_mode: RuntimeModeHandle,
+    kill_switch: KillSwitchHandle,
 }
 
 /// Boot recovery: scan in-flight (`Submitted`/`Ambiguous`) orders with no
@@ -189,36 +203,100 @@ async fn recover_dangling_orders(
 /// row-locked + admitted; a per-intent failure never aborts the batch. The
 /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
 /// admission `#17`, which denies the same condition per intent (05.5).
-async fn auto_dispatch_pass(
-    dispatcher: &Arc<dyn ExecutionSubmitPort>,
-    intents: &Arc<dyn OrderIntentRepository>,
-    reconciliation: &Arc<dyn ReconciliationRepository>,
-    runtime_mode: &RuntimeModeHandle,
-    kill_switch: &KillSwitchHandle,
+async fn armed_dispatch_pass(
+    worker: &ArmedDispatchWorker,
+    confirmation: &mut HashMap<OrderIntentId, ConfirmationProgress>,
 ) -> QuantResult<()> {
-    if runtime_mode.current() != QuantRuntimeMode::AutoExecution || !kill_switch.allows_new_entry()
-    {
+    let status = match worker.runtime_mode.current() {
+        QuantRuntimeMode::ReportOnly => return Ok(()),
+        QuantRuntimeMode::SemiAuto => OrderIntentStatus::Approved,
+        QuantRuntimeMode::AutoExecution => OrderIntentStatus::ApprovedByPolicy,
+    };
+    if !worker.kill_switch.allows_new_entry() {
         return Ok(());
     }
-    if reconciliation.has_unresolvable().await? {
+    if worker.reconciliation.has_unresolvable().await? {
         return Ok(());
     }
     let query = OrderIntentListQuery {
-        status: Some(OrderIntentStatus::ApprovedByPolicy),
+        status: Some(status),
         page: PageRequest::new(PageRequest::DEFAULT_PAGE, AUTO_DISPATCH_BATCH),
         ..Default::default()
     };
-    let page = intents.page(query).await?;
+    let page = worker.intents.page(query).await?;
     for intent in page.items {
-        if let Err(error) = dispatcher.submit_if_admitted(&intent.order_intent_id).await {
+        let recommendation = worker
+            .recommendations
+            .find_by_id(&intent.recommendation_id)
+            .await?;
+        let Some(recommendation) = recommendation else {
+            tracing::warn!(
+                intent_id = %intent.order_intent_id,
+                "armed intent references a missing recommendation",
+            );
+            continue;
+        };
+        let evaluation = evaluate_armed_intent(
+            &intent.order_intent_id,
+            intent.entry_trigger_state,
+            &intent.entry_trigger_json,
+            &recommendation,
+            &worker.book_store,
+            confirmation.get(&intent.order_intent_id).copied(),
+        );
+        if let Some(progress) = evaluation.progress {
+            confirmation.insert(intent.order_intent_id.clone(), progress);
+        } else {
+            confirmation.remove(&intent.order_intent_id);
+        }
+        if let Some(transition) = evaluation.transition {
+            worker
+                .intents
+                .transition_entry_trigger(&intent.order_intent_id, transition)
+                .await?;
+        }
+        if !evaluation.ready && intent.entry_trigger_state != EntryTriggerState::NotRequired {
+            continue;
+        }
+        if let Err(error) = worker
+            .dispatcher
+            .submit_if_admitted(&intent.order_intent_id)
+            .await
+        {
             tracing::warn!(
                 %error,
                 intent_id = %intent.order_intent_id,
                 "auto-execution dispatch failed for intent",
             );
+        } else {
+            confirmation.remove(&intent.order_intent_id);
         }
     }
     Ok(())
+}
+
+fn evaluate_armed_intent(
+    intent_id: &OrderIntentId,
+    state: EntryTriggerState,
+    trigger: &EntryTrigger,
+    recommendation: &RecommendationInfo,
+    book_store: &BookStore,
+    progress: Option<ConfirmationProgress>,
+) -> crate::execution::TriggerEvaluation {
+    let now = Utc::now();
+    let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(u64::MAX);
+    let snapshot = book_store.load(&recommendation.token_id);
+    let best_ask = snapshot
+        .as_deref()
+        .and_then(quant_pivot_models::domain::BookSnapshot::best_ask);
+    let book_fresh = snapshot.as_deref().is_some_and(|book| {
+        now_ms.saturating_sub(book.timestamp_ms) <= recommendation.entry_plan.max_book_age_ms
+    });
+    let evaluation = evaluate_entry_trigger(trigger, state, progress, best_ask, book_fresh, now);
+    if evaluation.transition.is_some() {
+        tracing::debug!(%intent_id, ?state, "entry trigger transitioned");
+    }
+    evaluation
 }
 
 /// Pending reconciliation row for an order found in-flight at boot.

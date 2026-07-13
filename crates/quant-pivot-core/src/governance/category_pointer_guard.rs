@@ -283,6 +283,8 @@ mod tests {
             version: 1,
             artifact_hash,
             training_dataset_id: None,
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
@@ -309,6 +311,8 @@ mod tests {
                     .expect("hash"),
                 factor_schema_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
                     .expect("hash"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             training_dataset_hash: ContentHash::parse(format!("blake3:{}", "3".repeat(64)))
                 .expect("hash"),

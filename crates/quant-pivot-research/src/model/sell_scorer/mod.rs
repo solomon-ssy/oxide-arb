@@ -333,6 +333,8 @@ mod tests {
                 model_family: ModelFamily::HoldVsExitWeighted,
                 feature_schema_hash: hash("aa"),
                 factor_schema_hash: hash("bb"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             weights: vec![
                 FactorWeight {

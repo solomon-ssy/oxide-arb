@@ -38,7 +38,7 @@ use quant_pivot_models::{
         quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
     },
     types::{
-        ExecutedPartialExitNodes, ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price,
+        ExecutionOrderId, FeatureParityStateId, OrderIntentId, PendingScaleOut, Price,
         RecommendationId, ReconciliationId,
     },
 };
@@ -245,16 +245,15 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             position::apply_fill(&txn, fill).await?;
         }
 
-        // Entry fill: freeze the opportunistic scale-out denominator to venue-confirmed
-        // shares (not entry_order_json.shares). Set once; never shrinks on partial exits.
+        // Entry fill freezes the denominator shared by every scale-out source.
         let prior_status = intent.status;
-        let prior_opportunistic_state = intent.opportunistic_exit_state.clone();
+        let prior_scale_out_state = intent.scale_out_state.clone();
         let mut intent_active = intent.into_active_model();
         if let Some(shares) = entry_fill_shares {
-            let mut state = prior_opportunistic_state.clone();
+            let mut state = prior_scale_out_state.clone();
             if state.denominator_shares.is_none() {
                 state.denominator_shares = Some(shares);
-                intent_active.opportunistic_exit_state = ActiveValue::Set(state);
+                intent_active.scale_out_state = ActiveValue::Set(state);
             }
         }
 
@@ -265,7 +264,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             intent_active.status = ActiveValue::Set(write.intent_status);
         }
         if !matches!(intent_active.status, ActiveValue::NotSet)
-            || !matches!(intent_active.opportunistic_exit_state, ActiveValue::NotSet)
+            || !matches!(intent_active.scale_out_state, ActiveValue::NotSet)
         {
             intent_active
                 .update(&txn)
@@ -329,13 +328,18 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         &self,
         order: NewExecutionOrder,
         exit_reason: ExitReason,
-        partial_exit_node_id: Option<String>,
+        pending_scale_out: Option<PendingScaleOut>,
     ) -> Result<ExecutionOrderInfo, StorageError> {
-        if partial_exit_node_id.is_some() && exit_reason != ExitReason::PartialExit {
+        if pending_scale_out.is_some()
+            && !matches!(
+                exit_reason,
+                ExitReason::PartialExit | ExitReason::Opportunistic
+            )
+        {
             return Err(error::invariant_violation(
                 Some(entity::QUANT_ORDER_INTENT),
                 format!(
-                    "partial_exit_node_id requires PartialExit reason, got {}",
+                    "pending scale-out requires PartialExit or Opportunistic reason, got {}",
                     exit_reason.as_str()
                 ),
             ));
@@ -370,10 +374,12 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         // Mark the lot `Open -> Closing` and advance the intent exit FSM.
         position::mark_closing(&txn, &intent_id).await?;
         let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let mut scale_out_state = intent.scale_out_state.clone();
+        scale_out_state.pending_target = pending_scale_out;
         let mut intent_active = intent.into_active_model();
         intent_active.exit_state = ActiveValue::Set(ExitState::OrderSubmitted);
         intent_active.exit_reason = ActiveValue::Set(Some(exit_reason));
-        intent_active.pending_partial_exit_node_id = ActiveValue::Set(partial_exit_node_id);
+        intent_active.scale_out_state = ActiveValue::Set(scale_out_state);
         intent_active
             .update(&txn)
             .await
@@ -422,13 +428,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map_err(StorageError::from)?;
 
         // Reduce/close the lot on a (partial) fill; complete capital on full exit.
-        let exit_filled = write.position_exit.is_some();
-        // The actual filled shares advance the opportunistic cumulative total.
-        let opportunistic_fill = write
-            .opportunistic_advance
-            .as_ref()
-            .zip(write.position_exit.as_ref())
-            .map(|(_advance, exit)| exit.shares);
+        let exit_fill_shares = write.position_exit.as_ref().map(|exit| exit.shares);
         if let Some(exit) = write.position_exit {
             position::apply_exit(&txn, &intent_id, exit).await?;
             if write.fully_exited {
@@ -443,22 +443,18 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
 
         // Advance the intent's exit FSM (status is unchanged — entry already filled).
         let intent = load_intent_for_update(&txn, &intent_id).await?;
-        let (executed_nodes, pending_node) =
-            partial_exit_nodes_after_exit_settlement(&intent, write.revert_to_open, exit_filled);
-        // Advance cumulative opportunistic shares sold (denominator frozen at entry fill).
-        let opportunistic_state = opportunistic_fill.map(|filled| {
-            let mut state = intent.opportunistic_exit_state.clone();
-            state.record_sold(filled);
-            state
-        });
+        let mut scale_out_state = intent.scale_out_state.clone();
+        if write.revert_to_open {
+            scale_out_state.pending_target = None;
+        } else if let Some(filled) = exit_fill_shares
+            && !write.fully_exited
+        {
+            scale_out_state.record(filled);
+        }
         let mut intent_active = intent.into_active_model();
         intent_active.exit_state = ActiveValue::Set(write.exit_state);
         intent_active.exit_reason = ActiveValue::Set(Some(write.exit_reason));
-        intent_active.executed_partial_exit_node_ids = ActiveValue::Set(executed_nodes);
-        intent_active.pending_partial_exit_node_id = ActiveValue::Set(pending_node);
-        if let Some(state) = opportunistic_state {
-            intent_active.opportunistic_exit_state = ActiveValue::Set(state);
-        }
+        intent_active.scale_out_state = ActiveValue::Set(scale_out_state);
         intent_active
             .update(&txn)
             .await
@@ -534,7 +530,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             // Exit-order reconciliation: the entry intent stays terminal; correct
             // the lot via `apply_exit` (never `apply_fill`) and complete the
             // capital `Spent -> Released` on a full exit.
-            let exit_filled = write.exit.is_some();
+            let exit_fill_shares = write.exit.as_ref().map(|exit| exit.shares);
             let revert_lot = write.revert_lot;
             if let Some(exit) = write.exit.take() {
                 position::apply_exit(&txn, &intent_id, exit).await?;
@@ -546,14 +542,19 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             if revert_lot {
                 position::revert_lot_to_open(&txn, &intent_id).await?;
             }
-            let (executed_nodes, pending_node) =
-                partial_exit_nodes_after_exit_settlement(&intent, revert_lot, exit_filled);
+            let mut scale_out_state = intent.scale_out_state.clone();
+            if revert_lot {
+                scale_out_state.pending_target = None;
+            } else if let Some(filled) = exit_fill_shares
+                && !write.exit_fully
+            {
+                scale_out_state.record(filled);
+            }
             let mut intent_active = intent.into_active_model();
             if let Some(exit_state) = write.exit_state {
                 intent_active.exit_state = ActiveValue::Set(exit_state);
             }
-            intent_active.executed_partial_exit_node_ids = ActiveValue::Set(executed_nodes);
-            intent_active.pending_partial_exit_node_id = ActiveValue::Set(pending_node);
+            intent_active.scale_out_state = ActiveValue::Set(scale_out_state);
             intent_active
                 .update(&txn)
                 .await
@@ -677,30 +678,4 @@ async fn advance_recommendation_executed(
         active.update(db).await.map_err(StorageError::from)?;
     }
     Ok(())
-}
-
-/// After exit settlement or reconciliation, compute the next partial-node ledger.
-fn partial_exit_nodes_after_exit_settlement(
-    intent: &quant_order_intent::Model,
-    revert: bool,
-    filled: bool,
-) -> (ExecutedPartialExitNodes, Option<String>) {
-    if revert {
-        return (intent.executed_partial_exit_node_ids.clone(), None);
-    }
-    if !filled {
-        return (
-            intent.executed_partial_exit_node_ids.clone(),
-            intent.pending_partial_exit_node_id.clone(),
-        );
-    }
-    let Some(pending) = intent.pending_partial_exit_node_id.clone() else {
-        return (
-            intent.executed_partial_exit_node_ids.clone(),
-            intent.pending_partial_exit_node_id.clone(),
-        );
-    };
-    let mut executed = intent.executed_partial_exit_node_ids.clone();
-    executed.record(&pending);
-    (executed, None)
 }

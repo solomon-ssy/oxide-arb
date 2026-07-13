@@ -40,6 +40,7 @@
 | `FactorDefinitionId` | UUID v7 | 新增，因子定义 |
 | `ModelSpecId` | UUID v7 | 新增，模型定义 |
 | `ModelVersionId` | UUID v7 | 新增，模型版本 |
+| `TradePolicyArtifactId` | content-addressed UUID | 治理型入场/退出策略 artifact，由内容哈希确定 |
 | `ModelRunId` | UUID v7 | 新增，训练/回测/推理运行 |
 | `SignalCandidateId` | UUID v7 | 新增，候选信号 |
 | `RecommendationId` | UUID v7 | 新增，报告中的单条建议 |
@@ -679,15 +680,24 @@ crates/quant-pivot-models/src/domain/
 - `RecommendationStatus`: `Published`, `Revoked`, `Expired`, `IntentCreated`, `Executed`, `Attributed`
 - `OutcomeSide`（recommendation/candidate 结果方向）: `Yes`, `No`
 - `Side`（执行层买卖动作，`enums::common`）: `Buy`, `Sell`
-- `EntryTriggerKind`: `Immediate`, `LimitPrice`, `Breakout`, `Pullback`, `TimeWindow`, `DataEvent`
-- `ExitTriggerKind`: `TakeProfit`, `StopLoss`, `TimeExit`, `TrailingStop`, `SignalInvalidation`, `Manual`
-- `OrderIntentStatus`: `Draft`, `PendingApproval`, `Approved`, `Rejected`, `Expired`, `Submitted`, `Filled`, `Cancelled`, `Failed`
+- `PriceComparison`: `AtOrAbove`, `AtOrBelow`
+- `FillRequirement`: `AllOrNothing`, `AllowPartial`
+- `EntryTriggerState`: `NotRequired`, `Waiting`, `Confirming`, `Ready`, `Expired`
+- `OrderType`: `Fok`, `Fak`, `Gtc`, `Gtd`
+- `OrderIntentStatus`: `Draft`, `PendingApproval`, `Approved`, `ApprovedByPolicy`, `AdmissionPending`, `AdmissionRejected`, `Submitted`, `PartiallyFilled`, `Filled`, `Rejected`, `Cancelled`, `Failed`, `Expired`, `Invalidated`
+- `TradePolicyStatus`: `Draft`, `Validated`, `Published`, `Retired`
 - `ModelPublicationStatus`: `Draft`, `Candidate`, `Shadow`, `Published`, `Retired`, `Rejected`
 - `DataQualityStatus`: `Fresh`, `Acceptable`, `Degraded`, `Stale`, `Insufficient`
+
+`EntryTrigger`、`EntryOrderPolicy`、`ScaleOutTarget`、`TrailingStopPolicy`、
+`ThesisInvalidationPolicy` 是带字段的正交 tagged union，不再使用把触发条件、订单类型和
+退出原因混在一起的 `EntryTriggerKind` / `ExitTriggerKind`。权威闭环见
+[`phase-11/11.7-labeling-entry-exit-closed-loop.md`](phase-11/11.7-labeling-entry-exit-closed-loop.md)。
 
 删除枚举：
 
 - `ExecutionMode`
+- `EntryTriggerKind`、`ExitTriggerKind`
 - Endgame-only calibration enums as active model enums: `PriceZone`, `DurationBucket` 只可作为 archived evidence 类型保留，不进入新主路径。
 -旧 `TradeState`、`TradeBusinessOutcome`、`TradeReconcileResolution`。
 
@@ -699,7 +709,7 @@ crates/quant-pivot-models/src/domain/
 2. 旧表进入 drop plan；如果需要保留历史，先导出到 archive schema 或对象存储。
 3. 不创建兼容 view。
 4. 不创建旧表到新表的 trigger。
-5. runtime-config v2 rows 只允许一次性 migration 到 v3；migration 后 v2 parser 删除。
+5. runtime-config 当前权威版本为 v11；旧版本直接拒绝并重建，不保留 parser、alias 或双读路径。
 6. 所有旧 API 路径删除或 410，不转发到新 API。
 7. 所有新表必须有 schema catalog、entity、domain DTO、repository、migration test。
 

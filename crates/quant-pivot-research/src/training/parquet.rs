@@ -386,6 +386,8 @@ mod tests {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: TrainingDatasetId::from_v7(),
             model_spec_id,
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             window_start,
             window_end,
@@ -466,8 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn dataset_artifact_version_is_two() {
-        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 2);
+    fn dataset_artifact_version_is_three() {
+        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 3);
     }
 
     #[tokio::test(flavor = "multi_thread")]

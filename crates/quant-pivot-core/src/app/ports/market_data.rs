@@ -29,6 +29,10 @@ impl CoreMarketData {
 
 #[async_trait]
 impl MarketDataPort for CoreMarketData {
+    fn book_for_token(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
+        self.book_store.load(token_id)
+    }
+
     fn book(
         &self,
         yes_token: &TokenId,

@@ -106,7 +106,6 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::OrderIntent, Operation::Approve),
         (ResourceType::OrderIntent, Operation::Reject),
         (ResourceType::OrderIntent, Operation::Cancel),
-        (ResourceType::OrderIntent, Operation::Submit),
         (ResourceType::Reconciliation, Operation::Resolve),
         (ResourceType::FactorDefinition, Operation::Publish),
         (ResourceType::FactorDefinition, Operation::Retire),

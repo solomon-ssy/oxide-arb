@@ -7,13 +7,13 @@ use quant_pivot_models::{
     domain::{
         AccountReadPort, BacktestPort, CalibrationArtifactFitPort, CatalogStatusPort, CoreEvent,
         CoreEventPublisher, CpcvBacktestPort, DataQualityPort, ExecutionReadPort,
-        ExecutionRecoveryPort, ExecutionSubmitPort, FactorGovernancePort, FeatureIntegrityPort,
-        KillSwitchPort, MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
+        ExecutionRecoveryPort, FactorGovernancePort, FeatureIntegrityPort, KillSwitchPort,
+        MarketDataPort, MarketLinkageGovernancePort, MaterializationRunEvent,
         MaterializationRunKind, MaterializationRunStatus, MetricsScrapePort,
         ModelCalibrationFitPort, ModelGovernancePort, ModelSpecPort, ModelTrainingPort,
         OrderIntentPort, QuantReportPort, ReadinessPort, ReconciliationPort, ResearchCatalogPort,
         ResearchJobPort, RuntimeConfigPort, RuntimeControlPort, StructuralMonitorPort,
-        TrainingDatasetPort,
+        TradePolicyPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -89,6 +89,8 @@ pub struct AppState {
     pub calibration_artifacts: Arc<dyn CalibrationArtifactFitPort>,
     /// Model-score `ProbabilityCalibrator` fit enqueue (Phase 11.3 §4).
     pub model_calibration_fit: Arc<dyn ModelCalibrationFitPort>,
+    /// Governed entry/exit policy artifact fit, catalog, and publication surface.
+    pub trade_policies: Arc<dyn TradePolicyPort>,
     /// Market → external-subject linkage ledger (Phase 11.2.2).
     pub market_linkages: Arc<dyn MarketLinkageRepository>,
     /// Domain-source ingest cursor health (Phase 11.2.2).
@@ -107,8 +109,6 @@ pub struct AppState {
     pub order_intents: Arc<dyn OrderIntentPort>,
     /// Execution order, position, and attribution read surface (Phase 05.7 API).
     pub execution_read: Arc<dyn ExecutionReadPort>,
-    /// Entry-execution submission bridge (Phase 05.4 API): claim → admit → submit.
-    pub execution_submit: Arc<dyn ExecutionSubmitPort>,
     /// Operator reconciliation resolve (Phase 05.5 closeout).
     pub reconciliation: Arc<dyn ReconciliationPort>,
     /// Execution recovery playbook detail (Phase 05.5 closeout).

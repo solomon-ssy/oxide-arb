@@ -8,9 +8,9 @@ use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use quant_pivot_api::{clob::ClobClient, infra::retry::RetryPolicy, keystore::OrderSigner};
 use quant_pivot_models::{
-    domain::order::{OrderAmount, OrderRequest},
+    domain::order::OrderRequest,
     enums::common::{OrderType, Side},
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    types::{MarketId, Price, Shares, TokenId, Usd, execution_payload::OrderAmount},
 };
 use rust_decimal_macros::dec;
 use std::str::FromStr as _;
@@ -143,13 +143,13 @@ pub fn test_order_request(order_type: OrderType) -> OrderRequest {
         token_id: test_token_id(),
         side: Side::Buy,
         amount: match order_type {
-            OrderType::Fok => OrderAmount::Usd(Usd::new(dec!(100))),
+            OrderType::Fok | OrderType::Fak => OrderAmount::Usd(Usd::new(dec!(100))),
             OrderType::Gtc | OrderType::Gtd { expiration: _ } => {
                 OrderAmount::Shares(Shares::new(dec!(100)))
             }
         },
         price: Price::new(dec!(0.92)),
         order_type,
-        neg_risk: false,
+        post_only: matches!(order_type, OrderType::Gtc | OrderType::Gtd { .. }),
     }
 }

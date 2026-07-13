@@ -21,22 +21,23 @@ use quant_pivot_models::{
         common::MarketCategory,
         factor::{FactorFamily, FactorValueState, NormalizationSource},
         quant::{
-            AccountSource, BindingConstraint, EntryTriggerKind, ExitSettlementMode,
-            FactorDirection, FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason,
-            OutcomeSide, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
-            RedeemPolicy, ReportKind, ReportTriggerKind, ResearchJobKind, ResearchJobStatus,
-            SizingBetStructure, SizingModelKind,
+            AccountSource, BindingConstraint, ExitSettlementMode, FactorDirection,
+            FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason, OutcomeSide,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
+            ReportKind, ReportTriggerKind, ResearchJobKind, ResearchJobStatus, SizingBetStructure,
+            SizingModelKind,
         },
     },
     types::{
         AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
-        DataQualitySummary, EligibilitySummary, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId,
-        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId,
-        Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary,
-        ResearchJobId, RiskEnvelope, RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan,
-        TokenId, Usd,
+        DataQualitySummary, EligibilitySummary, EntryOrderPolicy, EntryPlan, EntryTrigger,
+        EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
+        FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext, MarketId,
+        MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, ResearchJobId,
+        RiskEnvelope, RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan,
+        ThesisInvalidationPolicy, TokenId, Usd,
     },
 };
 use std::str::FromStr;
@@ -238,9 +239,12 @@ pub fn recommendation(
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger_kind: EntryTriggerKind::LimitPrice,
-        trigger_price: Some(Price::new(dec!(0.42))),
-        limit_price: Some(Price::new(dec!(0.43))),
+        trade_policy: None,
+        trigger: EntryTrigger::Immediate,
+        order_policy: EntryOrderPolicy::Passive {
+            limit_price: Price::new(dec!(0.43)),
+            post_only: true,
+        },
         max_slippage_bps: Bps::new(dec!(50)),
         valid_from: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
         valid_until: Utc.timestamp_opt(1_700_003_600, 0).unwrap(),
@@ -280,15 +284,20 @@ fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
 
 fn exit_plan() -> ExitPlan {
     ExitPlan {
+        trade_policy: None,
         take_profit_price: Some(Price::new(dec!(0.7))),
         take_profit_pct: Some(dec!(0.6)),
         stop_loss_price: Some(Price::new(dec!(0.3))),
         stop_loss_pct: Some(dec!(0.3)),
         time_exit_at: None,
         max_hold_secs: Some(86_400),
-        partial_exit_nodes: vec![],
+        scale_out_targets: vec![],
         trailing_stop: None,
-        signal_invalidation_rules: Vec::new(),
+        thesis_invalidation: ThesisInvalidationPolicy {
+            min_score_retention: dec!(0.6),
+            min_expected_return_bps: Bps::ZERO,
+            require_execution_eligibility: true,
+        },
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
@@ -349,6 +358,7 @@ const fn market_context() -> MarketContext {
         time_to_resolution_secs: Some(86_400),
         market_status: MarketStatus::Active,
         neg_risk: false,
+        tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
         fee_rate: None,
     }
 }

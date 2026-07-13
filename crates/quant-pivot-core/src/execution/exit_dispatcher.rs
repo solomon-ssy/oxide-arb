@@ -2,7 +2,7 @@
 //! transaction (Phase 05.6).
 //!
 //! Mirrors the entry dispatcher's write-ahead / venue-call / settle shape but
-//! for the exit side: it does **not** run the 20-check admission engine (an exit
+//! for the exit side: it does **not** run the 24-check admission engine (an exit
 //! reduces existing exposure; its lightweight gates — kill-switch `allows_auto_exit`,
 //! a readable mark — are enforced in [`decide_exit`](super::decide_exit)). The
 //! per-intent lot's capital is already `Spent` from entry; a full exit completes
@@ -20,8 +20,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation,
-        OpportunisticExitAdvance, PositionExit, PositionInfo,
+        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, PositionExit,
+        PositionInfo,
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
@@ -30,8 +30,8 @@ use quant_pivot_models::{
         quant::ExecutionOrderState,
     },
     types::{
-        ExecutionOrderId, OrderIntentId, Price, RecommendationId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, Shares, Usd,
+        ExecutionOrderId, OrderAmount, OrderIntentId, PendingScaleOut, Price, RecommendationId,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Usd,
     },
 };
 use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
@@ -57,13 +57,8 @@ pub struct ExitSubmitRequest {
     pub reason: ExitReason,
     /// The concrete sell order (side / type / limit / shares).
     pub order: ExitOrderSpec,
-    /// When `reason` is [`ExitReason::PartialExit`], the frozen node id being reduced.
-    pub partial_exit_node_id: Option<String>,
-    /// When `reason` is [`ExitReason::Opportunistic`], the frozen entry-filled
-    /// denominator to persist so cumulative-fraction tracking stays stable.
-    pub opportunistic_denominator: Option<Shares>,
-    /// Whether the market is a negative-risk market (venue signing context).
-    pub neg_risk: bool,
+    /// Stable deterministic scale-out target id, when applicable.
+    pub pending_scale_out: Option<PendingScaleOut>,
 }
 
 /// Collaborators the exit dispatcher needs.
@@ -95,9 +90,7 @@ impl CoreExitDispatcher {
             lot,
             reason,
             order,
-            partial_exit_node_id,
-            opportunistic_denominator,
-            neg_risk,
+            pending_scale_out,
         } = request;
 
         // 1. Write-ahead the Exit order (Submitted) + lot Open->Closing + exit FSM.
@@ -105,7 +98,7 @@ impl CoreExitDispatcher {
         let execution_order = self
             .deps
             .submission
-            .create_exit_order_and_mark_closing(new_order, reason, partial_exit_node_id)
+            .create_exit_order_and_mark_closing(new_order, reason, pending_scale_out)
             .await?;
         let recommendation_id = self
             .recommendation_id_for_intent(&lot.order_intent_id)
@@ -123,9 +116,9 @@ impl CoreExitDispatcher {
             token_id: lot.token_id.clone(),
             side: Side::Sell,
             price: order.limit_price,
-            shares: order.shares,
+            amount: OrderAmount::Shares(order.shares),
             order_type: order.order_type,
-            neg_risk,
+            post_only: false,
             category: lot.category,
         };
         let result = self
@@ -143,13 +136,8 @@ impl CoreExitDispatcher {
             .await;
 
         // 4. Build the atomic ledger write + the confirmed realized PnL (if any).
-        let (write, realized_pnl) = build_exit_ledger_write(
-            &result,
-            &lot,
-            reason,
-            &execution_order,
-            opportunistic_denominator,
-        );
+        let (write, realized_pnl) =
+            build_exit_ledger_write(&result, &lot, reason, &execution_order);
 
         // 5. Feed the daily realized-loss dimension with the confirmed PnL.
         if let Some(pnl) = realized_pnl {
@@ -228,7 +216,6 @@ fn build_exit_ledger_write(
     lot: &PositionInfo,
     reason: ExitReason,
     execution_order: &ExecutionOrderInfo,
-    opportunistic_denominator: Option<Shares>,
 ) -> (ExitLedgerWrite, Option<Usd>) {
     let outcome = result.outcome;
     let venue_status = outcome.venue_order_status();
@@ -241,8 +228,6 @@ fn build_exit_ledger_write(
     let realized_pnl_usd = proceeds_usd - cost_basis;
     let fully_exited = filled >= lot.shares;
 
-    let opportunistic_advance = opportunistic_denominator
-        .map(|denominator_shares| OpportunisticExitAdvance { denominator_shares });
     let position_exit = |state: ExitState| ExitLedgerWrite {
         order_state: outcome_order_state(outcome),
         venue_order_id: result.venue_order_id.clone(),
@@ -263,7 +248,6 @@ fn build_exit_ledger_write(
         fully_exited,
         revert_to_open: false,
         reconciliation: Some(exit_reconciliation_row(result, execution_order, outcome)),
-        opportunistic_advance: opportunistic_advance.clone(),
     };
 
     match outcome {
@@ -324,7 +308,6 @@ fn resting_open_exit_write(result: &VenueSubmitResult, reason: ExitReason) -> Ex
         fully_exited: false,
         revert_to_open: false,
         reconciliation: None,
-        opportunistic_advance: None,
     }
 }
 
@@ -352,7 +335,6 @@ fn ambiguous_exit_write(
             execution_order,
             VenueOutcome::Ambiguous,
         )),
-        opportunistic_advance: None,
     }
 }
 
@@ -378,7 +360,6 @@ fn failed_exit_write(
         fully_exited: false,
         revert_to_open: true,
         reconciliation: Some(exit_reconciliation_row(result, execution_order, outcome)),
-        opportunistic_advance: None,
     }
 }
 

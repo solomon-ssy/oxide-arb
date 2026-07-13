@@ -92,14 +92,14 @@ use quant_pivot_repository::{
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
         PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
         PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
-        PgShadowComparisonRepository,
+        PgShadowComparisonRepository, PgTradePolicyRepository,
     },
     traits::{
         BasisAlertRepository, CalibrationArtifactRepository, EquitySnapshotRepository,
         EventRepository, FactorRepository, FeatureParityRepository, MarketLinkageRepository,
         MarketRepository, MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
         QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
-        ReservedCapitalRepository, RuntimeConfigVersionRepository,
+        ReservedCapitalRepository, RuntimeConfigVersionRepository, TradePolicyRepository,
     },
 };
 use quant_pivot_research::{
@@ -941,6 +941,8 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         runtime_config_repo,
         artifact_store,
         calibration_loader,
+        trade_policy_repo: Arc::new(PgTradePolicyRepository::new(db.clone()))
+            as Arc<dyn TradePolicyRepository>,
         market_selector: Arc::new(ConfiguredMarketSelector::new()),
         market_selection_repo: Arc::new(PgMarketSelectionRepository::new(db.clone())),
         candidate_provider: Arc::new(MarketCandidateProvider::new(
@@ -1315,6 +1317,8 @@ async fn publish_weighted_model(
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
             factor_schema_hash: factor_schema_hash.clone(),
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
         },
         training_dataset_hash: factor_schema_hash.clone(),
         training_input_hash: factor_schema_hash,
@@ -1362,6 +1366,8 @@ async fn publish_weighted_model(
             version: 1,
             artifact_hash,
             training_dataset_id: None,
+            trade_policy_artifact_id: None,
+            trade_policy_hash: None,
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),

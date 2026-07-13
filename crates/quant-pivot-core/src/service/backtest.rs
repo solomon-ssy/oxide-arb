@@ -481,6 +481,8 @@ impl BacktestService {
                 version: next,
                 artifact_hash,
                 training_dataset_id: Some(dataset.training_dataset_id.clone()),
+                trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
+                trade_policy_hash: calibrated.header().trade_policy_hash.clone(),
                 publish_path_set_id: None,
                 metrics_json: serde_json::json!({
                     "calibrated_from": version.model_version_id.to_string(),

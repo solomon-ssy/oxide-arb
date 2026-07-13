@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use quant_pivot_api::clob::ClobClient;
 use quant_pivot_error::{
     QuantError, QuantResult, execution::ExecutionError, storage::StorageError,
 };
@@ -34,7 +35,8 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use super::{
-    AdmissionExposureState, AdmissionInput, AdmissionModelState, AdmissionSeams, StateVersion,
+    AdmissionExposureState, AdmissionInput, AdmissionModelState, AdmissionSeams,
+    AdmissionVenueMetadata, StateVersion,
 };
 use crate::{
     execution::{breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle},
@@ -63,6 +65,7 @@ pub struct AdmissionInputBuilderDeps {
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     pub account_factory: Arc<AccountProviderFactory>,
     pub book_store: Arc<BookStore>,
+    pub clob: Arc<ClobClient>,
     pub data_quality: Arc<dyn DataQualityPort>,
     pub config: Arc<RuntimeConfigStore>,
     pub runtime_mode: RuntimeModeHandle,
@@ -157,6 +160,7 @@ impl AdmissionInputBuilder {
             data_quality,
             max_stale_book_ratio_bps,
             exposure,
+            venue_metadata: fetched.venue_metadata,
             seams: AdmissionSeams {
                 venue_health: deps.venue_health.current(),
                 credentials_ready: deps.account_factory.credentials_ready(),
@@ -181,6 +185,8 @@ impl AdmissionInputBuilder {
         let order_intent_id = intent.order_intent_id.clone();
         let model_version_id = intent.model_version_id.clone();
         let account_factory = Arc::clone(&deps.account_factory);
+        let clob = Arc::clone(&deps.clob);
+        let token_id = intent.entry_order_json.token_id.clone();
 
         let (
             report_result,
@@ -192,6 +198,7 @@ impl AdmissionInputBuilder {
             account_result,
             market_result,
             open_intent_result,
+            venue_metadata_result,
         ) = tokio::join!(
             deps.reports.find_by_id(&report_id),
             deps.model_registry
@@ -208,14 +215,15 @@ impl AdmissionInputBuilder {
             },
             deps.markets.find_by_id(&market_id),
             deps.intents.count_open(),
+            async move { clob.order_metadata(&token_id).await },
         );
 
         let report = report_result?
             .ok_or_else(|| not_found("recommendation_report", report_id.to_string()))?;
-        let manual_block = market_result?
-            .ok_or_else(|| not_found("market", recommendation.market_id.to_string()))?
-            .status
-            == MarketStatus::ManuallyBlocked;
+        let market = market_result?
+            .ok_or_else(|| not_found("market", recommendation.market_id.to_string()))?;
+        let manual_block = market.status == MarketStatus::ManuallyBlocked;
+        let venue_metadata = venue_metadata_result?;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
 
@@ -228,6 +236,12 @@ impl AdmissionInputBuilder {
             manual_block,
             active_version,
             open_intent_count: open_intent_result?,
+            venue_metadata: AdmissionVenueMetadata {
+                registry_tick_size: market.tick_size,
+                registry_neg_risk: market.neg_risk,
+                venue_tick_size: venue_metadata.tick_size,
+                venue_neg_risk: venue_metadata.neg_risk,
+            },
         })
     }
 
@@ -271,6 +285,7 @@ struct ParallelAdmissionFetch {
     manual_block: bool,
     active_version: RuntimeConfigVersionInfo,
     open_intent_count: u64,
+    venue_metadata: AdmissionVenueMetadata,
 }
 
 fn not_found(entity: &'static str, id: String) -> QuantError {

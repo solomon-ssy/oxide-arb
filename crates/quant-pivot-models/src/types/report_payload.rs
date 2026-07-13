@@ -29,8 +29,8 @@ use crate::{
         common::MarketCategory,
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{
-            BindingConstraint, EmptyReportReason, EntryTriggerKind, ExitSettlementMode,
-            ExitTriggerKind, FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy,
+            BindingConstraint, EmptyReportReason, ExitSettlementMode, FactorDirection,
+            FillRequirement, IneligibilityReason, PriceComparison, QuantRuntimeMode, RedeemPolicy,
             SizingBetStructure, SizingModelKind,
         },
     },
@@ -39,7 +39,8 @@ use crate::{
     types::{
         BookSnapshotRef, Bps, ContentHash, EventId, FactorDefinitionId, FeatureVectorId,
         MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
-        ReportDataQualitySnapshotId, RuntimeConfigVersionId, Shares, SignalCandidateId, Usd,
+        ReportDataQualitySnapshotId, RuntimeConfigVersionId, Shares, SignalCandidateId,
+        TradePolicyArtifactId, TradePolicyCohortKey, Usd,
     },
 };
 
@@ -48,12 +49,12 @@ use crate::{
 /// When and how a recommendation becomes executable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct EntryPlan {
-    /// How the entry is triggered.
-    pub trigger_kind: EntryTriggerKind,
-    /// Trigger price for breakout / pullback / limit triggers.
-    pub trigger_price: Option<Price>,
-    /// Hard limit price for the entry order.
-    pub limit_price: Option<Price>,
+    /// Published artifact/cohort that produced this executable plan.
+    pub trade_policy: Option<TradePolicyCohortProvenance>,
+    /// The condition that arms venue submission.
+    pub trigger: EntryTrigger,
+    /// Venue execution policy, orthogonal to the trigger condition.
+    pub order_policy: EntryOrderPolicy,
     /// Maximum acceptable slippage from the reference price.
     pub max_slippage_bps: Bps,
     /// Earliest time the entry is valid.
@@ -68,6 +69,45 @@ pub struct EntryPlan {
     pub cancel_if_not_triggered: bool,
     /// Human explanation of the entry decision.
     pub entry_reason: String,
+}
+
+/// A typed, auditable entry condition. Time bounds live on [`EntryPlan`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryTrigger {
+    /// Submit as soon as the intent is approved and admission passes.
+    Immediate,
+    /// Submit only after a price condition remains continuously true.
+    PriceCondition {
+        comparison: PriceComparison,
+        threshold: Price,
+        confirmation_secs: u64,
+        max_observation_gap_ms: u64,
+    },
+}
+
+/// How an armed entry is submitted to the venue.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryOrderPolicy {
+    /// Rest a bounded, post-only limit order until the recommendation expires.
+    Passive { limit_price: Price, post_only: bool },
+    /// Cross the spread with a worst-price cap and explicit fill semantics.
+    Aggressive {
+        worst_price: Price,
+        fill_requirement: FillRequirement,
+    },
+}
+
+impl EntryOrderPolicy {
+    /// The hard maximum buy price admitted for this plan.
+    #[must_use]
+    pub const fn limit_price(&self) -> Price {
+        match self {
+            Self::Passive { limit_price, .. } => *limit_price,
+            Self::Aggressive { worst_price, .. } => *worst_price,
+        }
+    }
 }
 
 // ── Sizing plan (parent §9 "how much to buy") ────────────────────────────────
@@ -147,6 +187,8 @@ pub struct SizingPlan {
 /// When and how a recommendation should be exited.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct ExitPlan {
+    /// Published artifact/cohort frozen with the exit strategy.
+    pub trade_policy: Option<TradePolicyCohortProvenance>,
     /// Take-profit price target.
     pub take_profit_price: Option<Price>,
     /// Take-profit as a percentage move.
@@ -159,12 +201,12 @@ pub struct ExitPlan {
     pub time_exit_at: Option<DateTime<Utc>>,
     /// Maximum holding period in seconds.
     pub max_hold_secs: Option<u64>,
-    /// Scaled partial-exit nodes.
-    pub partial_exit_nodes: Vec<PartialExitNode>,
+    /// Monotone cumulative scale-out targets.
+    pub scale_out_targets: Vec<ScaleOutTarget>,
     /// Optional trailing-stop policy.
-    pub trailing_stop: Option<TrailingStop>,
-    /// Conditions that invalidate the thesis and force an exit.
-    pub signal_invalidation_rules: Vec<SignalInvalidationRule>,
+    pub trailing_stop: Option<TrailingStopPolicy>,
+    /// Frozen, machine-evaluable thesis invalidation policy.
+    pub thesis_invalidation: ThesisInvalidationPolicy,
     /// Whether the lot exits before resolution or holds through resolution.
     pub settlement_mode: ExitSettlementMode,
     /// Whether a resolved hold-to-resolution lot is redeemed automatically.
@@ -175,45 +217,51 @@ pub struct ExitPlan {
     pub exit_reason: String,
 }
 
-/// One scaled partial-exit node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PartialExitNode {
-    /// Stable node identifier.
-    pub node_id: String,
-    /// What triggers this partial exit.
-    pub trigger_kind: ExitTriggerKind,
-    /// Numeric trigger value (price / pct / seconds depending on `trigger_kind`).
-    pub trigger_value: Decimal,
-    /// Fraction of the remaining position to sell at this node.
-    pub sell_pct: Decimal,
+pub struct TradePolicyCohortProvenance {
+    pub artifact_id: TradePolicyArtifactId,
+    pub artifact_hash: ContentHash,
+    pub cohort_index: u32,
+    pub cohort_key: TradePolicyCohortKey,
+}
+
+/// One deterministic cumulative scale-out target.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleOutTarget {
+    /// Stable target identifier.
+    pub target_id: String,
+    /// Executable mark that activates this target.
+    pub trigger_price: Price,
+    /// Target fraction exited relative to frozen entry-filled shares.
+    pub target_cumulative_exit_pct: Decimal,
     /// Minimum acceptable sell price.
     pub min_price: Option<Price>,
     /// Earliest time this node is active.
     pub valid_after: Option<DateTime<Utc>>,
     /// Latest time this node is active.
     pub valid_until: Option<DateTime<Utc>>,
-    /// Human explanation for this node.
+    /// Human explanation for this target.
     pub reason: String,
 }
 
 /// A trailing-stop policy relative to the position's peak mark.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrailingStop {
+pub struct TrailingStopPolicy {
     /// Trailing distance in basis points below the peak mark.
     pub trail_bps: Bps,
     /// Price that must be reached before the trailing stop arms.
     pub activation_price: Option<Price>,
 }
 
-/// A condition that invalidates the recommendation thesis.
+/// Frozen conditions that invalidate the entry thesis.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignalInvalidationRule {
-    /// Stable rule identifier.
-    pub rule_id: String,
-    /// Human description of the invalidating condition.
-    pub description: String,
-    /// Optional numeric threshold associated with the rule.
-    pub threshold: Option<Decimal>,
+pub struct ThesisInvalidationPolicy {
+    /// Minimum fresh-score / entry-score ratio. Must be in `[0, 1]`.
+    pub min_score_retention: Decimal,
+    /// Minimum executable expected return required to keep holding.
+    pub min_expected_return_bps: Bps,
+    /// Whether fresh execution eligibility is required to keep holding.
+    pub require_execution_eligibility: bool,
 }
 
 // ── Risk envelope (parent §11 — admission inputs) ────────────────────────────
@@ -553,6 +601,7 @@ impl Sum for EligibilitySummary {
 }
 
 jsonb_active!(
+    EntryTrigger,
     EntryPlan,
     SizingPlan,
     ExitPlan,

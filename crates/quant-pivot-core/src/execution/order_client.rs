@@ -19,12 +19,12 @@ use chrono::{DateTime, Utc};
 use quant_pivot_api::{clob::ClobClient, fees::FeeCalculator};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
-    domain::{OrderAmount, OrderRequest, OrderResponse},
+    domain::{OrderRequest, OrderResponse},
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{ReconciliationResult, VenueOrderStatus},
     },
-    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
 };
 
 /// The concrete order an admitted intent submits to the venue (SDK-free).
@@ -36,11 +36,12 @@ pub struct VenueOrder {
     pub side: Side,
     /// Hard limit price.
     pub price: Price,
-    /// Share quantity to submit.
-    pub shares: Shares,
+    /// Tagged venue amount (USD spend for aggressive BUY; shares otherwise).
+    pub amount: OrderAmount,
     /// Time-in-force / order type (`Fok` | `Gtc` | `Gtd { expiration }`).
     pub order_type: OrderType,
-    pub neg_risk: bool,
+    /// Maker-only placement for passive limit orders.
+    pub post_only: bool,
     /// Market category for taker-fee derivation when the venue omits fee fields.
     pub category: MarketCategory,
 }
@@ -253,12 +254,10 @@ impl PolymarketOrderClient for ClobOrderClient {
             market_id: order.market_id.clone(),
             token_id: order.token_id.clone(),
             side: order.side,
-            // Entries always submit a fixed share quantity (the venue derives the
-            // USD notional); never a USD amount (the CLOB limit path requires shares).
-            amount: OrderAmount::Shares(order.shares),
+            amount: order.amount,
             price: order.price,
             order_type: order.order_type,
-            neg_risk: order.neg_risk,
+            post_only: order.post_only,
         };
         match self.clob.place_order(&request).await {
             Ok(response) => {

@@ -19,14 +19,15 @@ use crate::{
             VenueOrderStatus,
         },
         quant::{
-            ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
-            RecommendationAttributionOutcome,
+            ApprovalStatus, EntryTriggerState, ExecutionOrderState, OrderIntentStatus,
+            QuantRuntimeMode, RecommendationAttributionOutcome,
         },
     },
     types::{
-        AttributionDetail, ContentHash, EntryOrderSpec, EntryOutcome, ExecutionOrderId,
-        ExitOutcome, ExitPolicySpec, MarketId, ModelVersionId, OrderId, OrderIntentId, PositionId,
-        Price, RecommendationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        AttributionDetail, ContentHash, EntryOrderSpec, EntryOutcome, EntryTrigger,
+        ExecutionOrderId, ExitOutcome, ExitPolicySpec, MarketId, ModelVersionId, OrderId,
+        OrderIntentId, PositionId, Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState,
+        Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -54,10 +55,19 @@ pub struct OrderIntentView {
     pub policy_hash: Option<ContentHash>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
+    pub entry_trigger: EntryTrigger,
     pub entry_order: EntryOrderSpec,
     pub exit_policy: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+    pub entry_trigger_state: EntryTriggerState,
+    pub trigger_confirming_since: Option<DateTime<Utc>>,
+    pub trigger_last_observed_at: Option<DateTime<Utc>>,
+    pub trigger_ready_at: Option<DateTime<Utc>>,
+    /// Ephemeral live-book projection computed at read time; never persisted per tick.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_trigger_observation: Option<EntryTriggerObservationView>,
+    pub scale_out_state: ScaleOutState,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -80,14 +90,33 @@ impl From<OrderIntentInfo> for OrderIntentView {
             policy_hash: info.policy_hash,
             status_reason: info.status_reason,
             admission_trace_ref: info.admission_trace_ref,
+            entry_trigger: info.entry_trigger_json,
             entry_order: info.entry_order_json,
             exit_policy: info.exit_policy_json,
             risk_envelope_hash: info.risk_envelope_hash,
             expires_at: info.expires_at,
+            entry_trigger_state: info.entry_trigger_state,
+            trigger_confirming_since: info.trigger_confirming_since,
+            trigger_last_observed_at: info.trigger_last_observed_at,
+            trigger_ready_at: info.trigger_ready_at,
+            entry_trigger_observation: None,
+            scale_out_state: info.scale_out_state,
             created_at: info.created_at,
             updated_at: info.updated_at,
         }
     }
+}
+
+/// Read-time observability for a frozen entry trigger.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryTriggerObservationView {
+    pub current_price: Option<Price>,
+    pub book_observed_at: Option<DateTime<Utc>>,
+    pub book_age_ms: Option<u64>,
+    pub book_fresh: bool,
+    pub condition_satisfied: bool,
+    pub confirmation_remaining_secs: Option<u64>,
+    pub admission_blocker: Option<String>,
 }
 
 /// Outbound projection of an execution order (the result of a submission).
@@ -229,13 +258,6 @@ impl From<RecommendationAttributionInfo> for RecommendationAttributionView {
             created_at: info.created_at,
         }
     }
-}
-
-/// Inbound body for `POST /quant/intents/{id}/submit` (operator-triggered).
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct SubmitIntentRequest {
-    #[validate(length(min = 1, max = 512))]
-    pub reason: String,
 }
 
 /// Paginated filter for listing order intents.

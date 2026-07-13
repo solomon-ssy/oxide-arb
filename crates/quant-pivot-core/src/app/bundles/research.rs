@@ -35,8 +35,8 @@ use quant_pivot_repository::{
         MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
         ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
         PositionRepository, QuantFactReadRepository, RecommendationRepository,
-        RuntimeConfigVersionRepository, ShadowComparisonRepository, TradeTapeBlockCursorRepository,
-        TrainingDatasetRepository,
+        RuntimeConfigVersionRepository, ShadowComparisonRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
@@ -98,6 +98,8 @@ pub struct ResearchBundle {
     pub model_runner: Arc<ModelRunner>,
     /// Frozen training-dataset ledger persistence (3.5).
     pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Governed executable trade-policy catalog.
+    pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
     /// Final attribution rows available for supervised live samples (5.7).
     pub attribution_repo: Arc<dyn AttributionRepository>,
     /// Recommendation rows carrying frozen evidence refs for live attribution samples.
@@ -285,6 +287,7 @@ impl ResearchBundle {
             frozen_model_parity,
             model_runner,
             training_dataset_repo: offline.training_dataset,
+            trade_policy_repo: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
             attribution_repo: offline.attribution,
             recommendation_repo: offline.recommendation,
             backtest_report_repo: offline.backtest_report,
@@ -330,6 +333,7 @@ impl ResearchBundle {
                 fee_calculator: Arc::clone(&self.fee_calculator),
                 linkage_repo: Arc::clone(&self.market_linkage_repo),
                 model_registry: Arc::clone(&self.model_registry_repo),
+                trade_policy_repo: Arc::clone(&self.trade_policy_repo),
             },
             wire.config,
             wire.max_spine_samples,

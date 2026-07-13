@@ -3,7 +3,7 @@
 //! submission (05.4).
 //!
 //! Admission never mutates the report and never submits an order. It runs a
-//! fixed sequence of 23 hard checks over a frozen [`AdmissionInput`] (built once
+//! fixed sequence of 24 hard checks over a frozen [`AdmissionInput`] (built once
 //! by the [`AdmissionInputBuilder`], which owns *all* I/O) and produces an
 //! [`AdmissionDecision`] of allow / deny / defer plus a full per-check trace and
 //! replayable [`StateVersion`].
@@ -37,6 +37,7 @@ use quant_pivot_models::{
         RecommendationInfo, RecommendationReportInfo,
     },
     enums::{
+        common::TickSize,
         execution::{AdmissionCheckId, AdmissionOutcome, KillSwitchState},
         quant::QuantRuntimeMode,
     },
@@ -108,6 +109,15 @@ pub struct AdmissionExposureState {
     pub manual_block: bool,
 }
 
+/// Registry-versus-venue metadata frozen by the admission input builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionVenueMetadata {
+    pub registry_tick_size: TickSize,
+    pub registry_neg_risk: bool,
+    pub venue_tick_size: TickSize,
+    pub venue_neg_risk: bool,
+}
+
 /// Immutable, decision-time-frozen aggregate consumed by every admission check.
 ///
 /// Built once by [`AdmissionInputBuilder`]; the checks read it as pure
@@ -152,6 +162,9 @@ pub struct AdmissionInput {
     pub max_stale_book_ratio_bps: u64,
     /// Market / in-flight exposure blocking distilled at build time.
     pub exposure: AdmissionExposureState,
+    /// Venue metadata re-read through the official SDK and compared with the
+    /// frozen registry before order signing.
+    pub venue_metadata: AdmissionVenueMetadata,
     /// Deferred readiness seams (`#18`/`#19`/`#20`).
     pub seams: AdmissionSeams,
     /// Decision time.
@@ -166,7 +179,7 @@ impl AdmissionInput {
     /// Notional of the (possibly downscaled) frozen entry order.
     #[must_use]
     pub fn order_notional(&self) -> Usd {
-        self.intent.entry_order_json.shares * self.intent.entry_order_json.limit_price
+        self.intent.entry_order_json.notional()
     }
 }
 

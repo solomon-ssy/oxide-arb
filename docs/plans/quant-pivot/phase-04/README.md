@@ -1,5 +1,10 @@
 # Phase 04 — Report Plane 子phase索引
 
+> **Phase 11.7 覆盖说明**：本 Phase 历史章节中的 `EntryTriggerKind`、`PartialExitNode`、
+> `SignalInvalidationRule` 和 `ExitTriggerKind` 已被强类型入场/退出策略替换；新实现以
+> [`../phase-11/11.7-labeling-entry-exit-closed-loop.md`](../phase-11/11.7-labeling-entry-exit-closed-loop.md)
+> 为准。
+
 > 状态：生产级破坏式实施拆分（设计文档；本目录不含代码）
 >
 > 父文档（概念规格）：[`../04-topn-report-and-recommendation.md`](../04-topn-report-and-recommendation.md)、

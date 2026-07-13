@@ -1185,7 +1185,7 @@ mod tests {
             current: RuntimeConfigVersionInfo {
                 runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
                 config_hash: hash(),
-                schema_version: SchemaVersion::new(10),
+                schema_version: SchemaVersion::new(11),
                 config_json: serde_json::to_value(config).expect("runtime config json"),
                 source: RuntimeConfigVersionSource::Bootstrap,
                 created_by: "test".to_owned(),

@@ -3,18 +3,17 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    enums::quant::EntryTriggerKind,
     runtime_config::RuntimeConfig,
-    types::{Bps, EntryPlan, Usd},
+    types::{Bps, EntryOrderPolicy, EntryPlan, EntryTrigger, Usd},
 };
 use quant_pivot_research::model::SignalCandidate;
 use rust_decimal::Decimal;
 
 /// Derive the production [`EntryPlan`] for one recommendation.
 ///
-/// Default path is [`EntryTriggerKind::LimitPrice`] with trigger and limit at
-/// `entry_price_ref`. When `allow_market_orders` is enabled, the plan uses
-/// [`EntryTriggerKind::Immediate`] with `limit_price` as a slippage cap.
+/// Until a published trade-policy cohort is bound, the fail-safe projection is
+/// an immediately armed, bounded post-only order. No runtime flag selects a
+/// trading strategy.
 pub fn derive_entry_plan(
     candidate: &SignalCandidate,
     valid_from: DateTime<Utc>,
@@ -23,17 +22,6 @@ pub fn derive_entry_plan(
 ) -> QuantResult<EntryPlan> {
     let policy = &config.execution.entry_order_policy;
     let entry_price = candidate.entry_price_ref;
-    let (trigger_kind, trigger_price, limit_price, cancel_if_not_triggered) =
-        if policy.allow_market_orders {
-            (EntryTriggerKind::Immediate, None, Some(entry_price), false)
-        } else {
-            (
-                EntryTriggerKind::LimitPrice,
-                Some(entry_price),
-                Some(entry_price),
-                true,
-            )
-        };
 
     let min_depth_usd = policy
         .min_entry_book_depth_usd
@@ -47,15 +35,18 @@ pub fn derive_entry_plan(
         })?;
 
     Ok(EntryPlan {
-        trigger_kind,
-        trigger_price,
-        limit_price,
+        trade_policy: None,
+        trigger: EntryTrigger::Immediate,
+        order_policy: EntryOrderPolicy::Passive {
+            limit_price: entry_price,
+            post_only: true,
+        },
         max_slippage_bps: Bps::new(Decimal::from(policy.max_slippage_bps)),
         valid_from,
         valid_until,
         min_depth_usd: Usd::new(min_depth_usd),
         max_book_age_ms: config.data_quality.max_book_age_ms,
-        cancel_if_not_triggered,
+        cancel_if_not_triggered: true,
         entry_reason: candidate.model_explanation.headline.clone(),
     })
 }
@@ -64,9 +55,12 @@ pub fn derive_entry_plan(
 mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        enums::quant::{EntryTriggerKind, OutcomeSide},
+        enums::quant::OutcomeSide,
         runtime_config::RuntimeConfig,
-        types::{MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId},
+        types::{
+            EntryOrderPolicy, EntryTrigger, MarketId, ModelRunId, Price, Probability,
+            SignalCandidateId, TokenId,
+        },
     };
     use quant_pivot_research::model::{ModelExplanation, SignalCandidate};
     use rust_decimal_macros::dec;
@@ -118,9 +112,14 @@ mod tests {
         let plan = derive_entry_plan(&candidate(entry_price), as_of, valid_until, &config)
             .expect("valid entry plan");
 
-        assert_eq!(plan.trigger_kind, EntryTriggerKind::LimitPrice);
-        assert_eq!(plan.trigger_price, Some(entry_price));
-        assert_eq!(plan.limit_price, Some(entry_price));
+        assert_eq!(plan.trigger, EntryTrigger::Immediate);
+        assert_eq!(
+            plan.order_policy,
+            EntryOrderPolicy::Passive {
+                limit_price: entry_price,
+                post_only: true,
+            }
+        );
         assert!(plan.cancel_if_not_triggered);
         assert_eq!(plan.valid_from, as_of);
         assert_eq!(plan.valid_until, valid_until);

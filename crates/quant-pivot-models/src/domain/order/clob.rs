@@ -5,36 +5,10 @@ use crate::{
         common::{OrderType, Side},
         execution::VenueOrderStatus,
     },
-    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-/// Tagged order amount for CLOB submission (USD notional or share count).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "unit", content = "value")]
-pub enum OrderAmount {
-    Usd(Usd),
-    Shares(Shares),
-}
-
-impl OrderAmount {
-    #[must_use]
-    pub const fn as_usd(self) -> Option<Usd> {
-        match self {
-            Self::Usd(value) => Some(value),
-            Self::Shares(_) => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn as_shares(self) -> Option<Shares> {
-        match self {
-            Self::Shares(value) => Some(value),
-            Self::Usd(_) => None,
-        }
-    }
-}
 
 /// Outbound CLOB order submission request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +19,8 @@ pub struct OrderRequest {
     pub amount: OrderAmount,
     pub price: Price,
     pub order_type: OrderType,
-    pub neg_risk: bool,
+    /// Maker-only admission at the venue; valid only for GTC/GTD limit orders.
+    pub post_only: bool,
 }
 
 /// CLOB order submission response.

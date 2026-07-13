@@ -40,17 +40,17 @@ use quant_pivot_models::{
         BuildTrainingDatasetRequest, CalibrationArtifactFitPort, CalibrationArtifactInfo,
         CalibrationArtifactListQuery, CatalogState, CatalogStatusPort, ComparisonReportListQuery,
         CoreEventPublisher, CpcvBacktestPort, CreateModelSpecCommand, DataQualityPort,
-        DataQualitySnapshot, DecisionBoundary, DomainSourceCursorInfo, ExecutionOrderInfo,
-        ExecutionReadPort, ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort,
-        FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, FactorGovernancePort, FeatureContractEntryView,
-        FeatureContractView, FeatureIntegrityActionContext, FeatureIntegrityLatchView,
-        FeatureIntegrityPort, FeatureIntegritySummaryView, FeatureNullPolicyView,
-        FeatureParityEventListQuery, FeatureParityEventView, FeatureParityRunListQuery,
-        FeatureParityRunView, FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent,
-        GovernanceActor, HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort,
-        KillSwitchView, LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort,
-        MarketLinkageInfo, MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
+        DataQualitySnapshot, DecisionBoundary, DomainSourceCursorInfo, ExecutionReadPort,
+        ExecutionRecoveryPort, ExecutionRecoveryView, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        FactorGovernancePort, FeatureContractEntryView, FeatureContractView,
+        FeatureIntegrityActionContext, FeatureIntegrityLatchView, FeatureIntegrityPort,
+        FeatureIntegritySummaryView, FeatureNullPolicyView, FeatureParityEventListQuery,
+        FeatureParityEventView, FeatureParityRunListQuery, FeatureParityRunView,
+        FitBiasTableRequest, FitModelCalibratorRequest, GatePreviewIntent, GovernanceActor,
+        HealthReport, JobProgressSink, JobSubmitContext, KillSwitchPort, KillSwitchView,
+        LinkageResolveSummaryView, MarketDataPort, MarketLinkageGovernancePort, MarketLinkageInfo,
+        MarketLinkageListQuery, MetricsScrapePort, MissingReasonCountView,
         ModelCalibrationFitJobParams, ModelCalibrationFitOutcome, ModelCalibrationFitPort,
         ModelCalibrationFitPreflightView, ModelComparisonReportInfo, ModelGovernancePort,
         ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelSpecPort,
@@ -64,7 +64,8 @@ use quant_pivot_models::{
         ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
         RollbackModelCommand, RunBacktestRequest, RunCpcvBacktestRequest,
         RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
-        StructuralMonitorPort, SystemStatus, TradeTapeCoverageView, TradeTapeSourceHealthView,
+        StructuralMonitorPort, SystemStatus, TradePolicyArtifactInfo, TradePolicyFitPreflightView,
+        TradePolicyListQuery, TradePolicyPort, TradeTapeCoverageView, TradeTapeSourceHealthView,
         TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery,
         TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
         UpsertDomainSourceCursor, empty_catalog_page,
@@ -74,7 +75,7 @@ use quant_pivot_models::{
     types::{
         BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
         DomainInstrumentKey, DomainSourceId, FactorDefinitionId, MarketId, MarketLinkageId,
-        ModelComparisonReportId, ModelSpecId, ModelVersionId, OrderIntentId, ResearchJobId,
+        ModelComparisonReportId, ModelSpecId, ModelVersionId, ResearchJobId,
         RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
     },
 };
@@ -176,6 +177,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
             Some(Arc::clone(&input.catalog) as Arc<dyn CatalogStatusPort>),
         )),
         training_datasets: Arc::new(MockTrainingDatasetPort),
+        trade_policies: Arc::new(MockTradePolicyPort),
         model_training: Arc::new(MockModelTrainingPort),
         backtests: Arc::new(MockBacktestPort),
         cpcv_backtests: Arc::new(MockCpcvBacktestPort),
@@ -209,7 +211,6 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
             Arc::new(PgSettlementRedeemRepository::new(input.db.clone()))
                 as Arc<dyn SettlementRedeemRepository>,
         )) as Arc<dyn ExecutionReadPort>,
-        execution_submit: Arc::new(MockExecutionSubmit) as Arc<dyn ExecutionSubmitPort>,
         reconciliation: Arc::new(MockReconciliationPort) as Arc<dyn ReconciliationPort>,
         execution_recovery: Arc::new(MockExecutionRecoveryPort) as Arc<dyn ExecutionRecoveryPort>,
     }
@@ -645,10 +646,60 @@ pub struct MockRuntimeControl {
     mode: Mutex<QuantRuntimeMode>,
 }
 
-/// Execution-submit port stub for web integration tests. Submission requires
-/// real venue + admission wiring (covered by core integration tests), so the
-/// web harness only exercises routing / RBAC and fails closed here.
-pub struct MockExecutionSubmit;
+pub struct MockTradePolicyPort;
+
+#[async_trait]
+impl TradePolicyPort for MockTradePolicyPort {
+    async fn preflight(
+        &self,
+        _: &quant_pivot_models::domain::TradePolicyFitPreflightRequest,
+    ) -> QuantResult<TradePolicyFitPreflightView> {
+        Err(StorageError::NotFound {
+            entity: "trade_policy_artifact",
+            id: "mock".into(),
+        }
+        .into())
+    }
+
+    async fn fit(
+        &self,
+        _: quant_pivot_models::domain::FitTradePolicyRequest,
+    ) -> QuantResult<TradePolicyArtifactInfo> {
+        Err(StorageError::NotFound {
+            entity: "trade_policy_artifact",
+            id: "mock".into(),
+        }
+        .into())
+    }
+
+    async fn find(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+    ) -> QuantResult<Option<TradePolicyArtifactInfo>> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: TradePolicyListQuery,
+    ) -> QuantResult<Paginated<TradePolicyArtifactInfo>> {
+        Ok(Paginated::empty(query.page.page, query.page.size))
+    }
+
+    async fn transition(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        _: quant_pivot_models::enums::quant::TradePolicyStatus,
+        _: uuid::Uuid,
+        _: String,
+    ) -> QuantResult<TradePolicyArtifactInfo> {
+        Err(StorageError::NotFound {
+            entity: "trade_policy_artifact",
+            id: "mock".into(),
+        }
+        .into())
+    }
+}
 
 #[derive(Default)]
 pub struct MockReconciliationPort;
@@ -684,20 +735,6 @@ impl ExecutionRecoveryPort for MockExecutionRecoveryPort {
                 changed_at: chrono::Utc::now(),
             },
         })
-    }
-}
-
-#[async_trait]
-impl ExecutionSubmitPort for MockExecutionSubmit {
-    async fn submit_if_admitted(
-        &self,
-        intent_id: &OrderIntentId,
-    ) -> QuantResult<ExecutionOrderInfo> {
-        Err(ExecutionError::NotSubmittable {
-            intent_id: intent_id.to_string(),
-            state: "mock".to_owned(),
-        }
-        .into())
     }
 }
 
@@ -1154,6 +1191,16 @@ impl ResearchJobPort for MockResearchJobPort {
     ) -> QuantResult<ResearchJobView> {
         Err(QuantError::NotImplemented(
             "enqueue model calibrator fit".into(),
+        ))
+    }
+
+    async fn enqueue_trade_policy_fit(
+        &self,
+        _request: quant_pivot_models::domain::FitTradePolicyRequest,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented(
+            "enqueue trade policy fit".into(),
         ))
     }
 

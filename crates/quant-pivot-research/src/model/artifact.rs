@@ -26,7 +26,7 @@ use quant_pivot_models::{
     runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
     types::{
         ArtifactUri, CalibrationArtifactId, ContentHash, ModelArtifactId, ModelInputContract,
-        ModelInputRequiredness, ModelVersionId, Price, Probability,
+        ModelInputRequiredness, ModelVersionId, Price, Probability, TradePolicyArtifactId,
     },
 };
 use rust_decimal::Decimal;
@@ -117,6 +117,9 @@ pub struct ModelArtifactHeader {
     pub feature_schema_hash: ContentHash,
     /// Factor-schema hash the artifact was trained/built against.
     pub factor_schema_hash: ContentHash,
+    /// Trade policy frozen into triple-barrier/meta training, when applicable.
+    pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
+    pub trade_policy_hash: Option<ContentHash>,
 }
 
 /// A single factor weight in a weighted-factor artifact.
@@ -1455,7 +1458,7 @@ pub enum ModelArtifact {
 }
 
 /// Breaking stored-model wire version. No legacy parser is provided.
-pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub(crate) struct StoredModelArtifactRef<'a> {
@@ -1651,6 +1654,8 @@ mod tests {
                 model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: hash("aaa"),
                 factor_schema_hash: hash("bbb"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             training_dataset_hash: hash("ccc"),
             training_input_hash: hash("ddd"),
@@ -1749,6 +1754,8 @@ mod tests {
                 model_family: family,
                 feature_schema_hash: hash("aaa"),
                 factor_schema_hash: hash("bbb"),
+                trade_policy_artifact_id: None,
+                trade_policy_hash: None,
             },
             weights: vec![
                 FactorWeight {

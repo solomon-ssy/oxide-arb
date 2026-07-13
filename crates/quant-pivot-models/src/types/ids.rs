@@ -175,6 +175,23 @@ pub struct TrainingExampleId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelArtifactId(Arc<Uuid>);
 
+/// Governed, content-addressed entry/exit policy artifact identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TradePolicyArtifactId(Arc<Uuid>);
+
+impl TradePolicyArtifactId {
+    /// Deterministically project immutable policy content into its ledger id.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_0001);
+        Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
+    }
+}
+
+/// Append-only governance audit row for a trade-policy artifact.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TradePolicyGovernanceAuditId(Arc<Uuid>);
+
 /// Point-in-time backtest report identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BacktestReportId(Arc<Uuid>);
