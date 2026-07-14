@@ -5,15 +5,6 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
-const ARCHIVE_MANAGED_TABLES: [&str; 6] = [
-    "quant_crypto_price_report",
-    "quant_entry_condition_evaluation_event",
-    "quant_weather_observation_report",
-    "quant_weather_forecast_point",
-    "quant_domain_event",
-    "quant_domain_observation",
-];
-
 pub struct ClickHousePool {
     client: clickhouse::Client,
 }
@@ -64,29 +55,7 @@ impl ClickHousePool {
         for ddl in schema::all_ddl() {
             self.client.query(&ddl).execute().await?;
         }
-        for table in ARCHIVE_MANAGED_TABLES {
-            self.remove_legacy_ttl(table).await?;
-        }
         info!("ClickHouse schema ensured");
-        Ok(())
-    }
-
-    async fn remove_legacy_ttl(&self, table: &str) -> Result<(), StorageError> {
-        let create_query = self
-            .client
-            .query(
-                "SELECT create_table_query FROM system.tables \
-                 WHERE database = currentDatabase() AND name = ?",
-            )
-            .bind(table)
-            .fetch_optional::<String>()
-            .await?;
-        if create_query.is_some_and(|query| query.to_ascii_uppercase().contains(" TTL ")) {
-            self.client
-                .query(&format!("ALTER TABLE {table} REMOVE TTL"))
-                .execute()
-                .await?;
-        }
         Ok(())
     }
 }

@@ -98,14 +98,3 @@ CREATE TABLE IF NOT EXISTS quant_entry_condition_evaluation_event
 ENGINE = ReplacingMergeTree(evaluated_at)
 PARTITION BY toYYYYMM(evaluated_at)
 ORDER BY (condition_instance_id, evaluation_id);
-
-ALTER TABLE quant_entry_condition_evaluation_event
-    ADD COLUMN IF NOT EXISTS evaluation_id String FIRST;
-ALTER TABLE quant_entry_condition_evaluation_event
-    ADD COLUMN IF NOT EXISTS base_revision Int64 AFTER condition_instance_id;
-ALTER TABLE quant_entry_condition_evaluation_event
-    ADD COLUMN IF NOT EXISTS applied_revision Nullable(Int64) AFTER base_revision;
-ALTER TABLE quant_entry_condition_evaluation_event
-    ADD COLUMN IF NOT EXISTS trace_kind LowCardinality(String) AFTER applied_revision;
-ALTER TABLE quant_entry_condition_evaluation_event
-    ADD COLUMN IF NOT EXISTS continuity_hash String AFTER input_fingerprint;
