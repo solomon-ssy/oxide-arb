@@ -38,7 +38,11 @@ use crate::{
     factors::{
         computer::FactorComputer,
         identity::provisional_factor_definition_id,
-        names::{DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE},
+        names::{
+            DOMAIN_CRYPTO_BETA_REGIME, DOMAIN_CRYPTO_STRIKE_PRESSURE,
+            DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY, DOMAIN_WEATHER_ENSEMBLE_SPREAD,
+            DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK, DOMAIN_WEATHER_OBSERVED_HIGH_HEADROOM,
+        },
         value::{
             FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, RawFactor,
             RawFactorEligibility,
@@ -46,7 +50,7 @@ use crate::{
     },
     features::{
         FeatureCellState, FeatureName, FeatureValue, FeatureVector, feature_scalar,
-        names::{domain_crypto, market as market_names},
+        names::{domain_crypto, domain_weather, market as market_names},
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -73,6 +77,11 @@ impl DomainFactorRegistry {
         if domain.family_enabled(DomainFamily::Crypto) {
             for (spec, computer) in crypto_domain_factors() {
                 factors.push((DomainFamily::Crypto, spec, computer));
+            }
+        }
+        if domain.family_enabled(DomainFamily::Weather) {
+            for (spec, computer) in weather_domain_factors() {
+                factors.push((DomainFamily::Weather, spec, computer));
             }
         }
         Self { factors }
@@ -114,6 +123,54 @@ impl DomainFactorRegistry {
 #[must_use]
 pub fn crypto_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
     vec![strike_pressure_factor(), beta_regime_factor()]
+}
+
+/// The Weather vertical's four governed factors. Each consumes the typed
+/// feature with the same stable semantic name; category routing prevents
+/// cross-vertical normalization inputs.
+#[must_use]
+pub fn weather_domain_factors() -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
+    [
+        (
+            DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY,
+            domain_weather::ENSEMBLE_BIN_PROBABILITY,
+            FactorDirection::Positive,
+        ),
+        (
+            DOMAIN_WEATHER_ENSEMBLE_SPREAD,
+            domain_weather::ENSEMBLE_SPREAD,
+            FactorDirection::Negative,
+        ),
+        (
+            DOMAIN_WEATHER_OBSERVED_HIGH_HEADROOM,
+            domain_weather::OBSERVED_HIGH_HEADROOM,
+            FactorDirection::Neutral,
+        ),
+        (
+            DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK,
+            domain_weather::NOAA_RESOLUTION_BASIS_RISK,
+            FactorDirection::Negative,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, feature, direction)| {
+        let spec = FactorDefinitionSpec {
+            name,
+            family: FactorFamily::DomainWeather,
+            input_features: vec![feature.clone()],
+            output_kind: FactorOutputKind::NormalizedScore,
+            default_direction: direction,
+            normalization: FactorNormalization::Rank,
+            owner: "quant-pivot".to_owned(),
+            quality_gates: Vec::new(),
+        };
+        let computer = WeatherIdentityFactor {
+            spec: spec.clone(),
+            feature,
+        };
+        (spec, Arc::new(computer) as Arc<dyn FactorComputer>)
+    })
+    .collect()
 }
 
 /// Shared spec shape for a crypto domain factor.
@@ -173,6 +230,15 @@ fn routes_to_crypto(features: &FeatureVector) -> bool {
             DomainFamily::for_category(*category) == Some(DomainFamily::Crypto)
         }
         // No readable category ⇒ the vertical structurally cannot apply.
+        _ => false,
+    }
+}
+
+fn routes_to_weather(features: &FeatureVector) -> bool {
+    match features.value(&market_names::CATEGORY) {
+        Some(FeatureValue::Category(category)) => {
+            DomainFamily::for_category(*category) == Some(DomainFamily::Weather)
+        }
         _ => false,
     }
 }
@@ -237,7 +303,7 @@ fn not_applicable(spec: &FactorDefinitionSpec) -> RawFactor {
         spec,
         None,
         RawFactorEligibility::NotApplicable,
-        "market category maps to no crypto subject".to_owned(),
+        "market category maps to a different domain vertical".to_owned(),
         Vec::new(),
     )
 }
@@ -252,6 +318,41 @@ fn domain_missing(spec: &FactorDefinitionSpec) -> RawFactor {
         "domain inputs unavailable".to_owned(),
         Vec::new(),
     )
+}
+
+struct WeatherIdentityFactor {
+    spec: FactorDefinitionSpec,
+    feature: FeatureName,
+}
+
+impl FactorComputer for WeatherIdentityFactor {
+    fn definition_id(&self) -> FactorDefinitionId {
+        provisional_factor_definition_id(self.spec.name.as_str())
+    }
+
+    fn spec(&self) -> &FactorDefinitionSpec {
+        &self.spec
+    }
+
+    fn compute_raw(&self, features: &FeatureVector) -> QuantResult<RawFactor> {
+        if !routes_to_weather(features) {
+            return Ok(not_applicable(&self.spec));
+        }
+        match read_input(features, &self.feature) {
+            InputState::Present(value) => Ok(raw(
+                &self.spec,
+                Some(value),
+                RawFactorEligibility::Normalizable,
+                format!("{} = {value}", self.feature),
+                vec![FactorDriver {
+                    feature_name: self.feature.clone(),
+                    contribution: value,
+                }],
+            )),
+            InputState::NotApplicable => Ok(not_applicable(&self.spec)),
+            InputState::Missing => Ok(domain_missing(&self.spec)),
+        }
+    }
 }
 
 struct StrikePressureFactor {

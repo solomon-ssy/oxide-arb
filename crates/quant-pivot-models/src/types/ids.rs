@@ -79,10 +79,34 @@ impl DomainSourceId {
         Self::new("binance")
     }
 
-    /// The Chainlink on-chain aggregator source.
+    /// The Binance aggregate-trade stream used by live crypto events.
     #[must_use]
-    pub fn chainlink() -> Self {
-        Self::new("chainlink")
+    pub fn binance_agg_trade() -> Self {
+        Self::new("binance_agg_trade")
+    }
+
+    /// The Chainlink Data Streams signed-report source.
+    #[must_use]
+    pub fn chainlink_data_streams() -> Self {
+        Self::new("chainlink_data_streams")
+    }
+
+    /// NOAA `AviationWeather` METAR/SPECI/COR source.
+    #[must_use]
+    pub fn aviation_weather() -> Self {
+        Self::new("aviation_weather")
+    }
+
+    /// NOAA `GHCNh` historical station source.
+    #[must_use]
+    pub fn ghcnh() -> Self {
+        Self::new("ghcnh")
+    }
+
+    /// NOAA Global Ensemble Forecast System source.
+    #[must_use]
+    pub fn gefs() -> Self {
+        Self::new("gefs")
     }
 }
 
@@ -184,6 +208,40 @@ impl TradePolicyArtifactId {
     #[must_use]
     pub fn from_content_hash(content_hash: &ContentHash) -> Self {
         const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_0001);
+        Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
+    }
+}
+
+/// Immutable, content-addressed entry-condition artifact identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntryConditionArtifactId(Arc<Uuid>);
+
+impl EntryConditionArtifactId {
+    /// Deterministically project immutable condition content into its ledger id.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_0711);
+        Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
+    }
+}
+
+/// Durable recommendation-level entry-condition instance identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntryConditionInstanceId(Arc<Uuid>);
+
+/// Append-only entry-condition lifecycle audit identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntryConditionAuditId(Arc<Uuid>);
+
+/// One immutable domain-event envelope identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DomainEventId(Arc<Uuid>);
+
+impl DomainEventId {
+    /// Deterministic identity for an immutable event envelope.
+    #[must_use]
+    pub fn from_content_hash(content_hash: &ContentHash) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_d011);
         Self::new(Uuid::new_v5(&NAMESPACE, content_hash.as_str().as_bytes()))
     }
 }

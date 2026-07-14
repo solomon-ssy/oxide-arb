@@ -10,10 +10,10 @@ use quant_pivot_models::{
     },
     enums::{
         operation_log::OperationCategory,
-        quant::TradePolicyStatus,
+        quant::{ResearchJobKind, TradePolicyStatus},
         rbac::{Operation, ResourceType},
     },
-    types::TradePolicyArtifactId,
+    types::{ResearchJobId, TradePolicyArtifactId},
 };
 use uuid::Uuid;
 
@@ -37,15 +37,21 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::POST,
-            "/research/trade-policies/preflight",
+            "/research/trade-policy-fits/preflight",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             preflight,
         ),
         spec(
             Method::POST,
-            "/research/trade-policies/fit",
+            "/research/trade-policy-fits",
             Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
             fit,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policy-fits/{id}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            get_fit,
         ),
         spec(
             Method::GET,
@@ -78,6 +84,19 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             retire,
         ),
     ]
+}
+
+pub async fn get_fit(
+    state: web::Data<AppState>,
+    id: web::Path<ResearchJobId>,
+) -> Result<WebResponse<ResearchJobView>, WebError> {
+    let job = state
+        .research_jobs
+        .get(&id)
+        .await?
+        .filter(|job| job.kind == ResearchJobKind::TradePolicyFit)
+        .ok_or_else(|| WebError::NotFound(format!("trade-policy fit not found: {id}")))?;
+    Ok(WebResponse::ok(job))
 }
 
 pub async fn audits(

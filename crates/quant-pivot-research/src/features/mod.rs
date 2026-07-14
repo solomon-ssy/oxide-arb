@@ -30,11 +30,12 @@ pub use builder::{
 };
 pub use decision_capture::{
     CatalogDecisionRef, DecisionCaptureEvidence, DecisionSnapshotEvidence, MarketDecisionCapture,
-    RejectedMarketDraft, ResolvedMarketBundle, draft_data_quality_snapshot,
-    market_decision_capture_from_resolved,
+    MarketDecisionCaptureInput, RejectedMarketDraft, ResolvedMarketBundle,
+    draft_data_quality_snapshot, market_decision_capture_from_resolved,
 };
 pub use domain::{
-    CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceInputs,
+    CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceData,
+    DomainSliceDataRef, DomainSliceInputs, WeatherDomainFeatureBuilder,
 };
 pub use null_policy::{NullDecision, NullPolicyEngine};
 pub use resolved::{

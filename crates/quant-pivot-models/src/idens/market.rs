@@ -36,6 +36,7 @@ pub enum Market {
     NoTokenId,
     TickSize,
     NegRisk,
+    StartDate,
     EndDate,
     ResolvedAt,
     FeesEnabled,
@@ -75,6 +76,11 @@ pub fn table() -> TableCreateStatement {
                 .boolean()
                 .not_null()
                 .default(false),
+        )
+        .col(
+            ColumnDef::new(Market::StartDate)
+                .timestamp_with_time_zone()
+                .null(),
         )
         .col(
             ColumnDef::new(Market::EndDate)

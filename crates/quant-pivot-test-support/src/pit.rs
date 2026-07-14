@@ -138,6 +138,7 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             available_at: market.updated_at,
             status: market.status,
             neg_risk: market.neg_risk,
+            start_date: market.start_date,
             end_date: market.end_date,
             created_at: market.created_at,
         };

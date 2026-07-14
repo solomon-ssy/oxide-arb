@@ -177,16 +177,33 @@ wire_enum! {
 }
 
 pg_enum! {
-    type_name = "qp_entry_trigger_state",
-    /// Durable state of an approved, armed entry condition.
+    type_name = "qp_entry_condition_state",
+    /// Durable state of a recommendation-level entry condition instance.
     @derive(Default)
-    pub enum EntryTriggerState {
+    pub enum EntryConditionState {
         #[default]
         NotRequired => "not_required",
         Waiting => "waiting",
+        Unavailable => "unavailable",
         Confirming => "confirming",
-        Ready => "ready",
+        Qualified => "qualified",
+        Consumed => "consumed",
         Expired => "expired",
+        Invalidated => "invalidated",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_entry_condition_audit_action",
+    /// Append-only semantic transition recorded for a condition instance.
+    pub enum EntryConditionAuditAction {
+        Created => "created",
+        Evaluated => "evaluated",
+        LeaseTakenOver => "lease_taken_over",
+        Claimed => "claimed",
+        Reverted => "reverted",
+        Expired => "expired",
+        Invalidated => "invalidated",
     }
 }
 

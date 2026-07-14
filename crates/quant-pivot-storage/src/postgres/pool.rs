@@ -15,6 +15,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::config::PostgresConfig;
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
+    sqlx::postgres::PgListener,
 };
 use std::time::Duration;
 use tracing::{debug, error, info};
@@ -22,6 +23,19 @@ use tracing::{debug, error, info};
 pub struct PostgresPool {
     db: DatabaseConnection,
     config: PostgresConfig,
+}
+
+/// Dedicated `PostgreSQL` LISTEN connection with a storage-layer error facade.
+pub struct PostgresNotificationListener {
+    inner: PgListener,
+}
+
+impl PostgresNotificationListener {
+    pub async fn recv(&mut self) -> Result<(), StorageError> {
+        self.inner.recv().await.map(|_| ()).map_err(|_| {
+            StorageError::Connection("PostgreSQL notification receive failed".to_owned())
+        })
+    }
 }
 
 impl PostgresPool {
@@ -95,6 +109,25 @@ impl PostgresPool {
     /// Get a reference to the underlying `SeaORM` connection.
     pub const fn connection(&self) -> &DatabaseConnection {
         &self.db
+    }
+
+    /// Open a dedicated `PostgreSQL` notification connection. Listener failures
+    /// never expose the connection URL (which may contain credentials).
+    pub async fn listen(
+        &self,
+        channel: &'static str,
+    ) -> Result<PostgresNotificationListener, StorageError> {
+        let mut listener = PgListener::connect(&self.config.to_url())
+            .await
+            .map_err(|_| {
+                StorageError::Connection(
+                    "PostgreSQL notification listener connection failed".to_owned(),
+                )
+            })?;
+        listener.listen(channel).await.map_err(|_| {
+            StorageError::Connection("PostgreSQL notification listener setup failed".to_owned())
+        })?;
+        Ok(PostgresNotificationListener { inner: listener })
     }
 
     /// Verify the connection is alive.

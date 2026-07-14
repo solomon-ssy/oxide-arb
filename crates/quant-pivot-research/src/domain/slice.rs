@@ -21,20 +21,21 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionSource, DomainAvailability, DomainObservation, MarketLinkage,
-        MarketSubject, ResolutionOracle, ResolvedBinding,
+        CryptoPriceReport, DecisionBoundary, DecisionSource, DomainAvailability, DomainObservation,
+        MarketLinkage, MarketSubject, ResolvedBinding, ResolvedSourceBinding, WeatherForecastPoint,
+        WeatherObservationFact, WeatherObservationReportKind,
     },
     enums::{
         common::MarketCategory,
-        domain::{DomainFamily, DomainMetric},
+        domain::{DomainFamily, DomainMetric, LinkageSourceRole},
     },
     runtime_config::DomainConfig,
-    types::DomainInstrumentKey,
+    types::{DomainInstrumentKey, DomainSourceId, IcaoStation},
 };
 
 use crate::{
-    domain::DomainObservationWindow,
-    features::{DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef},
+    domain::{CryptoPriceReportWindow, DomainObservationWindow, WeatherFactWindow},
+    features::{DomainSliceData, DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef},
 };
 
 /// The trailing observation lookback (seconds) the crypto domain slice needs:
@@ -107,12 +108,19 @@ fn linkage_evidence(linkage: &MarketLinkage) -> EvidenceSourceRef {
 /// direction (never a false `Available`), acceptable for a continuously
 /// live source like Binance/Chainlink.
 #[must_use]
-pub fn domain_availability_at<S: BuildHasher>(
+#[derive(Clone, Copy)]
+pub struct DomainAvailabilityFacts<'a> {
+    pub observations: &'a HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
+    pub weather_observations: &'a HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+}
+
+#[must_use]
+pub fn domain_availability_at(
     category: MarketCategory,
     linkages: &[MarketLinkage],
     boundary: &DecisionBoundary,
     domain: &DomainConfig,
-    observations: &HashMap<DomainInstrumentKey, Vec<DomainObservation>, S>,
+    facts: DomainAvailabilityFacts<'_>,
 ) -> DomainAvailability {
     let Some(family) = DomainFamily::for_category(category) else {
         return DomainAvailability::NotMapped;
@@ -125,20 +133,46 @@ pub fn domain_availability_at<S: BuildHasher>(
         return DomainAvailability::Unresolved;
     };
 
-    let cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
-    let has_close_observation = observations
-        .get(&binding.instrument_key)
-        .is_some_and(|series| {
-            series.iter().any(|observation| {
-                observation.metric == DomainMetric::Close
-                    && observation.observed_at <= cutoff
-                    && observation.publish_time <= cutoff
-                    && observation
-                        .available_at
-                        .is_some_and(|available_at| available_at <= boundary.decision_at())
-            })
-        });
-    if has_close_observation {
+    let available = match &binding.subject {
+        MarketSubject::Crypto(_) => {
+            let Some(feature_binding) = source_binding(binding, LinkageSourceRole::Feature) else {
+                return DomainAvailability::Unresolved;
+            };
+            let cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
+            facts
+                .observations
+                .get(&feature_binding.instrument_key)
+                .is_some_and(|series| {
+                    series.iter().any(|observation| {
+                        observation.metric == DomainMetric::Close
+                            && observation.observed_at <= cutoff
+                            && observation.publish_time <= cutoff
+                            && observation
+                                .available_at
+                                .is_some_and(|available_at| available_at <= boundary.decision_at())
+                    })
+                })
+        }
+        MarketSubject::Weather(subject) => {
+            if !valid_weather_sources(binding, &subject.station) {
+                return DomainAvailability::Unresolved;
+            }
+            let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
+            facts
+                .weather_observations
+                .get(&subject.station)
+                .is_some_and(|series| {
+                    series.iter().any(|observation| {
+                        observation.local_date == subject.local_date
+                            && observation.report_kind
+                                != WeatherObservationReportKind::HistoricalGhcnh
+                            && observation.published_at <= cutoff
+                            && observation.available_at <= boundary.decision_at()
+                    })
+                })
+        }
+    };
+    if available {
         DomainAvailability::Available
     } else {
         DomainAvailability::SourceEmpty
@@ -150,12 +184,20 @@ pub fn domain_availability_at<S: BuildHasher>(
 /// `observations` is keyed by instrument, each series ascending by
 /// `observed_at` and already PIT-safe to slice (the caller prefetched at least
 /// `[source_cutoff - lookback, decision_at)`).
-pub fn build_domain_slice_inputs<S: BuildHasher>(
+#[derive(Clone, Copy)]
+pub struct DomainFactWindows<'a> {
+    pub observations: &'a HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
+    pub crypto_reports: &'a HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
+    pub weather_observations: &'a HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+    pub weather_forecasts: &'a HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+}
+
+pub fn build_domain_slice_inputs(
     category: MarketCategory,
     linkages: &[MarketLinkage],
     boundary: &DecisionBoundary,
     domain: &DomainConfig,
-    observations: &HashMap<DomainInstrumentKey, Vec<DomainObservation>, S>,
+    facts: DomainFactWindows<'_>,
 ) -> QuantResult<Option<DomainSliceInputs>> {
     let Some(family) = DomainFamily::for_category(category) else {
         return Ok(None);
@@ -172,33 +214,110 @@ pub fn build_domain_slice_inputs<S: BuildHasher>(
     let Some(binding) = linkage.binding().cloned() else {
         return Ok(None);
     };
-
-    let lookback_secs = i64::try_from(crypto_lookback_secs(domain)).map_err(|error| {
-        QuantError::config(format!(
-            "domain lookback does not fit chrono seconds: {error}"
-        ))
-    })?;
-    let lookback = ChronoDuration::seconds(lookback_secs);
-    let cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
-    let from = cutoff - lookback;
-
-    let primary = observation_window(
-        observations,
-        &binding.instrument_key,
-        from,
-        cutoff,
-        boundary.decision_at(),
-    );
-    let oracle = oracle_instrument(&binding)
-        .map(|key| observation_window(observations, &key, from, cutoff, boundary.decision_at()));
+    let data = match (&binding.subject, family) {
+        (MarketSubject::Crypto(_), DomainFamily::Crypto) => {
+            let Some(feature_binding) = source_binding(&binding, LinkageSourceRole::Feature) else {
+                return Ok(None);
+            };
+            let lookback_secs = i64::try_from(crypto_lookback_secs(domain)).map_err(|error| {
+                QuantError::config(format!(
+                    "domain lookback does not fit chrono seconds: {error}"
+                ))
+            })?;
+            let lookback = ChronoDuration::seconds(lookback_secs);
+            let cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
+            let from = cutoff - lookback;
+            let primary = observation_window(
+                facts.observations,
+                &feature_binding.instrument_key,
+                from,
+                cutoff,
+                boundary.decision_at(),
+            );
+            let oracle = oracle_instrument(&binding).map(|key| {
+                crypto_report_window(
+                    facts.crypto_reports,
+                    &key,
+                    from,
+                    cutoff,
+                    boundary.decision_at(),
+                )
+            });
+            DomainSliceData::Crypto { primary, oracle }
+        }
+        (MarketSubject::Weather(subject), DomainFamily::Weather) => {
+            if !valid_weather_sources(&binding, &subject.station) {
+                return Ok(None);
+            }
+            let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
+            let observations = facts
+                .weather_observations
+                .get(&subject.station)
+                .into_iter()
+                .flatten()
+                .filter(|fact| {
+                    fact.published_at <= cutoff && fact.available_at <= boundary.decision_at()
+                })
+                .cloned()
+                .collect();
+            let forecasts = facts
+                .weather_forecasts
+                .get(&subject.station)
+                .into_iter()
+                .flatten()
+                .filter(|fact| {
+                    fact.reference_time <= cutoff && fact.available_at <= boundary.decision_at()
+                })
+                .cloned()
+                .collect();
+            DomainSliceData::Weather(WeatherFactWindow {
+                decision_at: boundary.decision_at(),
+                observations,
+                forecasts,
+            })
+        }
+        _ => return Ok(None),
+    };
 
     Ok(Some(DomainSliceInputs {
         family,
+        linkage_id: linkage.linkage_id.clone(),
+        linkage_hash: linkage.content_hash.clone(),
         binding,
         linkage_evidence: linkage_evidence(linkage),
-        primary,
-        oracle,
+        data,
     }))
+}
+
+fn valid_weather_sources(binding: &ResolvedBinding, station: &IcaoStation) -> bool {
+    [
+        (
+            LinkageSourceRole::LiveEvent,
+            DomainSourceId::aviation_weather(),
+        ),
+        (
+            LinkageSourceRole::HistoricalCalibration,
+            DomainSourceId::ghcnh(),
+        ),
+        (LinkageSourceRole::Forecast, DomainSourceId::gefs()),
+    ]
+    .into_iter()
+    .all(|(role, source_id)| {
+        source_binding(binding, role).is_some_and(|source| {
+            source.source_id == source_id
+                && source.instrument_key
+                    == match role {
+                        LinkageSourceRole::LiveEvent => {
+                            DomainInstrumentKey::aviation_weather(station)
+                        }
+                        LinkageSourceRole::HistoricalCalibration => {
+                            DomainInstrumentKey::ghcnh(station)
+                        }
+                        LinkageSourceRole::Forecast => DomainInstrumentKey::gefs(station),
+                        LinkageSourceRole::Feature | LinkageSourceRole::Resolution => return false,
+                    }
+        })
+    })
 }
 
 /// The settlement-oracle instrument to cross-check against.
@@ -207,13 +326,20 @@ pub fn build_domain_slice_inputs<S: BuildHasher>(
 /// unrecognized oracle stays fail-closed.
 #[must_use]
 pub fn oracle_instrument(binding: &ResolvedBinding) -> Option<DomainInstrumentKey> {
-    let MarketSubject::Crypto(subject) = &binding.subject;
-    match &subject.resolution_oracle {
-        ResolutionOracle::ChainlinkDataStreams { feed } => {
-            Some(DomainInstrumentKey::chainlink_feed(feed))
-        }
-        ResolutionOracle::BinanceKline { .. } | ResolutionOracle::Other { .. } => None,
-    }
+    source_binding(binding, LinkageSourceRole::Resolution)
+        .filter(|binding| binding.source_id == DomainSourceId::chainlink_data_streams())
+        .map(|binding| binding.instrument_key.clone())
+}
+
+#[must_use]
+pub fn source_binding(
+    binding: &ResolvedBinding,
+    role: LinkageSourceRole,
+) -> Option<&ResolvedSourceBinding> {
+    binding
+        .source_bindings
+        .iter()
+        .find(|candidate| candidate.role == role)
 }
 
 /// Slice one instrument's series into a PIT window `[from, cutoff]`.
@@ -247,19 +373,48 @@ fn observation_window<S: BuildHasher>(
     }
 }
 
+fn crypto_report_window<S: BuildHasher>(
+    reports: &HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>, S>,
+    instrument_key: &DomainInstrumentKey,
+    from: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> CryptoPriceReportWindow {
+    let reports = reports
+        .get(instrument_key)
+        .map(|series| {
+            series
+                .iter()
+                .filter(|report| {
+                    report.event_time >= from
+                        && report.event_time <= cutoff
+                        && report.published_at <= cutoff
+                        && report.available_at <= decision_at
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    CryptoPriceReportWindow { cutoff, reports }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_domain_slice_inputs, domain_availability_at, linkage_valid_at};
+    use super::{
+        DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs,
+        domain_availability_at, linkage_valid_at,
+    };
+    use crate::features::DomainSliceData;
     use chrono::{DateTime, Duration, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
             CryptoSubject, DecisionBoundary, DecisionClock, DecisionSource, DomainAvailability,
             DomainObservation, GroundingProof, LinkageOutcome, MarketLinkage, MarketSubject,
-            PriceComparator, ResolutionOracle, ResolvedBinding,
+            PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
         },
         enums::{
             common::MarketCategory,
-            domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
+            domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
         },
         runtime_config::DomainConfig,
         types::{
@@ -270,6 +425,26 @@ mod tests {
     };
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
+
+    macro_rules! fact_windows {
+        ($observations:expr, $reports:expr, $weather:expr, $forecasts:expr) => {
+            DomainFactWindows {
+                observations: $observations,
+                crypto_reports: $reports,
+                weather_observations: $weather,
+                weather_forecasts: $forecasts,
+            }
+        };
+    }
+
+    macro_rules! availability_facts {
+        ($observations:expr, $weather:expr) => {
+            DomainAvailabilityFacts {
+                observations: $observations,
+                weather_observations: $weather,
+            }
+        };
+    }
 
     fn instrument() -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(
@@ -292,7 +467,26 @@ mod tests {
                     feed: ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
                 },
             }),
-            instrument_key: instrument(),
+            source_bindings: vec![
+                ResolvedSourceBinding {
+                    role: LinkageSourceRole::Feature,
+                    source_id: DomainSourceId::binance(),
+                    instrument_key: instrument(),
+                    available_at: now,
+                    binding_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                        .expect("hash"),
+                },
+                ResolvedSourceBinding {
+                    role: LinkageSourceRole::Resolution,
+                    source_id: DomainSourceId::chainlink_data_streams(),
+                    instrument_key: DomainInstrumentKey::chainlink_data_streams(
+                        &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
+                    ),
+                    available_at: now,
+                    binding_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
+                        .expect("hash"),
+                },
+            ],
             grounding: GroundingProof { spans: Vec::new() },
             override_context: None,
         }
@@ -341,7 +535,7 @@ mod tests {
 
     #[test]
     fn pit_valid_linkage_never_reads_a_future_revision() {
-        let early = linkage(LinkageOutcome::Resolved(binding()), 0);
+        let early = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         let late = linkage(
             LinkageOutcome::Unresolved {
                 reason: "metadata revised".to_owned(),
@@ -378,7 +572,7 @@ mod tests {
 
     #[test]
     fn backdated_linkage_is_invisible_until_its_availability_time() {
-        let early = linkage(LinkageOutcome::Resolved(binding()), 0);
+        let early = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         let mut backdated = linkage(
             LinkageOutcome::Unresolved {
                 reason: "late correction".to_owned(),
@@ -417,7 +611,7 @@ mod tests {
     #[test]
     fn linkage_ties_use_the_stable_id_order() {
         let domain = DomainConfig::default();
-        let mut lower_id = linkage(LinkageOutcome::Resolved(binding()), 0);
+        let mut lower_id = linkage(LinkageOutcome::Resolved(Box::new(binding())), 0);
         lower_id.linkage_id = MarketLinkageId::new(uuid::Uuid::from_u128(1));
         let mut higher_id = linkage(
             LinkageOutcome::Unresolved {
@@ -443,7 +637,10 @@ mod tests {
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
         let observations = HashMap::new();
-        let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
+        let reports = HashMap::new();
+        let weather_observations = HashMap::new();
+        let weather_forecasts = HashMap::new();
+        let resolved = vec![linkage(LinkageOutcome::Resolved(Box::new(binding())), 0)];
 
         assert!(
             build_domain_slice_inputs(
@@ -451,7 +648,12 @@ mod tests {
                 &resolved,
                 &boundary,
                 &domain,
-                &observations
+                fact_windows!(
+                    &observations,
+                    &reports,
+                    &weather_observations,
+                    &weather_forecasts
+                ),
             )
             .expect("slice build")
             .is_none()
@@ -463,7 +665,12 @@ mod tests {
                 &[],
                 &boundary,
                 &domain,
-                &observations,
+                fact_windows!(
+                    &observations,
+                    &reports,
+                    &weather_observations,
+                    &weather_forecasts
+                ),
             )
             .expect("slice build")
             .is_none()
@@ -481,7 +688,12 @@ mod tests {
                 &unresolved,
                 &boundary,
                 &domain,
-                &observations
+                fact_windows!(
+                    &observations,
+                    &reports,
+                    &weather_observations,
+                    &weather_forecasts
+                ),
             )
             .expect("slice build")
             .is_none()
@@ -492,13 +704,24 @@ mod tests {
             &resolved,
             &boundary,
             &domain,
-            &observations,
+            fact_windows!(
+                &observations,
+                &reports,
+                &weather_observations,
+                &weather_forecasts
+            ),
         )
         .expect("slice build")
         .expect("slice applies");
         assert_eq!(inputs.family, DomainFamily::Crypto);
         assert!(
-            inputs.oracle.is_some(),
+            matches!(
+                inputs.data,
+                DomainSliceData::Crypto {
+                    oracle: Some(_),
+                    ..
+                }
+            ),
             "chainlink-settled subject carries an oracle window"
         );
     }
@@ -521,22 +744,33 @@ mod tests {
             available_at: Some(at),
         };
         let observations = HashMap::from([(instrument(), vec![make(visible), make(too_fresh)])]);
-        let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
+        let reports = HashMap::new();
+        let weather_observations = HashMap::new();
+        let weather_forecasts = HashMap::new();
+        let resolved = vec![linkage(LinkageOutcome::Resolved(Box::new(binding())), 0)];
         let inputs = build_domain_slice_inputs(
             MarketCategory::Crypto,
             &resolved,
             &boundary,
             &domain,
-            &observations,
+            fact_windows!(
+                &observations,
+                &reports,
+                &weather_observations,
+                &weather_forecasts
+            ),
         )
         .expect("slice build")
         .expect("slice applies");
+        let DomainSliceData::Crypto { primary, .. } = inputs.data else {
+            panic!("crypto data expected");
+        };
         assert_eq!(
-            inputs.primary.observations.len(),
+            primary.observations.len(),
             1,
             "only observations at or before the frozen source cutoff are visible"
         );
-        assert_eq!(inputs.primary.observations[0].observed_at, visible);
+        assert_eq!(primary.observations[0].observed_at, visible);
     }
 
     fn close_observation(at: DateTime<Utc>) -> DomainObservation {
@@ -557,7 +791,7 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
-        let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
+        let resolved = vec![linkage(LinkageOutcome::Resolved(Box::new(binding())), 0)];
 
         assert_eq!(
             domain_availability_at(
@@ -565,7 +799,7 @@ mod tests {
                 &resolved,
                 &boundary,
                 &domain,
-                &HashMap::new()
+                availability_facts!(&HashMap::new(), &HashMap::new()),
             ),
             DomainAvailability::NotMapped,
             "a category with no domain family must never gate on domain evidence"
@@ -581,7 +815,7 @@ mod tests {
                 &resolved,
                 &boundary,
                 &disabled_domain,
-                &HashMap::new()
+                availability_facts!(&HashMap::new(), &HashMap::new()),
             ),
             DomainAvailability::NotMapped,
             "a disabled vertical must behave exactly like an unmapped category"
@@ -600,7 +834,7 @@ mod tests {
                 &[],
                 &boundary,
                 &domain,
-                &HashMap::new(),
+                availability_facts!(&HashMap::new(), &HashMap::new()),
             ),
             DomainAvailability::Unresolved,
             "no ledger row at all must fail closed to Unresolved"
@@ -618,7 +852,7 @@ mod tests {
                 &unresolved,
                 &boundary,
                 &domain,
-                &HashMap::new()
+                availability_facts!(&HashMap::new(), &HashMap::new()),
             ),
             DomainAvailability::Unresolved,
             "an Unresolved outcome must never be treated as mapped-but-missing-data"
@@ -630,7 +864,7 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let domain = DomainConfig::default();
         let boundary = boundary(as_of, &domain);
-        let resolved = vec![linkage(LinkageOutcome::Resolved(binding()), 0)];
+        let resolved = vec![linkage(LinkageOutcome::Resolved(Box::new(binding())), 0)];
 
         assert_eq!(
             domain_availability_at(
@@ -638,7 +872,7 @@ mod tests {
                 &resolved,
                 &boundary,
                 &domain,
-                &HashMap::new()
+                availability_facts!(&HashMap::new(), &HashMap::new()),
             ),
             DomainAvailability::SourceEmpty,
             "resolved linkage with no observation series must be SourceEmpty, never fabricated"
@@ -656,7 +890,7 @@ mod tests {
                 &resolved,
                 &boundary,
                 &domain,
-                &visible_only
+                availability_facts!(&visible_only, &HashMap::new()),
             ),
             DomainAvailability::Available,
             "an observation at or before the source-delayed cutoff must be Available"
@@ -669,7 +903,7 @@ mod tests {
                 &resolved,
                 &boundary,
                 &domain,
-                &too_fresh_only
+                availability_facts!(&too_fresh_only, &HashMap::new()),
             ),
             DomainAvailability::SourceEmpty,
             "an observation still inside the source-delay window must not count as visible"

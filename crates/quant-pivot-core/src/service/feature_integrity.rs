@@ -5,6 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+#[cfg(test)]
+use quant_pivot_models::runtime_config::RUNTIME_CONFIG_SCHEMA_VERSION;
 use quant_pivot_models::{
     domain::{
         AcknowledgeFeatureParityLatchRequest, FeatureIntegrityActionContext,
@@ -896,8 +898,7 @@ mod tests {
             runtime_config::RuntimeConfigVersionSource,
         },
         types::{
-            ModelVersionId, RecommendationReportId, RuntimeConfigActivationId, SchemaVersion,
-            TrainingDatasetId,
+            ModelVersionId, RecommendationReportId, RuntimeConfigActivationId, TrainingDatasetId,
         },
     };
     use quant_pivot_repository::traits::FeatureParityLatchActor;
@@ -1184,7 +1185,7 @@ mod tests {
             current: RuntimeConfigVersionInfo {
                 runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
                 config_hash: hash(),
-                schema_version: SchemaVersion::new(11),
+                schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
                 config_json: serde_json::to_value(config).expect("runtime config json"),
                 source: RuntimeConfigVersionSource::Bootstrap,
                 created_by: "test".to_owned(),

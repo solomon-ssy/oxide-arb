@@ -123,6 +123,7 @@ fn market_upsert_on_conflict() -> OnConflict {
             MarketColumn::NoTokenId,
             MarketColumn::NegRisk,
             MarketColumn::Outcome,
+            MarketColumn::StartDate,
             MarketColumn::EndDate,
             MarketColumn::ResolvedAt,
             MarketColumn::FeesEnabled,

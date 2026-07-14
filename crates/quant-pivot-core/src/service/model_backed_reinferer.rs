@@ -5,17 +5,20 @@
 //! factor, or feature rows. Loads the **intent-frozen** model version and
 //! runtime-config snapshot so exit evaluation matches the entry thesis.
 
-use std::{slice, sync::Arc, time::Duration};
+use std::{slice, str::FromStr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, DecisionSource, ModelVersionInfo, OrderIntentInfo,
-        PositionInfo,
+        DecisionBoundary, DecisionClock, DecisionSource, LatestFactorSnapshotBundleInfo,
+        LatestFactorSnapshotValueInfo, ModelVersionInfo, OrderIntentInfo, PositionInfo,
     },
-    enums::quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
+    enums::{
+        factor::FactorValueState,
+        quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
+    },
     runtime_config::{
         DataQualityConfig, DomainConfig, FactorsConfig, FeaturesConfig, RuntimeConfig,
     },
@@ -24,10 +27,14 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    ModelRegistryRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    FactorRepository, ModelRegistryRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::{
-    factors::{FactorEngine, MarketFactorOutcome, frozen_factor_outcome},
+    factors::{
+        FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue,
+        MarketFactorOutcome, NormalizedFactor, ScoredFactor,
+    },
     features::{
         ConfiguredFeatureBuilder, FeatureSchema, FeatureSourceWindows, FeatureVector,
         MarketWindowSnapshot, TradeTapeWindowSnapshot,
@@ -55,9 +62,10 @@ pub struct ModelBackedExitSignalReinfererDeps {
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     pub weight_overlay: Arc<WeightOverlayApplicator>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
-    /// Source of the entry recommendation's frozen factor breakdown, replayed as
-    /// the exit-side factor plane (reproducing the entry thesis).
+    /// Source of the recommendation's exact governed factor-definition set.
     pub recommendations: Arc<dyn RecommendationRepository>,
+    /// Coherent latest persisted factor snapshots for exit-side inference.
+    pub factors: Arc<dyn FactorRepository>,
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
 }
@@ -182,14 +190,14 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             return Ok(None);
         };
 
-        // Reproduce the entry factor thesis: replay the recommendation's frozen
-        // cross-sectional breakdown rather than recompute on a peerless single
-        // market (which would be all-indeterminate post-11.1).
-        let Some(frozen) = frozen_exit_outcome(
+        let Some(fresh) = fresh_exit_outcome(
             self.deps.recommendations.as_ref(),
+            self.deps.factors.as_ref(),
             intent,
             vector.market_id.clone(),
             boundary.decision_at(),
+            config.data_quality.max_feature_bucket_age_secs,
+            &config.factors,
         )
         .await?
         else {
@@ -198,10 +206,10 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
 
         let output = infer_lot(
             runtime.as_ref(),
-            &frozen.source_model_run_id,
+            &fresh.source_model_run_id,
             &market,
             &vector,
-            &frozen.outcome,
+            &fresh.outcome,
             boundary.decision_at(),
         )
         .await?;
@@ -218,6 +226,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
             candidate,
             &config,
             &version.artifact_hash,
+            &fresh.snapshot_hash,
         )?))
     }
 }
@@ -255,22 +264,21 @@ async fn infer_lot(
     runtime.infer_batch(input).await
 }
 
-/// Replay the entry recommendation's frozen factor breakdown as the exit-side
-/// [`MarketFactorOutcome`].
+/// Load the current coherent factor plane for exit-side inference.
 ///
-/// Exit re-inference must reproduce the *entry* thesis. A market has no
-/// cross-sectional peers at exit time, so recomputing factors on the single lot
-/// would make every cross-sectional factor `Indeterminate` (post-11.1) and the
-/// exit model would score a degenerate plane. Instead we load the recommendation
-/// the intent was minted from and rebuild the outcome from its persisted
-/// breakdown. Fail closed (`Ok(None)`, logged) when the recommendation or its
-/// breakdown is absent — never fabricate a neutral factor plane.
-pub(crate) async fn frozen_exit_outcome(
+/// Cross-sectional values remain meaningful because every value comes from one
+/// persisted serving run. The recommendation contributes only its frozen set of
+/// governed definition ids; its entry-time contribution breakdown is never
+/// reused as a current signal.
+pub(crate) async fn fresh_exit_outcome(
     recommendations: &dyn RecommendationRepository,
+    factors: &dyn FactorRepository,
     intent: &OrderIntentInfo,
     market_id: MarketId,
     as_of: DateTime<Utc>,
-) -> QuantResult<Option<FrozenExitOutcome>> {
+    max_age_secs: u64,
+    factor_config: &FactorsConfig,
+) -> QuantResult<Option<FreshExitOutcome>> {
     let Some(recommendation) = recommendations
         .find_by_id(&intent.recommendation_id)
         .await
@@ -282,24 +290,168 @@ pub(crate) async fn frozen_exit_outcome(
         );
         return Ok(None);
     };
-    let Some(outcome) = frozen_factor_outcome(market_id, as_of, &recommendation.factor_breakdown.0)
-    else {
+    let definition_ids = &recommendation.evidence_refs.factor_definition_versions;
+    if definition_ids.is_empty() {
         tracing::warn!(
             recommendation_id = %intent.recommendation_id,
-            "exit signal re-inference: recommendation has an empty factor breakdown"
+            "exit signal re-inference: recommendation has no governed factor definitions"
+        );
+        return Ok(None);
+    }
+    let Some(bundle) = factors
+        .latest_snapshot_bundle(definition_ids, &market_id, &intent.model_version_id)
+        .await
+        .map_err(QuantError::from)?
+    else {
+        tracing::debug!(
+            %market_id,
+            model_version_id = %intent.model_version_id,
+            "exit signal re-inference: coherent latest factor snapshot is unavailable"
         );
         return Ok(None);
     };
-    Ok(Some(FrozenExitOutcome {
+    if bundle.observed_at > as_of || bundle.available_at > as_of {
+        tracing::warn!(
+            %market_id,
+            observed_at = %bundle.observed_at,
+            available_at = %bundle.available_at,
+            %as_of,
+            "exit signal re-inference: factor snapshot violates PIT boundary"
+        );
+        return Ok(None);
+    }
+    let max_age = chrono::Duration::seconds(i64::try_from(max_age_secs).map_err(|error| {
+        QuantError::config(format!(
+            "factor snapshot max age does not fit seconds: {error}"
+        ))
+    })?);
+    if as_of - bundle.observed_at > max_age {
+        tracing::debug!(
+            %market_id,
+            observed_at = %bundle.observed_at,
+            max_age_secs,
+            "exit signal re-inference: latest factor snapshot is stale"
+        );
+        return Ok(None);
+    }
+    let outcome = snapshot_bundle_outcome(bundle.clone(), as_of, factor_config)?;
+    Ok(Some(FreshExitOutcome {
         outcome,
-        source_model_run_id: recommendation.evidence_refs.model_run_id,
+        source_model_run_id: bundle.model_run_id,
+        snapshot_hash: bundle.snapshot_hash,
     }))
 }
 
-/// Entry-thesis factor evidence and its real persisted serving-run identity.
-pub(crate) struct FrozenExitOutcome {
+/// Current factor evidence and its real persisted serving-run identity.
+pub(crate) struct FreshExitOutcome {
     pub outcome: MarketFactorOutcome,
     pub source_model_run_id: ModelRunId,
+    pub snapshot_hash: ContentHash,
+}
+
+fn snapshot_bundle_outcome(
+    bundle: LatestFactorSnapshotBundleInfo,
+    as_of: DateTime<Utc>,
+    factor_config: &FactorsConfig,
+) -> QuantResult<MarketFactorOutcome> {
+    let confidence_floor = Decimal::from_str(&factor_config.min_factor_confidence.value)
+        .map_err(|error| QuantError::config(format!("invalid factor confidence floor: {error}")))?;
+    let mut projected = Vec::with_capacity(bundle.values.len());
+    for snapshot in bundle.values {
+        let normalization = match snapshot.value_state {
+            FactorValueState::Scored => {
+                let score = snapshot.normalized_score.ok_or_else(|| {
+                    QuantError::config(format!(
+                        "scored factor {} has no normalized score",
+                        snapshot.factor_definition_id
+                    ))
+                })?;
+                let source = snapshot.normalization_source.ok_or_else(|| {
+                    QuantError::config(format!(
+                        "scored factor {} has no normalization source",
+                        snapshot.factor_definition_id
+                    ))
+                })?;
+                if snapshot.indeterminate_reason.is_some() {
+                    return Err(QuantError::config(format!(
+                        "scored factor {} carries an indeterminate reason",
+                        snapshot.factor_definition_id
+                    )));
+                }
+                NormalizedFactor::Scored {
+                    score,
+                    source,
+                    clamp: None,
+                }
+            }
+            FactorValueState::MissingInput => {
+                require_unscored_snapshot(&snapshot)?;
+                NormalizedFactor::MissingInput
+            }
+            FactorValueState::NotApplicable => {
+                require_unscored_snapshot(&snapshot)?;
+                NormalizedFactor::NotApplicable
+            }
+            FactorValueState::Indeterminate => {
+                let reason = snapshot.indeterminate_reason.ok_or_else(|| {
+                    QuantError::config(format!(
+                        "indeterminate factor {} has no reason",
+                        snapshot.factor_definition_id
+                    ))
+                })?;
+                if snapshot.normalized_score.is_some() || snapshot.normalization_source.is_some() {
+                    return Err(QuantError::config(format!(
+                        "indeterminate factor {} carries a normalized value",
+                        snapshot.factor_definition_id
+                    )));
+                }
+                NormalizedFactor::Indeterminate { reason }
+            }
+        };
+        let explanation = serde_json::from_value::<FactorExplanation>(snapshot.explanation)
+            .map_err(|error| {
+                QuantError::config(format!(
+                    "factor {} explanation cannot be decoded: {error}",
+                    snapshot.factor_definition_id
+                ))
+            })?;
+        let contributes = matches!(normalization, NormalizedFactor::Scored { .. })
+            && snapshot.confidence.inner() >= confidence_floor;
+        projected.push(ScoredFactor {
+            below_confidence_floor: snapshot.confidence.inner() < confidence_floor,
+            contributes,
+            value: FactorValue {
+                definition_id: snapshot.factor_definition_id,
+                name: FactorName::new(snapshot.name),
+                family: snapshot.family,
+                raw_value: snapshot.raw_value,
+                normalization,
+                direction: snapshot.direction,
+                confidence: snapshot.confidence,
+                explanation,
+                input_feature_refs: Vec::new(),
+            },
+        });
+    }
+    Ok(MarketFactorOutcome {
+        market_id: bundle.market_id,
+        decision_at: as_of,
+        eligibility: FactorEligibility::Eligible,
+        factors: projected,
+    })
+}
+
+fn require_unscored_snapshot(snapshot: &LatestFactorSnapshotValueInfo) -> QuantResult<()> {
+    if snapshot.normalized_score.is_some()
+        || snapshot.normalization_source.is_some()
+        || snapshot.indeterminate_reason.is_some()
+    {
+        return Err(QuantError::config(format!(
+            "unscored factor {} carries scored/indeterminate fields",
+            snapshot.factor_definition_id
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve the runtime-config snapshot frozen on the intent.
@@ -529,8 +681,11 @@ pub(crate) fn runtime_decision_boundary(
     let knowledge_lag_secs = config.pit_knowledge_lag_secs().ok_or_else(|| {
         QuantError::config("enabled report schedules disagree on knowledge_lag_secs")
     })?;
-    DecisionClock::new(knowledge_lag_secs)
-        .serving_boundary(decision_at, config.domain.crypto.availability_lag_secs)
+    DecisionClock::new(knowledge_lag_secs).serving_boundary(
+        decision_at,
+        config.domain.crypto.availability_lag_secs,
+        config.domain.weather.availability_lag_secs,
+    )
 }
 
 pub(crate) fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Option<Usd>> {
@@ -572,9 +727,11 @@ fn fresh_signal_from_candidate(
     candidate: &SignalCandidate,
     config: &RuntimeConfig,
     model_artifact_hash: &ContentHash,
+    factor_snapshot_hash: &ContentHash,
 ) -> QuantResult<FreshSignal> {
     Ok(FreshSignal {
         model_artifact_hash: model_artifact_hash.clone(),
+        factor_snapshot_hash: factor_snapshot_hash.clone(),
         composite_score: candidate.composite_score,
         expected_return_bps: Bps::new(candidate.expected_return_bps),
         auto_exec_eligible: fresh_auto_exec_eligible(candidate, config)?,
@@ -723,6 +880,7 @@ mod tests {
             liquidity_usd: None,
             volume_24h: None,
             fee_schedule: None,
+            start_date: None,
             end_date: None,
             resolved_at: None,
             created_at: Some(now - ChronoDuration::days(1)),
@@ -753,6 +911,7 @@ mod tests {
                 available_at: now,
                 status: MarketStatus::Active,
                 neg_risk: false,
+                start_date: None,
                 end_date: None,
                 created_at: Some(now - ChronoDuration::days(1)),
             },
@@ -850,6 +1009,10 @@ mod tests {
             boundary.cutoff_for(DecisionSource::DomainCrypto),
             decision_at - ChronoDuration::seconds(30)
         );
-        assert_eq!(boundary.per_source_cutoffs().len(), 6);
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::DomainWeather),
+            decision_at - ChronoDuration::seconds(300)
+        );
+        assert_eq!(boundary.per_source_cutoffs().len(), 7);
     }
 }

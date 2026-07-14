@@ -8,13 +8,14 @@ use quant_pivot_models::config::GammaConfig;
 use quant_pivot_repository::postgres::{
     PgAccountSnapshotRepository, PgAttributionRepository, PgBacktestPathSetRepository,
     PgBacktestReportRepository, PgBasisAlertRepository, PgCalibrationArtifactRepository,
-    PgCapitalAllocationRepository, PgCatalogVersionRepository, PgDomainSourceCursorRepository,
-    PgEquitySnapshotRepository, PgEventRepository, PgExecutionOrderRepository,
-    PgExecutionSubmissionRepository, PgFactorRepository, PgFeatureParityRepository,
-    PgFeatureRepository, PgKillSwitchStateRepository, PgMarketLinkageRepository,
-    PgMarketRepository, PgMarketSelectionRepository, PgMenuRepository,
-    PgModelComparisonReportRepository, PgModelGovernanceAuditRepository, PgModelRegistryRepository,
-    PgModelRunRepository, PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
+    PgCapitalAllocationRepository, PgCatalogVersionRepository, PgDomainProjectionRepository,
+    PgDomainSourceCursorRepository, PgEntryConditionRepository, PgEquitySnapshotRepository,
+    PgEventRepository, PgExecutionOrderRepository, PgExecutionSubmissionRepository,
+    PgFactorRepository, PgFeatureParityRepository, PgFeatureRepository,
+    PgKillSwitchStateRepository, PgMarketLinkageRepository, PgMarketRepository,
+    PgMarketSelectionRepository, PgMenuRepository, PgModelComparisonReportRepository,
+    PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
+    PgOperationLogRepository, PgOrderIntentRepository, PgPositionRepository,
     PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
     PgResearchJobRepository, PgReservedCapitalRepository, PgRoleMenuRepository,
     PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
@@ -35,6 +36,7 @@ pub struct PgRepositories {
     pub event: Arc<PgEventRepository>,
     pub catalog_version: Arc<PgCatalogVersionRepository>,
     pub order_intent: Arc<PgOrderIntentRepository>,
+    pub entry_condition: Arc<PgEntryConditionRepository>,
     pub execution_submission: Arc<PgExecutionSubmissionRepository>,
     pub execution_order: Arc<PgExecutionOrderRepository>,
     pub reconciliation: Arc<PgReconciliationRepository>,
@@ -71,6 +73,7 @@ pub struct PgRepositories {
     pub trade_tape_block_cursor: Arc<PgTradeTapeBlockCursorRepository>,
     pub market_linkage: Arc<PgMarketLinkageRepository>,
     pub domain_source_cursor: Arc<PgDomainSourceCursorRepository>,
+    pub domain_projection: Arc<PgDomainProjectionRepository>,
     pub basis_alert: Arc<PgBasisAlertRepository>,
 }
 
@@ -91,6 +94,7 @@ impl PgRepositories {
                 PgCatalogVersionRepository::new(db, catalog_visibility_guard_secs)
             }),
             order_intent: arc_repo(&db, PgOrderIntentRepository::new),
+            entry_condition: arc_repo(&db, PgEntryConditionRepository::new),
             execution_submission: arc_repo(&db, PgExecutionSubmissionRepository::new),
             execution_order: arc_repo(&db, PgExecutionOrderRepository::new),
             reconciliation: arc_repo(&db, PgReconciliationRepository::new),
@@ -127,6 +131,7 @@ impl PgRepositories {
             trade_tape_block_cursor: arc_repo(&db, PgTradeTapeBlockCursorRepository::new),
             market_linkage: arc_repo(&db, PgMarketLinkageRepository::new),
             domain_source_cursor: arc_repo(&db, PgDomainSourceCursorRepository::new),
+            domain_projection: arc_repo(&db, PgDomainProjectionRepository::new),
             basis_alert: arc_repo(&db, PgBasisAlertRepository::new),
         }
     }

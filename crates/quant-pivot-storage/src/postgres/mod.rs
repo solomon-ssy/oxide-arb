@@ -4,4 +4,4 @@ mod ensure;
 pub mod migration;
 mod pool;
 
-pub use pool::PostgresPool;
+pub use pool::{PostgresNotificationListener, PostgresPool};

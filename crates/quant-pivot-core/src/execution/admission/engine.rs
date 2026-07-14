@@ -10,7 +10,7 @@ use super::{
     AdmissionCheck, AdmissionDecision, AdmissionInput, ExecutionAdmissionEngine,
     checks::{
         BookFreshnessCheck, CalibratedReturnModelCheck, CapitalBudgetCheck, CategoryExposureCheck,
-        CredentialReadinessCheck, DataQualityCheck, EntryTriggerCheck, EventExposureCheck,
+        CredentialReadinessCheck, DataQualityCheck, EntryConditionCheck, EventExposureCheck,
         ExitMonitorReadinessCheck, IntentStateCheck, KillSwitchCheck, LiquidityDepthCheck,
         ManualBlockCheck, MarketExposureCheck, MaxOpenIntentsCheck, MaxReservedCapitalCheck,
         ModelPublicationCheck, RecommendationFreshnessCheck, ReportStatusCheck,
@@ -44,7 +44,7 @@ impl DefaultAdmissionEngine {
             Box::new(DataQualityCheck),
             Box::new(BookFreshnessCheck),
             Box::new(VenueMetadataCheck),
-            Box::new(EntryTriggerCheck),
+            Box::new(EntryConditionCheck),
             Box::new(RiskEnvelopeHashCheck),
             Box::new(CapitalBudgetCheck),
             Box::new(MaxOpenIntentsCheck),

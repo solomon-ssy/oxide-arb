@@ -7,7 +7,7 @@ use std::fmt;
 
 use rust_decimal::Decimal;
 use serde::{
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
 };
 
@@ -15,6 +15,34 @@ use crate::wire::decimal::parse_decimal_value;
 
 /// Fixed field count of one Binance kline row.
 pub const KLINE_FIELD_COUNT: usize = 12;
+
+/// Binance aggregate-trade payload shared by REST `/aggTrades` and the
+/// `<symbol>@aggTrade` WebSocket stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinanceAggTrade {
+    #[serde(rename = "e", default)]
+    pub event_type: Option<String>,
+    #[serde(rename = "E", default)]
+    pub event_time_ms: Option<i64>,
+    #[serde(rename = "s", default)]
+    pub symbol: Option<String>,
+    #[serde(rename = "a")]
+    pub aggregate_trade_id: u64,
+    #[serde(rename = "p", with = "rust_decimal::serde::str")]
+    pub price: Decimal,
+    #[serde(rename = "q", with = "rust_decimal::serde::str")]
+    pub quantity: Decimal,
+    #[serde(rename = "f")]
+    pub first_trade_id: u64,
+    #[serde(rename = "l")]
+    pub last_trade_id: u64,
+    #[serde(rename = "T")]
+    pub trade_time_ms: i64,
+    #[serde(rename = "m")]
+    pub buyer_is_market_maker: bool,
+    #[serde(rename = "M", default)]
+    pub best_price_match: Option<bool>,
+}
 
 /// One row from `GET /api/v3/klines` (12 fields, fixed order per Binance spot API).
 #[derive(Debug, Clone, PartialEq, Eq)]

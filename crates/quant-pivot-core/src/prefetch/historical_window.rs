@@ -21,6 +21,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
@@ -28,12 +29,13 @@ use quant_pivot_models::{
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
-        CatalogWindowInfo, DecisionBoundary, DecisionClock, DecisionSource, DomainObservation,
-        MarketLinkage, MarketRegistryInfo, TradeTapePrint,
+        CatalogWindowInfo, CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource,
+        DomainObservation, MarketLinkage, MarketRegistryInfo, MarketSubject, TradeTapePrint,
+        WeatherForecastPoint, WeatherObservationFact, WeatherSubject,
     },
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
-    types::{DomainInstrumentKey, MarketId, TokenId},
+    types::{DomainInstrumentKey, IcaoStation, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{
     CatalogVersionRepository, MarketLinkageRepository, QuantFactReadRepository,
@@ -89,6 +91,12 @@ pub struct Prefetched {
     pub catalog: CatalogWindowInfo,
     /// External domain observations per instrument, ascending (Phase 11.2.2).
     pub domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
+    /// Source-native Crypto reports per settlement instrument, ascending.
+    pub crypto_reports: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
+    /// Typed AviationWeather/GHCNh facts per station.
+    pub weather_observations: HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+    /// Raw GEFS points per station, including calibration history and target days.
+    pub weather_forecasts: HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
     /// Frozen linkage ledger records per market covering the window (any
     /// derivation order; PIT selection happens per `as_of`).
     pub linkages: HashMap<MarketId, Vec<MarketLinkage>>,
@@ -166,16 +174,7 @@ impl HistoricalWindowLoader {
         // Expand books to both binary outcome tokens named by every catalog
         // revision. The model context uses the exact PIT best ask for whichever
         // side it recommends; a NO quote is never synthesized as `1 - YES`.
-        let mut book_tokens: Vec<TokenId> = tokens.clone();
-        let mut seen_book_tokens: HashSet<TokenId> = seen_tokens.clone();
-        for market in &catalog_markets {
-            if seen_book_tokens.insert(market.token_yes.clone()) {
-                book_tokens.push(market.token_yes.clone());
-            }
-            if seen_book_tokens.insert(market.token_no.clone()) {
-                book_tokens.push(market.token_no.clone());
-            }
-        }
+        let book_tokens = expand_book_tokens(tokens.clone(), seen_tokens, &catalog_markets);
 
         // The earliest sample resolves its book at
         // `window_start - knowledge_lag`. Prefetch one full staleness window
@@ -247,7 +246,13 @@ impl HistoricalWindowLoader {
                 .push(row);
         }
 
-        let (linkages, domain_observations) = self
+        let (
+            linkages,
+            domain_observations,
+            crypto_reports,
+            weather_observations,
+            weather_forecasts,
+        ) = self
             .prefetch_domain(spec, &end_boundary, &markets, &catalog_markets)
             .await?;
 
@@ -258,6 +263,9 @@ impl HistoricalWindowLoader {
             resolutions,
             catalog,
             domain_observations,
+            crypto_reports,
+            weather_observations,
+            weather_forecasts,
             linkages,
         })
     }
@@ -279,43 +287,38 @@ impl HistoricalWindowLoader {
     ) -> QuantResult<(
         HashMap<MarketId, Vec<MarketLinkage>>,
         HashMap<DomainInstrumentKey, Vec<DomainObservation>>,
+        HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
+        HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+        HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
     )> {
         let mapped_markets = mapped_domain_markets(spec, sample_markets, catalog_markets);
         if mapped_markets.is_empty() {
-            return Ok((HashMap::new(), HashMap::new()));
+            return Ok((
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            ));
         }
 
-        let ledger_rows = self
-            .linkage_repo
-            .ledger_for_markets(&mapped_markets, end_boundary)
-            .await
-            .map_err(QuantError::from)?;
-        let mut linkages: HashMap<MarketId, Vec<MarketLinkage>> = HashMap::new();
-        let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
-        for info in ledger_rows {
-            let market_id = info.market_id.clone();
-            let linkage = info.into_domain().map_err(|error| {
-                QuantError::config(format!(
-                    "linkage ledger row for market {market_id} has an undecodable outcome \
-                     payload: {error}"
-                ))
-            })?;
-            if let Some(binding) = linkage.binding() {
-                instruments.insert(binding.instrument_key.clone());
-                if let Some(oracle_key) = oracle_instrument(binding) {
-                    instruments.insert(oracle_key);
-                }
-            }
-            linkages.entry(market_id).or_default().push(linkage);
-        }
-        if instruments.is_empty() {
-            return Ok((linkages, HashMap::new()));
+        let linkage_window =
+            load_domain_linkages(self.linkage_repo.as_ref(), &mapped_markets, end_boundary).await?;
+        if linkage_window.instruments.is_empty() {
+            return Ok((
+                linkage_window.linkages,
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            ));
         }
 
         let start_boundary = replay_boundary(
             spec.window_start,
             spec.knowledge_lag.as_secs(),
             spec.domain.crypto.availability_lag_secs,
+            spec.domain.weather.availability_lag_secs,
         )?;
         let domain_from = checked_sub_duration(
             start_boundary.cutoff_for(DecisionSource::DomainCrypto),
@@ -328,55 +331,311 @@ impl HistoricalWindowLoader {
             .timestamp_millis()
             .checked_add(1)
             .ok_or_else(|| QuantError::config("domain observation cutoff overflowed i64"))?;
-        let rows = self
-            .fact_read
-            .domain_observations_between(
-                instruments.into_iter().collect(),
-                from_ms,
-                to_ms,
-                domain_cutoff.timestamp_millis(),
-                end_boundary.decision_at().timestamp_millis(),
-            )
-            .await
-            .map_err(QuantError::from)?;
-        let mut domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>> =
-            HashMap::new();
-        for row in rows {
-            let observation = DomainObservation::from_clickhouse_row(&row).ok_or_else(|| {
-                ResearchError::PitResolution {
-                    detail: format!(
-                        "domain observation {} / {} at {} cannot be decoded",
-                        row.instrument_key, row.metric, row.event_time
-                    ),
-                }
-            })?;
-            if observation.observed_at < domain_from
-                || observation.observed_at > domain_cutoff
-                || observation.publish_time > domain_cutoff
-                || observation
-                    .available_at
-                    .is_none_or(|available_at| available_at > end_boundary.decision_at())
-            {
-                return Err(ResearchError::PitResolution {
-                    detail: format!(
-                        "domain observation {} at {} (published {}) is outside PIT prefetch window [{domain_from}, {domain_cutoff}]",
-                        observation.instrument_key,
-                        observation.observed_at,
-                        observation.publish_time
-                    ),
-                }
-                .into());
-            }
-            domain_observations
-                .entry(observation.instrument_key.clone())
-                .or_default()
-                .push(observation);
-        }
-        for series in domain_observations.values_mut() {
-            series.sort_by_key(|observation| observation.observed_at);
-        }
-        Ok((linkages, domain_observations))
+        let domain_observations = load_domain_observations(
+            self.fact_read.as_ref(),
+            &linkage_window.instruments,
+            domain_from,
+            domain_cutoff,
+            end_boundary.decision_at(),
+        )
+        .await?;
+        let crypto_reports = load_crypto_reports(
+            self.fact_read.as_ref(),
+            &linkage_window.oracle_instruments,
+            from_ms,
+            to_ms,
+            domain_cutoff,
+            end_boundary.decision_at(),
+        )
+        .await?;
+        let weather_from = checked_sub_duration(
+            start_boundary.cutoff_for(DecisionSource::DomainWeather),
+            Duration::from_secs(
+                u64::from(spec.domain.weather.calibration_lookback_days)
+                    .checked_mul(86_400)
+                    .ok_or_else(|| QuantError::config("Weather calibration lookback overflowed"))?,
+            ),
+            "Weather calibration lookback",
+        )?;
+        let weather_cutoff = end_boundary.cutoff_for(DecisionSource::DomainWeather);
+        let (weather_observations, weather_forecasts) = load_weather_facts(
+            self.fact_read.as_ref(),
+            &linkage_window.weather_stations,
+            weather_from,
+            linkage_window.weather_valid_to,
+            weather_cutoff,
+            end_boundary.decision_at(),
+        )
+        .await?;
+        Ok((
+            linkage_window.linkages,
+            domain_observations,
+            crypto_reports,
+            weather_observations,
+            weather_forecasts,
+        ))
     }
+}
+
+struct DomainLinkageWindow {
+    linkages: HashMap<MarketId, Vec<MarketLinkage>>,
+    instruments: HashSet<DomainInstrumentKey>,
+    oracle_instruments: HashSet<DomainInstrumentKey>,
+    weather_stations: HashSet<IcaoStation>,
+    weather_valid_to: DateTime<Utc>,
+}
+
+async fn load_domain_linkages(
+    repository: &dyn MarketLinkageRepository,
+    markets: &[MarketId],
+    boundary: &DecisionBoundary,
+) -> QuantResult<DomainLinkageWindow> {
+    let rows = repository
+        .ledger_for_markets(markets, boundary)
+        .await
+        .map_err(QuantError::from)?;
+    let mut window = DomainLinkageWindow {
+        linkages: HashMap::new(),
+        instruments: HashSet::new(),
+        oracle_instruments: HashSet::new(),
+        weather_stations: HashSet::new(),
+        weather_valid_to: boundary.decision_at(),
+    };
+    for info in rows {
+        let market_id = info.market_id.clone();
+        let linkage = info.into_domain().map_err(|error| {
+            QuantError::config(format!(
+                "linkage ledger row for market {market_id} has an undecodable outcome: {error}"
+            ))
+        })?;
+        if let Some(binding) = linkage.binding() {
+            window.instruments.extend(
+                binding
+                    .source_bindings
+                    .iter()
+                    .map(|source| source.instrument_key.clone()),
+            );
+            if let Some(oracle_key) = oracle_instrument(binding) {
+                window.instruments.insert(oracle_key.clone());
+                window.oracle_instruments.insert(oracle_key);
+            }
+            if let MarketSubject::Weather(subject) = &binding.subject {
+                window.weather_stations.insert(subject.station.clone());
+                window.weather_valid_to =
+                    window.weather_valid_to.max(weather_local_day_end(subject)?);
+            }
+        }
+        window.linkages.entry(market_id).or_default().push(linkage);
+    }
+    Ok(window)
+}
+
+async fn load_domain_observations(
+    fact_read: &dyn QuantFactReadRepository,
+    instruments: &HashSet<DomainInstrumentKey>,
+    from: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<HashMap<DomainInstrumentKey, Vec<DomainObservation>>> {
+    let to_ms = cutoff
+        .timestamp_millis()
+        .checked_add(1)
+        .ok_or_else(|| QuantError::config("domain observation cutoff overflowed i64"))?;
+    let rows = fact_read
+        .domain_observations_between(
+            instruments.iter().cloned().collect(),
+            from.timestamp_millis(),
+            to_ms,
+            cutoff.timestamp_millis(),
+            decision_at.timestamp_millis(),
+        )
+        .await
+        .map_err(QuantError::from)?;
+    let mut observations: HashMap<DomainInstrumentKey, Vec<DomainObservation>> = HashMap::new();
+    for row in rows {
+        let observation = DomainObservation::from_clickhouse_row(&row).ok_or_else(|| {
+            ResearchError::PitResolution {
+                detail: format!(
+                    "domain observation {} / {} at {} cannot be decoded",
+                    row.instrument_key, row.metric, row.event_time
+                ),
+            }
+        })?;
+        let outside_pit = observation.observed_at < from
+            || observation.observed_at > cutoff
+            || observation.publish_time > cutoff
+            || observation
+                .available_at
+                .is_none_or(|available_at| available_at > decision_at);
+        if outside_pit {
+            return Err(ResearchError::PitResolution {
+                detail: format!(
+                    "domain observation {} at {} is outside PIT window [{from}, {cutoff}]",
+                    observation.instrument_key, observation.observed_at
+                ),
+            }
+            .into());
+        }
+        observations
+            .entry(observation.instrument_key.clone())
+            .or_default()
+            .push(observation);
+    }
+    for series in observations.values_mut() {
+        series.sort_by_key(|observation| observation.observed_at);
+    }
+    Ok(observations)
+}
+
+async fn load_crypto_reports(
+    fact_read: &dyn QuantFactReadRepository,
+    instruments: &HashSet<DomainInstrumentKey>,
+    from_ms: i64,
+    to_ms: i64,
+    cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>> {
+    let rows = fact_read
+        .crypto_price_reports_between(
+            instruments.iter().cloned().collect(),
+            from_ms,
+            to_ms,
+            cutoff.timestamp_millis(),
+            decision_at.timestamp_millis(),
+        )
+        .await
+        .map_err(QuantError::from)?;
+    let mut reports: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>> = HashMap::new();
+    for row in rows {
+        let report = CryptoPriceReport::from_clickhouse_row(row).ok_or_else(|| {
+            ResearchError::PitResolution {
+                detail: "crypto report contains an invalid persisted timestamp".to_owned(),
+            }
+        })?;
+        reports
+            .entry(report.instrument_key.clone())
+            .or_default()
+            .push(report);
+    }
+    for series in reports.values_mut() {
+        series.sort_by_key(|report| {
+            (
+                report.event_time,
+                report.available_at,
+                report.source_sequence,
+            )
+        });
+    }
+    Ok(reports)
+}
+
+async fn load_weather_facts(
+    fact_read: &dyn QuantFactReadRepository,
+    stations: &HashSet<IcaoStation>,
+    from: DateTime<Utc>,
+    valid_to: DateTime<Utc>,
+    cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<(
+    HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+    HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+)> {
+    let stations = stations.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let observation_to = cutoff
+        .timestamp_millis()
+        .checked_add(1)
+        .ok_or_else(|| QuantError::config("Weather observation cutoff overflowed i64"))?;
+    let rows = fact_read
+        .weather_observation_reports_between(
+            stations.clone(),
+            from.timestamp_millis(),
+            observation_to,
+            cutoff.timestamp_millis(),
+            decision_at.timestamp_millis(),
+        )
+        .await
+        .map_err(QuantError::from)?;
+    let mut observations = HashMap::<IcaoStation, Vec<WeatherObservationFact>>::new();
+    for row in rows {
+        let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
+            ResearchError::PitResolution {
+                detail: "Weather observation contains an invalid persisted value".to_owned(),
+            }
+        })?;
+        observations
+            .entry(fact.station.clone())
+            .or_default()
+            .push(fact);
+    }
+    for series in observations.values_mut() {
+        series.sort_by(|left, right| {
+            (
+                left.observation_time,
+                left.revision,
+                left.report_hash.as_str(),
+            )
+                .cmp(&(
+                    right.observation_time,
+                    right.revision,
+                    right.report_hash.as_str(),
+                ))
+        });
+    }
+    let forecast_to = valid_to
+        .timestamp_millis()
+        .checked_add(1)
+        .ok_or_else(|| QuantError::config("GEFS valid-time cutoff overflowed i64"))?;
+    let rows = fact_read
+        .weather_forecast_points_between(
+            stations,
+            from.timestamp_millis(),
+            forecast_to,
+            cutoff.timestamp_millis(),
+            decision_at.timestamp_millis(),
+        )
+        .await
+        .map_err(QuantError::from)?;
+    let mut forecasts = HashMap::<IcaoStation, Vec<WeatherForecastPoint>>::new();
+    for row in rows {
+        let fact = WeatherForecastPoint::from_clickhouse_row(row).ok_or_else(|| {
+            ResearchError::PitResolution {
+                detail: "GEFS point contains an invalid persisted value".to_owned(),
+            }
+        })?;
+        forecasts
+            .entry(fact.station.clone())
+            .or_default()
+            .push(fact);
+    }
+    for series in forecasts.values_mut() {
+        series.sort_by_key(|point| {
+            (
+                point.reference_time,
+                point.valid_time,
+                point.lead_hours,
+                point.member,
+            )
+        });
+    }
+    Ok((observations, forecasts))
+}
+
+fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<DateTime<Utc>> {
+    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
+        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+    })?;
+    let next_date = subject
+        .local_date
+        .succ_opt()
+        .ok_or_else(|| QuantError::config("Weather local date overflow"))?;
+    let midnight = next_date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| QuantError::config("invalid Weather local midnight"))?;
+    timezone
+        .from_local_datetime(&midnight)
+        .single()
+        .map(|value| value.with_timezone(&Utc))
+        .ok_or_else(|| QuantError::config("Weather local midnight is ambiguous or missing"))
 }
 
 fn mapped_domain_markets(
@@ -425,6 +684,7 @@ fn window_end_boundary(spec: &WindowSpec) -> QuantResult<DecisionBoundary> {
         spec.window_end,
         spec.knowledge_lag.as_secs(),
         spec.domain.crypto.availability_lag_secs,
+        spec.domain.weather.availability_lag_secs,
     )
 }
 
@@ -436,8 +696,13 @@ pub fn replay_boundary(
     decision_at: DateTime<Utc>,
     knowledge_lag_secs: u64,
     domain_crypto_lag_secs: u64,
+    domain_weather_lag_secs: u64,
 ) -> QuantResult<DecisionBoundary> {
-    DecisionClock::new(knowledge_lag_secs).serving_boundary(decision_at, domain_crypto_lag_secs)
+    DecisionClock::new(knowledge_lag_secs).serving_boundary(
+        decision_at,
+        domain_crypto_lag_secs,
+        domain_weather_lag_secs,
+    )
 }
 
 fn decode_catalog_markets(catalog: &CatalogWindowInfo) -> QuantResult<Vec<MarketRegistryInfo>> {
@@ -496,6 +761,22 @@ struct WindowSubjects {
     tokens: Vec<TokenId>,
     markets: Vec<MarketId>,
     seen_tokens: HashSet<TokenId>,
+}
+
+fn expand_book_tokens(
+    mut tokens: Vec<TokenId>,
+    mut seen: HashSet<TokenId>,
+    markets: &[MarketRegistryInfo],
+) -> Vec<TokenId> {
+    for market in markets {
+        if seen.insert(market.token_yes.clone()) {
+            tokens.push(market.token_yes.clone());
+        }
+        if seen.insert(market.token_no.clone()) {
+            tokens.push(market.token_no.clone());
+        }
+    }
+    tokens
 }
 
 fn window_subjects(samples: &[ReplaySample]) -> WindowSubjects {

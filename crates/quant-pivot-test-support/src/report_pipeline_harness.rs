@@ -57,11 +57,11 @@ use quant_pivot_models::{
     domain::{
         BasisAlertInfo, BasisAlertListQuery, CoreEventPublisher, DecisionBoundary,
         MarketLinkageInfo, MarketLinkageListQuery, NewAccountSnapshot, NewBasisAlert,
-        NewEquitySnapshot, NewFeatureParityState, NewMarketLinkage, NewMarketSelection,
-        NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, Paginated, RecommendationInfo,
-        RecommendationReportInfo,
+        NewEntryConditionInstance, NewEquitySnapshot, NewFeatureParityState, NewMarketLinkage,
+        NewMarketSelection, NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan,
+        NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
+        NewReportTransaction, NewRuntimeConfigActivation, NewRuntimeConfigVersion, Paginated,
+        RecommendationInfo, RecommendationReportInfo,
         governance::lifecycle::OperationalPhase,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -73,8 +73,8 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            FeatureParityLatchState, FeatureParityStateTransition, OutcomeSide, PublicationStatus,
-            RecommendationReportStatus, ReportKind,
+            EntryConditionState, FeatureParityLatchState, FeatureParityStateTransition,
+            OutcomeSide, PublicationStatus, RecommendationReportStatus, ReportKind,
         },
         rbac::ResourceType,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -86,13 +86,14 @@ use quant_pivot_models::{
         RUNTIME_CONFIG_SCHEMA_VERSION, ReportsConfig, RuntimeConfig, SelectionConfig,
     },
     types::{
-        AccountPositions, BasisAlertId, ContentHash, DomainInstrumentKey, EventId,
-        ExposureBreakdown, FeatureParityStateId, MarketId, MarketLinkageId, MarketSelectionId,
-        ModelInputContract, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
+        AccountPositions, BasisAlertId, ConditionTruth, ContentHash, DomainInstrumentKey,
+        EntryConditionInstanceId, EntryConditionPlan, EventId, ExposureBreakdown,
+        FeatureParityStateId, MarketId, MarketLinkageId, MarketSelectionId, ModelInputContract,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
         PortfolioRiskBudget, Price, RecommendationId, RecommendationReportId,
-        ReportDataQualityTokens, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        SelectionExclusionSummary, Shares, TokenId, Usd,
+        RecommendationTradePlan, ReportDataQualityTokens, RuntimeConfigActivationId,
+        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -278,6 +279,10 @@ impl MarketLinkageRepository for EmptyLinkageRepo {
         &self,
         _market_ids: &[MarketId],
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -704,17 +709,72 @@ fn fixture_report_transaction(
 ) -> NewReportTransaction {
     let report_row = fixture_new_report(report);
     let sampled_feature_parity = report_fixtures::sampled_parity(&report_row);
+    let recommendations = recommendations
+        .into_iter()
+        .map(fixture_new_recommendation)
+        .collect::<Vec<_>>();
+    let entry_condition_instances = recommendations
+        .iter()
+        .map(|recommendation| {
+            let (state, truth_json, artifact_id, artifact_hash, next_evaluation_at) =
+                match &recommendation.trade_plan {
+                    RecommendationTradePlan::Frozen { entry, .. } => match &entry.condition {
+                        EntryConditionPlan::Immediate => (
+                            EntryConditionState::NotRequired,
+                            Some(ConditionTruth::Satisfied),
+                            None,
+                            None,
+                            None,
+                        ),
+                        EntryConditionPlan::Conditional {
+                            artifact_id,
+                            content_hash,
+                        } => (
+                            EntryConditionState::Waiting,
+                            None,
+                            Some(artifact_id.clone()),
+                            Some(content_hash.clone()),
+                            Some(report.decision_at),
+                        ),
+                    },
+                    RecommendationTradePlan::Unavailable { .. } => {
+                        (EntryConditionState::Invalidated, None, None, None, None)
+                    }
+                };
+            NewEntryConditionInstance {
+                condition_instance_id: EntryConditionInstanceId::from_v7(),
+                recommendation_id: recommendation.recommendation_id.clone(),
+                artifact_id,
+                artifact_hash,
+                state,
+                truth_json,
+                revision: 0,
+                evaluation_hash: None,
+                input_fingerprint: None,
+                continuity_hash: None,
+                confirmation_started_at: None,
+                last_evaluated_at: None,
+                next_evaluation_at,
+                expires_at: recommendation.valid_until,
+                lease_owner: None,
+                lease_expires_at: None,
+                lease_epoch: 0,
+                claimed_by_intent_id: None,
+                claim_admission_state_version: None,
+                consumed_at: None,
+            }
+        })
+        .collect();
     NewReportTransaction {
         feature_parity_state_id: Some(feature_parity_state_id),
         account_snapshot: fixture_account_snapshot(report),
         equity_snapshot: fixture_equity_snapshot(report),
         data_quality_snapshot: fixture_data_quality_snapshot(report),
-        portfolio_plan: fixture_portfolio_plan(report, &recommendations),
+        portfolio_plan: fixture_portfolio_plan(report),
         report: report_row,
-        recommendations: recommendations
-            .into_iter()
-            .map(fixture_new_recommendation)
-            .collect(),
+        recommendations,
+        entry_condition_artifacts: Vec::new(),
+        entry_condition_instances,
         sampled_feature_parity: Some(sampled_feature_parity),
         operation_log: fixture_publish_operation_log(report),
     }
@@ -762,10 +822,7 @@ fn fixture_data_quality_snapshot(
     }
 }
 
-fn fixture_portfolio_plan(
-    report: &RecommendationReportInfo,
-    _recommendations: &[RecommendationInfo],
-) -> NewPortfolioPlan {
+fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan {
     NewPortfolioPlan {
         portfolio_plan_id: report.portfolio_plan_id.clone(),
         model_run_id: None,
@@ -1084,6 +1141,7 @@ fn registry_market(
         liquidity_usd: Some(liquidity_usd),
         volume_24h: Some(volume_24h_usd),
         fee_schedule: None,
+        start_date: Some(Utc::now() - ChronoDuration::hours(1)),
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,
         created_at: Some(Utc::now() - ChronoDuration::days(2)),

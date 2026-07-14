@@ -27,7 +27,9 @@ use quant_pivot_models::{
     },
     types::{ModelVersionId, Price},
 };
-use quant_pivot_repository::traits::{ModelRegistryRepository, RecommendationRepository};
+use quant_pivot_repository::traits::{
+    FactorRepository, ModelRegistryRepository, RecommendationRepository,
+};
 use quant_pivot_research::{
     model::{
         LotStateInput, ModelRuntimeFactoryBuilder, SellScore, SellScoreInput, SellSignalPolicy,
@@ -46,9 +48,8 @@ use crate::{
     prefetch::feature_window::FeatureWindowProvider,
     runtime_config::RuntimeConfigStore,
     service::model_backed_reinferer::{
-        LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok,
-        frozen_exit_outcome, liquidity_score_cap, runtime_decision_boundary, schema_binding,
-        selected_market_for_lot,
+        LiveFeatureBuildRequest, build_live_feature_vector, exit_model_load_ok, fresh_exit_outcome,
+        liquidity_score_cap, runtime_decision_boundary, schema_binding, selected_market_for_lot,
     },
 };
 
@@ -76,9 +77,9 @@ pub struct ModelBackedOpportunisticSellScorerDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     pub config: Arc<RuntimeConfigStore>,
-    /// Source of the entry recommendation's frozen factor breakdown, replayed as
-    /// the exit-side factor plane (reproducing the entry thesis).
+    /// Source of the recommendation's governed factor-definition set.
     pub recommendations: Arc<dyn RecommendationRepository>,
+    pub factors: Arc<dyn FactorRepository>,
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     pub window_provider: FeatureWindowProvider,
 }
@@ -170,19 +171,20 @@ impl OpportunisticSellScorer for ModelBackedOpportunisticSellScorer {
         let Some(vector) = build_live_feature_vector(&request).await? else {
             return Ok(None);
         };
-        // Reproduce the entry factor thesis from the recommendation's frozen
-        // breakdown rather than recompute on a peerless single market.
-        let Some(frozen) = frozen_exit_outcome(
+        let Some(fresh) = fresh_exit_outcome(
             self.deps.recommendations.as_ref(),
+            self.deps.factors.as_ref(),
             intent,
             vector.market_id.clone(),
             boundary.decision_at(),
+            config.data_quality.max_feature_bucket_age_secs,
+            &config.factors,
         )
         .await?
         else {
             return Ok(None);
         };
-        let market_factors = frozen
+        let market_factors = fresh
             .outcome
             .factors
             .iter()

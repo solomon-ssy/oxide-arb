@@ -3,12 +3,12 @@
 use crate::{
     enums::{
         execution::{ExitReason, ExitState, OrderIntentKind},
-        quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
+        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryOrderSpec, EntryTrigger, ExitPolicySpec, ExitReinferenceObservation,
-        ModelVersionId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
-        ScaleOutState,
+        ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExitPolicySpec,
+        ExitReinferenceObservation, ModelVersionId, OrderIntentId, Price, RecommendationId,
+        RuntimeConfigVersionId, ScaleOutState,
     },
 };
 use chrono::{DateTime, Utc};
@@ -38,18 +38,13 @@ pub struct Model {
     pub status_reason: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub admission_trace_ref: Option<String>,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub entry_trigger_json: EntryTrigger,
+    pub condition_instance_id: EntryConditionInstanceId,
     #[sea_orm(column_type = "JsonBinary")]
     pub entry_order_json: EntryOrderSpec,
     #[sea_orm(column_type = "JsonBinary")]
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
-    pub entry_trigger_state: EntryTriggerState,
-    pub trigger_confirming_since: Option<DateTime<Utc>>,
-    pub trigger_last_observed_at: Option<DateTime<Utc>>,
-    pub trigger_ready_at: Option<DateTime<Utc>>,
     pub exit_state: ExitState,
     pub exit_reason: Option<ExitReason>,
     pub next_check_at: Option<DateTime<Utc>>,
@@ -71,6 +66,12 @@ pub enum Relation {
         to = "super::quant_recommendation::Column::RecommendationId"
     )]
     Recommendation,
+    #[sea_orm(
+        belongs_to = "super::quant_entry_condition_instance::Entity",
+        from = "Column::ConditionInstanceId",
+        to = "super::quant_entry_condition_instance::Column::ConditionInstanceId"
+    )]
+    ConditionInstance,
     #[sea_orm(has_many = "super::quant_execution_order::Entity")]
     ExecutionOrder,
     #[sea_orm(has_one = "super::quant_capital_allocation::Entity")]
@@ -82,6 +83,12 @@ pub enum Relation {
 impl Related<super::quant_recommendation::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Recommendation.def()
+    }
+}
+
+impl Related<super::quant_entry_condition_instance::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ConditionInstance.def()
     }
 }
 

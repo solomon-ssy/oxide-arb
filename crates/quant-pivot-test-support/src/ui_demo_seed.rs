@@ -38,20 +38,19 @@ use quant_pivot_models::{
             SettlementRedeemState, VenueOrderStatus,
         },
         quant::{
-            EntryTriggerState, ExecutionOrderState, ExecutionWalletKind, ExitSettlementMode,
-            OrderIntentStatus, OutcomeSide, PriceComparison, RecommendationAttributionOutcome,
-            RedeemPolicy,
+            ExecutionOrderState, ExecutionWalletKind, ExitSettlementMode, OrderIntentStatus,
+            OutcomeSide, RecommendationAttributionOutcome, RedeemPolicy,
         },
     },
     types::{
-        AccountSnapshotId, AttributionDetail, CapitalAllocationId, ContentHash, EntryOutcome,
-        EntryTrigger, ExecutionOrderId, ExitOutcome, MarketId, MarketSelectionId, OrderId,
-        OrderIntentId, PortfolioPlanId, PositionId, Price, RecommendationId,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, RuntimeConfigVersionId,
-        SelectionExclusionSummary, SettlementBalanceEvidence, SettlementPayoutVector,
-        SettlementRedeemId, SettlementRedeemIndexSets, SettlementRedeemLotId,
-        SettlementTokenBalance, Shares, TokenId, Usd,
+        AccountSnapshotId, AttributionDetail, CapitalAllocationId, ContentHash,
+        EntryConditionInstanceId, EntryOutcome, ExecutionOrderId, ExitOutcome, MarketId,
+        MarketSelectionId, OrderId, OrderIntentId, PortfolioPlanId, PositionId, Price,
+        RecommendationId, RecommendationReportId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        RuntimeConfigVersionId, SelectionExclusionSummary, SettlementBalanceEvidence,
+        SettlementPayoutVector, SettlementRedeemId, SettlementRedeemIndexSets,
+        SettlementRedeemLotId, SettlementTokenBalance, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -80,8 +79,9 @@ use crate::{
     catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{
         self, EXECUTION_NOTIONAL, ExecutionTxnIds, ReportBuildOptions, ReportSeedConfig,
-        SharedDemoInfra, build_custom_report_transaction, close_position_full, demo_recommendation,
-        entry_execution_order, fill_entry_lot, report_operation_log, seed_approved_intent,
+        SharedDemoInfra, build_custom_report_transaction, claim_entry_for_test,
+        close_position_full, demo_recommendation, entry_execution_order, fill_entry_lot,
+        report_operation_log, seed_approved_intent, seed_conditional_price_report_on_infra,
         seed_manual_approved_intent, seed_pending_intent, seed_report_on_infra,
         seed_shared_demo_infra,
     },
@@ -399,7 +399,6 @@ async fn seed_pending_a(
     let ids = seed_report(db, infra, "pending-a").await;
     let mut record = base_record("pending-a", &ids);
     let intent_id = seed_pending_intent(db, &ids).await;
-    configure_waiting_price_trigger(db, &intent_id).await;
     attach_intent_meta(db, &mut record, intent_id).await;
     record
 }
@@ -421,33 +420,11 @@ async fn seed_approved(
     infra: &SharedDemoInfra,
     _: &PgExecutionSubmissionRepository,
 ) -> DemoSeedRecord {
-    let ids = seed_report(db, infra, "approved").await;
+    let ids = seed_conditional_price_report_on_infra(db, infra, demo_report("approved")).await;
     let mut record = base_record("approved", &ids);
     let intent_id = seed_manual_approved_intent(db, &ids).await;
-    configure_waiting_price_trigger(db, &intent_id).await;
     attach_intent_meta(db, &mut record, intent_id).await;
     record
-}
-
-async fn configure_waiting_price_trigger(db: &DatabaseConnection, intent_id: &OrderIntentId) {
-    let row = quant_order_intent::Entity::find_by_id(intent_id.clone())
-        .one(db)
-        .await
-        .expect("load approved demo intent")
-        .expect("approved demo intent exists");
-    let mut active = row.into_active_model();
-    active.entry_trigger_json = ActiveValue::Set(EntryTrigger::PriceCondition {
-        comparison: PriceComparison::AtOrAbove,
-        threshold: Price::new(dec!(0.61)),
-        confirmation_secs: 2,
-        max_observation_gap_ms: 2_000,
-    });
-    active.entry_trigger_state = ActiveValue::Set(EntryTriggerState::Waiting);
-    active.trigger_confirming_since = ActiveValue::Set(None);
-    active.trigger_last_observed_at = ActiveValue::Set(None);
-    active.trigger_ready_at = ActiveValue::Set(None);
-    active.updated_at = ActiveValue::Set(Utc::now());
-    active.update(db).await.expect("arm demo price trigger");
 }
 
 async fn seed_approved_policy(
@@ -470,10 +447,7 @@ async fn seed_submitted(
     let ids = seed_report(db, infra, "submitted").await;
     let mut record = base_record("submitted", &ids);
     let intent_id = seed_approved_intent(db, &ids).await;
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(db, submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             entry_execution_order(&intent_id, &ids),
@@ -494,10 +468,7 @@ async fn seed_partial(
     let ids = seed_report(db, infra, "partial").await;
     let mut record = base_record("partial", &ids);
     let intent_id = seed_approved_intent(db, &ids).await;
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(db, submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             entry_execution_order(&intent_id, &ids),
@@ -548,7 +519,7 @@ async fn seed_filled_open(
     let ids = seed_report(db, infra, "filled-open").await;
     let mut record = base_record("filled-open", &ids);
     let intent_id = seed_approved_intent(db, &ids).await;
-    fill_entry_lot(submission, &ids, &intent_id).await;
+    fill_entry_lot(db, submission, &ids, &intent_id).await;
     if let Some(order) = first_entry_order(db, &intent_id).await {
         record.execution_order_id = Some(order);
     }
@@ -564,7 +535,7 @@ async fn seed_filled_closed(
     let ids = seed_report(db, infra, "filled-closed").await;
     let mut record = base_record("filled-closed", &ids);
     let intent_id = seed_approved_intent(db, &ids).await;
-    close_position_full(submission, &ids, &intent_id, None).await;
+    close_position_full(db, submission, &ids, &intent_id, None).await;
     if let Some(order) = first_entry_order(db, &intent_id).await {
         record.execution_order_id = Some(order);
     }
@@ -622,10 +593,7 @@ async fn seed_failed(
     let ids = seed_report(db, infra, "failed").await;
     let mut record = base_record("failed", &ids);
     let intent_id = seed_approved_intent(db, &ids).await;
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(db, submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             entry_execution_order(&intent_id, &ids),
@@ -667,7 +635,7 @@ async fn seed_reconciliation_queue(
         let ids = seed_report(db, infra, slug).await;
         let mut record = base_record(slug, &ids);
         let intent_id = seed_approved_intent(db, &ids).await;
-        let (intent_id, order_id) = ambiguous_order(submission, &ids, &intent_id).await;
+        let (intent_id, order_id) = ambiguous_order(db, submission, &ids, &intent_id).await;
         record.execution_order_id = Some(order_id.clone());
         attach_intent_meta(db, &mut record, intent_id.clone()).await;
 
@@ -726,7 +694,7 @@ async fn seed_settlement_hold_lots(
         }
         let intent_id = seed_approved_intent(db, &ids).await;
         patch_hold_to_resolution(db, &intent_id).await;
-        fill_entry_lot(submission, &ids, &intent_id).await;
+        fill_entry_lot(db, submission, &ids, &intent_id).await;
         hold_intents.push((ids, intent_id));
         summary.reports += 1;
         summary.intents += 1;
@@ -979,14 +947,12 @@ async fn first_entry_order(
 }
 
 async fn ambiguous_order(
+    db: &DatabaseConnection,
     submission: &PgExecutionSubmissionRepository,
     ids: &ExecutionTxnIds,
     intent_id: &OrderIntentId,
 ) -> (OrderIntentId, ExecutionOrderId) {
-    submission
-        .claim_for_submission(intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(db, submission, intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             entry_execution_order(intent_id, ids),
@@ -1316,6 +1282,7 @@ async fn seed_diff_report(
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: report_id.clone(),
         recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: infra.model_version_id.clone(),
         model_run: infra.model_run_id.clone(),
         market_selection: market_selection_id,
@@ -1378,6 +1345,7 @@ async fn seed_custom_report(
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: infra.model_version_id.clone(),
         model_run: infra.model_run_id.clone(),
         market_selection: market_selection_id,

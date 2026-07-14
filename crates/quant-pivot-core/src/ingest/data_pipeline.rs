@@ -299,6 +299,9 @@ impl BookApplyWorker {
         tracing::debug!(shard_id, ?status, "Shard status change");
         self.metrics.shard_status_changes.inc();
         let connected = matches!(status, ShardConnectionStatus::Connected);
+        if !connected {
+            self.book_store.mark_gap();
+        }
         self.metrics
             .ws_shard_connected
             .with_label_values(&[&shard_id.to_string()])

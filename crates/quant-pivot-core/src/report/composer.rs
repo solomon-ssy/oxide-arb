@@ -7,32 +7,42 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::{ChProbability, ChUsd, QuantRecommendationEventRow},
     domain::{
-        NewAccountSnapshot, NewEquitySnapshot, NewOperationLog, NewPortfolioPlan,
-        NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
-        NewReportTransaction, TradePolicyArtifactInfo, market::book::BookLevel,
+        MarketSubject, NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance,
+        NewEquitySnapshot, NewOperationLog, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
+        PriceComparator, TradePolicyArtifactInfo, market::book::BookLevel,
     },
     enums::{
         common::{MarketCategory, TickSize},
+        domain::LinkageSourceRole,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EmptyReportReason, IneligibilityReason, PriceComparison, QuantRuntimeMode,
-            RecommendationReportStatus, RecommendationStatus, ReportKind,
+            EmptyReportReason, EntryConditionState, IneligibilityReason, OutcomeSide,
+            PriceComparison, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
+            ReportKind,
         },
         rbac::ResourceType,
     },
     hashing::canonical_state_hash,
     runtime_config::RuntimeConfig,
     types::{
-        Bps, ConfidenceSummary, EligibilitySummary, EntryOrderPolicy, EntryOrderTemplate,
-        EntryPlan, EntryTrigger, EntryTriggerTemplate, EventId, EvidenceRefs, EvidenceRefsInput,
-        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId,
-        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OperationLogId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
-        TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
+        Bps, ClockAnchor, ClockCondition, ConditionTruth, ConfidenceSummary, ConfirmationPolicy,
+        ContentHash, CryptoSubjectPredicateEntered, ENTRY_CONDITION_EVALUATOR_VERSION,
+        ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary, EntryConditionArtifactId,
+        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFactorBinding,
+        EntryConditionInstanceId, EntryConditionPlan, EntryConditionSourceBinding,
+        EntryConditionTemplate, EntryConditionTemplateV1, EntryConditionV1, EntryOrderPolicy,
+        EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs, EvidenceRefsInput,
+        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorCondition, FactorDefinitionId,
+        FeatureVectorId, MarketEventCondition, MarketEventTemplate, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        Price, PriceCondition, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationReportId, RecommendationTradePlan, RejectionReasonCount,
+        ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
+        ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy, TradePlanBlocker, TradePolicyCohort,
+        TradePolicyCohortProvenance, TrailingStopPolicy, Usd, WeatherDailyHighEnteredBand,
+        WeatherDailyHighExceededBandUpper, WeatherObservationDayClosedOutsideBand,
     },
 };
 use quant_pivot_research::{
@@ -60,6 +70,7 @@ pub struct ComposeReportInput<'a> {
     pub runtime_mode: QuantRuntimeMode,
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
+    pub market_selection_hash: ContentHash,
     pub account: &'a AccountSnapshot,
     pub account_snapshot: NewAccountSnapshot,
     pub equity_snapshot: NewEquitySnapshot,
@@ -77,6 +88,9 @@ pub struct ComposeReportInput<'a> {
     pub top_n: u32,
     pub return_model_calibrated: bool,
     pub trade_policy: Option<&'a TradePolicyArtifactInfo>,
+    /// Exact source-native reference price visible at the decision boundary,
+    /// keyed by market. Only relative Crypto event predicates consume it.
+    pub crypto_reference_prices: HashMap<MarketId, Usd>,
 }
 
 /// Converts builder/planner output into persistence rows and post-commit events.
@@ -110,7 +124,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             .report_data_quality_snapshot_id
             .clone();
 
-        let recommendations = input
+        let recommendation_rows = input
             .planned
             .iter()
             .map(|planned| {
@@ -124,6 +138,18 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 )
             })
             .collect::<QuantResult<Vec<_>>>()?;
+        let recommendations = recommendation_rows
+            .iter()
+            .map(|rows| rows.recommendation.clone())
+            .collect::<Vec<_>>();
+        let entry_condition_artifacts = recommendation_rows
+            .iter()
+            .filter_map(|rows| rows.artifact.clone())
+            .collect();
+        let entry_condition_instances = recommendation_rows
+            .into_iter()
+            .map(|rows| rows.instance)
+            .collect();
 
         // Report validity is the data-driven roll-up of its recommendations'
         // validity (latest entry-by); an empty report falls back to the governed
@@ -143,49 +169,14 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         let notification =
             report_notification(&report_id, status, &input, &summary, &recommendations)?;
 
-        let account_snapshot_id = input.account_snapshot.account_snapshot_id.clone();
-        let equity_snapshot_id = input.equity_snapshot.equity_snapshot_id.clone();
-        let report = NewRecommendationReport {
-            recommendation_report_id: report_id.clone(),
-            report_kind: ReportKind::TopN,
-            trigger_kind: input.trigger.kind(),
-            trigger_key: input.trigger_key.clone(),
-            trigger_time: input.trigger_time,
-            knowledge_lag_secs: i64::try_from(input.knowledge_lag_secs).map_err(|error| {
-                QuantError::config(format!("knowledge_lag_secs too large: {error}"))
-            })?,
-            decision_at: input.decision_at,
-            // Informational nominal horizon: the governed fallback (per-rec
-            // horizons are data-driven and live on each recommendation).
-            horizon_secs: i64::try_from(fallback_horizon_secs).map_err(|error| {
-                QuantError::config(format!("reports.fallback_horizon_secs too large: {error}"))
-            })?,
-            runtime_mode: input.runtime_mode,
-            runtime_config_version_id: input.runtime_config_version_id.clone(),
-            model_run_id: input.model_run_id.clone(),
-            model_version_id: input.model_version_id.clone(),
-            market_selection_id: input.market_selection_id.clone(),
-            portfolio_plan_id: input.portfolio_plan.portfolio_plan_id.clone(),
-            top_n: i32::try_from(input.top_n).map_err(|error| {
-                QuantError::config(format!("reports top_n exceeds i32::MAX: {error}"))
-            })?,
+        let report = build_report_header(
+            &report_id,
+            &input,
             status,
-            account_source: input.account.source,
-            capital_base_usd: input.account.capital_base_usd,
-            account_snapshot_ref: account_snapshot_id,
-            equity_snapshot_ref: equity_snapshot_id,
+            report_valid_until,
             data_quality_snapshot_ref,
-            summary_json: summary,
-            published_at: Some(input.published_at),
-            // Roll-up of recommendation validity (data-driven), frozen at publish.
-            valid_until: Some(report_valid_until),
-            revoked_at: None,
-            expired_at: None,
-            status_reason: input
-                .empty
-                .as_ref()
-                .map(|empty| empty.reason.as_str().to_owned()),
-        };
+            summary,
+        )?;
         let operation_log = operation_log(&report_id, &input, status, &report)?;
         let ch_rows = recommendation_events(&report_id, &recommendations, input.published_at)?;
 
@@ -198,6 +189,8 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 portfolio_plan: input.portfolio_plan,
                 report,
                 recommendations,
+                entry_condition_artifacts,
+                entry_condition_instances,
                 sampled_feature_parity: None,
                 operation_log,
             },
@@ -207,6 +200,55 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             notify_operators: input.runtime_config.notification.policies.report_published,
         })
     }
+}
+
+fn build_report_header(
+    report_id: &RecommendationReportId,
+    input: &ComposeReportInput<'_>,
+    status: RecommendationReportStatus,
+    valid_until: DateTime<Utc>,
+    data_quality_snapshot_ref: ReportDataQualitySnapshotId,
+    summary: ReportSummary,
+) -> QuantResult<NewRecommendationReport> {
+    let fallback_horizon_secs = input.runtime_config.reports.fallback_horizon_secs;
+    Ok(NewRecommendationReport {
+        recommendation_report_id: report_id.clone(),
+        report_kind: ReportKind::TopN,
+        trigger_kind: input.trigger.kind(),
+        trigger_key: input.trigger_key.clone(),
+        trigger_time: input.trigger_time,
+        knowledge_lag_secs: i64::try_from(input.knowledge_lag_secs).map_err(|error| {
+            QuantError::config(format!("knowledge_lag_secs too large: {error}"))
+        })?,
+        decision_at: input.decision_at,
+        horizon_secs: i64::try_from(fallback_horizon_secs).map_err(|error| {
+            QuantError::config(format!("reports.fallback_horizon_secs too large: {error}"))
+        })?,
+        runtime_mode: input.runtime_mode,
+        runtime_config_version_id: input.runtime_config_version_id.clone(),
+        model_run_id: input.model_run_id.clone(),
+        model_version_id: input.model_version_id.clone(),
+        market_selection_id: input.market_selection_id.clone(),
+        portfolio_plan_id: input.portfolio_plan.portfolio_plan_id.clone(),
+        top_n: i32::try_from(input.top_n).map_err(|error| {
+            QuantError::config(format!("reports top_n exceeds i32::MAX: {error}"))
+        })?,
+        status,
+        account_source: input.account.source,
+        capital_base_usd: input.account.capital_base_usd,
+        account_snapshot_ref: input.account_snapshot.account_snapshot_id.clone(),
+        equity_snapshot_ref: input.equity_snapshot.equity_snapshot_id.clone(),
+        data_quality_snapshot_ref,
+        summary_json: summary,
+        published_at: Some(input.published_at),
+        valid_until: Some(valid_until),
+        revoked_at: None,
+        expired_at: None,
+        status_reason: input
+            .empty
+            .as_ref()
+            .map(|empty| empty.reason.as_str().to_owned()),
+    })
 }
 
 /// `instant + secs`, failing closed on overflow.
@@ -320,7 +362,7 @@ fn compose_recommendation(
     entry_window_ratio: Decimal,
     fallback_horizon_secs: u64,
     data_quality_snapshot_ref: &ReportDataQualitySnapshotId,
-) -> QuantResult<NewRecommendation> {
+) -> QuantResult<ComposedRecommendationRows> {
     let candidate = &planned.candidate;
     let capture = input.captures.get(&candidate.market_id).ok_or_else(|| {
         ReportError::InvariantViolation {
@@ -537,31 +579,67 @@ fn ask_vwap_for_usd(asks: &[BookLevel], target: Usd) -> Option<(Price, Price)> {
     Some((Price::new(target.inner() / shares), worst?))
 }
 
-fn policy_entry_plan(
+struct MaterializedEntryPlan {
+    plan: EntryPlan,
+    artifact: Option<NewEntryConditionArtifact>,
+}
+
+#[derive(Clone, Copy)]
+struct EntryPlanMaterialization<'a> {
+    recommendation_id: &'a RecommendationId,
     published_at: DateTime<Utc>,
     valid_until: DateTime<Utc>,
     tick_size: TickSize,
-    policy: &ResolvedRecommendationPolicy,
-) -> EntryPlan {
-    let trigger = match policy.cohort.entry_trigger {
-        EntryTriggerTemplate::Immediate => EntryTrigger::Immediate,
-        EntryTriggerTemplate::PriceOffset {
-            comparison,
-            threshold_offset_bps,
-            confirmation_secs,
+    candidate: &'a SignalCandidate,
+    capture: &'a MarketDecisionCapture,
+    input: &'a ComposeReportInput<'a>,
+    policy: &'a ResolvedRecommendationPolicy,
+}
+
+fn policy_entry_plan(context: EntryPlanMaterialization<'_>) -> QuantResult<MaterializedEntryPlan> {
+    let EntryPlanMaterialization {
+        recommendation_id,
+        published_at,
+        valid_until,
+        tick_size,
+        candidate,
+        capture,
+        input,
+        policy,
+    } = context;
+    let (condition, artifact) = match &policy.cohort.entry_condition {
+        EntryConditionTemplate::Immediate => (EntryConditionPlan::Immediate, None),
+        EntryConditionTemplate::Conditional {
+            root,
+            confirmation_ms,
             max_observation_gap_ms,
         } => {
-            let offset = threshold_offset_bps.inner() / Decimal::from(10_000);
-            let factor = match comparison {
-                PriceComparison::AtOrAbove => Decimal::ONE + offset,
-                PriceComparison::AtOrBelow => Decimal::ONE - offset,
-            };
-            EntryTrigger::PriceCondition {
-                comparison,
-                threshold: bounded_price(policy.executable_entry_price.inner() * factor),
-                confirmation_secs,
-                max_observation_gap_ms,
+            let root = materialize_condition_tree(root, tick_size, candidate, capture, input)?;
+            let (factor_bindings, source_bindings) = condition_leaf_bindings(&root);
+            if !source_bindings.is_empty()
+                && (capture.market_linkage_id.is_none() || capture.market_linkage_hash.is_none())
+            {
+                return Err(ReportError::InvariantViolation {
+                    stage: "entry_condition",
+                    detail: format!(
+                        "market-event condition for market {} has no PIT linkage revision",
+                        candidate.market_id
+                    ),
+                }
+                .into());
             }
+            let (condition, artifact) = materialize_condition_artifact(ConditionArtifactInput {
+                recommendation_id,
+                candidate,
+                capture,
+                input,
+                root,
+                confirmation_ms: *confirmation_ms,
+                max_observation_gap_ms: *max_observation_gap_ms,
+                factor_bindings,
+                source_bindings,
+            })?;
+            (condition, Some(artifact))
         }
     };
     let order_policy = match policy.cohort.entry_order {
@@ -575,7 +653,7 @@ fn policy_entry_plan(
         },
     };
     let mut plan = EntryPlan {
-        trigger,
+        condition,
         order_policy,
         max_slippage_bps: policy.cohort.max_slippage_bps,
         valid_from: published_at,
@@ -589,7 +667,414 @@ fn policy_entry_plan(
         ),
     };
     align_entry_plan_to_tick(&mut plan, tick_size);
-    plan
+    Ok(MaterializedEntryPlan { plan, artifact })
+}
+
+struct ConditionArtifactInput<'a> {
+    recommendation_id: &'a RecommendationId,
+    candidate: &'a SignalCandidate,
+    capture: &'a MarketDecisionCapture,
+    input: &'a ComposeReportInput<'a>,
+    root: EntryConditionV1,
+    confirmation_ms: u64,
+    max_observation_gap_ms: u64,
+    factor_bindings: Vec<EntryConditionFactorBinding>,
+    source_bindings: Vec<EntryConditionSourceBinding>,
+}
+
+fn materialize_condition_artifact(
+    artifact_input: ConditionArtifactInput<'_>,
+) -> QuantResult<(EntryConditionPlan, NewEntryConditionArtifact)> {
+    let ConditionArtifactInput {
+        recommendation_id,
+        candidate,
+        capture,
+        input,
+        root,
+        confirmation_ms,
+        max_observation_gap_ms,
+        factor_bindings,
+        source_bindings,
+    } = artifact_input;
+    let artifact = EntryConditionArtifactV1 {
+        schema_version: ENTRY_CONDITION_SCHEMA_VERSION,
+        evaluator_version: ENTRY_CONDITION_EVALUATOR_VERSION,
+        binding: EntryConditionBinding {
+            recommendation_id: recommendation_id.clone(),
+            market_id: candidate.market_id.clone(),
+            token_id: candidate.token_id.clone(),
+            outcome_side: candidate.outcome_side,
+            market_linkage_id: capture.market_linkage_id.clone(),
+            market_linkage_hash: capture.market_linkage_hash.clone(),
+            catalog_snapshot_id: input.market_selection_id.clone(),
+            catalog_snapshot_hash: input.market_selection_hash.clone(),
+            model_version_id: input.model_version_id.clone(),
+            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            factor_bindings,
+            source_bindings,
+        },
+        confirmation: ConfirmationPolicy {
+            required_continuous_ms: confirmation_ms,
+            max_observation_gap_ms,
+        },
+        root,
+    }
+    .canonicalize()
+    .map_err(|error| ReportError::InvariantViolation {
+        stage: "entry_condition",
+        detail: error.to_string(),
+    })?;
+    let content_hash =
+        artifact
+            .canonical_content_hash()
+            .map_err(|error| ReportError::InvariantViolation {
+                stage: "entry_condition",
+                detail: error.to_string(),
+            })?;
+    let artifact_id = EntryConditionArtifactId::from_content_hash(&content_hash);
+    Ok((
+        EntryConditionPlan::Conditional {
+            artifact_id: artifact_id.clone(),
+            content_hash: content_hash.clone(),
+        },
+        NewEntryConditionArtifact {
+            artifact_id,
+            content_hash,
+            schema_version: i32::try_from(ENTRY_CONDITION_SCHEMA_VERSION).map_err(|error| {
+                ReportError::NumericOverflow {
+                    field: "entry_condition.schema_version",
+                    detail: error.to_string(),
+                }
+            })?,
+            evaluator_version: i32::try_from(ENTRY_CONDITION_EVALUATOR_VERSION).map_err(
+                |error| ReportError::NumericOverflow {
+                    field: "entry_condition.evaluator_version",
+                    detail: error.to_string(),
+                },
+            )?,
+            payload_json: artifact,
+        },
+    ))
+}
+
+fn materialize_condition_tree(
+    node: &EntryConditionTemplateV1,
+    tick_size: TickSize,
+    candidate: &SignalCandidate,
+    capture: &MarketDecisionCapture,
+    input: &ComposeReportInput<'_>,
+) -> QuantResult<EntryConditionV1> {
+    match node {
+        EntryConditionTemplateV1::Price {
+            comparison,
+            threshold,
+            max_input_age_ms,
+        } => {
+            let direction = match comparison {
+                PriceComparison::AtOrAbove => TickDirection::Up,
+                PriceComparison::AtOrBelow => TickDirection::Down,
+            };
+            Ok(EntryConditionV1::Price(PriceCondition {
+                token_id: candidate.token_id.clone(),
+                comparison: *comparison,
+                threshold: tick_aligned_price(threshold.inner(), tick_size, direction),
+                max_input_age_ms: *max_input_age_ms,
+            }))
+        }
+        EntryConditionTemplateV1::Clock { anchor, offset_ms } => {
+            materialize_clock_condition(*anchor, *offset_ms, candidate, capture, input.decision_at)
+        }
+        EntryConditionTemplateV1::Factor {
+            definition_id,
+            definition_hash,
+            measure,
+            comparison,
+            threshold,
+            minimum_confidence,
+            max_input_age_ms,
+        } => {
+            if FactorDefinitionId::from_definition_hash(definition_hash) != *definition_id {
+                return Err(ReportError::InvariantViolation {
+                    stage: "entry_condition",
+                    detail: format!("factor {definition_id} definition id/hash mismatch"),
+                }
+                .into());
+            }
+            Ok(EntryConditionV1::Factor(FactorCondition {
+                definition_id: definition_id.clone(),
+                definition_hash: definition_hash.clone(),
+                model_version_id: input.model_version_id.clone(),
+                measure: *measure,
+                comparison: *comparison,
+                threshold: *threshold,
+                minimum_confidence: *minimum_confidence,
+                max_input_age_ms: *max_input_age_ms,
+            }))
+        }
+        EntryConditionTemplateV1::MarketEvent { event } => {
+            materialize_market_event(*event, candidate, capture, input)
+        }
+        EntryConditionTemplateV1::All { children } => Ok(EntryConditionV1::All {
+            children: children
+                .iter()
+                .map(|child| {
+                    materialize_condition_tree(child, tick_size, candidate, capture, input)
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
+        }),
+        EntryConditionTemplateV1::Any { children } => Ok(EntryConditionV1::Any {
+            children: children
+                .iter()
+                .map(|child| {
+                    materialize_condition_tree(child, tick_size, candidate, capture, input)
+                })
+                .collect::<QuantResult<Vec<_>>>()?,
+        }),
+    }
+}
+
+fn materialize_clock_condition(
+    anchor: ClockAnchor,
+    offset_ms: i64,
+    candidate: &SignalCandidate,
+    capture: &MarketDecisionCapture,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<EntryConditionV1> {
+    let anchor_at = match anchor {
+        ClockAnchor::RecommendationDecision => decision_at,
+        ClockAnchor::MarketStart => {
+            capture
+                .market
+                .start_date
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "entry_condition",
+                    detail: format!(
+                        "market {} has no frozen market_start clock anchor",
+                        candidate.market_id
+                    ),
+                })?
+        }
+        ClockAnchor::MarketEnd => {
+            capture
+                .market
+                .end_date
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "entry_condition",
+                    detail: format!(
+                        "market {} has no frozen market_end clock anchor",
+                        candidate.market_id
+                    ),
+                })?
+        }
+    };
+    let deadline_at = anchor_at
+        .checked_add_signed(Duration::milliseconds(offset_ms))
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "entry_condition",
+            detail: "clock condition deadline is outside chrono range".to_owned(),
+        })?;
+    Ok(EntryConditionV1::Clock(ClockCondition {
+        anchor,
+        anchor_at,
+        offset_ms,
+        deadline_at,
+    }))
+}
+
+fn materialize_market_event(
+    template: MarketEventTemplate,
+    candidate: &SignalCandidate,
+    capture: &MarketDecisionCapture,
+    input: &ComposeReportInput<'_>,
+) -> QuantResult<EntryConditionV1> {
+    let binding =
+        capture
+            .domain_binding
+            .as_ref()
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "entry_condition",
+                detail: format!(
+                    "market-event condition for market {} has no PIT typed binding",
+                    candidate.market_id
+                ),
+            })?;
+    let live = binding
+        .source_bindings
+        .iter()
+        .find(|source| source.role == LinkageSourceRole::LiveEvent)
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "entry_condition",
+            detail: format!(
+                "market-event condition for market {} has no live-event source binding",
+                candidate.market_id
+            ),
+        })?;
+    let source = EntryConditionSourceBinding {
+        source_id: live.source_id.clone(),
+        instrument_key: live.instrument_key.clone(),
+        binding_hash: live.binding_hash.clone(),
+    };
+    let family_matches = matches!(
+        (&binding.subject, template),
+        (
+            MarketSubject::Crypto(_),
+            MarketEventTemplate::CryptoSubjectPredicateEntered { .. }
+        ) | (
+            MarketSubject::Weather(_),
+            MarketEventTemplate::WeatherDailyHighPredicate { .. }
+        )
+    );
+    if !family_matches {
+        return Err(ReportError::InvariantViolation {
+            stage: "entry_condition",
+            detail: format!(
+                "market-event template family does not match market {} linkage family",
+                candidate.market_id
+            ),
+        }
+        .into());
+    }
+    let event = materialize_event_payload(&binding.subject, template, source, candidate, input)?;
+    Ok(EntryConditionV1::MarketEvent { event })
+}
+
+fn materialize_event_payload(
+    subject: &MarketSubject,
+    template: MarketEventTemplate,
+    source: EntryConditionSourceBinding,
+    candidate: &SignalCandidate,
+    input: &ComposeReportInput<'_>,
+) -> QuantResult<MarketEventCondition> {
+    let event = match (subject, template) {
+        (
+            MarketSubject::Crypto(subject),
+            MarketEventTemplate::CryptoSubjectPredicateEntered { max_input_age_ms },
+        ) => MarketEventCondition::CryptoSubjectPredicateEntered(CryptoSubjectPredicateEntered {
+            source,
+            comparator: subject.comparator,
+            strike: subject.strike,
+            reference_price: match subject.comparator {
+                PriceComparator::UpVsReference => Some(
+                    input
+                        .crypto_reference_prices
+                        .get(&candidate.market_id)
+                        .copied()
+                        .ok_or_else(|| ReportError::InvariantViolation {
+                            stage: "entry_condition",
+                            detail: format!(
+                                "relative Crypto market {} has no source-native PIT reference price",
+                                candidate.market_id
+                            ),
+                        })?,
+                ),
+                _ => None,
+            },
+            recommended_outcome: candidate.outcome_side,
+            max_input_age_ms,
+        }),
+        (
+            MarketSubject::Weather(subject),
+            MarketEventTemplate::WeatherDailyHighPredicate { max_input_age_ms },
+        ) => match candidate.outcome_side {
+                OutcomeSide::Yes => {
+                    MarketEventCondition::WeatherDailyHighEnteredBand(WeatherDailyHighEnteredBand {
+                        source,
+                        station: subject.station.to_string(),
+                        local_date: subject.local_date,
+                        unit: subject.market_unit,
+                        band: subject.outcome_band.clone(),
+                        proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                        max_input_age_ms,
+                    })
+                }
+                OutcomeSide::No => match subject.outcome_band.upper_inclusive {
+                    Some(upper_inclusive) => {
+                        MarketEventCondition::WeatherDailyHighExceededBandUpper(
+                            WeatherDailyHighExceededBandUpper {
+                                source,
+                                station: subject.station.to_string(),
+                                local_date: subject.local_date,
+                                unit: subject.market_unit,
+                                upper_inclusive,
+                                proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                                max_input_age_ms,
+                            },
+                        )
+                    }
+                    None => MarketEventCondition::WeatherObservationDayClosedOutsideBand(
+                        WeatherObservationDayClosedOutsideBand {
+                            source,
+                            station: subject.station.to_string(),
+                            local_date: subject.local_date,
+                            unit: subject.market_unit,
+                            band: subject.outcome_band.clone(),
+                            proxy_methodology_hash: subject.proxy_methodology_hash.clone(),
+                        },
+                    ),
+                },
+            },
+        (_, _) => {
+            return Err(ReportError::InvariantViolation {
+                stage: "entry_condition",
+                detail: format!(
+                    "market-event template family does not match market {} linkage family",
+                    candidate.market_id
+                ),
+            }
+            .into());
+        }
+    };
+    Ok(event)
+}
+
+fn condition_leaf_bindings(
+    root: &EntryConditionV1,
+) -> (
+    Vec<EntryConditionFactorBinding>,
+    Vec<EntryConditionSourceBinding>,
+) {
+    let mut factors = Vec::new();
+    let mut sources = Vec::new();
+    collect_condition_leaf_bindings(root, &mut factors, &mut sources);
+    factors.sort_by(|left, right| {
+        left.definition_id
+            .to_string()
+            .cmp(&right.definition_id.to_string())
+    });
+    factors.dedup();
+    sources.sort();
+    sources.dedup();
+    (factors, sources)
+}
+
+fn collect_condition_leaf_bindings(
+    node: &EntryConditionV1,
+    factors: &mut Vec<EntryConditionFactorBinding>,
+    sources: &mut Vec<EntryConditionSourceBinding>,
+) {
+    match node {
+        EntryConditionV1::Factor(condition) => factors.push(EntryConditionFactorBinding {
+            definition_id: condition.definition_id.clone(),
+            definition_hash: condition.definition_hash.clone(),
+        }),
+        EntryConditionV1::MarketEvent { event: condition } => {
+            let source = match condition {
+                MarketEventCondition::CryptoSubjectPredicateEntered(event) => &event.source,
+                MarketEventCondition::WeatherDailyHighEnteredBand(event) => &event.source,
+                MarketEventCondition::WeatherDailyHighExceededBandUpper(event) => &event.source,
+                MarketEventCondition::WeatherObservationDayClosedOutsideBand(event) => {
+                    &event.source
+                }
+            };
+            sources.push(source.clone());
+        }
+        EntryConditionV1::All { children } | EntryConditionV1::Any { children } => {
+            for child in children {
+                collect_condition_leaf_bindings(child, factors, sources);
+            }
+        }
+        EntryConditionV1::Price(_) | EntryConditionV1::Clock(_) => {}
+    }
 }
 
 fn policy_exit_plan(
@@ -664,18 +1149,6 @@ enum TickDirection {
 }
 
 fn align_entry_plan_to_tick(plan: &mut EntryPlan, tick_size: TickSize) {
-    if let EntryTrigger::PriceCondition {
-        comparison,
-        threshold,
-        ..
-    } = &mut plan.trigger
-    {
-        let direction = match comparison {
-            PriceComparison::AtOrAbove => TickDirection::Up,
-            PriceComparison::AtOrBelow => TickDirection::Down,
-        };
-        *threshold = tick_aligned_price(threshold.inner(), tick_size, direction);
-    }
     match &mut plan.order_policy {
         EntryOrderPolicy::Passive { limit_price, .. } => {
             *limit_price = tick_aligned_price(limit_price.inner(), tick_size, TickDirection::Down);
@@ -760,9 +1233,15 @@ struct NewRecommendationAssembly<'a> {
     policy: Result<ResolvedRecommendationPolicy, Vec<TradePlanBlocker>>,
 }
 
+struct ComposedRecommendationRows {
+    recommendation: NewRecommendation,
+    artifact: Option<NewEntryConditionArtifact>,
+    instance: NewEntryConditionInstance,
+}
+
 fn build_new_recommendation(
     assembly: NewRecommendationAssembly<'_>,
-) -> QuantResult<NewRecommendation> {
+) -> QuantResult<ComposedRecommendationRows> {
     let NewRecommendationAssembly {
         report_id,
         planned,
@@ -776,29 +1255,21 @@ fn build_new_recommendation(
         risk_envelope,
         policy,
     } = assembly;
-    let trade_policy_available = policy.is_ok();
-    let trade_plan = match policy {
-        Ok(policy) => {
-            let entry = policy_entry_plan(
-                input.published_at,
-                valid_until,
-                capture.market_context.tick_size,
-                &policy,
-            );
-            let exit =
-                policy_exit_plan(input.decision_at, capture.market_context.tick_size, &policy)?;
-            RecommendationTradePlan::Frozen {
-                policy: Box::new(policy.provenance),
-                entry,
-                sizing: Box::new(planned.sizing.clone()),
-                exit: Box::new(exit),
-                risk_envelope: Box::new(risk_envelope),
-            }
-        }
-        Err(blockers) => RecommendationTradePlan::Unavailable { blockers },
-    };
-    Ok(NewRecommendation {
-        recommendation_id: RecommendationId::from_v7(),
+    let recommendation_id = RecommendationId::from_v7();
+    let (trade_plan, artifact, trade_policy_available) =
+        build_recommendation_trade_plan(RecommendationTradePlanInput {
+            recommendation_id: &recommendation_id,
+            input,
+            candidate,
+            capture,
+            planned,
+            valid_until,
+            risk_envelope,
+            policy,
+        })?;
+    let condition = condition_instance_projection(&trade_plan, input.published_at);
+    let recommendation = NewRecommendation {
+        recommendation_id: recommendation_id.clone(),
         recommendation_report_id: report_id.clone(),
         rank: i32::try_from(planned.rank).map_err(|error| ReportError::NumericOverflow {
             field: "recommendation.rank",
@@ -845,7 +1316,143 @@ fn build_new_recommendation(
         valid_from: input.published_at,
         valid_until,
         status: RecommendationStatus::Published,
+    };
+    let instance = new_condition_instance(recommendation_id, condition, valid_until);
+    Ok(ComposedRecommendationRows {
+        recommendation,
+        artifact,
+        instance,
     })
+}
+
+struct RecommendationTradePlanInput<'a> {
+    recommendation_id: &'a RecommendationId,
+    input: &'a ComposeReportInput<'a>,
+    candidate: &'a SignalCandidate,
+    capture: &'a MarketDecisionCapture,
+    planned: &'a PlannedRecommendation,
+    valid_until: DateTime<Utc>,
+    risk_envelope: RiskEnvelope,
+    policy: Result<ResolvedRecommendationPolicy, Vec<TradePlanBlocker>>,
+}
+
+fn build_recommendation_trade_plan(
+    plan_input: RecommendationTradePlanInput<'_>,
+) -> QuantResult<(
+    RecommendationTradePlan,
+    Option<NewEntryConditionArtifact>,
+    bool,
+)> {
+    let RecommendationTradePlanInput {
+        recommendation_id,
+        input,
+        candidate,
+        capture,
+        planned,
+        valid_until,
+        risk_envelope,
+        policy,
+    } = plan_input;
+    let trade_policy_available = policy.is_ok();
+    let (trade_plan, artifact) = match policy {
+        Ok(policy) => {
+            let entry = policy_entry_plan(EntryPlanMaterialization {
+                recommendation_id,
+                published_at: input.published_at,
+                valid_until,
+                tick_size: capture.market_context.tick_size,
+                candidate,
+                capture,
+                input,
+                policy: &policy,
+            })?;
+            let exit =
+                policy_exit_plan(input.decision_at, capture.market_context.tick_size, &policy)?;
+            (
+                RecommendationTradePlan::Frozen {
+                    policy: Box::new(policy.provenance),
+                    entry: entry.plan,
+                    sizing: Box::new(planned.sizing.clone()),
+                    exit: Box::new(exit),
+                    risk_envelope: Box::new(risk_envelope),
+                },
+                entry.artifact,
+            )
+        }
+        Err(blockers) => (RecommendationTradePlan::Unavailable { blockers }, None),
+    };
+    Ok((trade_plan, artifact, trade_policy_available))
+}
+
+struct ConditionInstanceProjection {
+    state: EntryConditionState,
+    truth: Option<ConditionTruth>,
+    artifact_id: Option<EntryConditionArtifactId>,
+    artifact_hash: Option<ContentHash>,
+    next_evaluation_at: Option<DateTime<Utc>>,
+}
+
+fn condition_instance_projection(
+    trade_plan: &RecommendationTradePlan,
+    published_at: DateTime<Utc>,
+) -> ConditionInstanceProjection {
+    match trade_plan {
+        RecommendationTradePlan::Frozen { entry, .. } => match &entry.condition {
+            EntryConditionPlan::Immediate => ConditionInstanceProjection {
+                state: EntryConditionState::NotRequired,
+                truth: Some(ConditionTruth::Satisfied),
+                artifact_id: None,
+                artifact_hash: None,
+                next_evaluation_at: None,
+            },
+            EntryConditionPlan::Conditional {
+                artifact_id,
+                content_hash,
+            } => ConditionInstanceProjection {
+                state: EntryConditionState::Waiting,
+                truth: None,
+                artifact_id: Some(artifact_id.clone()),
+                artifact_hash: Some(content_hash.clone()),
+                next_evaluation_at: Some(published_at),
+            },
+        },
+        RecommendationTradePlan::Unavailable { .. } => ConditionInstanceProjection {
+            state: EntryConditionState::Invalidated,
+            truth: None,
+            artifact_id: None,
+            artifact_hash: None,
+            next_evaluation_at: None,
+        },
+    }
+}
+
+fn new_condition_instance(
+    recommendation_id: RecommendationId,
+    condition: ConditionInstanceProjection,
+    expires_at: DateTime<Utc>,
+) -> NewEntryConditionInstance {
+    NewEntryConditionInstance {
+        condition_instance_id: EntryConditionInstanceId::from_v7(),
+        recommendation_id,
+        artifact_id: condition.artifact_id,
+        artifact_hash: condition.artifact_hash,
+        state: condition.state,
+        truth_json: condition.truth,
+        revision: 0,
+        evaluation_hash: None,
+        input_fingerprint: None,
+        continuity_hash: None,
+        confirmation_started_at: None,
+        last_evaluated_at: None,
+        next_evaluation_at: condition.next_evaluation_at,
+        expires_at,
+        lease_owner: None,
+        lease_expires_at: None,
+        lease_epoch: 0,
+        claimed_by_intent_id: None,
+        claim_admission_state_version: None,
+        consumed_at: None,
+    }
 }
 
 /// Build the recommendation risk envelope: clone the planned baseline, apply the
@@ -1705,10 +2312,7 @@ mod tests {
 
     #[test]
     fn compose_rejects_missing_decision_capture() {
-        let as_of = Utc
-            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
-            .single()
-            .expect("valid time");
+        let as_of = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let trigger_time = as_of + Duration::seconds(120);
         let config = RuntimeConfig::default();
         let account = AccountSnapshot::new(
@@ -1780,6 +2384,8 @@ mod tests {
             runtime_mode: QuantRuntimeMode::ReportOnly,
             model_version_id: ModelVersionId::from_v7(),
             market_selection_id,
+            market_selection_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+                .expect("selection hash"),
             account: &account,
             account_snapshot,
             equity_snapshot,
@@ -1797,6 +2403,7 @@ mod tests {
             top_n: 5,
             return_model_calibrated: true,
             trade_policy: None,
+            crypto_reference_prices: HashMap::new(),
         });
 
         assert!(matches!(

@@ -1,7 +1,8 @@
 //! External-vertical (domain) vocabulary newtypes (Phase 11.2.2).
 //!
 //! Covers [`ResolverVersion`], [`CryptoAsset`], [`CryptoQuote`], [`BinanceSymbol`],
-//! [`ChainlinkFeedKey`], and the canonical [`DomainInstrumentKey`] constructors.
+//! [`ChainlinkFeedKey`], station identifiers, temperature values, and the
+//! canonical [`DomainInstrumentKey`] constructors.
 //!
 //! Assets are deliberately **not** a hard-coded enum: adding a listed asset is
 //! a resolver-ruleset data change (alias table + symbol + feed bindings) plus a
@@ -15,6 +16,7 @@ use std::{
     sync::Arc,
 };
 
+use rust_decimal::{Decimal, RoundingStrategy};
 use schemars::JsonSchema;
 use sea_orm::{
     ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
@@ -261,6 +263,87 @@ validated_token! {
 }
 
 validated_token! {
+    /// A four-letter ICAO airport/weather station identifier (e.g. `KJFK`).
+    IcaoStation, kind = "ICAO station", max_len = 4, allow_dash = false
+}
+
+/// Temperature unit exposed by a Polymarket weather contract.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TemperatureUnit {
+    Celsius,
+    Fahrenheit,
+}
+
+/// Temperature stored canonically in degrees Celsius.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
+pub struct TemperatureCelsius(#[schemars(with = "String")] Decimal);
+
+impl TemperatureCelsius {
+    #[must_use]
+    pub const fn new(value: Decimal) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn value(self) -> Decimal {
+        self.0
+    }
+
+    /// Convert to the market unit without applying the contract's whole-degree proxy.
+    #[must_use]
+    pub fn in_unit(self, unit: TemperatureUnit) -> Decimal {
+        match unit {
+            TemperatureUnit::Celsius => self.0,
+            TemperatureUnit::Fahrenheit => {
+                self.0 * Decimal::new(9, 0) / Decimal::new(5, 0) + Decimal::new(32, 0)
+            }
+        }
+    }
+
+    /// Apply the frozen whole-degree proxy used by weather event predicates.
+    #[must_use]
+    pub fn whole_degrees(self, unit: TemperatureUnit) -> Decimal {
+        self.in_unit(unit)
+            .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+    }
+}
+
+/// Inclusive integer-temperature outcome band in the market's displayed unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TemperatureBand {
+    #[schemars(with = "Option<String>")]
+    pub lower_inclusive: Option<Decimal>,
+    #[schemars(with = "Option<String>")]
+    pub upper_inclusive: Option<Decimal>,
+}
+
+impl TemperatureBand {
+    /// A valid market band has at least one bound and, when both are present,
+    /// the lower bound does not exceed the upper bound.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        match (self.lower_inclusive, self.upper_inclusive) {
+            (None, None) => false,
+            (Some(lower), Some(upper)) => lower <= upper,
+            (Some(_), None) | (None, Some(_)) => true,
+        }
+    }
+
+    #[must_use]
+    pub fn contains(&self, value: Decimal) -> bool {
+        self.is_valid()
+            && self.lower_inclusive.is_none_or(|lower| value >= lower)
+            && self.upper_inclusive.is_none_or(|upper| value <= upper)
+    }
+}
+
+validated_token! {
     /// A crypto quote currency (e.g. `USD`, `USDT`).
     CryptoQuote, kind = "crypto quote", max_len = 10, allow_dash = false
 }
@@ -284,10 +367,34 @@ impl DomainInstrumentKey {
         Self::new(format!("BINANCE:{symbol}:{}", interval.as_str()))
     }
 
-    /// Canonical key for a Chainlink aggregator feed: `CHAINLINK:{feed}`.
+    /// Canonical key for a Binance aggregate-trade stream.
     #[must_use]
-    pub fn chainlink_feed(feed: &ChainlinkFeedKey) -> Self {
-        Self::new(format!("CHAINLINK:{feed}"))
+    pub fn binance_agg_trade(symbol: &BinanceSymbol) -> Self {
+        Self::new(format!("BINANCE_AGG_TRADE:{symbol}"))
+    }
+
+    /// Canonical key for a Chainlink Data Streams feed.
+    #[must_use]
+    pub fn chainlink_data_streams(feed: &ChainlinkFeedKey) -> Self {
+        Self::new(format!("CHAINLINK_DATA_STREAMS:{feed}"))
+    }
+
+    /// Canonical key for an airport observation stream.
+    #[must_use]
+    pub fn aviation_weather(station: &IcaoStation) -> Self {
+        Self::new(format!("AVIATION_WEATHER:{station}"))
+    }
+
+    /// Canonical key for an airport's `GHCNh` history.
+    #[must_use]
+    pub fn ghcnh(station: &IcaoStation) -> Self {
+        Self::new(format!("GHCNH:{station}"))
+    }
+
+    /// Canonical key for an airport-bound GEFS forecast series.
+    #[must_use]
+    pub fn gefs(station: &IcaoStation) -> Self {
+        Self::new(format!("GEFS:{station}"))
     }
 
     /// The source this key belongs to, derived from the canonical prefix.
@@ -295,9 +402,31 @@ impl DomainInstrumentKey {
     pub fn source_id(&self) -> Option<DomainSourceId> {
         match self.as_str().split_once(':')?.0 {
             "BINANCE" => Some(DomainSourceId::binance()),
-            "CHAINLINK" => Some(DomainSourceId::chainlink()),
+            "BINANCE_AGG_TRADE" => Some(DomainSourceId::binance_agg_trade()),
+            "CHAINLINK_DATA_STREAMS" => Some(DomainSourceId::chainlink_data_streams()),
+            "AVIATION_WEATHER" => Some(DomainSourceId::aviation_weather()),
+            "GHCNH" => Some(DomainSourceId::ghcnh()),
+            "GEFS" => Some(DomainSourceId::gefs()),
             _ => None,
         }
+    }
+
+    /// Decode a canonical aggregate-trade instrument without accepting aliases.
+    #[must_use]
+    pub fn as_binance_agg_trade_symbol(&self) -> Option<BinanceSymbol> {
+        BinanceSymbol::parse(self.as_str().strip_prefix("BINANCE_AGG_TRADE:")?).ok()
+    }
+
+    /// Decode a canonical Data Streams instrument without accepting aliases.
+    #[must_use]
+    pub fn as_chainlink_feed(&self) -> Option<ChainlinkFeedKey> {
+        ChainlinkFeedKey::parse(self.as_str().strip_prefix("CHAINLINK_DATA_STREAMS:")?).ok()
+    }
+
+    /// Decode a canonical `AviationWeather` instrument without accepting aliases.
+    #[must_use]
+    pub fn as_aviation_weather_station(&self) -> Option<IcaoStation> {
+        IcaoStation::parse(self.as_str().strip_prefix("AVIATION_WEATHER:")?).ok()
     }
 }
 
@@ -327,10 +456,14 @@ mod tests {
         assert_eq!(key.as_str(), "BINANCE:BTCUSDT:1m");
         assert_eq!(key.source_id(), Some(DomainSourceId::binance()));
 
-        let feed =
-            DomainInstrumentKey::chainlink_feed(&ChainlinkFeedKey::parse("BTC-USD").expect("feed"));
-        assert_eq!(feed.as_str(), "CHAINLINK:BTC-USD");
-        assert_eq!(feed.source_id(), Some(DomainSourceId::chainlink()));
+        let feed = DomainInstrumentKey::chainlink_data_streams(
+            &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
+        );
+        assert_eq!(feed.as_str(), "CHAINLINK_DATA_STREAMS:BTC-USD");
+        assert_eq!(
+            feed.source_id(),
+            Some(DomainSourceId::chainlink_data_streams())
+        );
     }
 
     #[test]

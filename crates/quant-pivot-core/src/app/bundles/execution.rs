@@ -17,11 +17,12 @@ use quant_pivot_models::{
     domain::{DataQualityPort, ExecutionSubmitPort},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CapitalAllocationRepository, ExecutionOrderRepository,
-    ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
-    ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RuntimeConfigVersionRepository, SettlementRedeemRepository, TradePolicyRepository,
+    AttributionRepository, CapitalAllocationRepository, EntryConditionRepository,
+    ExecutionOrderRepository, ExecutionSubmissionRepository, FactorRepository,
+    FeatureParityRepository, MarketRepository, ModelRegistryRepository, OperationLogRepository,
+    OrderIntentRepository, PositionRepository, RecommendationReportRepository,
+    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+    SettlementRedeemRepository, TradePolicyRepository,
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
@@ -126,6 +127,7 @@ impl ExecutionBundle {
             Arc::new(CoreExecutionDispatcher::new(ExecutionDispatcherDeps {
                 intents,
                 submission: Arc::clone(&submission),
+                conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
                 admission_builder,
                 admission,
                 order_client: Arc::clone(&order_client),
@@ -313,6 +315,7 @@ fn build_admission_builder(
         reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         execution_orders: Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+        conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
         capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
         markets: Arc::clone(&deps.data.market_repo),
         config_versions: Arc::clone(&repos.runtime_config)
@@ -358,6 +361,7 @@ fn build_exit_monitor(
         config_versions: Arc::clone(&repos.runtime_config)
             as Arc<dyn RuntimeConfigVersionRepository>,
         recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+        factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
         pit_source: Arc::clone(&wiring.data.pit_source),
         window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
     });
@@ -378,6 +382,7 @@ fn build_exit_monitor(
             factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
             config: Arc::clone(&wiring.governance.runtime_config),
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+            factors: Arc::clone(&wiring.research.factor_repo) as Arc<dyn FactorRepository>,
             pit_source: Arc::clone(&wiring.data.pit_source),
             window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
         });

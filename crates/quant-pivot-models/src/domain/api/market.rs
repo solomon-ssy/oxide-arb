@@ -142,6 +142,7 @@ pub struct MarketView {
     pub subscribed: bool,
     /// Live order-book digest; `None` when no book has been published yet.
     pub book: Option<MarketBookSummaryView>,
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -169,6 +170,7 @@ impl MarketView {
             fees_enabled: m.fees_enabled,
             subscribed,
             book,
+            start_date: m.start_date,
             end_date: m.end_date,
             resolved_at: m.resolved_at,
             created_at: m.created_at,

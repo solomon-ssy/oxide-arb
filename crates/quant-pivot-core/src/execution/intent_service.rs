@@ -28,20 +28,20 @@ use quant_pivot_models::{
         execution::{ApprovalInvalidation, CapitalAllocationState, OrderIntentKind},
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            ApprovalStatus, EntryTriggerState, FillRequirement, OrderIntentStatus,
-            QuantRuntimeMode, RecommendationReportStatus,
+            ApprovalStatus, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
+            RecommendationReportStatus,
         },
         rbac::ResourceType,
     },
     types::{
-        CapitalAllocationId, ContentHash, EntryOrderPolicy, EntryOrderSpec, EntryTrigger,
-        ExitPolicySpec, ModelVersionId, OperationLogId, OrderAmount, OrderIntentId, Price,
-        RecommendationId, RecommendationReportId, Usd,
+        CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
+        EntryOrderSpec, ExitPolicySpec, ModelVersionId, OperationLogId, OrderAmount, OrderIntentId,
+        Price, RecommendationId, RecommendationReportId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository, TradePolicyRepository,
+    EntryConditionRepository, ModelRegistryRepository, OrderIntentRepository,
+    RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -96,6 +96,7 @@ pub struct OrderIntentServiceDeps {
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
+    pub conditions: Arc<dyn EntryConditionRepository>,
     pub metrics: Arc<MetricsHub>,
     /// Shared `quant.intent` lifecycle fan-out (bootstrap singleton).
     pub intent_lifecycle: Arc<IntentLifecyclePublisher>,
@@ -125,6 +126,7 @@ pub struct CoreOrderIntentService {
     recommendations: Arc<dyn RecommendationRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
     intents: Arc<dyn OrderIntentRepository>,
+    conditions: Arc<dyn EntryConditionRepository>,
     metrics: Arc<MetricsHub>,
     lifecycle: Arc<IntentLifecyclePublisher>,
     dispatch_wake: DispatchWake,
@@ -146,6 +148,7 @@ impl CoreOrderIntentService {
             recommendations: deps.recommendations,
             reports: deps.reports,
             intents: deps.intents,
+            conditions: deps.conditions,
             metrics: deps.metrics,
             lifecycle: deps.intent_lifecycle,
             dispatch_wake: deps.dispatch_wake,
@@ -220,8 +223,22 @@ impl CoreOrderIntentService {
         let entry = project_entry_order_spec(&rec, now)?;
         let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
         let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
-        let (new_intent, allocation) =
-            compose_create_rows(&rec, &report, mode, resolved, entry, exit)?;
+        let condition = self
+            .conditions
+            .find_by_recommendation(&rec.recommendation_id)
+            .await?
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "recommendation has no entry-condition instance".to_owned(),
+            })?;
+        let (new_intent, allocation) = compose_create_rows(
+            &rec,
+            &report,
+            mode,
+            resolved,
+            entry,
+            exit,
+            condition.condition_instance_id,
+        )?;
 
         let intent = self
             .intents
@@ -579,9 +596,10 @@ fn compose_create_rows(
     resolved: ResolvedPolicy,
     entry: EntryOrderSpec,
     exit: ExitPolicySpec,
+    condition_instance_id: EntryConditionInstanceId,
 ) -> Result<(NewOrderIntent, NewCapitalAllocation), ExecutionError> {
     let intent_id = OrderIntentId::from_v7();
-    let (_, entry_plan, _, _, risk_envelope) =
+    let (_, _, _, _, risk_envelope) =
         rec.trade_plan
             .frozen()
             .ok_or_else(|| ExecutionError::IntentDenied {
@@ -604,19 +622,11 @@ fn compose_create_rows(
         policy_hash: resolved.policy_hash,
         status_reason: None,
         admission_trace_ref: None,
-        entry_trigger_json: entry_plan.trigger.clone(),
+        condition_instance_id,
         entry_order_json: entry,
         exit_policy_json: exit,
         risk_envelope_hash: risk_envelope.envelope_hash.clone(),
         expires_at: resolved.expires_at,
-        entry_trigger_state: if matches!(resolved.status, OrderIntentStatus::ApprovedByPolicy) {
-            armed_trigger_state(&entry_plan.trigger)
-        } else {
-            EntryTriggerState::NotRequired
-        },
-        trigger_confirming_since: None,
-        trigger_last_observed_at: None,
-        trigger_ready_at: None,
     };
     let allocation = NewCapitalAllocation {
         capital_allocation_id: CapitalAllocationId::from_v7(),
@@ -631,13 +641,6 @@ fn compose_create_rows(
         reason: "intent created".to_owned(),
     };
     Ok((intent, allocation))
-}
-
-const fn armed_trigger_state(trigger: &EntryTrigger) -> EntryTriggerState {
-    match trigger {
-        EntryTrigger::Immediate => EntryTriggerState::NotRequired,
-        EntryTrigger::PriceCondition { .. } => EntryTriggerState::Waiting,
-    }
 }
 
 /// Map a mode-gate decision to the frozen intent fields, or the closing error.

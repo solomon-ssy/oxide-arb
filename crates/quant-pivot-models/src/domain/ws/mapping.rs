@@ -51,6 +51,11 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::to_value(payload).ok()?,
         ),
+        CoreEvent::Condition(payload) => (
+            WsChannel::QuantCondition,
+            None,
+            serde_json::to_value(payload).ok()?,
+        ),
         CoreEvent::MaterializationRun(payload) => (
             WsChannel::MaterializationRunUpdate,
             None,

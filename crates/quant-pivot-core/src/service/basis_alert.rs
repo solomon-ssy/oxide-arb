@@ -22,11 +22,12 @@ use std::{collections::HashMap, hash::BuildHasher};
 
 use quant_pivot_models::{
     domain::NewBasisAlert,
+    enums::domain::LinkageSourceRole,
     runtime_config::DomainConfig,
     types::{BasisAlertId, Bps, MarketId},
 };
 use quant_pivot_research::{
-    domain::oracle_instrument,
+    domain::{oracle_instrument, source_binding},
     features::{DomainSliceInputs, FeatureValue, FeatureVector, names::domain_crypto},
 };
 use rust_decimal::Decimal;
@@ -52,10 +53,11 @@ pub fn detect_basis_alerts<S: BuildHasher>(
             }
             let inputs = domain_inputs.get(&vector.market_id)?;
             let oracle_key = oracle_instrument(&inputs.binding)?;
+            let feature = source_binding(&inputs.binding, LinkageSourceRole::Feature)?;
             Some(NewBasisAlert {
                 alert_id: BasisAlertId::from_v7(),
                 market_id: vector.market_id.clone(),
-                instrument_key: inputs.binding.instrument_key.to_string(),
+                instrument_key: feature.instrument_key.to_string(),
                 oracle_instrument_key: oracle_key.to_string(),
                 basis_bps: Bps::new(*basis),
                 threshold_bps,
@@ -73,22 +75,22 @@ mod tests {
         domain::{
             BasisAlertInfo, BasisAlertListQuery, CryptoSubject, GroundingProof, MarketSubject,
             NewBasisAlert, Paginated, PriceComparator, ResolutionOracle, ResolvedBinding,
-            pagination::PageRequest,
+            ResolvedSourceBinding, pagination::PageRequest,
         },
         enums::{
-            domain::{DomainFamily, KlineInterval},
+            domain::{DomainFamily, KlineInterval, LinkageSourceRole},
             quant::DataQualityStatus,
         },
         runtime_config::DomainConfig,
         types::{
-            BasisAlertId, BinanceSymbol, ChainlinkFeedKey, CryptoAsset, CryptoQuote,
-            DomainInstrumentKey, MarketId, SchemaVersion, TokenId,
+            BasisAlertId, BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
+            DomainInstrumentKey, DomainSourceId, MarketId, MarketLinkageId, SchemaVersion, TokenId,
         },
     };
     use quant_pivot_research::{
         domain::DomainObservationWindow,
         features::{
-            DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef, FeatureCell,
+            DomainSliceData, DomainSliceInputs, EvidenceSourceKind, EvidenceSourceRef, FeatureCell,
             FeatureStaleness, FeatureValue, FeatureVector, names::domain_crypto,
         },
     };
@@ -120,7 +122,26 @@ mod tests {
                     feed: ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
                 },
             }),
-            instrument_key: instrument(),
+            source_bindings: vec![
+                ResolvedSourceBinding {
+                    role: LinkageSourceRole::Feature,
+                    source_id: DomainSourceId::binance(),
+                    instrument_key: instrument(),
+                    available_at: now,
+                    binding_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+                        .expect("binding hash"),
+                },
+                ResolvedSourceBinding {
+                    role: LinkageSourceRole::Resolution,
+                    source_id: DomainSourceId::chainlink_data_streams(),
+                    instrument_key: DomainInstrumentKey::chainlink_data_streams(
+                        &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
+                    ),
+                    available_at: now,
+                    binding_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+                        .expect("binding hash"),
+                },
+            ],
             grounding: GroundingProof { spans: Vec::new() },
             override_context: None,
         }
@@ -151,6 +172,9 @@ mod tests {
             market_id.clone(),
             DomainSliceInputs {
                 family: DomainFamily::Crypto,
+                linkage_id: MarketLinkageId::from_v7(),
+                linkage_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
+                    .expect("linkage hash"),
                 binding: binding(),
                 linkage_evidence: EvidenceSourceRef {
                     source_kind: EvidenceSourceKind::Linkage,
@@ -158,8 +182,10 @@ mod tests {
                     effective_at: Utc.with_ymd_and_hms(2026, 7, 1, 11, 59, 0).unwrap(),
                     available_at: Some(Utc.with_ymd_and_hms(2026, 7, 1, 11, 59, 1).unwrap()),
                 },
-                primary: DomainObservationWindow::default(),
-                oracle: None,
+                data: DomainSliceData::Crypto {
+                    primary: DomainObservationWindow::default(),
+                    oracle: None,
+                },
             },
         )])
     }
@@ -177,7 +203,10 @@ mod tests {
         assert_eq!(alerts[0].basis_bps.inner(), dec!(75));
         assert_eq!(alerts[0].threshold_bps.inner(), dec!(50));
         assert_eq!(alerts[0].market_id, vec.market_id);
-        assert_eq!(alerts[0].oracle_instrument_key, "CHAINLINK:BTC-USD");
+        assert_eq!(
+            alerts[0].oracle_instrument_key,
+            "CHAINLINK_DATA_STREAMS:BTC-USD"
+        );
     }
 
     #[test]

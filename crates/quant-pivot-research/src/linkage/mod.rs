@@ -21,21 +21,28 @@ pub mod oracle;
 pub mod ruleset;
 pub mod tier0_slug;
 pub mod tier1_template;
+pub mod weather_daily_high;
 
 pub use extractor::{
     DefaultSubjectValidator, ExtractedCandidate, SubjectExtractor, SubjectValidator,
     ValidationOutcome, validate_structural_consistency,
 };
 pub use manual_evidence::validate_manual_override;
-pub use ruleset::{AssetRule, CRYPTO_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
+pub use ruleset::{AssetRule, DOMAIN_RESOLVER_VERSION, find_alias, rule_for_alias, rules};
 pub use tier0_slug::Tier0SlugExtractor;
 pub use tier1_template::CryptoSubjectParser;
+pub use weather_daily_high::{WeatherDailyHighExtractor, WeatherStationCatalog};
 
-use quant_pivot_error::QuantResult;
+use chrono::{DateTime, Utc};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{LinkageOutcome, LinkageSourceMetadata, ResolvedBinding},
-    enums::domain::ResolverTier,
-    types::{Probability, ResolverVersion},
+    domain::{
+        LinkageOutcome, LinkageSourceMetadata, MarketSubject, ResolutionOracle, ResolvedBinding,
+        ResolvedSourceBinding,
+    },
+    enums::domain::{LinkageSourceRole, ResolverTier},
+    hashing::CanonicalDigest,
+    types::{DomainInstrumentKey, DomainSourceId, Probability, ResolverVersion},
 };
 
 /// One resolver pass's verdict for a market, ready to freeze into the ledger.
@@ -61,11 +68,15 @@ pub struct LayeredResolver {
 impl LayeredResolver {
     /// The 11.2.2 production resolver: Tier 0 → Tier 1, default grounding gate.
     #[must_use]
-    pub fn deterministic() -> Self {
+    pub fn deterministic(weather_stations: WeatherStationCatalog) -> Self {
         Self {
-            tiers: vec![Box::new(Tier0SlugExtractor), Box::new(CryptoSubjectParser)],
+            tiers: vec![
+                Box::new(Tier0SlugExtractor),
+                Box::new(CryptoSubjectParser),
+                Box::new(WeatherDailyHighExtractor::new(weather_stations)),
+            ],
             validator: Box::new(DefaultSubjectValidator),
-            resolver_version: CRYPTO_RESOLVER_VERSION,
+            resolver_version: DOMAIN_RESOLVER_VERSION,
         }
     }
 
@@ -85,7 +96,11 @@ impl LayeredResolver {
     /// # Errors
     ///
     /// Propagates irrecoverable extractor failures.
-    pub fn resolve(&self, metadata: &LinkageSourceMetadata) -> QuantResult<ResolutionResult> {
+    pub fn resolve(
+        &self,
+        metadata: &LinkageSourceMetadata,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<ResolutionResult> {
         let mut last_tier = ResolverTier::Tier0Slug;
         for tier in &self.tiers {
             last_tier = tier.tier();
@@ -94,12 +109,15 @@ impl LayeredResolver {
             };
             return Ok(match self.validator.validate(&candidate, metadata) {
                 ValidationOutcome::Accepted => ResolutionResult {
-                    outcome: LinkageOutcome::Resolved(ResolvedBinding {
+                    outcome: LinkageOutcome::Resolved(Box::new(ResolvedBinding {
+                        source_bindings: source_bindings_for_subject(
+                            &candidate.subject,
+                            available_at,
+                        )?,
                         subject: candidate.subject,
-                        instrument_key: candidate.instrument_key,
                         grounding: candidate.grounding,
                         override_context: None,
-                    }),
+                    })),
                     resolver_tier: tier.tier(),
                     resolver_version: self.resolver_version,
                     confidence: candidate.confidence,
@@ -125,11 +143,107 @@ impl LayeredResolver {
     }
 }
 
+/// Derive the complete, canonical role/source/instrument set for a subject.
+///
+/// # Errors
+///
+/// Returns a configuration error when the subject has no frozen source rule,
+/// or propagates canonical hashing failures.
+pub fn source_bindings_for_subject(
+    subject: &MarketSubject,
+    available_at: DateTime<Utc>,
+) -> QuantResult<Vec<ResolvedSourceBinding>> {
+    let (specs, binding_context) = match subject {
+        MarketSubject::Crypto(subject) => {
+            let ticker = subject.asset.as_str().to_lowercase();
+            let rule = rule_for_alias(&ticker).ok_or_else(|| {
+                QuantError::config(format!(
+                    "asset `{}` has no frozen source rule",
+                    subject.asset
+                ))
+            })?;
+            let mut specs = vec![(
+                LinkageSourceRole::Feature,
+                DomainSourceId::binance(),
+                rule.instrument_key(),
+            )];
+            match &subject.resolution_oracle {
+                ResolutionOracle::ChainlinkDataStreams { .. } => {
+                    let instrument = rule.chainlink_instrument();
+                    specs.push((
+                        LinkageSourceRole::LiveEvent,
+                        DomainSourceId::chainlink_data_streams(),
+                        instrument.clone(),
+                    ));
+                    specs.push((
+                        LinkageSourceRole::Resolution,
+                        DomainSourceId::chainlink_data_streams(),
+                        instrument,
+                    ));
+                }
+                ResolutionOracle::BinanceKline { .. } => {
+                    specs.push((
+                        LinkageSourceRole::LiveEvent,
+                        DomainSourceId::binance_agg_trade(),
+                        rule.binance_event_instrument(),
+                    ));
+                    specs.push((
+                        LinkageSourceRole::Resolution,
+                        DomainSourceId::binance(),
+                        rule.instrument_key(),
+                    ));
+                }
+            }
+            (specs, subject.asset.to_string())
+        }
+        MarketSubject::Weather(subject) => (
+            vec![
+                (
+                    LinkageSourceRole::LiveEvent,
+                    DomainSourceId::aviation_weather(),
+                    DomainInstrumentKey::aviation_weather(&subject.station),
+                ),
+                (
+                    LinkageSourceRole::HistoricalCalibration,
+                    DomainSourceId::ghcnh(),
+                    DomainInstrumentKey::ghcnh(&subject.station),
+                ),
+                (
+                    LinkageSourceRole::Forecast,
+                    DomainSourceId::gefs(),
+                    DomainInstrumentKey::gefs(&subject.station),
+                ),
+            ],
+            subject.station.to_string(),
+        ),
+    };
+    specs
+        .into_iter()
+        .map(|(role, source_id, instrument_key)| {
+            let binding_hash = CanonicalDigest::content_hash_json(&(
+                "domain_source_binding_v2",
+                &binding_context,
+                role,
+                &source_id,
+                &instrument_key,
+                subject,
+            ))?;
+            Ok(ResolvedSourceBinding {
+                role,
+                source_id,
+                instrument_key,
+                available_at,
+                binding_hash,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DefaultSubjectValidator, LayeredResolver, SubjectExtractor, SubjectValidator,
-        Tier0SlugExtractor, ValidationOutcome,
+        Tier0SlugExtractor, ValidationOutcome, WeatherStationCatalog,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -156,24 +270,26 @@ mod tests {
 
     #[test]
     fn tier0_wins_before_tier1_and_unrecognized_fails_closed() {
-        let resolver = LayeredResolver::deterministic();
+        let resolver = LayeredResolver::deterministic(WeatherStationCatalog::default());
 
         let tier0 = resolver
-            .resolve(&metadata(
-                "btc-updown-5m-1780319100",
-                "Bitcoin Up or Down",
-                Some(CHAINLINK_STREAM_RULES),
-            ))
+            .resolve(
+                &metadata(
+                    "btc-updown-5m-1780319100",
+                    "Bitcoin Up or Down",
+                    Some(CHAINLINK_STREAM_RULES),
+                ),
+                Utc::now(),
+            )
             .expect("resolve");
         assert_eq!(tier0.resolver_tier, ResolverTier::Tier0Slug);
         assert!(matches!(tier0.outcome, LinkageOutcome::Resolved(_)));
 
         let unresolved = resolver
-            .resolve(&metadata(
-                "who-wins-the-super-bowl",
-                "Who wins the Super Bowl?",
-                None,
-            ))
+            .resolve(
+                &metadata("who-wins-the-super-bowl", "Who wins the Super Bowl?", None),
+                Utc::now(),
+            )
             .expect("resolve");
         assert!(matches!(
             unresolved.outcome,

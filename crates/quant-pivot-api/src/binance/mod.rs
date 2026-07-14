@@ -1,5 +1,6 @@
 //! Binance spot REST kline source (`GET /api/v3/klines`).
 
+mod agg_trade;
 mod mapper;
 mod wire;
 
@@ -23,6 +24,8 @@ use crate::{
     infra::{http::get_text_with_retry, retry::RetryPolicy},
 };
 
+pub use agg_trade::{BinanceAggTradeSource, BinanceAggTradeStream};
+pub use wire::BinanceAggTrade;
 pub use wire::{BinanceKlineRow, KLINE_FIELD_COUNT};
 
 type WeightLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -43,25 +46,24 @@ pub struct BinanceKlineSource {
 
 impl BinanceKlineSource {
     /// Build from deploy configuration.
-    #[must_use]
-    pub fn new(config: BinanceSourceConfig) -> Self {
+    pub fn connect(config: BinanceSourceConfig) -> QuantResult<Self> {
         let budget = config.weight_budget_per_min.max(KLINE_REQUEST_WEIGHT);
-        let quota = Quota::with_period(Duration::from_mins(1))
-            .expect("valid quota")
-            .allow_burst(NonZeroU32::new(budget).expect("nonzero budget"));
+        let budget = NonZeroU32::new(budget)
+            .ok_or_else(|| QuantError::config("Binance weight budget must be non-zero"))?;
+        let quota = Quota::per_minute(budget);
         // A hung TCP connection must never block an ingest tick indefinitely
         // (R10 ingest hardening); `reqwest::Client::new()` has no request
         // timeout by default.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .build()
-            .expect("valid reqwest client");
-        Self {
+            .map_err(|error| ApiError::Sdk(format!("Binance HTTP client: {error}")))?;
+        Ok(Self {
             config,
             http,
             retry_policy: RetryPolicy::gamma_default(),
             weight_limiter: Arc::new(RateLimiter::direct(quota)),
-        }
+        })
     }
 
     /// Override the HTTP client (tests).
@@ -103,7 +105,7 @@ impl BinanceKlineSource {
         self.acquire_weight().await;
         let url = format!(
             "{}/api/v3/klines?symbol={}&interval={}&startTime={}&endTime={}&limit={KLINE_PAGE_SIZE}",
-            self.config.base_url.trim_end_matches('/'),
+            self.config.rest_url.trim_end_matches('/'),
             symbol.as_str(),
             interval.as_str(),
             start_ms,
@@ -233,10 +235,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let source = BinanceKlineSource::new(BinanceSourceConfig {
-            base_url: server.uri(),
+        let source = BinanceKlineSource::connect(BinanceSourceConfig {
+            rest_url: server.uri(),
             ..BinanceSourceConfig::default()
-        });
+        })
+        .expect("source");
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
             KlineInterval::OneMinute,
@@ -285,10 +288,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let source = BinanceKlineSource::new(BinanceSourceConfig {
-            base_url: server.uri(),
+        let source = BinanceKlineSource::connect(BinanceSourceConfig {
+            rest_url: server.uri(),
             ..BinanceSourceConfig::default()
-        });
+        })
+        .expect("source");
         let key = DomainInstrumentKey::binance_kline(
             &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
             KlineInterval::OneMinute,

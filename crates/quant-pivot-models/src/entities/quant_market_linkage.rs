@@ -2,9 +2,7 @@
 
 use crate::{
     enums::domain::{DomainFamily, LinkageStatus, ResolverTier},
-    types::{
-        ContentHash, DomainInstrumentKey, MarketId, MarketLinkageId, Probability, ResolverVersion,
-    },
+    types::{ContentHash, MarketId, MarketLinkageId, Probability, ResolverVersion},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -22,7 +20,6 @@ pub struct Model {
     pub confidence: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub outcome: Json,
-    pub instrument_key: Option<DomainInstrumentKey>,
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,

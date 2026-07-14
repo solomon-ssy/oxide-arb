@@ -1,0 +1,123 @@
+//! Durable `PostgreSQL` outbox publisher for derived domain events.
+
+use std::{sync::Arc, time::Duration};
+
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    storage::{StorageError, entity},
+};
+use quant_pivot_models::{
+    clickhouse::{ChSchemaVersion, DomainEventRow},
+    domain::{DomainEventEnvelope, DomainEventType},
+};
+use quant_pivot_repository::traits::{DomainProjectionRepository, FactWriter};
+use tokio_util::sync::CancellationToken;
+
+use crate::infra::periodic_task::PeriodicTask;
+
+const BATCH_SIZE: u64 = 500;
+
+/// Publishes append-only derived domain events.
+///
+/// The typed `PostgreSQL` projection commits before publication. `ClickHouse`
+/// writes are idempotent on `event_id`, so a crash safely replays the envelope.
+pub struct DomainEventOutboxWorker {
+    projections: Arc<dyn DomainProjectionRepository>,
+    writer: Arc<dyn FactWriter<DomainEventRow>>,
+}
+
+impl DomainEventOutboxWorker {
+    #[must_use]
+    pub const fn new(
+        projections: Arc<dyn DomainProjectionRepository>,
+        writer: Arc<dyn FactWriter<DomainEventRow>>,
+    ) -> Self {
+        Self {
+            projections,
+            writer,
+        }
+    }
+
+    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> QuantResult<()> {
+        let worker = Arc::clone(&self);
+        PeriodicTask::run(
+            "domain-event-outbox-worker",
+            || Duration::from_secs(1),
+            0.0,
+            false,
+            shutdown,
+            move || {
+                let worker = Arc::clone(&worker);
+                async move { worker.run_once().await }
+            },
+        )
+        .await
+    }
+
+    async fn run_once(&self) -> QuantResult<()> {
+        let events = self.projections.pending_events(BATCH_SIZE).await?;
+        if events.is_empty() {
+            return Ok(());
+        }
+        let rows = events
+            .iter()
+            .map(to_clickhouse_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Err(error) = self.writer.write_batch(rows).await {
+            for event in &events {
+                if let Err(mark_error) = self
+                    .projections
+                    .mark_event_failed(&event.id, error.to_string())
+                    .await
+                {
+                    tracing::error!(
+                        event_id = %event.id,
+                        %mark_error,
+                        "failed to record domain-event outbox delivery failure"
+                    );
+                }
+            }
+            return Err(error.into());
+        }
+        let published_at = chrono::Utc::now();
+        for event in events {
+            self.projections
+                .mark_event_published(&event.id, published_at)
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+fn to_clickhouse_row(event: &DomainEventEnvelope) -> Result<DomainEventRow, QuantError> {
+    let payload_json = serde_json::to_string(&event.payload).map_err(|error| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_DOMAIN_EVENT_OUTBOX),
+            format!("domain event payload serialization failed: {error}"),
+        )
+    })?;
+    Ok(DomainEventRow {
+        event_id: event.id.clone(),
+        source: event.source.to_string(),
+        event_type: event_type_name(event.event_type).to_owned(),
+        subject: event.subject.clone(),
+        event_time: event.time.timestamp_millis(),
+        published_at: event.published_at.timestamp_millis(),
+        available_at: event.available_at.timestamp_millis(),
+        schema_version: ChSchemaVersion(event.schema_version),
+        revision: event.revision,
+        supersedes_event_id: event.supersedes_event_id.clone(),
+        payload_hash: event.payload_hash.clone(),
+        source_checkpoint_hash: event.source_checkpoint_hash.clone(),
+        payload_json,
+    })
+}
+
+const fn event_type_name(event_type: DomainEventType) -> &'static str {
+    match event_type {
+        DomainEventType::CryptoPriceTransition => "crypto.price_transition",
+        DomainEventType::WeatherDailyHighAdvanced => "weather.daily_high_advanced",
+        DomainEventType::WeatherDailyHighCorrected => "weather.daily_high_corrected",
+        DomainEventType::WeatherObservationDayClosed => "weather.observation_day_closed",
+    }
+}

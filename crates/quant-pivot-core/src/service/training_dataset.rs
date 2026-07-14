@@ -219,14 +219,16 @@ struct KeepRateGrid {
     slices: u32,
     midpoint_denominator: u128,
     knowledge_lag_secs: u64,
-    domain_availability_lag_secs: u64,
+    domain_crypto_lag_secs: u64,
+    domain_weather_lag_secs: u64,
 }
 
 impl KeepRateGrid {
     fn new(
         request: &DatasetPlanRequest,
         slices: u32,
-        domain_availability_lag_secs: u64,
+        domain_crypto_lag_secs: u64,
+        domain_weather_lag_secs: u64,
     ) -> QuantResult<Self> {
         let span_secs = (request.window_end - request.window_start).num_seconds();
         if span_secs <= 0 {
@@ -250,7 +252,8 @@ impl KeepRateGrid {
             slices,
             midpoint_denominator,
             knowledge_lag_secs: request.knowledge_lag_secs,
-            domain_availability_lag_secs,
+            domain_crypto_lag_secs,
+            domain_weather_lag_secs,
         })
     }
 
@@ -289,7 +292,8 @@ impl KeepRateGrid {
         replay_boundary(
             decision_at,
             self.knowledge_lag_secs,
-            self.domain_availability_lag_secs,
+            self.domain_crypto_lag_secs,
+            self.domain_weather_lag_secs,
         )
     }
 }
@@ -946,7 +950,12 @@ impl TrainingDatasetService {
             Arc::clone(&self.fact_read),
             self.domain.clone(),
         );
-        let grid = KeepRateGrid::new(request, slices, self.domain.crypto.availability_lag_secs)?;
+        let grid = KeepRateGrid::new(
+            request,
+            slices,
+            self.domain.crypto.availability_lag_secs,
+            self.domain.weather.availability_lag_secs,
+        )?;
         let market_ids = sampled
             .iter()
             .map(|market| market.market_id.clone())
@@ -2539,6 +2548,7 @@ async fn pit_selected_replay_group(
         params.as_of,
         params.knowledge_lag_secs,
         params.domain.crypto.availability_lag_secs,
+        params.domain.weather.availability_lag_secs,
     )?;
     let selection = params
         .pit_selector
@@ -3394,7 +3404,7 @@ mod keep_rate_tests {
 
     #[test]
     fn keep_rate_grid_uses_integer_midpoints_and_one_boundary_derivation() {
-        let grid = KeepRateGrid::new(&request(), 4, 30).expect("grid");
+        let grid = KeepRateGrid::new(&request(), 4, 30, 60).expect("grid");
         let expected_offsets = [12, 37, 62, 87];
         for (index, expected_offset) in expected_offsets.into_iter().enumerate() {
             let index = u32::try_from(index).expect("index");
@@ -3413,7 +3423,7 @@ mod keep_rate_tests {
             );
         }
         assert!(grid.boundary(4).is_err());
-        assert!(KeepRateGrid::new(&request(), 0, 30).is_err());
+        assert!(KeepRateGrid::new(&request(), 0, 30, 60).is_err());
     }
 }
 

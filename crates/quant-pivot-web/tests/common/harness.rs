@@ -81,8 +81,8 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAttributionRepository, PgExecutionOrderRepository, PgPositionRepository,
-        PgReconciliationRepository, PgSettlementRedeemRepository,
+        PgAttributionRepository, PgEntryConditionRepository, PgExecutionOrderRepository,
+        PgPositionRepository, PgReconciliationRepository, PgSettlementRedeemRepository,
     },
     traits::{
         AttributionRepository, BasisAlertRepository, DomainSourceCursorRepository,
@@ -200,6 +200,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
             Arc::clone(&input.runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
         ),
         order_intents: input.order_intents,
+        entry_conditions: Arc::new(PgEntryConditionRepository::new(input.db.clone())),
         execution_read: Arc::new(CoreExecutionReadPort::new(
             Arc::new(PgExecutionOrderRepository::new(input.db.clone()))
                 as Arc<dyn ExecutionOrderRepository>,
@@ -1466,6 +1467,10 @@ impl MarketLinkageRepository for MockMarketLinkageRepository {
         &self,
         _market_ids: &[MarketId],
     ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError> {
         Ok(Vec::new())
     }
 

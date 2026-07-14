@@ -182,6 +182,8 @@ pub struct WireMarket {
     /// Settlement close time, e.g. `2026-06-11 04:05:01+00` (not RFC3339).
     #[serde(default)]
     pub closed_time: Option<String>,
+    #[serde(default)]
+    pub start_date: Option<String>,
     #[serde(flatten)]
     end_date: GammaEndDate,
     #[serde(default)]
@@ -212,6 +214,11 @@ impl WireMarket {
     #[must_use]
     pub fn end_date(&self) -> Option<DateTime<Utc>> {
         self.end_date.parse()
+    }
+
+    #[must_use]
+    pub fn start_date(&self) -> Option<DateTime<Utc>> {
+        self.start_date.as_deref().and_then(parse_gamma_timestamp)
     }
 }
 

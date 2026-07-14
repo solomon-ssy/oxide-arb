@@ -69,6 +69,18 @@ pub const DOMAIN_CRYPTO_STRIKE_PRESSURE: FactorName =
 /// Underlying momentum per unit realized vol (the crypto subject's regime).
 pub const DOMAIN_CRYPTO_BETA_REGIME: FactorName =
     FactorName::from_static("domain_crypto_beta_regime");
+/// Calibrated GEFS member probability of the linked temperature band.
+pub const DOMAIN_WEATHER_ENSEMBLE_BIN_PROBABILITY: FactorName =
+    FactorName::from_static("domain.weather.ensemble_bin_probability");
+/// Dispersion of calibrated GEFS daily member highs.
+pub const DOMAIN_WEATHER_ENSEMBLE_SPREAD: FactorName =
+    FactorName::from_static("domain.weather.ensemble_spread");
+/// Whole-degree distance of the observed high from the decisive band bound.
+pub const DOMAIN_WEATHER_OBSERVED_HIGH_HEADROOM: FactorName =
+    FactorName::from_static("domain.weather.observed_high_headroom");
+/// Empirical AviationWeather-vs-GHCNh daily-high proxy basis risk.
+pub const DOMAIN_WEATHER_NOAA_RESOLUTION_BASIS_RISK: FactorName =
+    FactorName::from_static("domain.weather.noaa_resolution_basis_risk");
 /// Neg-risk conversion edge (basket vs NO-favorite); neg-risk markets only.
 pub const STRUCT_NEGRISK_CONVERT_EDGE: FactorName =
     FactorName::from_static("struct.negrisk_convert_edge");

@@ -17,10 +17,11 @@
 > 因此不建设旧库升级或数据搬运路径，W5 仅保留从空库初始化、重建 artifact、full parity、
 > governed acknowledge 与 canary 的首次环境激活；
 > **11.2.3 Tier 2 LLM linkage** 设计已冻结、待实现。
-> 11.7 的执行/control/operational contract 已收口；真实登录/RBAC/BookStore 状态驱动的受保护 UI/E2E
+> 11.7 的基础执行/control contract 已收口；11.7.1 正在破坏式落地 Recommendation-owned typed
+> condition 与 Crypto/Weather source/event/shadow 闭环；真实登录/RBAC/BookStore 状态驱动的受保护 UI/E2E
 > 与当前 golden 已通过，不以静态页面替代；仓库中不存在改造前历史截图，不伪造 before evidence。
 > 真实 Published research policy 与端到端激活仍受 11.7.2 full-L2/fee/policy-validation 门禁阻断；
-> 11.0/11.2.1/11.3/11.7.1/11.7.2/11.8–11.11 其余工作仍在设计、实施或部分落地阶段。
+> 11.0/11.2.1/11.3/11.7.2/11.8–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
 > [`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)、
@@ -39,11 +40,11 @@
 
 | Contract | 当前版本 | 下一位 owner |
 |---|---:|---|
-| Runtime config | **v11** | 11.9 首次加入 feedback 字段时 `v11 → v12` |
+| Runtime config | **v12** | 11.9 首次加入 feedback 字段时 `v12 → v13` |
 | Feature schema | **v6** | 仅真实 schema 变更时 bump |
 | Dataset artifact | **v3** | 不双读旧 v2 |
 | Model artifact | **v3** | 不双读旧 v2 |
-| Trade policy artifact | **v1** | 11.7.2 在 v1 内补真实 research evidence，不制造 v2 |
+| Trade policy artifact | **v2** | 11.7.2 在 v2 内补真实 research evidence，不制造兼容 loader |
 
 11.11 只能引用本账本在实施当时的值，不得复制一份“当前版本”。项目未生产部署，schema、ClickHouse
 表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact loader、JSONB 双读、alias 或 re-export。
@@ -110,10 +111,10 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.5.1 | Sell-Side Lot-Level Leakage-Aware Validation | 防过拟合方法论套用到 Sell/Hold-vs-Exit 家族 — **已落地 + remediation**（residual-shares 状态机 + 路径分叉停止、activity-only DSR/PBO、null baseline uplift、Sell DD/tail 硬门禁；CPCV request 契约由 11.6 统一冻结） | — (11.5 落地中发现的覆盖缺口,不单独关闭审计点,见文档头部) | [11.5.1](11.5.1-sell-side-lot-level-validation.md) |
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 决策时钟、PIT catalog、FeatureCell、frozen transform、运行期 parity/latch — **W0–W4/W6 与全部本地/容器门禁已完成；W5 空库首次激活待执行** | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
-| 11.7.1 | Composable Entry Event Triggers | typed condition AST + PIT event provenance — **设计冻结、未实施，不预埋死语义** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
+| 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
 | 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility + exact-tier + PIT fee + purged CPCV/uniqueness/DSR/PBO，产出首个真实 Published policy — **设计冻结、待实施** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance — **设计冻结、尚未实施；未来 v11→v12** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance — **设计冻结、尚未实施；未来 v12→v13** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -132,6 +133,7 @@ flowchart TD
     P1151["11.5.1 Sell Lot-Level Validation"]
     P116["11.6 Train-Serve Parity"]
     P117["11.7 Labeling/Entry/Exit"]
+    P1171["11.7.1 Conditions + Crypto/Weather Events"]
     P1172["11.7.2 Executable L2 Policy Validation"]
     P118["11.8 Report Lifecycle FSM"]
     P119["11.9 Attribution Feedback + Retrain"]
@@ -151,7 +153,8 @@ flowchart TD
     P115 --> P113
     P115 --> P1151
     P113 --> P117
-    P117 --> P1172
+    P117 --> P1171
+    P1171 --> P1172
     P117 --> P118
     P115 --> P119
     P113 --> P119
@@ -185,11 +188,11 @@ flowchart TD
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
   11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
   再 bump 至 **5**（两层向量重构在 11.2.2）。当前实际 runtime config 已由后续已落地工作推进至
-  **v11**，feature schema 保持 **v6**；这是 11.7 的唯一有效版本组合。Tier 2 LLM linkage
+  **v12**，feature schema 保持 **v6**；这是 11.7.1 的唯一有效版本组合。Tier 2 LLM linkage
   不改 feature schema，但若实现时新增 runtime wire 字段，必须从届时当前版本显式 bump，
-  不得静默改写 v11（见 11.2.3）。11.9 尚未实现；其 `feedback` 段首次获得真实字段时才执行未来的
-  **v11 → v12**，当前仓库不得提前宣称 v12。Dataset Parquet 与 model artifact 只接受
-  `format_version = 3`；runtime v11 不意味着 feature v7。TradePolicy artifact 从 v1 起步。
+  不得静默改写 v12（见 11.2.3）。11.9 尚未实现；其 `feedback` 段首次获得真实字段时才执行未来的
+  **v12 → v13**。Dataset Parquet 与 model artifact 只接受
+  `format_version = 3`；runtime v12 不意味着 feature v7。TradePolicy artifact 只接受 v2。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 

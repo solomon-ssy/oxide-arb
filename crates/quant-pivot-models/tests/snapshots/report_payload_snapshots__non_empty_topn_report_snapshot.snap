@@ -126,7 +126,7 @@ expression: non_empty_topn_report()
           }
         },
         "entry": {
-          "trigger": {
+          "condition": {
             "kind": "immediate"
           },
           "order_policy": {
@@ -297,7 +297,7 @@ expression: non_empty_topn_report()
           }
         },
         "entry": {
-          "trigger": {
+          "condition": {
             "kind": "immediate"
           },
           "order_policy": {

@@ -50,6 +50,7 @@ pub struct ExitReinferenceObservation {
     pub observed_at: DateTime<Utc>,
     pub model_version_id: ModelVersionId,
     pub model_artifact_hash: ContentHash,
+    pub factor_snapshot_hash: ContentHash,
     pub mark: Price,
     pub score: Probability,
     pub score_retention: Decimal,

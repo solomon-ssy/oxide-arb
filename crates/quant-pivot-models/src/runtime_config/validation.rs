@@ -46,6 +46,7 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_data_quality(config, &mut report);
     validate_features(config, &mut report);
     validate_factors(config, &mut report);
+    validate_domain(config, &mut report);
     validate_model(config, &mut report);
     validate_quality_gate(config, &mut report);
     validate_training(config, &mut report);
@@ -54,6 +55,26 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_execution(config, &mut report);
     validate_research(config, &mut report);
     report
+}
+
+fn validate_domain(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let weather = &config.domain.weather;
+    if weather.max_forecast_age_secs == 0
+        || weather.minimum_bias_samples_per_lead == 0
+        || weather.calibration_lookback_days == 0
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain.weather",
+            detail: "forecast age and calibration sample/lookback limits must be positive"
+                .to_owned(),
+        });
+    }
+    if weather.minimum_complete_members != 31 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain.weather.minimum_complete_members",
+            detail: "must equal the complete GEFS 31-member ensemble".to_owned(),
+        });
+    }
 }
 
 fn validate_selection(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -872,6 +893,25 @@ fn validate_sizing(sizing: &SizingModelConfig, report: &mut ConfigValidationRepo
 }
 
 fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let condition = &config.execution.entry_condition;
+    if condition.backstop_interval_ms == 0
+        || condition.next_evaluation_delay_ms == 0
+        || condition.lease_duration_secs == 0
+        || condition.lease_renew_interval_secs == 0
+        || condition.pass_limit == 0
+        || condition.expiry_batch_limit == 0
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.entry_condition",
+            detail: "all cadence, lease, and batch limits must be greater than zero".to_owned(),
+        });
+    }
+    if condition.lease_renew_interval_secs >= condition.lease_duration_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.entry_condition.lease_renew_interval_secs",
+            detail: "must be less than lease_duration_secs".to_owned(),
+        });
+    }
     decimal(
         "execution.auto_execution.max_total_usd_per_report",
         &config.execution.auto_execution.max_total_usd_per_report,

@@ -9,14 +9,18 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionClock, ModelVersionInfo, RuntimeConfigVersionInfo,
-        TradePolicyArtifactInfo,
+        DecisionBoundary, DecisionClock, MarketSubject, ModelVersionInfo, PriceComparator,
+        RuntimeConfigVersionInfo, TradePolicyArtifactInfo,
         quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
-    enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason, TradePolicyStatus},
+    enums::{
+        domain::LinkageSourceRole,
+        quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason, TradePolicyStatus},
+    },
     runtime_config::RuntimeConfig,
     types::{
-        Bps, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
+        Bps, ContentHash, EntryConditionTemplate, EntryConditionTemplateV1, FeatureVectorId,
+        MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
         ReportDataQualitySnapshotId, ReportDataQualityTokens, Usd,
     },
 };
@@ -113,6 +117,7 @@ struct EmptyComposeInput<'a> {
     request: &'a BuildReportRequest,
     context: &'a BuildContext,
     market_selection_id: MarketSelectionId,
+    market_selection_hash: ContentHash,
     account: &'a AccountSnapshot,
     equity: &'a ReportEquitySnapshot,
     empty: EmptyReportContext,
@@ -136,6 +141,7 @@ struct PublishedComposeInput<'a> {
     features: &'a FeaturePipelineResult,
     model_outcome: ModelRunOutcome,
     plan: PortfolioPlanOutput,
+    crypto_reference_prices: HashMap<MarketId, Usd>,
 }
 
 struct FeatureStageRefs<'a> {
@@ -226,6 +232,7 @@ impl DefaultReportBuilder {
                 request: &request,
                 context: &context,
                 market_selection_id: selection.market_selection_id.clone(),
+                market_selection_hash: selection.selector_hash.clone(),
                 account: &account,
                 equity: &equity,
                 empty: EmptyReportContext {
@@ -253,6 +260,9 @@ impl DefaultReportBuilder {
         self.finalize_equity_for_sizing(&account, &mut equity)
             .await?;
 
+        let crypto_reference_prices = self
+            .crypto_reference_prices(&context, &features, &plan)
+            .await?;
         self.compose_published(PublishedComposeInput {
             request: &request,
             context: &context,
@@ -262,6 +272,7 @@ impl DefaultReportBuilder {
             features: &features,
             model_outcome,
             plan,
+            crypto_reference_prices,
         })
     }
 
@@ -312,6 +323,7 @@ impl DefaultReportBuilder {
             request,
             context,
             market_selection_id: selection.market_selection_id.clone(),
+            market_selection_hash: selection.selector_hash.clone(),
             account,
             equity,
             empty: EmptyReportContext {
@@ -349,6 +361,7 @@ impl DefaultReportBuilder {
             request,
             context,
             market_selection_id: selection.market_selection_id.clone(),
+            market_selection_hash: selection.selector_hash.clone(),
             account,
             equity,
             empty: EmptyReportContext {
@@ -385,6 +398,7 @@ impl DefaultReportBuilder {
             request: stage.request,
             context: stage.context,
             market_selection_id: stage.selection.market_selection_id.clone(),
+            market_selection_hash: stage.selection.selector_hash.clone(),
             account: stage.account,
             equity: stage.equity,
             empty: EmptyReportContext {
@@ -420,6 +434,7 @@ impl DefaultReportBuilder {
             request: stage.request,
             context: stage.context,
             market_selection_id: stage.selection.market_selection_id.clone(),
+            market_selection_hash: stage.selection.selector_hash.clone(),
             account: stage.account,
             equity: stage.equity,
             empty: EmptyReportContext {
@@ -463,6 +478,7 @@ impl DefaultReportBuilder {
         let boundary = DecisionClock::new(knowledge_lag_secs).serving_boundary(
             request.trigger_time,
             config.domain.crypto.availability_lag_secs,
+            config.domain.weather.availability_lag_secs,
         )?;
         let top_n = resolve_top_n(request, &config)?;
         let active = self
@@ -775,6 +791,67 @@ impl DefaultReportBuilder {
         Ok(Some(groups.into_constraint(Usd::new(cap))))
     }
 
+    async fn crypto_reference_prices(
+        &self,
+        context: &BuildContext,
+        features: &FeaturePipelineResult,
+        plan: &PortfolioPlanOutput,
+    ) -> QuantResult<HashMap<MarketId, Usd>> {
+        let Some(policy) = context.trade_policy.as_ref() else {
+            return Ok(HashMap::new());
+        };
+        if !policy
+            .payload_json
+            .cohorts
+            .iter()
+            .any(|cohort| template_has_crypto_event(&cohort.entry_condition))
+        {
+            return Ok(HashMap::new());
+        }
+        let mut prices = HashMap::new();
+        for planned in &plan.planned {
+            let Some(capture) = features.captures.get(&planned.candidate.market_id) else {
+                continue;
+            };
+            let Some(binding) = capture.domain_binding.as_ref() else {
+                continue;
+            };
+            let MarketSubject::Crypto(subject) = &binding.subject else {
+                continue;
+            };
+            if subject.comparator != PriceComparator::UpVsReference {
+                continue;
+            }
+            let Some(reference_at) = subject.reference_at else {
+                continue;
+            };
+            let Some(source) = binding
+                .source_bindings
+                .iter()
+                .find(|source| source.role == LinkageSourceRole::LiveEvent)
+            else {
+                continue;
+            };
+            if let Some(report) = self
+                .deps
+                .quant_fact_read_repo
+                .crypto_price_report_at(
+                    &source.source_id,
+                    &source.instrument_key,
+                    reference_at.timestamp_millis(),
+                    context.boundary.decision_at().timestamp_millis(),
+                )
+                .await?
+            {
+                prices.insert(
+                    planned.candidate.market_id.clone(),
+                    Usd::new(report.price.to_decimal()),
+                );
+            }
+        }
+        Ok(prices)
+    }
+
     fn compose_published(&self, input: PublishedComposeInput<'_>) -> QuantResult<ComposedReport> {
         let PortfolioPlanOutput {
             planned,
@@ -793,6 +870,7 @@ impl DefaultReportBuilder {
             runtime_mode: self.deps.runtime_mode.current(),
             model_version_id: input.context.active.model_version_id.clone(),
             market_selection_id: input.selection.market_selection_id.clone(),
+            market_selection_hash: input.selection.selector_hash.clone(),
             account: input.account,
             account_snapshot: input.equity.account_snapshot.clone(),
             equity_snapshot: input.equity.equity_snapshot.clone(),
@@ -813,6 +891,7 @@ impl DefaultReportBuilder {
             top_n: input.context.top_n,
             return_model_calibrated: input.context.return_model_calibrated,
             trade_policy: input.context.trade_policy.as_ref(),
+            crypto_reference_prices: input.crypto_reference_prices,
         })
     }
 
@@ -868,6 +947,7 @@ impl DefaultReportBuilder {
             runtime_mode: self.deps.runtime_mode.current(),
             model_version_id: input.context.active.model_version_id.clone(),
             market_selection_id: input.market_selection_id,
+            market_selection_hash: input.market_selection_hash,
             account: input.account,
             account_snapshot: input.equity.account_snapshot.clone(),
             equity_snapshot: input.equity.equity_snapshot.clone(),
@@ -891,7 +971,30 @@ impl DefaultReportBuilder {
             top_n: input.context.top_n,
             return_model_calibrated: input.context.return_model_calibrated,
             trade_policy: input.context.trade_policy.as_ref(),
+            crypto_reference_prices: HashMap::new(),
         })
+    }
+}
+
+fn template_has_crypto_event(template: &EntryConditionTemplate) -> bool {
+    match template {
+        EntryConditionTemplate::Immediate => false,
+        EntryConditionTemplate::Conditional { root, .. } => node_has_crypto_event(root),
+    }
+}
+
+fn node_has_crypto_event(node: &EntryConditionTemplateV1) -> bool {
+    match node {
+        EntryConditionTemplateV1::MarketEvent {
+            event: MarketEventTemplate::CryptoSubjectPredicateEntered { .. },
+        } => true,
+        EntryConditionTemplateV1::All { children } | EntryConditionTemplateV1::Any { children } => {
+            children.iter().any(node_has_crypto_event)
+        }
+        EntryConditionTemplateV1::Price { .. }
+        | EntryConditionTemplateV1::Clock { .. }
+        | EntryConditionTemplateV1::Factor { .. }
+        | EntryConditionTemplateV1::MarketEvent { .. } => false,
     }
 }
 

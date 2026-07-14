@@ -29,11 +29,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::quant_market_linkage,
-    enums::domain::{DomainFamily, KlineInterval, LinkageStatus, ResolverTier},
+    enums::domain::{DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus, ResolverTier},
     hashing::CanonicalDigest,
     types::{
         BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
-        DomainInstrumentKey, MarketId, MarketLinkageId, Probability, ResolverVersion, Usd,
+        DomainInstrumentKey, DomainSourceId, IcaoStation, MarketId, MarketLinkageId, Probability,
+        ResolverVersion, TemperatureBand, TemperatureUnit, Usd,
     },
 };
 
@@ -112,12 +113,6 @@ pub enum ResolutionOracle {
         /// Candle interval cited by the rules text.
         interval: KlineInterval,
     },
-    /// An oracle the resolver recognized as present but could not classify.
-    /// Basis cross-checking fails closed for this variant.
-    Other {
-        /// The literal rules-text fragment describing the oracle.
-        descriptor: String,
-    },
 }
 
 /// The extracted subject of a crypto market: which underlying, compared how,
@@ -140,6 +135,39 @@ pub struct CryptoSubject {
     pub resolution_oracle: ResolutionOracle,
 }
 
+/// Frozen airport daily-high subject supported by the Weather vertical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeatherSubject {
+    /// ICAO station whose observations proxy the settlement location.
+    pub station: IcaoStation,
+    /// IANA timezone used to derive the local calendar day.
+    pub timezone: String,
+    /// Local calendar date in `timezone`.
+    pub local_date: chrono::NaiveDate,
+    /// Recommended token's inclusive temperature band.
+    pub outcome_band: TemperatureBand,
+    /// Unit displayed by the market contract.
+    pub market_unit: TemperatureUnit,
+    /// Frozen settlement-rule URL. It is evidence only and is never scraped.
+    pub settlement_rule_url: String,
+    /// Canonical hash of the station coordinates, elevation and source station ids.
+    pub station_profile_hash: ContentHash,
+    /// Canonical hash of the whole-degree, midpoint-away-from-zero proxy methodology.
+    pub proxy_methodology_hash: ContentHash,
+}
+
+/// One exact source/instrument binding frozen into a linkage revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSourceBinding {
+    pub role: LinkageSourceRole,
+    pub source_id: DomainSourceId,
+    pub instrument_key: DomainInstrumentKey,
+    /// First instant this binding was knowable; never backdated by migration.
+    pub available_at: DateTime<Utc>,
+    /// Source-specific immutable configuration/profile digest.
+    pub binding_hash: ContentHash,
+}
+
 /// A market's extracted external subject, one variant per domain family.
 ///
 /// Additive: sports / politics / weather / geopolitics verticals extend this
@@ -149,6 +177,8 @@ pub struct CryptoSubject {
 pub enum MarketSubject {
     /// Crypto underlying-price subject.
     Crypto(CryptoSubject),
+    /// Airport local-day maximum-temperature subject.
+    Weather(WeatherSubject),
 }
 
 impl MarketSubject {
@@ -157,6 +187,7 @@ impl MarketSubject {
     pub const fn family(&self) -> DomainFamily {
         match self {
             Self::Crypto(_) => DomainFamily::Crypto,
+            Self::Weather(_) => DomainFamily::Weather,
         }
     }
 }
@@ -278,8 +309,8 @@ pub struct OverrideContext {
 pub struct ResolvedBinding {
     /// The extracted, validated subject.
     pub subject: MarketSubject,
-    /// Canonical feature-source instrument key (e.g. `BINANCE:BTCUSDT:1m`).
-    pub instrument_key: DomainInstrumentKey,
+    /// Exact multi-source bindings, with one row per role/source/instrument.
+    pub source_bindings: Vec<ResolvedSourceBinding>,
     /// Field → literal-span grounding proof (empty for an override — an
     /// operator decision is not text-extracted evidence; see
     /// [`Self::override_context`] for its real audit trail).
@@ -298,7 +329,7 @@ pub struct ResolvedBinding {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum LinkageOutcome {
     /// A validated binding exists.
-    Resolved(ResolvedBinding),
+    Resolved(Box<ResolvedBinding>),
     /// No tier produced a validated subject; the domain plane fails closed.
     Unresolved {
         /// Why resolution failed (operator-facing, drives the review queue).
@@ -414,7 +445,6 @@ pub struct MarketLinkageInfo {
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
     pub outcome: serde_json::Value,
-    pub instrument_key: Option<DomainInstrumentKey>,
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
@@ -438,7 +468,6 @@ info_from_model!(
         resolver_version,
         confidence,
         outcome,
-        instrument_key,
         metadata_hash,
         content_hash,
         derived_at,
@@ -462,7 +491,6 @@ pub struct NewMarketLinkage {
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
     pub outcome: serde_json::Value,
-    pub instrument_key: Option<DomainInstrumentKey>,
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
@@ -536,7 +564,6 @@ impl NewMarketLinkage {
             &metadata_hash,
         )?;
         let override_context = binding.and_then(|binding| binding.override_context.as_ref());
-        let instrument_key = binding.map(|binding| binding.instrument_key.clone());
         let override_reason = override_context.map(|context| context.reason.clone());
         let override_actor = override_context.map(|context| context.actor.clone());
         let outcome = serde_json::to_value(outcome).map_err(|error| {
@@ -554,7 +581,6 @@ impl NewMarketLinkage {
             resolver_version,
             confidence,
             outcome,
-            instrument_key,
             metadata_hash,
             content_hash,
             derived_at: effective_at,
@@ -604,14 +630,16 @@ mod tests {
     use super::{
         CryptoSubject, GroundingProof, GroundingSpan, LinkageOutcome, MarketLinkage,
         MarketLinkageDerivation, MarketSubject, NewMarketLinkage, PriceComparator,
-        ResolutionOracle, ResolvedBinding,
+        ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
     };
     use crate::{
         domain::{GroundingField, GroundingKind},
-        enums::domain::{DomainFamily, KlineInterval, LinkageStatus, ResolverTier},
+        enums::domain::{
+            DomainFamily, KlineInterval, LinkageSourceRole, LinkageStatus, ResolverTier,
+        },
         types::{
-            BinanceSymbol, ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey, MarketId,
-            MarketLinkageId, Probability, ResolverVersion,
+            BinanceSymbol, ContentHash, CryptoAsset, CryptoQuote, DomainInstrumentKey,
+            DomainSourceId, MarketId, MarketLinkageId, Probability, ResolverVersion,
         },
     };
     use chrono::Utc;
@@ -631,7 +659,17 @@ mod tests {
                     interval: KlineInterval::OneMinute,
                 },
             }),
-            instrument_key: DomainInstrumentKey::binance_kline(&symbol, KlineInterval::OneMinute),
+            source_bindings: vec![ResolvedSourceBinding {
+                role: LinkageSourceRole::Feature,
+                source_id: DomainSourceId::binance(),
+                instrument_key: DomainInstrumentKey::binance_kline(
+                    &symbol,
+                    KlineInterval::OneMinute,
+                ),
+                available_at: Utc::now(),
+                binding_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                    .expect("binding hash"),
+            }],
             grounding: GroundingProof {
                 spans: vec![GroundingSpan {
                     subject_field: "asset".to_owned(),
@@ -676,14 +714,14 @@ mod tests {
     #[test]
     fn status_derives_from_outcome_and_tier() {
         let resolved = sample_linkage(
-            LinkageOutcome::Resolved(sample_binding()),
+            LinkageOutcome::Resolved(Box::new(sample_binding())),
             ResolverTier::Tier0Slug,
         );
         assert_eq!(resolved.status(), LinkageStatus::Resolved);
         assert!(resolved.binding().is_some());
 
         let overridden = sample_linkage(
-            LinkageOutcome::Resolved(sample_binding()),
+            LinkageOutcome::Resolved(Box::new(sample_binding())),
             ResolverTier::Override,
         );
         assert_eq!(overridden.status(), LinkageStatus::Overridden);
@@ -703,7 +741,7 @@ mod tests {
         let effective_at = Utc::now();
         let pending = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: MarketId::new("0xpending"),
-            outcome: LinkageOutcome::Resolved(sample_binding()),
+            outcome: LinkageOutcome::Resolved(Box::new(sample_binding())),
             confidence: Probability::ONE,
             resolver_tier: ResolverTier::Tier0Slug,
             resolver_version: ResolverVersion::FIRST,
@@ -725,7 +763,7 @@ mod tests {
     fn content_hash_is_idempotent_and_outcome_sensitive() {
         let market_id = MarketId::new("0xmarket");
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
-        let resolved = LinkageOutcome::Resolved(sample_binding());
+        let resolved = LinkageOutcome::Resolved(Box::new(sample_binding()));
         let a = MarketLinkage::compute_content_hash(
             &market_id,
             DomainFamily::Crypto,

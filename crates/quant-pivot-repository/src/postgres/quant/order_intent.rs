@@ -22,22 +22,21 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        ApproveOrderIntent, ApproveOrderIntentOutcome, EntryTriggerTransition,
-        NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
-        OrderIntentListQuery, PageWindow, Paginated, RecommendationInfo, RecommendationReportInfo,
-        evaluate_intent_approval_invalidation,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
+        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, PageWindow, Paginated,
+        RecommendationInfo, RecommendationReportInfo, evaluate_intent_approval_invalidation,
     },
     entities::{
-        operation_log, quant_capital_allocation, quant_order_intent, quant_recommendation,
-        quant_recommendation_report, runtime_config_activation, runtime_config_version,
-        system_kill_switch,
+        operation_log, quant_capital_allocation, quant_entry_condition_instance,
+        quant_order_intent, quant_recommendation, quant_recommendation_report,
+        runtime_config_activation, runtime_config_version, system_kill_switch,
     },
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
-        quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, RecommendationStatus},
+        quant::{ApprovalStatus, OrderIntentStatus, RecommendationStatus},
     },
     types::{
-        EntryOrderSpec, EntryTrigger, OrderIntentId, RecommendationId, RecommendationReportId,
+        EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId,
         RuntimeConfigVersionId, ScaleOutState, Usd,
     },
 };
@@ -75,52 +74,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         intent: NewOrderIntent,
         allocation: NewCapitalAllocation,
     ) -> Result<OrderIntentInfo, StorageError> {
-        if !matches!(
-            intent.status,
-            OrderIntentStatus::PendingApproval | OrderIntentStatus::ApprovedByPolicy
-        ) {
-            return Err(error::invariant_violation(
-                Some(entity::QUANT_ORDER_INTENT),
-                format!(
-                    "order intent must be created as pending_approval or approved_by_policy, got {}",
-                    intent.status.as_str()
-                ),
-            ));
-        }
-        if allocation.order_intent_id != intent.order_intent_id {
-            return Err(error::invariant_violation(
-                Some(entity::QUANT_CAPITAL_ALLOCATION),
-                "capital allocation must reference its own order intent",
-            ));
-        }
-        if allocation.state != CapitalAllocationState::Allocated {
-            return Err(error::invariant_violation(
-                Some(entity::QUANT_CAPITAL_ALLOCATION),
-                format!(
-                    "new capital allocation must start as allocated, got {}",
-                    allocation.state.as_str()
-                ),
-            ));
-        }
-        validate_non_negative(
-            allocation.allocated_usd,
-            allocation.locked_usd,
-            allocation.spent_usd,
-            allocation.released_usd,
-        )?;
-        if !capital_invariant_ok(
-            allocation.planned_usd,
-            allocation.allocated_usd,
-            allocation.locked_usd,
-            allocation.spent_usd,
-            allocation.released_usd,
-        ) {
-            return Err(error::invariant_violation(
-                Some(entity::QUANT_CAPITAL_ALLOCATION),
-                "capital allocation violates the reserve invariant on create",
-            ));
-        }
-
+        validate_new_intent_and_allocation(&intent, &allocation)?;
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let rec_row = quant_recommendation::Entity::find_by_id(intent.recommendation_id.clone())
             .lock_exclusive()
@@ -147,6 +101,23 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             return Err(error::duplicate(
                 entity::QUANT_ORDER_INTENT,
                 intent.recommendation_id,
+            ));
+        }
+        let condition = quant_entry_condition_instance::Entity::find_by_id(
+            intent.condition_instance_id.clone(),
+        )
+        .lock_shared()
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "quant_entry_condition_instance",
+            id: intent.condition_instance_id.to_string(),
+        })?;
+        if condition.recommendation_id != intent.recommendation_id {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_ORDER_INTENT),
+                "order intent must reference its recommendation's condition instance",
             ));
         }
         if rec_row.status == RecommendationStatus::Published {
@@ -212,7 +183,6 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             ));
         }
 
-        let trigger_state = armed_trigger_state(&row.entry_trigger_json);
         let intent_model = apply_approval(
             &txn,
             intent_id,
@@ -220,7 +190,6 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             approval,
             entry_override,
             allocated_override,
-            trigger_state,
         )
         .await?;
         txn.commit().await.map_err(StorageError::from)?;
@@ -278,10 +247,6 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Expired);
         active.status_reason = ActiveValue::Set(Some("intent expired".to_owned()));
-        active.entry_trigger_state = ActiveValue::Set(EntryTriggerState::Expired);
-        active.trigger_confirming_since = ActiveValue::Set(None);
-        active.trigger_last_observed_at = ActiveValue::Set(None);
-        active.trigger_ready_at = ActiveValue::Set(None);
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
         release_capital(&txn, intent_id, "expired".to_owned()).await?;
         let after_info: OrderIntentInfo = intent_model.clone().into();
@@ -353,36 +318,6 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             Into::into,
         )
         .await
-    }
-
-    async fn transition_entry_trigger(
-        &self,
-        intent_id: &OrderIntentId,
-        transition: EntryTriggerTransition,
-    ) -> Result<OrderIntentInfo, StorageError> {
-        let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
-        if !matches!(
-            row.status,
-            OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
-        ) {
-            return Err(error::state_conflict(
-                entity::QUANT_ORDER_INTENT,
-                Some(intent_id),
-                format!(
-                    "entry trigger cannot transition while intent is {}",
-                    row.status.as_str()
-                ),
-            ));
-        }
-        let mut active = row.into_active_model();
-        active.entry_trigger_state = ActiveValue::Set(transition.state);
-        active.trigger_confirming_since = ActiveValue::Set(transition.confirming_since);
-        active.trigger_last_observed_at = ActiveValue::Set(transition.last_observed_at);
-        active.trigger_ready_at = ActiveValue::Set(transition.ready_at);
-        let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        txn.commit().await.map_err(StorageError::from)?;
-        Ok(updated.into())
     }
 
     async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError> {
@@ -500,6 +435,58 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
+}
+
+fn validate_new_intent_and_allocation(
+    intent: &NewOrderIntent,
+    allocation: &NewCapitalAllocation,
+) -> Result<(), StorageError> {
+    if !matches!(
+        intent.status,
+        OrderIntentStatus::PendingApproval | OrderIntentStatus::ApprovedByPolicy
+    ) {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_ORDER_INTENT),
+            format!(
+                "order intent must be created as pending_approval or approved_by_policy, got {}",
+                intent.status.as_str()
+            ),
+        ));
+    }
+    if allocation.order_intent_id != intent.order_intent_id {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_CAPITAL_ALLOCATION),
+            "capital allocation must reference its own order intent",
+        ));
+    }
+    if allocation.state != CapitalAllocationState::Allocated {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_CAPITAL_ALLOCATION),
+            format!(
+                "new capital allocation must start as allocated, got {}",
+                allocation.state.as_str()
+            ),
+        ));
+    }
+    validate_non_negative(
+        allocation.allocated_usd,
+        allocation.locked_usd,
+        allocation.spent_usd,
+        allocation.released_usd,
+    )?;
+    if !capital_invariant_ok(
+        allocation.planned_usd,
+        allocation.allocated_usd,
+        allocation.locked_usd,
+        allocation.spent_usd,
+        allocation.released_usd,
+    ) {
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_CAPITAL_ALLOCATION),
+            "capital allocation violates the reserve invariant on create",
+        ));
+    }
+    Ok(())
 }
 
 fn page_condition(query: &OrderIntentListQuery) -> Condition {
@@ -643,7 +630,6 @@ async fn apply_approval(
     approval: ApproveOrderIntent,
     entry_override: Option<EntryOrderSpec>,
     allocated_override: Option<Usd>,
-    trigger_state: EntryTriggerState,
 ) -> Result<quant_order_intent::Model, StorageError> {
     let mut active = row.into_active_model();
     active.status = ActiveValue::Set(OrderIntentStatus::Approved);
@@ -651,10 +637,6 @@ async fn apply_approval(
     active.approved_by = ActiveValue::Set(Some(approval.approved_by));
     active.approval_reason = ActiveValue::Set(Some(approval.approval_reason));
     active.approved_at = ActiveValue::Set(Some(approval.approved_at));
-    active.entry_trigger_state = ActiveValue::Set(trigger_state);
-    active.trigger_confirming_since = ActiveValue::Set(None);
-    active.trigger_last_observed_at = ActiveValue::Set(None);
-    active.trigger_ready_at = ActiveValue::Set(None);
     if let Some(entry) = entry_override {
         active.entry_order_json = ActiveValue::Set(entry);
     }
@@ -695,13 +677,6 @@ async fn apply_approval(
     }
 
     Ok(intent_model)
-}
-
-const fn armed_trigger_state(trigger: &EntryTrigger) -> EntryTriggerState {
-    match trigger {
-        EntryTrigger::Immediate => EntryTriggerState::NotRequired,
-        EntryTrigger::PriceCondition { .. } => EntryTriggerState::Waiting,
-    }
 }
 
 /// Invalidate an intent and release capital. When `validate_transition` is true
@@ -756,6 +731,7 @@ pub fn validate_intent_transition(
         ) | (
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy,
             OrderIntentStatus::AdmissionPending
+                | OrderIntentStatus::AdmissionRejected
                 | OrderIntentStatus::Cancelled
                 | OrderIntentStatus::Expired
                 | OrderIntentStatus::Invalidated,

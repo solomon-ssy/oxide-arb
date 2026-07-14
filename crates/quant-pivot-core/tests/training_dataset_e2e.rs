@@ -28,7 +28,8 @@ use quant_pivot_models::{
         MarketLinkageDerivation, MarketRegistryInfo, MarketSubject, NewCatalogSyncBatch,
         NewEventCatalogVersion, NewMarketCatalogVersion, NewMarketLinkage, NewModelSpec,
         NewModelVersion, NewRuntimeConfigVersion, NewTrainingDatasetPlan, NoopProgressSink,
-        PriceComparator, ResolutionOracle, ResolvedBinding, UpsertEvent, UpsertMarket,
+        PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding, UpsertEvent,
+        UpsertMarket,
         market::{book::BookLevel, registry::TokenInfo},
     },
     entities::{
@@ -38,7 +39,7 @@ use quant_pivot_models::{
     enums::{
         clickhouse::{ChFactSource, ChSnapshotReason},
         common::{CategorySet, MarketCategory, TickSize},
-        domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
+        domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
         factor::FactorFamily,
         market::{EventStatus, MarketStatus},
         model::ModelFamily,
@@ -701,6 +702,7 @@ fn market_registry_payload(
         liquidity_usd: Some(Usd::new(dec!(1000))),
         volume_24h: Some(Usd::new(dec!(1000))),
         fee_schedule: None,
+        start_date: Some(context.source_effective_at),
         end_date: Some(context.end_date),
         resolved_at: None,
         created_at: Some(context.source_effective_at),
@@ -1280,7 +1282,7 @@ fn resolved_crypto_linkage(
     reference_at: DateTime<Utc>,
 ) -> NewMarketLinkage {
     let market_id = MarketId::new(MARKET_ID);
-    let outcome = LinkageOutcome::Resolved(ResolvedBinding {
+    let outcome = LinkageOutcome::Resolved(Box::new(ResolvedBinding {
         subject: MarketSubject::Crypto(CryptoSubject {
             asset: CryptoAsset::parse("BTC").expect("asset"),
             quote: CryptoQuote::parse("USD").expect("quote"),
@@ -1293,10 +1295,17 @@ fn resolved_crypto_linkage(
                 interval: KlineInterval::OneMinute,
             },
         }),
-        instrument_key: crypto_instrument(),
+        source_bindings: vec![ResolvedSourceBinding {
+            role: LinkageSourceRole::Feature,
+            source_id: DomainSourceId::binance(),
+            instrument_key: crypto_instrument(),
+            available_at: derived_at,
+            binding_hash: ContentHash::parse(format!("blake3:{}", "8".repeat(64)))
+                .expect("binding hash"),
+        }],
         grounding: GroundingProof { spans: Vec::new() },
         override_context: None,
-    });
+    }));
     let metadata_hash = ContentHash::parse(format!("blake3:{}", "7".repeat(64))).expect("hash");
     NewMarketLinkage::from_derivation(MarketLinkageDerivation {
         market_id,

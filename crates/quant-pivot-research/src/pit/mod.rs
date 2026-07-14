@@ -84,6 +84,8 @@ pub struct MarketContextAt {
     pub status: MarketStatus,
     /// Whether the market is a neg-risk market.
     pub neg_risk: bool,
+    /// Scheduled market start time, when published by Gamma.
+    pub start_date: Option<DateTime<Utc>>,
     /// Scheduled resolution time, when known.
     pub end_date: Option<DateTime<Utc>>,
     /// Upstream catalog creation time (event-age proxy). `None` means Gamma did
@@ -188,6 +190,7 @@ pub fn resolve_catalog_snapshot(
         available_at: snapshot.market.available_at,
         status: market.status,
         neg_risk: market.neg_risk,
+        start_date: market.start_date,
         end_date: market.end_date,
         created_at: snapshot.market.source_created_at,
     };

@@ -6,8 +6,8 @@ use std::{sync::Arc, time::Duration};
 use chrono::Utc;
 use quant_pivot_models::domain::OrderIntentPort;
 use quant_pivot_repository::traits::{
-    FeatureParityRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository, TradePolicyRepository,
+    EntryConditionRepository, FeatureParityRepository, OrderIntentRepository,
+    RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,
 };
 
 use super::AppContext;
@@ -41,6 +41,7 @@ impl AppContext {
             reports: Arc::clone(&repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
             intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+            conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
             metrics: Arc::clone(&self.infra.metrics),
             intent_lifecycle: Arc::clone(&self.intent_lifecycle),
             dispatch_wake: self.execution_wake(),

@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 11),
+# They live in the versioned runtime configuration (schema_version = 12),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -174,37 +174,66 @@ batch_size = 1000
 # thresholds) are runtime config under `domain.*` — only connections live here.
 
 [domain_sources.binance]
-# Purpose: Binance spot kline ingestion (public market data, no key).
+# Purpose: Binance spot kline and aggregate-trade ingestion (public market data, no key).
 # Default: true.
 enabled = true
-# Purpose: Binance spot REST base URL. Default: "https://api.binance.com".
-base_url = "https://api.binance.com"
+rest_url = "https://api.binance.com"
+websocket_url = "wss://stream.binance.com:9443/ws"
+archive_url = "https://data.binance.vision"
 # Purpose: proactive request-weight budget per minute (klines cost weight
 # 2/request; the venue IP budget is 6000/min). Default: 1000.
 weight_budget_per_min = 1000
 # Purpose: incremental poll cadence (seconds). Default: 30.
-poll_secs = 30
+kline_poll_secs = 30
+websocket_rotation_secs = 82800
 # Purpose: ClickHouse batch size. Default: 5000.
 batch_size = 5000
 
-[domain_sources.chainlink]
-# Purpose: Chainlink aggregator oracle-quote ingestion via the shared Polygon
-# RPC ([polymarket.onchain].rpc_url) — basis cross-check source. Default: true.
-enabled = true
-# Purpose: incremental poll cadence (seconds). Default: 15.
-poll_secs = 15
-# Purpose: max historical rounds back-scanned per feed on bootstrap.
-# Default: 500.
-max_round_backscan = 500
+[domain_sources.chainlink_data_streams]
+# Credentials are intentionally absent from this file. Inject them through
+# QUANT_PIVOT__DOMAIN_SOURCES__CHAINLINK_DATA_STREAMS__API_KEY and API_SECRET.
+enabled = false
+rest_url = "https://api.dataengine.chain.link"
+websocket_url = "wss://ws.dataengine.chain.link"
+max_clock_skew_ms = 2000
+rest_page_limit = 1000
 
-# Purpose: AggregatorV3 proxy addresses keyed by feed (Polygon mainnet).
-# Adding an asset = add its feed here + extend the resolver ruleset.
-[domain_sources.chainlink.feeds]
-BTC-USD = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
-ETH-USD = "0xF9680D99D6C9589e2a93a78A04A279e509205945"
-SOL-USD = "0x16F8008c3e89f62e5e2b909Ce70999370D38F4F2"
-XRP-USD = "0x979211Dfbc0738559B778a6a58a5b1bbbBe720f9"
-DOGE-USD = "0x1c747D909102bfCdb305C54bDdDBdA3eF588B1d0"
+# Logical feed names map to subscription-specific V3 feed metadata in the
+# local deploy overlay. No feed ID or decimal fallback is shipped here.
+[domain_sources.chainlink_data_streams.feeds]
+
+[domain_sources.aviation_weather]
+enabled = true
+base_url = "https://aviationweather.gov/api/data"
+poll_secs = 60
+request_timeout_ms = 10000
+day_close_grace_secs = 7200
+
+[domain_sources.ghcnh]
+enabled = true
+base_url = "https://www.ncei.noaa.gov/oa/global-historical-climatology-network/hourly/access/by-year"
+request_timeout_ms = 120000
+refresh_secs = 86400
+calibration_years = 2
+
+[domain_sources.gefs]
+enabled = true
+bucket_url = "https://noaa-gefs-pds.s3.amazonaws.com"
+request_timeout_ms = 30000
+poll_secs = 900
+publication_lag_secs = 18000
+max_lead_hours = 240
+max_concurrency = 8
+
+# Weather markets are resolved only when their exact ICAO station has a
+# content-addressed profile. Add global stations through the local deploy
+# overlay; never infer station/timezone from a city name.
+[domain_sources.weather_stations.KLGA]
+timezone = "America/New_York"
+latitude = "40.7769"
+longitude = "-73.8740"
+elevation_meters = "6.4"
+ghcnh_station_id = "USW00014732"
 
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 

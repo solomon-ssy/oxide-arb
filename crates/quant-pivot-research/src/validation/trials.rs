@@ -253,7 +253,9 @@ fn methodology(detail: impl Into<String>) -> QuantError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClassicalTrialGrid, Trial, TrialGridSpec, WeightedFactorTrialGrid};
+    #[cfg(feature = "ml-classical")]
+    use super::ClassicalTrialGrid;
+    use super::{Trial, TrialGridSpec, WeightedFactorTrialGrid};
     use crate::model::TrainingObjectiveSpec;
     use quant_pivot_models::runtime_config::RankLossKind;
     use rust_decimal_macros::dec;

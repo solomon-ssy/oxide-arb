@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, OrderIntentInfo,
-        ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
+        NewExecutionOrder, OrderIntentInfo, ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     enums::execution::ExitReason,
     types::{
@@ -23,16 +23,14 @@ use quant_pivot_models::{
 /// inside a transaction (no DB lock is held across venue calls).
 #[async_trait::async_trait]
 pub trait ExecutionSubmissionRepository: Send + Sync {
-    /// Row-lock the intent, verify it is submittable at `now`
-    /// (`Approved`/`ApprovedByPolicy`, not expired), and claim it by
-    /// transitioning to `AdmissionPending`. A concurrent claimer that wins the
-    /// row lock first leaves the loser observing `AdmissionPending` (not
-    /// submittable) — this is the double-submit guard.
+    /// Row-lock the intent and its exact condition revision, verify both are
+    /// claimable, then atomically transition the intent to `AdmissionPending`
+    /// and the condition to `Consumed`. A concurrent claimer observes neither
+    /// half of the transition.
     async fn claim_for_submission(
         &self,
-        intent_id: &OrderIntentId,
-        now: DateTime<Utc>,
-    ) -> Result<OrderIntentInfo, StorageError>;
+        claim: EntryConditionClaim,
+    ) -> Result<(OrderIntentInfo, EntryConditionInstanceInfo), StorageError>;
 
     /// Release a claim on transient admission defer: `AdmissionPending ->
     /// Approved` (semi-auto) or `ApprovedByPolicy` (auto), so the dispatcher may

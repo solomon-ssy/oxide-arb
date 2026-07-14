@@ -33,8 +33,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        BookSnapshot, CapitalAllocationInfo, DataQualitySnapshot, OrderIntentInfo,
-        RecommendationInfo, RecommendationReportInfo,
+        BookSnapshot, CapitalAllocationInfo, DataQualitySnapshot, EntryConditionInstanceInfo,
+        OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
     },
     enums::{
         common::TickSize,
@@ -44,6 +44,7 @@ use quant_pivot_models::{
     types::{RuntimeConfigVersionId, Usd},
 };
 use quant_pivot_research::portfolio::AccountSnapshot;
+use serde::{Deserialize, Serialize};
 
 /// Venue-health seam read by `VenueGuardCheck` (#18).
 ///
@@ -80,7 +81,7 @@ pub struct AdmissionSeams {
 ///
 /// Recorded on the decision so the 05.4 dispatcher can persist *why* an intent
 /// was allowed / denied and the verdict can be replayed against the same state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateVersion {
     pub config_version_id: RuntimeConfigVersionId,
     pub account_as_of: DateTime<Utc>,
@@ -127,6 +128,8 @@ pub struct AdmissionVenueMetadata {
 pub struct AdmissionInput {
     /// The intent being admitted (frozen entry spec + risk-envelope hash).
     pub intent: OrderIntentInfo,
+    /// Recommendation-owned, revisioned entry-condition state.
+    pub condition: EntryConditionInstanceInfo,
     /// Source recommendation (entry/sizing/exit plans + risk envelope).
     pub recommendation: RecommendationInfo,
     /// Source report (governance status + config / model versions).

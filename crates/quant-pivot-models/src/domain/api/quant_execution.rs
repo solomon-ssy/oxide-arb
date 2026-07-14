@@ -9,6 +9,7 @@
 
 use crate::{
     domain::{
+        EntryConditionArtifactInfo, EntryConditionAuditInfo, EntryConditionInstanceInfo,
         ExecutionOrderInfo, OrderIntentInfo, PositionInfo, RecommendationAttributionInfo,
         pagination::PageRequest,
     },
@@ -19,15 +20,17 @@ use crate::{
             PositionLedgerState, VenueOrderStatus,
         },
         quant::{
-            ApprovalStatus, EntryTriggerState, ExecutionOrderState, OrderIntentStatus,
-            QuantRuntimeMode, RecommendationAttributionOutcome,
+            ApprovalStatus, EntryConditionAuditAction, EntryConditionState, ExecutionOrderState,
+            OrderIntentStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
         },
     },
     types::{
-        AttributionDetail, ContentHash, EntryOrderSpec, EntryOutcome, EntryTrigger,
-        ExecutionOrderId, ExitOutcome, ExitPolicySpec, ExitReinferenceObservation, MarketId,
-        ModelVersionId, NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId,
-        Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
+        AttributionDetail, ConditionTruth, ContentHash, EntryConditionArtifactId,
+        EntryConditionArtifactV1, EntryConditionAuditId, EntryConditionInstanceId,
+        EntryConditionNode, EntryOrderSpec, EntryOutcome, ExecutionOrderId, ExitOutcome,
+        ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
+        NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId, Price,
+        RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -54,18 +57,13 @@ pub struct OrderIntentView {
     pub policy_hash: Option<ContentHash>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
-    pub entry_trigger: EntryTrigger,
+    pub condition_instance_id: EntryConditionInstanceId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_condition: Option<EntryConditionInstanceSummaryView>,
     pub entry_order: EntryOrderSpec,
     pub exit_policy: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
-    pub entry_trigger_state: EntryTriggerState,
-    pub trigger_confirming_since: Option<DateTime<Utc>>,
-    pub trigger_last_observed_at: Option<DateTime<Utc>>,
-    pub trigger_ready_at: Option<DateTime<Utc>>,
-    /// Ephemeral live-book projection computed at read time; never persisted per tick.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub entry_trigger_observation: Option<EntryTriggerObservationView>,
     pub exit_state: ExitState,
     pub exit_reason: Option<ExitReason>,
     pub next_check_at: Option<DateTime<Utc>>,
@@ -98,16 +96,12 @@ impl From<OrderIntentInfo> for OrderIntentView {
             policy_hash: info.policy_hash,
             status_reason: info.status_reason,
             admission_trace_ref: info.admission_trace_ref,
-            entry_trigger: info.entry_trigger_json,
+            condition_instance_id: info.condition_instance_id,
+            entry_condition: None,
             entry_order: info.entry_order_json,
             exit_policy: info.exit_policy_json,
             risk_envelope_hash: info.risk_envelope_hash,
             expires_at: info.expires_at,
-            entry_trigger_state: info.entry_trigger_state,
-            trigger_confirming_since: info.trigger_confirming_since,
-            trigger_last_observed_at: info.trigger_last_observed_at,
-            trigger_ready_at: info.trigger_ready_at,
-            entry_trigger_observation: None,
             exit_state: info.exit_state,
             exit_reason: info.exit_reason,
             next_check_at: info.next_check_at,
@@ -122,16 +116,120 @@ impl From<OrderIntentInfo> for OrderIntentView {
     }
 }
 
-/// Read-time observability for a frozen entry trigger.
+/// Shared summary embedded by recommendation and intent detail views.
 #[derive(Debug, Clone, Serialize)]
-pub struct EntryTriggerObservationView {
-    pub current_price: Option<Price>,
-    pub book_observed_at: Option<DateTime<Utc>>,
-    pub book_age_ms: Option<u64>,
-    pub book_fresh: bool,
-    pub condition_satisfied: bool,
-    pub confirmation_remaining_secs: Option<u64>,
-    pub admission_blocker: Option<String>,
+pub struct EntryConditionInstanceSummaryView {
+    pub condition_instance_id: EntryConditionInstanceId,
+    pub artifact_id: Option<EntryConditionArtifactId>,
+    pub artifact_hash: Option<ContentHash>,
+    pub state: EntryConditionState,
+    pub truth: Option<ConditionTruth>,
+    pub revision: i64,
+    pub evaluation_hash: Option<ContentHash>,
+    pub input_fingerprint: Option<ContentHash>,
+    pub continuity_hash: Option<ContentHash>,
+    pub confirmation_started_at: Option<DateTime<Utc>>,
+    pub last_evaluated_at: Option<DateTime<Utc>>,
+    pub next_evaluation_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub lease_epoch: i64,
+    pub claimed_by_intent_id: Option<OrderIntentId>,
+    pub claim_admission_state_version: Option<ContentHash>,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
+impl From<EntryConditionInstanceInfo> for EntryConditionInstanceSummaryView {
+    fn from(info: EntryConditionInstanceInfo) -> Self {
+        Self {
+            condition_instance_id: info.condition_instance_id,
+            artifact_id: info.artifact_id,
+            artifact_hash: info.artifact_hash,
+            state: info.state,
+            truth: info.truth_json,
+            revision: info.revision,
+            evaluation_hash: info.evaluation_hash,
+            input_fingerprint: info.input_fingerprint,
+            continuity_hash: info.continuity_hash,
+            confirmation_started_at: info.confirmation_started_at,
+            last_evaluated_at: info.last_evaluated_at,
+            next_evaluation_at: info.next_evaluation_at,
+            expires_at: info.expires_at,
+            lease_epoch: info.lease_epoch,
+            claimed_by_intent_id: info.claimed_by_intent_id,
+            claim_admission_state_version: info.claim_admission_state_version,
+            consumed_at: info.consumed_at,
+        }
+    }
+}
+
+/// Full condition artifact plus stable server-generated node identities.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryConditionArtifactView {
+    pub artifact_id: EntryConditionArtifactId,
+    pub content_hash: ContentHash,
+    pub schema_version: i32,
+    pub evaluator_version: i32,
+    pub artifact: EntryConditionArtifactV1,
+    pub nodes: Vec<EntryConditionNode>,
+}
+
+impl EntryConditionArtifactView {
+    #[must_use]
+    pub fn from_info(info: EntryConditionArtifactInfo, nodes: Vec<EntryConditionNode>) -> Self {
+        Self {
+            artifact_id: info.artifact_id,
+            content_hash: info.content_hash,
+            schema_version: info.schema_version,
+            evaluator_version: info.evaluator_version,
+            artifact: info.payload_json,
+            nodes,
+        }
+    }
+}
+
+/// Recommendation-owned condition state with its immutable evaluator contract.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryConditionDetailView {
+    pub instance: EntryConditionInstanceSummaryView,
+    pub artifact: Option<EntryConditionArtifactView>,
+}
+
+/// One immutable condition lifecycle audit event.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryConditionAuditView {
+    pub audit_id: EntryConditionAuditId,
+    pub condition_instance_id: EntryConditionInstanceId,
+    pub revision: i64,
+    pub action: EntryConditionAuditAction,
+    pub from_state: Option<EntryConditionState>,
+    pub to_state: EntryConditionState,
+    pub truth: Option<ConditionTruth>,
+    pub evaluation_hash: Option<ContentHash>,
+    pub input_fingerprint: Option<ContentHash>,
+    pub continuity_hash: Option<ContentHash>,
+    pub lease_epoch: i64,
+    pub detail: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl From<EntryConditionAuditInfo> for EntryConditionAuditView {
+    fn from(info: EntryConditionAuditInfo) -> Self {
+        Self {
+            audit_id: info.audit_id,
+            condition_instance_id: info.condition_instance_id,
+            revision: info.revision,
+            action: info.action,
+            from_state: info.from_state,
+            to_state: info.to_state,
+            truth: info.truth_json,
+            evaluation_hash: info.evaluation_hash,
+            input_fingerprint: info.input_fingerprint,
+            continuity_hash: info.continuity_hash,
+            lease_epoch: info.lease_epoch,
+            detail: info.detail,
+            occurred_at: info.occurred_at,
+        }
+    }
 }
 
 /// Authoritative read-time projection of one lot's governed exit monitor.

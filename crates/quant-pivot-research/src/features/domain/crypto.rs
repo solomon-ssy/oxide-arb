@@ -21,19 +21,20 @@
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_models::{
-    domain::{CryptoSubject, DomainObservation, MarketSubject, PriceComparator, ResolutionOracle},
+    domain::{CryptoPriceReport, CryptoSubject, MarketSubject, PriceComparator, ResolutionOracle},
     enums::{
         domain::{DomainFamily, DomainMetric},
         feature::EvidenceSourceKind,
     },
+    runtime_config::CryptoDomainConfig,
 };
 use rust_decimal::Decimal;
 
 use crate::{
-    domain::DomainObservationWindow,
+    domain::{CryptoPriceReportWindow, DomainObservationWindow},
     features::{
         builder::RawFeature,
-        domain::{DomainComputeCtx, DomainFeatureBuilder},
+        domain::{DomainComputeCtx, DomainFeatureBuilder, DomainSliceDataRef},
         generic::stats::{realized_volatility, simple_return},
         names::domain_crypto as names,
         value::{EvidenceSourceRef, FeatureValue, NullReason},
@@ -52,32 +53,50 @@ impl DomainFeatureBuilder for CryptoDomainFeatureBuilder {
     }
 
     fn compute(&self, ctx: &DomainComputeCtx<'_>) -> Vec<RawFeature> {
-        let MarketSubject::Crypto(subject) = &ctx.binding.subject;
+        let MarketSubject::Crypto(subject) = &ctx.binding.subject else {
+            return Vec::new();
+        };
+        let DomainSliceDataRef::Crypto { primary, oracle } = ctx.data else {
+            return Vec::new();
+        };
+        let ctx = CryptoComputeCtx {
+            decision_at: ctx.decision_at,
+            linkage_evidence: ctx.linkage_evidence,
+            primary,
+            oracle,
+            crypto: &ctx.domain.crypto,
+        };
         vec![
-            distance_to_strike(ctx, subject),
-            underlying_momentum(ctx),
-            underlying_realized_vol(ctx),
-            time_to_observation(ctx, subject),
-            basis_vs_resolution_source(ctx, subject),
+            distance_to_strike(&ctx, subject),
+            underlying_momentum(&ctx),
+            underlying_realized_vol(&ctx),
+            time_to_observation(&ctx, subject),
+            basis_vs_resolution_source(&ctx, subject),
         ]
     }
+}
+
+struct CryptoComputeCtx<'a> {
+    decision_at: DateTime<Utc>,
+    linkage_evidence: &'a EvidenceSourceRef,
+    primary: &'a DomainObservationWindow,
+    oracle: Option<&'a CryptoPriceReportWindow>,
+    crypto: &'a CryptoDomainConfig,
 }
 
 /// Seconds between `anchor` and `observation.observed_at`.
 ///
 /// A future observation is invalid point-in-time evidence, not a fresh
 /// observation with age zero.
-fn observation_age_secs(observation: &DomainObservation, anchor: DateTime<Utc>) -> Option<u64> {
-    u64::try_from((anchor - observation.observed_at).num_seconds()).ok()
-}
-
 /// Whether a Chainlink oracle observation exceeds the governed staleness ceiling.
 fn oracle_stale(
-    observation: &DomainObservation,
+    observation: &CryptoPriceReport,
     anchor: DateTime<Utc>,
     max_staleness_secs: u64,
 ) -> Option<bool> {
-    observation_age_secs(observation, anchor).map(|age| age > max_staleness_secs)
+    u64::try_from((anchor - observation.event_time).num_seconds())
+        .ok()
+        .map(|age| age > max_staleness_secs)
 }
 
 /// Evidence ref anchored on one domain observation.
@@ -95,9 +114,23 @@ fn evidence(window: &DomainObservationWindow, metric: DomainMetric) -> Option<Ev
     })
 }
 
+fn oracle_evidence(window: &CryptoPriceReportWindow) -> Option<EvidenceSourceRef> {
+    window.latest().map(|report| EvidenceSourceRef {
+        source_kind: EvidenceSourceKind::DomainExternal,
+        reference: format!(
+            "{}:price@{}#{}",
+            report.instrument_key,
+            report.event_time.timestamp_millis(),
+            report.report_hash
+        ),
+        effective_at: report.published_at,
+        available_at: Some(report.available_at),
+    })
+}
+
 /// Signed relative distance from the underlying to the strike, oriented so
 /// positive favors YES.
-fn distance_to_strike(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> RawFeature {
+fn distance_to_strike(ctx: &CryptoComputeCtx<'_>, subject: &CryptoSubject) -> RawFeature {
     let name = names::DISTANCE_TO_STRIKE;
     let Some(close) = ctx.primary.latest(DomainMetric::Close) else {
         return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
@@ -123,9 +156,7 @@ fn distance_to_strike(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> Ra
                     let Some(oracle_window) = ctx.oracle else {
                         return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
                     };
-                    let Some(observation) =
-                        oracle_window.latest_at(DomainMetric::OraclePrice, reference_at)
-                    else {
+                    let Some(observation) = oracle_window.latest_at(reference_at) else {
                         return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
                     };
                     match oracle_stale(observation, reference_at, max_staleness) {
@@ -135,9 +166,9 @@ fn distance_to_strike(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> Ra
                         Some(false) => {}
                         None => return RawFeature::missing(name, NullReason::OutOfValidRange),
                     }
-                    observation.value
+                    observation.price.inner()
                 }
-                ResolutionOracle::BinanceKline { .. } | ResolutionOracle::Other { .. } => {
+                ResolutionOracle::BinanceKline { .. } => {
                     let Some(observation) =
                         ctx.primary.latest_at(DomainMetric::Close, reference_at)
                     else {
@@ -181,7 +212,7 @@ fn band_distance(close: Decimal, lo: Decimal, hi: Decimal) -> Option<Decimal> {
 }
 
 /// Underlying close-to-close momentum over the configured window.
-fn underlying_momentum(ctx: &DomainComputeCtx<'_>) -> RawFeature {
+fn underlying_momentum(ctx: &CryptoComputeCtx<'_>) -> RawFeature {
     let name = names::UNDERLYING_MOMENTUM;
     let Ok(window_secs) = i64::try_from(ctx.crypto.momentum_window_secs) else {
         return RawFeature::missing(name, NullReason::OutOfValidRange);
@@ -199,7 +230,7 @@ fn underlying_momentum(ctx: &DomainComputeCtx<'_>) -> RawFeature {
 }
 
 /// Underlying realized volatility over the configured window.
-fn underlying_realized_vol(ctx: &DomainComputeCtx<'_>) -> RawFeature {
+fn underlying_realized_vol(ctx: &CryptoComputeCtx<'_>) -> RawFeature {
     let name = names::UNDERLYING_REALIZED_VOL;
     let Ok(window_secs) = i64::try_from(ctx.crypto.volatility_window_secs) else {
         return RawFeature::missing(name, NullReason::OutOfValidRange);
@@ -217,7 +248,7 @@ fn underlying_realized_vol(ctx: &DomainComputeCtx<'_>) -> RawFeature {
 }
 
 /// Seconds from `as_of` until the subject's settlement observation.
-fn time_to_observation(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> RawFeature {
+fn time_to_observation(ctx: &CryptoComputeCtx<'_>, subject: &CryptoSubject) -> RawFeature {
     let name = names::TIME_TO_OBSERVATION;
     let seconds = (subject.observation_at - ctx.decision_at).num_seconds();
     let Ok(seconds) = u64::try_from(seconds) else {
@@ -228,7 +259,7 @@ fn time_to_observation(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> R
 }
 
 /// Basis (bps) between the feature source and the settlement oracle.
-fn basis_vs_resolution_source(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubject) -> RawFeature {
+fn basis_vs_resolution_source(ctx: &CryptoComputeCtx<'_>, subject: &CryptoSubject) -> RawFeature {
     let name = names::BASIS_VS_RESOLUTION_SOURCE;
     match &subject.resolution_oracle {
         // Feature source == settlement source: no cross-source divergence
@@ -243,7 +274,7 @@ fn basis_vs_resolution_source(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubjec
             let max_staleness = ctx.crypto.cross_check.max_oracle_staleness_secs;
             let (Some(close), Some(oracle)) = (
                 ctx.primary.latest(DomainMetric::Close),
-                oracle_window.latest(DomainMetric::OraclePrice),
+                oracle_window.latest(),
             ) else {
                 return RawFeature::missing(name, NullReason::DomainSourceUnavailable);
             };
@@ -254,18 +285,15 @@ fn basis_vs_resolution_source(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubjec
                 Some(false) => {}
                 None => return RawFeature::missing(name, NullReason::OutOfValidRange),
             }
-            if oracle.value.is_zero() {
+            if oracle.price.is_zero() {
                 return RawFeature::missing(name, NullReason::OutOfValidRange);
             }
-            let basis_bps = (close.value - oracle.value) / oracle.value * BPS_PER_UNIT;
-            match evidence(oracle_window, DomainMetric::OraclePrice) {
+            let oracle_price = oracle.price.inner();
+            let basis_bps = (close.value - oracle_price) / oracle_price * BPS_PER_UNIT;
+            match oracle_evidence(oracle_window) {
                 Some(evidence) => RawFeature::present(name, FeatureValue::Bps(basis_bps), evidence),
                 None => RawFeature::missing(name, NullReason::DomainSourceUnavailable),
             }
-        }
-        // Unrecognized oracle: we cannot cross-check — fail closed.
-        ResolutionOracle::Other { .. } => {
-            RawFeature::missing(name, NullReason::DomainSourceUnavailable)
         }
     }
 }
@@ -274,10 +302,10 @@ fn basis_vs_resolution_source(ctx: &DomainComputeCtx<'_>, subject: &CryptoSubjec
 mod tests {
     use super::{CryptoDomainFeatureBuilder, band_distance, signed_relative};
     use crate::{
-        domain::DomainObservationWindow,
+        domain::{CryptoPriceReportWindow, DomainObservationWindow},
         features::{
             FeatureName, RawFeature,
-            domain::{DomainComputeCtx, DomainFeatureBuilder},
+            domain::{DomainComputeCtx, DomainFeatureBuilder, DomainSliceDataRef},
             names::domain_crypto as names,
             value::{EvidenceSourceRef, FeatureValue, NullReason},
         },
@@ -285,17 +313,17 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            CryptoSubject, DomainObservation, GroundingProof, MarketSubject, PriceComparator,
-            ResolutionOracle, ResolvedBinding,
+            CryptoPriceReport, CryptoSubject, DomainObservation, GroundingProof, MarketSubject,
+            PriceComparator, ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
         },
         enums::{
-            domain::{DomainFamily, DomainMetric, KlineInterval},
+            domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole},
             feature::EvidenceSourceKind,
         },
-        runtime_config::CryptoDomainConfig,
+        runtime_config::{CryptoDomainConfig, DomainConfig},
         types::{
-            BinanceSymbol, ChainlinkFeedKey, CryptoAsset, CryptoQuote, DomainInstrumentKey,
-            DomainSourceId, Usd,
+            BinanceSymbol, ChainlinkFeedKey, ContentHash, CryptoAsset, CryptoQuote,
+            DomainInstrumentKey, DomainSourceId, Usd,
         },
     };
     use rust_decimal::Decimal;
@@ -321,19 +349,28 @@ mod tests {
         }
     }
 
-    fn oracle_observation(at: DateTime<Utc>, value: Decimal) -> DomainObservation {
-        DomainObservation {
-            family: DomainFamily::Crypto,
-            source_id: DomainSourceId::chainlink(),
-            instrument_key: DomainInstrumentKey::chainlink_feed(
+    fn oracle_observation(at: DateTime<Utc>, value: Decimal) -> CryptoPriceReport {
+        CryptoPriceReport {
+            source_id: DomainSourceId::chainlink_data_streams(),
+            instrument_key: DomainInstrumentKey::chainlink_data_streams(
                 &ChainlinkFeedKey::parse("BTC-USD").expect("feed"),
             ),
-            metric: DomainMetric::OraclePrice,
-            value,
-            observed_at: at,
-            publish_time: at,
-            available_at: Some(at),
+            source_sequence: u64::try_from(at.timestamp()).expect("positive timestamp"),
+            price: Usd::new(value),
+            quantity: None,
+            event_time: at,
+            published_at: at,
+            available_at: at,
+            valid_from: Some(at),
+            observations_timestamp: Some(at),
+            expires_at: Some(at + chrono::Duration::minutes(1)),
+            report_hash: content_hash(),
+            raw_report: "fixture".into(),
         }
+    }
+
+    fn content_hash() -> ContentHash {
+        ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash")
     }
 
     fn binding(comparator: PriceComparator, strike: Option<Usd>) -> ResolvedBinding {
@@ -362,7 +399,13 @@ mod tests {
                 observation_at: as_of + chrono::Duration::minutes(2),
                 resolution_oracle,
             }),
-            instrument_key: instrument(),
+            source_bindings: vec![ResolvedSourceBinding {
+                role: LinkageSourceRole::Feature,
+                source_id: DomainSourceId::binance(),
+                instrument_key: instrument(),
+                available_at: as_of,
+                binding_hash: content_hash(),
+            }],
             grounding: GroundingProof { spans: Vec::new() },
             override_context: None,
         }
@@ -390,6 +433,13 @@ mod tests {
         }
     }
 
+    fn domain(crypto: CryptoDomainConfig) -> DomainConfig {
+        DomainConfig {
+            crypto,
+            ..DomainConfig::default()
+        }
+    }
+
     fn find<'a>(features: &'a [RawFeature], name: &FeatureName) -> &'a RawFeature {
         features
             .iter()
@@ -402,15 +452,17 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(2, dec!(99000)), (1, dec!(101000))]);
         let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let distance = find(&features, &names::DISTANCE_TO_STRIKE);
@@ -426,15 +478,17 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = DomainObservationWindow::default();
         let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let distance = find(&features, &names::DISTANCE_TO_STRIKE);
@@ -448,23 +502,25 @@ mod tests {
     fn basis_measures_binance_vs_chainlink_divergence() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100500))]);
-        let oracle = DomainObservationWindow {
+        let oracle = CryptoPriceReportWindow {
             cutoff: as_of,
-            observations: vec![oracle_observation(
+            reports: vec![oracle_observation(
                 as_of - chrono::Duration::minutes(1),
                 dec!(100000),
             )],
         };
         let subject_binding = binding(PriceComparator::UpVsReference, None);
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &subject_binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: Some(&oracle),
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: Some(&oracle),
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let basis = find(&features, &names::BASIS_VS_RESOLUTION_SOURCE);
@@ -480,23 +536,25 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         // Binance ref at window open would be 100000; the oracle says 100100.
         let primary = window(&[(3, dec!(100000)), (1, dec!(100100))]);
-        let oracle = DomainObservationWindow {
+        let oracle = CryptoPriceReportWindow {
             cutoff: as_of,
-            observations: vec![oracle_observation(
+            reports: vec![oracle_observation(
                 as_of - chrono::Duration::minutes(3),
                 dec!(100100),
             )],
         };
         let binding = binding(PriceComparator::UpVsReference, None);
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: Some(&oracle),
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: Some(&oracle),
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let distance = find(&features, &names::DISTANCE_TO_STRIKE);
@@ -513,15 +571,17 @@ mod tests {
         // Binance has a ref at window open — must not be used when oracle is Chainlink.
         let primary = window(&[(3, dec!(100000)), (1, dec!(100100))]);
         let binding = binding(PriceComparator::UpVsReference, None);
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let distance = find(&features, &names::DISTANCE_TO_STRIKE);
@@ -546,17 +606,21 @@ mod tests {
                 interval: KlineInterval::OneMinute,
             },
         );
-        let MarketSubject::Crypto(ref mut subject) = binding.subject;
+        let MarketSubject::Crypto(ref mut subject) = binding.subject else {
+            panic!("crypto binding")
+        };
         subject.reference_at = Some(reference_at);
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let distance = find(&features, &names::DISTANCE_TO_STRIKE);
@@ -571,9 +635,9 @@ mod tests {
     fn stale_chainlink_oracle_triggers_stale_beyond_policy() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100500))]);
-        let oracle = DomainObservationWindow {
+        let oracle = CryptoPriceReportWindow {
             cutoff: as_of,
-            observations: vec![oracle_observation(
+            reports: vec![oracle_observation(
                 as_of - chrono::Duration::seconds(120),
                 dec!(100000),
             )],
@@ -581,14 +645,17 @@ mod tests {
         let binding = binding(PriceComparator::UpVsReference, None);
         let mut crypto = CryptoDomainConfig::default();
         crypto.cross_check.max_oracle_staleness_secs = 30;
+        let domain = domain(crypto);
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: Some(&oracle),
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: Some(&oracle),
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let basis = find(&features, &names::BASIS_VS_RESOLUTION_SOURCE);
@@ -616,15 +683,17 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100000))]);
         let subject_binding = binding(PriceComparator::UpVsReference, None);
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &subject_binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
         let tto = find(&features, &names::TIME_TO_OBSERVATION);
@@ -640,15 +709,19 @@ mod tests {
         );
 
         let mut elapsed_binding = binding(PriceComparator::UpVsReference, None);
-        let MarketSubject::Crypto(ref mut subject) = elapsed_binding.subject;
+        let MarketSubject::Crypto(ref mut subject) = elapsed_binding.subject else {
+            panic!("crypto binding")
+        };
         subject.observation_at = as_of - chrono::Duration::seconds(1);
         let elapsed_ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &elapsed_binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
         let elapsed = CryptoDomainFeatureBuilder.compute(&elapsed_ctx);
         assert_eq!(
@@ -664,23 +737,25 @@ mod tests {
     fn future_oracle_is_invalid_not_fresh_age_zero() {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100500))]);
-        let oracle = DomainObservationWindow {
+        let oracle = CryptoPriceReportWindow {
             cutoff: as_of + chrono::Duration::seconds(1),
-            observations: vec![oracle_observation(
+            reports: vec![oracle_observation(
                 as_of + chrono::Duration::seconds(1),
                 dec!(100000),
             )],
         };
         let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
-        let crypto = CryptoDomainConfig::default();
+        let domain = domain(CryptoDomainConfig::default());
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: Some(&oracle),
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: Some(&oracle),
+            },
+            domain: &domain,
         };
 
         let features = CryptoDomainFeatureBuilder.compute(&ctx);
@@ -698,19 +773,21 @@ mod tests {
         let as_of = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
         let primary = window(&[(1, dec!(100000))]);
         let binding = binding(PriceComparator::Above, Some(Usd::new(dec!(100000))));
-        let crypto = CryptoDomainConfig {
+        let domain = domain(CryptoDomainConfig {
             momentum_window_secs: u64::MAX,
             volatility_window_secs: u64::MAX,
             ..CryptoDomainConfig::default()
-        };
+        });
         let linkage_evidence = linkage_evidence(as_of);
         let ctx = DomainComputeCtx {
             decision_at: as_of,
             binding: &binding,
             linkage_evidence: &linkage_evidence,
-            primary: &primary,
-            oracle: None,
-            crypto: &crypto,
+            data: DomainSliceDataRef::Crypto {
+                primary: &primary,
+                oracle: None,
+            },
+            domain: &domain,
         };
 
         let features = CryptoDomainFeatureBuilder.compute(&ctx);

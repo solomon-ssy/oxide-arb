@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, FeatureVectorInfo,
+        DecisionBoundary, FeatureVectorInfo, ResolvedBinding,
         market::{book::BookLevel, registry::MarketRegistryInfo},
         quant::NewReportDataQualitySnapshot,
     },
@@ -17,8 +17,8 @@ use quant_pivot_models::{
     types::{
         BookSnapshotRef, BookSnapshotSource, Bps, CatalogSyncBatchId, ContentHash,
         EventCatalogVersionId, EventId, MarketCatalogVersionId, MarketContext, MarketId,
-        Probability, RecommendationIdentity, ReportDataQualitySnapshotId, ReportDataQualityTokens,
-        RuntimeConfigVersionId, TokenDataQualityRecord, TokenId, Usd,
+        MarketLinkageId, Probability, RecommendationIdentity, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, RuntimeConfigVersionId, TokenDataQualityRecord, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -113,6 +113,11 @@ pub struct MarketDecisionCapture {
     pub event_id: EventId,
     /// Primary outcome token.
     pub token_id: TokenId,
+    /// Exact PIT linkage revision, present only for a resolved vertical slice.
+    pub market_linkage_id: Option<MarketLinkageId>,
+    pub market_linkage_hash: Option<ContentHash>,
+    /// Full typed subject and source roles from that same PIT linkage revision.
+    pub domain_binding: Option<ResolvedBinding>,
     /// Order book resolved at `as_of`.
     pub book: ResolvedBook,
     /// Market metadata resolved at `as_of`.
@@ -302,15 +307,30 @@ pub fn book_evidence_ref(
 /// # Errors
 ///
 /// Propagates book content-hash failures.
+pub struct MarketDecisionCaptureInput<'a> {
+    pub boundary: &'a DecisionBoundary,
+    pub selected: &'a SelectedMarket,
+    pub book: ResolvedBook,
+    pub market: ResolvedMarketContext,
+    pub registry: Option<&'a MarketRegistryInfo>,
+    pub catalog: CatalogDecisionRef,
+    pub domain: Option<&'a super::DomainSliceInputs>,
+    pub liquidity_cap_usd: Usd,
+}
+
 pub fn market_decision_capture_from_resolved(
-    boundary: &DecisionBoundary,
-    selected: &SelectedMarket,
-    book: ResolvedBook,
-    market: ResolvedMarketContext,
-    registry: Option<&MarketRegistryInfo>,
-    catalog: CatalogDecisionRef,
-    liquidity_cap_usd: Usd,
+    input: MarketDecisionCaptureInput<'_>,
 ) -> QuantResult<MarketDecisionCapture> {
+    let MarketDecisionCaptureInput {
+        boundary,
+        selected,
+        book,
+        market,
+        registry,
+        catalog,
+        domain,
+        liquidity_cap_usd,
+    } = input;
     let as_of = boundary.decision_at();
     let book_snapshot_ref = book_snapshot_ref_from_resolved(&book)?;
     let identity = recommendation_identity_from_resolved(selected, registry)?;
@@ -322,6 +342,9 @@ pub fn market_decision_capture_from_resolved(
         market_id: selected.market_id.clone(),
         event_id: selected.event_id.clone(),
         token_id: selected.primary_token_id.clone(),
+        market_linkage_id: domain.map(|inputs| inputs.linkage_id.clone()),
+        market_linkage_hash: domain.map(|inputs| inputs.linkage_hash.clone()),
+        domain_binding: domain.map(|inputs| inputs.binding.clone()),
         book,
         market,
         identity,
@@ -545,6 +568,7 @@ mod tests {
             liquidity_usd: None,
             volume_24h: None,
             fee_schedule: None,
+            start_date: None,
             end_date: None,
             resolved_at: None,
             created_at: Some(Utc::now()),
@@ -571,6 +595,7 @@ mod tests {
             available_at: as_of,
             status: MarketStatus::Active,
             neg_risk: false,
+            start_date: None,
             end_date: None,
             created_at: Some(as_of),
         };

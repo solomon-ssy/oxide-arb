@@ -196,7 +196,7 @@ wire_enum! {
         DataQuality => "data_quality",
         BookFreshness => "book_freshness",
         VenueMetadata => "venue_metadata",
-        EntryTrigger => "entry_trigger",
+        EntryConditionPlan => "entry_condition",
         RiskEnvelopeHash => "risk_envelope_hash",
         CapitalBudget => "capital_budget",
         MaxOpenIntents => "max_open_intents",

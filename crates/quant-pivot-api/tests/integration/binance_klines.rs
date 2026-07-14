@@ -28,7 +28,7 @@ use std::env::var;
 fn live_config() -> BinanceSourceConfig {
     let mut config = BinanceSourceConfig::default();
     if let Ok(base_url) = var("BINANCE_API_BASE_URL") {
-        config.base_url = base_url;
+        config.rest_url = base_url;
     }
     config
 }
@@ -52,7 +52,7 @@ fn recent_completed_window() -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
 #[ignore = "requires live Binance spot REST API"]
 async fn live_klines_response_matches_typed_wire_schema() {
     let config = live_config();
-    let base = config.base_url.trim_end_matches('/');
+    let base = config.rest_url.trim_end_matches('/');
     let url = format!("{base}/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=5");
     let http = reqwest::Client::new();
     let body = http
@@ -81,7 +81,7 @@ async fn live_klines_response_matches_typed_wire_schema() {
 #[tokio::test]
 #[ignore = "requires live Binance spot REST API"]
 async fn live_kline_source_fetch_emits_close_observations() {
-    let source = BinanceKlineSource::new(live_config());
+    let source = BinanceKlineSource::connect(live_config()).expect("source");
     let key = btcusdt_1m_key();
     let (from, to) = recent_completed_window();
 
@@ -124,7 +124,7 @@ async fn live_kline_source_fetch_emits_close_observations() {
 #[tokio::test]
 #[ignore = "requires live Binance spot REST API"]
 async fn live_kline_source_reports_binance_identity() {
-    let source = BinanceKlineSource::new(live_config());
+    let source = BinanceKlineSource::connect(live_config()).expect("source");
     assert_eq!(source.family(), DomainFamily::Crypto);
     assert_eq!(source.source_id(), DomainSourceId::binance());
 }

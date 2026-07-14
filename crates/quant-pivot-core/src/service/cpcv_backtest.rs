@@ -28,14 +28,16 @@ use tokio::{runtime::Handle, task};
 use tokio_util::sync::CancellationToken;
 
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
+#[cfg(feature = "ml-classical")]
+use quant_pivot_models::types::{ArtifactUri, ModelArtifactId};
 use quant_pivot_models::{
     domain::{JobProgressSink, ResearchJobProgress, TrainingDatasetInfo},
     enums::{common::MarketCategory, quant::TrainingDatasetStatus},
     runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
-        ArtifactUri, BacktestPathSetId, BacktestReportId, ContentHash, ModelArtifactId,
-        ModelInputContract, ModelRunId, ModelVersionId, PositionId, RuntimeConfigVersionId,
-        TrainingDatasetId, TrainingSampleSource,
+        BacktestPathSetId, BacktestReportId, ContentHash, ModelInputContract, ModelRunId,
+        ModelVersionId, PositionId, RuntimeConfigVersionId, TrainingDatasetId,
+        TrainingSampleSource,
     },
 };
 use quant_pivot_repository::traits::TrainingDatasetRepository;

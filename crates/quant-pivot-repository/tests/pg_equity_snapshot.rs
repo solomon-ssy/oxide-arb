@@ -140,7 +140,7 @@ async fn realized_pnl_cumulative_matches_position_ledger_sum() {
 
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
-    close_position_full(&submission, &ids, &intent_id, None).await;
+    close_position_full(&db, &submission, &ids, &intent_id, None).await;
 
     let cumulative = positions
         .realized_pnl_cumulative_usd()

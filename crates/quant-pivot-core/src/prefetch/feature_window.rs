@@ -16,8 +16,11 @@ use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd},
-    domain::{DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint},
-    types::{DomainInstrumentKey, MarketId, TokenId},
+    domain::{
+        CryptoPriceReport, DecisionBoundary, DecisionSource, DomainObservation, TradeTapePrint,
+        WeatherForecastPoint, WeatherObservationFact,
+    },
+    types::{DomainInstrumentKey, IcaoStation, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::QuantFactReadRepository;
 use quant_pivot_research::{
@@ -181,6 +184,188 @@ impl FeatureWindowProvider {
                 .entry(observation.instrument_key.clone())
                 .or_default()
                 .push(observation);
+        }
+        Ok(grouped)
+    }
+
+    /// Load source-native Crypto reports for settlement-reference and basis
+    /// features. These facts are distinct from the legacy kline feature plane.
+    pub async fn load_crypto_reports(
+        &self,
+        instruments: Vec<DomainInstrumentKey>,
+        boundary: &DecisionBoundary,
+        lookback: Duration,
+    ) -> QuantResult<HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>> {
+        if instruments.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let cutoff = boundary.cutoff_for(DecisionSource::DomainCrypto);
+        let from = window_start(cutoff, lookback, "crypto report lookback")?;
+        let rows = self
+            .fact_read
+            .crypto_price_reports_between(
+                instruments,
+                from.timestamp_millis(),
+                cutoff
+                    .timestamp_millis()
+                    .checked_add(1)
+                    .ok_or_else(|| QuantError::config("crypto report cutoff overflowed i64"))?,
+                cutoff.timestamp_millis(),
+                boundary.decision_at().timestamp_millis(),
+            )
+            .await?;
+        let mut grouped: HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>> = HashMap::new();
+        for row in rows {
+            let report = CryptoPriceReport::from_clickhouse_row(row).ok_or_else(|| {
+                ResearchError::PitResolution {
+                    detail: "crypto price report contains an invalid persisted timestamp"
+                        .to_owned(),
+                }
+            })?;
+            if report.event_time < from
+                || report.event_time > cutoff
+                || report.published_at > cutoff
+                || report.available_at > boundary.decision_at()
+            {
+                return Err(ResearchError::PitResolution {
+                    detail: format!(
+                        "crypto report {} at {} is outside PIT window [{from}, {cutoff}]",
+                        report.instrument_key, report.event_time
+                    ),
+                }
+                .into());
+            }
+            grouped
+                .entry(report.instrument_key.clone())
+                .or_default()
+                .push(report);
+        }
+        Ok(grouped)
+    }
+
+    /// Load `AviationWeather` and `GHCNh` facts for the requested stations. The
+    /// source-time lookback supports real station calibration; publication and
+    /// system availability remain bounded by the Weather decision cutoff.
+    pub async fn load_weather_observations(
+        &self,
+        stations: Vec<IcaoStation>,
+        boundary: &DecisionBoundary,
+        lookback: Duration,
+    ) -> QuantResult<HashMap<IcaoStation, Vec<WeatherObservationFact>>> {
+        if stations.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
+        let from = window_start(cutoff, lookback, "Weather calibration lookback")?;
+        let rows = self
+            .fact_read
+            .weather_observation_reports_between(
+                stations.iter().map(ToString::to_string).collect(),
+                from.timestamp_millis(),
+                cutoff.timestamp_millis().checked_add(1).ok_or_else(|| {
+                    QuantError::config("Weather observation cutoff overflowed i64")
+                })?,
+                cutoff.timestamp_millis(),
+                boundary.decision_at().timestamp_millis(),
+            )
+            .await?;
+        let mut grouped = HashMap::<IcaoStation, Vec<WeatherObservationFact>>::new();
+        for row in rows {
+            let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
+                ResearchError::PitResolution {
+                    detail: "Weather observation contains an invalid persisted value".to_owned(),
+                }
+            })?;
+            if fact.published_at > cutoff || fact.available_at > boundary.decision_at() {
+                return Err(ResearchError::PitResolution {
+                    detail: format!(
+                        "Weather observation {} at {} is outside the PIT boundary",
+                        fact.station, fact.observation_time
+                    ),
+                }
+                .into());
+            }
+            grouped.entry(fact.station.clone()).or_default().push(fact);
+        }
+        for facts in grouped.values_mut() {
+            facts.sort_by(|left, right| {
+                (
+                    left.observation_time,
+                    left.revision,
+                    left.report_hash.as_str(),
+                )
+                    .cmp(&(
+                        right.observation_time,
+                        right.revision,
+                        right.report_hash.as_str(),
+                    ))
+            });
+        }
+        Ok(grouped)
+    }
+
+    /// Load raw GEFS points for calibration history plus the latest linked
+    /// target local day. Future `valid_time` is allowed; reference and
+    /// availability clocks are strictly PIT-bounded.
+    pub async fn load_weather_forecasts(
+        &self,
+        stations: Vec<IcaoStation>,
+        boundary: &DecisionBoundary,
+        lookback: Duration,
+        valid_to: DateTime<Utc>,
+    ) -> QuantResult<HashMap<IcaoStation, Vec<WeatherForecastPoint>>> {
+        if stations.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let cutoff = boundary.cutoff_for(DecisionSource::DomainWeather);
+        let from = window_start(cutoff, lookback, "GEFS calibration lookback")?;
+        let rows =
+            self.fact_read
+                .weather_forecast_points_between(
+                    stations.iter().map(ToString::to_string).collect(),
+                    from.timestamp_millis(),
+                    valid_to.timestamp_millis().checked_add(1).ok_or_else(|| {
+                        QuantError::config("GEFS valid-time cutoff overflowed i64")
+                    })?,
+                    cutoff.timestamp_millis(),
+                    boundary.decision_at().timestamp_millis(),
+                )
+                .await?;
+        let mut grouped = HashMap::<IcaoStation, Vec<WeatherForecastPoint>>::new();
+        for row in rows {
+            let fact = WeatherForecastPoint::from_clickhouse_row(row).ok_or_else(|| {
+                ResearchError::PitResolution {
+                    detail: "GEFS point contains an invalid persisted value".to_owned(),
+                }
+            })?;
+            if fact.reference_time > cutoff || fact.available_at > boundary.decision_at() {
+                return Err(ResearchError::PitResolution {
+                    detail: format!(
+                        "GEFS point {} / {} is outside the PIT boundary",
+                        fact.station, fact.valid_time
+                    ),
+                }
+                .into());
+            }
+            grouped.entry(fact.station.clone()).or_default().push(fact);
+        }
+        for facts in grouped.values_mut() {
+            facts.sort_by(|left, right| {
+                (
+                    left.reference_time,
+                    left.valid_time,
+                    left.lead_hours,
+                    left.member,
+                    left.run_manifest_hash.as_str(),
+                )
+                    .cmp(&(
+                        right.reference_time,
+                        right.valid_time,
+                        right.lead_hours,
+                        right.member,
+                        right.run_manifest_hash.as_str(),
+                    ))
+            });
         }
         Ok(grouped)
     }

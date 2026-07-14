@@ -25,6 +25,8 @@ pg_enum! {
         /// oracle). Routed by market category via `DomainFactorRegistry` —
         /// never selectable through `enabled_factor_families`.
         DomainCrypto => "domain_crypto",
+        /// Airport daily-high Weather external vertical.
+        DomainWeather => "domain_weather",
     }
 }
 
@@ -35,6 +37,8 @@ pg_enum! {
         Structural => "structural",
         /// Category-routed crypto domain factors (Phase 11.2.2).
         DomainCrypto => "domain_crypto",
+        /// Category-routed Weather domain factors.
+        DomainWeather => "domain_weather",
     }
 }
 
@@ -158,7 +162,7 @@ impl FactorFamily {
     /// Whether this is a category-routed external domain plane (Phase 11.2.2).
     #[must_use]
     pub const fn is_domain(self) -> bool {
-        matches!(self, Self::DomainCrypto)
+        matches!(self, Self::DomainCrypto | Self::DomainWeather)
     }
 
     /// Whether this family is config-selectable via `enabled_factor_families`
@@ -173,6 +177,7 @@ impl FactorFamily {
         match self {
             Self::Structural => FactorDefinitionScope::Structural,
             Self::DomainCrypto => FactorDefinitionScope::DomainCrypto,
+            Self::DomainWeather => FactorDefinitionScope::DomainWeather,
             _ => FactorDefinitionScope::Generic,
         }
     }

@@ -36,7 +36,7 @@ pub use collinearity::{
     neutralize_by_group,
 };
 pub use computer::{FactorComputer, FactorEngine};
-pub use domain::{DomainFactorRegistry, crypto_domain_factors};
+pub use domain::{DomainFactorRegistry, crypto_domain_factors, weather_domain_factors};
 pub use frozen::frozen_factor_outcome;
 pub use generic::generic_factors;
 pub use identity::{FactorDefinitionIdentity, factor_definition_identity};

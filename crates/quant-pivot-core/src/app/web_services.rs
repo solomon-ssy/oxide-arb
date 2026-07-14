@@ -39,12 +39,13 @@ use quant_pivot_repository::{
     traits::{
         AccountSnapshotRepository, AttributionRepository, BasisAlertRepository,
         CalibrationArtifactRepository, CatalogVersionRepository, DomainSourceCursorRepository,
-        EquitySnapshotRepository, ExecutionOrderRepository, FeatureParityEventRepository,
-        FeatureRepository, MenuRepository, OperationLogRepository, OrderIntentRepository,
-        PositionRepository, RecommendationReportRepository, RecommendationRepository,
-        ReconciliationRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
-        RuntimeConfigVersionRepository, ServingEvidenceRepository, SettlementRedeemRepository,
-        TradePolicyRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+        EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
+        FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
+        OrderIntentRepository, PositionRepository, RecommendationReportRepository,
+        RecommendationRepository, ReconciliationRepository, RoleMenuRepository,
+        RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
+        ServingEvidenceRepository, SettlementRedeemRepository, TradePolicyRepository,
+        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -199,6 +200,7 @@ async fn build_app_state(
                 as Arc<dyn RuntimeConfigVersionRepository>,
         })),
         order_intents,
+        entry_conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
         account_read: Arc::new(CoreAccountReadPort::new(
             Arc::clone(&repos.account_snapshot) as Arc<dyn AccountSnapshotRepository>,
             Arc::clone(&repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>,

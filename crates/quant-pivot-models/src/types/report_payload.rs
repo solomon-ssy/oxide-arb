@@ -30,15 +30,14 @@ use crate::{
         factor::{FactorFamily, FactorIndeterminateReason, FactorValueState, NormalizationSource},
         quant::{
             BindingConstraint, EmptyReportReason, ExitSettlementMode, FactorDirection,
-            FillRequirement, IneligibilityReason, PriceComparison, QuantRuntimeMode, RedeemPolicy,
-            SizingModelKind,
+            FillRequirement, IneligibilityReason, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
         },
     },
     hashing::CanonicalDigest,
     jsonb_active,
     types::{
-        BookSnapshotRef, Bps, ContentHash, EventId, FactorDefinitionId, FeatureVectorId,
-        MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
+        BookSnapshotRef, Bps, ContentHash, EntryConditionPlan, EventId, FactorDefinitionId,
+        FeatureVectorId, MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
         ReportDataQualitySnapshotId, RuntimeConfigVersionId, Shares, SignalCandidateId,
         TradePolicyArtifactId, TradePolicyCohortKey, Usd,
     },
@@ -49,9 +48,9 @@ use crate::{
 /// When and how a recommendation becomes executable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct EntryPlan {
-    /// The condition that arms venue submission.
-    pub trigger: EntryTrigger,
-    /// Venue execution policy, orthogonal to the trigger condition.
+    /// Immutable condition artifact reference evaluated at recommendation scope.
+    pub condition: EntryConditionPlan,
+    /// Venue execution policy, orthogonal to the entry condition.
     pub order_policy: EntryOrderPolicy,
     /// Maximum acceptable slippage from the reference price.
     pub max_slippage_bps: Bps,
@@ -67,21 +66,6 @@ pub struct EntryPlan {
     pub cancel_if_not_triggered: bool,
     /// Human explanation of the entry decision.
     pub entry_reason: String,
-}
-
-/// A typed, auditable entry condition. Time bounds live on [`EntryPlan`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum EntryTrigger {
-    /// Submit as soon as the intent is approved and admission passes.
-    Immediate,
-    /// Submit only after a price condition remains continuously true.
-    PriceCondition {
-        comparison: PriceComparison,
-        threshold: Price,
-        confirmation_secs: u64,
-        max_observation_gap_ms: u64,
-    },
 }
 
 /// How an armed entry is submitted to the venue.
@@ -666,7 +650,7 @@ impl Sum for EligibilitySummary {
 }
 
 jsonb_active!(
-    EntryTrigger,
+    EntryConditionPlan,
     EntryPlan,
     SizingPlan,
     ExitPlan,

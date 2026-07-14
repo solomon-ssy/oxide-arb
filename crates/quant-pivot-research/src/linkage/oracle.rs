@@ -4,7 +4,7 @@
 //! resolved the rest of the subject — is grounded to a **literal** anchor in
 //! the rules text (`description`): the `data.chain.link/streams/{feed}` URL
 //! for Chainlink Data Streams, a "Binance … 1-minute candle" citation, or a
-//! recognized-but-unclassified "resolution source" sentence. There is no
+//! an explicitly recognized settlement citation. There is no
 //! ruleset-default fallback: a market whose description cannot be matched
 //! against one of these anchors yields no oracle, and therefore no candidate
 //! at all (fail through / `Unresolved`) — never a guessed oracle. This is the
@@ -32,10 +32,6 @@ static BINANCE_CANDLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)Binance[^.]{0,120}?(?:1[- ]minute|one[- ]minute)[^.]{0,40}?candle")
         .expect("static regex")
 });
-
-/// A "resolution source" sentence (recognized-but-unclassified oracle).
-static RESOLUTION_SENTENCE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)resolution source[^.]*\.").expect("static regex"));
 
 /// Extract the settlement oracle from the rules text with its literal anchor.
 ///
@@ -70,14 +66,6 @@ pub fn extract_oracle(
             ResolutionOracle::BinanceKline {
                 symbol: rule.symbol(),
                 interval: KlineInterval::OneMinute,
-            },
-            span(matched.start(), matched.end()),
-        ));
-    }
-    if let Some(matched) = RESOLUTION_SENTENCE.find(description) {
-        return Some((
-            ResolutionOracle::Other {
-                descriptor: matched.as_str().to_owned(),
             },
             span(matched.start(), matched.end()),
         ));

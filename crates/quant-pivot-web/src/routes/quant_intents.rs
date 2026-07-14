@@ -22,18 +22,16 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
         ApproveIntentCommand, BookSnapshot, CancelIntentCommand, CreateIntentCommand,
-        EntryTriggerObservationView, ExitMonitorObservationView, OrderIntentListQuery,
+        EntryConditionInstanceSummaryView, ExitMonitorObservationView, OrderIntentListQuery,
         OrderIntentView, Paginated, PositionInfo, RejectIntentCommand,
     },
     domain::{ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest},
     enums::{
-        common::Side,
         operation_log::OperationCategory,
-        quant::{OrderIntentStatus, PriceComparison},
         rbac::{Operation, ResourceType},
     },
     hashing::CanonicalDigest,
-    types::{EntryTrigger, OrderIntentId, Price},
+    types::OrderIntentId,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -110,7 +108,11 @@ pub async fn get(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("order intent not found: {id}")))?;
     let mut view = OrderIntentView::from(info);
-    view.entry_trigger_observation = Some(entry_trigger_observation(&state, &view).await?);
+    view.entry_condition = state
+        .entry_conditions
+        .find_instance(&view.condition_instance_id)
+        .await?
+        .map(EntryConditionInstanceSummaryView::from);
     if let Some(position) = state
         .execution_read
         .get_position_by_intent(&view.order_intent_id)
@@ -178,113 +180,6 @@ pub(crate) async fn exit_monitor_observation(
         last_check_at: intent.last_signal_recheck_at,
         next_check_at: intent.next_check_at,
     })
-}
-
-async fn entry_trigger_observation(
-    state: &AppState,
-    intent: &OrderIntentView,
-) -> Result<EntryTriggerObservationView, WebError> {
-    let now = Utc::now();
-    let recommendation = state
-        .quant_reports
-        .find_recommendation(&intent.recommendation_id)
-        .await?;
-    let max_book_age_ms = recommendation
-        .as_ref()
-        .and_then(|row| {
-            row.trade_plan
-                .frozen()
-                .map(|(_, entry, _, _, _)| entry.max_book_age_ms)
-        })
-        .unwrap_or(0);
-    let snapshot = state
-        .market_data
-        .book_for_token(&intent.entry_order.token_id);
-    let current_price = snapshot
-        .as_deref()
-        .and_then(|book| match intent.entry_order.side {
-            Side::Buy => book.best_ask(),
-            Side::Sell => book.best_bid(),
-        });
-    let book_observed_at = snapshot
-        .as_deref()
-        .and_then(|book| i64::try_from(book.timestamp_ms).ok())
-        .and_then(DateTime::from_timestamp_millis);
-    let book_age_ms = snapshot.as_deref().map(|book| {
-        let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(u64::MAX);
-        now_ms.saturating_sub(book.timestamp_ms)
-    });
-    let book_fresh = book_age_ms.is_some_and(|age| age <= max_book_age_ms);
-    let condition_satisfied =
-        trigger_condition_satisfied(&intent.entry_trigger, current_price, book_fresh);
-    let confirmation_remaining_secs =
-        confirmation_remaining_secs(&intent.entry_trigger, intent.trigger_confirming_since, now);
-    let admission_blocker = intent
-        .status_reason
-        .clone()
-        .or_else(|| {
-            (intent.status == OrderIntentStatus::PendingApproval)
-                .then(|| "approval_required".to_owned())
-        })
-        .or_else(|| {
-            recommendation
-                .is_none()
-                .then(|| "recommendation_unavailable".to_owned())
-        })
-        .or_else(|| snapshot.is_none().then(|| "book_unavailable".to_owned()))
-        .or_else(|| (!book_fresh).then(|| "book_stale".to_owned()))
-        .or_else(|| (!condition_satisfied).then(|| "entry_condition_not_satisfied".to_owned()));
-
-    Ok(EntryTriggerObservationView {
-        current_price,
-        book_observed_at,
-        book_age_ms,
-        book_fresh,
-        condition_satisfied,
-        confirmation_remaining_secs,
-        admission_blocker,
-    })
-}
-
-fn trigger_condition_satisfied(
-    trigger: &EntryTrigger,
-    current_price: Option<Price>,
-    book_fresh: bool,
-) -> bool {
-    if !book_fresh {
-        return false;
-    }
-    match trigger {
-        EntryTrigger::Immediate => true,
-        EntryTrigger::PriceCondition {
-            comparison,
-            threshold,
-            ..
-        } => current_price.is_some_and(|price| match comparison {
-            PriceComparison::AtOrAbove => price >= *threshold,
-            PriceComparison::AtOrBelow => price <= *threshold,
-        }),
-    }
-}
-
-fn confirmation_remaining_secs(
-    trigger: &EntryTrigger,
-    confirming_since: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> Option<u64> {
-    let EntryTrigger::PriceCondition {
-        confirmation_secs, ..
-    } = trigger
-    else {
-        return None;
-    };
-    let confirming_since = confirming_since?;
-    let elapsed = now
-        .signed_duration_since(confirming_since)
-        .num_seconds()
-        .max(0);
-    let elapsed = u64::try_from(elapsed).unwrap_or(u64::MAX);
-    Some(confirmation_secs.saturating_sub(elapsed))
 }
 
 /// `POST /api/quant/intents` — create an intent from a recommendation.
@@ -471,58 +366,4 @@ fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
     CanonicalDigest::content_hash_json(state)
         .map(|hash| hash.as_str().to_owned())
         .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use chrono::{Duration, TimeZone, Utc};
-    use quant_pivot_models::{
-        enums::quant::PriceComparison,
-        types::{EntryTrigger, Price},
-    };
-    use rust_decimal_macros::dec;
-
-    use super::{confirmation_remaining_secs, trigger_condition_satisfied};
-
-    #[test]
-    fn price_condition_requires_a_fresh_executable_price() {
-        let trigger = EntryTrigger::PriceCondition {
-            comparison: PriceComparison::AtOrAbove,
-            threshold: Price::new(dec!(0.60)),
-            confirmation_secs: 10,
-            max_observation_gap_ms: 2_000,
-        };
-        assert!(trigger_condition_satisfied(
-            &trigger,
-            Some(Price::new(dec!(0.61))),
-            true,
-        ));
-        assert!(!trigger_condition_satisfied(
-            &trigger,
-            Some(Price::new(dec!(0.61))),
-            false,
-        ));
-    }
-
-    #[test]
-    fn confirmation_countdown_saturates_at_zero() {
-        let trigger = EntryTrigger::PriceCondition {
-            comparison: PriceComparison::AtOrBelow,
-            threshold: Price::new(dec!(0.40)),
-            confirmation_secs: 10,
-            max_observation_gap_ms: 2_000,
-        };
-        let start = Utc
-            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-            .single()
-            .expect("valid test instant");
-        assert_eq!(
-            confirmation_remaining_secs(&trigger, Some(start), start + Duration::seconds(4)),
-            Some(6),
-        );
-        assert_eq!(
-            confirmation_remaining_secs(&trigger, Some(start), start + Duration::seconds(12)),
-            Some(0),
-        );
-    }
 }

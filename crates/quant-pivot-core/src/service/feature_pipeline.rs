@@ -22,25 +22,28 @@ use crate::{
     prefetch::feature_window::FeatureWindowProvider,
     service::basis_alert::detect_basis_alerts,
 };
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+use chrono_tz::Tz;
 use futures_util::future::join_all;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError, research::ResearchError};
 use quant_pivot_models::{
     config::TradeTapeOnChainConfig,
     domain::{
-        DecisionBoundary, FeatureVectorInfo, MarketLinkage, NewFeatureVector, TradeTapeSourceKind,
-        quant::NewReportDataQualitySnapshot,
+        DecisionBoundary, FeatureVectorInfo, MarketLinkage, MarketLinkageInfo, MarketSubject,
+        NewFeatureVector, TradeTapeSourceKind, WeatherSubject, quant::NewReportDataQualitySnapshot,
     },
     enums::{domain::DomainFamily, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig},
-    types::{DomainInstrumentKey, MarketId, RuntimeConfigVersionId, TokenId, Usd},
+    types::{DomainInstrumentKey, IcaoStation, MarketId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{
     BasisAlertRepository, FeatureRepository, MarketLinkageRepository,
     TradeTapeBlockCursorRepository,
 };
 use quant_pivot_research::{
-    domain::{build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument},
+    domain::{
+        DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs, oracle_instrument,
+    },
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureName, FeatureSchema,
         FeatureSourceWindows, FeatureVector, MarketDecisionCapture, MarketWindowSnapshot,
@@ -488,31 +491,44 @@ impl FeaturePipelineService {
             .ledger_for_markets(&market_ids, &request.boundary)
             .await
             .map_err(QuantError::from)?;
-        let mut linkages: HashMap<MarketId, Vec<MarketLinkage>> = HashMap::new();
-        let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
-        for info in ledger_rows {
-            let market_id = info.market_id.clone();
-            let linkage = info.into_domain().map_err(|error| {
-                QuantError::config(format!(
-                    "linkage ledger row for market {market_id} has an undecodable outcome \
-                     payload: {error}"
-                ))
-            })?;
-            if let Some(binding) = linkage.binding() {
-                instruments.insert(binding.instrument_key.clone());
-                if let Some(oracle_key) = oracle_instrument(binding) {
-                    instruments.insert(oracle_key);
-                }
-            }
-            linkages.entry(market_id).or_default().push(linkage);
-        }
+        let linkages = collect_live_domain_linkages(ledger_rows, request.boundary.decision_at())?;
         let lookback = Duration::from_secs(crypto_lookback_secs(request.domain));
         let observations = self
             .window_provider
             .load_domain_observations(
-                instruments.into_iter().collect(),
+                linkages.instruments.iter().cloned().collect(),
                 &request.boundary,
                 lookback,
+            )
+            .await?;
+        let crypto_reports = self
+            .window_provider
+            .load_crypto_reports(
+                linkages.oracle_instruments.iter().cloned().collect(),
+                &request.boundary,
+                lookback,
+            )
+            .await?;
+        let weather_lookback = Duration::from_secs(
+            u64::from(request.domain.weather.calibration_lookback_days)
+                .checked_mul(86_400)
+                .ok_or_else(|| QuantError::config("Weather calibration lookback overflowed"))?,
+        );
+        let weather_observations = self
+            .window_provider
+            .load_weather_observations(
+                linkages.weather_stations.iter().cloned().collect(),
+                &request.boundary,
+                weather_lookback,
+            )
+            .await?;
+        let weather_forecasts = self
+            .window_provider
+            .load_weather_forecasts(
+                linkages.weather_stations.iter().cloned().collect(),
+                &request.boundary,
+                weather_lookback,
+                linkages.weather_valid_to,
             )
             .await?;
         let mut inputs = HashMap::new();
@@ -520,11 +536,17 @@ impl FeaturePipelineService {
             if let Some(slice_inputs) = build_domain_slice_inputs(
                 market.category,
                 linkages
+                    .by_market
                     .get(&market.market_id)
                     .map_or(&[][..], Vec::as_slice),
                 &request.boundary,
                 request.domain,
-                &observations,
+                DomainFactWindows {
+                    observations: &observations,
+                    crypto_reports: &crypto_reports,
+                    weather_observations: &weather_observations,
+                    weather_forecasts: &weather_forecasts,
+                },
             )? {
                 inputs.insert(market.market_id.clone(), slice_inputs);
             }
@@ -573,6 +595,77 @@ impl FeaturePipelineService {
         bundles.sort_by_key(|(index, _)| *index);
         Ok(bundles.into_iter().map(|(_, bundle)| bundle).collect())
     }
+}
+
+struct LiveDomainLinkages {
+    by_market: HashMap<MarketId, Vec<MarketLinkage>>,
+    instruments: HashSet<DomainInstrumentKey>,
+    oracle_instruments: HashSet<DomainInstrumentKey>,
+    weather_stations: HashSet<IcaoStation>,
+    weather_valid_to: chrono::DateTime<Utc>,
+}
+
+fn collect_live_domain_linkages(
+    rows: Vec<MarketLinkageInfo>,
+    decision_at: chrono::DateTime<Utc>,
+) -> QuantResult<LiveDomainLinkages> {
+    let mut collected = LiveDomainLinkages {
+        by_market: HashMap::new(),
+        instruments: HashSet::new(),
+        oracle_instruments: HashSet::new(),
+        weather_stations: HashSet::new(),
+        weather_valid_to: decision_at,
+    };
+    for info in rows {
+        let market_id = info.market_id.clone();
+        let linkage = info.into_domain().map_err(|error| {
+            QuantError::config(format!(
+                "linkage ledger row for market {market_id} has an undecodable outcome: {error}"
+            ))
+        })?;
+        if let Some(binding) = linkage.binding() {
+            collected.instruments.extend(
+                binding
+                    .source_bindings
+                    .iter()
+                    .map(|source| source.instrument_key.clone()),
+            );
+            if let Some(oracle_key) = oracle_instrument(binding) {
+                collected.instruments.insert(oracle_key.clone());
+                collected.oracle_instruments.insert(oracle_key);
+            }
+            if let MarketSubject::Weather(subject) = &binding.subject {
+                collected.weather_stations.insert(subject.station.clone());
+                collected.weather_valid_to = collected
+                    .weather_valid_to
+                    .max(weather_local_day_end(subject)?);
+            }
+        }
+        collected
+            .by_market
+            .entry(market_id)
+            .or_default()
+            .push(linkage);
+    }
+    Ok(collected)
+}
+
+fn weather_local_day_end(subject: &WeatherSubject) -> QuantResult<chrono::DateTime<Utc>> {
+    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
+        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+    })?;
+    let next_date = subject
+        .local_date
+        .succ_opt()
+        .ok_or_else(|| QuantError::config("Weather local date overflow"))?;
+    let local_midnight = next_date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| QuantError::config("invalid Weather local midnight"))?;
+    timezone
+        .from_local_datetime(&local_midnight)
+        .single()
+        .map(|value| value.with_timezone(&Utc))
+        .ok_or_else(|| QuantError::config("Weather local midnight is ambiguous or missing"))
 }
 
 struct FeaturePrefetchWindows {

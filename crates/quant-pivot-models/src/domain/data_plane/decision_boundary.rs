@@ -17,6 +17,7 @@ pub enum DecisionSource {
     TradeTape,
     Linkage,
     DomainCrypto,
+    DomainWeather,
 }
 
 impl DecisionSource {
@@ -30,6 +31,7 @@ impl DecisionSource {
             Self::TradeTape => "trade_tape",
             Self::Linkage => "linkage",
             Self::DomainCrypto => "domain_crypto",
+            Self::DomainWeather => "domain_weather",
         }
     }
 }
@@ -182,6 +184,7 @@ impl DecisionClock {
         self,
         decision_at: DateTime<Utc>,
         domain_crypto_lag_secs: u64,
+        domain_weather_lag_secs: u64,
     ) -> QuantResult<DecisionBoundary> {
         self.boundary(decision_at)?
             .with_source_cutoff(DecisionSource::Catalog, 0)?
@@ -189,7 +192,8 @@ impl DecisionClock {
             .with_source_cutoff(DecisionSource::Microstructure, 0)?
             .with_source_cutoff(DecisionSource::TradeTape, 0)?
             .with_source_cutoff(DecisionSource::Linkage, 0)?
-            .with_source_cutoff(DecisionSource::DomainCrypto, domain_crypto_lag_secs)
+            .with_source_cutoff(DecisionSource::DomainCrypto, domain_crypto_lag_secs)?
+            .with_source_cutoff(DecisionSource::DomainWeather, domain_weather_lag_secs)
     }
 }
 
@@ -268,7 +272,7 @@ mod tests {
     fn serving_boundary_registers_every_governed_source() {
         let decision_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
         let boundary = DecisionClock::new(120)
-            .serving_boundary(decision_at, 300)
+            .serving_boundary(decision_at, 300, 600)
             .expect("serving boundary");
 
         assert_eq!(
@@ -295,7 +299,11 @@ mod tests {
             boundary.cutoff_for(DecisionSource::DomainCrypto),
             decision_at - Duration::seconds(300)
         );
-        assert_eq!(boundary.per_source_cutoffs().len(), 6);
+        assert_eq!(
+            boundary.cutoff_for(DecisionSource::DomainWeather),
+            decision_at - Duration::seconds(600)
+        );
+        assert_eq!(boundary.per_source_cutoffs().len(), 7);
     }
 
     #[test]

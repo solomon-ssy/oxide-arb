@@ -11,7 +11,7 @@ use crate::{
     },
     types::{
         ContentHash, FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId,
-        Probability, SchemaVersion,
+        ModelVersionId, Probability, SchemaVersion,
     },
 };
 use chrono::{DateTime, Utc};
@@ -141,4 +141,61 @@ pub struct NewFactorValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactorValueModel {
     pub values: Vec<NewFactorValue>,
+}
+
+/// Latest scored factor value for one exact market/model/definition binding.
+///
+/// This is the online PIT snapshot consumed by entry/exit evaluators. It is
+/// intentionally separate from the frozen factor breakdown embedded in a
+/// recommendation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestFactorSnapshotInfo {
+    pub factor_value_id: FactorValueId,
+    pub factor_definition_id: FactorDefinitionId,
+    pub definition_hash: ContentHash,
+    pub model_version_id: ModelVersionId,
+    pub market_id: MarketId,
+    pub raw_value: Decimal,
+    pub normalized_value: Decimal,
+    pub confidence: Decimal,
+    pub observed_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub snapshot_hash: ContentHash,
+}
+
+/// One value inside a coherent latest factor snapshot bundle.
+///
+/// Unlike the recommendation's frozen contribution breakdown, this is the
+/// current persisted factor-plane fact and carries its exact governed
+/// definition revision and owning serving run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestFactorSnapshotValueInfo {
+    pub factor_value_id: FactorValueId,
+    pub factor_definition_id: FactorDefinitionId,
+    pub definition_hash: ContentHash,
+    pub name: String,
+    pub family: FactorFamily,
+    pub value_state: FactorValueState,
+    pub raw_value: Option<Decimal>,
+    pub normalized_score: Option<Probability>,
+    pub normalization_source: Option<NormalizationSource>,
+    pub indeterminate_reason: Option<FactorIndeterminateReason>,
+    pub direction: FactorDirection,
+    pub confidence: Probability,
+    pub explanation: serde_json::Value,
+}
+
+/// Latest complete factor plane from one exact serving run.
+///
+/// Values from different runs are never mixed: cross-sectional normalization
+/// only has meaning inside the batch that produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestFactorSnapshotBundleInfo {
+    pub model_run_id: ModelRunId,
+    pub model_version_id: ModelVersionId,
+    pub market_id: MarketId,
+    pub observed_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub values: Vec<LatestFactorSnapshotValueInfo>,
+    pub snapshot_hash: ContentHash,
 }

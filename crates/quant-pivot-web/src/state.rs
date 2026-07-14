@@ -17,10 +17,10 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    BasisAlertRepository, DomainSourceCursorRepository, MarketLinkageRepository, MarketRepository,
-    MenuRepository, OperationLogRepository, QuantFactReadRepository, RoleMenuRepository,
-    RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository, UserRepository,
-    UserRoleRepository,
+    BasisAlertRepository, DomainSourceCursorRepository, EntryConditionRepository,
+    MarketLinkageRepository, MarketRepository, MenuRepository, OperationLogRepository,
+    QuantFactReadRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+    RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
 };
 
 use crate::{
@@ -107,6 +107,8 @@ pub struct AppState {
     pub account_read: Arc<dyn AccountReadPort>,
     /// Order-intent read + governed mutation (Phase 05.2 API).
     pub order_intents: Arc<dyn OrderIntentPort>,
+    /// Recommendation-owned condition state and WORM audit timeline.
+    pub entry_conditions: Arc<dyn EntryConditionRepository>,
     /// Execution order, position, and attribution read surface (Phase 05.7 API).
     pub execution_read: Arc<dyn ExecutionReadPort>,
     /// Operator reconciliation resolve (Phase 05.5 closeout).

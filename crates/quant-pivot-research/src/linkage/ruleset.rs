@@ -21,7 +21,7 @@ use quant_pivot_models::{
 /// The current deterministic resolver ruleset version.
 ///
 /// Bump **every** time the alias / symbol / feed table below changes.
-pub const CRYPTO_RESOLVER_VERSION: ResolverVersion = ResolverVersion::new(1);
+pub const DOMAIN_RESOLVER_VERSION: ResolverVersion = ResolverVersion::new(2);
 
 /// One asset's frozen resolution bindings.
 #[derive(Debug, Clone, Copy)]
@@ -146,6 +146,18 @@ impl AssetRule {
     pub fn instrument_key(&self) -> DomainInstrumentKey {
         DomainInstrumentKey::binance_kline(&self.symbol(), KlineInterval::OneMinute)
     }
+
+    /// Low-latency Binance event stream used only by Binance-bound markets.
+    #[must_use]
+    pub fn binance_event_instrument(&self) -> DomainInstrumentKey {
+        DomainInstrumentKey::binance_agg_trade(&self.symbol())
+    }
+
+    /// Exact Chainlink Data Streams resolution/event feed.
+    #[must_use]
+    pub fn chainlink_instrument(&self) -> DomainInstrumentKey {
+        DomainInstrumentKey::chainlink_data_streams(&self.feed())
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +174,8 @@ mod tests {
             let _ = rule.symbol();
             let _ = rule.feed();
             let _ = rule.instrument_key();
+            let _ = rule.binance_event_instrument();
+            let _ = rule.chainlink_instrument();
             assert!(!rule.aliases.is_empty());
             for alias in rule.aliases {
                 assert_eq!(*alias, alias.to_lowercase(), "aliases must be lowercase");

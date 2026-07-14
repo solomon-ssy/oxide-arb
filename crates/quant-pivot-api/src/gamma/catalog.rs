@@ -50,6 +50,7 @@ pub struct CatalogMarket {
     pub settlement: Option<CatalogSettlement>,
     /// Settlement close time (`closedTime`); only set on settled markets.
     pub resolved_at: Option<DateTime<Utc>>,
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub fees_enabled: bool,
     pub fee_schedule: Option<WireFeeSchedule>,
@@ -210,6 +211,7 @@ impl TryFrom<WireMarket> for CatalogMarket {
                 }
             })?,
         };
+        let start_date = wire.start_date();
         let end_date = wire.end_date();
         let closed = wire.closed.unwrap_or(false);
         let status = market_status_from_wire(closed, wire.active.unwrap_or(true));
@@ -233,6 +235,7 @@ impl TryFrom<WireMarket> for CatalogMarket {
             neg_risk: wire.neg_risk.unwrap_or(false),
             settlement,
             resolved_at,
+            start_date,
             end_date,
             fees_enabled: wire.fees_enabled.unwrap_or(true),
             fee_schedule: wire.fee_schedule,

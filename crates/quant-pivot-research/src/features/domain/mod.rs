@@ -9,16 +9,21 @@
 //! structural non-applicability.
 
 pub mod crypto;
+pub mod weather;
 
 pub use crypto::CryptoDomainFeatureBuilder;
+pub use weather::WeatherDomainFeatureBuilder;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::ResolvedBinding, enums::domain::DomainFamily, runtime_config::CryptoDomainConfig,
+    domain::ResolvedBinding,
+    enums::domain::DomainFamily,
+    runtime_config::DomainConfig,
+    types::{ContentHash, MarketLinkageId},
 };
 
 use crate::{
-    domain::DomainObservationWindow,
+    domain::{CryptoPriceReportWindow, DomainObservationWindow, WeatherFactWindow},
     features::{EvidenceSourceRef, builder::RawFeature},
 };
 
@@ -30,13 +35,20 @@ pub struct DomainComputeCtx<'a> {
     pub binding: &'a ResolvedBinding,
     /// Exact linkage revision and its effective/availability clocks.
     pub linkage_evidence: &'a EvidenceSourceRef,
-    /// PIT window for the feature-source instrument (e.g. Binance klines).
-    pub primary: &'a DomainObservationWindow,
-    /// PIT window for the settlement-oracle instrument (e.g. Chainlink feed),
-    /// when one is ingested for this subject.
-    pub oracle: Option<&'a DomainObservationWindow>,
-    /// Frozen crypto vertical parameters.
-    pub crypto: &'a CryptoDomainConfig,
+    /// Family-specific, typed PIT facts. Cross-family reads are unrepresentable.
+    pub data: DomainSliceDataRef<'a>,
+    /// Frozen vertical parameters.
+    pub domain: &'a DomainConfig,
+}
+
+/// Borrowed family-specific input projection consumed by a domain builder.
+#[derive(Clone, Copy)]
+pub enum DomainSliceDataRef<'a> {
+    Crypto {
+        primary: &'a DomainObservationWindow,
+        oracle: Option<&'a CryptoPriceReportWindow>,
+    },
+    Weather(&'a WeatherFactWindow),
 }
 
 /// A pure domain feature-group computation (no I/O, no clock, no mutable state).
@@ -57,12 +69,54 @@ pub trait DomainFeatureBuilder: Send + Sync {
 pub struct DomainSliceInputs {
     /// The vertical this market maps to.
     pub family: DomainFamily,
+    /// Exact linkage ledger identity used to resolve the source roles.
+    pub linkage_id: MarketLinkageId,
+    /// Content address of the exact linkage revision.
+    pub linkage_hash: ContentHash,
     /// The frozen, validated linkage binding.
     pub binding: ResolvedBinding,
     /// Exact linkage revision and its effective/availability clocks.
     pub linkage_evidence: EvidenceSourceRef,
-    /// PIT window for the feature-source instrument.
-    pub primary: DomainObservationWindow,
-    /// PIT window for the settlement-oracle instrument, when ingested.
-    pub oracle: Option<DomainObservationWindow>,
+    /// Family-specific typed facts. A Weather linkage cannot accidentally read
+    /// Crypto windows, and vice versa.
+    pub data: DomainSliceData,
+}
+
+/// Owned family-specific PIT facts.
+#[derive(Debug, Clone)]
+pub enum DomainSliceData {
+    Crypto {
+        primary: DomainObservationWindow,
+        oracle: Option<CryptoPriceReportWindow>,
+    },
+    Weather(WeatherFactWindow),
+}
+
+impl DomainSliceData {
+    #[must_use]
+    pub const fn as_ref(&self) -> DomainSliceDataRef<'_> {
+        match self {
+            Self::Crypto { primary, oracle } => DomainSliceDataRef::Crypto {
+                primary,
+                oracle: oracle.as_ref(),
+            },
+            Self::Weather(window) => DomainSliceDataRef::Weather(window),
+        }
+    }
+
+    #[must_use]
+    pub fn freshest_time(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Crypto { primary, oracle } => primary
+                .freshest_time()
+                .into_iter()
+                .chain(
+                    oracle
+                        .as_ref()
+                        .and_then(|window| window.latest().map(|report| report.event_time)),
+                )
+                .max(),
+            Self::Weather(window) => window.freshest_time(),
+        }
+    }
 }

@@ -48,10 +48,12 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Pin to match polymarket_client_sdk_v2's `futures = "^0.3.32"` (futures-* crates
 # must share the same patch version).
 futures-util = "0.3.32"
+tokio-tungstenite = { version = "0.3", features = ["rustls-tls-webpki-roots"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+csv = "1"
 # Canonical serde adapters (PickFirst/DisplayFromStr for query-string number
 # coercion, rust::double_option for three-way-null PATCH fields, and the
 # SerializeDisplay / DeserializeFromStr derives) — never hand-roll these.
@@ -75,6 +77,9 @@ rust_decimal_macros = "1"
 chrono = { version = "0.4", features = ["serde"] }
 # IANA timezone database for wall-clock cron report schedules (pure Rust).
 chrono-tz = "0.10"
+
+# NOAA GEFS GRIB2 subset decoding after `.idx` byte-range selection.
+grib = "0.15"
 
 # Report-plane cron/interval/one-shot scheduler (Phase 4). In-process,
 # tokio-native; postgres_storage / nats_storage / signal features stay OFF —
@@ -178,7 +183,9 @@ governor = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 blake3 = "1"
-secrecy = "0.10"
+secrecy = { version = "0.10", features = ["serde"] }
+chainlink-data-streams-report = "1.2.2"
+chainlink-data-streams-sdk = { version = "1.2.2", default-features = false, features = ["rest", "websocket", "tracing"] }
 
 # URL parsing
 url = "2"

@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo, NewFactorDefinition,
+        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo,
+        LatestFactorSnapshotBundleInfo, LatestFactorSnapshotInfo, NewFactorDefinition,
         NewFactorValue, Paginated,
     },
-    types::{FactorDefinitionId, ModelRunId},
+    types::{FactorDefinitionId, MarketId, ModelRunId, ModelVersionId},
 };
 
 /// Factor definition and value persistence port.
@@ -68,4 +69,25 @@ pub trait FactorRepository: Send + Sync {
         from: DateTime<Utc>,
         until: DateTime<Utc>,
     ) -> Result<Vec<FactorValueInfo>, StorageError>;
+
+    /// Latest scored value for the exact online PIT binding.
+    async fn latest_snapshot(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+        market_id: &MarketId,
+        model_version_id: &ModelVersionId,
+    ) -> Result<Option<LatestFactorSnapshotInfo>, StorageError>;
+
+    /// Latest coherent factor plane for one exact market/model binding.
+    ///
+    /// Implementations must select a single serving run containing every
+    /// requested definition; values from different runs must never be mixed.
+    async fn latest_snapshot_bundle(
+        &self,
+        _factor_definition_ids: &[FactorDefinitionId],
+        _market_id: &MarketId,
+        _model_version_id: &ModelVersionId,
+    ) -> Result<Option<LatestFactorSnapshotBundleInfo>, StorageError> {
+        Ok(None)
+    }
 }

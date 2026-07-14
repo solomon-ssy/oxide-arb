@@ -11,12 +11,14 @@
 use crate::{
     features::{
         CatalogDecisionRef, FeatureBuildInput, FeatureBuilder, FeatureVector,
+        MarketDecisionCaptureInput,
         decision_capture::{
             ResolvedMarketBundle, book_snapshot_ref_from_resolved,
             market_decision_capture_from_resolved,
         },
         domain::{
             CryptoDomainFeatureBuilder, DomainComputeCtx, DomainFeatureBuilder, DomainSliceInputs,
+            WeatherDomainFeatureBuilder,
         },
         generic::{
             book::PriceBookFeatureBuilder, market::MarketMetadataFeatureBuilder,
@@ -344,6 +346,9 @@ impl ConfiguredFeatureBuilder {
                     if domain_config.family_enabled(DomainFamily::Crypto) {
                         domain_builders.push(Box::new(CryptoDomainFeatureBuilder));
                     }
+                    if domain_config.family_enabled(DomainFamily::Weather) {
+                        domain_builders.push(Box::new(WeatherDomainFeatureBuilder));
+                    }
                 }
             }
         }
@@ -411,15 +416,16 @@ impl ConfiguredFeatureBuilder {
         let capture_market = ResolvedMarketContext::from(snapshot.context);
         let registry = snapshot.market;
         let snapshot_sibling = snapshot.neg_risk_leg_set;
-        let capture = market_decision_capture_from_resolved(
+        let capture = market_decision_capture_from_resolved(MarketDecisionCaptureInput {
             boundary,
-            market,
-            capture_book,
-            capture_market,
-            Some(registry.as_ref()),
+            selected: market,
+            book: capture_book,
+            market: capture_market,
+            registry: Some(registry.as_ref()),
             catalog,
+            domain: windows.domain,
             liquidity_cap_usd,
-        )?;
+        })?;
         let book = if self.source_needs.book() {
             Some(capture.book.clone())
         } else {
@@ -625,9 +631,8 @@ impl ConfiguredFeatureBuilder {
             decision_at: resolved.decision_at,
             binding: &inputs.binding,
             linkage_evidence: &inputs.linkage_evidence,
-            primary: &inputs.primary,
-            oracle: inputs.oracle.as_ref(),
-            crypto: &self.domain_config.crypto,
+            data: inputs.data.as_ref(),
+            domain: &self.domain_config,
         };
         let mut raw: BTreeMap<FeatureName, RawFeature> = BTreeMap::new();
         for feature in builder.compute(&ctx) {
@@ -1022,7 +1027,7 @@ fn domain_age_ms(
     domain: Option<&DomainSliceInputs>,
 ) -> QuantResult<Option<u64>> {
     domain
-        .and_then(|inputs| inputs.primary.freshest_time())
+        .and_then(|inputs| inputs.data.freshest_time())
         .map(|observed_at| known_age_ms(as_of, observed_at))
         .transpose()
 }

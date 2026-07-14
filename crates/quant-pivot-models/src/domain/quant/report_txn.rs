@@ -4,8 +4,9 @@
 //! `account_snapshot → equity_snapshot → data_quality_snapshot → portfolio_plan → report → recommendations`.
 
 use super::{
-    NewAccountSnapshot, NewEquitySnapshot, NewFeatureParityRun, NewPortfolioPlan,
-    NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot, NewResearchJob,
+    NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
+    NewFeatureParityRun, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+    NewReportDataQualitySnapshot, NewResearchJob,
 };
 use crate::{domain::governance::NewOperationLog, types::FeatureParityStateId};
 
@@ -40,6 +41,11 @@ pub struct NewReportTransaction {
     pub report: NewRecommendationReport,
     /// The published recommendations.
     pub recommendations: Vec<NewRecommendation>,
+    /// Immutable conditional artifacts referenced by this report's recommendations.
+    pub entry_condition_artifacts: Vec<NewEntryConditionArtifact>,
+    /// Exactly one durable shadow instance per published recommendation,
+    /// including `NotRequired` instances for immediate entry.
+    pub entry_condition_instances: Vec<NewEntryConditionInstance>,
     /// Mandatory at repository commit for every report. The composer leaves it
     /// empty only while the report id does not yet have its atomic parity job;
     /// the lifecycle coordinator fills it immediately before persistence.

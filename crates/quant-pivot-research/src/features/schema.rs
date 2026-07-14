@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::features::{
     FeatureName,
     names::{
-        book, domain_crypto as domain_crypto_names, market as market_names, micro,
-        structural as structural_names, ts,
+        book, domain_crypto as domain_crypto_names, domain_weather as domain_weather_names,
+        market as market_names, micro, structural as structural_names, ts,
     },
     value::{EvidenceSourceKind, FeatureValueKind},
 };
@@ -954,6 +954,11 @@ fn structural_neg_risk_specs(out: &mut Vec<FeatureSpec>) {
 /// a source gap keeps an explicit present-but-missing value — never a
 /// fabricated zero, never market rejection.
 fn domain_specs(out: &mut Vec<FeatureSpec>) {
+    crypto_domain_specs(out);
+    weather_domain_specs(out);
+}
+
+fn crypto_domain_specs(out: &mut Vec<FeatureSpec>) {
     out.push(
         spec(
             domain_crypto_names::DISTANCE_TO_STRIKE,
@@ -1019,6 +1024,61 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
             StalenessRule::MaxDomainObservationAge,
         )
         .unit(FeatureUnit::Bps)
+        .null_policy(NullPolicy::Optional)
+        .build(),
+    );
+}
+
+fn weather_domain_specs(out: &mut Vec<FeatureSpec>) {
+    out.push(
+        spec(
+            domain_weather_names::ENSEMBLE_BIN_PROBABILITY,
+            FeatureFamily::Domain,
+            FeatureValueKind::Probability,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
+        )
+        .unit(FeatureUnit::Probability)
+        .range(Decimal::ZERO, Decimal::ONE)
+        .null_policy(NullPolicy::Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            domain_weather_names::ENSEMBLE_SPREAD,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
+        )
+        .range(Decimal::ZERO, Decimal::from(100))
+        .null_policy(NullPolicy::Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            domain_weather_names::OBSERVED_HIGH_HEADROOM,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
+        )
+        .null_policy(NullPolicy::Optional)
+        .build(),
+    );
+    out.push(
+        spec(
+            domain_weather_names::NOAA_RESOLUTION_BASIS_RISK,
+            FeatureFamily::Domain,
+            FeatureValueKind::Decimal,
+            SourceRequirement::DomainObservationWindow,
+            PitRule::FactAtOrBeforeSourceCutoff,
+            StalenessRule::MaxDomainObservationAge,
+        )
+        .range(Decimal::ZERO, Decimal::from(100))
         .null_policy(NullPolicy::Optional)
         .build(),
     );

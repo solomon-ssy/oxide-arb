@@ -498,7 +498,9 @@ mod tests {
             .extract(&metadata)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         let open = Utc.with_ymd_and_hms(2026, 7, 7, 19, 0, 0).unwrap();
         assert_eq!(subject.reference_at, Some(open));
         assert_eq!(subject.observation_at, open + chrono::Duration::hours(1));
@@ -521,7 +523,9 @@ mod tests {
             .extract(&with_year)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         assert_eq!(subject.reference_at, Some(open));
     }
 
@@ -536,7 +540,9 @@ mod tests {
             .extract(&metadata)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         // Noon EDT = 16:00Z; window opens the previous day.
         let close = Utc.with_ymd_and_hms(2026, 7, 7, 16, 0, 0).unwrap();
         assert_eq!(subject.observation_at, close);
@@ -557,7 +563,9 @@ mod tests {
             .extract(&metadata)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         assert_eq!(subject.comparator, PriceComparator::Above);
         assert_eq!(subject.strike, Some(Usd::new(dec!(150000))));
         assert!(matches!(
@@ -582,7 +590,9 @@ mod tests {
             .extract(&metadata)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         assert_eq!(subject.strike, Some(Usd::new(dec!(2500))));
         assert_eq!(
             subject.comparator,
@@ -668,7 +678,9 @@ mod tests {
             .extract(&metadata)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         // Dec 31, 2026, 11pm EST = Jan 1, 2027 04:00Z.
         let expected_open = Utc.with_ymd_and_hms(2027, 1, 1, 4, 0, 0).unwrap();
         assert_eq!(subject.reference_at, Some(expected_open));

@@ -24,7 +24,7 @@ use quant_pivot_models::{
     types::{MarketId, Price, Usd},
 };
 use quant_pivot_research::{
-    domain::build_domain_slice_inputs,
+    domain::{DomainFactWindows, build_domain_slice_inputs},
     factors::{FactorEngine, MarketFactorOutcome},
     features::{
         ConfiguredFeatureBuilder, DomainSliceInputs, FeatureSourceWindows, FeatureVector,
@@ -124,6 +124,7 @@ pub async fn materialize_cross_section(
         decision_at,
         request.knowledge_lag.as_secs(),
         config.domain.crypto.availability_lag_secs,
+        config.domain.weather.availability_lag_secs,
     )?;
     let ReplayInputs {
         selected,
@@ -149,7 +150,12 @@ pub async fn materialize_cross_section(
                     .map_or(&[][..], Vec::as_slice),
                 &boundary,
                 &config.domain,
-                &request.prefetched.domain_observations,
+                DomainFactWindows {
+                    observations: &request.prefetched.domain_observations,
+                    crypto_reports: &request.prefetched.crypto_reports,
+                    weather_observations: &request.prefetched.weather_observations,
+                    weather_forecasts: &request.prefetched.weather_forecasts,
+                },
             )
         })
         .collect::<QuantResult<Vec<_>>>()?;

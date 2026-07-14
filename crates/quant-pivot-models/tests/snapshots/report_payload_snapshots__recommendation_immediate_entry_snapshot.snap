@@ -64,7 +64,7 @@ expression: recommendation_immediate_entry()
       }
     },
     "entry": {
-      "trigger": {
+      "condition": {
         "kind": "immediate"
       },
       "order_policy": {

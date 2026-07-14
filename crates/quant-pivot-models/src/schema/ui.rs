@@ -1,4 +1,4 @@
-//! Runtime-config v10 UI metadata.
+//! Runtime-config v12 UI metadata.
 //!
 //! Two artifacts, one authored source of truth:
 //!
@@ -763,8 +763,8 @@ fn domain_fields() -> Vec<FieldUiEntry> {
             "domain.crypto.backfill_days",
             "Crypto backfill window",
             "加密回填窗口",
-            "Days of history the domain ingest worker backfills on bootstrap before switching to incremental polling. Exact for Binance klines; a ceiling for Chainlink, additionally capped by the deploy-config `max_round_backscan` round count (a Chainlink feed may backfill fewer days when its round cadence is sparse). Larger windows cost more Binance weight budget.",
-            "域摄取 worker 在启动时回填的历史天数，之后切换为增量轮询。对 Binance K 线是精确值；对 Chainlink 是上限——另受部署配置 `max_round_backscan` 轮次数量的约束（若某个 feed 的轮次节奏较稀疏，实际回填天数可能更短）。窗口越大消耗的 Binance weight 预算越多。",
+            "Days of Binance 1-minute kline history backfilled for feature and calibration windows. Aggregate trades and Chainlink Data Streams use source-native sequence checkpoints and independent gap recovery.",
+            "为特征与校准窗口回填的 Binance 一分钟 K 线历史天数。聚合成交与 Chainlink Data Streams 使用来源原生序列 checkpoint 和独立 gap recovery。",
         ),
         secs(
             "domain.crypto.momentum_window_secs",
@@ -798,8 +798,43 @@ fn domain_fields() -> Vec<FieldUiEntry> {
             "domain.crypto.cross_check.max_oracle_staleness_secs",
             "Max Chainlink oracle staleness",
             "Chainlink 预言机最大滞后",
-            "Risk control for the freshness gap between on-chain Chainlink Data Feeds (push, deviation/heartbeat cadence) and Polymarket's Data Streams settlement path. Oracle observations older than this (seconds) are rejected as stale in basis and price-to-beat features — mitigates but does not eliminate cross-source drift; true Data Streams ingest requires a paid subscription (Phase 11.2.3).",
-            "缓解链上 Chainlink Data Feeds（推送式、按偏差/心跳更新）与 Polymarket Data Streams 结算路径之间新鲜度差异的风险控制。超过此秒数的预言机观测在基差与 PTB 特征中被拒绝为滞后——缓解而非消除跨源偏离；真正的 Data Streams 接入需付费订阅（11.2.3 阶段）。",
+            "Maximum age of the source-native Chainlink Data Streams signed report used by basis and price-to-beat features. Older reports fail closed; Binance is never substituted for a Chainlink settlement binding.",
+            "基差与 PTB 特征所用 Chainlink Data Streams 原生签名报告的最大年龄。超过该年龄即失败关闭；Chainlink 结算绑定绝不以 Binance 替代。",
+        ),
+        secs(
+            "domain.weather.availability_lag_secs",
+            "Weather source visibility delay",
+            "天气源可见性延迟",
+            "Source publication lag applied to AviationWeather, GHCNh and GEFS facts before a Weather decision may consume them.",
+            "天气决策消费 AviationWeather、GHCNh 与 GEFS 事实前应用的来源发布时间延迟。",
+        ),
+        secs(
+            "domain.weather.max_forecast_age_secs",
+            "Maximum GEFS run age",
+            "GEFS 运行最大年龄",
+            "Maximum age of the latest complete GEFS run. Older runs are unavailable, never silently reused.",
+            "最新完整 GEFS 运行允许的最大年龄。超过后标记不可用，绝不静默复用。",
+        ),
+        integer(
+            "domain.weather.minimum_complete_members",
+            "Required GEFS members",
+            "GEFS 必需成员数",
+            "Exact ensemble-member count required before forecast factors can be produced. The supported GEFS contract requires all 31 members.",
+            "生成预报因子前要求的精确集合成员数。当前 GEFS 契约必须完整包含 31 个成员。",
+        ),
+        integer(
+            "domain.weather.minimum_bias_samples_per_lead",
+            "Minimum bias samples per lead",
+            "每个 lead 最小偏差样本",
+            "Minimum distinct station observations required for every exact GEFS lead-hour bias estimate. Missing lead calibration fails closed.",
+            "每个精确 GEFS lead-hour 偏差估计所需的最小独立站点观测数。任一 lead 缺少校准即失败关闭。",
+        ),
+        integer(
+            "domain.weather.calibration_lookback_days",
+            "Weather calibration lookback",
+            "天气校准回看天数",
+            "PIT history retained in the feature window for station×lead GEFS bias calibration and AviationWeather–GHCNh basis estimation.",
+            "用于 station×lead GEFS 偏差校准及 AviationWeather–GHCNh 基差估计的 PIT 历史窗口。",
         ),
     ]
 }
@@ -1896,6 +1931,7 @@ fn portfolio_optimizer_fields() -> Vec<FieldUiEntry> {
 fn execution_fields() -> Vec<FieldUiEntry> {
     let mut fields = execution_semi_auto_fields();
     fields.extend(execution_auto_fields());
+    fields.extend(execution_entry_condition_fields());
     fields.extend(execution_entry_policy_fields());
     fields.extend(execution_kill_switch_fields());
     fields.extend(execution_capital_fields());
@@ -1905,6 +1941,53 @@ fn execution_fields() -> Vec<FieldUiEntry> {
     fields.extend(execution_attribution_fields());
     fields.extend(execution_breaker_fields());
     fields
+}
+
+fn execution_entry_condition_fields() -> Vec<FieldUiEntry> {
+    vec![
+        millis(
+            "execution.entry_condition.backstop_interval_ms",
+            "Condition backstop interval",
+            "条件兜底扫描间隔",
+            "Safety scan cadence when no book, factor, domain-event, or clock wake arrives. It is not the primary observation cadence; lower values increase database pressure.",
+            "当没有盘口、因子、领域事件或时钟唤醒时的安全兜底扫描周期。它不是主要观测周期；调低会增加数据库压力。",
+        ),
+        millis(
+            "execution.entry_condition.next_evaluation_delay_ms",
+            "Next evaluation delay",
+            "下次求值延迟",
+            "Delay before a still-active instance becomes due again after an evaluation. Source-driven wakes may evaluate it earlier; this value bounds idle rechecks.",
+            "一次求值后，仍活跃实例再次到期前的延迟。来源事件可更早唤醒；该值约束空闲重检频率。",
+        ),
+        secs(
+            "execution.entry_condition.lease_duration_secs",
+            "Condition lease duration",
+            "条件租约时长",
+            "Exclusive processing lease for one condition instance. Lease takeover increments the epoch and resets confirming or qualified continuity before another worker proceeds.",
+            "单个条件实例的独占处理租约。接管租约会递增 epoch，并在其他 worker 继续前重置 Confirming/Qualified 连续性。",
+        ),
+        secs(
+            "execution.entry_condition.lease_renew_interval_secs",
+            "Condition lease renewal",
+            "条件租约续期间隔",
+            "How often a worker renews a held condition lease. It must be shorter than the lease duration so a stalled worker cannot retain ownership indefinitely.",
+            "worker 续期已持有条件租约的频率。必须短于租约时长，避免停滞 worker 无限占有实例。",
+        ),
+        integer(
+            "execution.entry_condition.pass_limit",
+            "Instances per condition pass",
+            "单轮条件实例上限",
+            "Maximum due instances evaluated in one worker pass. This bounds transaction and CPU work while later instances remain durably scheduled.",
+            "单轮 worker 最多求值的到期实例数。用于限制事务与 CPU 工作量，其余实例仍会持久化排队。",
+        ),
+        integer(
+            "execution.entry_condition.expiry_batch_limit",
+            "Condition expiry batch",
+            "条件过期批次上限",
+            "Maximum instances transitioned to Expired in one sweep. A bounded batch prevents a large expiry wave from starving live evaluations.",
+            "单次 sweep 最多转为 Expired 的实例数。有限批次可避免大规模同时过期挤占实时求值。",
+        ),
+    ]
 }
 
 fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
@@ -2512,6 +2595,11 @@ fn domain_section() -> SchemaNode {
             "domain.crypto.cross_check.max_basis_bps",
             "domain.crypto.cross_check.alert_cooldown_secs",
             "domain.crypto.cross_check.max_oracle_staleness_secs",
+            "domain.weather.availability_lag_secs",
+            "domain.weather.max_forecast_age_secs",
+            "domain.weather.minimum_complete_members",
+            "domain.weather.minimum_bias_samples_per_lead",
+            "domain.weather.calibration_lookback_days",
         ]),
     )
 }
@@ -2949,8 +3037,28 @@ fn execution_children_head() -> Vec<SchemaNode> {
         ),
         subsection(
             section_spec(
-                "execution.entry_order_policy",
+                "execution.entry_condition",
                 30,
+                "lucide:workflow",
+                ls("Entry-condition worker", "入场条件 worker"),
+                ls(
+                    "Durable evaluation cadence, leases, and bounded worker passes.",
+                    "持久化条件求值的节奏、租约与有界 worker 批次。",
+                ),
+            ),
+            fields_in_order(&[
+                "execution.entry_condition.backstop_interval_ms",
+                "execution.entry_condition.next_evaluation_delay_ms",
+                "execution.entry_condition.lease_duration_secs",
+                "execution.entry_condition.lease_renew_interval_secs",
+                "execution.entry_condition.pass_limit",
+                "execution.entry_condition.expiry_batch_limit",
+            ]),
+        ),
+        subsection(
+            section_spec(
+                "execution.entry_order_policy",
+                35,
                 "lucide:door-open",
                 ls("Entry order policy", "入场订单策略"),
                 ls(

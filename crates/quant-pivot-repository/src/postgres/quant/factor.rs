@@ -1,7 +1,7 @@
 //! Postgres-backed factor definition + value repository.
 
 use crate::{
-    postgres::{error, query::paginate_mapped},
+    postgres::{error, quant::condition_wake::notify_input_change, query::paginate_mapped},
     traits::FactorRepository,
 };
 use std::{
@@ -13,13 +13,15 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo, NewFactorDefinition,
-        NewFactorValue, PageWindow, Paginated,
+        FactorDefinitionInfo, FactorDefinitionListQuery, FactorValueInfo,
+        LatestFactorSnapshotBundleInfo, LatestFactorSnapshotInfo, LatestFactorSnapshotValueInfo,
+        NewFactorDefinition, NewFactorValue, PageWindow, Paginated,
     },
-    entities::{quant_factor_definition, quant_factor_value},
-    enums::quant::PublicationStatus,
+    entities::{quant_factor_definition, quant_factor_value, quant_model_run},
+    enums::{factor::FactorValueState, quant::PublicationStatus},
+    hashing::CanonicalDigest,
     schema::column,
-    types::{FactorDefinitionId, ModelRunId},
+    types::{FactorDefinitionId, MarketId, ModelRunId, ModelVersionId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseBackend,
@@ -137,6 +139,7 @@ impl FactorRepository for PgFactorRepository {
                 .map_err(StorageError::from)?;
             inserted.push(model.into());
         }
+        notify_input_change(&txn, "factor").await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(inserted)
     }
@@ -264,6 +267,234 @@ impl FactorRepository for PgFactorRepository {
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
+
+    async fn latest_snapshot(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+        market_id: &MarketId,
+        model_version_id: &ModelVersionId,
+    ) -> Result<Option<LatestFactorSnapshotInfo>, StorageError> {
+        let row = quant_factor_value::Entity::find()
+            .find_also_related(quant_model_run::Entity)
+            .filter(quant_factor_value::Column::FactorDefinitionId.eq(factor_definition_id.clone()))
+            .filter(quant_factor_value::Column::MarketId.eq(market_id.clone()))
+            .filter(quant_factor_value::Column::ValueState.eq(FactorValueState::Scored))
+            .filter(quant_model_run::Column::ModelVersionId.eq(model_version_id.clone()))
+            .order_by_desc(quant_factor_value::Column::DecisionAt)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let Some((value, Some(run))) = row else {
+            return Ok(None);
+        };
+        let Some(raw_value) = value.raw_value else {
+            return Ok(None);
+        };
+        let Some(normalized_score) = value.normalized_score else {
+            return Ok(None);
+        };
+        let definition = quant_factor_definition::Entity::find_by_id(factor_definition_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: entity::QUANT_FACTOR,
+                id: factor_definition_id.to_string(),
+            })?;
+        let snapshot_hash = CanonicalDigest::content_hash_json(&(
+            &value.factor_value_id,
+            &definition.definition_hash,
+            &run.model_version_id,
+            &value.market_id,
+            raw_value,
+            normalized_score,
+            value.confidence,
+            value.decision_at,
+            value.created_at,
+        ))
+        .map_err(|error| {
+            error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                format!("latest factor snapshot hash failed: {error}"),
+            )
+        })?;
+        Ok(Some(LatestFactorSnapshotInfo {
+            factor_value_id: value.factor_value_id,
+            factor_definition_id: value.factor_definition_id,
+            definition_hash: definition.definition_hash,
+            model_version_id: model_version_id.clone(),
+            market_id: value.market_id,
+            raw_value,
+            normalized_value: normalized_score.inner(),
+            confidence: value.confidence.inner(),
+            observed_at: value.decision_at,
+            available_at: value.created_at,
+            snapshot_hash,
+        }))
+    }
+
+    async fn latest_snapshot_bundle(
+        &self,
+        factor_definition_ids: &[FactorDefinitionId],
+        market_id: &MarketId,
+        model_version_id: &ModelVersionId,
+    ) -> Result<Option<LatestFactorSnapshotBundleInfo>, StorageError> {
+        if factor_definition_ids.is_empty() {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                "latest factor snapshot bundle requires at least one definition",
+            ));
+        }
+        let requested = factor_definition_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        if requested.len() != factor_definition_ids.len() {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                "latest factor snapshot bundle contains duplicate definition ids",
+            ));
+        }
+
+        let latest = quant_factor_value::Entity::find()
+            .find_also_related(quant_model_run::Entity)
+            .filter(quant_factor_value::Column::MarketId.eq(market_id.clone()))
+            .filter(
+                quant_factor_value::Column::FactorDefinitionId
+                    .is_in(factor_definition_ids.iter().cloned()),
+            )
+            .filter(quant_model_run::Column::ModelVersionId.eq(model_version_id.clone()))
+            .order_by_desc(quant_factor_value::Column::DecisionAt)
+            .order_by_desc(quant_factor_value::Column::CreatedAt)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let Some((latest_value, Some(run))) = latest else {
+            return Ok(None);
+        };
+
+        let rows = quant_factor_value::Entity::find()
+            .filter(quant_factor_value::Column::ModelRunId.eq(run.model_run_id.clone()))
+            .filter(quant_factor_value::Column::MarketId.eq(market_id.clone()))
+            .filter(
+                quant_factor_value::Column::FactorDefinitionId
+                    .is_in(factor_definition_ids.iter().cloned()),
+            )
+            .order_by_asc(quant_factor_value::Column::FactorDefinitionId)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let found = rows
+            .iter()
+            .map(|row| row.factor_definition_id.clone())
+            .collect::<HashSet<_>>();
+        if found != requested || rows.len() != requested.len() {
+            return Ok(None);
+        }
+        if rows
+            .iter()
+            .any(|row| row.decision_at != latest_value.decision_at)
+        {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                format!(
+                    "model run {} contains mixed decision timestamps for market {}",
+                    run.model_run_id, market_id
+                ),
+            ));
+        }
+
+        let available_at = rows.iter().map(|row| row.created_at).max().ok_or_else(|| {
+            error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                "factor snapshot bundle unexpectedly has no values",
+            )
+        })?;
+        let values = project_snapshot_values(
+            &self.db,
+            factor_definition_ids,
+            market_id,
+            rows,
+            requested.len(),
+        )
+        .await?;
+        let snapshot_hash = CanonicalDigest::content_hash_json(&(
+            &run.model_run_id,
+            model_version_id,
+            market_id,
+            latest_value.decision_at,
+            available_at,
+            &values,
+        ))
+        .map_err(|error| {
+            error::invariant_violation(
+                Some(entity::QUANT_FACTOR),
+                format!("latest factor snapshot bundle hash failed: {error}"),
+            )
+        })?;
+        Ok(Some(LatestFactorSnapshotBundleInfo {
+            model_run_id: run.model_run_id,
+            model_version_id: model_version_id.clone(),
+            market_id: market_id.clone(),
+            observed_at: latest_value.decision_at,
+            available_at,
+            values,
+            snapshot_hash,
+        }))
+    }
+}
+
+async fn project_snapshot_values(
+    db: &DatabaseConnection,
+    factor_definition_ids: &[FactorDefinitionId],
+    market_id: &MarketId,
+    rows: Vec<quant_factor_value::Model>,
+    expected_definition_count: usize,
+) -> Result<Vec<LatestFactorSnapshotValueInfo>, StorageError> {
+    let definitions = quant_factor_definition::Entity::find()
+        .filter(
+            quant_factor_definition::Column::FactorDefinitionId
+                .is_in(factor_definition_ids.iter().cloned()),
+        )
+        .all(db)
+        .await
+        .map_err(StorageError::from)?
+        .into_iter()
+        .map(|definition| (definition.factor_definition_id.clone(), definition))
+        .collect::<HashMap<_, _>>();
+    if definitions.len() != expected_definition_count {
+        return Err(error::state_conflict(
+            entity::QUANT_FACTOR,
+            Some(market_id),
+            "factor snapshot bundle references a missing definition revision",
+        ));
+    }
+    rows.into_iter()
+        .map(|row| {
+            let definition = definitions.get(&row.factor_definition_id).ok_or_else(|| {
+                error::state_conflict(
+                    entity::QUANT_FACTOR,
+                    Some(&row.factor_definition_id),
+                    "factor snapshot definition disappeared",
+                )
+            })?;
+            Ok(LatestFactorSnapshotValueInfo {
+                factor_value_id: row.factor_value_id,
+                factor_definition_id: row.factor_definition_id,
+                definition_hash: definition.definition_hash.clone(),
+                name: definition.name.clone(),
+                family: definition.factor_family,
+                value_state: row.value_state,
+                raw_value: row.raw_value,
+                normalized_score: row.normalized_score,
+                normalization_source: row.normalization_source,
+                indeterminate_reason: row.indeterminate_reason,
+                direction: row.direction,
+                confidence: row.confidence,
+                explanation: row.explanation,
+            })
+        })
+        .collect()
 }
 
 fn ensure_identical_definition(

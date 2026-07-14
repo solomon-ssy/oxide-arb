@@ -41,7 +41,6 @@ pub enum QuantMarketLinkage {
     ResolverVersion,
     Confidence,
     Outcome,
-    InstrumentKey,
     MetadataHash,
     ContentHash,
     DerivedAt,
@@ -73,11 +72,6 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantMarketLinkage::Outcome)
                 .json_binary()
                 .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantMarketLinkage::InstrumentKey)
-                .text()
-                .null(),
         )
         .col(
             ColumnDef::new(QuantMarketLinkage::MetadataHash)
@@ -152,17 +146,6 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .col((QuantMarketLinkage::DerivedAt, IndexOrder::Desc))
                 .to_owned(),
             "governance unresolved-queue and status filters",
-        ),
-        IndexSpec::sea_query(
-            "idx_quant_market_linkage_instrument",
-            quant_market_linkage_table_name,
-            IndexBuildMode::Transactional,
-            Index::create()
-                .name("idx_quant_market_linkage_instrument")
-                .table(QuantMarketLinkage::Table)
-                .col(QuantMarketLinkage::InstrumentKey)
-                .to_owned(),
-            "linkages by external instrument (ingest-scope derivation)",
         ),
     ]
 }

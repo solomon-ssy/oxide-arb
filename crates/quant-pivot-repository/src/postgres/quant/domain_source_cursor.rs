@@ -53,7 +53,8 @@ impl DomainSourceCursorRepository for PgDomainSourceCursorRepository {
                     quant_domain_source_cursor::Column::InstrumentKey,
                 ])
                 .update_columns([
-                    quant_domain_source_cursor::Column::LastEventTime,
+                    quant_domain_source_cursor::Column::CheckpointJson,
+                    quant_domain_source_cursor::Column::CheckpointHash,
                     quant_domain_source_cursor::Column::Status,
                     quant_domain_source_cursor::Column::LastError,
                     quant_domain_source_cursor::Column::UpdatedAt,

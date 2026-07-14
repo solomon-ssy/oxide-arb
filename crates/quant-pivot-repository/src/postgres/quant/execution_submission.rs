@@ -15,6 +15,10 @@ use crate::{
                 complete_exit_capital, lock_capital, reconcile_capital, release_capital,
                 settle_capital,
             },
+            entry_condition::{
+                claim_for_submission as claim_entry_condition, require_consumed_for_intent,
+                revert_consumed_for_intent,
+            },
             execution_order::validate_execution_order_transition,
             feature_parity::verify_clear_latch_generation,
             order_intent::{load_intent_for_update, validate_intent_transition},
@@ -27,8 +31,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, OrderIntentInfo,
-        ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        EntryConditionClaim, EntryConditionInstanceInfo, ExecutionOrderInfo, ExitLedgerWrite,
+        NewExecutionOrder, NewReconciliation, OrderIntentInfo, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
     },
     entities::{
         quant_execution_order, quant_order_intent, quant_recommendation, quant_reconciliation,
@@ -74,10 +79,10 @@ impl PgExecutionSubmissionRepository {
 impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     async fn claim_for_submission(
         &self,
-        intent_id: &OrderIntentId,
-        now: DateTime<Utc>,
-    ) -> Result<OrderIntentInfo, StorageError> {
+        claim: EntryConditionClaim,
+    ) -> Result<(OrderIntentInfo, EntryConditionInstanceInfo), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let intent_id = &claim.order_intent_id;
         let row = load_intent_for_update(&txn, intent_id).await?;
         if !matches!(
             row.status,
@@ -89,11 +94,25 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
                 format!("intent is not submittable from {}", row.status.as_str()),
             ));
         }
-        if row.expires_at <= now {
+        if row.expires_at <= claim.claimed_at {
             return Err(error::state_conflict(
                 entity::QUANT_ORDER_INTENT,
                 Some(intent_id),
                 "intent has expired and cannot be submitted",
+            ));
+        }
+        if row.condition_instance_id != claim.condition_instance_id {
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                "intent/condition pair changed before atomic claim",
+            ));
+        }
+        let condition = claim_entry_condition(&txn, &claim).await?;
+        if condition.recommendation_id != row.recommendation_id {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_ORDER_INTENT),
+                "condition recommendation does not match intent recommendation",
             ));
         }
         validate_intent_transition(row.status, OrderIntentStatus::AdmissionPending, intent_id)?;
@@ -101,7 +120,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         active.status = ActiveValue::Set(OrderIntentStatus::AdmissionPending);
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(intent_model.into())
+        Ok((intent_model.into(), condition.into()))
     }
 
     async fn revert_claim(
@@ -117,6 +136,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         }
         let revert_to = revert_target_status(&row);
         validate_intent_transition(row.status, revert_to, intent_id)?;
+        revert_consumed_for_intent(&txn, &row.condition_instance_id, intent_id, Utc::now()).await?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(revert_to);
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
@@ -170,6 +190,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             ));
         }
         let recommendation_id = intent.recommendation_id.clone();
+        require_consumed_for_intent(&txn, &intent.condition_instance_id, &intent_id).await?;
 
         // Write-ahead the venue intent: the row exists in `Submitted` before any
         // network call, so a crash mid-submit is recoverable via reconciliation.

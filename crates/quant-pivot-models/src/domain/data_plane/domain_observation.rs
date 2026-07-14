@@ -10,14 +10,14 @@ use std::str::FromStr;
 
 use chrono::{DateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromJsonQueryResult, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     clickhouse::{ChDecimal64, ChSchemaVersion, DomainObservationRow},
     entities::quant_domain_source_cursor,
     enums::domain::{DomainFamily, DomainMetric},
-    types::{DomainInstrumentKey, DomainSourceId},
+    types::{ContentHash, DomainInstrumentKey, DomainSourceId},
 };
 
 /// One normalized external-source metric reading.
@@ -118,6 +118,58 @@ impl DomainCursorStatus {
     }
 }
 
+/// Typed, source-native ingest checkpoint. Equal event times remain distinct
+/// through source sequence/report identity, so corrections are never skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DomainSourceCheckpoint {
+    BinanceKline {
+        close_time: DateTime<Utc>,
+    },
+    BinanceAggTrade {
+        aggregate_trade_id: u64,
+        event_time: DateTime<Utc>,
+    },
+    ChainlinkDataStreams {
+        observations_timestamp: DateTime<Utc>,
+        report_hash: ContentHash,
+    },
+    AviationWeather {
+        observation_time: DateTime<Utc>,
+        report_hash: ContentHash,
+    },
+    Ghcnh {
+        last_hour: DateTime<Utc>,
+        file_hash: ContentHash,
+    },
+    Gefs {
+        reference_time: DateTime<Utc>,
+        request_hash: ContentHash,
+        manifest_hash: ContentHash,
+    },
+}
+
+impl DomainSourceCheckpoint {
+    #[must_use]
+    pub const fn event_time(&self) -> DateTime<Utc> {
+        match self {
+            Self::BinanceKline { close_time } => *close_time,
+            Self::BinanceAggTrade { event_time, .. } => *event_time,
+            Self::ChainlinkDataStreams {
+                observations_timestamp,
+                ..
+            } => *observations_timestamp,
+            Self::AviationWeather {
+                observation_time, ..
+            } => *observation_time,
+            Self::Ghcnh { last_hour, .. } => *last_hour,
+            Self::Gefs { reference_time, .. } => *reference_time,
+        }
+    }
+}
+
+crate::jsonb_active!(DomainSourceCheckpoint);
+
 /// Persisted ingest checkpoint for one `(source, instrument)` stream.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, DerivePartialModel, FromQueryResult,
@@ -126,7 +178,8 @@ impl DomainCursorStatus {
 pub struct DomainSourceCursorInfo {
     pub source_id: DomainSourceId,
     pub instrument_key: DomainInstrumentKey,
-    pub last_event_time: DateTime<Utc>,
+    pub checkpoint_json: DomainSourceCheckpoint,
+    pub checkpoint_hash: ContentHash,
     pub status: String,
     /// Detail from the most recent failed tick; `None` when the last tick
     /// for this instrument succeeded (R10 ingest hardening).
@@ -141,7 +194,8 @@ info_from_model!(
     {
         source_id,
         instrument_key,
-        last_event_time,
+        checkpoint_json,
+        checkpoint_hash,
         status,
         last_error,
         created_at,
@@ -155,7 +209,8 @@ info_from_model!(
 pub struct UpsertDomainSourceCursor {
     pub source_id: DomainSourceId,
     pub instrument_key: DomainInstrumentKey,
-    pub last_event_time: DateTime<Utc>,
+    pub checkpoint_json: DomainSourceCheckpoint,
+    pub checkpoint_hash: ContentHash,
     pub status: String,
     /// Set on a failed tick; explicitly cleared to `None` on the next
     /// success so a resolved error never lingers in the read view.

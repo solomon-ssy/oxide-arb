@@ -21,6 +21,7 @@ uuid = { workspace = true, features = ["v5"] }
 linkme = { workspace = true }
 # Deterministic Tier-1 linkage template parsing (11.2.2).
 regex = { workspace = true }
+url = { workspace = true }
 
 # ── Research numeric stack ────────────────────────────────────────────────────
 # Pure-Rust, lightweight, and load-bearing for the online feature plane (rolling

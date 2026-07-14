@@ -4,15 +4,16 @@ use crate::{postgres::query::paginate_mapped, traits::MarketLinkageRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        DecisionBoundary, DecisionSource, MarketLinkageInfo, MarketLinkageListQuery,
-        NewMarketLinkage, PageWindow, Paginated,
+        DecisionBoundary, DecisionSource, LinkageOutcome, MarketLinkageInfo,
+        MarketLinkageListQuery, NewMarketLinkage, PageWindow, Paginated,
     },
-    entities::quant_market_linkage,
+    entities::{market, quant_market_linkage, quant_market_linkage_source},
+    enums::market::MarketStatus,
     types::{MarketId, MarketLinkageId},
 };
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, sea_query::OnConflict,
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query::OnConflict,
 };
 
 /// Reduce rows already ordered `(market_id ASC, derived_at DESC, created_at
@@ -46,6 +47,17 @@ impl PgMarketLinkageRepository {
 impl MarketLinkageRepository for PgMarketLinkageRepository {
     async fn append(&self, linkage: NewMarketLinkage) -> Result<MarketLinkageInfo, StorageError> {
         let content_hash = linkage.content_hash.clone();
+        let source_bindings = match serde_json::from_value::<LinkageOutcome>(
+            linkage.outcome.clone(),
+        )
+        .map_err(|error| StorageError::InvariantViolation {
+            entity: Some("quant_market_linkage"),
+            detail: format!("invalid typed linkage outcome: {error}"),
+        })? {
+            LinkageOutcome::Resolved(binding) => binding.source_bindings,
+            LinkageOutcome::Unresolved { .. } => Vec::new(),
+        };
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
         // Idempotent append: a duplicate content hash is a resolver no-op, not
         // an error — the ledger row for that outcome already exists.
         quant_market_linkage::Entity::insert(linkage.into_active_model())
@@ -55,18 +67,45 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
                     .to_owned(),
             )
             .do_nothing()
-            .exec(&self.db)
+            .exec(&txn)
             .await
             .map_err(StorageError::from)?;
         let row = quant_market_linkage::Entity::find()
             .filter(quant_market_linkage::Column::ContentHash.eq(content_hash.clone()))
-            .one(&self.db)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or(StorageError::NotFound {
+                entity: "quant_market_linkage",
+                id: content_hash.to_string(),
+            })?;
+        for binding in source_bindings {
+            quant_market_linkage_source::Entity::insert(quant_market_linkage_source::ActiveModel {
+                linkage_id: ActiveValue::Set(row.linkage_id.clone()),
+                role: ActiveValue::Set(binding.role),
+                source_id: ActiveValue::Set(binding.source_id),
+                instrument_key: ActiveValue::Set(binding.instrument_key),
+                binding_hash: ActiveValue::Set(binding.binding_hash),
+                available_at: ActiveValue::Set(binding.available_at),
+                created_at: ActiveValue::NotSet,
+            })
+            .on_conflict(
+                OnConflict::columns([
+                    quant_market_linkage_source::Column::LinkageId,
+                    quant_market_linkage_source::Column::Role,
+                    quant_market_linkage_source::Column::SourceId,
+                    quant_market_linkage_source::Column::InstrumentKey,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .do_nothing()
+            .exec(&txn)
             .await
             .map_err(StorageError::from)?;
-        row.map(Into::into).ok_or(StorageError::NotFound {
-            entity: "quant_market_linkage",
-            id: content_hash.to_string(),
-        })
+        }
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(row.into())
     }
 
     async fn valid_at(
@@ -138,6 +177,18 @@ impl MarketLinkageRepository for PgMarketLinkageRepository {
             .await
             .map_err(StorageError::from)?;
         Ok(reduce_to_first_per_market(rows))
+    }
+
+    async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+        let market_ids = market::Entity::find()
+            .select_only()
+            .column(market::Column::MarketId)
+            .filter(market::Column::Status.eq(MarketStatus::Active))
+            .into_tuple::<MarketId>()
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        self.latest_for_markets(&market_ids).await
     }
 
     async fn ledger_for_markets(

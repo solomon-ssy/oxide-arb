@@ -10,14 +10,18 @@ use crate::{
     domain::{TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, pagination::PageRequest},
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
     types::{
-        ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyFitContract,
-        TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TrainingDatasetId,
+        ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload,
+        TradePolicyConditionCandidate, TradePolicyFitContract, TradePolicyGovernanceAuditId,
+        TradePolicyPublicationBlocker, TrainingDatasetId, VerticalActivationTarget,
     },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct FitTradePolicyRequest {
     pub contract: TradePolicyFitContract,
+    pub activation_target: VerticalActivationTarget,
+    #[validate(length(min = 1, max = 16))]
+    pub condition_candidates: Vec<TradePolicyConditionCandidate>,
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
 }
@@ -25,6 +29,9 @@ pub struct FitTradePolicyRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct TradePolicyFitPreflightRequest {
     pub contract: TradePolicyFitContract,
+    pub activation_target: VerticalActivationTarget,
+    #[validate(length(min = 1, max = 16))]
+    pub condition_candidates: Vec<TradePolicyConditionCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -172,6 +179,8 @@ pub struct TradePolicyFitPreflightView {
     pub full_l2_trajectory_present: TradePolicyPreflightCheckStatus,
     pub fee_model_present: TradePolicyPreflightCheckStatus,
     pub publishable_input: TradePolicyPreflightCheckStatus,
+    pub canonical_condition_candidates: Option<Vec<TradePolicyConditionCandidate>>,
+    pub condition_candidate_set_hash: Option<ContentHash>,
     pub messages: Vec<String>,
 }
 

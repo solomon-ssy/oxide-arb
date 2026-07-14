@@ -61,6 +61,12 @@ pub enum Relation {
         to = "super::market::Column::MarketId"
     )]
     Market,
+    #[sea_orm(
+        belongs_to = "super::quant_model_run::Entity",
+        from = "Column::ModelRunId",
+        to = "super::quant_model_run::Column::ModelRunId"
+    )]
+    ModelRun,
 }
 
 impl Related<super::quant_factor_definition::Entity> for Entity {
@@ -78,6 +84,12 @@ impl Related<super::quant_feature_vector::Entity> for Entity {
 impl Related<super::market::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Market.def()
+    }
+}
+
+impl Related<super::quant_model_run::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ModelRun.def()
     }
 }
 

@@ -16,6 +16,8 @@ mod capital;
 mod comparison;
 #[allow(clippy::needless_update)] // NewTrainingDatasetPlan omits materialization/timestamps
 mod dataset;
+#[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
+mod entry_condition;
 mod execution;
 mod exit_training;
 mod factor;
@@ -57,6 +59,7 @@ pub use candidate::*;
 pub use capital::*;
 pub use comparison::*;
 pub use dataset::*;
+pub use entry_condition::*;
 pub use execution::*;
 pub use exit_training::*;
 pub use factor::*;

@@ -6,9 +6,11 @@ use quant_pivot_models::{
     enums::{
         common::OrderType,
         execution::AdmissionCheckId,
-        quant::{OrderIntentStatus, PriceComparison, QuantRuntimeMode, RecommendationReportStatus},
+        quant::{
+            EntryConditionState, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
+        },
     },
-    types::{Bps, EntryTrigger, Price, Shares, Usd},
+    types::{Bps, Price, Shares, Usd},
 };
 use rust_decimal::Decimal;
 
@@ -269,43 +271,31 @@ impl AdmissionCheck for VenueMetadataCheck {
 ///
 /// Confirmation is owned by the durable trigger worker; admission rechecks the
 /// current price condition immediately before the money-changing claim.
-pub(super) struct EntryTriggerCheck;
+pub(super) struct EntryConditionCheck;
 
-impl AdmissionCheck for EntryTriggerCheck {
+impl AdmissionCheck for EntryConditionCheck {
     fn id(&self) -> AdmissionCheckId {
-        AdmissionCheckId::EntryTrigger
+        AdmissionCheckId::EntryConditionPlan
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        match &input.intent.entry_trigger_json {
-            EntryTrigger::Immediate => {
-                AdmissionCheckTrace::pass(self.id(), "immediate entry trigger")
+        if input.condition.recommendation_id != input.intent.recommendation_id
+            || input.condition.condition_instance_id != input.intent.condition_instance_id
+        {
+            return AdmissionCheckTrace::deny(self.id(), "condition binding does not match intent");
+        }
+        match input.condition.state {
+            EntryConditionState::NotRequired => {
+                AdmissionCheckTrace::pass(self.id(), "entry condition not required")
             }
-            EntryTrigger::PriceCondition {
-                comparison,
-                threshold,
-                ..
-            } => {
-                let Some(book) = &input.book else {
-                    return AdmissionCheckTrace::defer(self.id(), "no book to evaluate trigger");
-                };
-                let Some(best_ask) = book.best_ask() else {
-                    return AdmissionCheckTrace::defer(self.id(), "ask side empty");
-                };
-                let satisfied = match comparison {
-                    PriceComparison::AtOrAbove => best_ask >= *threshold,
-                    PriceComparison::AtOrBelow => best_ask <= *threshold,
-                };
-                if satisfied {
-                    AdmissionCheckTrace::pass(self.id(), "price condition satisfied")
-                        .with_threshold(threshold.to_string())
-                        .with_actual(best_ask.to_string())
-                } else {
-                    AdmissionCheckTrace::defer(self.id(), "price condition is no longer satisfied")
-                        .with_threshold(threshold.to_string())
-                        .with_actual(best_ask.to_string())
-                }
-            }
+            EntryConditionState::Qualified => AdmissionCheckTrace::pass(
+                self.id(),
+                "entry condition is qualified at the frozen evaluation revision",
+            ),
+            state => AdmissionCheckTrace::defer(
+                self.id(),
+                format!("entry condition is {}", state.as_str()),
+            ),
         }
     }
 }

@@ -10,9 +10,10 @@ use sea_orm::{
 use crate::{
     enums::{
         execution::{ExitReason, ExitState, OrderIntentKind},
-        quant::{ApprovalStatus, EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
+        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
     idens::{
+        quant_entry_condition_instance::QuantEntryConditionInstance,
         quant_model_version::QuantModelVersion, quant_recommendation::QuantRecommendation,
         runtime_config_version::RuntimeConfigVersion,
     },
@@ -43,15 +44,11 @@ pub enum QuantOrderIntent {
     PolicyHash,
     StatusReason,
     AdmissionTraceRef,
-    EntryTriggerJson,
+    ConditionInstanceId,
     EntryOrderJson,
     ExitPolicyJson,
     RiskEnvelopeHash,
     ExpiresAt,
-    EntryTriggerState,
-    TriggerConfirmingSince,
-    TriggerLastObservedAt,
-    TriggerReadyAt,
     ExitState,
     ExitReason,
     NextCheckAt,
@@ -85,7 +82,6 @@ pub fn table() -> TableCreateStatement {
         ));
     add_approval_columns(&mut stmt);
     add_frozen_policy_columns(&mut stmt);
-    add_trigger_columns(&mut stmt);
     add_exit_columns(&mut stmt);
     stmt.col(timestamp_with_write_default(QuantOrderIntent::CreatedAt))
         .col(timestamp_with_write_default(QuantOrderIntent::UpdatedAt));
@@ -116,11 +112,7 @@ fn add_frozen_policy_columns(stmt: &mut TableCreateStatement) {
             .text()
             .null(),
     )
-    .col(
-        ColumnDef::new(QuantOrderIntent::EntryTriggerJson)
-            .json_binary()
-            .not_null(),
-    )
+    .col(column::uuid_fk(QuantOrderIntent::ConditionInstanceId))
     .col(
         ColumnDef::new(QuantOrderIntent::EntryOrderJson)
             .json_binary()
@@ -140,28 +132,6 @@ fn add_frozen_policy_columns(stmt: &mut TableCreateStatement) {
         ColumnDef::new(QuantOrderIntent::ExpiresAt)
             .timestamp_with_time_zone()
             .not_null(),
-    );
-}
-
-fn add_trigger_columns(stmt: &mut TableCreateStatement) {
-    stmt.col(column::pg_enum_default::<EntryTriggerState>(
-        QuantOrderIntent::EntryTriggerState,
-        &EntryTriggerState::NotRequired,
-    ))
-    .col(
-        ColumnDef::new(QuantOrderIntent::TriggerConfirmingSince)
-            .timestamp_with_time_zone()
-            .null(),
-    )
-    .col(
-        ColumnDef::new(QuantOrderIntent::TriggerLastObservedAt)
-            .timestamp_with_time_zone()
-            .null(),
-    )
-    .col(
-        ColumnDef::new(QuantOrderIntent::TriggerReadyAt)
-            .timestamp_with_time_zone()
-            .null(),
     );
 }
 
@@ -209,6 +179,19 @@ fn add_foreign_keys(stmt: &mut TableCreateStatement) {
             .to(
                 QuantRecommendation::Table,
                 QuantRecommendation::RecommendationId,
+            )
+            .on_delete(ForeignKeyAction::Restrict),
+    )
+    .foreign_key(
+        ForeignKey::create()
+            .name("fk_quant_order_intent_condition_instance")
+            .from(
+                QuantOrderIntent::Table,
+                QuantOrderIntent::ConditionInstanceId,
+            )
+            .to(
+                QuantEntryConditionInstance::Table,
+                QuantEntryConditionInstance::ConditionInstanceId,
             )
             .on_delete(ForeignKeyAction::Restrict),
     )
@@ -265,6 +248,7 @@ pub fn indexes() -> Vec<IndexSpec> {
 pub fn dependencies() -> Vec<TableDependency> {
     vec![
         TableDependency::foreign_key(quant_recommendation_table_name),
+        TableDependency::foreign_key(quant_entry_condition_instance_table_name),
         TableDependency::foreign_key(runtime_config_version_table_name),
         TableDependency::foreign_key(quant_model_version_table_name),
     ]
@@ -280,6 +264,10 @@ fn quant_order_intent_table_name() -> String {
 
 fn quant_recommendation_table_name() -> String {
     QuantRecommendation::Table.to_string()
+}
+
+fn quant_entry_condition_instance_table_name() -> String {
+    QuantEntryConditionInstance::Table.to_string()
 }
 
 fn runtime_config_version_table_name() -> String {

@@ -2162,6 +2162,7 @@ pub(crate) fn report_decision_boundary(
     DecisionClock::new(knowledge_lag_secs).serving_boundary(
         report.decision_at,
         config.domain.crypto.availability_lag_secs,
+        config.domain.weather.availability_lag_secs,
     )
 }
 

@@ -3,31 +3,35 @@
 //! This module is compiled only into the existing web integration-test binary;
 //! production route assembly remains unchanged.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use actix_web::{App, HttpResponse, HttpServer, middleware::from_fn, web};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_core::{
-    execution::{ConfirmationProgress, evaluate_entry_trigger},
+    execution::{
+        EntryConditionInputSet, ExecutablePriceInput, decide_entry_condition_state,
+        evaluate_entry_condition,
+    },
     ingest::book_store::BookStore,
     observability::metrics_hub::MetricsHub,
 };
 use quant_pivot_error::{QuantError, QuantResult, control::ControlError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        BacktestPathSetInfo, BacktestPathSetListQuery, BacktestReportInfo, BacktestReportListQuery,
-        BookLevel, FactorCollinearitySource, FactorCollinearityView, FactorDefinitionInfo,
-        FactorDefinitionListQuery, JobProgressSink, MarketDataPort, ModelComparisonReportInfo,
-        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort,
-        ModelVersionInfo, ModelVersionListQuery, Paginated, PublishedModelOptionView,
-        ResearchCatalogPort, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
-        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+        ApplyEntryConditionEvaluation, BacktestPathSetInfo, BacktestPathSetListQuery,
+        BacktestReportInfo, BacktestReportListQuery, BookLevel, EntryConditionArtifactInfo,
+        EntryConditionInstanceInfo, FactorCollinearitySource, FactorCollinearityView,
+        FactorDefinitionInfo, FactorDefinitionListQuery, JobProgressSink, MarketDataPort,
+        ModelComparisonReportInfo, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
+        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
+        PublishedModelOptionView, RecommendationInfo, ResearchCatalogPort, TradePolicyArtifactInfo,
+        TradePolicyAuditListQuery, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
         TradePolicyGovernanceAuditInfo, TradePolicyListQuery, TradePolicyPort, TrainModelRequest,
         TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, empty_catalog_page,
     },
-    entities::quant_recommendation,
-    enums::quant::{EntryTriggerState, TradePolicyGovernanceAction, TradePolicyStatus},
+    entities::{quant_entry_condition_instance, quant_recommendation},
+    enums::quant::{EntryConditionState, TradePolicyGovernanceAction, TradePolicyStatus},
     types::{
         FactorDefinitionId, ModelVersionId, OrderIntentId, Price, RecommendationId,
         RecommendationTradePlan, Shares, TokenId, TradePlanBlocker, TradePolicyArtifactId,
@@ -36,12 +40,14 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgExecutionSubmissionRepository, PgModelRegistryRepository, PgOrderIntentRepository,
-        PgRecommendationRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgEntryConditionRepository, PgExecutionSubmissionRepository, PgModelRegistryRepository,
+        PgOrderIntentRepository, PgRecommendationRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
-        ExecutionSubmissionRepository, ModelRegistryRepository, OrderIntentRepository,
-        RecommendationRepository, TradePolicyRepository, TrainingDatasetRepository,
+        EntryConditionRepository, ExecutionSubmissionRepository, ModelRegistryRepository,
+        OrderIntentRepository, RecommendationRepository, TradePolicyRepository,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_test_support::ui_demo_seed::{DemoSeedRecord, seed_ui_demo_pg};
@@ -50,7 +56,6 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -350,7 +355,6 @@ struct E2eFixtures {
 struct E2eControlState {
     db: DatabaseConnection,
     books: Arc<BookStore>,
-    progress: Mutex<HashMap<OrderIntentId, ConfirmationProgress>>,
     fixtures: E2eFixtures,
 }
 
@@ -364,9 +368,15 @@ struct BookObservationRequest {
 
 #[derive(Serialize)]
 struct BookObservationResponse {
-    entry_trigger_state: EntryTriggerState,
+    entry_condition_state: EntryConditionState,
     confirming_since: Option<DateTime<Utc>>,
     ready_at: Option<DateTime<Utc>>,
+}
+
+struct E2eConditionFixture {
+    recommendation: RecommendationInfo,
+    instance: EntryConditionInstanceInfo,
+    artifact: EntryConditionArtifactInfo,
 }
 
 async fn get_fixtures(control: web::Data<E2eControlState>) -> web::Json<E2eFixtures> {
@@ -391,21 +401,11 @@ async fn observe_book_inner(
     intent_id: &OrderIntentId,
     request: &BookObservationRequest,
 ) -> QuantResult<BookObservationResponse> {
-    let intents = PgOrderIntentRepository::new(control.db.clone());
-    let intent = intents
-        .find_by_id(intent_id)
-        .await?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "quant_order_intent",
-            id: intent_id.to_string(),
-        })?;
-    let recommendation = PgRecommendationRepository::new(control.db.clone())
-        .find_by_id(&intent.recommendation_id)
-        .await?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "quant_recommendation",
-            id: intent.recommendation_id.to_string(),
-        })?;
+    let E2eConditionFixture {
+        recommendation,
+        mut instance,
+        artifact,
+    } = load_condition_fixture(control, intent_id).await?;
     let timestamp = if request.stale {
         Utc::now() - Duration::seconds(10)
     } else {
@@ -420,44 +420,130 @@ async fn observe_book_inner(
     let snapshot = control.books.load(&recommendation.token_id);
     let best_ask = snapshot
         .as_deref()
-        .and_then(quant_pivot_models::domain::BookSnapshot::best_ask);
-    let max_book_age_ms = recommendation
-        .trade_plan
-        .frozen()
-        .map_or(0, |(_, entry, _, _, _)| entry.max_book_age_ms);
-    let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(u64::MAX);
-    let book_fresh = snapshot
-        .as_deref()
-        .is_some_and(|book| now_ms.saturating_sub(book.timestamp_ms) <= max_book_age_ms);
-    let previous = control.progress.lock().await.get(intent_id).copied();
-    let evaluation = evaluate_entry_trigger(
-        &intent.entry_trigger_json,
-        intent.entry_trigger_state,
-        previous,
-        best_ask,
-        book_fresh,
+        .and_then(quant_pivot_models::domain::BookSnapshot::best_ask)
+        .ok_or_else(|| QuantError::config("E2E condition book has no best ask"))?;
+    let observed_at = if request.stale {
+        request.observed_at - Duration::seconds(10)
+    } else {
+        request.observed_at
+    };
+    let evaluation = evaluate_entry_condition(
+        &artifact.payload_json,
+        &EntryConditionInputSet {
+            binding: artifact.payload_json.binding.clone(),
+            evaluated_at: request.observed_at,
+            prices: vec![ExecutablePriceInput {
+                token_id: recommendation.token_id,
+                price: best_ask,
+                observed_at,
+                available_at: observed_at,
+                gap_generation: control.books.gap_generation(),
+            }],
+            factors: Vec::new(),
+            crypto: Vec::new(),
+            weather: Vec::new(),
+        },
+    )?;
+    let decision = decide_entry_condition_state(
+        instance.state,
+        instance.confirmation_started_at,
+        instance.continuity_hash.as_ref(),
+        instance.last_evaluated_at,
+        &artifact.payload_json,
+        &evaluation,
         request.observed_at,
     );
-    {
-        let mut progress = control.progress.lock().await;
-        if let Some(next) = evaluation.progress {
-            progress.insert(intent_id.clone(), next);
-        } else {
-            progress.remove(intent_id);
-        }
-    }
-    let updated = if let Some(transition) = evaluation.transition {
-        intents
-            .transition_entry_trigger(intent_id, transition)
-            .await?
-    } else {
-        intent
-    };
+    let worker_id = Uuid::now_v7();
+    instance =
+        lease_condition_instance(&control.db, &instance, worker_id, request.observed_at).await?;
+    let conditions = PgEntryConditionRepository::new(control.db.clone());
+    let updated = conditions
+        .apply_evaluation(
+            &instance.condition_instance_id,
+            worker_id,
+            ApplyEntryConditionEvaluation {
+                expected_revision: instance.revision,
+                expected_lease_epoch: instance.lease_epoch,
+                state: decision.state,
+                truth: evaluation.truth,
+                evaluation_hash: evaluation.evaluation_hash,
+                input_fingerprint: evaluation.input_fingerprint,
+                continuity_hash: evaluation.continuity_hash,
+                confirmation_started_at: decision.confirmation_started_at,
+                evaluated_at: request.observed_at,
+                next_evaluation_at: Some(request.observed_at + Duration::seconds(1)),
+            },
+        )
+        .await?;
     Ok(BookObservationResponse {
-        entry_trigger_state: updated.entry_trigger_state,
-        confirming_since: updated.trigger_confirming_since,
-        ready_at: updated.trigger_ready_at,
+        entry_condition_state: updated.state,
+        confirming_since: updated.confirmation_started_at,
+        ready_at: (updated.state == EntryConditionState::Qualified).then_some(request.observed_at),
     })
+}
+
+async fn load_condition_fixture(
+    control: &E2eControlState,
+    intent_id: &OrderIntentId,
+) -> QuantResult<E2eConditionFixture> {
+    let intent = PgOrderIntentRepository::new(control.db.clone())
+        .find_by_id(intent_id)
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "quant_order_intent",
+            id: intent_id.to_string(),
+        })?;
+    let recommendation = PgRecommendationRepository::new(control.db.clone())
+        .find_by_id(&intent.recommendation_id)
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "quant_recommendation",
+            id: intent.recommendation_id.to_string(),
+        })?;
+    let conditions = PgEntryConditionRepository::new(control.db.clone());
+    let instance = conditions
+        .find_instance(&intent.condition_instance_id)
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "quant_entry_condition_instance",
+            id: intent.condition_instance_id.to_string(),
+        })?;
+    let artifact_id = instance
+        .artifact_id
+        .clone()
+        .ok_or_else(|| QuantError::config("E2E conditional intent instance has no artifact id"))?;
+    let artifact = conditions
+        .find_artifact(&artifact_id)
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "quant_entry_condition_artifact",
+            id: artifact_id.to_string(),
+        })?;
+    Ok(E2eConditionFixture {
+        recommendation,
+        instance,
+        artifact,
+    })
+}
+
+async fn lease_condition_instance(
+    db: &DatabaseConnection,
+    instance: &EntryConditionInstanceInfo,
+    worker_id: Uuid,
+    observed_at: DateTime<Utc>,
+) -> QuantResult<EntryConditionInstanceInfo> {
+    let row =
+        quant_entry_condition_instance::Entity::find_by_id(instance.condition_instance_id.clone())
+            .one(db)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "quant_entry_condition_instance",
+                id: instance.condition_instance_id.to_string(),
+            })?;
+    let mut active = row.into_active_model();
+    active.lease_owner = ActiveValue::Set(Some(worker_id));
+    active.lease_expires_at = ActiveValue::Set(Some(observed_at + Duration::seconds(15)));
+    Ok(active.update(db).await?.into())
 }
 
 fn apply_book(
@@ -509,6 +595,11 @@ async fn seed_exit_reinference_observation(
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 ))
                 .expect("fixture model hash"),
+                factor_snapshot_hash: quant_pivot_models::types::ContentHash::parse(concat!(
+                    "blake3:",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                ))
+                .expect("fixture factor snapshot hash"),
                 mark: Price::new(dec!(0.69)),
                 score: quant_pivot_models::types::Probability::new(dec!(0.67)),
                 score_retention: dec!(0.82),
@@ -625,7 +716,6 @@ async fn serve_protected_ui_e2e() {
     let control = web::Data::new(E2eControlState {
         db: env.db.clone(),
         books,
-        progress: Mutex::new(HashMap::new()),
         fixtures,
     });
     let state = web::Data::new(env.state.clone());

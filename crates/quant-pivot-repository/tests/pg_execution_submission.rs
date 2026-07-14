@@ -15,8 +15,8 @@ use quant_pivot_error::storage::{
 use quant_pivot_models::{
     domain::{
         ApproveOrderIntent, ApproveOrderIntentOutcome, CapitalReconcileSettlement,
-        CapitalSettlement, EntryTriggerTransition, ExitLedgerWrite, NewAccountSnapshot,
-        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
+        CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot, NewCapitalAllocation,
+        NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
         NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
         NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
         NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
@@ -39,7 +39,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerState,
+            AccountSource, ApprovalStatus, BindingConstraint, EntryConditionState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
@@ -50,21 +50,22 @@ use quant_pivot_models::{
     },
     types::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
-        ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderPolicy,
-        EntryOrderSpec, EntryPlan, EntryTrigger, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown,
-        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
-        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId, PendingScaleOut,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigActivationId,
-        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
+        ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary,
+        EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy, EntryOrderSpec, EntryPlan,
+        EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan,
+        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
+        OrderAmount, OrderId, OrderIntentId, PendingScaleOut, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary, RiskEnvelope,
+        RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
+        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -85,6 +86,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
+    execution_pg_seed::{claim_entry_for_test, entry_claim_for_test},
     pg::setup_pg,
     report_fixtures,
 };
@@ -108,15 +110,15 @@ async fn claim_guards_against_double_submit() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    let claimed = submission
-        .claim_for_submission(&intent_id, Utc::now())
+    let claim = entry_claim_for_test(&db, &intent_id).await;
+    let (claimed, consumed) = submission
+        .claim_for_submission(claim.clone())
         .await
         .expect("first claim succeeds");
     assert_eq!(claimed.status, OrderIntentStatus::AdmissionPending);
+    assert_eq!(consumed.state, EntryConditionState::Consumed);
 
-    let second = submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await;
+    let second = submission.claim_for_submission(claim).await;
     assert!(
         second.is_err(),
         "a second concurrent claim must fail (intent no longer submittable)",
@@ -211,36 +213,17 @@ async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn expiry_is_atomic_and_idempotent_across_trigger_capital_and_audit() {
+async fn expiry_is_atomic_and_idempotent_across_capital_and_audit() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let intents = PgOrderIntentRepository::new(db.clone());
-    let now = Utc::now();
-
-    intents
-        .transition_entry_trigger(
-            &intent_id,
-            EntryTriggerTransition {
-                state: EntryTriggerState::Confirming,
-                confirming_since: Some(now),
-                last_observed_at: Some(now),
-                ready_at: None,
-            },
-        )
-        .await
-        .expect("seed confirming trigger state");
-
     let expired = intents
         .expire(&intent_id, intent_expiry_operation_log(&intent_id, "first"))
         .await
         .expect("expire intent");
     assert_eq!(expired.status, OrderIntentStatus::Expired);
-    assert_eq!(expired.entry_trigger_state, EntryTriggerState::Expired);
-    assert_eq!(expired.trigger_confirming_since, None);
-    assert_eq!(expired.trigger_last_observed_at, None);
-    assert_eq!(expired.trigger_ready_at, None);
 
     let repeated = intents
         .expire(
@@ -323,8 +306,9 @@ async fn expiry_and_submission_claim_race_has_one_owner() {
     let claim_intent = seed_approved_intent(&db, &claim_ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     let expire_repo = PgOrderIntentRepository::new(db.clone());
+    let claim = entry_claim_for_test(&db, &claim_intent).await;
     let (claim_result, expire_result) = tokio::join!(
-        submission.claim_for_submission(&claim_intent, Utc::now()),
+        submission.claim_for_submission(claim),
         expire_repo.expire(
             &claim_intent,
             intent_expiry_operation_log(&claim_intent, "claim-race"),
@@ -371,10 +355,7 @@ async fn create_entry_locks_capital_and_advances_intent() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -409,10 +390,7 @@ async fn stale_parity_generation_blocks_entry_write_ahead() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
 
     let stale_generation = FeatureParityStateId::from_v7();
     let error = submission
@@ -446,10 +424,7 @@ async fn create_entry_advances_recommendation_to_executed() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -475,10 +450,6 @@ async fn reject_admission_releases_capital_and_marks_rejected() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
     let rejected = submission
         .reject_admission(
             &intent_id,
@@ -511,10 +482,7 @@ async fn revert_claim_restores_approved_by_policy_for_auto_intent() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let reverted = submission
         .revert_claim(&intent_id)
         .await
@@ -531,10 +499,7 @@ async fn partial_fill_splits_capital_while_locked() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -639,10 +604,7 @@ async fn full_fill_spends_capital_and_writes_position() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -701,10 +663,7 @@ async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -774,10 +733,7 @@ async fn rejected_releases_capital_without_position() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -825,10 +781,7 @@ async fn recover_dangling_returns_in_flight_orders() {
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
 
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(&db, &submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, &ids),
@@ -948,7 +901,7 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
         policy_hash: None,
         status_reason: None,
         admission_trace_ref: None,
-        entry_trigger_json: EntryTrigger::Immediate,
+        condition_instance_id: ids.condition_instance.clone(),
         entry_order_json: EntryOrderSpec {
             token_id: TokenId::new("token-1"),
             side: Side::Buy,
@@ -981,10 +934,6 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
         },
         risk_envelope_hash: content_hash('f'),
         expires_at: Utc::now() + chrono::Duration::hours(1),
-        entry_trigger_state: EntryTriggerState::NotRequired,
-        trigger_confirming_since: None,
-        trigger_last_observed_at: None,
-        trigger_ready_at: None,
     }
 }
 
@@ -1015,10 +964,7 @@ async fn ambiguous_order(
     ids: &TxnIds,
 ) -> (OrderIntentId, ExecutionOrderId) {
     let intent_id = seed_approved_intent(db, ids).await;
-    submission
-        .claim_for_submission(&intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(db, submission, &intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(&intent_id, ids),
@@ -1547,7 +1493,7 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 policy_hash: None,
                 status_reason: None,
                 admission_trace_ref: None,
-                entry_trigger_json: EntryTrigger::Immediate,
+                condition_instance_id: ids.condition_instance.clone(),
                 entry_order_json: EntryOrderSpec {
                     token_id: TokenId::new("token-1"),
                     side: Side::Buy,
@@ -1580,10 +1526,6 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 },
                 risk_envelope_hash: content_hash('f'),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
-                entry_trigger_state: EntryTriggerState::NotRequired,
-                trigger_confirming_since: None,
-                trigger_last_observed_at: None,
-                trigger_ready_at: None,
             },
             NewCapitalAllocation {
                 capital_allocation_id: CapitalAllocationId::from_v7(),
@@ -1640,6 +1582,7 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
@@ -1820,6 +1763,7 @@ struct TxnIds {
     portfolio_plan: PortfolioPlanId,
     report: RecommendationReportId,
     recommendation: RecommendationId,
+    condition_instance: EntryConditionInstanceId,
     model_version: ModelVersionId,
     model_run: ModelRunId,
     market_selection: MarketSelectionId,
@@ -1833,6 +1777,29 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     let report = report_row(ids, equity_snapshot_id.clone());
     let decision_at = report.decision_at;
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
+    let recommendation = report_recommendation(ids);
+    let entry_condition_instance = NewEntryConditionInstance {
+        condition_instance_id: ids.condition_instance.clone(),
+        recommendation_id: ids.recommendation.clone(),
+        artifact_id: None,
+        artifact_hash: None,
+        state: EntryConditionState::NotRequired,
+        truth_json: Some(ConditionTruth::Satisfied),
+        revision: 0,
+        evaluation_hash: None,
+        input_fingerprint: None,
+        continuity_hash: None,
+        confirmation_started_at: None,
+        last_evaluated_at: None,
+        next_evaluation_at: None,
+        expires_at: recommendation.valid_until,
+        lease_owner: None,
+        lease_expires_at: None,
+        lease_epoch: 0,
+        claimed_by_intent_id: None,
+        claim_admission_state_version: None,
+        consumed_at: None,
+    };
     NewReportTransaction {
         feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
         account_snapshot: NewAccountSnapshot {
@@ -1848,7 +1815,9 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         },
         portfolio_plan: report_portfolio_plan(ids),
         report,
-        recommendations: vec![report_recommendation(ids)],
+        recommendations: vec![recommendation],
+        entry_condition_artifacts: Vec::new(),
+        entry_condition_instances: vec![entry_condition_instance],
         sampled_feature_parity: Some(sampled_feature_parity),
         operation_log: report_operation_log(ids),
     }
@@ -2035,7 +2004,7 @@ fn new_account_snapshot() -> NewAccountSnapshot {
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger: EntryTrigger::Immediate,
+        condition: EntryConditionPlan::Immediate,
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.6)),
             post_only: true,
@@ -2244,14 +2213,12 @@ fn report_summary() -> ReportSummary {
 /// Drive an approved intent's entry to a confirmed full fill: capital `Spent`,
 /// one open lot (100 @ 0.60), intent `Filled`.
 async fn fill_entry_lot(
+    db: &sea_orm::DatabaseConnection,
     submission: &PgExecutionSubmissionRepository,
     ids: &TxnIds,
     intent_id: &OrderIntentId,
 ) {
-    submission
-        .claim_for_submission(intent_id, Utc::now())
-        .await
-        .expect("claim");
+    claim_entry_for_test(db, submission, intent_id).await;
     let order = submission
         .create_entry_order_and_lock_capital(
             new_execution_order(intent_id, ids),
@@ -2292,7 +2259,7 @@ async fn entry_fill_freezes_scale_out_denominator() {
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     let intents = PgOrderIntentRepository::new(db.clone());
 
-    fill_entry_lot(&submission, &ids, &intent_id).await;
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
 
     let intent = intents
         .find_by_id(&intent_id)
@@ -2341,7 +2308,7 @@ async fn exit_full_releases_capital_with_realized_pnl() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&submission, &ids, &intent_id).await;
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
 
     // Write-ahead the exit: lot Open -> Closing.
     let exit = submission
@@ -2413,7 +2380,7 @@ async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&submission, &ids, &intent_id).await;
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
 
     let exit = submission
         .create_exit_order_and_mark_closing(
@@ -2489,7 +2456,7 @@ async fn exit_rejects_second_in_flight_order() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&submission, &ids, &intent_id).await;
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
 
     submission
         .create_exit_order_and_mark_closing(

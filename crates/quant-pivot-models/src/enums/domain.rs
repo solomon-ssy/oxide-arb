@@ -2,9 +2,8 @@
 //! tiers, and domain-observation metrics (Phase 11.2.2).
 //!
 //! The domain plane models category-routed alpha built on **external** data
-//! sources (crypto underlying prices today; sports / politics / weather /
-//! geopolitics additively later). Everything here is deliberately open along
-//! the four extension axes: new vertical = new [`DomainFamily`] variant, new
+//! sources (crypto underlying prices and airport daily-high weather). Everything
+//! here is deliberately open along the four extension axes: new vertical = new [`DomainFamily`] variant, new
 //! asset = resolver-ruleset entry, new oracle = [`ResolutionOracle`] variant
 //! (in `domain::quant::linkage`), new feed = new `DomainSourceId` — the
 //! long-format `quant_domain_observation` fact never changes shape.
@@ -22,14 +21,29 @@ pg_enum! {
     /// sources and domain factors.
     @derive(JsonSchema, PartialOrd, Ord)
     pub enum DomainFamily {
-        /// Crypto underlying-price vertical (Binance klines + Chainlink oracle).
+        /// Crypto underlying-price vertical (Binance + Chainlink Data Streams).
         Crypto => "crypto",
+        /// Airport local-calendar-day maximum-temperature vertical.
+        Weather => "weather",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_linkage_source_role",
+    /// Exact role an external source plays for a resolved market linkage.
+    @derive(PartialOrd, Ord)
+    pub enum LinkageSourceRole {
+        Feature => "feature",
+        LiveEvent => "live_event",
+        Resolution => "resolution",
+        HistoricalCalibration => "historical_calibration",
+        Forecast => "forecast",
     }
 }
 
 impl DomainFamily {
     /// Every domain family in declaration order.
-    pub const ALL: [Self; 1] = [Self::Crypto];
+    pub const ALL: [Self; 2] = [Self::Crypto, Self::Weather];
 
     /// The vertical a market category maps to, if any.
     ///
@@ -40,6 +54,7 @@ impl DomainFamily {
     pub const fn for_category(category: MarketCategory) -> Option<Self> {
         match category {
             MarketCategory::Crypto => Some(Self::Crypto),
+            MarketCategory::Weather => Some(Self::Weather),
             _ => None,
         }
     }
@@ -85,19 +100,15 @@ pg_enum! {
 wire_enum! {
     /// The metric dimension of one long-format domain observation.
     ///
-    /// Only metrics that are actually persisted **and consumed by a feature**
-    /// exist here (no dead semantics): candle close from the Binance kline
-    /// source (the sole feature-source price every crypto domain feature
-    /// reads) and the oracle spot price from the Chainlink aggregator source
-    /// (the basis cross-check counterpart). Candle volume is deliberately
+    /// Only metrics that are persisted **and consumed by the legacy long-form
+    /// feature plane** exist here. Live crypto reports and all weather facts use
+    /// dedicated typed fact tables. Candle volume is deliberately
     /// **not** modeled here — Binance klines carry it on the wire, but no
     /// domain feature consumes it; re-add it only alongside a real consumer.
     @derive(JsonSchema, PartialOrd, Ord)
     pub enum DomainMetric {
         /// Candle close price (Binance klines; the feature-source price).
         Close => "close",
-        /// Oracle spot price (Chainlink aggregator; basis cross-check source).
-        OraclePrice => "oracle_price",
     }
 }
 

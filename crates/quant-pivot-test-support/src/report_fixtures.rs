@@ -29,7 +29,7 @@ use quant_pivot_models::{
     },
     types::{
         AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
-        DataQualitySummary, EligibilitySummary, EntryOrderPolicy, EntryPlan, EntryTrigger,
+        DataQualitySummary, EligibilitySummary, EntryConditionPlan, EntryOrderPolicy, EntryPlan,
         EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
         FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext, MarketId,
         MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, Probability,
@@ -241,7 +241,7 @@ pub fn recommendation(
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger: EntryTrigger::Immediate,
+        condition: EntryConditionPlan::Immediate,
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.43)),
             post_only: true,

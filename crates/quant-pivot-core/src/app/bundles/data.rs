@@ -111,12 +111,20 @@ impl DataBundle {
         let event_repo: Arc<dyn EventRepository> = cached_event_repo(deps);
         let catalog_version_repo: Arc<dyn CatalogVersionRepository> =
             Arc::clone(&deps.infra.repos.catalog_version) as Arc<dyn CatalogVersionRepository>;
-        let linkage_resolver = Arc::new(LinkageResolverService::new(LinkageResolverDeps {
-            linkage_repo: Arc::clone(&deps.infra.repos.market_linkage)
-                as Arc<dyn MarketLinkageRepository>,
-            market_repo: Arc::clone(&market_repo),
-            event_repo: Arc::clone(&event_repo),
-        }));
+        let linkage_resolver = Arc::new(LinkageResolverService::new(
+            LinkageResolverDeps {
+                linkage_repo: Arc::clone(&deps.infra.repos.market_linkage)
+                    as Arc<dyn MarketLinkageRepository>,
+                market_repo: Arc::clone(&market_repo),
+                event_repo: Arc::clone(&event_repo),
+            },
+            deps.deploy
+                .domain_sources
+                .weather_stations
+                .clone()
+                .into_iter()
+                .collect(),
+        ));
         let status_nudge = SystemStatusNudge::default();
         let (gamma_service, ws_subscription) = assemble_gamma_service(GammaServiceAssembly {
             deps,

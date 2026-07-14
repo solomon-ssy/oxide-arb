@@ -12,11 +12,12 @@ use quant_pivot_models::{
         TradePolicyPort, TrainingDatasetInfo,
     },
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus, TrainingDatasetStatus},
+    hashing::CanonicalDigest,
     types::{
         ContentHash, TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TradePolicyArtifactId,
         TradePolicyArtifactPayload, TradePolicyEvidenceGap, TradePolicyExecutionEvidence,
         TradePolicyFitContract, TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence,
-        TradePolicyValidationEvidence,
+        TradePolicyValidationEvidence, canonicalize_condition_candidates,
     },
 };
 use quant_pivot_repository::traits::{TradePolicyRepository, TrainingDatasetRepository};
@@ -58,6 +59,8 @@ impl TradePolicyService {
         request
             .contract
             .validate()
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+        canonicalize_condition_candidates(request.condition_candidates.clone())
             .map_err(|detail| ResearchError::DatasetBuild { detail })?;
         let dataset = self
             .datasets
@@ -111,13 +114,21 @@ impl TradePolicyPort for TradePolicyService {
             .find_by_id(&request.contract.source_dataset_id)
             .await?;
         let mut messages = Vec::new();
-        let contract_valid = match request.contract.validate() {
-            Ok(()) => true,
-            Err(detail) => {
-                messages.push(detail);
-                false
-            }
-        };
+        let canonical_condition_candidates =
+            match request.contract.validate().and_then(|()| {
+                canonicalize_condition_candidates(request.condition_candidates.clone())
+            }) {
+                Ok(candidates) => Some(candidates),
+                Err(detail) => {
+                    messages.push(detail);
+                    None
+                }
+            };
+        let contract_valid = canonical_condition_candidates.is_some();
+        let condition_candidate_set_hash = canonical_condition_candidates
+            .as_ref()
+            .map(CanonicalDigest::content_hash_json)
+            .transpose()?;
         let source_dataset_ready = dataset
             .as_ref()
             .is_some_and(|row| row.status == TrainingDatasetStatus::Ready);
@@ -194,6 +205,8 @@ impl TradePolicyPort for TradePolicyService {
             full_l2_trajectory_present: full_l2_trajectory_present.into(),
             fee_model_present: fee_model_present.into(),
             publishable_input: publishable_input.into(),
+            canonical_condition_candidates,
+            condition_candidate_set_hash,
             messages,
         })
     }
@@ -357,8 +370,13 @@ fn fit_payload(
     let (labels_matured_by_cutoff, labels_excluded_after_cutoff) =
         label_cutoff_counts(&request.contract, examples);
     let filtered_sample_hash = ResearchHasher::canonical(&projection)?;
+    let condition_candidates =
+        canonicalize_condition_candidates(request.condition_candidates.clone())
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+    let condition_candidate_set_hash = CanonicalDigest::content_hash_json(&condition_candidates)?;
     Ok(TradePolicyArtifactPayload {
         format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
+        activation_target: request.activation_target,
         fit_contract: request.contract.clone(),
         source_dataset_hash: source_dataset_hash.clone(),
         feature_schema_hash: feature_schema_hash.clone(),
@@ -371,6 +389,9 @@ fn fit_payload(
             filtered_sample_hash,
         }),
         execution_evidence: degraded_execution_evidence(filtered_sample_count),
+        condition_candidate_set_hash,
+        condition_candidates,
+        vertical_gate_evidence: Vec::new(),
         cohorts: Vec::new(),
         validation: TradePolicyValidationEvidence {
             trial_ledger_hash: None,

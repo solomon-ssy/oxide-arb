@@ -5,6 +5,7 @@ use super::DeployConfig;
 use crate::{
     constants::POLYGON_CHAIN_ID,
     enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
+    types::IcaoStation,
 };
 use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
@@ -99,8 +100,97 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         });
     }
     validate_market_data(deploy, &mut report);
+    validate_domain_sources(deploy, &mut report);
 
     report
+}
+
+fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let sources = &deploy.domain_sources;
+    if sources.binance.enabled
+        && (sources.binance.request_timeout_ms == 0
+            || sources.binance.websocket_rotation_secs == 0
+            || sources.binance.batch_size == 0)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain_sources.binance",
+            detail: "request_timeout_ms, websocket_rotation_secs, and batch_size must be > 0"
+                .into(),
+        });
+    }
+    if sources.chainlink_data_streams.enabled {
+        let credentials_present = sources.chainlink_data_streams.api_key.is_some()
+            && sources.chainlink_data_streams.api_secret.is_some();
+        if !credentials_present || sources.chainlink_data_streams.feeds.is_empty() {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "domain_sources.chainlink_data_streams",
+                detail: "enabled source requires API credentials and at least one frozen V3 feed"
+                    .into(),
+            });
+        }
+        if sources.chainlink_data_streams.max_clock_skew_ms == 0
+            || sources.chainlink_data_streams.rest_page_limit == 0
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "domain_sources.chainlink_data_streams",
+                detail: "max_clock_skew_ms and rest_page_limit must be > 0".into(),
+            });
+        }
+    }
+    if sources.aviation_weather.enabled
+        && (sources.aviation_weather.poll_secs == 0
+            || sources.aviation_weather.request_timeout_ms == 0
+            || sources.aviation_weather.day_close_grace_secs == 0)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain_sources.aviation_weather",
+            detail: "poll_secs, request_timeout_ms, and day_close_grace_secs must be > 0".into(),
+        });
+    }
+    if sources.ghcnh.enabled
+        && (sources.ghcnh.request_timeout_ms == 0
+            || sources.ghcnh.refresh_secs == 0
+            || sources.ghcnh.calibration_years == 0)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain_sources.ghcnh",
+            detail: "request_timeout_ms, refresh_secs, and calibration_years must be > 0".into(),
+        });
+    }
+    if sources.gefs.enabled
+        && (sources.gefs.request_timeout_ms == 0
+            || sources.gefs.poll_secs == 0
+            || sources.gefs.publication_lag_secs == 0
+            || !(3..=240).contains(&sources.gefs.max_lead_hours)
+            || !sources.gefs.max_lead_hours.is_multiple_of(3)
+            || sources.gefs.max_concurrency == 0)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "domain_sources.gefs",
+            detail: "timeouts/cadences/concurrency must be > 0 and max_lead_hours must be a 3-hour step in 3..=240".into(),
+        });
+    }
+    for (station, profile) in &sources.weather_stations {
+        if IcaoStation::parse(station).is_err()
+            || profile.timezone.parse::<chrono_tz::Tz>().is_err()
+            || profile.latitude < dec!(-90)
+            || profile.latitude > dec!(90)
+            || profile.longitude < dec!(-180)
+            || profile.longitude > dec!(180)
+            || profile.ghcnh_station_id.len() != 11
+            || !profile
+                .ghcnh_station_id
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "domain_sources.weather_stations",
+                detail: format!(
+                    "station `{station}` must have a valid ICAO id, IANA timezone, coordinates, and GHCNh id"
+                ),
+            });
+        }
+    }
 }
 
 fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationReport) {

@@ -2,9 +2,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ApproveOrderIntent, ApproveOrderIntentOutcome, EntryTriggerTransition,
-        NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
-        OrderIntentListQuery, Paginated,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
+        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
     },
     enums::{execution::ApprovalInvalidation, quant::OrderIntentStatus},
     types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
@@ -91,14 +90,6 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         query: OrderIntentListQuery,
     ) -> Result<Paginated<OrderIntentInfo>, StorageError>;
-
-    /// Persist one armed-trigger state transition. Tick observations that do
-    /// not change state are intentionally not written.
-    async fn transition_entry_trigger(
-        &self,
-        intent_id: &OrderIntentId,
-        transition: EntryTriggerTransition,
-    ) -> Result<OrderIntentInfo, StorageError>;
 
     /// Intents past `expires_at` still in an expirable status (sweep input).
     async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError>;

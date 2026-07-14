@@ -49,6 +49,11 @@ pub trait MarketLinkageRepository: Send + Sync {
         market_ids: &[MarketId],
     ) -> Result<Vec<MarketLinkageInfo>, StorageError>;
 
+    /// Latest resolver outcome for every currently active market. This is the
+    /// authoritative discovery surface for live external-source workers; they
+    /// must not fall back to a static instrument list.
+    async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError>;
+
     /// The full ledger history visible through `end_boundary`, ordered by
     /// market, effective time, availability time, and stable linkage id. Feeds
     /// offline replay; each sample applies its own boundary in memory.

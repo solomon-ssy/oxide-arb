@@ -20,7 +20,8 @@ pub enum QuantDomainSourceCursor {
     Table,
     SourceId,
     InstrumentKey,
-    LastEventTime,
+    CheckpointJson,
+    CheckpointHash,
     Status,
     /// Human-readable detail from the most recent failed tick, or `NULL` when
     /// the last tick for this instrument succeeded (R10 ingest hardening).
@@ -37,8 +38,13 @@ pub fn table() -> TableCreateStatement {
         .col(column::text_id(QuantDomainSourceCursor::SourceId))
         .col(column::text_id(QuantDomainSourceCursor::InstrumentKey))
         .col(
-            ColumnDef::new(QuantDomainSourceCursor::LastEventTime)
-                .timestamp_with_time_zone()
+            ColumnDef::new(QuantDomainSourceCursor::CheckpointJson)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantDomainSourceCursor::CheckpointHash)
+                .text()
                 .not_null(),
         )
         .col(column::text_id(QuantDomainSourceCursor::Status))

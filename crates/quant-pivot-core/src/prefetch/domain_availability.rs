@@ -23,18 +23,26 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{DecisionBoundary, DecisionSource, DomainAvailability, LinkageOutcome},
+    domain::{
+        DecisionBoundary, DecisionSource, DomainAvailability, LinkageOutcome, MarketLinkageInfo,
+        MarketSubject, ResolvedBinding, WeatherForecastPoint, WeatherObservationFact,
+        WeatherObservationReportKind, WeatherSubject,
+    },
     enums::{
         common::MarketCategory,
-        domain::{DomainFamily, DomainMetric, LinkageStatus},
+        domain::{DomainFamily, DomainMetric, LinkageSourceRole, LinkageStatus},
     },
     runtime_config::DomainConfig,
-    types::{DomainInstrumentKey, MarketId},
+    types::{DomainInstrumentKey, DomainSourceId, IcaoStation, MarketId},
 };
 use quant_pivot_repository::traits::{MarketLinkageRepository, QuantFactReadRepository};
-use quant_pivot_research::domain::domain_availability_at;
+use quant_pivot_research::domain::{
+    DomainAvailabilityFacts, domain_availability_at, source_binding,
+};
 
 use crate::prefetch::historical_window::Prefetched;
 
@@ -106,58 +114,291 @@ pub async fn resolve_domain_availability(
         by_market.insert(market_id.clone(), DomainAvailability::Unresolved);
     }
 
-    // Resolve source presence once per distinct instrument.
-    let mut instrument_by_market: HashMap<MarketId, DomainInstrumentKey> = HashMap::new();
-    let mut instruments: HashSet<DomainInstrumentKey> = HashSet::new();
-    for info in valid_at {
+    let resolved = resolve_availability_bindings(valid_at)?;
+    let instrument_has_data =
+        load_crypto_availability(fact_read, &resolved.instruments, source_cutoff, decision_at)
+            .await?;
+    let weather = load_weather_availability(fact_read, boundary, &resolved).await?;
+    project_availability(
+        &mut by_market,
+        resolved.binding_by_market,
+        &instrument_has_data,
+        &weather,
+    )?;
+    Ok(by_market)
+}
+
+enum AvailabilityBinding {
+    Crypto(DomainInstrumentKey),
+    Weather {
+        station: IcaoStation,
+        local_date: chrono::NaiveDate,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    },
+}
+
+struct AvailabilityResolution {
+    binding_by_market: HashMap<MarketId, AvailabilityBinding>,
+    instruments: HashSet<DomainInstrumentKey>,
+    weather_stations: HashSet<IcaoStation>,
+    weather_from: Option<DateTime<Utc>>,
+    weather_to: Option<DateTime<Utc>>,
+}
+
+struct WeatherAvailability {
+    observations: HashMap<IcaoStation, Vec<WeatherObservationFact>>,
+    forecasts: HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+}
+
+fn resolve_availability_bindings(
+    rows: Vec<MarketLinkageInfo>,
+) -> QuantResult<AvailabilityResolution> {
+    let mut resolved = AvailabilityResolution {
+        binding_by_market: HashMap::new(),
+        instruments: HashSet::new(),
+        weather_stations: HashSet::new(),
+        weather_from: None,
+        weather_to: None,
+    };
+    for info in rows {
         if info.status == LinkageStatus::Unresolved {
             continue;
         }
         let market_id = info.market_id.clone();
         let outcome: LinkageOutcome = serde_json::from_value(info.outcome).map_err(|error| {
             QuantError::config(format!(
-                "linkage ledger row for market {market_id} has an undecodable outcome \
-                 payload: {error}"
+                "linkage ledger row for market {market_id} has an undecodable outcome: {error}"
             ))
         })?;
-        if let LinkageOutcome::Resolved(binding) = outcome {
-            instruments.insert(binding.instrument_key.clone());
-            instrument_by_market.insert(market_id, binding.instrument_key);
+        let LinkageOutcome::Resolved(binding) = outcome else {
+            continue;
+        };
+        match &binding.subject {
+            MarketSubject::Crypto(_) => {
+                let Some(feature) = source_binding(&binding, LinkageSourceRole::Feature) else {
+                    continue;
+                };
+                resolved.instruments.insert(feature.instrument_key.clone());
+                resolved.binding_by_market.insert(
+                    market_id,
+                    AvailabilityBinding::Crypto(feature.instrument_key.clone()),
+                );
+            }
+            MarketSubject::Weather(subject) => {
+                let Some(binding) = weather_availability_binding(&binding, subject)? else {
+                    continue;
+                };
+                let AvailabilityBinding::Weather {
+                    ref station,
+                    from,
+                    to,
+                    ..
+                } = binding
+                else {
+                    continue;
+                };
+                resolved.weather_from = Some(
+                    resolved
+                        .weather_from
+                        .map_or(from, |current| current.min(from)),
+                );
+                resolved.weather_to =
+                    Some(resolved.weather_to.map_or(to, |current| current.max(to)));
+                resolved.weather_stations.insert(station.clone());
+                resolved.binding_by_market.insert(market_id, binding);
+            }
         }
     }
+    Ok(resolved)
+}
 
-    let cutoff_ms = source_cutoff.timestamp_millis();
-    let mut instrument_has_data: HashMap<DomainInstrumentKey, bool> = HashMap::new();
+fn weather_availability_binding(
+    binding: &ResolvedBinding,
+    subject: &WeatherSubject,
+) -> QuantResult<Option<AvailabilityBinding>> {
+    let Some(live) = source_binding(binding, LinkageSourceRole::LiveEvent) else {
+        return Ok(None);
+    };
+    let Some(forecast) = source_binding(binding, LinkageSourceRole::Forecast) else {
+        return Ok(None);
+    };
+    let Some(calibration) = source_binding(binding, LinkageSourceRole::HistoricalCalibration)
+    else {
+        return Ok(None);
+    };
+    let sources_match = live.source_id == DomainSourceId::aviation_weather()
+        && live.instrument_key == DomainInstrumentKey::aviation_weather(&subject.station)
+        && forecast.source_id == DomainSourceId::gefs()
+        && forecast.instrument_key == DomainInstrumentKey::gefs(&subject.station)
+        && calibration.source_id == DomainSourceId::ghcnh()
+        && calibration.instrument_key == DomainInstrumentKey::ghcnh(&subject.station);
+    if !sources_match {
+        return Ok(None);
+    }
+    let (from, to) = weather_day_bounds(subject)?;
+    Ok(Some(AvailabilityBinding::Weather {
+        station: subject.station.clone(),
+        local_date: subject.local_date,
+        from,
+        to,
+    }))
+}
+
+async fn load_crypto_availability(
+    fact_read: &dyn QuantFactReadRepository,
+    instruments: &HashSet<DomainInstrumentKey>,
+    source_cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<HashMap<DomainInstrumentKey, bool>> {
+    let mut available = HashMap::new();
     for instrument in instruments {
         let observation = fact_read
             .domain_observation_at(
-                &instrument,
+                instrument,
                 DomainMetric::Close.as_str(),
-                cutoff_ms,
+                source_cutoff.timestamp_millis(),
                 decision_at.timestamp_millis(),
             )
             .await
             .map_err(QuantError::from)?;
-        instrument_has_data.insert(instrument, observation.is_some());
+        available.insert(instrument.clone(), observation.is_some());
     }
+    Ok(available)
+}
 
-    for (market_id, instrument) in instrument_by_market {
-        let has_data = instrument_has_data
-            .get(&instrument)
-            .copied()
-            .ok_or_else(|| {
-                QuantError::config(format!(
-                    "domain availability batch omitted instrument {instrument}"
-                ))
-            })?;
-        let availability = if has_data {
-            DomainAvailability::Available
-        } else {
-            DomainAvailability::SourceEmpty
-        };
-        by_market.insert(market_id, availability);
+async fn load_weather_availability(
+    fact_read: &dyn QuantFactReadRepository,
+    boundary: &DecisionBoundary,
+    resolution: &AvailabilityResolution,
+) -> QuantResult<WeatherAvailability> {
+    let mut available = WeatherAvailability {
+        observations: HashMap::new(),
+        forecasts: HashMap::new(),
+    };
+    let (Some(from), Some(to)) = (resolution.weather_from, resolution.weather_to) else {
+        return Ok(available);
+    };
+    let stations = resolution
+        .weather_stations
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let source_cutoff = boundary
+        .cutoff_for(DecisionSource::DomainWeather)
+        .timestamp_millis();
+    for row in fact_read
+        .weather_observation_reports_between(
+            stations.clone(),
+            from.timestamp_millis(),
+            to.timestamp_millis(),
+            source_cutoff,
+            boundary.decision_at().timestamp_millis(),
+        )
+        .await
+        .map_err(QuantError::from)?
+    {
+        let fact = WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
+            QuantError::config("invalid Weather observation in availability projection")
+        })?;
+        available
+            .observations
+            .entry(fact.station.clone())
+            .or_default()
+            .push(fact);
     }
-    Ok(by_market)
+    for row in fact_read
+        .weather_forecast_points_between(
+            stations,
+            from.timestamp_millis(),
+            to.timestamp_millis(),
+            source_cutoff,
+            boundary.decision_at().timestamp_millis(),
+        )
+        .await
+        .map_err(QuantError::from)?
+    {
+        let fact = WeatherForecastPoint::from_clickhouse_row(row)
+            .ok_or_else(|| QuantError::config("invalid GEFS point in availability projection"))?;
+        available
+            .forecasts
+            .entry(fact.station.clone())
+            .or_default()
+            .push(fact);
+    }
+    Ok(available)
+}
+
+fn project_availability(
+    by_market: &mut HashMap<MarketId, DomainAvailability>,
+    bindings: HashMap<MarketId, AvailabilityBinding>,
+    crypto: &HashMap<DomainInstrumentKey, bool>,
+    weather: &WeatherAvailability,
+) -> QuantResult<()> {
+    for (market_id, binding) in bindings {
+        let has_data = match binding {
+            AvailabilityBinding::Crypto(instrument) => {
+                crypto.get(&instrument).copied().ok_or_else(|| {
+                    QuantError::config(format!(
+                        "domain availability batch omitted instrument {instrument}"
+                    ))
+                })?
+            }
+            AvailabilityBinding::Weather {
+                station,
+                local_date,
+                from,
+                to,
+            } => {
+                let has_observation = weather.observations.get(&station).is_some_and(|facts| {
+                    facts.iter().any(|fact| {
+                        fact.local_date == local_date
+                            && fact.report_kind != WeatherObservationReportKind::HistoricalGhcnh
+                    })
+                });
+                let has_forecast = weather.forecasts.get(&station).is_some_and(|facts| {
+                    facts
+                        .iter()
+                        .any(|fact| fact.valid_time >= from && fact.valid_time < to)
+                });
+                has_observation || has_forecast
+            }
+        };
+        by_market.insert(
+            market_id,
+            if has_data {
+                DomainAvailability::Available
+            } else {
+                DomainAvailability::SourceEmpty
+            },
+        );
+    }
+    Ok(())
+}
+
+fn weather_day_bounds(subject: &WeatherSubject) -> QuantResult<(DateTime<Utc>, DateTime<Utc>)> {
+    let timezone = subject.timezone.parse::<Tz>().map_err(|error| {
+        QuantError::config(format!("invalid Weather linkage timezone: {error}"))
+    })?;
+    let next_date = subject
+        .local_date
+        .succ_opt()
+        .ok_or_else(|| QuantError::config("Weather local date overflow"))?;
+    let local_start = subject
+        .local_date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| QuantError::config("invalid Weather local day start"))?;
+    let local_end = next_date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| QuantError::config("invalid Weather local day end"))?;
+    let resolve = |local| {
+        timezone
+            .from_local_datetime(&local)
+            .single()
+            .map(|value| value.with_timezone(&Utc))
+            .ok_or_else(|| QuantError::config("Weather local midnight is ambiguous or missing"))
+    };
+    Ok((resolve(local_start)?, resolve(local_end)?))
 }
 
 /// Live-repository [`DomainAvailabilitySource`] backend.
@@ -246,7 +487,10 @@ impl DomainAvailabilitySource for PrefetchedDomainAvailabilitySource<'_> {
                     linkages,
                     boundary,
                     self.domain,
-                    &self.prefetched.domain_observations,
+                    DomainAvailabilityFacts {
+                        observations: &self.prefetched.domain_observations,
+                        weather_observations: &self.prefetched.weather_observations,
+                    },
                 );
                 (market_id.clone(), availability)
             })
@@ -274,10 +518,14 @@ mod tests {
             DomainAvailability, DomainObservation, GroundingProof, LinkageOutcome, MarketInfo,
             MarketLinkage, MarketLinkageInfo, MarketLinkageListQuery, MarketSubject,
             NewMarketLinkage, Paginated, PriceComparator, ResolutionOracle, ResolvedBinding,
+            ResolvedSourceBinding,
         },
         enums::{
             common::{MarketCategory, TickSize},
-            domain::{DomainFamily, DomainMetric, KlineInterval, LinkageStatus, ResolverTier},
+            domain::{
+                DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, LinkageStatus,
+                ResolverTier,
+            },
             market::MarketStatus,
         },
         runtime_config::DomainConfig,
@@ -328,6 +576,7 @@ mod tests {
             no_token_id: TokenId::new("no"),
             tick_size: TickSize::Hundredth,
             neg_risk: false,
+            start_date: None,
             end_date: None,
             resolved_at: None,
             fees_enabled: false,
@@ -357,7 +606,14 @@ mod tests {
                     interval: KlineInterval::OneMinute,
                 },
             }),
-            instrument_key: instrument_for(symbol),
+            source_bindings: vec![ResolvedSourceBinding {
+                role: LinkageSourceRole::Feature,
+                source_id: DomainSourceId::binance(),
+                instrument_key: instrument_for(symbol),
+                available_at: now,
+                binding_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+                    .expect("binding hash"),
+            }],
             grounding: GroundingProof { spans: Vec::new() },
             override_context: None,
         }
@@ -408,6 +664,9 @@ mod tests {
                 event_versions: Vec::new(),
             },
             domain_observations: HashMap::new(),
+            crypto_reports: HashMap::new(),
+            weather_observations: HashMap::new(),
+            weather_forecasts: HashMap::new(),
             linkages: HashMap::new(),
         }
     }
@@ -421,14 +680,14 @@ mod tests {
             MarketId::new("resolved-available"),
             vec![linkage(
                 "resolved-available",
-                LinkageOutcome::Resolved(binding()),
+                LinkageOutcome::Resolved(Box::new(binding())),
             )],
         );
         prefetched.linkages.insert(
             MarketId::new("resolved-empty"),
             vec![linkage(
                 "resolved-empty",
-                LinkageOutcome::Resolved(binding_for("ETHUSDT")),
+                LinkageOutcome::Resolved(Box::new(binding_for("ETHUSDT"))),
             )],
         );
         prefetched.linkages.insert(
@@ -532,6 +791,10 @@ mod tests {
             _market_ids: &[MarketId],
         ) -> Result<Vec<MarketLinkageInfo>, StorageError> {
             unimplemented!("unused by this test")
+        }
+
+        async fn latest_for_active_markets(&self) -> Result<Vec<MarketLinkageInfo>, StorageError> {
+            Ok(self.rows.clone())
         }
 
         async fn ledger_for_markets(
@@ -713,7 +976,6 @@ mod tests {
             resolver_version: linkage.resolver_version,
             confidence: linkage.confidence,
             outcome: serde_json::to_value(&linkage.outcome).expect("serialize outcome"),
-            instrument_key: Some(instrument()),
             metadata_hash: linkage.metadata_hash,
             content_hash: linkage.content_hash,
             derived_at: linkage.effective_at,
@@ -731,7 +993,7 @@ mod tests {
             rows: vec![linkage_row(
                 "0xcrypto",
                 LinkageStatus::Resolved,
-                LinkageOutcome::Resolved(binding()),
+                LinkageOutcome::Resolved(Box::new(binding())),
             )],
         };
         let fact_read = FakeFactRead {

@@ -19,7 +19,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     domain::{
-        CapitalSettlement, ExecutionOrderInfo, ExecutionSubmitPort, IntentEventKind,
+        CapitalSettlement, CoreEvent, EntryConditionClaim, EntryConditionInstanceInfo,
+        EntryConditionLifecycleEvent, ExecutionOrderInfo, ExecutionSubmitPort, IntentEventKind,
         NewExecutionOrder, NewReconciliation, OrderIntentInfo, PositionFill, RecommendationInfo,
         SubmissionLedgerWrite,
     },
@@ -31,12 +32,15 @@ use quant_pivot_models::{
         },
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
+    hashing::CanonicalDigest,
     types::{
         EntryOrderSpec, ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price,
         ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
     },
 };
-use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
+use quant_pivot_repository::traits::{
+    EntryConditionRepository, ExecutionSubmissionRepository, OrderIntentRepository,
+};
 
 use crate::{
     execution::{
@@ -57,6 +61,7 @@ use crate::{
 pub struct ExecutionDispatcherDeps {
     pub intents: Arc<dyn OrderIntentRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
+    pub conditions: Arc<dyn EntryConditionRepository>,
     pub admission_builder: Arc<AdmissionInputBuilder>,
     pub admission: Arc<dyn ExecutionAdmissionEngine>,
     pub order_client: Arc<dyn PolymarketOrderClient>,
@@ -112,19 +117,23 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         // fans out on `quant.intent`.
         let prior_status = intent.status;
 
-        // 2. Claim (atomic double-submit guard): Approved -> AdmissionPending. A
-        //    lost race / state change surfaces as a non-submittable conflict.
-        if let Err(error) = self
+        // 2. Evaluate against a read-only frozen snapshot. The exact condition
+        //    revision and admission fingerprint are revalidated by the atomic
+        //    claim below, so a concurrent correction cannot slip through.
+        let (recommendation, condition_claim) =
+            Box::pin(self.evaluate_admission(intent_id, &intent, now)).await?;
+        // 3. Atomically claim intent + condition. There is no observable
+        //    `AdmissionPending` intent with an unconsumed condition.
+        let (_, claimed_condition) = match self
             .deps
             .submission
-            .claim_for_submission(intent_id, now)
+            .claim_for_submission(condition_claim)
             .await
         {
-            return Err(submission_storage_failure(intent_id, error));
-        }
-
-        // 3–7. Admission gate, write-ahead, venue call, and ledger settle.
-        let recommendation = Box::pin(self.evaluate_admission(intent_id, &intent, now)).await?;
+            Ok(claimed) => claimed,
+            Err(error) => return Err(submission_storage_failure(intent_id, error)),
+        };
+        self.publish_condition(&claimed_condition);
         let feature_parity_state_id = match self
             .deps
             .feature_parity_gate
@@ -154,19 +163,38 @@ impl CoreExecutionDispatcher {
         intent_id: &OrderIntentId,
         intent: &OrderIntentInfo,
         now: DateTime<Utc>,
-    ) -> QuantResult<RecommendationInfo> {
+    ) -> QuantResult<(RecommendationInfo, EntryConditionClaim)> {
         let input = match self.deps.admission_builder.build(intent, now).await {
             Ok(input) => input,
-            Err(error) => return Err(self.revert_and(intent_id, error).await),
+            Err(error) => return Err(error),
         };
         let recommendation = input.recommendation.clone();
+        let condition = input.condition.clone();
         let decision = match self.deps.admission.evaluate(input).await {
             Ok(decision) => decision,
-            Err(error) => return Err(self.revert_and(intent_id, error).await),
+            Err(error) => return Err(error),
         };
 
         match decision.outcome {
-            AdmissionOutcome::Allow => Ok(recommendation),
+            AdmissionOutcome::Allow => {
+                let admission_state_version =
+                    CanonicalDigest::content_hash_json(&decision.state_version)?;
+                Ok((
+                    recommendation,
+                    EntryConditionClaim {
+                        condition_instance_id: condition.condition_instance_id,
+                        order_intent_id: intent_id.clone(),
+                        artifact_id: condition.artifact_id,
+                        artifact_hash: condition.artifact_hash,
+                        expected_revision: condition.revision,
+                        evaluation_hash: condition.evaluation_hash,
+                        input_fingerprint: condition.input_fingerprint,
+                        continuity_hash: condition.continuity_hash,
+                        admission_state_version,
+                        claimed_at: now,
+                    },
+                ))
+            }
             AdmissionOutcome::Deny => {
                 let reason = decision
                     .denial_reason
@@ -184,13 +212,10 @@ impl CoreExecutionDispatcher {
                 );
                 Err(ExecutionError::AdmissionDenied { reason }.into())
             }
-            AdmissionOutcome::Defer => {
-                self.deps.submission.revert_claim(intent_id).await?;
-                Err(ExecutionError::AdmissionDeferred {
-                    reason: defer_reason(&decision),
-                }
-                .into())
+            AdmissionOutcome::Defer => Err(ExecutionError::AdmissionDeferred {
+                reason: defer_reason(&decision),
             }
+            .into()),
         }
     }
 
@@ -266,10 +291,39 @@ impl CoreExecutionDispatcher {
     /// Best-effort release the claim (`AdmissionPending -> Approved`) before
     /// propagating a pre-submission error, so the intent stays retryable.
     async fn revert_and(&self, intent_id: &OrderIntentId, error: QuantError) -> QuantError {
-        if let Err(revert_error) = self.deps.submission.revert_claim(intent_id).await {
-            tracing::error!(%revert_error, %intent_id, "failed to revert admission claim");
+        match self.deps.submission.revert_claim(intent_id).await {
+            Ok(intent) => {
+                match self
+                    .deps
+                    .conditions
+                    .find_instance(&intent.condition_instance_id)
+                    .await
+                {
+                    Ok(Some(condition)) => self.publish_condition(&condition),
+                    Ok(None) => {}
+                    Err(revert_error) => {
+                        tracing::error!(%revert_error, %intent_id, "failed to load reverted condition");
+                    }
+                }
+            }
+            Err(revert_error) => {
+                tracing::error!(%revert_error, %intent_id, "failed to revert admission claim");
+            }
         }
         error
+    }
+
+    fn publish_condition(&self, condition: &EntryConditionInstanceInfo) {
+        self.deps
+            .intent_lifecycle
+            .publisher()
+            .publish(CoreEvent::Condition(EntryConditionLifecycleEvent {
+                condition_instance_id: condition.condition_instance_id.clone(),
+                revision: condition.revision,
+                state: condition.state,
+                truth: condition.truth_json.clone(),
+                evaluation_hash: condition.evaluation_hash.clone(),
+            }));
     }
 }
 

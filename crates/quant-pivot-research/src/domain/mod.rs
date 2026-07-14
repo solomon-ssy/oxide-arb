@@ -14,12 +14,15 @@
 pub mod slice;
 
 pub use slice::{
-    build_domain_slice_inputs, crypto_lookback_secs, domain_availability_at, linkage_valid_at,
-    oracle_instrument,
+    DomainAvailabilityFacts, DomainFactWindows, build_domain_slice_inputs, crypto_lookback_secs,
+    domain_availability_at, linkage_valid_at, oracle_instrument, source_binding,
 };
 
 use chrono::{DateTime, Utc};
-use quant_pivot_models::{domain::DomainObservation, enums::domain::DomainMetric};
+use quant_pivot_models::{
+    domain::{CryptoPriceReport, DomainObservation, WeatherForecastPoint, WeatherObservationFact},
+    enums::domain::DomainMetric,
+};
 use rust_decimal::Decimal;
 
 /// A pre-fetched, PIT-bounded window of observations for one instrument.
@@ -32,6 +35,50 @@ pub struct DomainObservationWindow {
     pub cutoff: DateTime<Utc>,
     /// Ascending observations, all `observed_at <= cutoff`.
     pub observations: Vec<DomainObservation>,
+}
+
+/// PIT-bounded signed/venue crypto reports for one source instrument.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CryptoPriceReportWindow {
+    pub cutoff: DateTime<Utc>,
+    pub reports: Vec<CryptoPriceReport>,
+}
+
+/// PIT-bounded typed Weather facts for one station.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WeatherFactWindow {
+    /// System decision instant bounding every fact's availability.
+    pub decision_at: DateTime<Utc>,
+    /// `AviationWeather` live reports and `GHCNh` calibration observations.
+    pub observations: Vec<WeatherObservationFact>,
+    /// Raw GEFS ensemble points; bias is applied only by the governed builder.
+    pub forecasts: Vec<WeatherForecastPoint>,
+}
+
+impl WeatherFactWindow {
+    #[must_use]
+    pub fn freshest_time(&self) -> Option<DateTime<Utc>> {
+        self.observations
+            .iter()
+            .map(|fact| fact.observation_time)
+            .chain(self.forecasts.iter().map(|fact| fact.valid_time))
+            .max()
+    }
+}
+
+impl CryptoPriceReportWindow {
+    #[must_use]
+    pub fn latest(&self) -> Option<&CryptoPriceReport> {
+        self.reports.last()
+    }
+
+    #[must_use]
+    pub fn latest_at(&self, at: DateTime<Utc>) -> Option<&CryptoPriceReport> {
+        self.reports
+            .iter()
+            .rev()
+            .find(|report| report.event_time <= at)
+    }
 }
 
 impl DomainObservationWindow {

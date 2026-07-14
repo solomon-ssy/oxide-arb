@@ -19,10 +19,12 @@ use quant_pivot_models::{
     clickhouse::DomainObservationRow,
     config::DomainSourcesConfig,
     domain::{
-        DomainCursorStatus, DomainObservation, DomainSourceCursorInfo, UpsertDomainSourceCursor,
+        DomainCursorStatus, DomainObservation, DomainSourceCheckpoint, DomainSourceCursorInfo,
+        UpsertDomainSourceCursor,
     },
     enums::domain::DomainFamily,
-    types::{DomainInstrumentKey, DomainSourceId},
+    hashing::CanonicalDigest,
+    types::{ContentHash, DomainInstrumentKey, DomainSourceId},
 };
 use quant_pivot_repository::traits::{DomainSourceCursorRepository, FactWriter};
 use quant_pivot_research::linkage::{AssetRule, rules};
@@ -44,7 +46,8 @@ struct InstrumentScanOutcome {
 struct InstrumentCheckpoint {
     source_id: DomainSourceId,
     instrument_key: DomainInstrumentKey,
-    last_event_time: DateTime<Utc>,
+    checkpoint: DomainSourceCheckpoint,
+    checkpoint_hash: ContentHash,
     status: DomainCursorStatus,
 }
 
@@ -176,6 +179,10 @@ impl DomainIngestor {
             .max()
             .unwrap_or(prior_last_event_time);
         let status = checkpoint_status(cursor.as_ref(), bootstrap, last_event_time, now);
+        let checkpoint = DomainSourceCheckpoint::BinanceKline {
+            close_time: last_event_time,
+        };
+        let checkpoint_hash = CanonicalDigest::content_hash_json(&checkpoint)?;
 
         Ok(InstrumentScanOutcome {
             source_id: source_id.clone(),
@@ -184,7 +191,8 @@ impl DomainIngestor {
             checkpoint: InstrumentCheckpoint {
                 source_id,
                 instrument_key: instrument_key.clone(),
-                last_event_time,
+                checkpoint,
+                checkpoint_hash,
                 status,
             },
         })
@@ -195,7 +203,8 @@ impl DomainIngestor {
             .upsert(UpsertDomainSourceCursor {
                 source_id: checkpoint.source_id,
                 instrument_key: checkpoint.instrument_key,
-                last_event_time: checkpoint.last_event_time,
+                checkpoint_json: checkpoint.checkpoint,
+                checkpoint_hash: checkpoint.checkpoint_hash,
                 status: checkpoint.status.as_str().to_owned(),
                 // A checkpoint is only ever constructed on this tick's
                 // success path, so any error recorded on a prior failed tick
@@ -244,15 +253,28 @@ impl DomainIngestor {
         // A failed initial fetch has not observed any source event. Persist the
         // configured coverage floor, never `now`, so the retry cannot skip the
         // entire historical bootstrap window.
-        let last_event_time = existing
-            .as_ref()
-            .map_or(bootstrap_from, |row| row.last_event_time);
+        let (checkpoint_json, checkpoint_hash) = if let Some(existing) = existing {
+            (existing.checkpoint_json, existing.checkpoint_hash)
+        } else {
+            let checkpoint = DomainSourceCheckpoint::BinanceKline {
+                close_time: bootstrap_from,
+            };
+            let Ok(hash) = CanonicalDigest::content_hash_json(&checkpoint) else {
+                tracing::error!(
+                    %source_id, %instrument_key,
+                    "failed to hash initial domain-ingest error checkpoint"
+                );
+                return;
+            };
+            (checkpoint, hash)
+        };
         if let Err(persist_error) = self
             .cursor_repo
             .upsert(UpsertDomainSourceCursor {
                 source_id: source_id.clone(),
                 instrument_key: instrument_key.clone(),
-                last_event_time,
+                checkpoint_json,
+                checkpoint_hash,
                 status: DomainCursorStatus::Error.as_str().to_owned(),
                 last_error: Some(error.to_string()),
                 updated_at: Utc::now(),
@@ -268,7 +290,8 @@ impl DomainIngestor {
 }
 
 /// Discover canonical instrument keys from the frozen linkage ruleset and
-/// deploy-config Chainlink feed map.
+/// active legacy factor sources. Live event sources are discovered from
+/// linkage role projections by their dedicated workers.
 #[must_use]
 pub fn discover_instruments(
     domain_sources: &DomainSourcesConfig,
@@ -277,19 +300,6 @@ pub fn discover_instruments(
     if domain_sources.binance.enabled {
         let keys = rules().iter().map(AssetRule::instrument_key).collect();
         map.insert(DomainSourceId::binance(), keys);
-    }
-    if domain_sources.chainlink.enabled {
-        let keys = rules()
-            .iter()
-            .filter(|rule| {
-                domain_sources
-                    .chainlink
-                    .feeds
-                    .contains_key(rule.chainlink_feed)
-            })
-            .map(|rule| DomainInstrumentKey::chainlink_feed(&rule.feed()))
-            .collect();
-        map.insert(DomainSourceId::chainlink(), keys);
     }
     map
 }
@@ -303,12 +313,13 @@ fn resume_point(
     let Some(row) = cursor else {
         return Ok((bootstrap_from, true, bootstrap_from));
     };
-    if row.last_event_time > now {
+    let last_event_time = row.checkpoint_json.event_time();
+    if last_event_time > now {
         return Err(StorageError::invariant_violation(
             Some(entity::QUANT_DOMAIN_SOURCE_CURSOR),
             format!(
                 "cursor {}/{} has future last_event_time {} after scan boundary {now}",
-                row.source_id, row.instrument_key, row.last_event_time
+                row.source_id, row.instrument_key, last_event_time
             ),
         )
         .into());
@@ -323,11 +334,11 @@ fn resume_point(
         )
     })?;
     Ok(match status {
-        DomainCursorStatus::Bootstrap => (bootstrap_from, true, row.last_event_time),
+        DomainCursorStatus::Bootstrap => (bootstrap_from, true, last_event_time),
         DomainCursorStatus::Backfilling | DomainCursorStatus::Error => {
-            (row.last_event_time, true, row.last_event_time)
+            (last_event_time, true, last_event_time)
         }
-        DomainCursorStatus::Live => (row.last_event_time, false, row.last_event_time),
+        DomainCursorStatus::Live => (last_event_time, false, last_event_time),
     })
 }
 
@@ -371,34 +382,38 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         config::DomainSourcesConfig,
-        domain::{DomainCursorStatus, DomainObservation, DomainSourceCursorInfo},
+        domain::{
+            DomainCursorStatus, DomainObservation, DomainSourceCheckpoint, DomainSourceCursorInfo,
+        },
         enums::domain::{DomainFamily, DomainMetric, KlineInterval},
-        types::{BinanceSymbol, DomainInstrumentKey, DomainSourceId},
+        types::{BinanceSymbol, ContentHash, DomainInstrumentKey, DomainSourceId},
     };
     use rust_decimal_macros::dec;
 
     #[test]
     fn discover_instruments_respects_deploy_enablement() {
-        let mut config = DomainSourcesConfig::default();
-        config.chainlink.enabled = false;
+        let config = DomainSourcesConfig::default();
         let map = discover_instruments(&config);
         assert!(map.contains_key(&DomainSourceId::binance()));
-        assert!(!map.contains_key(&DomainSourceId::chainlink()));
+        assert!(!map.contains_key(&DomainSourceId::chainlink_data_streams()));
         assert_eq!(map[&DomainSourceId::binance()].len(), 5);
     }
 
-    #[test]
-    fn chainlink_instruments_intersect_ruleset_and_deploy_feeds() {
-        let mut config = DomainSourcesConfig::default();
-        config.chainlink.feeds.clear();
-        config
-            .chainlink
-            .feeds
-            .insert("BTC-USD".to_owned(), "0xabc".to_owned());
-        let map = discover_instruments(&config);
-        let keys = &map[&DomainSourceId::chainlink()];
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].as_str(), "CHAINLINK:BTC-USD");
+    fn cursor(last: chrono::DateTime<Utc>, status: DomainCursorStatus) -> DomainSourceCursorInfo {
+        DomainSourceCursorInfo {
+            source_id: DomainSourceId::binance(),
+            instrument_key: DomainInstrumentKey::binance_kline(
+                &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                KlineInterval::OneMinute,
+            ),
+            checkpoint_json: DomainSourceCheckpoint::BinanceKline { close_time: last },
+            checkpoint_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
+                .expect("checkpoint hash"),
+            status: status.as_str().to_owned(),
+            last_error: None,
+            created_at: last,
+            updated_at: last,
+        }
     }
 
     #[test]
@@ -412,18 +427,7 @@ mod tests {
     #[test]
     fn resume_point_is_incremental_after_live_cursor() {
         let last = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-        let cursor = DomainSourceCursorInfo {
-            source_id: DomainSourceId::binance(),
-            instrument_key: DomainInstrumentKey::binance_kline(
-                &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-                KlineInterval::OneMinute,
-            ),
-            last_event_time: last,
-            status: DomainCursorStatus::Live.as_str().to_owned(),
-            last_error: None,
-            created_at: last,
-            updated_at: last,
-        };
+        let cursor = cursor(last, DomainCursorStatus::Live);
         let (start, bootstrap, prior) =
             resume_point(Some(&cursor), last, last).expect("resume point");
         assert_eq!(start, last);
@@ -435,20 +439,8 @@ mod tests {
     fn resume_point_keeps_backfilling_and_error_cursors_in_bootstrap_mode() {
         let last = Utc.with_ymd_and_hms(2026, 7, 1, 10, 0, 0).unwrap();
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-        let instrument_key = DomainInstrumentKey::binance_kline(
-            &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-            KlineInterval::OneMinute,
-        );
         for status in [DomainCursorStatus::Backfilling, DomainCursorStatus::Error] {
-            let cursor = DomainSourceCursorInfo {
-                source_id: DomainSourceId::binance(),
-                instrument_key: instrument_key.clone(),
-                last_event_time: last,
-                status: status.as_str().to_owned(),
-                last_error: None,
-                created_at: last,
-                updated_at: last,
-            };
+            let cursor = cursor(last, status);
             let (start, bootstrap, prior) = resume_point(Some(&cursor), last, now)
                 .expect("backfill/error cursor must resume conservatively");
             assert_eq!(start, last);
@@ -460,24 +452,16 @@ mod tests {
     #[test]
     fn resume_point_rejects_unknown_status_and_future_checkpoint() {
         let now = Utc.with_ymd_and_hms(2026, 7, 1, 12, 0, 0).unwrap();
-        let mut cursor = DomainSourceCursorInfo {
-            source_id: DomainSourceId::binance(),
-            instrument_key: DomainInstrumentKey::binance_kline(
-                &BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-                KlineInterval::OneMinute,
-            ),
-            last_event_time: now,
-            status: "legacy_unknown".to_owned(),
-            last_error: None,
-            created_at: now,
-            updated_at: now,
-        };
+        let mut cursor = cursor(now, DomainCursorStatus::Live);
+        cursor.status = "legacy_unknown".to_owned();
         let error = resume_point(Some(&cursor), now, now)
             .expect_err("unknown persisted status must fail closed");
         assert!(error.to_string().contains("unknown status"));
 
         cursor.status = DomainCursorStatus::Live.as_str().to_owned();
-        cursor.last_event_time = now + chrono::Duration::seconds(1);
+        cursor.checkpoint_json = DomainSourceCheckpoint::BinanceKline {
+            close_time: now + chrono::Duration::seconds(1),
+        };
         let error = resume_point(Some(&cursor), now, now)
             .expect_err("future persisted checkpoint must fail closed");
         assert!(error.to_string().contains("future last_event_time"));
@@ -606,7 +590,8 @@ mod isolation_tests {
             let info = DomainSourceCursorInfo {
                 source_id: cursor.source_id,
                 instrument_key: cursor.instrument_key,
-                last_event_time: cursor.last_event_time,
+                checkpoint_json: cursor.checkpoint_json,
+                checkpoint_hash: cursor.checkpoint_hash,
                 status: cursor.status,
                 last_error: cursor.last_error,
                 created_at: now,

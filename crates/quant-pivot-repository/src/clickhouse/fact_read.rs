@@ -7,11 +7,12 @@ use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, CryptoPriceReportRow, DomainObservationRow,
+        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        WeatherForecastPointRow, WeatherObservationReportRow,
     },
     enums::clickhouse::{ChBookEventType, ChTradeTapeSource},
-    types::{DomainInstrumentKey, MarketId, TokenId},
+    types::{DomainInstrumentKey, DomainSourceId, MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
@@ -32,6 +33,131 @@ impl ChQuantFactReadRepository {
 
 #[async_trait]
 impl QuantFactReadRepository for ChQuantFactReadRepository {
+    async fn crypto_price_report_at(
+        &self,
+        source_id: &DomainSourceId,
+        instrument_key: &DomainInstrumentKey,
+        source_timestamp_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Option<CryptoPriceReportRow>, StorageError> {
+        let row = self
+            .pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_crypto_price_report \
+                 WHERE source_id = ? \
+                 AND instrument_key = ? \
+                 AND ifNull(observations_timestamp, event_time) <= fromUnixTimestamp64Milli(?) \
+                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY ifNull(observations_timestamp, event_time) DESC, \
+                 available_at DESC, source_sequence DESC, report_hash DESC \
+                 LIMIT 1",
+            )
+            .bind(source_id.clone())
+            .bind(instrument_key.clone())
+            .bind(source_timestamp_ms)
+            .bind(decision_at_ms)
+            .fetch_optional::<CryptoPriceReportRow>()
+            .await?;
+        Ok(row)
+    }
+
+    async fn crypto_price_reports_between(
+        &self,
+        instrument_keys: Vec<DomainInstrumentKey>,
+        from_ms: i64,
+        to_ms: i64,
+        publish_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<CryptoPriceReportRow>, StorageError> {
+        if instrument_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_crypto_price_report \
+                 WHERE instrument_key IN ? \
+                 AND event_time >= fromUnixTimestamp64Milli(?) \
+                 AND event_time < fromUnixTimestamp64Milli(?) \
+                 AND published_at <= fromUnixTimestamp64Milli(?) \
+                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY instrument_key, event_time, available_at, source_sequence, report_hash",
+            )
+            .bind(instrument_keys)
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(publish_cutoff_ms)
+            .bind(decision_at_ms)
+            .fetch_all::<CryptoPriceReportRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn weather_observation_reports_between(
+        &self,
+        stations: Vec<String>,
+        from_ms: i64,
+        to_ms: i64,
+        publish_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<WeatherObservationReportRow>, StorageError> {
+        if stations.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_weather_observation_report \
+                 WHERE station IN ? \
+                 AND observation_time >= fromUnixTimestamp64Milli(?) \
+                 AND observation_time < fromUnixTimestamp64Milli(?) \
+                 AND published_at <= fromUnixTimestamp64Milli(?) \
+                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY station, local_date, observation_time, revision, available_at, report_hash",
+            )
+            .bind(stations)
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(publish_cutoff_ms)
+            .bind(decision_at_ms)
+            .fetch_all::<WeatherObservationReportRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn weather_forecast_points_between(
+        &self,
+        stations: Vec<String>,
+        valid_from_ms: i64,
+        valid_to_ms: i64,
+        reference_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<WeatherForecastPointRow>, StorageError> {
+        if stations.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_weather_forecast_point \
+                 WHERE station IN ? \
+                 AND valid_time >= fromUnixTimestamp64Milli(?) \
+                 AND valid_time < fromUnixTimestamp64Milli(?) \
+                 AND reference_time <= fromUnixTimestamp64Milli(?) \
+                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY station, reference_time, valid_time, member, available_at, run_manifest_hash",
+            )
+            .bind(stations)
+            .bind(valid_from_ms)
+            .bind(valid_to_ms)
+            .bind(reference_cutoff_ms)
+            .bind(decision_at_ms)
+            .fetch_all::<WeatherForecastPointRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
     async fn microstructure_window(
         &self,
         token_ids: Vec<TokenId>,

@@ -3,19 +3,32 @@
 use super::AppContext;
 use crate::{
     app::{
-        domain_ingest_worker::DomainIngestWorker, task_id::TaskId, task_registry::AppRunner,
+        domain_event_outbox_worker::DomainEventOutboxWorker,
+        domain_ingest_worker::DomainIngestWorker,
+        domain_live_ingest_worker::{DomainLiveIngestDeps, DomainLiveIngestWorker},
+        task_id::TaskId,
+        task_registry::AppRunner,
         trade_tape_worker::TradeTapeWorker,
     },
     service::domain_ingest::DomainIngestor,
 };
 use quant_pivot_api::{
-    binance::BinanceKlineSource, chainlink::ChainlinkAggregatorSource, domain::DomainDataSource,
+    binance::{BinanceAggTradeSource, BinanceKlineSource},
+    chainlink::ChainlinkDataStreamsSource,
+    domain::DomainDataSource,
     exchange::ExchangeLogClient,
+    weather::{AviationWeatherSource, GefsSource, GhcnhSource},
 };
-use quant_pivot_models::clickhouse::{DomainObservationRow, TradeTapeRow};
+use quant_pivot_models::clickhouse::{
+    CryptoPriceReportRow, DomainEventRow, DomainObservationRow, TradeTapeRow,
+    WeatherForecastPointRow, WeatherObservationReportRow,
+};
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
-    traits::{DomainSourceCursorRepository, FactWriter, TradeTapeBlockCursorRepository},
+    traits::{
+        DomainProjectionRepository, DomainSourceCursorRepository, FactWriter,
+        MarketLinkageRepository, TradeTapeBlockCursorRepository,
+    },
 };
 use std::sync::Arc;
 
@@ -46,6 +59,116 @@ impl AppContext {
                 }
             });
         }
+        self.register_domain_live_ingest_worker(runner);
+        let projections =
+            Arc::clone(&self.infra.repos.domain_projection) as Arc<dyn DomainProjectionRepository>;
+        let worker = Arc::new(DomainEventOutboxWorker::new(
+            projections,
+            Arc::new(ChFactWriter::<DomainEventRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_domain_event",
+            )),
+        ));
+        runner.spawn(TaskId::DomainEventOutboxWorker, move |token| async move {
+            if let Err(error) = worker.run(token).await {
+                tracing::error!(%error, "DomainEventOutboxWorker exited with error");
+            }
+        });
+    }
+
+    fn register_domain_live_ingest_worker(&self, runner: &mut AppRunner) {
+        let sources = &self.config.domain_sources;
+        let binance = if sources.binance.enabled {
+            match BinanceAggTradeSource::connect(sources.binance.clone()) {
+                Ok(source) => Some(Arc::new(source)),
+                Err(error) => {
+                    tracing::error!(%error, "Binance aggTrade unavailable; bound conditions fail closed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let chainlink = if sources.chainlink_data_streams.enabled {
+            match ChainlinkDataStreamsSource::connect(sources.chainlink_data_streams.clone()) {
+                Ok(source) => Some(Arc::new(source)),
+                Err(error) => {
+                    tracing::error!(%error, "Chainlink Data Streams unavailable; bound conditions fail closed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let aviation = if sources.aviation_weather.enabled {
+            match AviationWeatherSource::connect(sources.aviation_weather.clone()) {
+                Ok(source) => Some(Arc::new(source)),
+                Err(error) => {
+                    tracing::error!(%error, "AviationWeather unavailable; bound conditions fail closed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let ghcnh = if sources.ghcnh.enabled {
+            match GhcnhSource::connect(sources.ghcnh.clone()) {
+                Ok(source) => Some(Arc::new(source)),
+                Err(error) => {
+                    tracing::error!(%error, "GHCNh unavailable; Weather calibration remains blocked");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let gefs = if sources.gefs.enabled {
+            match GefsSource::connect(sources.gefs.clone()) {
+                Ok(source) => Some(Arc::new(source)),
+                Err(error) => {
+                    tracing::error!(%error, "GEFS unavailable; Weather forecast factors remain blocked");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let worker = Arc::new(DomainLiveIngestWorker::new(DomainLiveIngestDeps {
+            linkages: Arc::clone(&self.infra.repos.market_linkage)
+                as Arc<dyn MarketLinkageRepository>,
+            cursors: Arc::clone(&self.infra.repos.domain_source_cursor)
+                as Arc<dyn DomainSourceCursorRepository>,
+            projections: Arc::clone(&self.infra.repos.domain_projection)
+                as Arc<dyn DomainProjectionRepository>,
+            crypto_writer: Arc::new(ChFactWriter::<CryptoPriceReportRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_crypto_price_report",
+            )),
+            weather_writer: Arc::new(ChFactWriter::<WeatherObservationReportRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_weather_observation_report",
+            )),
+            forecast_writer: Arc::new(ChFactWriter::<WeatherForecastPointRow>::new(
+                Arc::clone(&self.infra.ch),
+                Arc::clone(&self.infra.ch_write_manager),
+                "quant_weather_forecast_point",
+            )),
+            binance,
+            chainlink,
+            aviation,
+            ghcnh,
+            gefs,
+            aviation_config: sources.aviation_weather.clone(),
+            ghcnh_config: sources.ghcnh.clone(),
+            gefs_config: sources.gefs.clone(),
+            station_profiles: sources.weather_stations.clone(),
+        }));
+        runner.spawn(TaskId::DomainLiveIngestWorker, move |token| async move {
+            worker.run(token).await;
+        });
     }
 
     fn build_trade_tape_worker(&self) -> Option<Arc<TradeTapeWorker>> {
@@ -76,7 +199,7 @@ impl AppContext {
 
     fn build_domain_ingest_worker(&self) -> Option<Arc<DomainIngestWorker>> {
         let sources_config = &self.config.domain_sources;
-        if !sources_config.binance.enabled && !sources_config.chainlink.enabled {
+        if !sources_config.binance.enabled {
             return None;
         }
 
@@ -84,27 +207,15 @@ impl AppContext {
         let mut poll_secs = u64::MAX;
 
         if sources_config.binance.enabled {
-            sources.push(Arc::new(BinanceKlineSource::new(
-                sources_config.binance.clone(),
-            )));
-            poll_secs = poll_secs.min(sources_config.binance.poll_secs);
-        }
-        if sources_config.chainlink.enabled {
-            match ChainlinkAggregatorSource::connect(
-                &self.config.polymarket.onchain,
-                sources_config.chainlink.clone(),
-            ) {
-                Ok(source) => {
-                    sources.push(Arc::new(source));
-                    poll_secs = poll_secs.min(sources_config.chainlink.poll_secs);
-                }
+            let source = match BinanceKlineSource::connect(sources_config.binance.clone()) {
+                Ok(source) => source,
                 Err(error) => {
-                    tracing::error!(%error, "domain-ingest worker disabled: Chainlink RPC connect failed");
-                    if sources.is_empty() {
-                        return None;
-                    }
+                    tracing::error!(%error, "Binance kline source unavailable");
+                    return None;
                 }
-            }
+            };
+            sources.push(Arc::new(source));
+            poll_secs = poll_secs.min(sources_config.binance.kline_poll_secs);
         }
 
         if sources.is_empty() {

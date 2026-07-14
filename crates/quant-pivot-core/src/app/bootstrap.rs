@@ -25,6 +25,7 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     ctx.register_report_expire_sweep(&mut runner);
     ctx.register_recommendation_deadline_scheduler(&mut runner);
     ctx.register_recommendation_expire_sweep(&mut runner);
+    ctx.register_entry_condition_worker(&mut runner);
     ctx.register_execution_dispatcher(&mut runner);
     ctx.register_reconciliation_worker(&mut runner);
     ctx.register_exit_monitor_worker(&mut runner);

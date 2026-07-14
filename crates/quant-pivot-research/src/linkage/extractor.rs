@@ -127,7 +127,9 @@ impl SubjectValidator for DefaultSubjectValidator {
         //    independently-extracted evidence. This is the fix for the
         //    audited pseudo-grounding hole: a whole-slug span used to satisfy
         //    "has any span" for every field regardless of kind.
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            return validate_weather_candidate(candidate);
+        };
         if !has_span_of_kind(candidate, "asset", GroundingKind::LiteralSpan) {
             return ValidationOutcome::Rejected {
                 reason: "candidate carries no literal grounding span for `asset`".to_owned(),
@@ -168,6 +170,60 @@ impl SubjectValidator for DefaultSubjectValidator {
             Err(reason) => ValidationOutcome::Rejected { reason },
         }
     }
+}
+
+fn validate_weather_candidate(candidate: &ExtractedCandidate) -> ValidationOutcome {
+    let MarketSubject::Weather(subject) = &candidate.subject else {
+        return ValidationOutcome::Rejected {
+            reason: "unsupported domain subject".to_owned(),
+        };
+    };
+    for field in [
+        "station",
+        "settlement_rule_url",
+        "outcome_band",
+        "market_unit",
+        "local_date",
+    ] {
+        if !has_span_of_kind(candidate, field, GroundingKind::LiteralSpan) {
+            return ValidationOutcome::Rejected {
+                reason: format!("weather candidate carries no literal grounding for `{field}`"),
+            };
+        }
+    }
+    if !subject.outcome_band.is_valid() {
+        return ValidationOutcome::Rejected {
+            reason: "weather outcome band is empty or inverted".to_owned(),
+        };
+    }
+    if subject
+        .outcome_band
+        .lower_inclusive
+        .is_some_and(|value| !value.fract().is_zero())
+        || subject
+            .outcome_band
+            .upper_inclusive
+            .is_some_and(|value| !value.fract().is_zero())
+    {
+        return ValidationOutcome::Rejected {
+            reason: "weather outcome band must use whole-degree bounds".to_owned(),
+        };
+    }
+    if subject.timezone.parse::<chrono_tz::Tz>().is_err() {
+        return ValidationOutcome::Rejected {
+            reason: "weather station profile has an invalid IANA timezone".to_owned(),
+        };
+    }
+    let expected = DomainInstrumentKey::aviation_weather(&subject.station);
+    if candidate.instrument_key != expected {
+        return ValidationOutcome::Rejected {
+            reason: format!(
+                "weather station instrument mismatch: expected `{expected}`, got `{}`",
+                candidate.instrument_key
+            ),
+        };
+    }
+    ValidationOutcome::Accepted
 }
 
 /// Ruleset-consistency checks shared by every candidate regardless of how it was produced.

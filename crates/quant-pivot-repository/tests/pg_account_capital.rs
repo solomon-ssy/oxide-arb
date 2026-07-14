@@ -11,12 +11,12 @@ use chrono::{Duration, Utc};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome, NewAccountSnapshot,
-        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
-        NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
-        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationAttribution,
-        NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
-        NewReportTransaction, NewRuntimeConfigVersion, NullablePatch, OperationLogQuery, Patch,
-        ReconciliationPatch, UpsertKillSwitchState,
+        NewCapitalAllocation, NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder,
+        NewFeatureParityState, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
+        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, NullablePatch,
+        OperationLogQuery, Patch, ReconciliationPatch, UpsertKillSwitchState,
     },
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -29,7 +29,7 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerState,
+            AccountSource, ApprovalStatus, BindingConstraint, EntryConditionState,
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
@@ -41,13 +41,13 @@ use quant_pivot_models::{
     },
     types::{
         AccountPositions, AccountSnapshotId, AttributionDetail, BookSnapshotRef, Bps,
-        CapitalAllocationId, ConfidenceSummary, ContentHash, DataQualitySummary,
-        EligibilitySummary, EntryOrderPolicy, EntryOrderSpec, EntryOutcome, EntryPlan,
-        EntryTrigger, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility,
-        ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec, ExposureBreakdown,
-        FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId, MarketContext, MarketId,
-        MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract,
-        ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId,
+        CapitalAllocationId, ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
+        EligibilitySummary, EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy,
+        EntryOrderSpec, EntryOutcome, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
+        ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec,
+        ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId,
+        MarketContext, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId,
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
@@ -179,6 +179,7 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: model_version_id.clone(),
         model_run: model_run_id.clone(),
         market_selection: market_selection_id.clone(),
@@ -191,6 +192,7 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
     assert_reserved_capital_tracks_pending_intent(
         &db,
         &ids.recommendation,
+        &ids.condition_instance,
         &ids.runtime_config_version,
         &ids.model_version,
     )
@@ -217,6 +219,7 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
@@ -372,6 +375,7 @@ async fn assert_recommendation_roundtrip(
 async fn assert_reserved_capital_tracks_pending_intent(
     db: &sea_orm::DatabaseConnection,
     recommendation_id: &RecommendationId,
+    condition_instance_id: &EntryConditionInstanceId,
     runtime_config_version_id: &RuntimeConfigVersionId,
     model_version_id: &ModelVersionId,
 ) {
@@ -401,7 +405,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 policy_hash: None,
                 status_reason: None,
                 admission_trace_ref: None,
-                entry_trigger_json: EntryTrigger::Immediate,
+                condition_instance_id: condition_instance_id.clone(),
                 entry_order_json: EntryOrderSpec {
                     token_id: TokenId::new("token-1"),
                     side: Side::Buy,
@@ -434,10 +438,6 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 },
                 risk_envelope_hash: content_hash('e'),
                 expires_at: Utc::now(),
-                entry_trigger_state: EntryTriggerState::NotRequired,
-                trigger_confirming_since: None,
-                trigger_last_observed_at: None,
-                trigger_ready_at: None,
             },
             NewCapitalAllocation {
                 capital_allocation_id: CapitalAllocationId::from_v7(),
@@ -708,6 +708,7 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
         model_version: model_version_id,
         model_run: model_run_id,
         market_selection: market_selection_id,
@@ -766,7 +767,7 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                 policy_hash: None,
                 status_reason: None,
                 admission_trace_ref: None,
-                entry_trigger_json: EntryTrigger::Immediate,
+                condition_instance_id: ids.condition_instance.clone(),
                 entry_order_json: EntryOrderSpec {
                     token_id: TokenId::new("token-1"),
                     side: Side::Buy,
@@ -799,10 +800,6 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                 },
                 risk_envelope_hash: content_hash('e'),
                 expires_at: Utc::now(),
-                entry_trigger_state: EntryTriggerState::NotRequired,
-                trigger_confirming_since: None,
-                trigger_last_observed_at: None,
-                trigger_ready_at: None,
             },
             NewCapitalAllocation {
                 capital_allocation_id: CapitalAllocationId::from_v7(),
@@ -942,6 +939,7 @@ struct TxnIds {
     portfolio_plan: PortfolioPlanId,
     report: RecommendationReportId,
     recommendation: RecommendationId,
+    condition_instance: EntryConditionInstanceId,
     model_version: ModelVersionId,
     model_run: ModelRunId,
     market_selection: MarketSelectionId,
@@ -954,6 +952,29 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
     let equity_snapshot_id = EquitySnapshotId::from_v7();
     let report = report_row(ids, equity_snapshot_id.clone());
     let sampled_feature_parity = report_fixtures::sampled_parity(&report);
+    let recommendation = report_recommendation(ids);
+    let entry_condition_instance = NewEntryConditionInstance {
+        condition_instance_id: ids.condition_instance.clone(),
+        recommendation_id: ids.recommendation.clone(),
+        artifact_id: None,
+        artifact_hash: None,
+        state: EntryConditionState::NotRequired,
+        truth_json: Some(ConditionTruth::Satisfied),
+        revision: 0,
+        evaluation_hash: None,
+        input_fingerprint: None,
+        continuity_hash: None,
+        confirmation_started_at: None,
+        last_evaluated_at: None,
+        next_evaluation_at: None,
+        expires_at: recommendation.valid_until,
+        lease_owner: None,
+        lease_expires_at: None,
+        lease_epoch: 0,
+        claimed_by_intent_id: None,
+        claim_admission_state_version: None,
+        consumed_at: None,
+    };
     NewReportTransaction {
         feature_parity_state_id: Some(ids.feature_parity_state_id.clone()),
         account_snapshot: NewAccountSnapshot {
@@ -969,7 +990,9 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         },
         portfolio_plan: report_portfolio_plan(ids),
         report,
-        recommendations: vec![report_recommendation(ids)],
+        recommendations: vec![recommendation],
+        entry_condition_artifacts: Vec::new(),
+        entry_condition_instances: vec![entry_condition_instance],
         sampled_feature_parity: Some(sampled_feature_parity),
         operation_log: report_operation_log(ids),
     }
@@ -1106,7 +1129,7 @@ fn report_trigger_key(ids: &TxnIds) -> String {
 
 fn entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger: EntryTrigger::Immediate,
+        condition: EntryConditionPlan::Immediate,
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.6)),
             post_only: true,

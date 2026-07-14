@@ -98,6 +98,7 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         liquidity_usd: Some(Usd::new(Decimal::from(20_000))),
         volume_24h: Some(Usd::new(Decimal::from(8_000))),
         fee_schedule: None,
+        start_date: Some(Utc::now()),
         end_date: Some(Utc::now() + Duration::days(7)),
         resolved_at: None,
         created_at: Some(Utc::now()),

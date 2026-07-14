@@ -8,11 +8,12 @@ use crate::{
         common::{AlertCategory, AlertLevel, AlertSource},
         execution::{ReconciliationResult, SettlementRedeemState},
         quant::{
-            EmptyReportReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
-            ReportKind, ResearchJobKind, ResearchJobStatus, TrainingDatasetStatus,
+            EmptyReportReason, EntryConditionState, OrderIntentStatus, QuantRuntimeMode,
+            RecommendationReportStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
+            TrainingDatasetStatus,
         },
     },
-    types::MarketId,
+    types::{ConditionTruth, ContentHash, EntryConditionInstanceId, MarketId},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -542,6 +543,17 @@ pub struct SettlementRedeemLifecycleEvent {
     pub state: SettlementRedeemState,
 }
 
+/// Condition-instance revision hint fanned out on `quant.condition`.
+/// Full evidence remains on the REST detail endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryConditionLifecycleEvent {
+    pub condition_instance_id: EntryConditionInstanceId,
+    pub revision: i64,
+    pub state: EntryConditionState,
+    pub truth: Option<ConditionTruth>,
+    pub evaluation_hash: Option<ContentHash>,
+}
+
 /// Cross-subsystem runtime events consumed by web and observability layers.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
@@ -559,6 +571,7 @@ pub enum CoreEvent {
     },
     Report(ReportLifecycleEvent),
     Intent(IntentLifecycleEvent),
+    Condition(EntryConditionLifecycleEvent),
     Alert(SystemAlertEvent),
     MaterializationRun(MaterializationRunEvent),
     Reconciliation(ReconciliationLifecycleEvent),
@@ -575,6 +588,7 @@ impl CoreEvent {
             Self::ConfigActivated { .. } => "config.activated",
             Self::Report(event) => event.event.wire(),
             Self::Intent(event) => event.event.wire(),
+            Self::Condition(_) => "quant.condition",
             Self::Alert(_) => "system.alert",
             Self::MaterializationRun(_) => "materialization.run_update",
             Self::Reconciliation(_) => "quant.reconciliation",

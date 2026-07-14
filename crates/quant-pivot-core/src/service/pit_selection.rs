@@ -263,7 +263,7 @@ mod tests {
             CatalogWindowInfo, CryptoSubject, DecisionBoundary, DecisionClock, DecisionSource,
             DomainAvailability, DomainObservation, EventRegistryInfo, GroundingProof,
             LinkageOutcome, MarketDataHealth, MarketLinkage, MarketSubject, PriceComparator,
-            ResolutionOracle, ResolvedBinding,
+            ResolutionOracle, ResolvedBinding, ResolvedSourceBinding,
             market::{
                 book::BookLevel,
                 registry::{MarketRegistryInfo, NegRiskLegSet, TokenInfo},
@@ -271,7 +271,7 @@ mod tests {
         },
         enums::{
             common::{CategorySet, MarketCategory, TickSize},
-            domain::{DomainFamily, DomainMetric, KlineInterval, ResolverTier},
+            domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
             market::{EventStatus, MarketStatus},
         },
         runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
@@ -325,6 +325,7 @@ mod tests {
             liquidity_usd: None,
             volume_24h: None,
             fee_schedule: None,
+            start_date: Some(now),
             end_date: Some(now),
             resolved_at: None,
             created_at: Some(now),
@@ -339,6 +340,7 @@ mod tests {
             available_at: market.updated_at,
             status: market.status,
             neg_risk: market.neg_risk,
+            start_date: market.start_date,
             end_date: market.end_date,
             created_at: market.created_at,
         }
@@ -530,7 +532,7 @@ mod tests {
     fn resolved_linkage(market_id: &str, effective_at: DateTime<Utc>) -> MarketLinkage {
         let market_id = MarketId::new(market_id);
         let now = effective_at;
-        let outcome = LinkageOutcome::Resolved(ResolvedBinding {
+        let outcome = LinkageOutcome::Resolved(Box::new(ResolvedBinding {
             subject: MarketSubject::Crypto(CryptoSubject {
                 asset: CryptoAsset::parse("BTC").expect("asset"),
                 quote: CryptoQuote::parse("USD").expect("quote"),
@@ -543,10 +545,17 @@ mod tests {
                     interval: KlineInterval::OneMinute,
                 },
             }),
-            instrument_key: instrument(),
+            source_bindings: vec![ResolvedSourceBinding {
+                role: LinkageSourceRole::Feature,
+                source_id: DomainSourceId::binance(),
+                instrument_key: instrument(),
+                available_at: now,
+                binding_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                    .expect("binding hash"),
+            }],
             grounding: GroundingProof { spans: Vec::new() },
             override_context: None,
-        });
+        }));
         let metadata_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
         let content_hash = MarketLinkage::compute_content_hash(
             &market_id,
@@ -583,6 +592,9 @@ mod tests {
                 event_versions: Vec::new(),
             },
             domain_observations: HashMap::new(),
+            crypto_reports: HashMap::new(),
+            weather_observations: HashMap::new(),
+            weather_forecasts: HashMap::new(),
             linkages: HashMap::new(),
         }
     }

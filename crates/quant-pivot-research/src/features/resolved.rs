@@ -307,6 +307,8 @@ pub struct ResolvedMarketContext {
     pub status: MarketStatus,
     /// Whether the market is a neg-risk market.
     pub neg_risk: bool,
+    /// Scheduled market start time, when published by Gamma.
+    pub start_date: Option<DateTime<Utc>>,
     /// Scheduled resolution time, when known.
     pub end_date: Option<DateTime<Utc>>,
     /// Upstream catalog creation time, when the source supplied one.
@@ -323,6 +325,7 @@ impl ResolvedMarketContext {
             available_at: info.updated_at,
             status: info.status,
             neg_risk: info.neg_risk,
+            start_date: info.start_date,
             end_date: info.end_date,
             created_at: info.created_at,
         }
@@ -337,6 +340,7 @@ impl From<MarketContextAt> for ResolvedMarketContext {
             available_at: context.available_at,
             status: context.status,
             neg_risk: context.neg_risk,
+            start_date: context.start_date,
             end_date: context.end_date,
             created_at: context.created_at,
         }

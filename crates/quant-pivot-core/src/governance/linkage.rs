@@ -11,6 +11,7 @@ use quant_pivot_error::{
     QuantError, QuantResult, governance::GovernanceError, storage::StorageError,
 };
 use quant_pivot_models::{
+    config::WeatherStationProfileConfig,
     domain::{
         LinkageOutcome, LinkageResolveSummaryView, LinkageSourceMetadata, MarketInfo,
         MarketLinkageDerivation, MarketLinkageGovernancePort, MarketLinkageInfo, MarketSubject,
@@ -18,12 +19,15 @@ use quant_pivot_models::{
     },
     enums::{
         common::MarketCategory,
-        domain::{LinkageStatus, ResolverTier},
+        domain::{LinkageSourceRole, LinkageStatus, ResolverTier},
     },
-    types::{ContentHash, DomainInstrumentKey, EventId, MarketId, Probability, ResolverVersion},
+    types::{ContentHash, EventId, MarketId, Probability, ResolverVersion},
 };
 use quant_pivot_repository::traits::{EventRepository, MarketLinkageRepository, MarketRepository};
-use quant_pivot_research::linkage::{LayeredResolver, ResolutionResult, validate_manual_override};
+use quant_pivot_research::linkage::{
+    LayeredResolver, ResolutionResult, WeatherStationCatalog, source_bindings_for_subject,
+    validate_manual_override,
+};
 
 /// Dependencies for the offline linkage resolver.
 pub struct LinkageResolverDeps {
@@ -44,10 +48,15 @@ pub struct LinkageResolverService {
 impl LinkageResolverService {
     /// Wire the service from boot-time dependencies.
     #[must_use]
-    pub fn new(deps: LinkageResolverDeps) -> Self {
+    pub fn new(
+        deps: LinkageResolverDeps,
+        weather_stations: HashMap<String, WeatherStationProfileConfig>,
+    ) -> Self {
         Self {
             deps,
-            resolver: LayeredResolver::deterministic(),
+            resolver: LayeredResolver::deterministic(WeatherStationCatalog::new(
+                weather_stations.into_iter().collect(),
+            )),
         }
     }
 
@@ -63,8 +72,9 @@ impl LinkageResolverService {
         metadata: LinkageSourceMetadata,
     ) -> QuantResult<MarketLinkageInfo> {
         let metadata_hash = metadata.metadata_hash()?;
-        let result = self.resolver.resolve(&metadata)?;
-        let linkage = resolution_to_new_linkage(&metadata, metadata_hash, result, Utc::now())?;
+        let available_at = Utc::now();
+        let result = self.resolver.resolve(&metadata, available_at)?;
+        let linkage = resolution_to_new_linkage(&metadata, metadata_hash, result, available_at)?;
         self.deps
             .linkage_repo
             .append(linkage)
@@ -84,7 +94,7 @@ impl LinkageResolverService {
         &self,
         market_ids: &[MarketId],
     ) -> QuantResult<LinkageResolveSummaryView> {
-        let markets = self.load_crypto_markets(market_ids).await?;
+        let markets = self.load_supported_markets(market_ids).await?;
         let examined =
             u64::try_from(markets.len()).map_err(|error| GovernanceError::NumericOverflow {
                 field: "linkage resolver market count",
@@ -200,26 +210,55 @@ impl LinkageResolverService {
         let metadata_hash = metadata.metadata_hash()?;
         let subject: MarketSubject = serde_json::from_value(request.subject)
             .map_err(|error| QuantError::config(error.to_string()))?;
-        let instrument_key = DomainInstrumentKey::new(&request.instrument_key);
-        let MarketSubject::Crypto(crypto_subject) = &subject;
+        let MarketSubject::Crypto(crypto_subject) = &subject else {
+            return Err(QuantError::config(
+                "manual Weather linkage overrides are not supported by the crypto validator",
+            ));
+        };
+        let effective_at = Utc::now();
+        let source_bindings = source_bindings_for_subject(&subject, effective_at)?;
+        let feature_binding = source_bindings
+            .iter()
+            .find(|binding| binding.role == LinkageSourceRole::Feature)
+            .ok_or_else(|| QuantError::config("subject has no canonical feature source binding"))?;
         let grounding = validate_manual_override(
             crypto_subject,
-            &instrument_key,
+            &feature_binding.instrument_key,
             &metadata,
             &request.evidence,
         )
         .map_err(QuantError::config)?;
-        let outcome = LinkageOutcome::Resolved(ResolvedBinding {
+        let mut requested_source_bindings = request.source_bindings;
+        requested_source_bindings.sort_by(|left, right| {
+            (left.role, &left.source_id, &left.instrument_key).cmp(&(
+                right.role,
+                &right.source_id,
+                &right.instrument_key,
+            ))
+        });
+        let requested_identities = requested_source_bindings
+            .iter()
+            .map(|binding| (binding.role, &binding.source_id, &binding.instrument_key))
+            .collect::<Vec<_>>();
+        let expected_identities = source_bindings
+            .iter()
+            .map(|binding| (binding.role, &binding.source_id, &binding.instrument_key))
+            .collect::<Vec<_>>();
+        if requested_identities != expected_identities {
+            return Err(QuantError::config(
+                "override source bindings do not match the subject's frozen source rules",
+            ));
+        }
+        let outcome = LinkageOutcome::Resolved(Box::new(ResolvedBinding {
             subject,
-            instrument_key,
+            source_bindings,
             grounding,
             override_context: Some(OverrideContext {
                 reason: request.reason,
                 actor,
             }),
-        });
+        }));
         let resolver_version = self.resolver.resolver_version();
-        let effective_at = Utc::now();
         let linkage = NewMarketLinkage::from_derivation(MarketLinkageDerivation {
             market_id: market_id.clone(),
             outcome,
@@ -236,7 +275,10 @@ impl LinkageResolverService {
             .map_err(QuantError::from)
     }
 
-    async fn load_crypto_markets(&self, market_ids: &[MarketId]) -> QuantResult<Vec<MarketInfo>> {
+    async fn load_supported_markets(
+        &self,
+        market_ids: &[MarketId],
+    ) -> QuantResult<Vec<MarketInfo>> {
         let markets: Vec<MarketInfo> = if market_ids.is_empty() {
             self.deps
                 .market_repo
@@ -258,7 +300,12 @@ impl LinkageResolverService {
         };
         Ok(markets
             .into_iter()
-            .filter(|market| market.fee_category() == MarketCategory::Crypto)
+            .filter(|market| {
+                matches!(
+                    market.fee_category(),
+                    MarketCategory::Crypto | MarketCategory::Weather
+                )
+            })
             .collect())
     }
 

@@ -35,6 +35,7 @@ pub struct Model {
     pub no_token_id: TokenId,
     pub tick_size: TickSize,
     pub neg_risk: bool,
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub fees_enabled: bool,

@@ -13,12 +13,12 @@ use crate::{
             OrderTypeKind, VenueOrderStatus,
         },
         quant::{
-            ApprovalStatus, EntryTriggerState, ExecutionOrderState, OrderIntentStatus,
-            QuantRuntimeMode, RecommendationReportStatus,
+            ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
+            RecommendationReportStatus,
         },
     },
     types::{
-        ContentHash, EntryOrderSpec, EntryTrigger, ExecutionOrderId, ExitPolicySpec,
+        ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
         ExitReinferenceObservation, MarketId, ModelVersionId, OrderId, OrderIntentId, Price,
         RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
     },
@@ -47,15 +47,11 @@ pub struct OrderIntentInfo {
     pub policy_hash: Option<ContentHash>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
-    pub entry_trigger_json: EntryTrigger,
+    pub condition_instance_id: EntryConditionInstanceId,
     pub entry_order_json: EntryOrderSpec,
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
-    pub entry_trigger_state: EntryTriggerState,
-    pub trigger_confirming_since: Option<DateTime<Utc>>,
-    pub trigger_last_observed_at: Option<DateTime<Utc>>,
-    pub trigger_ready_at: Option<DateTime<Utc>>,
     pub exit_state: ExitState,
     pub exit_reason: Option<ExitReason>,
     pub next_check_at: Option<DateTime<Utc>>,
@@ -71,9 +67,8 @@ info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
     order_intent_id, recommendation_id, runtime_mode, runtime_config_version_id,
     model_version_id, intent_kind, status, approval_status, approved_by,
     approval_reason, approved_at, policy_id, policy_hash, status_reason,
-    admission_trace_ref, entry_trigger_json, entry_order_json, exit_policy_json, risk_envelope_hash,
-    expires_at, entry_trigger_state, trigger_confirming_since, trigger_last_observed_at,
-    trigger_ready_at, exit_state, exit_reason, next_check_at, peak_mark_price,
+    admission_trace_ref, condition_instance_id, entry_order_json, exit_policy_json, risk_envelope_hash,
+    expires_at, exit_state, exit_reason, next_check_at, peak_mark_price,
     last_signal_recheck_at, latest_reinference_json, scale_out_state, created_at, updated_at,
 });
 
@@ -96,24 +91,11 @@ pub struct NewOrderIntent {
     pub policy_hash: Option<ContentHash>,
     pub status_reason: Option<String>,
     pub admission_trace_ref: Option<String>,
-    pub entry_trigger_json: EntryTrigger,
+    pub condition_instance_id: EntryConditionInstanceId,
     pub entry_order_json: EntryOrderSpec,
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
-    pub entry_trigger_state: EntryTriggerState,
-    pub trigger_confirming_since: Option<DateTime<Utc>>,
-    pub trigger_last_observed_at: Option<DateTime<Utc>>,
-    pub trigger_ready_at: Option<DateTime<Utc>>,
-}
-
-/// Atomic durable update emitted only when an entry-trigger state changes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EntryTriggerTransition {
-    pub state: EntryTriggerState,
-    pub confirming_since: Option<DateTime<Utc>>,
-    pub last_observed_at: Option<DateTime<Utc>>,
-    pub ready_at: Option<DateTime<Utc>>,
 }
 
 /// Approval transition payload for an order intent.

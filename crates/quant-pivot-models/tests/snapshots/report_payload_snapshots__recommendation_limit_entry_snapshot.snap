@@ -64,12 +64,10 @@ expression: recommendation_limit_entry()
       }
     },
     "entry": {
-      "trigger": {
-        "kind": "price_condition",
-        "comparison": "at_or_below",
-        "threshold": "0.42",
-        "confirmation_secs": 30,
-        "max_observation_gap_ms": 2000
+      "condition": {
+        "kind": "conditional",
+        "artifact_id": "152808fb-15d3-536b-8e91-ee7334ae9728",
+        "content_hash": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       },
       "order_policy": {
         "kind": "passive",

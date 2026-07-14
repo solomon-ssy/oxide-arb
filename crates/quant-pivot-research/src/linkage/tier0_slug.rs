@@ -193,7 +193,9 @@ mod tests {
             .extract(&source)
             .expect("extract")
             .expect("recognized");
-        let MarketSubject::Crypto(subject) = &candidate.subject;
+        let MarketSubject::Crypto(subject) = &candidate.subject else {
+            panic!("crypto subject")
+        };
         assert_eq!(subject.asset.as_str(), "BTC");
         assert_eq!(subject.comparator, PriceComparator::UpVsReference);
         assert!(subject.strike.is_none());

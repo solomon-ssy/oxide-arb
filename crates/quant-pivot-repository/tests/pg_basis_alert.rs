@@ -55,6 +55,7 @@ async fn seed_market(db: &sea_orm::DatabaseConnection, market_id: &str) {
             no_token_id: TokenId::new("222"),
             tick_size: TickSize::Hundredth,
             neg_risk: false,
+            start_date: None,
             end_date: None,
             resolved_at: None,
             fees_enabled: true,

@@ -17,13 +17,14 @@ use quant_pivot_models::{
     },
     enums::quant::{
         EmptyReportReason, ExitSettlementMode, FillRequirement, IneligibilityReason, OutcomeSide,
-        PriceComparison, QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
+        QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
     },
     types::{
-        BookSnapshotRef, Bps, EligibilitySummary, EntryOrderPolicy, EntryPlan, EntryTrigger,
-        EquitySnapshotId, EvidenceRefs, ExecutionEligibility, ExitPlan, Price, RecommendationId,
-        RecommendationReportId, RecommendationTradePlan, ReportSummary, ScaleOutTarget,
-        ThesisInvalidationPolicy, TrailingStopPolicy, Usd,
+        BookSnapshotRef, Bps, ContentHash, EligibilitySummary, EntryConditionArtifactId,
+        EntryConditionPlan, EntryOrderPolicy, EntryPlan, EquitySnapshotId, EvidenceRefs,
+        ExecutionEligibility, ExitPlan, Price, RecommendationId, RecommendationReportId,
+        RecommendationTradePlan, ReportSummary, ScaleOutTarget, ThesisInvalidationPolicy,
+        TrailingStopPolicy, Usd,
     },
 };
 
@@ -140,11 +141,10 @@ fn evidence_refs() -> EvidenceRefs {
 
 fn limit_entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger: EntryTrigger::PriceCondition {
-            comparison: PriceComparison::AtOrBelow,
-            threshold: Price::new(dec!(0.42)),
-            confirmation_secs: 30,
-            max_observation_gap_ms: 2_000,
+        condition: EntryConditionPlan::Conditional {
+            artifact_id: EntryConditionArtifactId::new(seeded_uuid("snapshot-condition")),
+            content_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64)))
+                .expect("condition hash"),
         },
         order_policy: EntryOrderPolicy::Passive {
             limit_price: Price::new(dec!(0.42)),
@@ -162,7 +162,7 @@ fn limit_entry_plan() -> EntryPlan {
 
 fn immediate_entry_plan() -> EntryPlan {
     EntryPlan {
-        trigger: EntryTrigger::Immediate,
+        condition: EntryConditionPlan::Immediate,
         order_policy: EntryOrderPolicy::Aggressive {
             worst_price: Price::new(dec!(0.43)),
             fill_requirement: FillRequirement::AllowPartial,

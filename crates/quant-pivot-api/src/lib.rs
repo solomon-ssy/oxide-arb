@@ -23,5 +23,6 @@ pub mod infra;
 pub mod keystore;
 pub mod relayer;
 pub mod wallet;
+pub mod weather;
 pub mod wire;
 pub mod ws;

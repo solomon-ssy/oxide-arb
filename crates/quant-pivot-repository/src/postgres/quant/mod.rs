@@ -7,8 +7,11 @@ mod basis_alert;
 mod calibration_artifact;
 mod capital_allocation;
 mod comparison_report;
+pub(crate) mod condition_wake;
 mod dataset;
+mod domain_projection;
 mod domain_source_cursor;
+mod entry_condition;
 mod equity_snapshot;
 mod execution_order;
 mod execution_submission;
@@ -39,8 +42,10 @@ pub use {
     basis_alert::PgBasisAlertRepository, calibration_artifact::PgCalibrationArtifactRepository,
     capital_allocation::PgCapitalAllocationRepository,
     comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
+    domain_projection::PgDomainProjectionRepository,
     domain_source_cursor::PgDomainSourceCursorRepository,
-    equity_snapshot::PgEquitySnapshotRepository, execution_order::PgExecutionOrderRepository,
+    entry_condition::PgEntryConditionRepository, equity_snapshot::PgEquitySnapshotRepository,
+    execution_order::PgExecutionOrderRepository,
     execution_submission::PgExecutionSubmissionRepository, factor::PgFactorRepository,
     feature::PgFeatureRepository, feature_parity::PgFeatureParityRepository,
     governance_audit::PgModelGovernanceAuditRepository, market_linkage::PgMarketLinkageRepository,

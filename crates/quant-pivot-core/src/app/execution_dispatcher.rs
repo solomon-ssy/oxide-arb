@@ -7,36 +7,31 @@
 //! spawned task; multi-replica leader election is Phase 8+ (the row lock keeps it
 //! safe regardless of replica count).
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
-        BookSnapshot, ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation,
-        OrderIntentListQuery, PageRequest, RecommendationInfo,
+        ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation, OrderIntentListQuery,
+        PageRequest,
     },
     enums::{
         execution::{ReconciliationEvidenceKind, ReconciliationResult},
-        quant::{EntryTriggerState, OrderIntentStatus, QuantRuntimeMode},
+        quant::{EntryConditionState, OrderIntentStatus, QuantRuntimeMode},
     },
-    types::{
-        EntryTrigger, OrderIntentId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId,
-    },
+    types::{ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId},
 };
 use quant_pivot_repository::traits::{
-    ExecutionSubmissionRepository, OrderIntentRepository, RecommendationRepository,
+    EntryConditionRepository, ExecutionSubmissionRepository, OrderIntentRepository,
     ReconciliationRepository,
 };
 
 use super::AppContext;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
-    execution::{ConfirmationProgress, TriggerEvaluation, evaluate_entry_trigger},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::periodic_task::PeriodicTask,
-    ingest::book_store::BookStore,
 };
 
 /// Max armed intents pulled per dispatch pass.
@@ -84,9 +79,8 @@ impl AppContext {
         let worker = ArmedDispatchWorker {
             dispatcher: self.execution_dispatcher(),
             intents: Arc::clone(&self.infra.repos.order_intent) as Arc<dyn OrderIntentRepository>,
-            recommendations: Arc::clone(&self.infra.repos.recommendation)
-                as Arc<dyn RecommendationRepository>,
-            book_store: Arc::clone(&self.data.book_store),
+            conditions: Arc::clone(&self.infra.repos.entry_condition)
+                as Arc<dyn EntryConditionRepository>,
             reconciliation: Arc::clone(&reconciliation),
             runtime_mode: self.runtime_mode(),
             kill_switch: self.kill_switch_handle(),
@@ -101,7 +95,6 @@ impl AppContext {
             // retry with backoff until it succeeds; the submit loop is not
             // entered (so nothing is auto-submitted) until recovery is durably
             // done. The report plane runs independently and is unaffected.
-            let mut confirmation = HashMap::new();
             loop {
                 match recover_dangling_orders(&submission, &reconciliation, RECOVER_DANGLING_LIMIT)
                     .await
@@ -140,7 +133,7 @@ impl AppContext {
                     () = wake.wait() => {}
                     () = tokio::time::sleep(poll) => {}
                 }
-                if let Err(error) = armed_dispatch_pass(&worker, &mut confirmation).await {
+                if let Err(error) = armed_dispatch_pass(&worker).await {
                     tracing::warn!(%error, "auto-execution dispatch pass failed");
                 }
             }
@@ -151,8 +144,7 @@ impl AppContext {
 struct ArmedDispatchWorker {
     dispatcher: Arc<dyn ExecutionSubmitPort>,
     intents: Arc<dyn OrderIntentRepository>,
-    recommendations: Arc<dyn RecommendationRepository>,
-    book_store: Arc<BookStore>,
+    conditions: Arc<dyn EntryConditionRepository>,
     reconciliation: Arc<dyn ReconciliationRepository>,
     runtime_mode: RuntimeModeHandle,
     kill_switch: KillSwitchHandle,
@@ -203,10 +195,7 @@ async fn recover_dangling_orders(
 /// row-locked + admitted; a per-intent failure never aborts the batch. The
 /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
 /// admission `#17`, which denies the same condition per intent (05.5).
-async fn armed_dispatch_pass(
-    worker: &ArmedDispatchWorker,
-    confirmation: &mut HashMap<OrderIntentId, ConfirmationProgress>,
-) -> QuantResult<()> {
+async fn armed_dispatch_pass(worker: &ArmedDispatchWorker) -> QuantResult<()> {
     let status = match worker.runtime_mode.current() {
         QuantRuntimeMode::ReportOnly => return Ok(()),
         QuantRuntimeMode::SemiAuto => OrderIntentStatus::Approved,
@@ -225,37 +214,22 @@ async fn armed_dispatch_pass(
     };
     let page = worker.intents.page(query).await?;
     for intent in page.items {
-        let recommendation = worker
-            .recommendations
-            .find_by_id(&intent.recommendation_id)
+        let condition = worker
+            .conditions
+            .find_instance(&intent.condition_instance_id)
             .await?;
-        let Some(recommendation) = recommendation else {
+        let Some(condition) = condition else {
             tracing::warn!(
                 intent_id = %intent.order_intent_id,
-                "armed intent references a missing recommendation",
+                condition_instance_id = %intent.condition_instance_id,
+                "armed intent references a missing condition instance",
             );
             continue;
         };
-        let evaluation = evaluate_armed_intent(
-            &intent.order_intent_id,
-            intent.entry_trigger_state,
-            &intent.entry_trigger_json,
-            &recommendation,
-            &worker.book_store,
-            confirmation.get(&intent.order_intent_id).copied(),
-        );
-        if let Some(progress) = evaluation.progress {
-            confirmation.insert(intent.order_intent_id.clone(), progress);
-        } else {
-            confirmation.remove(&intent.order_intent_id);
-        }
-        if let Some(transition) = evaluation.transition {
-            worker
-                .intents
-                .transition_entry_trigger(&intent.order_intent_id, transition)
-                .await?;
-        }
-        if !evaluation.ready && intent.entry_trigger_state != EntryTriggerState::NotRequired {
+        if !matches!(
+            condition.state,
+            EntryConditionState::NotRequired | EntryConditionState::Qualified
+        ) {
             continue;
         }
         if let Err(error) = worker
@@ -268,37 +242,9 @@ async fn armed_dispatch_pass(
                 intent_id = %intent.order_intent_id,
                 "auto-execution dispatch failed for intent",
             );
-        } else {
-            confirmation.remove(&intent.order_intent_id);
         }
     }
     Ok(())
-}
-
-fn evaluate_armed_intent(
-    intent_id: &OrderIntentId,
-    state: EntryTriggerState,
-    trigger: &EntryTrigger,
-    recommendation: &RecommendationInfo,
-    book_store: &BookStore,
-    progress: Option<ConfirmationProgress>,
-) -> TriggerEvaluation {
-    let now = Utc::now();
-    let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(u64::MAX);
-    let snapshot = book_store.load(&recommendation.token_id);
-    let best_ask = snapshot.as_deref().and_then(BookSnapshot::best_ask);
-    let max_book_age_ms = recommendation
-        .trade_plan
-        .frozen()
-        .map_or(0, |(_, entry, _, _, _)| entry.max_book_age_ms);
-    let book_fresh = snapshot
-        .as_deref()
-        .is_some_and(|book| now_ms.saturating_sub(book.timestamp_ms) <= max_book_age_ms);
-    let evaluation = evaluate_entry_trigger(trigger, state, progress, best_ask, book_fresh, now);
-    if evaluation.transition.is_some() {
-        tracing::debug!(%intent_id, ?state, "entry trigger transitioned");
-    }
-    evaluation
 }
 
 /// Pending reconciliation row for an order found in-flight at boot.

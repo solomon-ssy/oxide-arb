@@ -22,6 +22,7 @@ use std::{
     },
     time::Instant,
 };
+use tokio::sync::Notify;
 
 struct TokenBookState {
     live: Mutex<OrderBook>,
@@ -38,6 +39,8 @@ pub struct BookStore {
     token_latency_traces: DashMap<TokenId, Arc<LatencyTrace>>,
     metrics: Arc<MetricsHub>,
     metric_update_counter: atomic::AtomicU64,
+    gap_generation: AtomicU64,
+    update_notify: Notify,
 }
 
 impl BookStore {
@@ -47,6 +50,8 @@ impl BookStore {
             token_latency_traces: DashMap::new(),
             metrics,
             metric_update_counter: StdSyncAtomicU64::new(0),
+            gap_generation: AtomicU64::new(0),
+            update_notify: Notify::new(),
         }
     }
 
@@ -116,6 +121,24 @@ impl BookStore {
             .map_or(0, |e| e.value().version.load(Ordering::Acquire))
     }
 
+    /// Source-discontinuity generation shared by all CLOB token books.
+    #[inline]
+    pub fn gap_generation(&self) -> u64 {
+        self.gap_generation.load(Ordering::Acquire)
+    }
+
+    /// Mark an observed CLOB stream discontinuity. Price-condition continuity
+    /// must restart even when the recovered best ask is numerically unchanged.
+    pub fn mark_gap(&self) {
+        self.gap_generation.fetch_add(1, Ordering::AcqRel);
+        self.update_notify.notify_one();
+    }
+
+    /// Coalesced wake for the durable condition worker; Postgres remains the queue.
+    pub async fn wait_for_update(&self) {
+        self.update_notify.notified().await;
+    }
+
     pub fn apply_snapshot(
         &self,
         token_id: &TokenId,
@@ -136,6 +159,7 @@ impl BookStore {
             self.token_latency_traces
                 .insert(token_id.clone(), Arc::new(lat));
         }
+        self.update_notify.notify_one();
         version
     }
 
@@ -159,6 +183,7 @@ impl BookStore {
             self.token_latency_traces
                 .insert(token_id.clone(), Arc::new(lat));
         }
+        self.update_notify.notify_one();
         version
     }
 

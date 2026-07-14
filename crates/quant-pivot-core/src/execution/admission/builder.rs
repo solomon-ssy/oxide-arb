@@ -23,10 +23,10 @@ use quant_pivot_models::{
     types::Usd,
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ExecutionOrderRepository, MarketRepository,
-    ModelRegistryRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
-    TradePolicyRepository,
+    CapitalAllocationRepository, EntryConditionRepository, ExecutionOrderRepository,
+    MarketRepository, ModelRegistryRepository, OrderIntentRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RuntimeConfigVersionRepository, TradePolicyRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -65,6 +65,7 @@ pub struct AdmissionInputBuilderDeps {
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
+    pub conditions: Arc<dyn EntryConditionRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub markets: Arc<dyn MarketRepository>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
@@ -113,6 +114,16 @@ impl AdmissionInputBuilder {
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| not_found("recommendation", intent.recommendation_id.to_string()))?;
+        let condition = deps
+            .conditions
+            .find_instance(&intent.condition_instance_id)
+            .await?
+            .ok_or_else(|| {
+                not_found(
+                    "entry_condition_instance",
+                    intent.condition_instance_id.to_string(),
+                )
+            })?;
 
         let config = deps.config.current();
         let budget_total_usd = parse_budget_usd(&config.portfolio.budget.total_budget_usd.value)?;
@@ -159,6 +170,7 @@ impl AdmissionInputBuilder {
 
         Ok(AdmissionInput {
             intent: intent.clone(),
+            condition,
             recommendation,
             report: fetched.report,
             mode,

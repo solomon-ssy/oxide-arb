@@ -19,12 +19,14 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgCalibrationArtifactRepository, PgModelRegistryRepository, PgOrderIntentRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgTradePolicyRepository,
+        PgCalibrationArtifactRepository, PgEntryConditionRepository, PgModelRegistryRepository,
+        PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgTradePolicyRepository,
     },
     traits::{
-        CalibrationArtifactRepository, ModelRegistryRepository, OrderIntentRepository,
-        RecommendationReportRepository, RecommendationRepository, TradePolicyRepository,
+        CalibrationArtifactRepository, EntryConditionRepository, ModelRegistryRepository,
+        OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+        TradePolicyRepository,
     },
 };
 use quant_pivot_research::{artifact::LocalArtifactStore, model::CalibrationArtifactLoader};
@@ -63,6 +65,8 @@ pub fn build_order_intent_service(
             as Arc<dyn RecommendationReportRepository>,
         intents: Arc::new(PgOrderIntentRepository::new(db.clone()))
             as Arc<dyn OrderIntentRepository>,
+        conditions: Arc::new(PgEntryConditionRepository::new(db.clone()))
+            as Arc<dyn EntryConditionRepository>,
         intent_lifecycle,
         dispatch_wake: DispatchWake::new(),
         metrics: Arc::new(MetricsHub::new()),

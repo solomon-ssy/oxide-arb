@@ -17,7 +17,7 @@ SRC_GLOBS=(crates/*/src)
 ERRORS=0
 
 echo "=== Checking deleted dead-semantic symbols do not reappear ==="
-DELETED='BindingConstraint::ManualCap|CapitalAllocationState::Planned|ChCapitalAllocationState::Planned|EmptyReportReason::ModelQualityGateFailed|EmptyReportReason::RuntimeModeDisabled|EmptyReason\b|SizingBetStructure|HeuristicTpSl|EntryTriggerKind|PartialExitNode|SignalInvalidationRule|ExecutedPartialExitNodes|OpportunisticExitState|ExitTriggerKind|override_shares|override_limit_price|max_allowed_usd|target_reward_multiple|order_retry_policy|set_order_retry|\bmeta_label\b|MetaLabel'
+DELETED='BindingConstraint::ManualCap|CapitalAllocationState::Planned|ChCapitalAllocationState::Planned|EmptyReportReason::ModelQualityGateFailed|EmptyReportReason::RuntimeModeDisabled|EmptyReason\b|SizingBetStructure|HeuristicTpSl|EntryConditionPlanKind|PartialExitNode|SignalInvalidationRule|ExecutedPartialExitNodes|OpportunisticExitState|ExitTriggerKind|override_shares|override_limit_price|max_allowed_usd|target_reward_multiple|order_retry_policy|set_order_retry|\bmeta_label\b|MetaLabel'
 if rg -n -P "$DELETED" "${SRC_GLOBS[@]}" --glob '!**/tests/**' 2>/dev/null; then
     echo "ERROR: a symbol deleted in Phase 11.0 reappeared in production src (see lint-dead-semantics.sh)"
     ERRORS=$((ERRORS + 1))
@@ -38,9 +38,9 @@ require_live() {
     fi
 }
 
-require_live 'EntryTriggerState::Expired' \
-    'EntryTriggerState::Expired' \
-    'entry_trigger_state'
+require_live 'EntryConditionState::Expired' \
+    'EntryConditionState::Expired' \
+    'entry_condition_state'
 require_live 'FAK' \
     'OrderType::Fak' \
     'OrderType::Fak|OrderTypeKind::Fak'

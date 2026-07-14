@@ -33,6 +33,7 @@ pub struct MarketInfo {
     pub no_token_id: TokenId,
     pub tick_size: TickSize,
     pub neg_risk: bool,
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub fees_enabled: bool,
@@ -48,7 +49,7 @@ pub struct MarketInfo {
 
 info_from_model!(MarketInfo, crate::entities::market::Model, {
     market_id, event_id, question, slug, description, categories, status, outcome,
-    yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at,
+    yes_token_id, no_token_id, tick_size, neg_risk, start_date, end_date, resolved_at,
     fees_enabled, fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate,
     fee_source, fee_observed_at, created_at, updated_at,
 });
@@ -83,6 +84,7 @@ pub struct UpsertMarket {
     pub no_token_id: TokenId,
     pub tick_size: TickSize,
     pub neg_risk: bool,
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub fees_enabled: bool,
@@ -232,6 +234,7 @@ pub struct MarketRegistryInfo {
     /// Gamma-reported trailing 24h volume when published by the upstream source.
     pub volume_24h: Option<Usd>,
     pub fee_schedule: Option<MarketFeeSchedule>,
+    pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
     /// Upstream creation time. Missing remains `None`; age features must not
@@ -287,6 +290,7 @@ impl UpsertMarket {
             no_token_id: value.token_no.clone(),
             tick_size: value.tick_size,
             neg_risk: value.neg_risk,
+            start_date: value.start_date,
             end_date: value.end_date,
             resolved_at: value.resolved_at,
             fees_enabled: fee_columns.fees_enabled,

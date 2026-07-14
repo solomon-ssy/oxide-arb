@@ -13,16 +13,65 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, CryptoPriceReportRow, DomainObservationRow,
+        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        WeatherForecastPointRow, WeatherObservationReportRow,
     },
-    types::{DomainInstrumentKey, MarketId, TokenId},
+    types::{DomainInstrumentKey, DomainSourceId, MarketId, TokenId},
 };
 
 /// Read port over persisted quant facts, used to materialize feature windows and
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    /// Latest source-native Crypto report applicable at `source_timestamp_ms`
+    /// and visible by `decision_at_ms`. Chainlink uses its signed
+    /// `observations_timestamp`; other sources use `event_time`.
+    async fn crypto_price_report_at(
+        &self,
+        _source_id: &DomainSourceId,
+        _instrument_key: &DomainInstrumentKey,
+        _source_timestamp_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Option<CryptoPriceReportRow>, StorageError> {
+        Ok(None)
+    }
+
+    /// Source-native Crypto facts in `[from_ms, to_ms)`, PIT-visible by the
+    /// supplied source publication and system availability cutoffs.
+    async fn crypto_price_reports_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<CryptoPriceReportRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn weather_observation_reports_between(
+        &self,
+        _stations: Vec<String>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _publish_cutoff_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<WeatherObservationReportRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn weather_forecast_points_between(
+        &self,
+        _stations: Vec<String>,
+        _valid_from_ms: i64,
+        _valid_to_ms: i64,
+        _reference_cutoff_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<WeatherForecastPointRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// One-second microstructure buckets for `token_ids` whose `bucket_time`
     /// falls in `[from_ms, to_ms)` (epoch milliseconds), ordered by token then
     /// time. Used both for the online feature window (`to_ms` = PIT cutoff) and

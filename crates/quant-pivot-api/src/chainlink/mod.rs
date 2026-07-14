@@ -1,391 +1,366 @@
-//! Chainlink on-chain aggregator source (`AggregatorV3` `eth_call`).
+//! Chainlink Data Streams V3 source.
 //!
-//! Round ids are composite `uint80` values (`phase_id << 64 | aggregator_round_id`)
-//! and are handled via [`round_id::RoundId`] — never narrowed to `u64`.
-//!
-//! **Current oracle plane (11.2.2):** this module reads **Chainlink Data Feeds**
-//! on Polygon — on-chain `AggregatorV3` rounds pushed by deviation/heartbeat
-//! rules. Polymarket crypto up/down markets settle against **Chainlink Data
-//! Streams** (off-chain, sub-second signed reports; paid subscription). The two
-//! sources can diverge by 0.3–0.8% for 10–30 seconds in volatile windows.
-//!
-//! Phase 11.2.2 mitigates (but does not eliminate) that gap via:
-//! - PTB fail-closed: Chainlink-settled markets never silently fall back to
-//!   Binance for price-to-beat;
-//! - `domain.crypto.cross_check.max_oracle_staleness_secs`: reject stale Data
-//!   Feed observations in basis/PTB features (`StaleBeyondPolicy`).
-//!
-//! True Data Streams ingest is deferred to Phase 11.2.3 (requires a paid
-//! Chainlink subscription).
+//! This module deliberately has no `DomainDataSource` implementation: signed
+//! Data Streams reports are immutable crypto facts, not generic factor
+//! observations. Callers persist [`CryptoPriceReport`] first and derive price
+//! transitions from adjacent reports of the same source/feed.
 
-use std::{collections::BTreeMap, str::FromStr, sync::Mutex, time::Duration};
+use std::{collections::BTreeMap, fmt::Display, sync::Arc, time::Duration};
 
-use alloy::{
-    primitives::{Address, I256},
-    providers::{Provider, ProviderBuilder},
-    rpc::client::RpcClient,
-    sol,
-    transports::http::Http,
+use chainlink_data_streams_report::{
+    feed_id::ID,
+    report::{Report, decode_full_report, v3::ReportDataV3},
 };
-
-mod round_id;
-
+use chainlink_data_streams_sdk::{
+    client::Client,
+    config::{Config, WebSocketHighAvailability},
+    stream::Stream,
+};
 use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_error::{QuantError, QuantResult, rpc::RpcError};
 use quant_pivot_models::{
-    config::{ChainlinkSourceConfig, OnchainConfig},
-    domain::DomainObservation,
-    enums::domain::{DomainFamily, DomainMetric},
-    types::{ChainlinkFeedKey, DomainInstrumentKey, DomainSourceId},
+    config::{ChainlinkDataStreamFeedConfig, ChainlinkDataStreamsSourceConfig},
+    domain::CryptoPriceReport,
+    hashing::CanonicalDigest,
+    types::{ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId, Usd},
 };
-use reqwest::Client as ReqwestClient;
-use round_id::{backscan_start, gap_recovery_floor, is_missing_round_reason, prev};
 use rust_decimal::Decimal;
-use url::Url;
+use secrecy::ExposeSecret;
 
-use crate::domain::{DomainDataSource, DomainFetchRequest};
-
-type DynProvider = alloy::providers::DynProvider;
-
-sol! {
-    #[sol(rpc)]
-    interface AggregatorV3Interface {
-        function latestRoundData() external view returns (
-            uint80 roundId,
-            int256 answer,
-            uint256 startedAt,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        );
-        function getRoundData(uint80 roundId) external view returns (
-            uint80 roundId,
-            int256 answer,
-            uint256 startedAt,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        );
-        function decimals() external view returns (uint8);
-    }
+#[derive(Clone)]
+struct FeedBinding {
+    id: ID,
+    decimals: u32,
 }
 
-/// Chainlink aggregator reader backed by Polygon `eth_call`.
-pub struct ChainlinkAggregatorSource {
-    config: ChainlinkSourceConfig,
-    provider: DynProvider,
-    feeds: BTreeMap<ChainlinkFeedKey, Address>,
-    decimals_cache: Mutex<BTreeMap<ChainlinkFeedKey, u8>>,
+/// Authenticated REST/HA-WebSocket client for the configured V3 feeds.
+pub struct ChainlinkDataStreamsSource {
+    config: ChainlinkDataStreamsSourceConfig,
+    sdk_config: Config,
+    client: Arc<Client>,
+    clock_http: reqwest::Client,
+    feeds: BTreeMap<ChainlinkFeedKey, FeedBinding>,
 }
 
-impl ChainlinkAggregatorSource {
-    /// Connect from deploy config (reuses the shared Polygon RPC endpoint).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the RPC URL is invalid or feed addresses fail to parse.
-    pub fn connect(
-        onchain: &OnchainConfig,
-        config: ChainlinkSourceConfig,
-    ) -> Result<Self, RpcError> {
-        let rpc_url = Url::parse(&onchain.rpc_url).map_err(|error| {
-            RpcError::ConnectionFailed(format!(
-                "invalid Polygon RPC URL '{}': {error}",
-                onchain.rpc_url
-            ))
+impl ChainlinkDataStreamsSource {
+    /// Construct a fail-closed source. Disabled or credential-incomplete
+    /// configurations are rejected so callers can keep unrelated workers live.
+    pub fn connect(config: ChainlinkDataStreamsSourceConfig) -> Result<Self, RpcError> {
+        if !config.enabled {
+            return Err(RpcError::ConnectionFailed(
+                "Chainlink Data Streams is not configured".into(),
+            ));
+        }
+        let api_key = config.api_key.as_ref().ok_or_else(|| {
+            RpcError::ConnectionFailed("Chainlink Data Streams API key is missing".into())
         })?;
-        let http_client = ReqwestClient::builder()
-            .timeout(Duration::from_millis(onchain.rpc_timeout_ms))
-            .build()
-            .map_err(|error| {
-                RpcError::ConnectionFailed(format!(
-                    "failed to build Polygon RPC HTTP client: {error}"
-                ))
-            })?;
-        let transport = Http::with_client(http_client, rpc_url);
-        let rpc_client = RpcClient::new(transport, false);
-        let provider = ProviderBuilder::new().connect_client(rpc_client).erased();
+        let api_secret = config.api_secret.as_ref().ok_or_else(|| {
+            RpcError::ConnectionFailed("Chainlink Data Streams API secret is missing".into())
+        })?;
+        let sdk_config = Config::new(
+            api_key.expose_secret().to_owned(),
+            api_secret.expose_secret().to_owned(),
+            config.rest_url.clone(),
+            config.websocket_url.clone(),
+        )
+        .with_ws_ha(WebSocketHighAvailability::Enabled)
+        .with_ws_max_reconnect(usize::MAX)
+        .build()
+        .map_err(|error| data_streams_failure("configure", error))?;
         let feeds = config
             .feeds
             .iter()
-            .map(|(feed, address)| {
-                let key = ChainlinkFeedKey::parse(feed).map_err(|error| RpcError::CallFailed {
-                    method: "chainlink_feed_key".into(),
-                    reason: error.to_string(),
-                })?;
-                let address = Address::from_str(address).map_err(|error| RpcError::CallFailed {
-                    method: "chainlink_feed_address".into(),
-                    reason: format!("{feed}: {error}"),
-                })?;
-                Ok((key, address))
-            })
-            .collect::<Result<BTreeMap<_, _>, RpcError>>()?;
+            .map(|(name, feed)| parse_feed_binding(name, feed))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let client = Client::new(sdk_config.clone())
+            .map_err(|error| data_streams_failure("REST client", error))?;
+        let clock_http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|error| data_streams_failure("clock client", error))?;
         Ok(Self {
             config,
-            provider,
+            sdk_config,
+            client: Arc::new(client),
+            clock_http,
             feeds,
-            decimals_cache: Mutex::new(BTreeMap::new()),
         })
     }
 
-    fn parse_instrument(key: &DomainInstrumentKey) -> QuantResult<ChainlinkFeedKey> {
-        let feed = key
-            .as_str()
-            .strip_prefix("CHAINLINK:")
-            .ok_or_else(|| QuantError::config(format!("not a Chainlink instrument key: {key}")))?;
-        ChainlinkFeedKey::parse(feed).map_err(|error| QuantError::config(error.to_string()))
+    #[must_use]
+    pub fn source_id(&self) -> DomainSourceId {
+        DomainSourceId::chainlink_data_streams()
     }
 
-    async fn decimals(&self, feed: &ChainlinkFeedKey, address: Address) -> QuantResult<u8> {
-        let cached = self.decimals_cache.lock().expect("lock").get(feed).copied();
-        if let Some(decimals) = cached {
-            return Ok(decimals);
+    #[must_use]
+    pub fn instruments(&self) -> Vec<DomainInstrumentKey> {
+        self.feeds
+            .keys()
+            .map(DomainInstrumentKey::chainlink_data_streams)
+            .collect()
+    }
+
+    /// Create an HA stream subscribed to every configured feed. The SDK
+    /// deduplicates reports received from multiple origins.
+    pub async fn stream(&self, feeds: &[ChainlinkFeedKey]) -> QuantResult<Stream> {
+        if feeds.is_empty() {
+            return Err(data_streams_failure("WebSocket connect", "no feeds requested").into());
         }
-        let contract = AggregatorV3Interface::new(address, &self.provider);
-        let decimals = contract.decimals().call().await.map_err(|error| {
-            QuantError::Rpc(RpcError::CallFailed {
-                method: "chainlink_decimals".into(),
-                reason: error.to_string(),
-            })
-        })?;
-        self.decimals_cache
-            .lock()
-            .expect("lock")
-            .insert(feed.clone(), decimals);
-        Ok(decimals)
-    }
-
-    async fn observation_from_round_fields(
-        &self,
-        feed: &ChainlinkFeedKey,
-        address: Address,
-        answer: I256,
-        updated_at_raw: alloy::primitives::U256,
-    ) -> QuantResult<Option<DomainObservation>> {
-        if answer <= I256::ZERO {
-            return Ok(None);
-        }
-        let updated_at = i64::try_from(updated_at_raw).map_err(|error| {
-            QuantError::Rpc(RpcError::CallFailed {
-                method: "chainlink_updated_at".into(),
-                reason: error.to_string(),
-            })
-        })?;
-        let observed_at = Utc.timestamp_opt(updated_at, 0).single().ok_or_else(|| {
-            QuantError::Rpc(RpcError::CallFailed {
-                method: "chainlink_updated_at".into(),
-                reason: "timestamp out of range".into(),
-            })
-        })?;
-        let decimals = self.decimals(feed, address).await?;
-        let value = scale_answer(answer, decimals)?;
-        Ok(Some(DomainObservation {
-            family: DomainFamily::Crypto,
-            source_id: DomainSourceId::chainlink(),
-            instrument_key: DomainInstrumentKey::chainlink_feed(feed),
-            metric: DomainMetric::OraclePrice,
-            value,
-            observed_at,
-            publish_time: observed_at,
-            available_at: None,
-        }))
-    }
-
-    /// Steady-state fetch: normally just `latestRoundData`, but walks
-    /// `getRoundData` backward — bounded by `max_incremental_gap_rounds` — to
-    /// recover any rounds the aggregator advanced between polls (e.g. after a
-    /// poller outage), rather than permanently losing them (R10 ingest
-    /// hardening). The common case (no gap: the latest round is already
-    /// `<= from_exclusive`'s successor) costs exactly one RPC call.
-    async fn fetch_incremental(
-        &self,
-        feed: &ChainlinkFeedKey,
-        address: Address,
-        from_exclusive: DateTime<Utc>,
-    ) -> QuantResult<Vec<DomainObservation>> {
-        let contract = AggregatorV3Interface::new(address, &self.provider);
-        let latest = contract.latestRoundData().call().await.map_err(|error| {
-            QuantError::Rpc(RpcError::CallFailed {
-                method: "chainlink_latestRoundData".into(),
-                reason: error.to_string(),
-            })
-        })?;
-        let latest_round = latest.roundId;
-        let floor_round = gap_recovery_floor(latest_round, self.config.max_incremental_gap_rounds);
-
-        let mut observations = Vec::new();
-        let mut round_id = latest_round;
-        let mut answer = latest.answer;
-        let mut updated_at = latest.updatedAt;
-        loop {
-            let Some(observation) = self
-                .observation_from_round_fields(feed, address, answer, updated_at)
-                .await?
-            else {
-                // An unpriced round breaks the ascending-timestamp assumption
-                // this walk relies on; stop rather than guess further back.
-                break;
-            };
-            if observation.observed_at <= from_exclusive {
-                break;
-            }
-            observations.push(observation);
-            if round_id <= floor_round {
-                break;
-            }
-            let Some(prev_round) = prev(round_id) else {
-                break;
-            };
-            round_id = prev_round;
-            let round = match contract.getRoundData(round_id).call().await {
-                Ok(round) => round,
-                Err(error) => {
-                    let reason = error.to_string();
-                    if is_missing_round_reason(&reason) {
-                        tracing::debug!(
-                            round_id = %round_id,
-                            "chainlink incremental backscan stopped at missing round"
-                        );
-                        break;
-                    }
-                    return Err(QuantError::Rpc(RpcError::CallFailed {
-                        method: "chainlink_getRoundData".into(),
-                        reason,
-                    }));
-                }
-            };
-            answer = round.answer;
-            updated_at = round.updatedAt;
-        }
-        observations.sort_by_key(|row| row.observed_at);
-        Ok(observations)
-    }
-
-    async fn fetch_bootstrap(
-        &self,
-        feed: &ChainlinkFeedKey,
-        address: Address,
-        from_exclusive: DateTime<Utc>,
-        to_inclusive: DateTime<Utc>,
-    ) -> QuantResult<Vec<DomainObservation>> {
-        let contract = AggregatorV3Interface::new(address, &self.provider);
-        let latest = contract.latestRoundData().call().await.map_err(|error| {
-            QuantError::Rpc(RpcError::CallFailed {
-                method: "chainlink_latestRoundData".into(),
-                reason: error.to_string(),
-            })
-        })?;
-        let latest_round = latest.roundId;
-        let floor_round = backscan_start(latest_round, self.config.max_round_backscan);
-        let mut observations = Vec::new();
-        let mut round_id = latest_round;
-        loop {
-            let round = match contract.getRoundData(round_id).call().await {
-                Ok(round) => round,
-                Err(error) => {
-                    let reason = error.to_string();
-                    if round_id == latest_round {
-                        return Err(QuantError::Rpc(RpcError::CallFailed {
-                            method: "chainlink_getRoundData".into(),
-                            reason,
-                        }));
-                    }
-                    if is_missing_round_reason(&reason) {
-                        tracing::debug!(
-                            round_id = %round_id,
-                            "chainlink bootstrap backscan stopped at missing round"
-                        );
-                        break;
-                    }
-                    return Err(QuantError::Rpc(RpcError::CallFailed {
-                        method: "chainlink_getRoundData".into(),
-                        reason,
-                    }));
-                }
-            };
-            if let Some(observation) = self
-                .observation_from_round_fields(feed, address, round.answer, round.updatedAt)
-                .await?
-                && observation.observed_at > from_exclusive
-                && observation.observed_at <= to_inclusive
-            {
-                observations.push(observation);
-            }
-            if round_id <= floor_round {
-                break;
-            }
-            let Some(prev_round) = prev(round_id) else {
-                break;
-            };
-            round_id = prev_round;
-        }
-        observations.sort_by_key(|row| row.observed_at);
-        Ok(observations)
-    }
-}
-
-fn scale_answer(answer: I256, decimals: u8) -> QuantResult<Decimal> {
-    let raw = answer
-        .to_string()
-        .parse::<Decimal>()
-        .map_err(|error| QuantError::config(format!("chainlink answer parse: {error}")))?;
-    let scale = Decimal::from(10_u64.pow(u32::from(decimals)));
-    Ok(raw / scale)
-}
-
-#[async_trait::async_trait]
-impl DomainDataSource for ChainlinkAggregatorSource {
-    fn family(&self) -> DomainFamily {
-        DomainFamily::Crypto
-    }
-
-    fn source_id(&self) -> DomainSourceId {
-        DomainSourceId::chainlink()
-    }
-
-    async fn fetch(&self, request: DomainFetchRequest) -> QuantResult<Vec<DomainObservation>> {
-        let feed = Self::parse_instrument(&request.instrument_key)?;
-        let address = self.feeds.get(&feed).ok_or_else(|| {
-            QuantError::config(format!("chainlink feed `{feed}` is not configured"))
-        })?;
-        if request.bootstrap {
-            self.fetch_bootstrap(
-                &feed,
-                *address,
-                request.from_exclusive,
-                request.to_inclusive,
-            )
+        let ids = feeds
+            .iter()
+            .map(|feed| self.binding(feed).map(|binding| binding.id))
+            .collect::<QuantResult<Vec<_>>>()?;
+        Stream::new(&self.sdk_config, ids)
             .await
-        } else {
-            self.fetch_incremental(&feed, *address, request.from_exclusive)
-                .await
+            .map_err(|error| data_streams_failure("WebSocket connect", error).into())
+    }
+
+    /// Read and decode one HA-deduplicated signed report from the official SDK
+    /// stream, resolving its feed only through the frozen deploy binding.
+    pub async fn next_report(
+        &self,
+        stream: &mut Stream,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<CryptoPriceReport> {
+        let response = stream
+            .read()
+            .await
+            .map_err(|error| data_streams_failure("WebSocket read", error))?;
+        let (feed, binding) = self
+            .feeds
+            .iter()
+            .find(|(_, binding)| binding.id == response.report.feed_id)
+            .ok_or_else(|| {
+                data_streams_failure(
+                    "WebSocket decode",
+                    "report feed ID has no frozen configuration binding",
+                )
+            })?;
+        self.decode(feed, binding, response.report, available_at)
+    }
+
+    /// Recover sequential reports after a native observations timestamp.
+    pub async fn reports_page(
+        &self,
+        feed: &ChainlinkFeedKey,
+        start_timestamp: u128,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<Vec<CryptoPriceReport>> {
+        let binding = self.binding(feed)?;
+        let reports = self
+            .client
+            .get_reports_page_with_limit(binding.id, start_timestamp, self.config.rest_page_limit)
+            .await
+            .map_err(|error| data_streams_failure("reports page", error))?;
+        reports
+            .into_iter()
+            .map(|report| self.decode(feed, binding, report, available_at))
+            .collect()
+    }
+
+    /// Freeze the exact report applicable at a market's reference timestamp.
+    pub async fn report_at(
+        &self,
+        feed: &ChainlinkFeedKey,
+        timestamp: u128,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<CryptoPriceReport> {
+        let binding = self.binding(feed)?;
+        let response = self
+            .client
+            .get_report(binding.id, timestamp)
+            .await
+            .map_err(|error| data_streams_failure("reference report", error))?;
+        self.decode(feed, binding, response.report, available_at)
+    }
+
+    /// Validate a trusted server-time sample. Callers must mark the source
+    /// unhealthy when this fails; report age is not a clock-skew substitute.
+    pub fn validate_clock(
+        &self,
+        local_time: DateTime<Utc>,
+        trusted_server_time: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        let skew = (local_time - trusted_server_time)
+            .num_milliseconds()
+            .unsigned_abs();
+        if skew > self.config.max_clock_skew_ms {
+            return Err(QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_data_streams_clock".into(),
+                reason: format!(
+                    "clock skew {skew}ms exceeds {}ms",
+                    self.config.max_clock_skew_ms
+                ),
+            }));
         }
+        Ok(())
+    }
+
+    /// Sample the authenticated REST origin's HTTPS `Date` header and compare
+    /// it with the midpoint of the local request interval. Missing/invalid
+    /// server time and excessive RTT both fail closed.
+    pub async fn validate_system_clock(&self) -> QuantResult<()> {
+        let sent_at = Utc::now();
+        let response = self
+            .clock_http
+            .head(&self.config.rest_url)
+            .send()
+            .await
+            .map_err(|error| data_streams_failure("clock sample", error))?;
+        let received_at = Utc::now();
+        let round_trip_ms = (received_at - sent_at).num_milliseconds().unsigned_abs();
+        if round_trip_ms > self.config.max_clock_skew_ms {
+            return Err(data_streams_failure(
+                "clock sample",
+                format!("round-trip {round_trip_ms}ms exceeds trusted clock budget"),
+            )
+            .into());
+        }
+        let header = response
+            .headers()
+            .get(reqwest::header::DATE)
+            .ok_or_else(|| data_streams_failure("clock sample", "server Date header is missing"))?
+            .to_str()
+            .map_err(|error| data_streams_failure("clock sample", error))?;
+        let trusted = DateTime::parse_from_rfc2822(header)
+            .map_err(|error| data_streams_failure("clock sample", error))?
+            .with_timezone(&Utc);
+        let local_midpoint = sent_at + (received_at - sent_at) / 2;
+        self.validate_clock(local_midpoint, trusted)
+    }
+
+    fn binding(&self, feed: &ChainlinkFeedKey) -> QuantResult<&FeedBinding> {
+        self.feeds.get(feed).ok_or_else(|| {
+            QuantError::Rpc(RpcError::CallFailed {
+                method: "chainlink_data_streams_feed".into(),
+                reason: format!("feed `{feed}` is not configured"),
+            })
+        })
+    }
+
+    fn decode(
+        &self,
+        feed: &ChainlinkFeedKey,
+        binding: &FeedBinding,
+        report: Report,
+        available_at: DateTime<Utc>,
+    ) -> QuantResult<CryptoPriceReport> {
+        if report.feed_id != binding.id {
+            return Err(data_streams_failure(
+                "decode V3",
+                "response feed ID does not match frozen binding",
+            )
+            .into());
+        }
+        let raw_hex = report
+            .full_report
+            .strip_prefix("0x")
+            .unwrap_or(&report.full_report);
+        let full_report = hex::decode(raw_hex)
+            .map_err(|error| data_streams_failure("decode fullReport hex", error))?;
+        let (_, report_blob) = decode_full_report(&full_report)
+            .map_err(|error| data_streams_failure("decode fullReport envelope", error))?;
+        let decoded = ReportDataV3::decode(&report_blob)
+            .map_err(|error| data_streams_failure("decode V3 report", error))?;
+        if decoded.feed_id != binding.id {
+            return Err(data_streams_failure(
+                "decode V3",
+                "report payload feed ID does not match frozen binding",
+            )
+            .into());
+        }
+        let price = decimal_price(&decoded.benchmark_price.to_string(), binding.decimals)?;
+        let observations_timestamp = utc_seconds(decoded.observations_timestamp, "observations")?;
+        let valid_from = utc_seconds(decoded.valid_from_timestamp, "valid from")?;
+        let expires_at = utc_seconds(decoded.expires_at, "expires at")?;
+        let report_hash = ContentHash::parse(CanonicalDigest::prefixed_bytes(&full_report))?;
+        Ok(CryptoPriceReport {
+            source_id: self.source_id(),
+            instrument_key: DomainInstrumentKey::chainlink_data_streams(feed),
+            source_sequence: u64::from(decoded.observations_timestamp),
+            price: Usd::new(price),
+            quantity: None,
+            event_time: observations_timestamp,
+            published_at: observations_timestamp,
+            available_at,
+            valid_from: Some(valid_from),
+            observations_timestamp: Some(observations_timestamp),
+            expires_at: Some(expires_at),
+            report_hash,
+            raw_report: report.full_report,
+        })
+    }
+}
+
+fn parse_feed_binding(
+    name: &str,
+    config: &ChainlinkDataStreamFeedConfig,
+) -> Result<(ChainlinkFeedKey, FeedBinding), RpcError> {
+    let name =
+        ChainlinkFeedKey::parse(name).map_err(|error| data_streams_failure("feed name", error))?;
+    let id = ID::from_hex_str(&config.feed_id)
+        .map_err(|error| data_streams_failure("feed ID", error))?;
+    if id.0[..2] != [0, 3] {
+        return Err(data_streams_failure(
+            "feed ID",
+            format!("`{name}` is not a V3 feed"),
+        ));
+    }
+    if config.decimals > 28 {
+        return Err(data_streams_failure(
+            "feed decimals",
+            format!("`{name}` exceeds Decimal scale"),
+        ));
+    }
+    Ok((
+        name,
+        FeedBinding {
+            id,
+            decimals: config.decimals,
+        },
+    ))
+}
+
+fn decimal_price(raw: &str, decimals: u32) -> QuantResult<Decimal> {
+    let raw = raw
+        .parse::<Decimal>()
+        .map_err(|error| data_streams_failure("benchmark price", error))?;
+    let price = raw * Decimal::new(1, decimals);
+    if price <= Decimal::ZERO {
+        return Err(data_streams_failure("benchmark price", "price must be positive").into());
+    }
+    Ok(price)
+}
+
+fn utc_seconds(seconds: u32, field: &'static str) -> QuantResult<DateTime<Utc>> {
+    Utc.timestamp_opt(i64::from(seconds), 0)
+        .single()
+        .ok_or_else(|| data_streams_failure(field, "timestamp out of range").into())
+}
+
+fn data_streams_failure(operation: &str, error: impl Display) -> RpcError {
+    RpcError::CallFailed {
+        method: format!("chainlink_data_streams_{operation}"),
+        reason: error.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::round_id::{ONE, RoundId, gap_recovery_floor};
-
-    fn phase_one_round(aggregator_round: u64) -> RoundId {
-        (RoundId::from(1_u64) << 64) + RoundId::from(aggregator_round)
-    }
+    use super::decimal_price;
+    use rust_decimal_macros::dec;
 
     #[test]
-    fn floor_is_bounded_by_gap_cap_in_phase_zero() {
+    fn benchmark_price_uses_frozen_feed_scale() {
         assert_eq!(
-            gap_recovery_floor(RoundId::from(1_000_u64), 100),
-            RoundId::from(900_u64)
+            decimal_price("123456789", 8).expect("valid price"),
+            dec!(1.23456789)
         );
     }
 
     #[test]
-    fn floor_supports_phase_one_round_ids() {
-        let latest = phase_one_round(3_684_024);
-        assert_eq!(gap_recovery_floor(latest, 100), phase_one_round(3_683_924));
-    }
-
-    #[test]
-    fn floor_clamps_to_round_one_near_genesis() {
-        assert_eq!(gap_recovery_floor(RoundId::from(50_u64), 100), ONE);
-        assert_eq!(gap_recovery_floor(ONE, 100), ONE);
+    fn non_positive_benchmark_price_is_rejected() {
+        assert!(decimal_price("0", 8).is_err());
+        assert!(decimal_price("-1", 8).is_err());
     }
 }

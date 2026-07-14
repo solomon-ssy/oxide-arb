@@ -29,6 +29,10 @@ pub enum TaskId {
     TradeTapeWorker,
     /// Periodically ingests external domain observations into `quant_domain_observation`.
     DomainIngestWorker,
+    /// Dynamically ingests source-native Crypto/Weather live events from active linkages.
+    DomainLiveIngestWorker,
+    /// Delivers typed derived-domain events from the `PostgreSQL` outbox to `ClickHouse`.
+    DomainEventOutboxWorker,
 
     // ── Catalog ───────────────────────────────────────────────────────
     GammaSync,
@@ -54,6 +58,8 @@ pub enum TaskId {
     // ── Execution ─────────────────────────────────────────────────────
     /// Auto-execution worker: pulls `ApprovedByPolicy` intents and submits them.
     ExecutionDispatcher,
+    /// Evaluates durable recommendation condition instances in all runtime modes.
+    EntryConditionWorker,
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
@@ -127,9 +133,10 @@ impl TaskId {
             | Self::WsBroadcaster
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
-            Self::DataPipeline | Self::TradeTapeWorker | Self::DomainIngestWorker => {
-                TaskKind::WsIngress
-            }
+            Self::DataPipeline
+            | Self::TradeTapeWorker
+            | Self::DomainIngestWorker
+            | Self::DomainLiveIngestWorker => TaskKind::WsIngress,
             Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::PotentialLossEscalation
@@ -140,6 +147,7 @@ impl TaskId {
                 TaskKind::HealthMonitor
             }
             Self::ExecutionDispatcher
+            | Self::EntryConditionWorker
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
             | Self::ExitMonitor
@@ -156,6 +164,7 @@ impl TaskId {
             | Self::IntentDeadlineScheduler => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
             Self::DetectionWriter
+            | Self::DomainEventOutboxWorker
             | Self::TickEventsWriter
             | Self::BookL2ReplayWriter
             | Self::BookSnapshotWriter

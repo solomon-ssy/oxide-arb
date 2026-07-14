@@ -50,6 +50,7 @@ pub fn make_market(
         no_token_id: TokenId::new("67890"),
         tick_size: TickSize::Hundredth,
         neg_risk: false,
+        start_date: None,
         end_date,
         resolved_at: None,
         fees_enabled: true,

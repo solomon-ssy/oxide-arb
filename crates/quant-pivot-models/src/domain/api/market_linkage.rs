@@ -14,15 +14,24 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        BasisAlertInfo, DomainSourceCursorInfo, ManualEvidenceInput, MarketLinkageInfo,
-        pagination::PageRequest,
+        BasisAlertInfo, DomainSourceCheckpoint, DomainSourceCursorInfo, LinkageOutcome,
+        ManualEvidenceInput, MarketLinkageInfo, ResolvedSourceBinding, pagination::PageRequest,
     },
-    enums::domain::{DomainFamily, LinkageStatus, ResolverTier},
+    enums::domain::{DomainFamily, LinkageSourceRole, LinkageStatus, ResolverTier},
     types::{
-        BasisAlertId, Bps, ContentHash, DomainInstrumentKey, MarketId, MarketLinkageId,
-        Probability, ResolverVersion,
+        BasisAlertId, Bps, ContentHash, DomainInstrumentKey, DomainSourceId, MarketId,
+        MarketLinkageId, Probability, ResolverVersion,
     },
 };
+
+/// Operator-proposed binding identity. Availability and content hashes are
+/// server-owned and therefore cannot be supplied by the client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverrideSourceBindingInput {
+    pub role: LinkageSourceRole,
+    pub source_id: DomainSourceId,
+    pub instrument_key: DomainInstrumentKey,
+}
 
 /// Paginated filter over the linkage ledger.
 ///
@@ -60,9 +69,9 @@ pub struct MarketLinkageListQuery {
 pub struct OverrideLinkageRequest {
     /// The full `MarketSubject` document to bind.
     pub subject: serde_json::Value,
-    /// Canonical instrument key the subject joins to (e.g. `BINANCE:BTCUSDT:1m`).
-    #[validate(length(min = 3, max = 128))]
-    pub instrument_key: String,
+    /// Exact source/role/instrument bindings. A single generic instrument is invalid.
+    #[validate(length(min = 1, max = 8))]
+    pub source_bindings: Vec<OverrideSourceBindingInput>,
     /// Operator reason recorded on the operation log and the ledger row.
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
@@ -97,7 +106,7 @@ pub struct MarketLinkageSummaryView {
     pub resolver_tier: ResolverTier,
     pub resolver_version: ResolverVersion,
     pub confidence: Probability,
-    pub instrument_key: Option<DomainInstrumentKey>,
+    pub source_bindings: Vec<ResolvedSourceBinding>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
     /// Populated only for `resolver_tier = override` rows (R4 audit columns).
@@ -116,7 +125,7 @@ impl From<MarketLinkageInfo> for MarketLinkageSummaryView {
             resolver_tier: info.resolver_tier,
             resolver_version: info.resolver_version,
             confidence: info.confidence,
-            instrument_key: info.instrument_key,
+            source_bindings: source_bindings_from_outcome(&info.outcome),
             content_hash: info.content_hash,
             derived_at: info.derived_at,
             override_reason: info.override_reason,
@@ -139,7 +148,7 @@ pub struct MarketLinkageDetailView {
     pub confidence: Probability,
     /// The full `LinkageOutcome` document (subject + grounding, or reason).
     pub outcome: serde_json::Value,
-    pub instrument_key: Option<DomainInstrumentKey>,
+    pub source_bindings: Vec<ResolvedSourceBinding>,
     pub metadata_hash: ContentHash,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
@@ -159,8 +168,8 @@ impl From<MarketLinkageInfo> for MarketLinkageDetailView {
             resolver_tier: info.resolver_tier,
             resolver_version: info.resolver_version,
             confidence: info.confidence,
+            source_bindings: source_bindings_from_outcome(&info.outcome),
             outcome: info.outcome,
-            instrument_key: info.instrument_key,
             metadata_hash: info.metadata_hash,
             content_hash: info.content_hash,
             derived_at: info.derived_at,
@@ -186,7 +195,7 @@ pub struct MarketLinkageHistoryEntryView {
     /// The full `LinkageOutcome` document (subject + grounding, or reason;
     /// carries `override_context` when `resolver_tier = override`).
     pub outcome: serde_json::Value,
-    pub instrument_key: Option<DomainInstrumentKey>,
+    pub source_bindings: Vec<ResolvedSourceBinding>,
     pub content_hash: ContentHash,
     pub derived_at: DateTime<Utc>,
     /// Populated only for `resolver_tier = override` rows (R4 audit columns).
@@ -203,14 +212,21 @@ impl From<MarketLinkageInfo> for MarketLinkageHistoryEntryView {
             resolver_tier: info.resolver_tier,
             resolver_version: info.resolver_version,
             confidence: info.confidence,
+            source_bindings: source_bindings_from_outcome(&info.outcome),
             outcome: info.outcome,
-            instrument_key: info.instrument_key,
             content_hash: info.content_hash,
             derived_at: info.derived_at,
             override_reason: info.override_reason,
             override_actor: info.override_actor,
             created_at: info.created_at,
         }
+    }
+}
+
+fn source_bindings_from_outcome(outcome: &serde_json::Value) -> Vec<ResolvedSourceBinding> {
+    match serde_json::from_value::<LinkageOutcome>(outcome.clone()) {
+        Ok(LinkageOutcome::Resolved(binding)) => binding.source_bindings,
+        Ok(LinkageOutcome::Unresolved { .. }) | Err(_) => Vec::new(),
     }
 }
 
@@ -233,9 +249,12 @@ pub struct LinkageResolveSummaryView {
 /// One `(source, instrument)` domain ingest cursor health row.
 #[derive(Debug, Clone, Serialize)]
 pub struct DomainSourceCursorView {
+    pub family: DomainFamily,
     pub source_id: String,
     pub instrument_key: String,
+    pub checkpoint: DomainSourceCheckpoint,
     pub last_event_time: DateTime<Utc>,
+    pub checkpoint_hash: ContentHash,
     pub status: String,
     /// Detail from the most recent failed tick; `null` when the last tick for
     /// this instrument succeeded (R10 ingest hardening).
@@ -247,11 +266,23 @@ pub struct DomainSourceCursorView {
 
 impl From<DomainSourceCursorInfo> for DomainSourceCursorView {
     fn from(info: DomainSourceCursorInfo) -> Self {
-        let lag_secs = (Utc::now() - info.last_event_time).num_seconds();
+        let last_event_time = info.checkpoint_json.event_time();
+        let family = match &info.checkpoint_json {
+            DomainSourceCheckpoint::BinanceKline { .. }
+            | DomainSourceCheckpoint::BinanceAggTrade { .. }
+            | DomainSourceCheckpoint::ChainlinkDataStreams { .. } => DomainFamily::Crypto,
+            DomainSourceCheckpoint::AviationWeather { .. }
+            | DomainSourceCheckpoint::Ghcnh { .. }
+            | DomainSourceCheckpoint::Gefs { .. } => DomainFamily::Weather,
+        };
+        let lag_secs = (Utc::now() - last_event_time).num_seconds();
         Self {
+            family,
             source_id: info.source_id.to_string(),
             instrument_key: info.instrument_key.to_string(),
-            last_event_time: info.last_event_time,
+            checkpoint: info.checkpoint_json,
+            last_event_time,
+            checkpoint_hash: info.checkpoint_hash,
             status: info.status,
             last_error: info.last_error,
             lag_secs,

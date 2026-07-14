@@ -11,6 +11,7 @@ pub fn all_ddl() -> Vec<String> {
         include_str!("sql/market_resolution_event.sql"),
         include_str!("sql/quant_trade_tape.sql"),
         include_str!("sql/quant_domain_observation.sql"),
+        include_str!("sql/quant_domain_events.sql"),
         include_str!("sql/quant_facts.sql"),
         include_str!("sql/quant_feature_parity.sql"),
     ]

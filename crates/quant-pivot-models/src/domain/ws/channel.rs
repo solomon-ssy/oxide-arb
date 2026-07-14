@@ -59,6 +59,8 @@ pub enum WsChannel {
     /// Order-intent lifecycle events (created / approved / rejected / cancelled
     /// / expired / invalidated), discriminated by the payload's `event` field.
     QuantIntent,
+    /// Recommendation-owned entry-condition instance revision hints.
+    QuantCondition,
     /// Materialization / replay run lifecycle update for dashboard clients.
     MaterializationRunUpdate,
     /// Reconciliation row detect/update lifecycle (worker + operator resolve),
@@ -72,7 +74,7 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::MarketResolved,
@@ -80,6 +82,7 @@ impl WsChannel {
         Self::ConfigActivated,
         Self::QuantReport,
         Self::QuantIntent,
+        Self::QuantCondition,
         Self::MaterializationRunUpdate,
         Self::QuantReconciliation,
         Self::QuantSettlement,
@@ -96,6 +99,7 @@ impl WsChannel {
             Self::ConfigActivated => "config.activated",
             Self::QuantReport => "quant.report",
             Self::QuantIntent => "quant.intent",
+            Self::QuantCondition => "quant.condition",
             Self::MaterializationRunUpdate => "materialization.run_update",
             Self::QuantReconciliation => "quant.reconciliation",
             Self::QuantSettlement => "quant.settlement",
@@ -111,7 +115,7 @@ impl WsChannel {
         match self {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
-            Self::QuantReport => ResourceType::QuantReport,
+            Self::QuantReport | Self::QuantCondition => ResourceType::QuantReport,
             Self::QuantIntent => ResourceType::OrderIntent,
             Self::MaterializationRunUpdate => ResourceType::Materialization,
             Self::ConfigActivated => ResourceType::RuntimeConfig,

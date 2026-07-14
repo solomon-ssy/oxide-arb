@@ -9,22 +9,26 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
-        FeatureParityJobParams, NewOperationLog, NewRecommendationReport,
+        FeatureParityJobParams, NewEntryConditionArtifact, NewEntryConditionAudit,
+        NewEntryConditionInstance, NewOperationLog, NewRecommendation, NewRecommendationReport,
         NewReportDataQualitySnapshot, NewReportFeatureParity, NewReportTransaction, PageWindow,
         Paginated, QuantReportListQuery, RecommendationReportInfo, ReportDataQualitySnapshotInfo,
     },
     entities::{
-        operation_log, quant_account_snapshot, quant_feature_parity_run, quant_portfolio_plan,
-        quant_recommendation, quant_recommendation_report, quant_report_data_quality_snapshot,
-        quant_research_job,
+        operation_log, quant_account_snapshot, quant_entry_condition_artifact,
+        quant_entry_condition_audit, quant_entry_condition_instance, quant_feature_parity_run,
+        quant_portfolio_plan, quant_recommendation, quant_recommendation_report,
+        quant_report_data_quality_snapshot, quant_research_job,
     },
     enums::quant::{
-        FeatureParityRunKind, FeatureParityRunStatus, RecommendationReportStatus,
-        RecommendationStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
+        EntryConditionAuditAction, EntryConditionState, FeatureParityRunKind,
+        FeatureParityRunStatus, RecommendationReportStatus, RecommendationStatus, ReportKind,
+        ResearchJobKind, ResearchJobStatus,
     },
     schema::column,
     types::{
-        FeatureParityStateId, ModelRunId, RecommendationReportId, ReportDataQualitySnapshotId,
+        EntryConditionArtifactId, EntryConditionAuditId, EntryConditionPlan, FeatureParityStateId,
+        ModelRunId, RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
     },
 };
 use sea_orm::{
@@ -142,12 +146,207 @@ fn validate_report_data_quality(
     Ok(())
 }
 
+fn validate_entry_conditions(
+    recommendations: &[NewRecommendation],
+    artifacts: &[NewEntryConditionArtifact],
+    instances: &[NewEntryConditionInstance],
+) -> Result<(), StorageError> {
+    if recommendations.len() != instances.len() {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "report commit requires exactly one condition instance per recommendation",
+        ));
+    }
+    validate_condition_artifacts(artifacts)?;
+    validate_condition_instances(instances)?;
+    for recommendation in recommendations {
+        let instance = instances
+            .iter()
+            .find(|instance| instance.recommendation_id == recommendation.recommendation_id)
+            .ok_or_else(|| {
+                StorageError::invariant_violation(
+                    Some("quant_entry_condition_instance"),
+                    "recommendation has no condition instance",
+                )
+            })?;
+        validate_recommendation_condition(recommendation, instance, artifacts)?;
+    }
+    Ok(())
+}
+
+fn validate_condition_artifacts(
+    artifacts: &[NewEntryConditionArtifact],
+) -> Result<(), StorageError> {
+    let mut artifact_ids = HashSet::new();
+    for artifact in artifacts {
+        let canonical = artifact
+            .payload_json
+            .clone()
+            .canonicalize()
+            .map_err(|error| {
+                StorageError::invariant_violation(
+                    Some("quant_entry_condition_artifact"),
+                    error.to_string(),
+                )
+            })?;
+        let content_hash = canonical.canonical_content_hash().map_err(|error| {
+            StorageError::invariant_violation(
+                Some("quant_entry_condition_artifact"),
+                error.to_string(),
+            )
+        })?;
+        if artifact.payload_json != canonical
+            || artifact.content_hash != content_hash
+            || artifact.artifact_id != EntryConditionArtifactId::from_content_hash(&content_hash)
+            || !artifact_ids.insert(artifact.artifact_id.clone())
+        {
+            return Err(StorageError::invariant_violation(
+                Some("quant_entry_condition_artifact"),
+                "condition artifact is not canonical, content-addressed, and unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_condition_instances(
+    instances: &[NewEntryConditionInstance],
+) -> Result<(), StorageError> {
+    let mut recommendation_ids = HashSet::new();
+    for instance in instances {
+        if !recommendation_ids.insert(instance.recommendation_id.clone()) {
+            return Err(StorageError::invariant_violation(
+                Some("quant_entry_condition_instance"),
+                "duplicate recommendation condition instance",
+            ));
+        }
+        if instance.revision != 0
+            || instance.lease_epoch != 0
+            || instance.claimed_by_intent_id.is_some()
+            || instance.consumed_at.is_some()
+        {
+            return Err(StorageError::invariant_violation(
+                Some("quant_entry_condition_instance"),
+                "new report condition instance has non-initial lifecycle state",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_recommendation_condition(
+    recommendation: &NewRecommendation,
+    instance: &NewEntryConditionInstance,
+    artifacts: &[NewEntryConditionArtifact],
+) -> Result<(), StorageError> {
+    match &recommendation.trade_plan {
+        RecommendationTradePlan::Frozen { entry, .. } => match &entry.condition {
+            EntryConditionPlan::Immediate
+                if instance.state == EntryConditionState::NotRequired
+                    && instance.artifact_id.is_none()
+                    && instance.artifact_hash.is_none() => {}
+            EntryConditionPlan::Conditional {
+                artifact_id,
+                content_hash,
+            } if instance.state == EntryConditionState::Waiting
+                && instance.artifact_id.as_ref() == Some(artifact_id)
+                && instance.artifact_hash.as_ref() == Some(content_hash)
+                && artifacts.iter().any(|artifact| {
+                    artifact.artifact_id == *artifact_id
+                        && artifact.content_hash == *content_hash
+                        && artifact.payload_json.binding.recommendation_id
+                            == recommendation.recommendation_id
+                }) => {}
+            _ => {
+                return Err(StorageError::invariant_violation(
+                    Some("quant_entry_condition_instance"),
+                    "recommendation trade plan and condition instance disagree",
+                ));
+            }
+        },
+        RecommendationTradePlan::Unavailable { .. }
+            if instance.state == EntryConditionState::Invalidated
+                && instance.artifact_id.is_none()
+                && instance.artifact_hash.is_none() => {}
+        RecommendationTradePlan::Unavailable { .. } => {
+            return Err(StorageError::invariant_violation(
+                Some("quant_entry_condition_instance"),
+                "unavailable trade plan must create an invalidated shadow instance",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn new_condition_audit(
+    instance: &NewEntryConditionInstance,
+    occurred_at: DateTime<Utc>,
+) -> NewEntryConditionAudit {
+    NewEntryConditionAudit {
+        audit_id: EntryConditionAuditId::from_v7(),
+        condition_instance_id: instance.condition_instance_id.clone(),
+        revision: 0,
+        action: EntryConditionAuditAction::Created,
+        from_state: None,
+        to_state: instance.state,
+        truth_json: instance.truth_json.clone(),
+        evaluation_hash: None,
+        input_fingerprint: None,
+        continuity_hash: None,
+        lease_epoch: 0,
+        detail: Some("created atomically with recommendation report".to_owned()),
+        occurred_at,
+    }
+}
+
+async fn insert_sampled_feature_parity(
+    txn: &DatabaseTransaction,
+    parity: Option<NewReportFeatureParity>,
+    report_id: &RecommendationReportId,
+) -> Result<(), StorageError> {
+    let Some(parity) = parity else {
+        return Ok(());
+    };
+    let parity_key = report_id.to_string();
+    quant_feature_parity_run::Entity::insert(parity.run.into_active_model())
+        .exec(txn)
+        .await
+        .map_err(|error| error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &parity_key))?;
+    quant_research_job::Entity::insert(parity.job.into_active_model())
+        .exec(txn)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
+fn validate_report_transaction(
+    transaction: &NewReportTransaction,
+) -> Result<DateTime<Utc>, StorageError> {
+    validate_sampled_feature_parity(
+        &transaction.report,
+        transaction.sampled_feature_parity.as_ref(),
+    )?;
+    validate_report_data_quality(&transaction.report, &transaction.data_quality_snapshot)?;
+    validate_entry_conditions(
+        &transaction.recommendations,
+        &transaction.entry_condition_artifacts,
+        &transaction.entry_condition_instances,
+    )?;
+    transaction.report.published_at.ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "published report requires published_at for condition audit",
+        )
+    })
+}
+
 #[async_trait::async_trait]
 impl RecommendationReportRepository for PgRecommendationReportRepository {
     async fn create_report(
         &self,
         transaction: NewReportTransaction,
     ) -> Result<RecommendationReportInfo, StorageError> {
+        let condition_created_at = validate_report_transaction(&transaction)?;
         let NewReportTransaction {
             feature_parity_state_id,
             account_snapshot,
@@ -156,12 +355,12 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             portfolio_plan,
             report,
             recommendations,
+            entry_condition_artifacts,
+            entry_condition_instances,
             sampled_feature_parity,
             operation_log,
         } = transaction;
 
-        validate_sampled_feature_parity(&report, sampled_feature_parity.as_ref())?;
-        validate_report_data_quality(&report, &data_quality_snapshot)?;
         let feature_parity_state_id = feature_parity_state_id.ok_or_else(|| {
             StorageError::invariant_violation(
                 Some(entity::QUANT_RECOMMENDATION_REPORT),
@@ -192,28 +391,51 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
-        if let Some(parity) = sampled_feature_parity {
-            let parity_key = report_model.recommendation_report_id.to_string();
-            quant_feature_parity_run::Entity::insert(parity.run.into_active_model())
-                .exec(&txn)
-                .await
-                .map_err(|error| {
-                    error::map_unique(error, entity::QUANT_FEATURE_PARITY_RUN, &parity_key)
-                })?;
-            quant_research_job::Entity::insert(parity.job.into_active_model())
-                .exec(&txn)
-                .await
-                .map_err(StorageError::from)?;
+        if !entry_condition_artifacts.is_empty() {
+            quant_entry_condition_artifact::Entity::insert_many(
+                entry_condition_artifacts
+                    .into_iter()
+                    .map(IntoActiveModel::into_active_model),
+            )
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
         }
+        insert_sampled_feature_parity(
+            &txn,
+            sampled_feature_parity,
+            &report_model.recommendation_report_id,
+        )
+        .await?;
         if !recommendations.is_empty() {
-            let rows = recommendations
-                .into_iter()
-                .map(IntoActiveModel::into_active_model)
-                .collect::<Vec<quant_recommendation::ActiveModel>>();
-            quant_recommendation::Entity::insert_many(rows)
-                .exec(&txn)
-                .await
-                .map_err(StorageError::from)?;
+            quant_recommendation::Entity::insert_many(
+                recommendations
+                    .into_iter()
+                    .map(IntoActiveModel::into_active_model),
+            )
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        }
+        if !entry_condition_instances.is_empty() {
+            quant_entry_condition_instance::Entity::insert_many(
+                entry_condition_instances
+                    .iter()
+                    .cloned()
+                    .map(IntoActiveModel::into_active_model),
+            )
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+            quant_entry_condition_audit::Entity::insert_many(
+                entry_condition_instances
+                    .iter()
+                    .map(|instance| new_condition_audit(instance, condition_created_at))
+                    .map(IntoActiveModel::into_active_model),
+            )
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
         }
         operation_log::Entity::insert(operation_log.into_active_model())
             .exec(&txn)

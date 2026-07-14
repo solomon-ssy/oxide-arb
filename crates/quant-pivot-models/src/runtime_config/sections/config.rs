@@ -549,12 +549,10 @@ pub struct CryptoCrossCheckConfig {
     /// consecutive report rounds raises one alert per cooldown window, not
     /// one per round — the governance feed stays a signal, not a flood.
     pub alert_cooldown_secs: u64,
-    /// Maximum tolerated age (seconds) of a Chainlink oracle observation
-    /// before it is rejected as [`NullReason::StaleBeyondPolicy`] in basis and
-    /// price-to-beat features. Mitigates the freshness gap between on-chain
-    /// Data Feeds (deviation/heartbeat updates) and Polymarket's Data Streams
-    /// settlement path — does not eliminate it; true Data Streams ingest is
-    /// deferred to Phase 11.2.3.
+    /// Maximum tolerated age (seconds) of a Chainlink Data Streams signed
+    /// report before basis and price-to-beat features reject it as stale.
+    /// Binance is never substituted for a stale or unavailable settlement
+    /// binding.
     pub max_oracle_staleness_secs: u64,
 }
 
@@ -577,15 +575,10 @@ pub struct CryptoDomainConfig {
     /// the decision time.
     pub availability_lag_secs: u64,
     /// Days of history the ingest worker backfills on bootstrap, applied as a
-    /// uniform **time** lower bound (`now - backfill_days`) to every domain
-    /// source's fetch window. For Binance (1m klines) this is exact: the
-    /// source pages until it reaches the bound. For Chainlink this is a
-    /// **ceiling, not a guarantee**: `domain_sources.chainlink.max_round_backscan`
-    /// additionally caps bootstrap to a fixed round count (round cadence is
-    /// feed-specific and not translatable to a day count), so a feed whose
-    /// `max_round_backscan` rounds span less than `backfill_days` returns a
-    /// shorter, fail-closed history rather than silently over-fetching RPC
-    /// calls to satisfy the day bound.
+    /// uniform **time** lower bound (`now - backfill_days`) to the historical
+    /// Binance kline feature source. Live aggregate trades and Chainlink Data
+    /// Streams maintain their own source-native sequence checkpoints and gap
+    /// recovery windows.
     pub backfill_days: u32,
     /// Lookback (seconds) for the underlying momentum feature.
     pub momentum_window_secs: u64,
@@ -619,6 +612,41 @@ pub struct DomainConfig {
     pub enabled_by_family: BTreeMap<DomainFamily, bool>,
     /// Crypto vertical parameters.
     pub crypto: CryptoDomainConfig,
+    /// Airport local-day maximum-temperature vertical parameters.
+    pub weather: WeatherDomainConfig,
+}
+
+/// Weather feature-source PIT and calibration policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WeatherDomainConfig {
+    /// Source publication/ingest lag subtracted from the decision clock before
+    /// `AviationWeather`, `GHCNh`, or `GEFS` facts become PIT-visible.
+    pub availability_lag_secs: u64,
+    /// Maximum age in seconds of the newest complete GEFS run accepted for
+    /// forecast factors. Older runs fail closed.
+    pub max_forecast_age_secs: u64,
+    /// Exact minimum number of complete GEFS ensemble members required for a
+    /// forecast factor projection.
+    pub minimum_complete_members: u8,
+    /// Minimum distinct historical samples required for each station-by-lead
+    /// GEFS bias calibration cell.
+    pub minimum_bias_samples_per_lead: u32,
+    /// Maximum historical lookback in local calendar days used to fit Weather
+    /// station/lead bias and source-basis calibration.
+    pub calibration_lookback_days: u32,
+}
+
+impl Default for WeatherDomainConfig {
+    fn default() -> Self {
+        Self {
+            availability_lag_secs: 300,
+            max_forecast_age_secs: 21_600,
+            minimum_complete_members: 31,
+            minimum_bias_samples_per_lead: 30,
+            calibration_lookback_days: 730,
+        }
+    }
 }
 
 impl DomainConfig {
@@ -641,6 +669,7 @@ impl DomainConfig {
         Self {
             enabled_by_family: BTreeMap::new(),
             crypto: CryptoDomainConfig::default(),
+            weather: WeatherDomainConfig::default(),
         }
     }
 }
@@ -649,9 +678,11 @@ impl Default for DomainConfig {
     fn default() -> Self {
         let mut enabled_by_family = BTreeMap::new();
         enabled_by_family.insert(DomainFamily::Crypto, true);
+        enabled_by_family.insert(DomainFamily::Weather, true);
         Self {
             enabled_by_family,
             crypto: CryptoDomainConfig::default(),
+            weather: WeatherDomainConfig::default(),
         }
     }
 }
@@ -1031,6 +1062,8 @@ pub struct ExecutionConfig {
     pub semi_auto: SemiAutoConfig,
     /// Auto-execution policy.
     pub auto_execution: AutoExecutionConfig,
+    /// Recommendation-owned entry-condition worker policy.
+    pub entry_condition: EntryConditionWorkerConfig,
     /// Entry order policy document.
     pub entry_order_policy: EntryOrderPolicy,
     /// Exit-monitor cadence + signal-degradation policy.
@@ -1047,6 +1080,40 @@ pub struct ExecutionConfig {
     pub attribution: AttributionPolicy,
     /// Execution-breaker thresholds (venue health + auto kill-switch trip).
     pub breaker: ExecutionBreakerConfig,
+}
+
+/// Durable condition evaluator cadence, lease, and bounded-pass policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct EntryConditionWorkerConfig {
+    /// Millisecond cadence of the safety backstop scan. Source notifications,
+    /// book wakes, and clock deadlines remain the primary wake paths.
+    pub backstop_interval_ms: u64,
+    /// Milliseconds before a still-active instance becomes eligible for its
+    /// next scheduled evaluation after one worker pass.
+    pub next_evaluation_delay_ms: u64,
+    /// Duration in seconds of an exclusive instance-processing lease.
+    pub lease_duration_secs: u64,
+    /// Renewal cadence in seconds for a held lease; must remain shorter than
+    /// the lease duration so takeover is explicit and auditable.
+    pub lease_renew_interval_secs: u64,
+    /// Maximum number of due condition instances evaluated in one worker pass.
+    pub pass_limit: usize,
+    /// Maximum number of expired instances transitioned in one expiry sweep.
+    pub expiry_batch_limit: u64,
+}
+
+impl Default for EntryConditionWorkerConfig {
+    fn default() -> Self {
+        Self {
+            backstop_interval_ms: 1_000,
+            next_evaluation_delay_ms: 1_000,
+            lease_duration_secs: 15,
+            lease_renew_interval_secs: 5,
+            pass_limit: 256,
+            expiry_batch_limit: 512,
+        }
+    }
 }
 
 /// Semi-auto approval policy.
