@@ -1,5 +1,6 @@
 //! Typed raw domain facts, derived events, and condition evaluation traces.
 
+use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -77,16 +78,24 @@ pub struct DomainEventRow {
     pub payload_json: String,
 }
 
-#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, clickhouse::Row, Serialize, Deserialize, FromJsonQueryResult,
+)]
 pub struct EntryConditionEvaluationEventRow {
+    pub evaluation_id: ContentHash,
     pub condition_instance_id: EntryConditionInstanceId,
-    pub revision: i64,
+    pub base_revision: i64,
+    pub applied_revision: Option<i64>,
+    pub trace_kind: String,
     pub evaluator_version: u32,
     pub evaluated_at: i64,
     pub state: String,
     pub truth: String,
     pub evaluation_hash: ContentHash,
     pub input_fingerprint: ContentHash,
+    pub continuity_hash: ContentHash,
     pub tree_json: String,
     pub schema_version: ChSchemaVersion,
 }
+
+crate::jsonb_active!(EntryConditionEvaluationEventRow);

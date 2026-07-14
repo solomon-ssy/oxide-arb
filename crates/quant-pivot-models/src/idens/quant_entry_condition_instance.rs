@@ -35,6 +35,7 @@ pub enum QuantEntryConditionInstance {
     EvaluationHash,
     InputFingerprint,
     ContinuityHash,
+    FoldStateJson,
     ConfirmationStartedAt,
     LastEvaluatedAt,
     NextEvaluationAt,
@@ -107,6 +108,12 @@ fn add_evaluation_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(QuantEntryConditionInstance::ContinuityHash)
                 .text()
                 .null(),
+        )
+        .col(
+            ColumnDef::new(QuantEntryConditionInstance::FoldStateJson)
+                .json_binary()
+                .not_null()
+                .default(Expr::cust("'{\"crypto\":[]}'::jsonb")),
         )
         .col(
             ColumnDef::new(QuantEntryConditionInstance::ConfirmationStartedAt)

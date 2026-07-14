@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
@@ -819,6 +819,49 @@ fn crypto_domain_feature_present_with_domain_external_evidence() {
     assert!(distance.evidence.is_some());
 }
 
+fn crypto_pit_linkage(
+    as_of: DateTime<Utc>,
+    instrument_key: &DomainInstrumentKey,
+    visible_at: DateTime<Utc>,
+) -> MarketLinkage {
+    let binding = ResolvedBinding {
+        subject: MarketSubject::Crypto(CryptoSubject {
+            asset: CryptoAsset::parse("BTC").expect("asset"),
+            quote: CryptoQuote::parse("USD").expect("quote"),
+            comparator: PriceComparator::UpVsReference,
+            strike: None,
+            reference_at: None,
+            observation_at: as_of,
+            resolution_oracle: ResolutionOracle::BinanceKline {
+                symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
+                interval: KlineInterval::OneMinute,
+            },
+        }),
+        source_bindings: vec![source_binding(
+            LinkageSourceRole::Feature,
+            DomainSourceId::binance(),
+            instrument_key.clone(),
+            visible_at,
+        )],
+        grounding: GroundingProof { spans: Vec::new() },
+        override_context: None,
+    };
+    let content_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
+    MarketLinkage {
+        linkage_id: MarketLinkageId::from_v7(),
+        market_id: MarketId::new("m"),
+        domain_family: DomainFamily::Crypto,
+        outcome: LinkageOutcome::Resolved(Box::new(binding)),
+        confidence: Probability::ONE,
+        resolver_tier: ResolverTier::Tier0Slug,
+        resolver_version: ResolverVersion::FIRST,
+        metadata_hash: content_hash.clone(),
+        content_hash,
+        effective_at: as_of - Duration::days(1),
+        available_at: as_of - Duration::days(1),
+    }
+}
+
 #[test]
 fn domain_observation_pit_excludes_after_as_of_minus_delay() {
     // Exercises the **actual** production PIT assembly (`build_domain_slice_inputs`
@@ -852,42 +895,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
 
     let mut domain_config = DomainConfig::default();
     domain_config.crypto.availability_lag_secs = knowledge_lag_secs;
-    let binding = ResolvedBinding {
-        subject: MarketSubject::Crypto(CryptoSubject {
-            asset: CryptoAsset::parse("BTC").expect("asset"),
-            quote: CryptoQuote::parse("USD").expect("quote"),
-            comparator: PriceComparator::UpVsReference,
-            strike: None,
-            reference_at: None,
-            observation_at: as_of,
-            resolution_oracle: ResolutionOracle::BinanceKline {
-                symbol: BinanceSymbol::parse("BTCUSDT").expect("symbol"),
-                interval: KlineInterval::OneMinute,
-            },
-        }),
-        source_bindings: vec![source_binding(
-            LinkageSourceRole::Feature,
-            DomainSourceId::binance(),
-            instrument_key.clone(),
-            visible_at,
-        )],
-        grounding: GroundingProof { spans: Vec::new() },
-        override_context: None,
-    };
-    let content_hash = ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash");
-    let linkage = MarketLinkage {
-        linkage_id: MarketLinkageId::from_v7(),
-        market_id: MarketId::new("m"),
-        domain_family: DomainFamily::Crypto,
-        outcome: LinkageOutcome::Resolved(Box::new(binding)),
-        confidence: Probability::ONE,
-        resolver_tier: ResolverTier::Tier0Slug,
-        resolver_version: ResolverVersion::FIRST,
-        metadata_hash: content_hash.clone(),
-        content_hash,
-        effective_at: as_of - Duration::days(1),
-        available_at: as_of - Duration::days(1),
-    };
+    let linkage = crypto_pit_linkage(as_of, &instrument_key, visible_at);
 
     let boundary = DecisionClock::new(0)
         .boundary(as_of)
@@ -907,6 +915,7 @@ fn domain_observation_pit_excludes_after_as_of_minus_delay() {
             crypto_reports: &std::collections::HashMap::new(),
             weather_observations: &std::collections::HashMap::new(),
             weather_forecasts: &std::collections::HashMap::new(),
+            weather_calibrations: &[],
         },
     )
     .expect("domain slice build")

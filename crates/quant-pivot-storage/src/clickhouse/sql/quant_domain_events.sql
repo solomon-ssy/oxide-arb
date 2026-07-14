@@ -80,17 +80,32 @@ ORDER BY (subject, event_type, event_time, revision, event_id);
 
 CREATE TABLE IF NOT EXISTS quant_entry_condition_evaluation_event
 (
+    evaluation_id String,
     condition_instance_id UUID,
-    revision Int64,
+    base_revision Int64,
+    applied_revision Nullable(Int64),
+    trace_kind LowCardinality(String),
     evaluator_version UInt32,
     evaluated_at DateTime64(3, 'UTC'),
     state LowCardinality(String),
     truth LowCardinality(String),
     evaluation_hash String,
     input_fingerprint String,
+    continuity_hash String,
     tree_json String,
     schema_version UInt16
 )
 ENGINE = ReplacingMergeTree(evaluated_at)
 PARTITION BY toYYYYMM(evaluated_at)
-ORDER BY (condition_instance_id, revision, evaluation_hash);
+ORDER BY (condition_instance_id, evaluation_id);
+
+ALTER TABLE quant_entry_condition_evaluation_event
+    ADD COLUMN IF NOT EXISTS evaluation_id String FIRST;
+ALTER TABLE quant_entry_condition_evaluation_event
+    ADD COLUMN IF NOT EXISTS base_revision Int64 AFTER condition_instance_id;
+ALTER TABLE quant_entry_condition_evaluation_event
+    ADD COLUMN IF NOT EXISTS applied_revision Nullable(Int64) AFTER base_revision;
+ALTER TABLE quant_entry_condition_evaluation_event
+    ADD COLUMN IF NOT EXISTS trace_kind LowCardinality(String) AFTER applied_revision;
+ALTER TABLE quant_entry_condition_evaluation_event
+    ADD COLUMN IF NOT EXISTS continuity_hash String AFTER input_fingerprint;

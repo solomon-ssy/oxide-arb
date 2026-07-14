@@ -7,6 +7,7 @@ use quant_pivot_models::{
     },
     types::{DomainEventId, DomainInstrumentKey, DomainSourceId, IcaoStation},
 };
+use uuid::Uuid;
 
 /// Atomic typed projections + source cursor + durable domain-event outbox.
 #[async_trait::async_trait]
@@ -53,17 +54,25 @@ pub trait DomainProjectionRepository: Send + Sync {
         observed_at: DateTime<Utc>,
     ) -> Result<u64, StorageError>;
 
-    async fn pending_events(&self, limit: u64) -> Result<Vec<DomainEventEnvelope>, StorageError>;
+    async fn claim_pending_events(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<DomainEventEnvelope>, StorageError>;
 
     async fn mark_event_published(
         &self,
         event_id: &DomainEventId,
+        worker_id: Uuid,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError>;
 
     async fn mark_event_failed(
         &self,
         event_id: &DomainEventId,
+        worker_id: Uuid,
         detail: String,
     ) -> Result<(), StorageError>;
 }

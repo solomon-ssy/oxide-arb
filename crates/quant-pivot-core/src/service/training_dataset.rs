@@ -63,10 +63,10 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CatalogVersionRepository, FeatureRepository, MarketLinkageRepository,
-    MarketRepository, MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
-    QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
-    TrainingDatasetRepository,
+    AttributionRepository, CalibrationArtifactRepository, CatalogVersionRepository,
+    FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+    ModelRegistryRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
+    TradePolicyRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -464,6 +464,8 @@ pub struct TrainingDatasetServiceDeps {
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     /// Governed policy catalog used for executable policy-derived labels.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
+    /// Published frozen calibration artifacts consumed by PIT feature windows.
+    pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
 /// Deploy + frozen-config bundle for wiring [`TrainingDatasetService`].
@@ -529,6 +531,7 @@ pub struct TrainingDatasetService {
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
     trade_policy_repo: Arc<dyn TradePolicyRepository>,
+    calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     domain: DomainConfig,
@@ -580,6 +583,7 @@ impl TrainingDatasetService {
             linkage_repo: deps.linkage_repo,
             model_registry: deps.model_registry,
             trade_policy_repo: deps.trade_policy_repo,
+            calibration_repo: deps.calibration_repo,
             features: config.features,
             factors: config.factors,
             domain: config.domain,
@@ -1557,6 +1561,7 @@ impl TrainingDatasetService {
             Arc::clone(&self.fact_read),
             Arc::clone(&self.catalog_repo),
             Arc::clone(&self.linkage_repo),
+            Arc::clone(&self.calibration_repo),
             self.max_book_staleness,
         )
     }

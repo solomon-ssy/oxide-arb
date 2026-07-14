@@ -1,14 +1,16 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
+    clickhouse::EntryConditionEvaluationEventRow,
     domain::{
-        ApplyEntryConditionEvaluation, CryptoPriceProjectionInfo, EntryConditionArtifactInfo,
-        EntryConditionAuditInfo, EntryConditionInstanceInfo, NewEntryConditionArtifact,
-        NewEntryConditionInstance, WeatherDailyHighProjectionInfo,
+        ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
+        CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
+        EntryConditionInstanceInfo, NewEntryConditionArtifact, NewEntryConditionInstance,
+        WeatherDailyHighProjectionInfo,
     },
     types::{
-        DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId, EntryConditionInstanceId,
-        RecommendationId,
+        ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
+        EntryConditionInstanceId, RecommendationId,
     },
 };
 use uuid::Uuid;
@@ -96,7 +98,29 @@ pub trait EntryConditionRepository: Send + Sync {
         instance_id: &EntryConditionInstanceId,
         worker_id: Uuid,
         evaluation: ApplyEntryConditionEvaluation,
-    ) -> Result<EntryConditionInstanceInfo, StorageError>;
+    ) -> Result<ApplyEntryConditionEvaluationOutcome, StorageError>;
+
+    async fn claim_pending_evaluations(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<EntryConditionEvaluationEventRow>, StorageError>;
+
+    async fn mark_evaluation_published(
+        &self,
+        evaluation_id: &ContentHash,
+        worker_id: Uuid,
+        published_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+
+    async fn mark_evaluation_failed(
+        &self,
+        evaluation_id: &ContentHash,
+        worker_id: Uuid,
+        detail: String,
+    ) -> Result<(), StorageError>;
 
     /// Permanently invalidate a leased instance whose immutable contract can
     /// no longer be verified.

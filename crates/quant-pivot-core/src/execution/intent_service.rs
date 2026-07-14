@@ -25,7 +25,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::{OrderType, Side},
-        execution::{ApprovalInvalidation, CapitalAllocationState, OrderIntentKind},
+        execution::{CapitalAllocationState, OrderIntentKind},
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             ApprovalStatus, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
@@ -59,33 +59,12 @@ use crate::{
     observability::metrics_hub::MetricsHub,
     service::feature_integrity::FeatureParityGatePort,
 };
-/// Notify the intent plane that a report's recommendations are no longer valid.
+/// Post-commit event sink for terminally invalidated intents.
 ///
-/// The active intents derived from the report are invalidated and their capital
-/// released. Implemented by [`CoreOrderIntentService`]; consumed by the report
-/// lifecycle on revoke / expire (dependency inversion — the report plane does
-/// not depend on execution types).
-#[async_trait]
-pub trait IntentInvalidationHook: Send + Sync {
-    /// Invalidate every active (pre-submission) intent derived from `report_id`,
-    /// releasing reserved capital. Returns the number invalidated. Any failure
-    /// propagates so governed parity recovery cannot precede containment.
-    async fn invalidate_for_report(
-        &self,
-        report_id: &RecommendationReportId,
-        reason: ApprovalInvalidation,
-        now: DateTime<Utc>,
-    ) -> QuantResult<u32>;
-
-    /// Invalidate every active (pre-submission) intent derived from a single
-    /// `recommendation_id`, releasing reserved capital — the per-recommendation
-    /// expiry cascade. Returns the number invalidated.
-    async fn invalidate_for_recommendation(
-        &self,
-        recommendation_id: &RecommendationId,
-        reason: ApprovalInvalidation,
-        now: DateTime<Utc>,
-    ) -> QuantResult<u32>;
+/// Persistence and capital release have already committed; this dependency only
+/// fans lifecycle notifications out to in-process readers.
+pub trait IntentTerminalEventSink: Send + Sync {
+    fn publish_invalidated(&self, intents: &[OrderIntentInfo], now: DateTime<Utc>);
 }
 
 /// Dependencies for [`CoreOrderIntentService`].
@@ -118,7 +97,7 @@ pub struct OrderIntentServiceDeps {
 }
 
 /// Governed order-intent service (implements the web [`OrderIntentPort`], the
-/// report-cascade [`IntentInvalidationHook`], and the sweep `expire_due`).
+/// report terminal-event [`IntentTerminalEventSink`], and the sweep `expire_due`).
 pub struct CoreOrderIntentService {
     mode_gate: Arc<dyn RuntimeModeGate>,
     runtime_mode: RuntimeModeHandle,
@@ -377,9 +356,11 @@ impl CoreOrderIntentService {
         command: RejectIntentCommand,
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
+        let current = self.load_intent(&command.order_intent_id).await?;
+        let log = intent_operation_log("quant.intent.reject", &current, &command.reason);
         let rejected = self
             .intents
-            .reject(&command.order_intent_id, command.reason)
+            .reject(&command.order_intent_id, command.reason, now, log)
             .await?;
         self.metrics.inc_order_intent_rejected(
             rejected.runtime_mode.as_str(),
@@ -395,9 +376,11 @@ impl CoreOrderIntentService {
         command: CancelIntentCommand,
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
+        let current = self.load_intent(&command.order_intent_id).await?;
+        let log = intent_operation_log("quant.intent.cancel", &current, &command.reason);
         let cancelled = self
             .intents
-            .cancel(&command.order_intent_id, command.reason)
+            .cancel(&command.order_intent_id, command.reason, now, log)
             .await?;
         self.publish(&cancelled, IntentEventKind::Cancelled, now);
         Ok(cancelled)
@@ -411,7 +394,7 @@ impl CoreOrderIntentService {
         let mut expired = 0_u32;
         for intent in due.into_iter().take(limit) {
             let log = intent_operation_log("quant.intent.expire", &intent, "ttl_expired");
-            match self.intents.expire(&intent.order_intent_id, log).await {
+            match self.intents.expire(&intent.order_intent_id, now, log).await {
                 Ok(updated) => {
                     self.publish(&updated, IntentEventKind::Expired, now);
                     expired = expired.saturating_add(1);
@@ -495,49 +478,11 @@ impl OrderIntentPort for CoreOrderIntentService {
     }
 }
 
-#[async_trait]
-impl IntentInvalidationHook for CoreOrderIntentService {
-    async fn invalidate_for_report(
-        &self,
-        report_id: &RecommendationReportId,
-        reason: ApprovalInvalidation,
-        now: DateTime<Utc>,
-    ) -> QuantResult<u32> {
-        let active = self.intents.find_active_by_report(report_id).await?;
-        let mut count = 0_u32;
-        for intent in active {
-            let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
-            let updated = self
-                .intents
-                .invalidate(&intent.order_intent_id, reason, log)
-                .await?;
-            self.publish(&updated, IntentEventKind::Invalidated, now);
-            count = count.saturating_add(1);
+impl IntentTerminalEventSink for CoreOrderIntentService {
+    fn publish_invalidated(&self, intents: &[OrderIntentInfo], now: DateTime<Utc>) {
+        for intent in intents {
+            self.publish(intent, IntentEventKind::Invalidated, now);
         }
-        Ok(count)
-    }
-
-    async fn invalidate_for_recommendation(
-        &self,
-        recommendation_id: &RecommendationId,
-        reason: ApprovalInvalidation,
-        now: DateTime<Utc>,
-    ) -> QuantResult<u32> {
-        let active = self
-            .intents
-            .find_active_intents_by_recommendation(recommendation_id)
-            .await?;
-        let mut count = 0_u32;
-        for intent in active {
-            let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
-            let updated = self
-                .intents
-                .invalidate(&intent.order_intent_id, reason, log)
-                .await?;
-            self.publish(&updated, IntentEventKind::Invalidated, now);
-            count = count.saturating_add(1);
-        }
-        Ok(count)
     }
 }
 

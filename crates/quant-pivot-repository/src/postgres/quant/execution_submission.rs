@@ -16,12 +16,14 @@ use crate::{
                 settle_capital,
             },
             entry_condition::{
-                claim_for_submission as claim_entry_condition, require_consumed_for_intent,
-                revert_consumed_for_intent,
+                claim_for_submission as claim_entry_condition, invalidate_for_intent_terminal,
+                require_consumed_for_intent, revert_consumed_for_intent,
             },
             execution_order::validate_execution_order_transition,
             feature_parity::verify_clear_latch_generation,
-            order_intent::{load_intent_for_update, validate_intent_transition},
+            order_intent::{
+                load_intent_for_update, lock_terminal_graph, validate_intent_transition,
+            },
             position,
         },
     },
@@ -83,7 +85,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
     ) -> Result<(OrderIntentInfo, EntryConditionInstanceInfo), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let intent_id = &claim.order_intent_id;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         if !matches!(
             row.status,
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
@@ -128,7 +130,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         intent_id: &OrderIntentId,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         // No-op if the claim is already gone (e.g. report-cascade invalidation).
         if row.status != OrderIntentStatus::AdmissionPending {
             txn.commit().await.map_err(StorageError::from)?;
@@ -151,13 +153,21 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         admission_trace_ref: Option<String>,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::AdmissionRejected, intent_id)?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::AdmissionRejected);
         active.status_reason = ActiveValue::Set(Some(status_reason.clone()));
         active.admission_trace_ref = ActiveValue::Set(admission_trace_ref);
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
+        invalidate_for_intent_terminal(
+            &txn,
+            &intent_model.condition_instance_id,
+            intent_id,
+            format!("admission rejected: {status_reason}"),
+            Utc::now(),
+        )
+        .await?;
         release_capital(
             &txn,
             intent_id,
@@ -178,7 +188,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         verify_clear_latch_generation(&txn, feature_parity_state_id).await?;
 
         // Re-lock the intent and re-verify the claim is still held (double-submit guard).
-        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let intent = lock_terminal_graph(&txn, &intent_id).await?;
         if intent.status != OrderIntentStatus::AdmissionPending {
             return Err(error::state_conflict(
                 entity::QUANT_ORDER_INTENT,

@@ -7,12 +7,12 @@ use quant_pivot_models::{
     enums::quant::{EntryConditionState, OutcomeSide, PriceComparison},
     hashing::CanonicalDigest,
     types::{
-        ConditionTruth, ConditionUnavailableReason, ContentHash, CryptoSubjectPredicateEntered,
-        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionSourceBinding,
-        EntryConditionV1, FactorCondition, FactorDefinitionId, FactorMeasure, MarketEventCondition,
-        ModelVersionId, Price, PriceCondition, TemperatureCelsius, TokenId, Usd,
-        WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
-        WeatherObservationDayClosedOutsideBand,
+        ConditionTruth, ConditionUnavailableReason, ContentHash, CryptoEnteredFoldState,
+        CryptoSubjectPredicateEntered, EntryConditionArtifactV1, EntryConditionBinding,
+        EntryConditionFoldState, EntryConditionSourceBinding, EntryConditionV1, FactorCondition,
+        FactorDefinitionId, FactorMeasure, MarketEventCondition, ModelVersionId, Price,
+        PriceCondition, TemperatureCelsius, TokenId, Usd, WeatherDailyHighEnteredBand,
+        WeatherDailyHighExceededBandUpper, WeatherObservationDayClosedOutsideBand,
     },
 };
 use rust_decimal::Decimal;
@@ -42,16 +42,21 @@ pub struct FactorSnapshotInput {
     pub snapshot_hash: ContentHash,
 }
 
-/// Current same-source crypto state plus its most recent predicate transition.
+/// One source-native crypto fact in deterministic fold order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CryptoPriceReportInput {
+    pub source_sequence: u64,
+    pub price: Usd,
+    pub event_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub report_hash: ContentHash,
+}
+
+/// Ordered same-source crypto facts and the source discontinuity generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CryptoPriceInput {
     pub source: EntryConditionSourceBinding,
-    pub previous_price: Usd,
-    pub current_price: Usd,
-    pub source_sequence: u64,
-    pub transition_at: DateTime<Utc>,
-    pub available_at: DateTime<Utc>,
-    pub report_hash: ContentHash,
+    pub reports: Vec<CryptoPriceReportInput>,
     pub gap_generation: u64,
     pub source_healthy: bool,
 }
@@ -76,6 +81,9 @@ pub struct WeatherDailyHighInput {
 #[derive(Debug, Clone)]
 pub struct EntryConditionInputSet {
     pub binding: EntryConditionBinding,
+    pub binding_revision: ContentHash,
+    pub binding_unavailable_reason: Option<ConditionUnavailableReason>,
+    pub fold_state: EntryConditionFoldState,
     pub evaluated_at: DateTime<Utc>,
     pub prices: Vec<ExecutablePriceInput>,
     pub factors: Vec<FactorSnapshotInput>,
@@ -92,7 +100,10 @@ pub enum ConditionLeafEvidence {
         evaluated_at: DateTime<Utc>,
     },
     Factor(FactorSnapshotInput),
-    Crypto(CryptoPriceInput),
+    Crypto {
+        input: CryptoPriceInput,
+        state: CryptoEnteredFoldState,
+    },
     Weather(WeatherDailyHighInput),
     Unavailable(ConditionUnavailableReason),
 }
@@ -114,6 +125,7 @@ pub struct EntryConditionEvaluation {
     pub evaluation_hash: ContentHash,
     pub input_fingerprint: ContentHash,
     pub continuity_hash: ContentHash,
+    pub fold_state: EntryConditionFoldState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,19 +147,30 @@ pub fn evaluate_entry_condition(
             .map_err(|error| ReportError::ContractViolation {
                 detail: error.to_string(),
             })?;
+    let mut fold_state = input.fold_state.clone();
+    if let Some(reason) = input.binding_unavailable_reason.clone() {
+        clear_crypto_latches(&mut fold_state);
+        return unavailable_evaluation(&artifact.root, reason, input, fold_state);
+    }
     if artifact.binding != input.binding {
+        clear_crypto_latches(&mut fold_state);
         return unavailable_evaluation(
             &artifact.root,
             ConditionUnavailableReason::BindingDrift,
             input,
+            fold_state,
         );
     }
     let mut node_id = 0_u16;
-    let tree = evaluate_node(&artifact.root, input, &mut node_id)?;
+    let tree = evaluate_node(&artifact.root, input, &mut fold_state, &mut node_id)?;
     let evidence = flatten_evidence(&tree);
     let input_fingerprint =
         CanonicalDigest::content_hash_json(&evidence).map_err(QuantError::from)?;
-    let continuity = continuity_projection(&evidence);
+    let continuity = ContinuityEnvelope {
+        binding: &input.binding,
+        binding_revision: &input.binding_revision,
+        leaves: continuity_projection(&evidence),
+    };
     let continuity_hash =
         CanonicalDigest::content_hash_json(&continuity).map_err(QuantError::from)?;
     let evaluation_hash = CanonicalDigest::content_hash_json(&tree).map_err(QuantError::from)?;
@@ -157,6 +180,7 @@ pub fn evaluate_entry_condition(
         evaluation_hash,
         input_fingerprint,
         continuity_hash,
+        fold_state,
     })
 }
 
@@ -164,6 +188,7 @@ fn unavailable_evaluation(
     root: &EntryConditionV1,
     reason: ConditionUnavailableReason,
     input: &EntryConditionInputSet,
+    fold_state: EntryConditionFoldState,
 ) -> QuantResult<EntryConditionEvaluation> {
     let tree = ConditionNodeEvaluation {
         node_id: 0,
@@ -183,12 +208,14 @@ fn unavailable_evaluation(
         evaluation_hash,
         input_fingerprint,
         continuity_hash,
+        fold_state,
     })
 }
 
 fn evaluate_node(
     condition: &EntryConditionV1,
     input: &EntryConditionInputSet,
+    fold_state: &mut EntryConditionFoldState,
     next_node_id: &mut u16,
 ) -> QuantResult<ConditionNodeEvaluation> {
     let node_id = *next_node_id;
@@ -217,15 +244,26 @@ fn evaluate_node(
             })
         }
         EntryConditionV1::Factor(condition) => Ok(leaf(node_id, evaluate_factor(condition, input))),
-        EntryConditionV1::MarketEvent { event: condition } => {
-            Ok(leaf(node_id, evaluate_market_event(condition, input)))
-        }
-        EntryConditionV1::All { children } => {
-            evaluate_composite(node_id, children, input, next_node_id, CompositeKind::All)
-        }
-        EntryConditionV1::Any { children } => {
-            evaluate_composite(node_id, children, input, next_node_id, CompositeKind::Any)
-        }
+        EntryConditionV1::MarketEvent { event: condition } => Ok(leaf(
+            node_id,
+            evaluate_market_event(node_id, condition, input, fold_state),
+        )),
+        EntryConditionV1::All { children } => evaluate_composite(
+            node_id,
+            children,
+            input,
+            fold_state,
+            next_node_id,
+            CompositeKind::All,
+        ),
+        EntryConditionV1::Any { children } => evaluate_composite(
+            node_id,
+            children,
+            input,
+            fold_state,
+            next_node_id,
+            CompositeKind::Any,
+        ),
     }
 }
 
@@ -249,12 +287,13 @@ fn evaluate_composite(
     node_id: u16,
     conditions: &[EntryConditionV1],
     input: &EntryConditionInputSet,
+    fold_state: &mut EntryConditionFoldState,
     next_node_id: &mut u16,
     kind: CompositeKind,
 ) -> QuantResult<ConditionNodeEvaluation> {
     let children = conditions
         .iter()
-        .map(|condition| evaluate_node(condition, input, next_node_id))
+        .map(|condition| evaluate_node(condition, input, fold_state, next_node_id))
         .collect::<QuantResult<Vec<_>>>()?;
     let (truth, decisive_child_id) = composite_truth(&children, kind);
     Ok(ConditionNodeEvaluation {
@@ -382,12 +421,14 @@ fn evaluate_factor(
 }
 
 fn evaluate_market_event(
+    node_id: u16,
     condition: &MarketEventCondition,
     input: &EntryConditionInputSet,
+    fold_state: &mut EntryConditionFoldState,
 ) -> (ConditionTruth, ConditionLeafEvidence) {
     match condition {
         MarketEventCondition::CryptoSubjectPredicateEntered(condition) => {
-            evaluate_crypto(condition, input)
+            evaluate_crypto(node_id, condition, input, fold_state)
         }
         MarketEventCondition::WeatherDailyHighEnteredBand(condition) => {
             evaluate_weather_entered(condition, input)
@@ -402,8 +443,10 @@ fn evaluate_market_event(
 }
 
 fn evaluate_crypto(
+    node_id: u16,
     condition: &CryptoSubjectPredicateEntered,
     input: &EntryConditionInputSet,
+    fold_state: &mut EntryConditionFoldState,
 ) -> (ConditionTruth, ConditionLeafEvidence) {
     let Some(value) = input
         .crypto
@@ -413,35 +456,160 @@ fn evaluate_crypto(
     else {
         return unavailable_leaf(ConditionUnavailableReason::InputMissing);
     };
+    let mut state = fold_crypto_reports(node_id, condition, &value, fold_state);
     if !value.source_healthy {
+        clear_crypto_latch(&mut fold_state.crypto, node_id);
+        if let Some(cleared) = fold_state
+            .crypto
+            .iter()
+            .find(|state| state.node_id == node_id)
+        {
+            state = cleared.clone();
+        }
         return (
             ConditionTruth::Unavailable(ConditionUnavailableReason::SourceUnhealthy {
                 source_id: value.source.source_id.clone(),
             }),
-            ConditionLeafEvidence::Crypto(value),
+            ConditionLeafEvidence::Crypto {
+                input: value,
+                state,
+            },
         );
     }
+    let evidence = ConditionLeafEvidence::Crypto {
+        input: value.clone(),
+        state: state.clone(),
+    };
+    let Some(latest) = value.reports.last() else {
+        return unavailable_leaf(ConditionUnavailableReason::InputMissing);
+    };
     if let Some(reason) = freshness_reason(
-        value.transition_at,
-        value.available_at,
+        latest.event_at,
+        latest.available_at,
         input.evaluated_at,
         condition.max_input_age_ms,
     ) {
-        return (
-            ConditionTruth::Unavailable(reason),
-            ConditionLeafEvidence::Crypto(value),
-        );
+        return (ConditionTruth::Unavailable(reason), evidence);
     }
-    let outcome = crypto_outcome(
-        condition.comparator,
-        condition.strike,
-        condition.reference_price,
-        value.current_price,
+    (truth_from_bool(state.latched), evidence)
+}
+
+fn fold_crypto_reports(
+    node_id: u16,
+    condition: &CryptoSubjectPredicateEntered,
+    input: &CryptoPriceInput,
+    fold_state: &mut EntryConditionFoldState,
+) -> CryptoEnteredFoldState {
+    let existing = fold_state
+        .crypto
+        .iter()
+        .position(|state| state.node_id == node_id);
+    let mut state = existing.map_or_else(
+        || CryptoEnteredFoldState {
+            node_id,
+            source: input.source.clone(),
+            last_outcome: None,
+            latched: false,
+            last_source_sequence: None,
+            last_report_hash: None,
+            last_event_at: None,
+            last_available_at: None,
+            gap_generation: input.gap_generation,
+            discontinuity_epoch: 0,
+            triggering_report_hash: None,
+            triggering_at: None,
+        },
+        |index| fold_state.crypto[index].clone(),
     );
-    (
-        truth_from_bool(outcome == Some(condition.recommended_outcome)),
-        ConditionLeafEvidence::Crypto(value),
-    )
+    if state.source != input.source || state.gap_generation != input.gap_generation {
+        reset_crypto_continuity(&mut state, input);
+    }
+    for report in &input.reports {
+        if state.last_source_sequence == Some(report.source_sequence)
+            && state.last_report_hash.as_ref() == Some(&report.report_hash)
+        {
+            continue;
+        }
+        let correction = state
+            .last_source_sequence
+            .is_some_and(|sequence| report.source_sequence <= sequence);
+        if correction {
+            state.latched = false;
+            state.last_outcome = None;
+            state.triggering_report_hash = None;
+            state.triggering_at = None;
+            state.discontinuity_epoch = state.discontinuity_epoch.saturating_add(1);
+        }
+        let outcome = crypto_outcome(
+            condition.comparator,
+            condition.strike,
+            condition.reference_price,
+            report.price,
+        );
+        if let (Some(previous), Some(current)) = (state.last_outcome, outcome) {
+            if previous != condition.recommended_outcome && current == condition.recommended_outcome
+            {
+                state.latched = true;
+                state.triggering_report_hash = Some(report.report_hash.clone());
+                state.triggering_at = Some(report.event_at);
+            } else if previous == condition.recommended_outcome
+                && current != condition.recommended_outcome
+            {
+                state.latched = false;
+                state.triggering_report_hash = None;
+                state.triggering_at = None;
+                state.discontinuity_epoch = state.discontinuity_epoch.saturating_add(1);
+            }
+        }
+        state.last_outcome = outcome;
+        state.last_source_sequence = Some(report.source_sequence);
+        state.last_report_hash = Some(report.report_hash.clone());
+        state.last_event_at = Some(report.event_at);
+        state.last_available_at = Some(report.available_at);
+    }
+    if let Some(index) = existing {
+        fold_state.crypto[index] = state.clone();
+    } else {
+        fold_state.crypto.push(state.clone());
+        fold_state.crypto.sort_by_key(|state| state.node_id);
+    }
+    state
+}
+
+fn reset_crypto_continuity(state: &mut CryptoEnteredFoldState, input: &CryptoPriceInput) {
+    state.source = input.source.clone();
+    state.last_outcome = None;
+    state.latched = false;
+    state.last_source_sequence = None;
+    state.last_report_hash = None;
+    state.last_event_at = None;
+    state.last_available_at = None;
+    state.gap_generation = input.gap_generation;
+    state.discontinuity_epoch = state.discontinuity_epoch.saturating_add(1);
+    state.triggering_report_hash = None;
+    state.triggering_at = None;
+}
+
+fn clear_crypto_latches(state: &mut EntryConditionFoldState) {
+    for leaf in &mut state.crypto {
+        if leaf.latched {
+            leaf.latched = false;
+            leaf.triggering_report_hash = None;
+            leaf.triggering_at = None;
+            leaf.discontinuity_epoch = leaf.discontinuity_epoch.saturating_add(1);
+        }
+    }
+}
+
+fn clear_crypto_latch(states: &mut [CryptoEnteredFoldState], node_id: u16) {
+    if let Some(state) = states.iter_mut().find(|state| state.node_id == node_id)
+        && state.latched
+    {
+        state.latched = false;
+        state.triggering_report_hash = None;
+        state.triggering_at = None;
+        state.discontinuity_epoch = state.discontinuity_epoch.saturating_add(1);
+    }
 }
 
 fn crypto_outcome(
@@ -662,6 +830,17 @@ struct ContinuityProjection<'a> {
     node_index: usize,
     source: Option<&'a EntryConditionSourceBinding>,
     gap_generation: Option<u64>,
+    revision_hash: Option<&'a ContentHash>,
+    revision: Option<u64>,
+    discontinuity_epoch: Option<u64>,
+    latched: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ContinuityEnvelope<'a> {
+    binding: &'a EntryConditionBinding,
+    binding_revision: &'a ContentHash,
+    leaves: Vec<ContinuityProjection<'a>>,
 }
 
 fn continuity_projection<'a>(
@@ -675,24 +854,49 @@ fn continuity_projection<'a>(
                 node_index,
                 source: None,
                 gap_generation: Some(value.gap_generation),
+                revision_hash: None,
+                revision: None,
+                discontinuity_epoch: None,
+                latched: None,
             },
-            ConditionLeafEvidence::Crypto(value) => ContinuityProjection {
+            ConditionLeafEvidence::Crypto { input, state } => ContinuityProjection {
                 node_index,
-                source: Some(&value.source),
-                gap_generation: Some(value.gap_generation),
+                source: Some(&input.source),
+                gap_generation: Some(input.gap_generation),
+                revision_hash: state.triggering_report_hash.as_ref(),
+                revision: None,
+                discontinuity_epoch: Some(state.discontinuity_epoch),
+                latched: Some(state.latched),
             },
             ConditionLeafEvidence::Weather(value) => ContinuityProjection {
                 node_index,
                 source: Some(&value.source),
                 gap_generation: Some(value.gap_generation),
+                revision_hash: Some(&value.report_hash),
+                revision: Some(value.revision),
+                discontinuity_epoch: None,
+                latched: None,
             },
-            ConditionLeafEvidence::Clock { .. }
-            | ConditionLeafEvidence::Factor(_)
-            | ConditionLeafEvidence::Unavailable(_) => ContinuityProjection {
+            ConditionLeafEvidence::Factor(value) => ContinuityProjection {
                 node_index,
                 source: None,
                 gap_generation: None,
+                revision_hash: Some(&value.snapshot_hash),
+                revision: None,
+                discontinuity_epoch: None,
+                latched: None,
             },
+            ConditionLeafEvidence::Clock { .. } | ConditionLeafEvidence::Unavailable(_) => {
+                ContinuityProjection {
+                    node_index,
+                    source: None,
+                    gap_generation: None,
+                    revision_hash: None,
+                    revision: None,
+                    discontinuity_epoch: None,
+                    latched: None,
+                }
+            }
         })
         .collect()
 }
@@ -773,19 +977,21 @@ mod tests {
             ClockAnchor, ClockCondition, ConditionTruth, ConditionUnavailableReason,
             ConfirmationPolicy, ContentHash, CryptoSubjectPredicateEntered, DomainInstrumentKey,
             DomainSourceId, ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
-            EntryConditionArtifactV1, EntryConditionBinding, EntryConditionSourceBinding,
-            EntryConditionV1, MarketEventCondition, MarketId, MarketLinkageId, MarketSelectionId,
-            ModelVersionId, RecommendationId, RuntimeConfigVersionId, TemperatureBand,
-            TemperatureCelsius, TemperatureUnit, TokenId, Usd, WeatherDailyHighEnteredBand,
-            WeatherDailyHighExceededBandUpper, WeatherObservationDayClosedOutsideBand,
+            EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFoldState,
+            EntryConditionSourceBinding, EntryConditionV1, MarketEventCondition, MarketId,
+            MarketLinkageId, MarketSelectionId, ModelVersionId, RecommendationId,
+            RuntimeConfigVersionId, TemperatureBand, TemperatureCelsius, TemperatureUnit, TokenId,
+            Usd, WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
+            WeatherObservationDayClosedOutsideBand,
         },
     };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{
-        CompositeKind, ConditionNodeEvaluation, CryptoPriceInput, EntryConditionInputSet,
-        WeatherDailyHighInput, composite_truth, decide_entry_condition_state,
-        evaluate_entry_condition,
+        CompositeKind, ConditionNodeEvaluation, CryptoPriceInput, CryptoPriceReportInput,
+        EntryConditionInputSet, WeatherDailyHighInput, composite_truth,
+        decide_entry_condition_state, evaluate_entry_condition,
     };
 
     fn node(node_id: u16, truth: ConditionTruth) -> ConditionNodeEvaluation {
@@ -872,12 +1078,74 @@ mod tests {
     ) -> EntryConditionInputSet {
         EntryConditionInputSet {
             binding: artifact.binding.clone(),
+            binding_revision: hash('9'),
+            binding_unavailable_reason: None,
+            fold_state: EntryConditionFoldState::default(),
             evaluated_at,
             prices: Vec::new(),
             factors: Vec::new(),
             crypto: Vec::new(),
             weather: Vec::new(),
         }
+    }
+
+    fn crypto_input_set(
+        artifact: &EntryConditionArtifactV1,
+        evaluated_at: DateTime<Utc>,
+        source: &EntryConditionSourceBinding,
+        reports: &[(u64, Decimal, char)],
+        gap_generation: u64,
+        fold_state: EntryConditionFoldState,
+    ) -> EntryConditionInputSet {
+        let mut inputs = input(artifact, evaluated_at);
+        inputs.fold_state = fold_state;
+        inputs.crypto.push(CryptoPriceInput {
+            source: source.clone(),
+            reports: reports
+                .iter()
+                .map(|(sequence, price, report_hash)| CryptoPriceReportInput {
+                    source_sequence: *sequence,
+                    price: Usd::new(*price),
+                    event_at: evaluated_at,
+                    available_at: evaluated_at,
+                    report_hash: hash(*report_hash),
+                })
+                .collect(),
+            gap_generation,
+            source_healthy: true,
+        });
+        inputs
+    }
+
+    fn assert_crypto_baseline_and_transient_recross(
+        artifact: &EntryConditionArtifactV1,
+        source: &EntryConditionSourceBinding,
+        evaluated_at: DateTime<Utc>,
+    ) {
+        let already_on_side = crypto_input_set(
+            artifact,
+            evaluated_at,
+            source,
+            &[(1, dec!(101), '1')],
+            0,
+            EntryConditionFoldState::default(),
+        );
+        let baseline =
+            evaluate_entry_condition(artifact, &already_on_side).expect("on-side baseline");
+        assert_eq!(baseline.truth, ConditionTruth::Unsatisfied);
+        assert!(!baseline.fold_state.crypto[0].latched);
+
+        let transient = crypto_input_set(
+            artifact,
+            evaluated_at,
+            source,
+            &[(2, dec!(99), '2'), (3, dec!(101), '3'), (4, dec!(99), '4')],
+            0,
+            EntryConditionFoldState::default(),
+        );
+        let result = evaluate_entry_condition(artifact, &transient).expect("transient recross");
+        assert_eq!(result.truth, ConditionTruth::Unsatisfied);
+        assert!(!result.fold_state.crypto[0].latched);
     }
 
     #[test]
@@ -1065,12 +1333,22 @@ mod tests {
         );
         let chainlink = CryptoPriceInput {
             source: frozen_source,
-            previous_price: Usd::new(dec!(99)),
-            current_price: Usd::new(dec!(101)),
-            source_sequence: 1,
-            transition_at: evaluated_at,
-            available_at: evaluated_at,
-            report_hash: hash('d'),
+            reports: vec![
+                CryptoPriceReportInput {
+                    source_sequence: 0,
+                    price: Usd::new(dec!(99)),
+                    event_at: evaluated_at - Duration::milliseconds(1),
+                    available_at: evaluated_at - Duration::milliseconds(1),
+                    report_hash: hash('c'),
+                },
+                CryptoPriceReportInput {
+                    source_sequence: 1,
+                    price: Usd::new(dec!(101)),
+                    event_at: evaluated_at,
+                    available_at: evaluated_at,
+                    report_hash: hash('d'),
+                },
+            ],
             gap_generation: 0,
             source_healthy: true,
         };
@@ -1079,10 +1357,14 @@ mod tests {
         let entered = evaluate_entry_condition(&artifact, &inputs).expect("entered evaluation");
         assert_eq!(entered.truth, ConditionTruth::Satisfied);
 
-        inputs.crypto[0].previous_price = Usd::new(dec!(101));
-        inputs.crypto[0].current_price = Usd::new(dec!(99));
-        inputs.crypto[0].source_sequence = 2;
-        inputs.crypto[0].report_hash = hash('e');
+        inputs.fold_state = entered.fold_state.clone();
+        inputs.crypto[0].reports = vec![CryptoPriceReportInput {
+            source_sequence: 2,
+            price: Usd::new(dec!(99)),
+            event_at: evaluated_at,
+            available_at: evaluated_at,
+            report_hash: hash('e'),
+        }];
         let recrossed = evaluate_entry_condition(&artifact, &inputs).expect("recross evaluation");
         assert_eq!(recrossed.truth, ConditionTruth::Unsatisfied);
         assert_eq!(
@@ -1109,6 +1391,100 @@ mod tests {
             cross_source.truth,
             ConditionTruth::Unavailable(ConditionUnavailableReason::InputMissing)
         );
+    }
+
+    #[test]
+    fn crypto_fold_baseline_transient_gap_correction_and_restart_are_deterministic() {
+        let evaluated_at = timestamp();
+        let frozen_source = source(
+            DomainSourceId::chainlink_data_streams(),
+            "CHAINLINK_DATA_STREAMS:BTC-USD",
+        );
+        let artifact = market_event_artifact(
+            MarketEventCondition::CryptoSubjectPredicateEntered(CryptoSubjectPredicateEntered {
+                source: frozen_source.clone(),
+                comparator: PriceComparator::UpVsReference,
+                strike: None,
+                reference_price: Some(Usd::new(dec!(100))),
+                recommended_outcome: OutcomeSide::Yes,
+                max_input_age_ms: 10_000,
+            }),
+            frozen_source.clone(),
+        );
+        assert_crypto_baseline_and_transient_recross(&artifact, &frozen_source, evaluated_at);
+
+        let initial = crypto_input_set(
+            &artifact,
+            evaluated_at,
+            &frozen_source,
+            &[(10, dec!(99), 'a')],
+            0,
+            EntryConditionFoldState::default(),
+        );
+        let persisted = evaluate_entry_condition(&artifact, &initial).expect("persisted baseline");
+        let after_restart = crypto_input_set(
+            &artifact,
+            evaluated_at,
+            &frozen_source,
+            &[(10, dec!(99), 'a'), (11, dec!(101), 'b')],
+            0,
+            persisted.fold_state,
+        );
+        let live = evaluate_entry_condition(&artifact, &after_restart).expect("restart fold");
+
+        let replay = crypto_input_set(
+            &artifact,
+            evaluated_at,
+            &frozen_source,
+            &[(10, dec!(99), 'a'), (11, dec!(101), 'b')],
+            0,
+            EntryConditionFoldState::default(),
+        );
+        let replayed = evaluate_entry_condition(&artifact, &replay).expect("full replay fold");
+        assert_eq!(live.tree, replayed.tree);
+        assert_eq!(live.input_fingerprint, replayed.input_fingerprint);
+        assert_eq!(live.evaluation_hash, replayed.evaluation_hash);
+        assert_eq!(live.continuity_hash, replayed.continuity_hash);
+        assert_eq!(live.fold_state, replayed.fold_state);
+
+        let same_side = crypto_input_set(
+            &artifact,
+            evaluated_at,
+            &frozen_source,
+            &[(12, dec!(102), 'c')],
+            0,
+            live.fold_state.clone(),
+        );
+        let same_side_result =
+            evaluate_entry_condition(&artifact, &same_side).expect("same-side tick");
+        assert_eq!(same_side_result.truth, ConditionTruth::Satisfied);
+        assert_eq!(same_side_result.continuity_hash, live.continuity_hash);
+
+        let gap = crypto_input_set(
+            &artifact,
+            evaluated_at,
+            &frozen_source,
+            &[(13, dec!(103), 'd')],
+            1,
+            same_side_result.fold_state.clone(),
+        );
+        let after_gap = evaluate_entry_condition(&artifact, &gap).expect("gap reset");
+        assert_eq!(after_gap.truth, ConditionTruth::Unsatisfied);
+        assert!(!after_gap.fold_state.crypto[0].latched);
+        assert_ne!(after_gap.continuity_hash, same_side_result.continuity_hash);
+
+        let correction = crypto_input_set(
+            &artifact,
+            evaluated_at,
+            &frozen_source,
+            &[(11, dec!(99), 'e')],
+            0,
+            live.fold_state,
+        );
+        let corrected =
+            evaluate_entry_condition(&artifact, &correction).expect("same-sequence correction");
+        assert_eq!(corrected.truth, ConditionTruth::Unsatisfied);
+        assert!(!corrected.fold_state.crypto[0].latched);
     }
 
     #[test]

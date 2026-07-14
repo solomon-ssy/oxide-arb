@@ -155,6 +155,7 @@ pub async fn materialize_cross_section(
                     crypto_reports: &request.prefetched.crypto_reports,
                     weather_observations: &request.prefetched.weather_observations,
                     weather_forecasts: &request.prefetched.weather_forecasts,
+                    weather_calibrations: &request.prefetched.weather_calibrations,
                 },
             )
         })

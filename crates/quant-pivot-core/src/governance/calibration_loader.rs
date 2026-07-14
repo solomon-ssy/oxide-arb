@@ -286,7 +286,7 @@ mod tests {
     use quant_pivot_models::{
         domain::{
             CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact,
-            Paginated,
+            Paginated, PublishedWeatherStationLeadBias,
         },
         types::Probability,
     };
@@ -325,10 +325,24 @@ mod tests {
             Ok(self.row.lock().expect("lock").clone())
         }
 
+        async fn find_by_content_hash(
+            &self,
+            _content_hash: &ContentHash,
+        ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
+            unimplemented!("not exercised by loader tests")
+        }
+
         async fn page(
             &self,
             _query: CalibrationArtifactListQuery,
         ) -> Result<Paginated<CalibrationArtifactInfo>, StorageError> {
+            unimplemented!("not exercised by loader tests")
+        }
+
+        async fn published_weather_through(
+            &self,
+            _at: chrono::DateTime<Utc>,
+        ) -> Result<Vec<PublishedWeatherStationLeadBias>, StorageError> {
             unimplemented!("not exercised by loader tests")
         }
 

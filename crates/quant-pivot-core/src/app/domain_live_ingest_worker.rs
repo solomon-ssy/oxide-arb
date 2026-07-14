@@ -2,7 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    slice,
+    future::Future,
+    mem, slice,
     sync::Arc,
     time::Duration as StdDuration,
 };
@@ -17,7 +18,7 @@ use quant_pivot_api::{
         AviationWeatherSource, GefsDecodedMember, GefsSource, GefsStationBinding, GhcnhSource,
     },
 };
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{
         ChDecimal64, ChSchemaVersion, CryptoPriceReportRow, WeatherForecastPointRow,
@@ -29,21 +30,31 @@ use quant_pivot_models::{
     },
     domain::{
         CryptoPriceReport, DomainCursorStatus, DomainSourceCheckpoint, DomainSourceCursorInfo,
-        LinkageOutcome, MarketLinkage, MarketSubject, UpsertDomainSourceCursor,
+        LinkageOutcome, MarketLinkage, MarketSubject, NewCalibrationArtifact,
+        UpsertDomainSourceCursor, WeatherForecastPoint, WeatherObservationFact,
         WeatherObservationReport,
     },
-    enums::domain::LinkageSourceRole,
+    enums::{
+        domain::{DomainFamily, LinkageSourceRole},
+        quant::CalibrationKind,
+    },
     hashing::CanonicalDigest,
     types::{
-        BinanceSymbol, ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId,
-        IcaoStation,
+        BinanceSymbol, CalibrationArtifactId, ChainlinkFeedKey, ContentHash, DomainInstrumentKey,
+        DomainSourceId, IcaoStation,
     },
 };
 use quant_pivot_repository::traits::{
-    DomainProjectionRepository, DomainSourceCursorRepository, FactWriter, MarketLinkageRepository,
+    CalibrationArtifactRepository, DomainProjectionRepository, DomainSourceCursorRepository,
+    FactWriter, MarketLinkageRepository, QuantFactReadRepository,
+};
+use quant_pivot_research::features::domain::weather::{
+    WeatherStationLeadBiasFit, fit_weather_station_lead_bias,
 };
 use tokio::{task::JoinHandle, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
+
+use crate::runtime_config::RuntimeConfigStore;
 
 const DISCOVERY_INTERVAL: StdDuration = StdDuration::from_secs(30);
 const RECONNECT_BACKOFF: StdDuration = StdDuration::from_secs(2);
@@ -83,6 +94,9 @@ pub struct DomainLiveIngestWorker {
     crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
     weather_writer: Arc<dyn FactWriter<WeatherObservationReportRow>>,
     forecast_writer: Arc<dyn FactWriter<WeatherForecastPointRow>>,
+    fact_read: Arc<dyn QuantFactReadRepository>,
+    calibrations: Arc<dyn CalibrationArtifactRepository>,
+    runtime_config: Arc<RuntimeConfigStore>,
     binance: Option<Arc<BinanceAggTradeSource>>,
     chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
     aviation: Option<Arc<AviationWeatherSource>>,
@@ -101,6 +115,9 @@ pub struct DomainLiveIngestDeps {
     pub crypto_writer: Arc<dyn FactWriter<CryptoPriceReportRow>>,
     pub weather_writer: Arc<dyn FactWriter<WeatherObservationReportRow>>,
     pub forecast_writer: Arc<dyn FactWriter<WeatherForecastPointRow>>,
+    pub fact_read: Arc<dyn QuantFactReadRepository>,
+    pub calibrations: Arc<dyn CalibrationArtifactRepository>,
+    pub runtime_config: Arc<RuntimeConfigStore>,
     pub binance: Option<Arc<BinanceAggTradeSource>>,
     pub chainlink: Option<Arc<ChainlinkDataStreamsSource>>,
     pub aviation: Option<Arc<AviationWeatherSource>>,
@@ -122,6 +139,9 @@ impl DomainLiveIngestWorker {
             crypto_writer: deps.crypto_writer,
             weather_writer: deps.weather_writer,
             forecast_writer: deps.forecast_writer,
+            fact_read: deps.fact_read,
+            calibrations: deps.calibrations,
+            runtime_config: deps.runtime_config,
             binance: deps.binance,
             chainlink: deps.chainlink,
             aviation: deps.aviation,
@@ -140,7 +160,8 @@ impl DomainLiveIngestWorker {
         let weather = Arc::clone(&self).run_weather_loop(shutdown.child_token());
         let ghcnh = Arc::clone(&self).run_ghcnh_loop(shutdown.child_token());
         let gefs = Arc::clone(&self).run_gefs_loop(shutdown.child_token());
-        tokio::join!(binance, chainlink, weather, ghcnh, gefs);
+        let calibration = Arc::clone(&self).run_weather_calibration_loop(shutdown.child_token());
+        tokio::join!(binance, chainlink, weather, ghcnh, gefs, calibration);
     }
 
     async fn discover(&self) -> QuantResult<LiveBindings> {
@@ -361,50 +382,58 @@ impl DomainLiveIngestWorker {
         mut gap_generation: u64,
         shutdown: &CancellationToken,
     ) -> QuantResult<()> {
-        let cursor = self
-            .cursors
-            .find(&DomainSourceId::binance_agg_trade(), instrument)
+        let mut expected = self
+            .resume_binance_sequence(source, instrument, symbol, gap_generation)
             .await?;
-        let mut expected = match cursor.map(|cursor| cursor.checkpoint_json) {
-            Some(DomainSourceCheckpoint::BinanceAggTrade {
-                aggregate_trade_id, ..
-            }) => Some(next_sequence(aggregate_trade_id)?),
-            Some(_) => {
-                return Err(QuantError::config(
-                    "Binance aggTrade cursor contains a different source checkpoint type",
-                ));
-            }
-            None => None,
-        };
-        if let Some(from_id) = expected {
-            expected = Some(
-                self.recover_binance(source, symbol, from_id, None, gap_generation)
-                    .await?,
-            );
-        }
         let mut stream = source.stream(symbol).await?;
         loop {
-            if stream.rotation_due() {
-                return Err(QuantError::config("scheduled Binance WebSocket rotation"));
-            }
-            let report = tokio::select! {
-                () = shutdown.cancelled() => return Ok(()),
-                result = stream.next_report() => result?,
-                () = tokio::time::sleep(StdDuration::from_secs(1)) => continue,
+            let (report, planned_rotation) = if stream.rotation_due() {
+                match source.stream(symbol).await {
+                    Ok(mut replacement) => {
+                        let report = tokio::select! {
+                            () = shutdown.cancelled() => return Ok(()),
+                            result = replacement.next_report() => result?,
+                            () = tokio::time::sleep(StdDuration::from_secs(10)) => {
+                                tracing::warn!(%instrument, "Binance overlap rotation produced no first report");
+                                continue;
+                            }
+                        };
+                        stream = replacement;
+                        (report, true)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%instrument, %error, "Binance overlap rotation connection failed");
+                        let report = tokio::select! {
+                            () = shutdown.cancelled() => return Ok(()),
+                            result = stream.next_report() => result?,
+                            () = tokio::time::sleep(StdDuration::from_secs(1)) => continue,
+                        };
+                        (report, false)
+                    }
+                }
+            } else {
+                let report = tokio::select! {
+                    () = shutdown.cancelled() => return Ok(()),
+                    result = stream.next_report() => result?,
+                    () = tokio::time::sleep(StdDuration::from_secs(1)) => continue,
+                };
+                (report, false)
             };
             if let Some(next_id) = expected {
                 if report.source_sequence < next_id {
                     continue;
                 }
                 if report.source_sequence > next_id {
-                    gap_generation = self
-                        .projections
-                        .mark_crypto_source_gap(
-                            &DomainSourceId::binance_agg_trade(),
-                            instrument,
-                            Utc::now(),
-                        )
-                        .await?;
+                    if !planned_rotation {
+                        gap_generation = self
+                            .projections
+                            .mark_crypto_source_gap(
+                                &DomainSourceId::binance_agg_trade(),
+                                instrument,
+                                Utc::now(),
+                            )
+                            .await?;
+                    }
                     expected = Some(
                         self.recover_binance(
                             source,
@@ -424,6 +453,91 @@ impl DomainLiveIngestWorker {
         }
     }
 
+    async fn resume_binance_sequence(
+        &self,
+        source: &BinanceAggTradeSource,
+        instrument: &DomainInstrumentKey,
+        symbol: &BinanceSymbol,
+        gap_generation: u64,
+    ) -> QuantResult<Option<u64>> {
+        let cursor = self
+            .cursors
+            .find(&DomainSourceId::binance_agg_trade(), instrument)
+            .await?;
+        let (mut expected, archive_from) = match cursor.map(|cursor| cursor.checkpoint_json) {
+            Some(DomainSourceCheckpoint::BinanceAggTrade {
+                aggregate_trade_id,
+                event_time,
+            }) => (
+                Some(next_sequence(aggregate_trade_id)?),
+                Some(event_time.date_naive()),
+            ),
+            Some(_) => {
+                return Err(QuantError::config(
+                    "Binance aggTrade cursor contains a different source checkpoint type",
+                ));
+            }
+            None => (None, None),
+        };
+        if let Some(from_id) = expected {
+            let archive_recovered = self
+                .recover_binance_archive(
+                    source,
+                    symbol,
+                    from_id,
+                    archive_from.ok_or_else(|| {
+                        QuantError::config("Binance cursor lacks archive start date")
+                    })?,
+                    gap_generation,
+                )
+                .await?;
+            expected = Some(
+                self.recover_binance(source, symbol, archive_recovered, None, gap_generation)
+                    .await?,
+            );
+        }
+        Ok(expected)
+    }
+
+    async fn recover_binance_archive(
+        &self,
+        source: &BinanceAggTradeSource,
+        symbol: &BinanceSymbol,
+        mut from_id: u64,
+        mut date: NaiveDate,
+        gap_generation: u64,
+    ) -> QuantResult<u64> {
+        let today = Utc::now().date_naive();
+        while date < today {
+            let Some(reports) = source.recover_archive_day(symbol, date, Utc::now()).await? else {
+                break;
+            };
+            let mut pending = Vec::with_capacity(5_000);
+            for report in reports {
+                if report.source_sequence < from_id {
+                    continue;
+                }
+                if report.source_sequence != from_id {
+                    return Err(QuantError::config(format!(
+                        "Binance archive recovery gap: expected {from_id}, got {} on {date}",
+                        report.source_sequence
+                    )));
+                }
+                from_id = next_sequence(from_id)?;
+                pending.push(report);
+                if pending.len() == 5_000 {
+                    self.persist_crypto_batch(mem::take(&mut pending), gap_generation)
+                        .await?;
+                }
+            }
+            self.persist_crypto_batch(pending, gap_generation).await?;
+            date = date
+                .succ_opt()
+                .ok_or_else(|| QuantError::config("Binance archive date overflow"))?;
+        }
+        Ok(from_id)
+    }
+
     async fn recover_binance(
         &self,
         source: &BinanceAggTradeSource,
@@ -440,8 +554,10 @@ impl DomainLiveIngestWorker {
                 return Ok(from_id);
             }
             let page_len = reports.len();
+            let mut pending = Vec::with_capacity(page_len);
             for report in reports {
                 if stop_before.is_some_and(|limit| report.source_sequence >= limit) {
+                    self.persist_crypto_batch(pending, gap_generation).await?;
                     return Ok(from_id);
                 }
                 if report.source_sequence != from_id {
@@ -450,9 +566,10 @@ impl DomainLiveIngestWorker {
                         report.source_sequence
                     )));
                 }
-                self.persist_crypto(report, gap_generation).await?;
+                pending.push(report);
                 from_id = next_sequence(from_id)?;
             }
+            self.persist_crypto_batch(pending, gap_generation).await?;
             if page_len < usize::from(BINANCE_PAGE_SIZE) {
                 return Ok(from_id);
             }
@@ -588,13 +705,14 @@ impl DomainLiveIngestWorker {
             let start = u128::try_from(timestamp.timestamp()).map_err(|error| {
                 QuantError::config(format!("negative Chainlink checkpoint timestamp: {error}"))
             })?;
-            let reports = source.reports_page(feed, start, Utc::now()).await?;
-            for report in reports {
-                if should_process_crypto(&report, last.as_ref()) {
-                    self.persist_crypto(report.clone(), gap_generation).await?;
-                    last = Some((report.event_time, report.report_hash.clone()));
-                }
-            }
+            last = catch_up_chainlink_pages(
+                start,
+                source.rest_page_limit(),
+                last,
+                |page_start| source.reports_page(feed, page_start, Utc::now()),
+                |report| self.persist_crypto(report, gap_generation),
+            )
+            .await?;
         }
         let mut stream = source.stream(slice::from_ref(feed)).await?;
         stream.listen().await.map_err(|error| {
@@ -738,7 +856,10 @@ impl DomainLiveIngestWorker {
                 )])
                 .await?;
             let checkpoint = DomainSourceCheckpoint::AviationWeather {
+                available_at: report.available_at,
+                published_at: report.published_at,
                 observation_time: report.observation_time,
+                revision,
                 report_hash: report.report_hash.clone(),
             };
             self.projections
@@ -908,15 +1029,253 @@ impl DomainLiveIngestWorker {
             };
             if let Some(source) = self.gefs.as_ref()
                 && !bindings.is_empty()
-                && let Err(error) = self.ingest_gefs_cycle(source, &bindings, Utc::now()).await
             {
-                tracing::warn!(%error, "GEFS ensemble ingest failed");
+                if let Err(error) = self.ingest_gefs_cycle(source, &bindings, Utc::now()).await {
+                    tracing::warn!(%error, "GEFS ensemble ingest failed");
+                }
+                if let Err(error) = self
+                    .ingest_gefs_backfill_cycle(source, &bindings, Utc::now())
+                    .await
+                {
+                    tracing::warn!(%error, "GEFS historical calibration backfill failed");
+                }
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
                 () = tokio::time::sleep(StdDuration::from_secs(self.gefs_config.poll_secs.max(1))) => {}
             }
         }
+    }
+
+    async fn run_weather_calibration_loop(self: Arc<Self>, shutdown: CancellationToken) {
+        let mut interval = tokio::time::interval(StdDuration::from_hours(1));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                _ = interval.tick() => {}
+            }
+            let bindings = match self.discover().await {
+                Ok(bindings) => bindings.weather,
+                Err(error) => {
+                    tracing::warn!(%error, "Weather calibration binding discovery failed");
+                    continue;
+                }
+            };
+            if bindings.is_empty() {
+                continue;
+            }
+            if let Err(error) = self
+                .publish_weather_calibration(&bindings, Utc::now())
+                .await
+            {
+                tracing::warn!(%error, "Weather calibration publish remains blocked");
+            }
+        }
+    }
+
+    async fn publish_weather_calibration(
+        &self,
+        bindings: &BTreeMap<(String, NaiveDate), WeatherTarget>,
+        now: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        let runtime = self.runtime_config.load();
+        if !runtime.domain.family_enabled(DomainFamily::Weather) {
+            return Ok(());
+        }
+        let config = &runtime.domain.weather;
+        let stations = weather_stations(bindings);
+        if !self.gefs_backfill_complete(stations.keys(), now).await? {
+            return Err(QuantError::config(
+                "GEFS historical backfill has not reached the calibration boundary",
+            ));
+        }
+        let lag = i64::try_from(config.availability_lag_secs).map_err(|error| {
+            QuantError::config(format!(
+                "Weather calibration availability lag overflow: {error}"
+            ))
+        })?;
+        let availability_cutoff = now
+            .checked_sub_signed(Duration::seconds(lag))
+            .ok_or_else(|| QuantError::config("Weather calibration cutoff underflow"))?;
+        let fit_end = Utc.from_utc_datetime(
+            &availability_cutoff
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| QuantError::config("invalid Weather calibration day boundary"))?,
+        );
+        let fit_start = fit_end
+            .checked_sub_signed(Duration::days(i64::from(config.calibration_lookback_days)))
+            .ok_or_else(|| QuantError::config("Weather calibration fit window underflow"))?;
+        let station_names = stations.keys().map(ToString::to_string).collect::<Vec<_>>();
+        let (observations, forecasts) = self
+            .load_weather_calibration_facts(station_names, fit_start, fit_end, availability_cutoff)
+            .await?;
+        let fit = fit_weather_station_lead_bias(
+            &observations,
+            &forecasts,
+            fit_start,
+            fit_end,
+            config.minimum_complete_members,
+        )?;
+        ensure_weather_fit_coverage(
+            &fit,
+            stations.len(),
+            usize::from(self.gefs_config.max_lead_hours / 3),
+            config.minimum_bias_samples_per_lead,
+        )?;
+        self.activate_weather_calibration(fit, fit_start, fit_end, now)
+            .await
+    }
+
+    async fn load_weather_calibration_facts(
+        &self,
+        station_names: Vec<String>,
+        fit_start: DateTime<Utc>,
+        fit_end: DateTime<Utc>,
+        availability_cutoff: DateTime<Utc>,
+    ) -> QuantResult<(Vec<WeatherObservationFact>, Vec<WeatherForecastPoint>)> {
+        let observation_rows = self
+            .fact_read
+            .weather_observation_reports_between(
+                station_names.clone(),
+                (fit_start - Duration::hours(3)).timestamp_millis(),
+                fit_end.timestamp_millis(),
+                availability_cutoff.timestamp_millis(),
+                availability_cutoff.timestamp_millis(),
+            )
+            .await?;
+        let observations = observation_rows
+            .into_iter()
+            .map(|row| {
+                WeatherObservationFact::from_clickhouse_row(row).ok_or_else(|| {
+                    QuantError::config("invalid Weather observation row during calibration")
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        let forecast_rows = self
+            .fact_read
+            .weather_forecast_points_between(
+                station_names,
+                fit_start.timestamp_millis(),
+                fit_end.timestamp_millis(),
+                fit_end.timestamp_millis(),
+                availability_cutoff.timestamp_millis(),
+            )
+            .await?;
+        let forecasts = forecast_rows
+            .into_iter()
+            .map(|row| {
+                WeatherForecastPoint::from_clickhouse_row(row).ok_or_else(|| {
+                    QuantError::config("invalid Weather forecast row during calibration")
+                })
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+        Ok((observations, forecasts))
+    }
+
+    async fn activate_weather_calibration(
+        &self,
+        fit: WeatherStationLeadBiasFit,
+        fit_start: DateTime<Utc>,
+        fit_end: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        let content_hash = CanonicalDigest::content_hash_json(&(
+            CalibrationKind::WeatherStationLeadBias,
+            fit_start,
+            fit_end,
+            &fit.calibration_split_hash,
+            fit.sample_count,
+            &fit.payload,
+        ))?;
+        let publications = self.calibrations.published_weather_through(now).await?;
+        if publications
+            .last()
+            .is_some_and(|publication| publication.content_hash == content_hash)
+        {
+            return Ok(());
+        }
+        let artifact = if let Some(artifact) = self
+            .calibrations
+            .find_by_content_hash(&content_hash)
+            .await?
+        {
+            artifact
+        } else {
+            let new_artifact = NewCalibrationArtifact {
+                artifact_id: CalibrationArtifactId::from_v7(),
+                kind: CalibrationKind::WeatherStationLeadBias,
+                content_hash: content_hash.clone(),
+                fit_window_start: fit_start,
+                fit_window_end: fit_end,
+                calibration_split_hash: fit.calibration_split_hash,
+                sample_count: fit.sample_count,
+                payload_json: serde_json::to_value(&fit.payload).map_err(|error| {
+                    QuantError::config(format!(
+                        "Weather calibration payload serialization failed: {error}"
+                    ))
+                })?,
+                active: false,
+            };
+            match self.calibrations.create(new_artifact).await {
+                Ok(artifact) => artifact,
+                Err(StorageError::Duplicate { .. }) => self
+                    .calibrations
+                    .find_by_content_hash(&content_hash)
+                    .await?
+                    .ok_or_else(|| {
+                        QuantError::config(
+                            "duplicate Weather calibration disappeared after create race",
+                        )
+                    })?,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        self.calibrations.mark_active(&artifact.artifact_id).await?;
+        Ok(())
+    }
+
+    async fn gefs_backfill_complete<'a>(
+        &self,
+        stations: impl Iterator<Item = &'a IcaoStation>,
+        now: DateTime<Utc>,
+    ) -> QuantResult<bool> {
+        let end_date = now
+            .date_naive()
+            .pred_opt()
+            .ok_or_else(|| QuantError::config("GEFS calibration boundary underflow"))?;
+        let end = Utc.from_utc_datetime(
+            &end_date
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| QuantError::config("invalid GEFS calibration boundary"))?,
+        );
+        let required = end
+            .checked_sub_signed(Duration::days(1))
+            .ok_or_else(|| QuantError::config("GEFS required backfill boundary underflow"))?;
+        for station in stations {
+            let cursor = self
+                .cursors
+                .find(
+                    &DomainSourceId::gefs(),
+                    &DomainInstrumentKey::gefs_backfill(station),
+                )
+                .await?;
+            let complete = cursor.is_some_and(|cursor| {
+                matches!(
+                    cursor.checkpoint_json,
+                    DomainSourceCheckpoint::GefsBackfill {
+                        completed_reference_time,
+                        ..
+                    } if completed_reference_time >= required
+                )
+            });
+            if !complete {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     async fn ingest_gefs_cycle(
@@ -983,6 +1342,145 @@ impl DomainLiveIngestWorker {
         Ok(())
     }
 
+    async fn ingest_gefs_backfill_cycle(
+        &self,
+        source: &Arc<GefsSource>,
+        bindings: &BTreeMap<(String, NaiveDate), WeatherTarget>,
+        now: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        let (backfill_start, backfill_end) = self.gefs_backfill_window(now)?;
+        let stations = weather_stations(bindings);
+        let next_by_station = self
+            .next_gefs_backfill_by_station(&stations, backfill_start)
+            .await?;
+        let Some(reference_time) = next_by_station.values().copied().min() else {
+            return Ok(());
+        };
+        if reference_time >= backfill_end {
+            return Ok(());
+        }
+        let selected = next_by_station
+            .iter()
+            .filter(|(_, next)| **next == reference_time)
+            .filter_map(|(station, _)| {
+                stations
+                    .get(station)
+                    .and_then(|targets| targets.first())
+                    .map(|target| GefsStationBinding {
+                        station: station.clone(),
+                        latitude: target.latitude,
+                        longitude: target.longitude,
+                    })
+            })
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            return Err(QuantError::config(
+                "GEFS backfill selected no station profiles",
+            ));
+        }
+        let request_hash = CanonicalDigest::content_hash_json(&(
+            "gefs_00z_calibration_backfill_v1",
+            reference_time,
+            self.gefs_config.max_lead_hours,
+            selected
+                .iter()
+                .map(|binding| (&binding.station, binding.latitude, binding.longitude))
+                .collect::<Vec<_>>(),
+        ))?;
+        let mut decoded = self
+            .decode_gefs_members_for_stations(source, &selected, reference_time)
+            .await?;
+        decoded.sort_by_key(|member| (member.lead_hours, member.member));
+        let run_manifest_hash = CanonicalDigest::content_hash_json(&(
+            &request_hash,
+            decoded
+                .iter()
+                .map(|member| {
+                    (
+                        member.lead_hours,
+                        member.member,
+                        member.segment_hash.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ))?;
+        self.write_gefs_rows(decoded, &run_manifest_hash).await?;
+        for station in selected.iter().map(|binding| &binding.station) {
+            self.upsert_source_cursor(
+                DomainSourceId::gefs(),
+                DomainInstrumentKey::gefs_backfill(station),
+                DomainSourceCheckpoint::GefsBackfill {
+                    completed_reference_time: reference_time,
+                    request_hash: request_hash.clone(),
+                    manifest_hash: run_manifest_hash.clone(),
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    fn gefs_backfill_window(
+        &self,
+        now: DateTime<Utc>,
+    ) -> QuantResult<(DateTime<Utc>, DateTime<Utc>)> {
+        let end_date = now
+            .date_naive()
+            .pred_opt()
+            .ok_or_else(|| QuantError::config("GEFS backfill end date underflow"))?;
+        let backfill_end = Utc.from_utc_datetime(
+            &end_date
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| QuantError::config("invalid GEFS backfill end time"))?,
+        );
+        let source_days = u32::from(self.ghcnh_config.calibration_years)
+            .checked_mul(365)
+            .ok_or_else(|| QuantError::config("GEFS backfill lookback overflow"))?;
+        let runtime_days = self
+            .runtime_config
+            .load()
+            .domain
+            .weather
+            .calibration_lookback_days;
+        let backfill_start = backfill_end
+            .checked_sub_signed(Duration::days(i64::from(source_days.max(runtime_days))))
+            .ok_or_else(|| QuantError::config("GEFS backfill start underflow"))?;
+        Ok((backfill_start, backfill_end))
+    }
+
+    async fn next_gefs_backfill_by_station(
+        &self,
+        stations: &BTreeMap<IcaoStation, Vec<WeatherTarget>>,
+        backfill_start: DateTime<Utc>,
+    ) -> QuantResult<BTreeMap<IcaoStation, DateTime<Utc>>> {
+        let mut next_by_station = BTreeMap::new();
+        for station in stations.keys() {
+            let cursor = self
+                .cursors
+                .find(
+                    &DomainSourceId::gefs(),
+                    &DomainInstrumentKey::gefs_backfill(station),
+                )
+                .await?;
+            let next = match cursor.map(|cursor| cursor.checkpoint_json) {
+                Some(DomainSourceCheckpoint::GefsBackfill {
+                    completed_reference_time,
+                    ..
+                }) => completed_reference_time
+                    .checked_add_signed(Duration::days(1))
+                    .ok_or_else(|| QuantError::config("GEFS backfill cursor overflow"))?,
+                Some(_) => {
+                    return Err(QuantError::config(
+                        "GEFS backfill cursor contains a different checkpoint type",
+                    ));
+                }
+                None => backfill_start,
+            };
+            next_by_station.insert(station.clone(), next.max(backfill_start));
+        }
+        Ok(next_by_station)
+    }
+
     async fn decode_gefs_members(
         &self,
         source: &Arc<GefsSource>,
@@ -1021,6 +1519,38 @@ impl DomainLiveIngestWorker {
             return Err(QuantError::config(
                 "GEFS cycle has no valid times for active Weather subjects",
             ));
+        }
+        Ok(decoded)
+    }
+
+    async fn decode_gefs_members_for_stations(
+        &self,
+        source: &Arc<GefsSource>,
+        stations: &[GefsStationBinding],
+        reference_time: DateTime<Utc>,
+    ) -> QuantResult<Vec<GefsDecodedMember>> {
+        let mut decoded = Vec::new();
+        for lead_hours in (3..=self.gefs_config.max_lead_hours).step_by(3) {
+            let members = stream::iter(0_u8..=30)
+                .map(|member| {
+                    let source = Arc::clone(source);
+                    let stations = stations.to_vec();
+                    async move {
+                        source
+                            .tmax_member(reference_time, lead_hours, member, &stations)
+                            .await
+                    }
+                })
+                .buffer_unordered(self.gefs_config.max_concurrency)
+                .try_collect::<Vec<_>>()
+                .await?;
+            if members.len() != 31 {
+                return Err(QuantError::config(format!(
+                    "GEFS backfill lead {lead_hours} decoded {} of 31 members",
+                    members.len()
+                )));
+            }
+            decoded.extend(members);
         }
         Ok(decoded)
     }
@@ -1146,6 +1676,32 @@ impl DomainLiveIngestWorker {
         Ok(())
     }
 
+    async fn persist_crypto_batch(
+        &self,
+        reports: Vec<CryptoPriceReport>,
+        gap_generation: u64,
+    ) -> QuantResult<()> {
+        let Some(last) = reports.last().cloned() else {
+            return Ok(());
+        };
+        self.crypto_writer
+            .write_batch(
+                reports
+                    .into_iter()
+                    .map(|report| report.to_clickhouse_row())
+                    .collect(),
+            )
+            .await?;
+        let checkpoint = DomainSourceCheckpoint::BinanceAggTrade {
+            aggregate_trade_id: last.source_sequence,
+            event_time: last.event_time,
+        };
+        self.projections
+            .apply_crypto_report(last, checkpoint, gap_generation, true)
+            .await?;
+        Ok(())
+    }
+
     async fn mark_crypto_unavailable(&self, instrument: &DomainInstrumentKey) {
         let Some(source_id) = instrument.source_id() else {
             return;
@@ -1179,6 +1735,47 @@ fn should_process_crypto(
     })
 }
 
+async fn catch_up_chainlink_pages<Fetch, FetchFuture, Persist, PersistFuture>(
+    mut start: u128,
+    page_limit: usize,
+    mut last: Option<(DateTime<Utc>, ContentHash)>,
+    mut fetch: Fetch,
+    mut persist: Persist,
+) -> QuantResult<Option<(DateTime<Utc>, ContentHash)>>
+where
+    Fetch: FnMut(u128) -> FetchFuture,
+    FetchFuture: Future<Output = QuantResult<Vec<CryptoPriceReport>>>,
+    Persist: FnMut(CryptoPriceReport) -> PersistFuture,
+    PersistFuture: Future<Output = QuantResult<()>>,
+{
+    if page_limit == 0 {
+        return Err(QuantError::config(
+            "Chainlink report page limit must be positive",
+        ));
+    }
+    loop {
+        let reports = fetch(start).await?;
+        let page_len = reports.len();
+        let last_sequence = reports.last().map(|report| report.source_sequence);
+        for report in reports {
+            if should_process_crypto(&report, last.as_ref()) {
+                let checkpoint = (report.event_time, report.report_hash.clone());
+                persist(report).await?;
+                last = Some(checkpoint);
+            }
+        }
+        if page_len < page_limit {
+            return Ok(last);
+        }
+        let last_sequence = last_sequence.ok_or_else(|| {
+            QuantError::config("Chainlink returned an empty page at the configured page limit")
+        })?;
+        start = u128::from(last_sequence.checked_add(1).ok_or_else(|| {
+            QuantError::config("Chainlink report sequence overflow during catch-up")
+        })?);
+    }
+}
+
 fn next_sequence(value: u64) -> QuantResult<u64> {
     value
         .checked_add(1)
@@ -1196,6 +1793,28 @@ fn weather_stations(
             .push(target.clone());
     }
     stations
+}
+
+fn ensure_weather_fit_coverage(
+    fit: &WeatherStationLeadBiasFit,
+    station_count: usize,
+    expected_leads: usize,
+    minimum_samples: u32,
+) -> QuantResult<()> {
+    let incomplete = fit.payload.stations.len() != station_count
+        || fit.payload.stations.iter().any(|station| {
+            station.leads.len() != expected_leads
+                || station
+                    .leads
+                    .iter()
+                    .any(|lead| lead.sample_count < minimum_samples)
+        });
+    if incomplete {
+        return Err(QuantError::config(
+            "Weather calibration does not cover every station/lead at the governed sample floor",
+        ));
+    }
+    Ok(())
 }
 
 fn latest_gefs_cycle(now: DateTime<Utc>, publication_lag_secs: u64) -> QuantResult<DateTime<Utc>> {
@@ -1237,7 +1856,10 @@ fn weather_resume_indices(
         return Ok((0..reports.len()).collect());
     };
     let DomainSourceCheckpoint::AviationWeather {
+        available_at,
+        published_at,
         observation_time,
+        revision,
         report_hash,
     } = &cursor.checkpoint_json
     else {
@@ -1245,28 +1867,26 @@ fn weather_resume_indices(
             "AviationWeather cursor contains a different checkpoint type",
         ));
     };
-    let same_time_position = reports.iter().position(|report| {
-        report.observation_time == *observation_time && report.report_hash == *report_hash
-    });
-    let last_same_time_position = reports
-        .iter()
-        .rposition(|report| report.observation_time == *observation_time);
-    Ok(reports
-        .iter()
-        .enumerate()
-        .filter(|(index, report)| {
-            report.observation_time > *observation_time
-                || (report.observation_time == *observation_time
-                    && same_time_position.map_or_else(
-                        || {
-                            last_same_time_position == Some(*index)
-                                && report.report_hash != *report_hash
-                        },
-                        |position| *index > position,
-                    ))
-        })
-        .map(|(index, _)| index)
-        .collect())
+    let mut indices = Vec::new();
+    for (index, report) in reports.iter().enumerate() {
+        let (report_revision, _) = weather_revision(reports, index)?;
+        if (
+            report.available_at,
+            report.published_at,
+            report.observation_time,
+            report_revision,
+            &report.report_hash,
+        ) > (
+            *available_at,
+            *published_at,
+            *observation_time,
+            *revision,
+            report_hash,
+        ) {
+            indices.push(index);
+        }
+    }
+    Ok(indices)
 }
 
 fn weather_revision(
@@ -1341,19 +1961,22 @@ async fn stop_all(tasks: BTreeMap<DomainInstrumentKey, SourceTask>) {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use std::{collections::VecDeque, future::ready};
+
+    use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{
-            DomainSourceCheckpoint, DomainSourceCursorInfo, WeatherObservationReport,
-            WeatherObservationReportKind,
+            CryptoPriceReport, DomainSourceCheckpoint, DomainSourceCursorInfo,
+            WeatherObservationReport, WeatherObservationReportKind,
         },
         types::{
-            ContentHash, DomainInstrumentKey, DomainSourceId, IcaoStation, TemperatureCelsius,
+            ChainlinkFeedKey, ContentHash, DomainInstrumentKey, DomainSourceId, IcaoStation,
+            TemperatureCelsius, Usd,
         },
     };
     use rust_decimal_macros::dec;
 
-    use super::{weather_resume_indices, weather_revision};
+    use super::{catch_up_chainlink_pages, weather_resume_indices, weather_revision};
 
     fn hash(seed: char) -> ContentHash {
         ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("test hash")
@@ -1384,6 +2007,67 @@ mod tests {
         }
     }
 
+    fn chainlink_report(
+        sequence: u64,
+        event_time: DateTime<Utc>,
+        hash_seed: char,
+    ) -> CryptoPriceReport {
+        let feed = ChainlinkFeedKey::parse("BTC-USD").expect("feed");
+        CryptoPriceReport {
+            source_id: DomainSourceId::chainlink_data_streams(),
+            instrument_key: DomainInstrumentKey::chainlink_data_streams(&feed),
+            source_sequence: sequence,
+            price: Usd::new(dec!(65000)),
+            quantity: None,
+            event_time,
+            published_at: event_time,
+            available_at: event_time,
+            valid_from: Some(event_time),
+            observations_timestamp: Some(event_time),
+            expires_at: None,
+            report_hash: hash(hash_seed),
+            raw_report: hash_seed.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn chainlink_catch_up_reads_full_pages_until_source_is_caught_up() {
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 13, 16, 0, 0).unwrap();
+        let mut pages = VecDeque::from([
+            vec![
+                chainlink_report(100, t0, 'a'),
+                chainlink_report(101, t0 + chrono::Duration::seconds(1), 'b'),
+            ],
+            vec![chainlink_report(
+                102,
+                t0 + chrono::Duration::seconds(2),
+                'c',
+            )],
+        ]);
+        let mut starts = Vec::new();
+        let mut persisted = Vec::new();
+
+        let last = catch_up_chainlink_pages(
+            100,
+            2,
+            Some((t0, hash('a'))),
+            |start| {
+                starts.push(start);
+                ready(Ok(pages.pop_front().unwrap_or_default()))
+            },
+            |report| {
+                persisted.push(report.source_sequence);
+                ready(Ok(()))
+            },
+        )
+        .await
+        .expect("catch up");
+
+        assert_eq!(starts, vec![100, 102]);
+        assert_eq!(persisted, vec![101, 102]);
+        assert_eq!(last, Some((t0 + chrono::Duration::seconds(2), hash('c'))));
+    }
+
     #[test]
     fn same_time_correction_resumes_after_exact_report_hash() {
         let reports = vec![report('a', 1, dec!(27)), report('b', 2, dec!(26))];
@@ -1391,7 +2075,10 @@ mod tests {
             source_id: DomainSourceId::aviation_weather(),
             instrument_key: DomainInstrumentKey::aviation_weather(&reports[0].station),
             checkpoint_json: DomainSourceCheckpoint::AviationWeather {
+                available_at: reports[0].available_at,
+                published_at: reports[0].published_at,
                 observation_time: reports[0].observation_time,
+                revision: 0,
                 report_hash: reports[0].report_hash.clone(),
             },
             checkpoint_hash: hash('c'),

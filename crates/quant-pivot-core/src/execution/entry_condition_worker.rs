@@ -1,30 +1,36 @@
 //! Durable recommendation-level entry-condition evaluation worker.
 
-use std::{future::pending, sync::Arc, time::Duration as StdDuration};
+use std::{future::pending, slice, sync::Arc, time::Duration as StdDuration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    clickhouse::{ChSchemaVersion, EntryConditionEvaluationEventRow},
     domain::{
         ApplyEntryConditionEvaluation, CoreEvent, CoreEventPublisher, EntryConditionInstanceInfo,
-        EntryConditionLifecycleEvent,
+        EntryConditionLifecycleEvent, MarketLinkageInfo,
     },
+    enums::{domain::LinkageStatus, quant::PublicationStatus},
+    hashing::CanonicalDigest,
     runtime_config::EntryConditionWorkerConfig,
     types::{
-        ConditionTruth, CryptoSubjectPredicateEntered, EntryConditionArtifactV1,
-        EntryConditionSourceBinding, EntryConditionV1, FactorCondition, MarketEventCondition,
-        MarketId, TokenId,
+        ConditionUnavailableReason, ContentHash, CryptoSubjectPredicateEntered,
+        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionSourceBinding,
+        EntryConditionV1, FactorCondition, MarketEventCondition, MarketId, ModelVersionId, TokenId,
+        Usd,
     },
 };
-use quant_pivot_repository::traits::{EntryConditionRepository, FactWriter, FactorRepository};
+use quant_pivot_repository::traits::{
+    EntryConditionRepository, FactorRepository, MarketLinkageRepository, MarketSelectionRepository,
+    ModelRegistryRepository, QuantFactReadRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository,
+};
 use quant_pivot_storage::postgres::PostgresNotificationListener;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{
-    CryptoPriceInput, EntryConditionEvaluation, EntryConditionInputSet,
+    CryptoPriceInput, CryptoPriceReportInput, EntryConditionEvaluation, EntryConditionInputSet,
     EntryConditionStateDecision, ExecutablePriceInput, FactorSnapshotInput, WeatherDailyHighInput,
     decide_entry_condition_state, evaluate_entry_condition,
 };
@@ -36,6 +42,7 @@ pub trait EntryConditionInputProvider: Send + Sync {
     async fn load(
         &self,
         artifact: &EntryConditionArtifactV1,
+        instance: &EntryConditionInstanceInfo,
         evaluated_at: DateTime<Utc>,
     ) -> QuantResult<EntryConditionInputSet>;
 }
@@ -46,20 +53,165 @@ pub struct LiveEntryConditionInputProvider {
     books: Arc<BookStore>,
     conditions: Arc<dyn EntryConditionRepository>,
     factors: Arc<dyn FactorRepository>,
+    facts: Arc<dyn QuantFactReadRepository>,
+    recommendations: Arc<dyn RecommendationRepository>,
+    linkages: Arc<dyn MarketLinkageRepository>,
+    selections: Arc<dyn MarketSelectionRepository>,
+    models: Arc<dyn ModelRegistryRepository>,
+    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    runtime_config: Arc<RuntimeConfigStore>,
+}
+
+/// Repository and runtime dependencies for the live condition input provider.
+pub struct LiveEntryConditionInputDeps {
+    pub books: Arc<BookStore>,
+    pub conditions: Arc<dyn EntryConditionRepository>,
+    pub factors: Arc<dyn FactorRepository>,
+    pub facts: Arc<dyn QuantFactReadRepository>,
+    pub recommendations: Arc<dyn RecommendationRepository>,
+    pub linkages: Arc<dyn MarketLinkageRepository>,
+    pub selections: Arc<dyn MarketSelectionRepository>,
+    pub models: Arc<dyn ModelRegistryRepository>,
+    pub runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
+    pub runtime_config: Arc<RuntimeConfigStore>,
 }
 
 impl LiveEntryConditionInputProvider {
     #[must_use]
-    pub const fn new(
-        books: Arc<BookStore>,
-        conditions: Arc<dyn EntryConditionRepository>,
-        factors: Arc<dyn FactorRepository>,
-    ) -> Self {
+    pub fn new(deps: LiveEntryConditionInputDeps) -> Self {
         Self {
-            books,
-            conditions,
-            factors,
+            books: deps.books,
+            conditions: deps.conditions,
+            factors: deps.factors,
+            facts: deps.facts,
+            recommendations: deps.recommendations,
+            linkages: deps.linkages,
+            selections: deps.selections,
+            models: deps.models,
+            runtime_configs: deps.runtime_configs,
+            runtime_config: deps.runtime_config,
         }
+    }
+
+    async fn load_linkage_binding(
+        &self,
+        expected: &EntryConditionBinding,
+    ) -> QuantResult<(Option<MarketLinkageInfo>, Option<MarketLinkageInfo>)> {
+        let linkage = match expected.market_linkage_id.as_ref() {
+            Some(linkage_id) => self.linkages.find_by_id(linkage_id).await?,
+            None => None,
+        };
+        let latest = if expected.market_linkage_id.is_some() {
+            self.linkages
+                .latest_for_markets(slice::from_ref(&expected.market_id))
+                .await?
+                .into_iter()
+                .next()
+        } else {
+            None
+        };
+        Ok((linkage, latest))
+    }
+
+    async fn resolve_binding(
+        &self,
+        expected: &EntryConditionBinding,
+    ) -> QuantResult<ResolvedBinding> {
+        let recommendation = self
+            .recommendations
+            .find_by_id(&expected.recommendation_id)
+            .await?;
+        let selection = self
+            .selections
+            .find_by_id(&expected.catalog_snapshot_id)
+            .await?;
+        let model = self
+            .models
+            .find_model_version_by_id(&expected.model_version_id)
+            .await?;
+        let current_runtime_config = self.runtime_configs.load_current().await?;
+        let factor_ids = expected
+            .factor_bindings
+            .iter()
+            .map(|binding| binding.definition_id.clone())
+            .collect::<Vec<_>>();
+        let factors = self.factors.find_definitions_by_ids(&factor_ids).await?;
+        let (linkage, latest_linkage) = self.load_linkage_binding(expected).await?;
+        let reason = if recommendation.as_ref().is_none_or(|recommendation| {
+            recommendation.market_id != expected.market_id
+                || recommendation.token_id != expected.token_id
+                || recommendation.outcome_side != expected.outcome_side
+                || recommendation.evidence_refs.market_selection_id != expected.catalog_snapshot_id
+                || recommendation.evidence_refs.model_version_id != expected.model_version_id
+                || recommendation.evidence_refs.runtime_config_version_id
+                    != expected.runtime_config_version_id
+        }) {
+            Some(ConditionUnavailableReason::BindingDrift)
+        } else if selection.as_ref().is_none_or(|selection| {
+            let snapshot_matches = selection.selector_hash == expected.catalog_snapshot_hash;
+            let runtime_config_matches =
+                selection.runtime_config_version_id == expected.runtime_config_version_id;
+            !snapshot_matches || !runtime_config_matches
+        }) {
+            Some(ConditionUnavailableReason::CatalogSnapshotMismatch)
+        } else if expected.market_linkage_id.is_some()
+            && (linkage.as_ref().is_none_or(|linkage| {
+                Some(&linkage.content_hash) != expected.market_linkage_hash.as_ref()
+                    || linkage.market_id != expected.market_id
+                    || !matches!(
+                        linkage.status,
+                        LinkageStatus::Resolved | LinkageStatus::Overridden
+                    )
+            }) || latest_linkage.as_ref().is_none_or(|latest| {
+                Some(&latest.linkage_id) != expected.market_linkage_id.as_ref()
+                    || Some(&latest.content_hash) != expected.market_linkage_hash.as_ref()
+            }))
+        {
+            Some(ConditionUnavailableReason::MarketLinkageMismatch)
+        } else if model
+            .as_ref()
+            .is_none_or(|model| model.publication_status != PublicationStatus::Published)
+            || current_runtime_config.as_ref().is_none_or(|config| {
+                config.runtime_config_version_id != expected.runtime_config_version_id
+            })
+            || !runtime_model_is_active(&self.runtime_config, &expected.model_version_id)
+        {
+            Some(ConditionUnavailableReason::BindingDrift)
+        } else if factors.len() != expected.factor_bindings.len()
+            || expected.factor_bindings.iter().any(|binding| {
+                factors
+                    .iter()
+                    .find(|definition| definition.factor_definition_id == binding.definition_id)
+                    .is_none_or(|definition| {
+                        definition.definition_hash != binding.definition_hash
+                            || definition.status != PublicationStatus::Published
+                    })
+            })
+        {
+            Some(ConditionUnavailableReason::FactorDefinitionMismatch)
+        } else {
+            None
+        };
+        let revision = CanonicalDigest::content_hash_json(&(
+            expected,
+            selection.as_ref().map(|value| &value.selector_hash),
+            linkage.as_ref().map(|value| &value.content_hash),
+            latest_linkage.as_ref().map(|value| &value.content_hash),
+            model.as_ref().map(|value| &value.artifact_hash),
+            current_runtime_config
+                .as_ref()
+                .map(|value| &value.config_hash),
+            factors
+                .iter()
+                .map(|value| (&value.factor_definition_id, &value.definition_hash))
+                .collect::<Vec<_>>(),
+        ))
+        .map_err(QuantError::from)?;
+        Ok(ResolvedBinding {
+            binding: expected.clone(),
+            revision,
+            unavailable_reason: reason,
+        })
     }
 
     fn load_prices(&self, token_ids: Vec<TokenId>) -> Vec<ExecutablePriceInput> {
@@ -133,7 +285,9 @@ impl LiveEntryConditionInputProvider {
 
     async fn load_crypto(
         &self,
+        instance: &EntryConditionInstanceInfo,
         required: Vec<CryptoSubjectPredicateEntered>,
+        evaluated_at: DateTime<Utc>,
     ) -> QuantResult<Vec<CryptoPriceInput>> {
         let mut inputs = Vec::with_capacity(required.len());
         for condition in required {
@@ -147,20 +301,83 @@ impl LiveEntryConditionInputProvider {
             else {
                 continue;
             };
-            let (Some(previous_price), Ok(gap_generation)) = (
-                projection.previous_price,
-                u64::try_from(projection.gap_generation),
-            ) else {
+            let Ok(gap_generation) = u64::try_from(projection.gap_generation) else {
                 continue;
             };
+            let prior = instance
+                .fold_state_json
+                .crypto
+                .iter()
+                .find(|state| state.source == condition.source);
+            let from = prior
+                .and_then(|state| state.last_available_at)
+                .unwrap_or(instance.created_at)
+                .timestamp_millis();
+            let to = evaluated_at
+                .timestamp_millis()
+                .checked_add(1)
+                .ok_or_else(|| ReportError::ContractViolation {
+                    detail: "entry condition evaluation timestamp overflow".to_owned(),
+                })?;
+            let mut rows = self
+                .facts
+                .crypto_price_reports_available_between(
+                    vec![condition.source.instrument_key.clone()],
+                    from,
+                    to,
+                    evaluated_at.timestamp_millis(),
+                )
+                .await?;
+            rows.retain(|row| {
+                row.source_id == condition.source.source_id
+                    && row.instrument_key == condition.source.instrument_key
+            });
+            if prior.is_none()
+                && let Some(baseline) = self
+                    .facts
+                    .crypto_price_report_at(
+                        &condition.source.source_id,
+                        &condition.source.instrument_key,
+                        instance.created_at.timestamp_millis(),
+                        instance.created_at.timestamp_millis(),
+                    )
+                    .await?
+            {
+                rows.push(baseline);
+            }
+            rows.sort_by(|left, right| {
+                (
+                    left.available_at,
+                    left.event_time,
+                    left.source_sequence,
+                    &left.report_hash,
+                )
+                    .cmp(&(
+                        right.available_at,
+                        right.event_time,
+                        right.source_sequence,
+                        &right.report_hash,
+                    ))
+            });
+            rows.dedup_by(|left, right| {
+                left.source_sequence == right.source_sequence
+                    && left.report_hash == right.report_hash
+            });
+            let reports = rows
+                .into_iter()
+                .filter_map(|row| {
+                    Some(CryptoPriceReportInput {
+                        source_sequence: row.source_sequence,
+                        price: Usd::new(row.price.to_decimal()),
+                        event_at: DateTime::from_timestamp_millis(row.event_time)?,
+                        available_at: DateTime::from_timestamp_millis(row.available_at)?,
+                        report_hash: row.report_hash,
+                    })
+                })
+                .collect();
             inputs.push(CryptoPriceInput {
                 source: condition.source,
-                previous_price,
-                current_price: projection.current_price,
-                source_sequence: projection.source_sequence,
-                transition_at: projection.event_time,
-                available_at: projection.available_at,
-                report_hash: projection.report_hash,
+                reports,
                 gap_generation,
                 source_healthy: projection.source_healthy,
             });
@@ -219,19 +436,26 @@ impl EntryConditionInputProvider for LiveEntryConditionInputProvider {
     async fn load(
         &self,
         artifact: &EntryConditionArtifactV1,
+        instance: &EntryConditionInstanceInfo,
         evaluated_at: DateTime<Utc>,
     ) -> QuantResult<EntryConditionInputSet> {
+        let resolved_binding = self.resolve_binding(&artifact.binding).await?;
         let mut required = RequiredInputs::default();
         required.collect(&artifact.root);
         let prices = self.load_prices(required.prices);
         let factors = self
             .load_factors(&artifact.binding.market_id, required.factors)
             .await?;
-        let crypto = self.load_crypto(required.crypto).await?;
+        let crypto = self
+            .load_crypto(instance, required.crypto, evaluated_at)
+            .await?;
         let weather = self.load_weather(required.weather).await?;
 
         Ok(EntryConditionInputSet {
-            binding: artifact.binding.clone(),
+            binding: resolved_binding.binding,
+            binding_revision: resolved_binding.revision,
+            binding_unavailable_reason: resolved_binding.unavailable_reason,
+            fold_state: instance.fold_state_json.clone(),
             evaluated_at,
             prices,
             factors,
@@ -239,6 +463,24 @@ impl EntryConditionInputProvider for LiveEntryConditionInputProvider {
             weather,
         })
     }
+}
+
+struct ResolvedBinding {
+    binding: EntryConditionBinding,
+    revision: ContentHash,
+    unavailable_reason: Option<ConditionUnavailableReason>,
+}
+
+fn runtime_model_is_active(runtime_config: &RuntimeConfigStore, expected: &ModelVersionId) -> bool {
+    let config = runtime_config.load();
+    config
+        .model
+        .active_model_version_id
+        .as_ref()
+        .into_iter()
+        .chain(config.model.category_model_pointers.values())
+        .filter_map(|reference| ModelVersionId::try_from(reference).ok())
+        .any(|model_version_id| &model_version_id == expected)
 }
 
 #[derive(Default)]
@@ -322,7 +564,6 @@ pub struct EntryConditionWorker {
     worker_id: Uuid,
     conditions: Arc<dyn EntryConditionRepository>,
     inputs: Arc<dyn EntryConditionInputProvider>,
-    evaluations: Arc<dyn FactWriter<EntryConditionEvaluationEventRow>>,
     books: Arc<BookStore>,
     runtime_config: Arc<RuntimeConfigStore>,
     events: CoreEventPublisher,
@@ -333,7 +574,6 @@ impl EntryConditionWorker {
     pub fn new(
         conditions: Arc<dyn EntryConditionRepository>,
         inputs: Arc<dyn EntryConditionInputProvider>,
-        evaluations: Arc<dyn FactWriter<EntryConditionEvaluationEventRow>>,
         books: Arc<BookStore>,
         runtime_config: Arc<RuntimeConfigStore>,
         events: CoreEventPublisher,
@@ -342,7 +582,6 @@ impl EntryConditionWorker {
             worker_id: Uuid::now_v7(),
             conditions,
             inputs,
-            evaluations,
             books,
             runtime_config,
             events,
@@ -515,7 +754,7 @@ impl EntryConditionWorker {
                 .await;
         }
 
-        let input = self.inputs.load(&artifact, evaluated_at).await?;
+        let input = self.inputs.load(&artifact, &instance, evaluated_at).await?;
         let evaluation = evaluate_entry_condition(&artifact, &input)?;
         let decision = decide_entry_condition_state(
             instance.state,
@@ -546,38 +785,18 @@ impl EntryConditionWorker {
         decision: EntryConditionStateDecision,
         evaluated_at: DateTime<Utc>,
     ) -> QuantResult<EntryConditionInstanceInfo> {
-        let revision =
-            instance
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| ReportError::ContractViolation {
-                    detail: "entry condition revision overflow".to_owned(),
-                })?;
         let tree_json = serde_json::to_string(&evaluation.tree).map_err(|error| {
             ReportError::ContractViolation {
                 detail: format!("entry condition evaluation serialization failed: {error}"),
             }
         })?;
-        self.evaluations
-            .write_batch(vec![EntryConditionEvaluationEventRow {
-                condition_instance_id: instance.condition_instance_id.clone(),
-                revision,
-                evaluator_version: artifact.evaluator_version,
-                evaluated_at: evaluated_at.timestamp_millis(),
-                state: decision.state.as_str().to_owned(),
-                truth: truth_label(&evaluation.truth).to_owned(),
-                evaluation_hash: evaluation.evaluation_hash.clone(),
-                input_fingerprint: evaluation.input_fingerprint.clone(),
-                tree_json,
-                schema_version: ChSchemaVersion::FIRST,
-            }])
-            .await?;
         let next_delay =
             chrono_duration_millis(policy.next_evaluation_delay_ms, "next evaluation delay")?;
         let periodic_at = evaluated_at + next_delay;
         let next_evaluation_at = earliest_future_clock_deadline(&artifact.root, evaluated_at)
             .map_or(periodic_at, |deadline| deadline.min(periodic_at));
-        self.conditions
+        let outcome = self
+            .conditions
             .apply_evaluation(
                 &instance.condition_instance_id,
                 self.worker_id,
@@ -585,17 +804,21 @@ impl EntryConditionWorker {
                     expected_revision: instance.revision,
                     expected_lease_epoch: instance.lease_epoch,
                     state: decision.state,
-                    truth: evaluation.truth,
-                    evaluation_hash: evaluation.evaluation_hash,
-                    input_fingerprint: evaluation.input_fingerprint,
-                    continuity_hash: evaluation.continuity_hash,
+                    truth: evaluation.truth.clone(),
+                    evaluation_hash: evaluation.evaluation_hash.clone(),
+                    input_fingerprint: evaluation.input_fingerprint.clone(),
+                    continuity_hash: evaluation.continuity_hash.clone(),
+                    fold_state: evaluation.fold_state.clone(),
                     confirmation_started_at: decision.confirmation_started_at,
                     evaluated_at,
                     next_evaluation_at: Some(next_evaluation_at),
+                    evaluator_version: artifact.evaluator_version,
+                    tree_json,
                 },
             )
             .await
-            .map_err(QuantError::from)
+            .map_err(QuantError::from)?;
+        Ok(outcome.instance)
     }
 
     fn spawn_lease_renewal(
@@ -693,12 +916,4 @@ fn chrono_duration_millis(value: u64, field: &str) -> QuantResult<Duration> {
     let value = i64::try_from(value)
         .map_err(|error| QuantError::config(format!("{field} does not fit i64: {error}")))?;
     Ok(Duration::milliseconds(value))
-}
-
-const fn truth_label(truth: &ConditionTruth) -> &'static str {
-    match truth {
-        ConditionTruth::Satisfied => "satisfied",
-        ConditionTruth::Unsatisfied => "unsatisfied",
-        ConditionTruth::Unavailable(_) => "unavailable",
-    }
 }

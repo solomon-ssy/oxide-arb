@@ -9,9 +9,8 @@ use quant_pivot_error::{
     storage::{StorageError, entity},
 };
 use quant_pivot_models::{
-    domain::{NewOperationLog, RecommendationReportInfo, ReportLifecycleEvent},
+    domain::{NewOperationLog, OrderIntentInfo, RecommendationReportInfo, ReportLifecycleEvent},
     enums::{
-        execution::ApprovalInvalidation,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{EmptyReportReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
         rbac::ResourceType,
@@ -25,7 +24,7 @@ use quant_pivot_repository::traits::{
 use tokio::sync::Mutex;
 
 use crate::{
-    execution::IntentInvalidationHook,
+    execution::IntentTerminalEventSink,
     governance::RuntimeModeHandle,
     observability::metrics_hub::MetricsHub,
     service::feature_integrity::{FeatureParityGatePort, FeatureParityRunCoordinator},
@@ -78,10 +77,9 @@ pub struct ReportLifecycleService {
     feature_parity_gate: Arc<dyn FeatureParityGatePort>,
     feature_parity_runs: Arc<FeatureParityRunCoordinator>,
     run_lock: Mutex<()>,
-    /// Cascade hook: on revoke / expire, the active order intents derived from
-    /// the report are invalidated and their capital released. Set once at boot
-    /// (absent in report-only builds without the execution plane).
-    intent_invalidation: OnceLock<Arc<dyn IntentInvalidationHook>>,
+    /// Post-commit event sink for intents atomically invalidated by report or
+    /// recommendation terminal repository commands.
+    intent_terminal_events: OnceLock<Arc<dyn IntentTerminalEventSink>>,
 }
 
 impl ReportLifecycleService {
@@ -99,59 +97,18 @@ impl ReportLifecycleService {
             feature_parity_gate: deps.feature_parity_gate,
             feature_parity_runs: deps.feature_parity_runs,
             run_lock: Mutex::new(()),
-            intent_invalidation: OnceLock::new(),
+            intent_terminal_events: OnceLock::new(),
         }
     }
 
-    /// Install the order-intent cascade hook (idempotent; first set wins).
-    pub fn set_intent_invalidation_hook(&self, hook: Arc<dyn IntentInvalidationHook>) {
-        let _ = self.intent_invalidation.set(hook);
+    /// Install the order-intent terminal event sink (idempotent; first set wins).
+    pub fn set_intent_terminal_event_sink(&self, sink: Arc<dyn IntentTerminalEventSink>) {
+        let _ = self.intent_terminal_events.set(sink);
     }
 
-    /// Cascade-invalidate the active intents derived from a terminated report.
-    ///
-    /// Fail closed for report revocation: parity containment is not complete
-    /// until every pre-submission intent has been invalidated and its capital
-    /// released. The parity latch remains open when this returns an error.
-    async fn cascade_intent_invalidation(
-        &self,
-        report_id: &RecommendationReportId,
-        reason: ApprovalInvalidation,
-        now: DateTime<Utc>,
-    ) -> QuantResult<()> {
-        let Some(hook) = self.intent_invalidation.get() else {
-            return Ok(());
-        };
-        let count = hook.invalidate_for_report(report_id, reason, now).await?;
-        if count > 0 {
-            tracing::info!(%report_id, count, reason = reason.as_str(), "cascaded intent invalidation");
-        }
-        Ok(())
-    }
-
-    /// Cascade-invalidate the active intents derived from one expired
-    /// recommendation. Best-effort (the intent's own `expires_at` sweep is the
-    /// fail-closed backstop, since `intent.expires_at <= recommendation.valid_until`).
-    async fn cascade_recommendation_invalidation(
-        &self,
-        recommendation_id: &RecommendationId,
-        reason: ApprovalInvalidation,
-        now: DateTime<Utc>,
-    ) {
-        let Some(hook) = self.intent_invalidation.get() else {
-            return;
-        };
-        match hook
-            .invalidate_for_recommendation(recommendation_id, reason, now)
-            .await
-        {
-            Ok(count) if count > 0 => {
-                tracing::info!(%recommendation_id, count, reason = reason.as_str(), "cascaded recommendation intent invalidation");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%recommendation_id, %error, "recommendation intent cascade failed");
-            }
+    fn publish_invalidated_intents(&self, intents: &[OrderIntentInfo], now: DateTime<Utc>) {
+        if let Some(sink) = self.intent_terminal_events.get() {
+            sink.publish_invalidated(intents, now);
         }
     }
 
@@ -197,7 +154,7 @@ impl ReportLifecycleService {
         reason: &str,
         revoked_at: DateTime<Utc>,
     ) -> QuantResult<RecommendationReportInfo> {
-        let report = self
+        let (report, invalidated_intents) = self
             .report_repo
             .revoke(
                 report_id,
@@ -207,23 +164,17 @@ impl ReportLifecycleService {
             )
             .await?;
         self.publisher.publish_revoked(&report);
-        self.cascade_intent_invalidation(
-            report_id,
-            ApprovalInvalidation::ReportRevoked,
-            revoked_at,
-        )
-        .await?;
+        self.publish_invalidated_intents(&invalidated_intents, revoked_at);
         Ok(report)
     }
 
     /// Idempotently contain one report affected by a deterministic parity
     /// incident.
     ///
-    /// A terminal report no longer admits new entry, but its pre-submission
-    /// intents may still require release. Therefore terminal report states skip
-    /// the impossible revoke transition while the intent cascade still runs.
-    /// Only the exact terminal-state race is accepted; not-found, database, and
-    /// unrelated transition failures continue to fail containment closed.
+    /// The repository revoke command atomically terminates recommendations,
+    /// pre-submission intents, conditions, and capital before this method emits
+    /// any lifecycle event. Only the exact terminal-state race is accepted;
+    /// unrelated failures continue to fail containment closed.
     pub(crate) async fn contain_parity_incident(
         &self,
         report_id: &RecommendationReportId,
@@ -249,7 +200,10 @@ impl ReportLifecycleService {
                 )
                 .await
             {
-                Ok(revoked) => self.publisher.publish_revoked(&revoked),
+                Ok((revoked, invalidated_intents)) => {
+                    self.publisher.publish_revoked(&revoked);
+                    self.publish_invalidated_intents(&invalidated_intents, occurred_at);
+                }
                 Err(error) if is_report_revoke_transition_conflict(&error, report_id) => {
                     let latest =
                         self.report_repo
@@ -269,19 +223,14 @@ impl ReportLifecycleService {
             }
         }
 
-        self.cascade_intent_invalidation(
-            report_id,
-            ApprovalInvalidation::ReportRevoked,
-            occurred_at,
-        )
-        .await
+        Ok(())
     }
 
     /// Expire every recommendation whose data-driven `valid_until` has elapsed
     /// (`Published` / `IntentCreated -> Expired`), oldest deadline first, up to
-    /// `limit` per pass. Each expiry: its own committed transaction, then a
-    /// best-effort cascade releasing that recommendation's reserved capital, then
-    /// a best-effort report roll-up. A single conflict is logged and skipped.
+    /// `limit` per pass. Each expiry atomically releases every pre-submission
+    /// reservation before commit, then performs a best-effort report roll-up. A
+    /// single conflict is logged and skipped.
     /// Returns the number of recommendations expired.
     pub async fn expire_due_recommendations(
         &self,
@@ -295,10 +244,10 @@ impl ReportLifecycleService {
             let log = recommendation_operation_log(&recommendation_id, "ttl_expired");
             match self
                 .recommendation_repo
-                .expire(&recommendation_id, log)
+                .expire(&recommendation_id, now, log)
                 .await
             {
-                Ok(recommendation) => {
+                Ok((recommendation, invalidated_intents)) => {
                     expired =
                         expired
                             .checked_add(1)
@@ -306,12 +255,7 @@ impl ReportLifecycleService {
                                 field: "report.expired_recommendation_count",
                                 detail: "expiry sweep count exceeds u32".to_owned(),
                             })?;
-                    self.cascade_recommendation_invalidation(
-                        &recommendation_id,
-                        ApprovalInvalidation::RecommendationExpired,
-                        now,
-                    )
-                    .await;
+                    self.publish_invalidated_intents(&invalidated_intents, now);
                     self.try_roll_up_report(&recommendation.recommendation_report_id, now)
                         .await;
                 }

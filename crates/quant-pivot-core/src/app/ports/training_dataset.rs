@@ -129,6 +129,7 @@ impl CoreTrainingDatasetPort {
                 linkage_repo: Arc::clone(&self.linkage_repo),
                 model_registry: Arc::clone(&self.model_registry),
                 trade_policy_repo: Arc::clone(&self.trade_policy_repo),
+                calibration_repo: Arc::clone(&self.bias_table_repo),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,

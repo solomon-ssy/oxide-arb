@@ -25,12 +25,12 @@ use crate::{
         },
     },
     types::{
-        AttributionDetail, ConditionTruth, ContentHash, EntryConditionArtifactId,
-        EntryConditionArtifactV1, EntryConditionAuditId, EntryConditionInstanceId,
-        EntryConditionNode, EntryOrderSpec, EntryOutcome, ExecutionOrderId, ExitOutcome,
-        ExitPolicySpec, ExitReinferenceObservation, MarketId, ModelVersionId,
-        NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId, Price,
-        RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
+        AttributionDetail, ConditionTruth, ConditionUnavailableReason, ContentHash,
+        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionAuditId,
+        EntryConditionInstanceId, EntryConditionNode, EntryOrderSpec, EntryOutcome,
+        ExecutionOrderId, ExitOutcome, ExitPolicySpec, ExitReinferenceObservation, MarketId,
+        ModelVersionId, NextScaleOutProjection, OrderAmount, OrderId, OrderIntentId, PositionId,
+        Price, RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -192,6 +192,36 @@ impl EntryConditionArtifactView {
 pub struct EntryConditionDetailView {
     pub instance: EntryConditionInstanceSummaryView,
     pub artifact: Option<EntryConditionArtifactView>,
+    pub latest_authoritative_evaluation: Option<EntryConditionEvaluationView>,
+}
+
+/// Latest PostgreSQL-applied evaluator trace and its operator-facing evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryConditionEvaluationView {
+    pub evaluation_id: ContentHash,
+    pub applied_revision: i64,
+    pub evaluator_version: u32,
+    pub evaluated_at: DateTime<Utc>,
+    pub state: String,
+    pub truth: String,
+    pub evaluation_hash: ContentHash,
+    pub input_fingerprint: ContentHash,
+    pub continuity_hash: ContentHash,
+    pub tree: serde_json::Value,
+    pub leaf_evidence: Vec<EntryConditionLeafEvidenceView>,
+}
+
+/// One evaluated leaf with explicit source/freshness/checkpoint projections.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryConditionLeafEvidenceView {
+    pub node_id: u16,
+    pub truth: serde_json::Value,
+    pub evidence: serde_json::Value,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub available_at: Option<DateTime<Utc>>,
+    pub freshness_ms: Option<i64>,
+    pub source_checkpoint: Option<serde_json::Value>,
+    pub unavailable_reason: Option<ConditionUnavailableReason>,
 }
 
 /// One immutable condition lifecycle audit event.

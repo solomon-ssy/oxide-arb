@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     enums::quant::EntryConditionState,
     types::{
-        ConditionTruth, ContentHash, EntryConditionArtifactId, EntryConditionInstanceId,
-        OrderIntentId, RecommendationId,
+        ConditionTruth, ContentHash, EntryConditionArtifactId, EntryConditionFoldState,
+        EntryConditionInstanceId, OrderIntentId, RecommendationId,
     },
 };
 
@@ -27,6 +27,8 @@ pub struct Model {
     pub evaluation_hash: Option<ContentHash>,
     pub input_fingerprint: Option<ContentHash>,
     pub continuity_hash: Option<ContentHash>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub fold_state_json: EntryConditionFoldState,
     pub confirmation_started_at: Option<DateTime<Utc>>,
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub next_evaluation_at: Option<DateTime<Utc>>,

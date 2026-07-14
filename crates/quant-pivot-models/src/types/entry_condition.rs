@@ -560,6 +560,33 @@ pub enum ConditionTruth {
     Unavailable(ConditionUnavailableReason),
 }
 
+/// Durable ordered-fact fold state for one condition instance.
+///
+/// Only semantic event state is persisted here. Ordinary same-side market
+/// ticks are represented by the cursor fields but do not advance the condition
+/// revision or change the continuity epoch.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct EntryConditionFoldState {
+    pub crypto: Vec<CryptoEnteredFoldState>,
+}
+
+/// Persistent edge-triggered latch for one canonical crypto leaf.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CryptoEnteredFoldState {
+    pub node_id: u16,
+    pub source: EntryConditionSourceBinding,
+    pub last_outcome: Option<OutcomeSide>,
+    pub latched: bool,
+    pub last_source_sequence: Option<u64>,
+    pub last_report_hash: Option<ContentHash>,
+    pub last_event_at: Option<DateTime<Utc>>,
+    pub last_available_at: Option<DateTime<Utc>>,
+    pub gap_generation: u64,
+    pub discontinuity_epoch: u64,
+    pub triggering_report_hash: Option<ContentHash>,
+    pub triggering_at: Option<DateTime<Utc>>,
+}
+
 /// Typed fail-closed reason attached to an unavailable evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -613,7 +640,11 @@ pub enum EntryConditionValidationError {
     Hash(String),
 }
 
-jsonb_active!(EntryConditionArtifactV1, ConditionTruth);
+jsonb_active!(
+    EntryConditionArtifactV1,
+    ConditionTruth,
+    EntryConditionFoldState
+);
 
 #[cfg(test)]
 mod tests {

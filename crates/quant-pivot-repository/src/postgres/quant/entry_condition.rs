@@ -3,27 +3,30 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
+    clickhouse::{ChSchemaVersion, EntryConditionEvaluationEventRow},
     domain::{
-        ApplyEntryConditionEvaluation, CryptoPriceProjectionInfo, EntryConditionArtifactInfo,
-        EntryConditionAuditInfo, EntryConditionClaim, EntryConditionInstanceInfo,
-        NewEntryConditionArtifact, NewEntryConditionAudit, NewEntryConditionInstance,
-        WeatherDailyHighProjectionInfo,
+        ApplyEntryConditionEvaluation, ApplyEntryConditionEvaluationOutcome,
+        CryptoPriceProjectionInfo, EntryConditionArtifactInfo, EntryConditionAuditInfo,
+        EntryConditionClaim, EntryConditionInstanceInfo, NewEntryConditionArtifact,
+        NewEntryConditionAudit, NewEntryConditionInstance, WeatherDailyHighProjectionInfo,
     },
     entities::{
         quant_crypto_price_projection, quant_entry_condition_artifact, quant_entry_condition_audit,
-        quant_entry_condition_instance, quant_weather_daily_high_projection,
+        quant_entry_condition_evaluation_outbox, quant_entry_condition_instance,
+        quant_weather_daily_high_projection,
     },
     enums::quant::{EntryConditionAuditAction, EntryConditionState},
+    hashing::CanonicalDigest,
     types::{
-        ConditionTruth, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
-        EntryConditionAuditId, EntryConditionInstanceId, OrderIntentId, RecommendationId,
-        TemperatureCelsius,
+        ConditionTruth, ContentHash, CryptoEnteredFoldState, DomainInstrumentKey, DomainSourceId,
+        EntryConditionArtifactId, EntryConditionAuditId, EntryConditionFoldState,
+        EntryConditionInstanceId, OrderIntentId, RecommendationId, TemperatureCelsius,
     },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::{LockBehavior, LockType, OnConflict},
+    sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
 use uuid::Uuid;
 
@@ -440,7 +443,7 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         instance_id: &EntryConditionInstanceId,
         worker_id: Uuid,
         evaluation: ApplyEntryConditionEvaluation,
-    ) -> Result<EntryConditionInstanceInfo, StorageError> {
+    ) -> Result<ApplyEntryConditionEvaluationOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = load_for_update(&txn, instance_id).await?;
         if row.lease_owner != Some(worker_id)
@@ -464,42 +467,162 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         ) {
             return Err(state_conflict(instance_id, "instance is not evaluable"));
         }
+        let transitioned = row.state != evaluation.state
+            || row.truth_json.as_ref() != Some(&evaluation.truth)
+            || row.continuity_hash.as_ref() != Some(&evaluation.continuity_hash)
+            || row.confirmation_started_at != evaluation.confirmation_started_at
+            || fold_semantics_changed(&row.fold_state_json, &evaluation.fold_state);
         let from_state = row.state;
-        let revision = checked_revision(row.revision)?;
+        let revision = if transitioned {
+            checked_revision(row.revision)?
+        } else {
+            row.revision
+        };
         let mut active = row.into_active_model();
-        active.state = ActiveValue::Set(evaluation.state);
-        active.truth_json = ActiveValue::Set(Some(evaluation.truth.clone()));
-        active.revision = ActiveValue::Set(revision);
-        active.evaluation_hash = ActiveValue::Set(Some(evaluation.evaluation_hash.clone()));
-        active.input_fingerprint = ActiveValue::Set(Some(evaluation.input_fingerprint.clone()));
-        active.continuity_hash = ActiveValue::Set(Some(evaluation.continuity_hash.clone()));
-        active.confirmation_started_at = ActiveValue::Set(evaluation.confirmation_started_at);
+        if transitioned {
+            active.state = ActiveValue::Set(evaluation.state);
+            active.truth_json = ActiveValue::Set(Some(evaluation.truth.clone()));
+            active.revision = ActiveValue::Set(revision);
+            active.evaluation_hash = ActiveValue::Set(Some(evaluation.evaluation_hash.clone()));
+            active.input_fingerprint = ActiveValue::Set(Some(evaluation.input_fingerprint.clone()));
+            active.continuity_hash = ActiveValue::Set(Some(evaluation.continuity_hash.clone()));
+            active.confirmation_started_at = ActiveValue::Set(evaluation.confirmation_started_at);
+        }
+        active.fold_state_json = ActiveValue::Set(evaluation.fold_state.clone());
         active.last_evaluated_at = ActiveValue::Set(Some(evaluation.evaluated_at));
         active.next_evaluation_at = ActiveValue::Set(evaluation.next_evaluation_at);
         active.lease_owner = ActiveValue::Set(None);
         active.lease_expires_at = ActiveValue::Set(None);
         let updated = active.update(&txn).await.map_err(StorageError::from)?;
-        insert_audit(
-            &txn,
-            NewEntryConditionAudit {
-                audit_id: EntryConditionAuditId::from_v7(),
-                condition_instance_id: instance_id.clone(),
-                revision,
-                action: EntryConditionAuditAction::Evaluated,
-                from_state: Some(from_state),
-                to_state: evaluation.state,
-                truth_json: Some(evaluation.truth),
-                evaluation_hash: Some(evaluation.evaluation_hash),
-                input_fingerprint: Some(evaluation.input_fingerprint),
-                continuity_hash: Some(evaluation.continuity_hash),
-                lease_epoch: evaluation.expected_lease_epoch,
-                detail: None,
-                occurred_at: evaluation.evaluated_at,
-            },
-        )
-        .await?;
+        if transitioned {
+            insert_audit(
+                &txn,
+                NewEntryConditionAudit {
+                    audit_id: EntryConditionAuditId::from_v7(),
+                    condition_instance_id: instance_id.clone(),
+                    revision,
+                    action: EntryConditionAuditAction::Evaluated,
+                    from_state: Some(from_state),
+                    to_state: evaluation.state,
+                    truth_json: Some(evaluation.truth.clone()),
+                    evaluation_hash: Some(evaluation.evaluation_hash.clone()),
+                    input_fingerprint: Some(evaluation.input_fingerprint.clone()),
+                    continuity_hash: Some(evaluation.continuity_hash.clone()),
+                    lease_epoch: evaluation.expected_lease_epoch,
+                    detail: None,
+                    occurred_at: evaluation.evaluated_at,
+                },
+            )
+            .await?;
+        }
+        insert_evaluation_outbox(&txn, instance_id, &evaluation, transitioned, revision).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(updated.into())
+        Ok(ApplyEntryConditionEvaluationOutcome {
+            instance: updated.into(),
+            transitioned,
+        })
+    }
+
+    async fn claim_pending_evaluations(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<EntryConditionEvaluationEventRow>, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let rows = quant_entry_condition_evaluation_outbox::Entity::find()
+            .filter(quant_entry_condition_evaluation_outbox::Column::PublishedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt.is_null())
+                    .add(quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt.lte(now)),
+            )
+            .order_by_asc(quant_entry_condition_evaluation_outbox::Column::CreatedAt)
+            .limit(limit)
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let mut evaluations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let attempts = row
+                .publish_attempts
+                .checked_add(1)
+                .ok_or_else(|| invariant(ENTITY_INSTANCE, "evaluation publish attempt overflow"))?;
+            let mut active = row.into_active_model();
+            active.claim_owner = ActiveValue::Set(Some(worker_id));
+            active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
+            active.publish_attempts = ActiveValue::Set(attempts);
+            let claimed = active.update(&txn).await.map_err(StorageError::from)?;
+            evaluations.push(claimed.event_json);
+        }
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(evaluations)
+    }
+
+    async fn mark_evaluation_published(
+        &self,
+        evaluation_id: &ContentHash,
+        worker_id: Uuid,
+        published_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let result = quant_entry_condition_evaluation_outbox::Entity::update_many()
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::PublishedAt,
+                Expr::value(published_at),
+            )
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::LastError,
+                Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::ClaimOwner,
+                Expr::value(Option::<Uuid>::None),
+            )
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt,
+                Expr::value(Option::<DateTime<Utc>>::None),
+            )
+            .filter(
+                quant_entry_condition_evaluation_outbox::Column::EvaluationId
+                    .eq(evaluation_id.clone()),
+            )
+            .filter(quant_entry_condition_evaluation_outbox::Column::ClaimOwner.eq(worker_id))
+            .exec(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        ensure_outbox_owner(result.rows_affected, evaluation_id)
+    }
+
+    async fn mark_evaluation_failed(
+        &self,
+        evaluation_id: &ContentHash,
+        worker_id: Uuid,
+        detail: String,
+    ) -> Result<(), StorageError> {
+        let result = quant_entry_condition_evaluation_outbox::Entity::update_many()
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::LastError,
+                Expr::value(Some(detail)),
+            )
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::ClaimOwner,
+                Expr::value(Option::<Uuid>::None),
+            )
+            .col_expr(
+                quant_entry_condition_evaluation_outbox::Column::LeaseExpiresAt,
+                Expr::value(Option::<DateTime<Utc>>::None),
+            )
+            .filter(
+                quant_entry_condition_evaluation_outbox::Column::EvaluationId
+                    .eq(evaluation_id.clone()),
+            )
+            .filter(quant_entry_condition_evaluation_outbox::Column::ClaimOwner.eq(worker_id))
+            .exec(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        ensure_outbox_owner(result.rows_affected, evaluation_id)
     }
 
     async fn invalidate(
@@ -550,6 +673,82 @@ impl EntryConditionRepository for PgEntryConditionRepository {
         txn.commit().await.map_err(StorageError::from)?;
         Ok(updated.into())
     }
+}
+
+fn fold_semantics_changed(
+    previous: &EntryConditionFoldState,
+    next: &EntryConditionFoldState,
+) -> bool {
+    previous.crypto.len() != next.crypto.len()
+        || previous.crypto.iter().any(|previous_leaf| {
+            next.crypto
+                .iter()
+                .find(|next_leaf| next_leaf.node_id == previous_leaf.node_id)
+                .is_none_or(|next_leaf| crypto_semantics_changed(previous_leaf, next_leaf))
+        })
+}
+
+fn crypto_semantics_changed(
+    previous: &CryptoEnteredFoldState,
+    next: &CryptoEnteredFoldState,
+) -> bool {
+    previous.node_id != next.node_id
+        || previous.source != next.source
+        || previous.last_outcome != next.last_outcome
+        || previous.latched != next.latched
+        || previous.gap_generation != next.gap_generation
+        || previous.discontinuity_epoch != next.discontinuity_epoch
+        || previous.triggering_report_hash != next.triggering_report_hash
+        || previous.triggering_at != next.triggering_at
+}
+
+async fn insert_evaluation_outbox<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    instance_id: &EntryConditionInstanceId,
+    evaluation: &ApplyEntryConditionEvaluation,
+    transitioned: bool,
+    revision: i64,
+) -> Result<(), StorageError> {
+    let trace_kind = if transitioned { "applied" } else { "observed" };
+    let evaluation_id = CanonicalDigest::content_hash_json(&(
+        trace_kind,
+        instance_id,
+        evaluation.expected_revision,
+        evaluation.evaluated_at,
+        &evaluation.evaluation_hash,
+    ))
+    .map_err(|error| invariant(ENTITY_INSTANCE, error.to_string()))?;
+    let event = EntryConditionEvaluationEventRow {
+        evaluation_id: evaluation_id.clone(),
+        condition_instance_id: instance_id.clone(),
+        base_revision: evaluation.expected_revision,
+        applied_revision: transitioned.then_some(revision),
+        trace_kind: trace_kind.to_owned(),
+        evaluator_version: evaluation.evaluator_version,
+        evaluated_at: evaluation.evaluated_at.timestamp_millis(),
+        state: evaluation.state.as_str().to_owned(),
+        truth: truth_label(&evaluation.truth).to_owned(),
+        evaluation_hash: evaluation.evaluation_hash.clone(),
+        input_fingerprint: evaluation.input_fingerprint.clone(),
+        continuity_hash: evaluation.continuity_hash.clone(),
+        tree_json: evaluation.tree_json.clone(),
+        schema_version: ChSchemaVersion::FIRST,
+    };
+    quant_entry_condition_evaluation_outbox::ActiveModel {
+        outbox_id: ActiveValue::Set(Uuid::now_v7()),
+        evaluation_id: ActiveValue::Set(evaluation_id),
+        event_json: ActiveValue::Set(event),
+        published_at: ActiveValue::Set(None),
+        publish_attempts: ActiveValue::Set(0),
+        claim_owner: ActiveValue::Set(None),
+        lease_expires_at: ActiveValue::Set(None),
+        last_error: ActiveValue::Set(None),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .map_err(StorageError::from)?;
+    Ok(())
 }
 
 pub async fn claim_for_submission<C: sea_orm::ConnectionTrait>(
@@ -663,6 +862,66 @@ pub async fn revert_consumed_for_intent<C: sea_orm::ConnectionTrait>(
     Ok(updated)
 }
 
+/// Complete the condition side of a pre-submission intent terminal command.
+/// The caller owns the surrounding transaction and follows the global lock
+/// order: recommendation, intent, condition, capital reservation.
+pub async fn invalidate_for_intent_terminal<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    instance_id: &EntryConditionInstanceId,
+    intent_id: &OrderIntentId,
+    detail: String,
+    now: DateTime<Utc>,
+) -> Result<quant_entry_condition_instance::Model, StorageError> {
+    let row = load_for_update(db, instance_id).await?;
+    if matches!(
+        row.state,
+        EntryConditionState::Invalidated | EntryConditionState::Expired
+    ) {
+        return Ok(row);
+    }
+    if row.state == EntryConditionState::Consumed
+        && row.claimed_by_intent_id.as_ref() != Some(intent_id)
+    {
+        return Err(state_conflict(
+            instance_id,
+            "consumed condition belongs to a different terminal intent command",
+        ));
+    }
+    let from_state = row.state;
+    let revision = checked_revision(row.revision)?;
+    let mut fold_state = row.fold_state_json.clone();
+    for state in &mut fold_state.crypto {
+        if state.latched {
+            state.latched = false;
+            state.triggering_report_hash = None;
+            state.triggering_at = None;
+            state.discontinuity_epoch = state.discontinuity_epoch.saturating_add(1);
+        }
+    }
+    let mut active = row.into_active_model();
+    active.state = ActiveValue::Set(EntryConditionState::Invalidated);
+    active.revision = ActiveValue::Set(revision);
+    active.fold_state_json = ActiveValue::Set(fold_state);
+    active.confirmation_started_at = ActiveValue::Set(None);
+    active.next_evaluation_at = ActiveValue::Set(None);
+    active.lease_owner = ActiveValue::Set(None);
+    active.lease_expires_at = ActiveValue::Set(None);
+    let updated = active.update(db).await.map_err(StorageError::from)?;
+    insert_audit(
+        db,
+        audit_from_model(
+            &updated,
+            revision,
+            EntryConditionAuditAction::Invalidated,
+            Some(from_state),
+            Some(detail),
+            now,
+        ),
+    )
+    .await?;
+    Ok(updated)
+}
+
 pub async fn require_consumed_for_intent<C: sea_orm::ConnectionTrait>(
     db: &C,
     instance_id: &EntryConditionInstanceId,
@@ -758,6 +1017,28 @@ fn checked_revision(value: i64) -> Result<i64, StorageError> {
     value
         .checked_add(1)
         .ok_or_else(|| invariant(ENTITY_INSTANCE, "revision/lease epoch overflow"))
+}
+
+const fn truth_label(truth: &ConditionTruth) -> &'static str {
+    match truth {
+        ConditionTruth::Satisfied => "satisfied",
+        ConditionTruth::Unsatisfied => "unsatisfied",
+        ConditionTruth::Unavailable(_) => "unavailable",
+    }
+}
+
+fn ensure_outbox_owner(
+    rows_affected: u64,
+    evaluation_id: &ContentHash,
+) -> Result<(), StorageError> {
+    if rows_affected == 1 {
+        return Ok(());
+    }
+    Err(StorageError::StateConflict {
+        entity: "quant_entry_condition_evaluation_outbox",
+        id: Some(evaluation_id.to_string()),
+        detail: "evaluation outbox claim owner no longer matches".to_owned(),
+    })
 }
 
 fn invariant(entity: &'static str, detail: impl Into<String>) -> StorageError {

@@ -408,6 +408,7 @@ async fn build_features(
         block_cursor_repo: live_trade_tape_block_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
         trade_tape_on_chain: TradeTapeOnChainConfig::default(),
     });
 
@@ -637,6 +638,7 @@ async fn build_cross_section_features(
         block_cursor_repo: live_trade_tape_block_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
         trade_tape_on_chain: TradeTapeOnChainConfig::default(),
     });
 

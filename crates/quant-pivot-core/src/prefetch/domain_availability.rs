@@ -667,6 +667,7 @@ mod tests {
             crypto_reports: HashMap::new(),
             weather_observations: HashMap::new(),
             weather_forecasts: HashMap::new(),
+            weather_calibrations: Vec::new(),
             linkages: HashMap::new(),
         }
     }

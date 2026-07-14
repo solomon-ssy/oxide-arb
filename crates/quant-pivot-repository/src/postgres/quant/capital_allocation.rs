@@ -158,6 +158,7 @@ pub async fn load_capital(
 ) -> Result<quant_capital_allocation::Model, StorageError> {
     quant_capital_allocation::Entity::find()
         .filter(quant_capital_allocation::Column::OrderIntentId.eq(intent_id.clone()))
+        .lock_exclusive()
         .one(db)
         .await
         .map_err(StorageError::from)?

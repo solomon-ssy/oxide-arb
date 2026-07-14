@@ -26,7 +26,8 @@ use quant_pivot_models::{
     },
     config::TradeTapeOnChainConfig,
     domain::{
-        DecisionClock, FeatureVectorInfo, NewFeatureVector,
+        CalibrationArtifactInfo, CalibrationArtifactListQuery, DecisionClock, FeatureVectorInfo,
+        NewCalibrationArtifact, NewFeatureVector, Paginated, PublishedWeatherStationLeadBias,
         market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
     enums::{
@@ -36,13 +37,18 @@ use quant_pivot_models::{
     },
     runtime_config::{DataQualityConfig, DomainConfig, FeaturesConfig, SelectionConfig},
     types::{
-        DomainInstrumentKey, EventId, FeatureVectorId, MarketId, Price, RuntimeConfigVersionId,
-        Shares, TokenId, Usd,
+        CalibrationArtifactId, ContentHash, DomainInstrumentKey, EventId, FeatureVectorId,
+        MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
-    postgres::{PgEventRepository, PgFeatureRepository, PgMarketRepository},
-    traits::{EventRepository, FeatureRepository, MarketRepository, QuantFactReadRepository},
+    postgres::{
+        PgCalibrationArtifactRepository, PgEventRepository, PgFeatureRepository, PgMarketRepository,
+    },
+    traits::{
+        CalibrationArtifactRepository, EventRepository, FeatureRepository, MarketRepository,
+        QuantFactReadRepository,
+    },
 };
 use quant_pivot_research::{
     features::{FeatureVector, names},
@@ -180,6 +186,53 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
 }
 
 struct EmptyFactRead;
+
+struct EmptyCalibrationArtifactRepo;
+
+#[async_trait]
+impl CalibrationArtifactRepository for EmptyCalibrationArtifactRepo {
+    async fn create(
+        &self,
+        _artifact: NewCalibrationArtifact,
+    ) -> Result<CalibrationArtifactInfo, StorageError> {
+        unimplemented!("feature-plane test does not create calibration artifacts")
+    }
+
+    async fn find_by_id(
+        &self,
+        _artifact_id: &CalibrationArtifactId,
+    ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn find_by_content_hash(
+        &self,
+        _content_hash: &ContentHash,
+    ) -> Result<Option<CalibrationArtifactInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        _query: CalibrationArtifactListQuery,
+    ) -> Result<Paginated<CalibrationArtifactInfo>, StorageError> {
+        unimplemented!("feature-plane test does not page calibration artifacts")
+    }
+
+    async fn published_weather_through(
+        &self,
+        _at: chrono::DateTime<Utc>,
+    ) -> Result<Vec<PublishedWeatherStationLeadBias>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn mark_active(
+        &self,
+        _artifact_id: &CalibrationArtifactId,
+    ) -> Result<CalibrationArtifactInfo, StorageError> {
+        unimplemented!("feature-plane test does not activate calibration artifacts")
+    }
+}
 
 #[async_trait]
 impl QuantFactReadRepository for EmptyFactRead {
@@ -447,6 +500,7 @@ async fn insufficient_vectors_are_audited_but_partitioned_from_model_input() {
         block_cursor_repo: live_trade_tape_block_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        calibration_repo: Arc::new(EmptyCalibrationArtifactRepo),
         trade_tape_on_chain: TradeTapeOnChainConfig::default(),
     });
 
@@ -567,6 +621,7 @@ async fn create_feature_vector_then_find() {
         block_cursor_repo: live_trade_tape_block_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
         trade_tape_on_chain: TradeTapeOnChainConfig::default(),
     });
 

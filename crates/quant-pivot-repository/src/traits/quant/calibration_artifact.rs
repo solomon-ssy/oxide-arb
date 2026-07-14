@@ -4,12 +4,13 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         CalibrationArtifactInfo, CalibrationArtifactListQuery, NewCalibrationArtifact, Paginated,
+        PublishedWeatherStationLeadBias,
     },
-    types::CalibrationArtifactId,
+    types::{CalibrationArtifactId, ContentHash},
 };
 
 /// Persistence port for the append-only, content-addressed calibration-
-/// artifact ledger (`model_score` and `market_price_bias` kinds alike).
+/// artifact ledger (model score, market-price bias, and Weather lead bias).
 #[async_trait::async_trait]
 pub trait CalibrationArtifactRepository: Send + Sync {
     /// Insert a new calibration-artifact row, returning the persisted projection.
@@ -24,11 +25,23 @@ pub trait CalibrationArtifactRepository: Send + Sync {
         artifact_id: &CalibrationArtifactId,
     ) -> Result<Option<CalibrationArtifactInfo>, StorageError>;
 
+    /// Resolve an artifact after an idempotent content-addressed create race.
+    async fn find_by_content_hash(
+        &self,
+        content_hash: &ContentHash,
+    ) -> Result<Option<CalibrationArtifactInfo>, StorageError>;
+
     /// Page the ledger for the operator catalog, newest (`created_at`) first.
     async fn page(
         &self,
         query: CalibrationArtifactListQuery,
     ) -> Result<Paginated<CalibrationArtifactInfo>, StorageError>;
+
+    /// Immutable Weather calibration publications visible at or before `at`.
+    async fn published_weather_through(
+        &self,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<PublishedWeatherStationLeadBias>, StorageError>;
 
     /// Mark an artifact `active` (idempotent) — recorded when an operator
     /// binds/activates it (bias-table runtime-config ref, or a model

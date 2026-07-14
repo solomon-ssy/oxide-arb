@@ -47,26 +47,26 @@ use quant_pivot_models::{
         ConditionTruth, ConfidenceSummary, ConfirmationPolicy, ContentHash, DataQualitySummary,
         ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary,
         EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionBinding,
-        EntryConditionInstanceId, EntryConditionPlan, EntryConditionTemplate, EntryConditionV1,
-        EntryOrderPolicy, EntryOrderSpec, EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId,
-        EvidenceRefs, ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId, ExitPlan,
-        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
-        OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
-        PriceCondition, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary, RiskEnvelope,
-        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TradePolicyCohort, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortProvenance, TradePolicyConditionCandidate, TradePolicyExecutionEvidence,
-        TradePolicyFitContract, TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence,
-        TradePolicyQualityGate, TradePolicyValidationEvidence, TrainingDatasetId, Usd,
-        VerticalActivationTarget,
+        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
+        EntryConditionTemplate, EntryConditionV1, EntryOrderPolicy, EntryOrderSpec,
+        EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
+        ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec,
+        ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId,
+        MarketContext, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
+        ModelTrainingContract, ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, PriceCondition,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
+        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
+        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, ThesisInvalidationPolicy, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCohort,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance,
+        TradePolicyConditionCandidate, TradePolicyExecutionEvidence, TradePolicyFitContract,
+        TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence, TradePolicyQualityGate,
+        TradePolicyValidationEvidence, TrainingDatasetId, Usd, VerticalActivationTarget,
     },
 };
 use quant_pivot_repository::{
@@ -192,6 +192,7 @@ pub struct ReportBuildOptions {
     pub summary: ReportSummary,
     pub as_of: DateTime<Utc>,
     pub published_at: Option<DateTime<Utc>>,
+    pub runtime_mode: QuantRuntimeMode,
 }
 
 impl ReportBuildOptions {
@@ -213,6 +214,7 @@ impl ReportBuildOptions {
             summary: report_summary(),
             as_of: Utc::now(),
             published_at: Some(Utc::now()),
+            runtime_mode: QuantRuntimeMode::AutoExecution,
         }
     }
 
@@ -226,6 +228,7 @@ impl ReportBuildOptions {
             summary: empty_report_summary(),
             as_of: Utc::now(),
             published_at: Some(Utc::now()),
+            runtime_mode: QuantRuntimeMode::AutoExecution,
         }
     }
 }
@@ -364,8 +367,29 @@ pub async fn seed_conditional_price_report_on_infra(
     infra: &SharedDemoInfra,
     config: ReportSeedConfig,
 ) -> ExecutionTxnIds {
+    seed_conditional_price_report_with_mode(db, infra, config, QuantRuntimeMode::AutoExecution)
+        .await
+}
+
+/// Seed the same durable conditional evidence graph under `ReportOnly`, where
+/// evaluation is active but intent creation and venue submission are forbidden.
+pub async fn seed_report_only_conditional_price_report_on_infra(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    config: ReportSeedConfig,
+) -> ExecutionTxnIds {
+    seed_conditional_price_report_with_mode(db, infra, config, QuantRuntimeMode::ReportOnly).await
+}
+
+async fn seed_conditional_price_report_with_mode(
+    db: &DatabaseConnection,
+    infra: &SharedDemoInfra,
+    config: ReportSeedConfig,
+    runtime_mode: QuantRuntimeMode,
+) -> ExecutionTxnIds {
     let ids = prepare_report_seed(db, infra, &config).await;
     let mut options = ReportBuildOptions::published_single(&ids);
+    options.runtime_mode = runtime_mode;
     let artifact = price_condition_artifact(&ids);
     let recommendation = options
         .recommendations
@@ -1330,6 +1354,7 @@ fn fixture_condition_instance(
         evaluation_hash: None,
         input_fingerprint: None,
         continuity_hash: None,
+        fold_state_json: EntryConditionFoldState::default(),
         confirmation_started_at: None,
         last_evaluated_at: None,
         next_evaluation_at,
@@ -1408,7 +1433,7 @@ fn fixture_report(
         knowledge_lag_secs: 10,
         decision_at: options.as_of,
         horizon_secs: 86_400,
-        runtime_mode: QuantRuntimeMode::AutoExecution,
+        runtime_mode: options.runtime_mode,
         runtime_config_version_id: ids.runtime_config_version.clone(),
         model_run_id: None,
         model_version_id: ids.model_version.clone(),

@@ -1,15 +1,20 @@
 //! Postgres-backed recommendation repository (read + per-recommendation expiry).
 
 use crate::{
-    postgres::{error, quant::attribution, query::find_models_by_id_chunks, state_hash},
+    postgres::{
+        error,
+        quant::{attribution, order_intent::invalidate_pre_submission_for_recommendation},
+        query::find_models_by_id_chunks,
+        state_hash,
+    },
     traits::RecommendationRepository,
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{NewOperationLog, RecommendationInfo},
+    domain::{NewOperationLog, OrderIntentInfo, RecommendationInfo},
     entities::{operation_log, quant_recommendation, quant_recommendation_attribution},
-    enums::quant::RecommendationStatus,
+    enums::{execution::ApprovalInvalidation, quant::RecommendationStatus},
     types::{RecommendationId, RecommendationReportId},
 };
 use sea_orm::{
@@ -112,8 +117,9 @@ impl RecommendationRepository for PgRecommendationRepository {
     async fn expire(
         &self,
         recommendation_id: &RecommendationId,
+        expired_at: DateTime<Utc>,
         operation_log: NewOperationLog,
-    ) -> Result<RecommendationInfo, StorageError> {
+    ) -> Result<(RecommendationInfo, Vec<OrderIntentInfo>), StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = quant_recommendation::Entity::find_by_id(recommendation_id.clone())
             .lock_exclusive()
@@ -132,6 +138,14 @@ impl RecommendationRepository for PgRecommendationRepository {
             ));
         }
         let before_info: RecommendationInfo = row.clone().into();
+        let invalidated = invalidate_pre_submission_for_recommendation(
+            &txn,
+            recommendation_id,
+            ApprovalInvalidation::RecommendationExpired,
+            expired_at,
+            &operation_log,
+        )
+        .await?;
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(RecommendationStatus::Expired);
         let model = active.update(&txn).await.map_err(StorageError::from)?;
@@ -143,7 +157,7 @@ impl RecommendationRepository for PgRecommendationRepository {
             .await
             .map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(model.into())
+        Ok((model.into(), invalidated))
     }
 
     async fn find_expired_attribution_candidates(

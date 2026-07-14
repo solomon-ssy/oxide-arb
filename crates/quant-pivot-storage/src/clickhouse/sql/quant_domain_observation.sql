@@ -13,5 +13,5 @@ CREATE TABLE IF NOT EXISTS quant_domain_observation (
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_date)
 ORDER BY (instrument_key, metric, event_time)
-TTL event_date + INTERVAL 730 DAY DELETE
 SETTINGS index_granularity = 8192
+;

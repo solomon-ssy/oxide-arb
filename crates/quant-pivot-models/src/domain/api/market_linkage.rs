@@ -273,7 +273,8 @@ impl From<DomainSourceCursorInfo> for DomainSourceCursorView {
             | DomainSourceCheckpoint::ChainlinkDataStreams { .. } => DomainFamily::Crypto,
             DomainSourceCheckpoint::AviationWeather { .. }
             | DomainSourceCheckpoint::Ghcnh { .. }
-            | DomainSourceCheckpoint::Gefs { .. } => DomainFamily::Weather,
+            | DomainSourceCheckpoint::Gefs { .. }
+            | DomainSourceCheckpoint::GefsBackfill { .. } => DomainFamily::Weather,
         };
         let lag_secs = (Utc::now() - last_event_time).num_seconds();
         Self {

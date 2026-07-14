@@ -28,8 +28,9 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow, MarketResolutionRow,
-        MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow,
+        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow,
+        TradeTapeRow,
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -70,13 +71,14 @@ use quant_pivot_models::{
         TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
         TrainingDatasetPort, TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
     },
+    entities::quant_entry_condition_evaluation_outbox,
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::{FeatureFamily, RuntimeConfig},
     types::{
         BacktestPathSetId, BacktestReportId, BasisAlertId, CalibrationArtifactId, ContentHash,
-        DomainInstrumentKey, DomainSourceId, FactorDefinitionId, MarketId, MarketLinkageId,
-        ModelComparisonReportId, ModelSpecId, ModelVersionId, ResearchJobId,
-        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
+        DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, FactorDefinitionId,
+        MarketId, MarketLinkageId, ModelComparisonReportId, ModelSpecId, ModelVersionId,
+        ResearchJobId, RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -106,7 +108,7 @@ use quant_pivot_web::{
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use serde_json::Value;
 use std::{collections::HashSet, sync::Mutex};
 use testcontainers::ContainerAsync;
@@ -168,7 +170,7 @@ fn web_harness_app_state(input: WebHarnessAppStateInput<'_>) -> AppState {
         data_quality: Arc::clone(&input.data_quality) as Arc<dyn DataQualityPort>,
         events: input.events,
         markets: Arc::clone(&input.repos.markets),
-        quant_facts: Arc::new(MockQuantFactRead),
+        quant_facts: Arc::new(MockQuantFactRead::default()),
         ws_sessions: input.ws_sessions,
         metrics: Arc::new(MockMetricsScrape),
         readiness: Arc::new(PgRedisReadiness::new(
@@ -437,10 +439,38 @@ impl MetricsScrapePort for MockMetricsScrape {
 /// No-op quant fact read port for web integration tests. The market-detail
 /// microstructure endpoint is exercised for routing / RBAC only; the live
 /// ClickHouse-backed series are covered by repository integration tests.
-struct MockQuantFactRead;
+#[derive(Default)]
+pub struct MockQuantFactRead {
+    evaluation_db: Option<DatabaseConnection>,
+}
+
+impl MockQuantFactRead {
+    pub const fn with_evaluation_outbox(db: DatabaseConnection) -> Self {
+        Self {
+            evaluation_db: Some(db),
+        }
+    }
+}
 
 #[async_trait]
 impl QuantFactReadRepository for MockQuantFactRead {
+    async fn latest_applied_entry_condition_evaluation(
+        &self,
+        instance_id: &EntryConditionInstanceId,
+    ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
+        let Some(db) = &self.evaluation_db else {
+            return Ok(None);
+        };
+        let rows = quant_entry_condition_evaluation_outbox::Entity::find()
+            .order_by_desc(quant_entry_condition_evaluation_outbox::Column::CreatedAt)
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(rows.into_iter().map(|row| row.event_json).find(|event| {
+            event.condition_instance_id == *instance_id && event.applied_revision.is_some()
+        }))
+    }
+
     async fn microstructure_window(
         &self,
         _token_ids: Vec<TokenId>,

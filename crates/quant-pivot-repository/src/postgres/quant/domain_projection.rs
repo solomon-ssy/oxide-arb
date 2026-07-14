@@ -20,10 +20,11 @@ use quant_pivot_models::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, DatabaseTransaction,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
     EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::{Expr, OnConflict},
+    sea_query::{Expr, LockBehavior, LockType, OnConflict},
 };
+use uuid::Uuid;
 
 use crate::{
     postgres::quant::condition_wake::notify_input_change, traits::DomainProjectionRepository,
@@ -195,11 +196,16 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(Some(weather_info(row)));
         }
-        let checkpoint = DomainSourceCheckpoint::AviationWeather {
-            observation_time: row.last_observation_time,
-            report_hash: row.last_report_hash.clone(),
-        };
-        let event = weather_close_event(&row, closed_at, hash_checkpoint(&checkpoint)?)?;
+        let cursor = quant_domain_source_cursor::Entity::find_by_id((
+            DomainSourceId::aviation_weather(),
+            DomainInstrumentKey::aviation_weather(station),
+        ))
+        .lock_shared()
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| invariant("weather projection has no authoritative source cursor"))?;
+        let event = weather_close_event(&row, closed_at, cursor.checkpoint_hash)?;
         let revision = checked_add(row.revision, "weather daily close revision")?;
         let mut active = row.into_active_model();
         active.day_closed = ActiveValue::Set(true);
@@ -275,20 +281,48 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
         from_i64(generation, "weather gap generation")
     }
 
-    async fn pending_events(&self, limit: u64) -> Result<Vec<DomainEventEnvelope>, StorageError> {
-        quant_domain_event_outbox::Entity::find()
+    async fn claim_pending_events(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<DomainEventEnvelope>, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let rows = quant_domain_event_outbox::Entity::find()
             .filter(quant_domain_event_outbox::Column::PublishedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(quant_domain_event_outbox::Column::LeaseExpiresAt.is_null())
+                    .add(quant_domain_event_outbox::Column::LeaseExpiresAt.lte(now)),
+            )
             .order_by_asc(quant_domain_event_outbox::Column::CreatedAt)
             .limit(limit)
-            .all(&self.db)
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .all(&txn)
             .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(|row| row.envelope_json).collect())
+            .map_err(StorageError::from)?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let attempts = row
+                .publish_attempts
+                .checked_add(1)
+                .ok_or_else(|| invariant("domain event publish attempt overflow"))?;
+            let mut active = row.into_active_model();
+            active.claim_owner = ActiveValue::Set(Some(worker_id));
+            active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
+            active.publish_attempts = ActiveValue::Set(attempts);
+            let claimed = active.update(&txn).await.map_err(StorageError::from)?;
+            events.push(claimed.envelope_json);
+        }
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(events)
     }
 
     async fn mark_event_published(
         &self,
         event_id: &DomainEventId,
+        worker_id: Uuid,
         published_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         quant_domain_event_outbox::Entity::update_many()
@@ -300,7 +334,16 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
                 quant_domain_event_outbox::Column::LastError,
                 Expr::value(Option::<String>::None),
             )
+            .col_expr(
+                quant_domain_event_outbox::Column::ClaimOwner,
+                Expr::value(Option::<Uuid>::None),
+            )
+            .col_expr(
+                quant_domain_event_outbox::Column::LeaseExpiresAt,
+                Expr::value(Option::<DateTime<Utc>>::None),
+            )
             .filter(quant_domain_event_outbox::Column::EventId.eq(event_id.clone()))
+            .filter(quant_domain_event_outbox::Column::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -310,18 +353,24 @@ impl DomainProjectionRepository for PgDomainProjectionRepository {
     async fn mark_event_failed(
         &self,
         event_id: &DomainEventId,
+        worker_id: Uuid,
         detail: String,
     ) -> Result<(), StorageError> {
         quant_domain_event_outbox::Entity::update_many()
             .col_expr(
-                quant_domain_event_outbox::Column::PublishAttempts,
-                Expr::col(quant_domain_event_outbox::Column::PublishAttempts).add(1),
-            )
-            .col_expr(
                 quant_domain_event_outbox::Column::LastError,
                 Expr::value(Some(detail)),
             )
+            .col_expr(
+                quant_domain_event_outbox::Column::ClaimOwner,
+                Expr::value(Option::<Uuid>::None),
+            )
+            .col_expr(
+                quant_domain_event_outbox::Column::LeaseExpiresAt,
+                Expr::value(Option::<DateTime<Utc>>::None),
+            )
             .filter(quant_domain_event_outbox::Column::EventId.eq(event_id.clone()))
+            .filter(quant_domain_event_outbox::Column::ClaimOwner.eq(worker_id))
             .exec(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -674,6 +723,8 @@ async fn insert_outbox<C: sea_orm::ConnectionTrait>(
         envelope_json: ActiveValue::Set(event),
         published_at: ActiveValue::Set(None),
         publish_attempts: ActiveValue::Set(0),
+        claim_owner: ActiveValue::Set(None),
+        lease_expires_at: ActiveValue::Set(None),
         last_error: ActiveValue::Set(None),
         ..Default::default()
     })

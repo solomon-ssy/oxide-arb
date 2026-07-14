@@ -1,5 +1,5 @@
-//! Order-intent service wiring: web `OrderIntentPort`, report-cascade
-//! `IntentInvalidationHook`, and the TTL expiry sweep worker.
+//! Order-intent service wiring: web `OrderIntentPort`, terminal lifecycle event
+//! sink, and the TTL expiry sweep worker.
 
 use std::{sync::Arc, time::Duration};
 
@@ -14,7 +14,7 @@ use super::AppContext;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
     execution::{
-        CoreOrderIntentService, DefaultRuntimeModeGate, IntentInvalidationHook,
+        CoreOrderIntentService, DefaultRuntimeModeGate, IntentTerminalEventSink,
         OrderIntentServiceDeps, RuntimeModeGate,
     },
     infra::{deadline_scheduler, periodic_task::PeriodicTask},
@@ -27,7 +27,7 @@ const INTENT_EXPIRE_SWEEP_BATCH: usize = 256;
 impl AppContext {
     /// Assemble the governed order-intent service over the execution + governance
     /// planes. The same instance serves the web `OrderIntentPort`, the report
-    /// cascade `IntentInvalidationHook`, and the expiry sweep.
+    /// terminal event sink, and the expiry sweep.
     #[must_use]
     pub fn build_order_intent_service(&self) -> Arc<CoreOrderIntentService> {
         let repos = &self.infra.repos;
@@ -56,13 +56,14 @@ impl AppContext {
         }))
     }
 
-    /// Build the order-intent service, install the report-termination cascade
-    /// hook, register the expiry sweep, and return the web port handle.
+    /// Build the order-intent service, install the post-commit terminal event
+    /// sink, register the expiry sweep, and return the web port handle.
     #[must_use]
     pub fn register_execution_services(&self, runner: &mut AppRunner) -> Arc<dyn OrderIntentPort> {
         let service = self.build_order_intent_service();
-        self.report_lifecycle()
-            .set_intent_invalidation_hook(Arc::clone(&service) as Arc<dyn IntentInvalidationHook>);
+        self.report_lifecycle().set_intent_terminal_event_sink(
+            Arc::clone(&service) as Arc<dyn IntentTerminalEventSink>
+        );
         self.register_intent_expire_sweep(runner, Arc::clone(&service));
         self.register_intent_deadline_scheduler(runner, Arc::clone(&service));
         service as Arc<dyn OrderIntentPort>

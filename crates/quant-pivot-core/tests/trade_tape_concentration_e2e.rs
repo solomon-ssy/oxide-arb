@@ -469,6 +469,7 @@ async fn run_whale_feature_pipeline(harness: &WhaleTapeConcHarness) -> FeaturePi
         block_cursor_repo: live_trade_tape_block_cursor_repo(),
         linkage_repo: Arc::new(EmptyLinkageRepo),
         basis_alert_repo: Arc::new(EmptyBasisAlertRepo),
+        calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(harness.db.clone())),
         trade_tape_on_chain: TradeTapeOnChainConfig::default(),
     });
 

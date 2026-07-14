@@ -944,6 +944,8 @@ pg_enum! {
         /// A `FavoriteLongshotBiasTable` mapping market-implied price →
         /// empirical settlement frequency (Phase 11.2.1, folded in here).
         MarketPriceBias => "market_price_bias",
+        /// Frozen GEFS forecast-minus-observation bias by station and exact lead.
+        WeatherStationLeadBias => "weather_station_lead_bias",
     }
 }
 

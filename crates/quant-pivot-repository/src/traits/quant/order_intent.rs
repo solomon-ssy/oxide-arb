@@ -47,6 +47,8 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         intent_id: &OrderIntentId,
         reason: String,
+        rejected_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError>;
 
     /// Cancel a not-yet-submitted intent and release its capital atomically.
@@ -54,6 +56,8 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         intent_id: &OrderIntentId,
         reason: String,
+        cancelled_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError>;
 
     /// Expire a due intent: release its capital and write the operation log in
@@ -61,6 +65,7 @@ pub trait OrderIntentRepository: Send + Sync {
     async fn expire(
         &self,
         intent_id: &OrderIntentId,
+        expired_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError>;
 
@@ -70,6 +75,7 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         intent_id: &OrderIntentId,
         reason: ApprovalInvalidation,
+        invalidated_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError>;
 

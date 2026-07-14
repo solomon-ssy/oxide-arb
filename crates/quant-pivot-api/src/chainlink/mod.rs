@@ -152,10 +152,20 @@ impl ChainlinkDataStreamsSource {
             .get_reports_page_with_limit(binding.id, start_timestamp, self.config.rest_page_limit)
             .await
             .map_err(|error| data_streams_failure("reports page", error))?;
-        reports
+        let mut reports = reports
             .into_iter()
             .map(|report| self.decode(feed, binding, report, available_at))
-            .collect()
+            .collect::<QuantResult<Vec<_>>>()?;
+        reports.sort_by(|left, right| {
+            (left.source_sequence, &left.report_hash)
+                .cmp(&(right.source_sequence, &right.report_hash))
+        });
+        Ok(reports)
+    }
+
+    #[must_use]
+    pub const fn rest_page_limit(&self) -> usize {
+        self.config.rest_page_limit
     }
 
     /// Freeze the exact report applicable at a market's reference timestamp.

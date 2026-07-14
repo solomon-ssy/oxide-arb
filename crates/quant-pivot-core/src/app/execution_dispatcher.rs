@@ -7,7 +7,7 @@
 //! spawned task; multi-replica leader election is Phase 8+ (the row lock keeps it
 //! safe regardless of replica count).
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_error::QuantResult;
@@ -196,11 +196,29 @@ async fn recover_dangling_orders(
 /// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
 /// admission `#17`, which denies the same condition per intent (05.5).
 async fn armed_dispatch_pass(worker: &ArmedDispatchWorker) -> QuantResult<()> {
-    let status = match worker.runtime_mode.current() {
+    dispatch_for_runtime_mode(worker.runtime_mode.current(), |status| {
+        armed_dispatch_enabled_pass(worker, status)
+    })
+    .await
+}
+
+async fn dispatch_for_runtime_mode<F, Fut>(mode: QuantRuntimeMode, dispatch: F) -> QuantResult<()>
+where
+    F: FnOnce(OrderIntentStatus) -> Fut,
+    Fut: Future<Output = QuantResult<()>>,
+{
+    let status = match mode {
         QuantRuntimeMode::ReportOnly => return Ok(()),
         QuantRuntimeMode::SemiAuto => OrderIntentStatus::Approved,
         QuantRuntimeMode::AutoExecution => OrderIntentStatus::ApprovedByPolicy,
     };
+    dispatch(status).await
+}
+
+async fn armed_dispatch_enabled_pass(
+    worker: &ArmedDispatchWorker,
+    status: OrderIntentStatus,
+) -> QuantResult<()> {
     if !worker.kill_switch.allows_new_entry() {
         return Ok(());
     }
@@ -276,5 +294,28 @@ fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation
         discrepancy_usd: None,
         resolved_by: None,
         resolved_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use quant_pivot_models::enums::quant::QuantRuntimeMode;
+
+    use super::dispatch_for_runtime_mode;
+
+    #[tokio::test]
+    async fn report_only_never_invokes_the_submission_path() {
+        let calls = AtomicUsize::new(0);
+
+        dispatch_for_runtime_mode(QuantRuntimeMode::ReportOnly, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            async { Ok(()) }
+        })
+        .await
+        .expect("ReportOnly dispatch gate");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }

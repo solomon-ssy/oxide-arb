@@ -12,7 +12,7 @@ use crate::schema::{
     timestamp_with_write_default,
 };
 
-#[quant_schema(lifecycle = "ledger")]
+#[quant_schema(lifecycle = "audit")]
 pub enum QuantEntryConditionArtifact {
     Table,
     ArtifactId,

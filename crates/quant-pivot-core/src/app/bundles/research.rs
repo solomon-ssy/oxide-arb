@@ -143,6 +143,8 @@ pub struct ResearchBundle {
     /// Unified calibration-artifact ledger port: favorite-longshot bias-table
     /// fitter + generic catalog read/activate for every artifact kind (11.2.1, 11.3).
     pub calibration_artifact_fit: Arc<dyn CalibrationArtifactFitPort>,
+    /// Calibration artifact catalog used by historical PIT feature windows.
+    pub calibration_artifact_repo: Arc<dyn CalibrationArtifactRepository>,
 }
 
 struct OfflineResearchRepos {
@@ -184,6 +186,8 @@ fn assemble_research_pipelines(
         linkage_repo: Arc::clone(market_linkage_repo),
         basis_alert_repo: Arc::clone(&deps.infra.repos.basis_alert)
             as Arc<dyn BasisAlertRepository>,
+        calibration_repo: Arc::clone(&deps.infra.repos.calibration_artifact)
+            as Arc<dyn CalibrationArtifactRepository>,
         trade_tape_on_chain: deps.deploy.market_data.trade_tape_on_chain.clone(),
     }));
     let factor_repo: Arc<dyn FactorRepository> =
@@ -311,6 +315,8 @@ impl ResearchBundle {
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             fee_calculator: Arc::clone(&deps.data.fee_calculator),
             calibration_artifact_fit,
+            calibration_artifact_repo: Arc::clone(&repos.calibration_artifact)
+                as Arc<dyn CalibrationArtifactRepository>,
         }
     }
 
@@ -338,6 +344,7 @@ impl ResearchBundle {
                 linkage_repo: Arc::clone(&self.market_linkage_repo),
                 model_registry: Arc::clone(&self.model_registry_repo),
                 trade_policy_repo: Arc::clone(&self.trade_policy_repo),
+                calibration_repo: Arc::clone(&self.calibration_artifact_repo),
             },
             wire.config,
             wire.max_spine_samples,

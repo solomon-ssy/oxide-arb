@@ -85,9 +85,10 @@ impl AviationWeatherSource {
             .filter_map(|row| map_report(station, row, available_at).transpose())
             .collect::<QuantResult<Vec<_>>>()?;
         reports.sort_by(|left, right| {
-            left.observation_time
-                .cmp(&right.observation_time)
+            left.available_at
+                .cmp(&right.available_at)
                 .then_with(|| left.published_at.cmp(&right.published_at))
+                .then_with(|| left.observation_time.cmp(&right.observation_time))
                 .then_with(|| left.report_hash.as_str().cmp(right.report_hash.as_str()))
         });
         Ok(reports)

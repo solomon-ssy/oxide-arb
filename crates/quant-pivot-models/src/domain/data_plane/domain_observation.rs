@@ -135,7 +135,10 @@ pub enum DomainSourceCheckpoint {
         report_hash: ContentHash,
     },
     AviationWeather {
+        available_at: DateTime<Utc>,
+        published_at: DateTime<Utc>,
         observation_time: DateTime<Utc>,
+        revision: u32,
         report_hash: ContentHash,
     },
     Ghcnh {
@@ -144,6 +147,11 @@ pub enum DomainSourceCheckpoint {
     },
     Gefs {
         reference_time: DateTime<Utc>,
+        request_hash: ContentHash,
+        manifest_hash: ContentHash,
+    },
+    GefsBackfill {
+        completed_reference_time: DateTime<Utc>,
         request_hash: ContentHash,
         manifest_hash: ContentHash,
     },
@@ -164,6 +172,10 @@ impl DomainSourceCheckpoint {
             } => *observation_time,
             Self::Ghcnh { last_hour, .. } => *last_hour,
             Self::Gefs { reference_time, .. } => *reference_time,
+            Self::GefsBackfill {
+                completed_reference_time,
+                ..
+            } => *completed_reference_time,
         }
     }
 }

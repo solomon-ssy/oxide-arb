@@ -1,17 +1,18 @@
 //! Unified calibration-artifact persistence DTOs (Phase 11.3 §3.4).
 //!
 //! One append-only table backs every empirical calibration artifact: `kind =
-//! model_score` (`ProbabilityCalibrator`) and `kind = market_price_bias`
-//! (`FavoriteLongshotBiasTable`, folded in from Phase 11.2.1 — no standalone
-//! table, no alias). The kind-specific shape lives in `payload_json`; callers
-//! branch on `kind` to deserialize the matching payload type.
+//! model_score` (`ProbabilityCalibrator`), `kind = market_price_bias`
+//! (`FavoriteLongshotBiasTable`), and `kind = weather_station_lead_bias`
+//! (frozen station × forecast-lead correction). The kind-specific shape lives
+//! in `payload_json`; callers branch on `kind` to deserialize it.
 
 use crate::{
     entities::quant_calibration_artifact,
     enums::quant::CalibrationKind,
-    types::{CalibrationArtifactId, ContentHash},
+    types::{CalibrationArtifactId, ContentHash, IcaoStation},
 };
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -63,4 +64,42 @@ pub struct NewCalibrationArtifact {
     pub sample_count: i64,
     pub payload_json: serde_json::Value,
     pub active: bool,
+}
+
+/// Frozen mean GEFS forecast-minus-observation bias for one exact lead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeatherLeadBiasV1 {
+    pub lead_hours: u16,
+    pub sample_count: u32,
+    pub bias_celsius: Decimal,
+}
+
+/// Frozen lead-bias table for one station.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeatherStationBiasV1 {
+    pub station: IcaoStation,
+    pub leads: Vec<WeatherLeadBiasV1>,
+}
+
+/// Versioned, content-addressed Weather calibration payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeatherStationLeadBiasArtifactV1 {
+    pub schema_version: u32,
+    pub methodology: String,
+    pub methodology_hash: ContentHash,
+    pub grid_hashes: Vec<ContentHash>,
+    pub source_hashes: Vec<ContentHash>,
+    pub stations: Vec<WeatherStationBiasV1>,
+}
+
+/// One immutable Weather calibration publication visible on the PIT timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedWeatherStationLeadBias {
+    pub artifact_id: CalibrationArtifactId,
+    pub content_hash: ContentHash,
+    pub fit_window_start: DateTime<Utc>,
+    pub fit_window_end: DateTime<Utc>,
+    pub sample_count: i64,
+    pub published_at: DateTime<Utc>,
+    pub payload: WeatherStationLeadBiasArtifactV1,
 }

@@ -397,6 +397,12 @@ impl DomainInstrumentKey {
         Self::new(format!("GEFS:{station}"))
     }
 
+    /// Independent resumable cursor for historical 00Z GEFS calibration runs.
+    #[must_use]
+    pub fn gefs_backfill(station: &IcaoStation) -> Self {
+        Self::new(format!("GEFS_BACKFILL:{station}"))
+    }
+
     /// The source this key belongs to, derived from the canonical prefix.
     #[must_use]
     pub fn source_id(&self) -> Option<DomainSourceId> {
@@ -406,7 +412,7 @@ impl DomainInstrumentKey {
             "CHAINLINK_DATA_STREAMS" => Some(DomainSourceId::chainlink_data_streams()),
             "AVIATION_WEATHER" => Some(DomainSourceId::aviation_weather()),
             "GHCNH" => Some(DomainSourceId::ghcnh()),
-            "GEFS" => Some(DomainSourceId::gefs()),
+            "GEFS" | "GEFS_BACKFILL" => Some(DomainSourceId::gefs()),
             _ => None,
         }
     }

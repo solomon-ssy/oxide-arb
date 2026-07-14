@@ -13,6 +13,7 @@ use crate::{
         quant::capital_allocation::{
             capital_invariant_ok, load_capital, release_capital, validate_non_negative,
         },
+        quant::entry_condition::invalidate_for_intent_terminal,
         query::{find_models_by_id_chunks, paginate_mapped},
         state_hash,
     },
@@ -33,10 +34,12 @@ use quant_pivot_models::{
     },
     enums::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
+        operation_log::OperationCategory,
         quant::{ApprovalStatus, OrderIntentStatus, RecommendationStatus},
+        rbac::ResourceType,
     },
     types::{
-        EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId,
+        EntryOrderSpec, OperationLogId, OrderIntentId, RecommendationId, RecommendationReportId,
         RuntimeConfigVersionId, ScaleOutState, Usd,
     },
 };
@@ -55,6 +58,7 @@ const EXPIRABLE_STATUSES: [OrderIntentStatus; 3] = [
 
 /// Singleton row id for `system_kill_switch`.
 const SYSTEM_KILL_SWITCH_ID: i32 = 1;
+const ENTRY_CONDITION_ENTITY: &str = "quant_entry_condition_instance";
 
 /// Postgres-backed order intent repository.
 pub struct PgOrderIntentRepository {
@@ -148,7 +152,7 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         now: DateTime<Utc>,
     ) -> Result<ApproveOrderIntentOutcome, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         if row.status != OrderIntentStatus::PendingApproval {
             return Err(error::state_conflict(
                 entity::QUANT_ORDER_INTENT,
@@ -175,7 +179,8 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         };
 
         if let Some(reason) = invalidation {
-            let intent_model = transition_invalidated(&txn, intent_id, row, reason, false).await?;
+            let intent_model =
+                transition_invalidated(&txn, intent_id, row, reason, now, false).await?;
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(ApproveOrderIntentOutcome::Invalidated(
                 intent_model.into(),
@@ -200,16 +205,28 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         &self,
         intent_id: &OrderIntentId,
         reason: String,
+        rejected_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::Rejected, intent_id)?;
+        let before_info: OrderIntentInfo = row.clone().into();
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Rejected);
         active.approval_status = ActiveValue::Set(ApprovalStatus::Rejected);
         active.status_reason = ActiveValue::Set(Some(reason.clone()));
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
+        invalidate_for_intent_terminal(
+            &txn,
+            &intent_model.condition_instance_id,
+            intent_id,
+            format!("intent rejected: {reason}"),
+            rejected_at,
+        )
+        .await?;
         release_capital(&txn, intent_id, format!("rejected: {reason}")).await?;
+        insert_terminal_operation_log(&txn, operation_log, &before_info, &intent_model).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(intent_model.into())
     }
@@ -218,15 +235,27 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         &self,
         intent_id: &OrderIntentId,
         reason: String,
+        cancelled_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::Cancelled, intent_id)?;
+        let before_info: OrderIntentInfo = row.clone().into();
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Cancelled);
         active.status_reason = ActiveValue::Set(Some(reason.clone()));
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
+        invalidate_for_intent_terminal(
+            &txn,
+            &intent_model.condition_instance_id,
+            intent_id,
+            format!("intent cancelled: {reason}"),
+            cancelled_at,
+        )
+        .await?;
         release_capital(&txn, intent_id, format!("cancelled: {reason}")).await?;
+        insert_terminal_operation_log(&txn, operation_log, &before_info, &intent_model).await?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(intent_model.into())
     }
@@ -234,10 +263,11 @@ impl OrderIntentRepository for PgOrderIntentRepository {
     async fn expire(
         &self,
         intent_id: &OrderIntentId,
+        expired_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent_for_update(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         if row.status == OrderIntentStatus::Expired {
             txn.commit().await.map_err(StorageError::from)?;
             return Ok(row.into());
@@ -248,6 +278,14 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         active.status = ActiveValue::Set(OrderIntentStatus::Expired);
         active.status_reason = ActiveValue::Set(Some("intent expired".to_owned()));
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
+        invalidate_for_intent_terminal(
+            &txn,
+            &intent_model.condition_instance_id,
+            intent_id,
+            "intent expired".to_owned(),
+            expired_at,
+        )
+        .await?;
         release_capital(&txn, intent_id, "expired".to_owned()).await?;
         let after_info: OrderIntentInfo = intent_model.clone().into();
         let operation_log =
@@ -264,12 +302,14 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         &self,
         intent_id: &OrderIntentId,
         reason: ApprovalInvalidation,
+        invalidated_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let row = load_intent(&txn, intent_id).await?;
+        let row = lock_terminal_graph(&txn, intent_id).await?;
         let before_info: OrderIntentInfo = row.clone().into();
-        let intent_model = transition_invalidated(&txn, intent_id, row, reason, true).await?;
+        let intent_model =
+            transition_invalidated(&txn, intent_id, row, reason, invalidated_at, true).await?;
         let after_info: OrderIntentInfo = intent_model.clone().into();
         let operation_log =
             state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
@@ -687,6 +727,7 @@ async fn transition_invalidated(
     intent_id: &OrderIntentId,
     row: quant_order_intent::Model,
     reason: ApprovalInvalidation,
+    occurred_at: DateTime<Utc>,
     validate_transition: bool,
 ) -> Result<quant_order_intent::Model, StorageError> {
     if validate_transition {
@@ -696,8 +737,156 @@ async fn transition_invalidated(
     active.status = ActiveValue::Set(OrderIntentStatus::Invalidated);
     active.status_reason = ActiveValue::Set(Some(reason.as_str().to_owned()));
     let intent_model = active.update(db).await.map_err(StorageError::from)?;
+    invalidate_for_intent_terminal(
+        db,
+        &intent_model.condition_instance_id,
+        intent_id,
+        format!("intent invalidated: {}", reason.as_str()),
+        occurred_at,
+    )
+    .await?;
     release_capital(db, intent_id, format!("invalidated: {}", reason.as_str())).await?;
     Ok(intent_model)
+}
+
+async fn insert_terminal_operation_log(
+    db: &impl ConnectionTrait,
+    operation_log: NewOperationLog,
+    before: &OrderIntentInfo,
+    after: &quant_order_intent::Model,
+) -> Result<(), StorageError> {
+    let after_info: OrderIntentInfo = after.clone().into();
+    let operation_log = state_hash::apply_transition_hashes(operation_log, before, &after_info)?;
+    operation_log::Entity::insert(operation_log.into_active_model())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Atomically invalidate every pre-submission intent for an already locked
+/// recommendation. The caller owns the transaction and must lock the parent
+/// recommendation first. Intents are locked in primary-key order before their
+/// condition and capital rows, preserving the global terminal-command order.
+pub async fn invalidate_pre_submission_for_recommendation(
+    db: &impl ConnectionTrait,
+    recommendation_id: &RecommendationId,
+    reason: ApprovalInvalidation,
+    occurred_at: DateTime<Utc>,
+    parent_log: &NewOperationLog,
+) -> Result<Vec<OrderIntentInfo>, StorageError> {
+    let rows = quant_order_intent::Entity::find()
+        .filter(quant_order_intent::Column::RecommendationId.eq(recommendation_id.clone()))
+        .filter(quant_order_intent::Column::Status.is_in(OrderIntentStatus::PRE_SUBMISSION_ACTIVE))
+        .order_by_asc(quant_order_intent::Column::OrderIntentId)
+        .lock_exclusive()
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    let mut invalidated = Vec::with_capacity(rows.len());
+    for row in rows {
+        let intent_id = row.order_intent_id.clone();
+        validate_intent_transition(row.status, OrderIntentStatus::Invalidated, &intent_id)?;
+        let before_info: OrderIntentInfo = row.clone().into();
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(OrderIntentStatus::Invalidated);
+        active.status_reason = ActiveValue::Set(Some(reason.as_str().to_owned()));
+        let model = active.update(db).await.map_err(StorageError::from)?;
+        invalidate_for_intent_terminal(
+            db,
+            &model.condition_instance_id,
+            &intent_id,
+            format!("intent invalidated: {}", reason.as_str()),
+            occurred_at,
+        )
+        .await?;
+        release_capital(db, &intent_id, format!("invalidated: {}", reason.as_str())).await?;
+
+        let after_info: OrderIntentInfo = model.clone().into();
+        let intent_log = state_hash::apply_transition_hashes(
+            terminal_intent_operation_log(parent_log, &intent_id, reason),
+            &before_info,
+            &after_info,
+        )?;
+        operation_log::Entity::insert(intent_log.into_active_model())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+        invalidated.push(after_info);
+    }
+    Ok(invalidated)
+}
+
+fn terminal_intent_operation_log(
+    parent: &NewOperationLog,
+    intent_id: &OrderIntentId,
+    reason: ApprovalInvalidation,
+) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: format!("{}:intent:{intent_id}", parent.request_id),
+        actor_user_id: parent.actor_user_id.clone(),
+        actor_username: parent.actor_username.clone(),
+        acting_role: parent.acting_role.clone(),
+        category: OperationCategory::Governance,
+        action: "quant.intent.invalidate".to_owned(),
+        resource_type: Some(ResourceType::OrderIntent),
+        resource_id: Some(intent_id.to_string()),
+        http_method: parent.http_method.clone(),
+        http_path: format!("/system/quant/intent/{intent_id}/invalidate"),
+        http_status: parent.http_status,
+        outcome: parent.outcome,
+        client_ip: parent.client_ip.clone(),
+        user_agent: parent.user_agent.clone(),
+        latency_ms: parent.latency_ms,
+        detail: serde_json::json!({
+            "reason": reason.as_str(),
+            "parent_action": parent.action,
+            "parent_resource_id": parent.resource_id,
+        }),
+        before_hash: None,
+        after_hash: None,
+        governance_audit_event_id: parent.governance_audit_event_id.clone(),
+        governance_audit_sequence: parent.governance_audit_sequence,
+    }
+}
+
+pub async fn lock_terminal_graph(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+) -> Result<quant_order_intent::Model, StorageError> {
+    let probe = load_intent(db, intent_id).await?;
+    let recommendation = quant_recommendation::Entity::find_by_id(probe.recommendation_id.clone())
+        .lock_exclusive()
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| error::not_found(entity::QUANT_RECOMMENDATION, &probe.recommendation_id))?;
+    let intent = load_intent_for_update(db, intent_id).await?;
+    if recommendation.recommendation_id != intent.recommendation_id {
+        return Err(error::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            Some(intent_id),
+            "intent recommendation changed while acquiring terminal graph locks",
+        ));
+    }
+    let condition =
+        quant_entry_condition_instance::Entity::find_by_id(intent.condition_instance_id.clone())
+            .lock_exclusive()
+            .one(db)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                error::not_found(ENTRY_CONDITION_ENTITY, &intent.condition_instance_id)
+            })?;
+    if condition.recommendation_id != recommendation.recommendation_id {
+        return Err(error::invariant_violation(
+            Some(ENTRY_CONDITION_ENTITY),
+            "condition recommendation does not match terminal intent graph",
+        ));
+    }
+    let _capital = load_capital(db, intent_id).await?;
+    Ok(intent)
 }
 
 pub async fn load_intent(

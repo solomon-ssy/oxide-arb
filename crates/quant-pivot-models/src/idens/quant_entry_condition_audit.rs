@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-#[quant_schema(lifecycle = "ledger")]
+#[quant_schema(lifecycle = "audit")]
 pub enum QuantEntryConditionAudit {
     Table,
     AuditId,

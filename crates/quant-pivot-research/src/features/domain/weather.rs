@@ -7,17 +7,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use chrono_tz::Tz;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        MarketSubject, WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind,
+        MarketSubject, WeatherForecastPoint, WeatherLeadBiasV1, WeatherObservationFact,
+        WeatherObservationReportKind, WeatherStationBiasV1, WeatherStationLeadBiasArtifactV1,
         WeatherSubject,
     },
     enums::{domain::DomainFamily, feature::EvidenceSourceKind},
     hashing::CanonicalDigest,
     runtime_config::WeatherDomainConfig,
-    types::{ContentHash, Probability, TemperatureCelsius},
+    types::{ContentHash, IcaoStation, Probability, TemperatureCelsius},
 };
 use rust_decimal::Decimal;
 
@@ -31,8 +33,239 @@ use crate::{
     },
 };
 
-const FORECAST_INTERVAL_HOURS: i64 = 3;
 const SQRT_ITERATIONS: usize = 32;
+const FORECAST_INTERVAL_HOURS: i64 = 3;
+const WEATHER_BIAS_METHODOLOGY: &str = "gefs_00z_ensemble_mean_minus_ghcnh_three_hour_max_v1";
+
+type ObservationKey = (IcaoStation, DateTime<Utc>);
+type ForecastGroupKey = (IcaoStation, DateTime<Utc>, DateTime<Utc>, u16);
+type ForecastVariantKey = (ContentHash, ContentHash);
+type ForecastGroups<'a> =
+    BTreeMap<ForecastGroupKey, BTreeMap<ForecastVariantKey, Vec<&'a WeatherForecastPoint>>>;
+type BiasErrors = BTreeMap<IcaoStation, BTreeMap<u16, Vec<Decimal>>>;
+type CalibrationSampleKey = (
+    IcaoStation,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    u16,
+    ContentHash,
+    ContentHash,
+);
+
+#[derive(Default)]
+struct WeatherCalibrationSamples {
+    errors: BiasErrors,
+    sample_keys: Vec<CalibrationSampleKey>,
+    observation_hashes: BTreeSet<ContentHash>,
+    manifest_hashes: BTreeSet<ContentHash>,
+    grid_hashes: BTreeSet<ContentHash>,
+}
+
+/// Deterministic result of one offline Weather station-by-lead fit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeatherStationLeadBiasFit {
+    pub payload: WeatherStationLeadBiasArtifactV1,
+    pub calibration_split_hash: ContentHash,
+    pub sample_count: i64,
+}
+
+/// Fit frozen station-by-lead GEFS bias from historical facts.
+///
+/// One sample is one complete `(station, run, valid_time, lead)` ensemble mean
+/// paired with the latest-revision `GHCNh` maximum in its three-hour interval.
+pub fn fit_weather_station_lead_bias(
+    observations: &[WeatherObservationFact],
+    forecasts: &[WeatherForecastPoint],
+    fit_start: DateTime<Utc>,
+    fit_end: DateTime<Utc>,
+    required_members: u8,
+) -> QuantResult<WeatherStationLeadBiasFit> {
+    if fit_start >= fit_end || required_members == 0 {
+        return Err(QuantError::config(
+            "Weather calibration requires a non-empty fit window and members",
+        ));
+    }
+    let latest = latest_historical_observations(observations, fit_start, fit_end);
+    let groups = group_forecasts(forecasts, fit_start, fit_end);
+    let samples = pair_calibration_samples(groups, &latest, required_members)?;
+    if samples.sample_keys.is_empty() {
+        return Err(QuantError::config(
+            "Weather calibration has no complete forecast/observation pairs",
+        ));
+    }
+    assemble_weather_bias_fit(samples)
+}
+
+fn latest_historical_observations(
+    observations: &[WeatherObservationFact],
+    fit_start: DateTime<Utc>,
+    fit_end: DateTime<Utc>,
+) -> BTreeMap<ObservationKey, &WeatherObservationFact> {
+    let mut latest = BTreeMap::<ObservationKey, &WeatherObservationFact>::new();
+    let history_start = fit_start - Duration::hours(FORECAST_INTERVAL_HOURS);
+    for fact in observations.iter().filter(|fact| {
+        fact.report_kind == WeatherObservationReportKind::HistoricalGhcnh
+            && fact.observation_time >= history_start
+            && fact.observation_time < fit_end
+    }) {
+        latest
+            .entry((fact.station.clone(), fact.observation_time))
+            .and_modify(|current| {
+                if (fact.revision, fact.available_at, fact.report_hash.as_str())
+                    > (
+                        current.revision,
+                        current.available_at,
+                        current.report_hash.as_str(),
+                    )
+                {
+                    *current = fact;
+                }
+            })
+            .or_insert(fact);
+    }
+    latest
+}
+
+fn group_forecasts(
+    forecasts: &[WeatherForecastPoint],
+    fit_start: DateTime<Utc>,
+    fit_end: DateTime<Utc>,
+) -> ForecastGroups<'_> {
+    let mut groups = ForecastGroups::new();
+    for point in forecasts.iter().filter(|point| {
+        point.valid_time >= fit_start
+            && point.valid_time < fit_end
+            && point.reference_time.hour() == 0
+    }) {
+        groups
+            .entry((
+                point.station.clone(),
+                point.reference_time,
+                point.valid_time,
+                point.lead_hours,
+            ))
+            .or_default()
+            .entry((
+                point.run_manifest_hash.clone(),
+                point.grid_binding_hash.clone(),
+            ))
+            .or_default()
+            .push(point);
+    }
+    groups
+}
+
+fn pair_calibration_samples(
+    groups: ForecastGroups<'_>,
+    latest: &BTreeMap<ObservationKey, &WeatherObservationFact>,
+    required_members: u8,
+) -> QuantResult<WeatherCalibrationSamples> {
+    let mut samples = WeatherCalibrationSamples::default();
+    for ((station, reference_time, valid_time, lead), variants) in groups {
+        let candidate = variants
+            .into_iter()
+            .filter(|(_, points)| has_complete_members(points, required_members))
+            .max_by(
+                |((left_manifest, _), left_points), ((right_manifest, _), right_points)| {
+                    let left_available = left_points.iter().map(|point| point.available_at).max();
+                    let right_available = right_points.iter().map(|point| point.available_at).max();
+                    (left_available, left_manifest).cmp(&(right_available, right_manifest))
+                },
+            );
+        let Some(((manifest_hash, grid_hash), points)) = candidate else {
+            continue;
+        };
+        let interval_start = valid_time - Duration::hours(FORECAST_INTERVAL_HOURS);
+        let observed = latest
+            .range((station.clone(), interval_start)..=(station.clone(), valid_time))
+            .filter(|((candidate, time), _)| {
+                candidate == &station && *time > interval_start && *time <= valid_time
+            })
+            .map(|(_, fact)| *fact)
+            .max_by_key(|fact| fact.temperature.value());
+        let Some(observed) = observed else {
+            continue;
+        };
+        let member_count = u32::try_from(points.len())
+            .map_err(|error| QuantError::config(format!("GEFS member count overflow: {error}")))?;
+        let forecast_mean = points
+            .iter()
+            .map(|point| point.tmax_celsius.value())
+            .sum::<Decimal>()
+            / Decimal::from(member_count);
+        samples
+            .errors
+            .entry(station.clone())
+            .or_default()
+            .entry(lead)
+            .or_default()
+            .push(forecast_mean - observed.temperature.value());
+        samples.sample_keys.push((
+            station,
+            reference_time,
+            valid_time,
+            lead,
+            manifest_hash.clone(),
+            observed.report_hash.clone(),
+        ));
+        samples
+            .observation_hashes
+            .insert(observed.report_hash.clone());
+        samples.manifest_hashes.insert(manifest_hash);
+        samples.grid_hashes.insert(grid_hash);
+    }
+    Ok(samples)
+}
+
+fn station_biases(errors: BiasErrors) -> QuantResult<(Vec<WeatherStationBiasV1>, i64)> {
+    let mut sample_count = 0_i64;
+    let mut stations = Vec::with_capacity(errors.len());
+    for (station, lead_errors) in errors {
+        let mut leads = Vec::with_capacity(lead_errors.len());
+        for (lead_hours, values) in lead_errors {
+            let count = u32::try_from(values.len()).map_err(|error| {
+                QuantError::config(format!("Weather calibration sample overflow: {error}"))
+            })?;
+            sample_count = sample_count
+                .checked_add(i64::from(count))
+                .ok_or_else(|| QuantError::config("Weather calibration total sample overflow"))?;
+            leads.push(WeatherLeadBiasV1 {
+                lead_hours,
+                sample_count: count,
+                bias_celsius: values.iter().copied().sum::<Decimal>() / Decimal::from(count),
+            });
+        }
+        stations.push(WeatherStationBiasV1 { station, leads });
+    }
+    Ok((stations, sample_count))
+}
+
+fn assemble_weather_bias_fit(
+    mut samples: WeatherCalibrationSamples,
+) -> QuantResult<WeatherStationLeadBiasFit> {
+    let (stations, sample_count) = station_biases(samples.errors)?;
+    samples.sample_keys.sort();
+    let calibration_split_hash = CanonicalDigest::content_hash_json(&samples.sample_keys)?;
+    let observation_set_hash = CanonicalDigest::content_hash_json(&samples.observation_hashes)?;
+    let manifest_set_hash = CanonicalDigest::content_hash_json(&samples.manifest_hashes)?;
+    let mut source_hashes = vec![observation_set_hash, manifest_set_hash];
+    source_hashes.sort();
+    source_hashes.dedup();
+    let methodology = WEATHER_BIAS_METHODOLOGY.to_owned();
+    let methodology_hash = CanonicalDigest::content_hash_json(&methodology)?;
+    Ok(WeatherStationLeadBiasFit {
+        payload: WeatherStationLeadBiasArtifactV1 {
+            schema_version: 1,
+            methodology,
+            methodology_hash,
+            grid_hashes: samples.grid_hashes.into_iter().collect(),
+            source_hashes,
+            stations,
+        },
+        calibration_split_hash,
+        sample_count,
+    })
+}
 
 /// The Weather vertical's pure feature builder.
 pub struct WeatherDomainFeatureBuilder;
@@ -138,16 +371,27 @@ fn calibrated_ensemble(
         .parse::<Tz>()
         .map_err(|_| NullReason::LinkageUnresolved)?;
     let target = latest_complete_target_run(subject, window, config, timezone)?;
-    let biases = fit_lead_biases(window, config, target.reference_time)?;
+    let calibration = window
+        .calibration
+        .as_ref()
+        .ok_or(NullReason::InsufficientHistory)?;
+    let station_bias = calibration
+        .payload
+        .stations
+        .iter()
+        .find(|station| station.station == subject.station)
+        .ok_or(NullReason::InsufficientHistory)?;
     let mut highs = BTreeMap::<u8, Decimal>::new();
     for point in &target.points {
-        let Some((sample_count, bias)) = biases.get(&point.lead_hours) else {
-            return Err(NullReason::InsufficientHistory);
-        };
-        if *sample_count < config.minimum_bias_samples_per_lead {
+        let lead = station_bias
+            .leads
+            .iter()
+            .find(|lead| lead.lead_hours == point.lead_hours)
+            .ok_or(NullReason::InsufficientHistory)?;
+        if lead.sample_count < config.minimum_bias_samples_per_lead {
             return Err(NullReason::InsufficientHistory);
         }
-        let corrected = point.tmax_celsius.value() - *bias;
+        let corrected = point.tmax_celsius.value() - lead.bias_celsius;
         highs
             .entry(point.member)
             .and_modify(|current| *current = (*current).max(corrected))
@@ -156,8 +400,6 @@ fn calibrated_ensemble(
     if highs.len() != usize::from(config.minimum_complete_members) {
         return Err(NullReason::DomainSourceUnavailable);
     }
-    let calibration_hash =
-        CanonicalDigest::content_hash_json(&biases).map_err(|_| NullReason::OutOfValidRange)?;
     let effective_at = target
         .points
         .iter()
@@ -169,12 +411,14 @@ fn calibrated_ensemble(
         evidence: EvidenceSourceRef {
             source_kind: EvidenceSourceKind::DomainExternal,
             reference: format!(
-                "gefs:{}#{}:bias={calibration_hash}",
+                "gefs:{}#{}:bias={}@{}",
                 target.reference_time.timestamp_millis(),
                 target.run_manifest_hash,
+                calibration.artifact_id,
+                calibration.content_hash,
             ),
             effective_at,
-            available_at: Some(target.available_at),
+            available_at: Some(target.available_at.max(calibration.published_at)),
         },
     })
 }
@@ -232,74 +476,6 @@ fn latest_complete_target_run<'a>(
         .ok_or(NullReason::DomainSourceUnavailable)
 }
 
-/// Fit one mean `forecast TMAX - observed interval max` bias per exact lead.
-/// A sample is one `(run, valid_time, lead)` ensemble, not 31 pseudo-samples.
-fn fit_lead_biases(
-    window: &WeatherFactWindow,
-    config: &WeatherDomainConfig,
-    before: DateTime<Utc>,
-) -> Result<BTreeMap<u16, (u32, Decimal)>, NullReason> {
-    let lookback = i64::from(config.calibration_lookback_days);
-    let from = window.decision_at - Duration::days(lookback);
-    let ghcnh = latest_observations(
-        &window.observations,
-        WeatherObservationReportKind::HistoricalGhcnh,
-    );
-    let mut groups = BTreeMap::<
-        (DateTime<Utc>, DateTime<Utc>, u16, &ContentHash),
-        Vec<&WeatherForecastPoint>,
-    >::new();
-    for point in &window.forecasts {
-        if point.valid_time >= before || point.valid_time < from {
-            continue;
-        }
-        groups
-            .entry((
-                point.reference_time,
-                point.valid_time,
-                point.lead_hours,
-                &point.run_manifest_hash,
-            ))
-            .or_default()
-            .push(point);
-    }
-    let mut errors = BTreeMap::<u16, Vec<Decimal>>::new();
-    for ((_, valid_time, lead_hours, _), points) in groups {
-        if !has_complete_members(&points, config.minimum_complete_members) {
-            continue;
-        }
-        let interval_start = valid_time - Duration::hours(FORECAST_INTERVAL_HOURS);
-        let observed = ghcnh
-            .iter()
-            .filter(|fact| {
-                fact.observation_time > interval_start && fact.observation_time <= valid_time
-            })
-            .map(|fact| fact.temperature.value())
-            .max();
-        let Some(observed) = observed else {
-            continue;
-        };
-        let forecast = points
-            .iter()
-            .map(|point| point.tmax_celsius.value())
-            .sum::<Decimal>()
-            / Decimal::from(points.len());
-        errors
-            .entry(lead_hours)
-            .or_default()
-            .push(forecast - observed);
-    }
-    let biases = errors
-        .into_iter()
-        .map(|(lead, values)| {
-            let count = u32::try_from(values.len()).map_err(|_| NullReason::OutOfValidRange)?;
-            let mean = values.iter().copied().sum::<Decimal>() / Decimal::from(values.len());
-            Ok((lead, (count, mean)))
-        })
-        .collect::<Result<BTreeMap<_, _>, NullReason>>()?;
-    Ok(biases)
-}
-
 fn has_complete_members(points: &[&WeatherForecastPoint], required: u8) -> bool {
     if required == 0 {
         return false;
@@ -309,30 +485,6 @@ fn has_complete_members(points: &[&WeatherForecastPoint], required: u8) -> bool 
         .map(|point| point.member)
         .collect::<BTreeSet<_>>();
     members == (0..required).collect::<BTreeSet<_>>()
-}
-
-fn latest_observations(
-    facts: &[WeatherObservationFact],
-    kind: WeatherObservationReportKind,
-) -> Vec<&WeatherObservationFact> {
-    let mut latest = BTreeMap::<DateTime<Utc>, &WeatherObservationFact>::new();
-    for fact in facts.iter().filter(|fact| fact.report_kind == kind) {
-        latest
-            .entry(fact.observation_time)
-            .and_modify(|current| {
-                if (fact.revision, fact.available_at, fact.report_hash.as_str())
-                    > (
-                        current.revision,
-                        current.available_at,
-                        current.report_hash.as_str(),
-                    )
-                {
-                    *current = fact;
-                }
-            })
-            .or_insert(fact);
-    }
-    latest.into_values().collect()
 }
 
 fn daily_highs(
@@ -555,10 +707,18 @@ fn decimal_sqrt(value: Decimal) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use quant_pivot_models::types::TemperatureCelsius;
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::{WeatherForecastPoint, WeatherObservationFact, WeatherObservationReportKind},
+        types::{ContentHash, DomainSourceId, IcaoStation, TemperatureCelsius},
+    };
     use rust_decimal_macros::dec;
 
-    use super::{decimal_sqrt, ensemble_standard_deviation};
+    use super::{decimal_sqrt, ensemble_standard_deviation, fit_weather_station_lead_bias};
+
+    fn hash(seed: char) -> ContentHash {
+        ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+    }
 
     #[test]
     fn decimal_spread_is_deterministic() {
@@ -568,5 +728,61 @@ mod tests {
         ]);
         assert_eq!(spread.round_dp(8), dec!(1));
         assert_eq!(decimal_sqrt(dec!(4)).round_dp(8), dec!(2));
+    }
+
+    #[test]
+    fn station_lead_fit_uses_latest_observation_revision_and_complete_ensemble() {
+        let station = IcaoStation::parse("KJFK").expect("station");
+        let reference = Utc
+            .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+            .single()
+            .expect("reference");
+        let valid = reference + Duration::hours(3);
+        let observation = |revision, temperature, report_hash| WeatherObservationFact {
+            source_id: DomainSourceId::ghcnh(),
+            station: station.clone(),
+            local_date: valid.date_naive(),
+            report_kind: WeatherObservationReportKind::HistoricalGhcnh,
+            temperature: TemperatureCelsius::new(temperature),
+            precision_celsius: dec!(0.1),
+            observation_time: valid,
+            published_at: valid,
+            available_at: valid + Duration::days(1),
+            revision,
+            report_hash,
+            supersedes_report_hash: None,
+        };
+        let observations = vec![
+            observation(0, dec!(10), hash('1')),
+            observation(1, dec!(11), hash('2')),
+        ];
+        let forecast = |member, temperature| WeatherForecastPoint {
+            source_id: DomainSourceId::gefs(),
+            station: station.clone(),
+            reference_time: reference,
+            valid_time: valid,
+            available_at: reference + Duration::hours(5),
+            lead_hours: 3,
+            member,
+            tmax_celsius: TemperatureCelsius::new(temperature),
+            grid_binding_hash: hash('3'),
+            run_manifest_hash: hash('4'),
+        };
+        let fit = fit_weather_station_lead_bias(
+            &observations,
+            &[forecast(0, dec!(12)), forecast(1, dec!(14))],
+            reference,
+            reference + Duration::days(1),
+            2,
+        )
+        .expect("fit");
+
+        assert_eq!(fit.sample_count, 1);
+        assert_eq!(fit.payload.stations.len(), 1);
+        assert_eq!(fit.payload.stations[0].station, station);
+        assert_eq!(fit.payload.stations[0].leads[0].lead_hours, 3);
+        assert_eq!(fit.payload.stations[0].leads[0].sample_count, 1);
+        assert_eq!(fit.payload.stations[0].leads[0].bias_celsius, dec!(2));
+        assert_eq!(fit.payload.grid_hashes, vec![hash('3')]);
     }
 }

@@ -1,5 +1,6 @@
 //! Application context — system composition root and lifecycle manager.
 
+pub mod archive_partition_worker;
 pub mod attribution_worker;
 pub mod book_update_coalescer;
 pub mod bootstrap;
@@ -7,6 +8,7 @@ pub mod build;
 pub mod domain_event_outbox_worker;
 pub mod domain_ingest_worker;
 pub mod domain_live_ingest_worker;
+pub mod entry_condition_evaluation_outbox_worker;
 pub mod entry_condition_worker;
 pub mod execution_dispatcher;
 pub mod exit_monitor_worker;

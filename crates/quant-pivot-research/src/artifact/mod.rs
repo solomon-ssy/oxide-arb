@@ -20,6 +20,8 @@ use std::fmt::{self, Display, Formatter};
 /// Logical grouping for an artifact, mapped to a sub-directory / key prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactNamespace {
+    /// Verified `ClickHouse` partition archives (`archives/`).
+    Archive,
     /// Frozen training datasets (`datasets/`).
     Dataset,
     /// Serialized model artifacts (`models/`).
@@ -33,6 +35,7 @@ impl ArtifactNamespace {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Archive => "archives",
             Self::Dataset => "datasets",
             Self::Model => "models",
             Self::Backtest => "backtests",

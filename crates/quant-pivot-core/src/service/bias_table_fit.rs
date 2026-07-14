@@ -36,7 +36,7 @@ use quant_pivot_models::{
     domain::{
         BiasTableFitJobParams, BiasTableFitOutcome, CalibrationArtifactFitPort,
         CalibrationArtifactInfo, CalibrationArtifactListQuery, DecisionClock, JobProgressSink,
-        Paginated, WindowBoundsError, query::TimeWindow,
+        Paginated, WeatherStationLeadBiasArtifactV1, WindowBoundsError, query::TimeWindow,
     },
     enums::{common::MarketCategory, quant::CalibrationKind},
     runtime_config::{
@@ -104,6 +104,19 @@ fn validate_payload_shape(info: &CalibrationArtifactInfo) -> QuantResult<()> {
                     detail: format!(
                         "calibration artifact `{}` declares kind `market_price_bias` but its \
                          payload does not deserialize as one: {error}",
+                        info.artifact_id
+                    ),
+                })
+            })?;
+        }
+        CalibrationKind::WeatherStationLeadBias => {
+            serde_json::from_value::<WeatherStationLeadBiasArtifactV1>(info.payload_json.clone())
+                .map_err(|error| {
+                QuantError::from(ResearchError::DatasetBuild {
+                    detail: format!(
+                        "calibration artifact `{}` declares kind \
+                             `weather_station_lead_bias` but its payload does not deserialize as \
+                             one: {error}",
                         info.artifact_id
                     ),
                 })
@@ -350,6 +363,7 @@ impl BiasTableFitService {
             Arc::clone(&self.fact_read),
             Arc::clone(&self.catalog_repo),
             Arc::clone(&self.linkage_repo),
+            Arc::clone(&self.calibration_repo),
             max_book_staleness,
         );
         let historical = loader.load(&spec).await?;

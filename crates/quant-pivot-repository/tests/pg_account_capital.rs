@@ -42,15 +42,15 @@ use quant_pivot_models::{
     types::{
         AccountPositions, AccountSnapshotId, AttributionDetail, BookSnapshotRef, Bps,
         CapitalAllocationId, ConditionTruth, ConfidenceSummary, ContentHash, DataQualitySummary,
-        EligibilitySummary, EntryConditionInstanceId, EntryConditionPlan, EntryOrderPolicy,
-        EntryOrderSpec, EntryOutcome, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec,
-        ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId,
-        MarketContext, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        EligibilitySummary, EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
+        EntryOrderPolicy, EntryOrderSpec, EntryOutcome, EntryPlan, EquitySnapshotId, EventId,
+        EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan,
+        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
+        OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
         ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
         ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
@@ -265,7 +265,7 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
     // Expire the recommendation, then the report rolls up to Expired.
     let recommendation_repo = PgRecommendationRepository::new(db.clone());
     recommendation_repo
-        .expire(&ids.recommendation, report_operation_log(&ids))
+        .expire(&ids.recommendation, Utc::now(), report_operation_log(&ids))
         .await
         .expect("expire recommendation");
     let rolled = report_repo
@@ -463,7 +463,12 @@ async fn assert_reserved_capital_tracks_pending_intent(
 
     // … and a reject releases it in the same transaction as the intent move.
     let rejected = intent_repo
-        .reject(&order_intent_id, "operator veto".to_owned())
+        .reject(
+            &order_intent_id,
+            "operator veto".to_owned(),
+            Utc::now(),
+            intent_operation_log(&order_intent_id, "quant.intent.reject.test"),
+        )
         .await
         .expect("reject intent");
     assert_eq!(rejected.status, OrderIntentStatus::Rejected);
@@ -964,6 +969,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         evaluation_hash: None,
         input_fingerprint: None,
         continuity_hash: None,
+        fold_state_json: EntryConditionFoldState::default(),
         confirmation_started_at: None,
         last_evaluated_at: None,
         next_evaluation_at: None,
@@ -1109,6 +1115,32 @@ fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
         http_method: "SYSTEM".to_owned(),
         http_path: "/test/quant/report".to_owned(),
         http_status: 201,
+        outcome: OperationOutcome::Success,
+        client_ip: None,
+        user_agent: None,
+        latency_ms: 0,
+        detail: serde_json::json!({ "test": true }),
+        before_hash: None,
+        after_hash: None,
+        governance_audit_event_id: None,
+        governance_audit_sequence: None,
+    }
+}
+
+fn intent_operation_log(intent_id: &OrderIntentId, action: &str) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: format!("account-capital:{action}:{intent_id}"),
+        actor_user_id: None,
+        actor_username: Some("test".to_owned()),
+        acting_role: Some("test".to_owned()),
+        category: OperationCategory::Governance,
+        action: action.to_owned(),
+        resource_type: Some(ResourceType::OrderIntent),
+        resource_id: Some(intent_id.to_string()),
+        http_method: "SYSTEM".to_owned(),
+        http_path: format!("/test/quant/intents/{intent_id}/reject"),
+        http_status: 200,
         outcome: OperationOutcome::Success,
         client_ip: None,
         user_agent: None,

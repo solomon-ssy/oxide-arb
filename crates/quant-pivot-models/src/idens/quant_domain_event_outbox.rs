@@ -19,6 +19,8 @@ pub enum QuantDomainEventOutbox {
     EnvelopeJson,
     PublishedAt,
     PublishAttempts,
+    ClaimOwner,
+    LeaseExpiresAt,
     LastError,
     CreatedAt,
     UpdatedAt,
@@ -45,6 +47,12 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(0),
         )
+        .col(column::uuid_null(QuantDomainEventOutbox::ClaimOwner))
+        .col(
+            ColumnDef::new(QuantDomainEventOutbox::LeaseExpiresAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
         .col(
             ColumnDef::new(QuantDomainEventOutbox::LastError)
                 .text()
@@ -68,6 +76,7 @@ pub fn indexes() -> Vec<IndexSpec> {
             .name("idx_quant_domain_event_outbox_pending")
             .table(QuantDomainEventOutbox::Table)
             .col(QuantDomainEventOutbox::PublishedAt)
+            .col(QuantDomainEventOutbox::LeaseExpiresAt)
             .col(QuantDomainEventOutbox::CreatedAt)
             .to_owned(),
         "durable pending domain-event delivery queue",

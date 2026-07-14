@@ -894,6 +894,7 @@ impl DurableFeatureParitySource {
             Arc::clone(&self.deps.fact_read),
             Arc::clone(&self.deps.catalog),
             Arc::clone(&self.deps.linkages),
+            Arc::clone(&self.deps.calibration_artifacts),
             Duration::from_millis(config.training.max_book_staleness_ms),
         );
         let window_end = boundary

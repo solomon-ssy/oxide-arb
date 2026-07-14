@@ -14,16 +14,25 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, CryptoPriceReportRow, DomainObservationRow,
-        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
-        WeatherForecastPointRow, WeatherObservationReportRow,
+        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow,
+        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
     },
-    types::{DomainInstrumentKey, DomainSourceId, MarketId, TokenId},
+    types::{DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId, TokenId},
 };
 
 /// Read port over persisted quant facts, used to materialize feature windows and
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    /// Latest authoritative applied evaluation, explicitly deduplicated by
+    /// deterministic `evaluation_id` rather than `MergeTree` background merges.
+    async fn latest_applied_entry_condition_evaluation(
+        &self,
+        _instance_id: &EntryConditionInstanceId,
+    ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
+        Ok(None)
+    }
+
     /// Latest source-native Crypto report applicable at `source_timestamp_ms`
     /// and visible by `decision_at_ms`. Chainlink uses its signed
     /// `observations_timestamp`; other sources use `event_time`.
@@ -38,7 +47,7 @@ pub trait QuantFactReadRepository: Send + Sync {
     }
 
     /// Source-native Crypto facts in `[from_ms, to_ms)`, PIT-visible by the
-    /// supplied source publication and system availability cutoffs.
+    /// supplied cutoffs and immediately deduplicated by immutable report identity.
     async fn crypto_price_reports_between(
         &self,
         _instrument_keys: Vec<DomainInstrumentKey>,
@@ -50,6 +59,23 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Crypto facts first made visible in `[available_from_ms, available_to_ms)`.
+    /// This availability-ordered reader is the canonical live/replay fold input;
+    /// it includes late corrections whose economic event time predates the
+    /// current evaluator cursor. Exact writer retries are removed explicitly;
+    /// this never relies on a background `ReplacingMergeTree` merge.
+    async fn crypto_price_reports_available_between(
+        &self,
+        _instrument_keys: Vec<DomainInstrumentKey>,
+        _available_from_ms: i64,
+        _available_to_ms: i64,
+        _decision_at_ms: i64,
+    ) -> Result<Vec<CryptoPriceReportRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Weather observations, explicitly deduplicated by station, observation,
+    /// revision, and report hash while retaining later COR revisions.
     async fn weather_observation_reports_between(
         &self,
         _stations: Vec<String>,
@@ -61,6 +87,7 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// GEFS points, explicitly deduplicated by member and frozen run manifest.
     async fn weather_forecast_points_between(
         &self,
         _stations: Vec<String>,

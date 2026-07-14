@@ -33,6 +33,8 @@ pub enum TaskId {
     DomainLiveIngestWorker,
     /// Delivers typed derived-domain events from the `PostgreSQL` outbox to `ClickHouse`.
     DomainEventOutboxWorker,
+    /// Seals old `ClickHouse` partitions to Parquet before explicit deletion.
+    ArchivePartitionWorker,
 
     // ── Catalog ───────────────────────────────────────────────────────
     GammaSync,
@@ -60,6 +62,8 @@ pub enum TaskId {
     ExecutionDispatcher,
     /// Evaluates durable recommendation condition instances in all runtime modes.
     EntryConditionWorker,
+    /// Delivers committed condition evaluation traces from Postgres to `ClickHouse`.
+    EntryConditionEvaluationOutboxWorker,
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
@@ -164,7 +168,9 @@ impl TaskId {
             | Self::IntentDeadlineScheduler => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
             Self::DetectionWriter
+            | Self::ArchivePartitionWorker
             | Self::DomainEventOutboxWorker
+            | Self::EntryConditionEvaluationOutboxWorker
             | Self::TickEventsWriter
             | Self::BookL2ReplayWriter
             | Self::BookSnapshotWriter

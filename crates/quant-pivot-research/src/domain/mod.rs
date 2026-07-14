@@ -20,7 +20,10 @@ pub use slice::{
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    domain::{CryptoPriceReport, DomainObservation, WeatherForecastPoint, WeatherObservationFact},
+    domain::{
+        CryptoPriceReport, DomainObservation, PublishedWeatherStationLeadBias,
+        WeatherForecastPoint, WeatherObservationFact,
+    },
     enums::domain::DomainMetric,
 };
 use rust_decimal::Decimal;
@@ -53,6 +56,8 @@ pub struct WeatherFactWindow {
     pub observations: Vec<WeatherObservationFact>,
     /// Raw GEFS ensemble points; bias is applied only by the governed builder.
     pub forecasts: Vec<WeatherForecastPoint>,
+    /// Latest immutable calibration publication visible at `decision_at`.
+    pub calibration: Option<PublishedWeatherStationLeadBias>,
 }
 
 impl WeatherFactWindow {

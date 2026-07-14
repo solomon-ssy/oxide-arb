@@ -3,6 +3,7 @@
 use super::AppContext;
 use crate::{
     app::{
+        archive_partition_worker::ArchivePartitionWorker,
         domain_event_outbox_worker::DomainEventOutboxWorker,
         domain_ingest_worker::DomainIngestWorker,
         domain_live_ingest_worker::{DomainLiveIngestDeps, DomainLiveIngestWorker},
@@ -26,8 +27,9 @@ use quant_pivot_models::clickhouse::{
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
-        DomainProjectionRepository, DomainSourceCursorRepository, FactWriter,
-        MarketLinkageRepository, TradeTapeBlockCursorRepository,
+        ArchivePartitionRepository, CalibrationArtifactRepository, DomainProjectionRepository,
+        DomainSourceCursorRepository, FactWriter, MarketLinkageRepository,
+        TradeTapeBlockCursorRepository,
     },
 };
 use std::sync::Arc;
@@ -73,6 +75,16 @@ impl AppContext {
         runner.spawn(TaskId::DomainEventOutboxWorker, move |token| async move {
             if let Err(error) = worker.run(token).await {
                 tracing::error!(%error, "DomainEventOutboxWorker exited with error");
+            }
+        });
+        let archive_worker = Arc::new(ArchivePartitionWorker::new(
+            Arc::clone(&self.infra.ch),
+            Arc::clone(&self.infra.repos.archive_partition) as Arc<dyn ArchivePartitionRepository>,
+            self.artifact_store(),
+        ));
+        runner.spawn(TaskId::ArchivePartitionWorker, move |token| async move {
+            if let Err(error) = archive_worker.run(token).await {
+                tracing::error!(%error, "ArchivePartitionWorker exited with error");
             }
         });
     }
@@ -156,6 +168,10 @@ impl AppContext {
                 Arc::clone(&self.infra.ch_write_manager),
                 "quant_weather_forecast_point",
             )),
+            fact_read: Arc::clone(&self.infra.quant_fact_read),
+            calibrations: Arc::clone(&self.infra.repos.calibration_artifact)
+                as Arc<dyn CalibrationArtifactRepository>,
+            runtime_config: Arc::clone(&self.governance.runtime_config),
             binance,
             chainlink,
             aviation,

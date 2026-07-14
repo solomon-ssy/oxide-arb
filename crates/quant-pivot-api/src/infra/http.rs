@@ -53,3 +53,55 @@ pub async fn get_text_with_retry(
     })
     .await
 }
+
+/// Perform one GET and return response bytes. `404` is represented as `None`
+/// for immutable public-data partitions that may not have been published yet.
+pub async fn get_optional_bytes_with_retry(
+    http: &reqwest::Client,
+    retry_policy: &RetryPolicy,
+    url: &str,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    retry::retry_with_policy(retry_policy, || {
+        let http = http.clone();
+        let url = url.to_owned();
+        async move {
+            let response = http
+                .get(&url)
+                .send()
+                .await
+                .map_err(|error| ApiError::Http {
+                    method: "GET",
+                    url: url.clone(),
+                    status: 0,
+                    body: error.to_string(),
+                    retryable: true,
+                })?;
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            if status.is_success() {
+                return response
+                    .bytes()
+                    .await
+                    .map(|bytes| Some(bytes.to_vec()))
+                    .map_err(|error| ApiError::Http {
+                        method: "GET",
+                        url: url.clone(),
+                        status: 0,
+                        body: error.to_string(),
+                        retryable: true,
+                    });
+            }
+            let code = status.as_u16();
+            Err(ApiError::Http {
+                method: "GET",
+                url: url.clone(),
+                status: code,
+                body: response.text().await.unwrap_or_default(),
+                retryable: is_retryable_status(code),
+            })
+        }
+    })
+    .await
+}

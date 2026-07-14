@@ -9,10 +9,15 @@ pub mod market_catalog_version;
 pub mod menu;
 pub mod operation_log;
 pub mod quant_account_snapshot;
+pub mod quant_archive_partition_drop_audit;
+pub mod quant_archive_partition_drop_command;
+pub mod quant_archive_partition_manifest;
 pub mod quant_backtest_path_set;
 pub mod quant_backtest_report;
 pub mod quant_basis_alert;
 pub mod quant_calibration_artifact;
+#[cfg(feature = "repository")]
+pub mod quant_calibration_artifact_publication;
 pub mod quant_capital_allocation;
 #[cfg_attr(not(feature = "repository"), allow(dead_code))]
 pub mod quant_crypto_price_projection;
@@ -21,6 +26,8 @@ pub mod quant_domain_event_outbox;
 pub mod quant_domain_source_cursor;
 pub mod quant_entry_condition_artifact;
 pub mod quant_entry_condition_audit;
+#[cfg_attr(not(feature = "repository"), allow(dead_code))]
+pub mod quant_entry_condition_evaluation_outbox;
 pub mod quant_entry_condition_instance;
 pub mod quant_equity_snapshot;
 pub mod quant_execution_order;

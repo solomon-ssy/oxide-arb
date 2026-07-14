@@ -272,9 +272,9 @@ pub struct ModelComparisonReportId(Arc<Uuid>);
 /// independent held-out calibration split — and `kind = MarketPriceBias`
 /// (formerly the standalone Phase 11.2.1 `FavoriteLongshotBiasTableId`,
 /// deleted, no alias) — market-implied price → empirical settlement
-/// frequency, conditioned by `(category, ttr_bucket, price_bucket)`. Both
-/// kinds share one table, one content-hash/split-hash contract, and one
-/// reliability-report shape.
+/// frequency, conditioned by `(category, ttr_bucket, price_bucket)` — plus
+/// `kind = WeatherStationLeadBias`, the frozen station × lead correction used
+/// by Weather features. All kinds share one content-addressed ledger.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CalibrationArtifactId(Arc<Uuid>);
 

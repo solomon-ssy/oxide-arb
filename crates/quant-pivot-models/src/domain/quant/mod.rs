@@ -1,6 +1,7 @@
 //! Quant-pivot persistence DTOs for Phase 1 schema-first repositories.
 
 mod account;
+mod archive;
 mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
@@ -50,6 +51,7 @@ mod shadow;
 mod trade_policy;
 
 pub use account::*;
+pub use archive::*;
 pub use attribution::*;
 pub use backtest::*;
 pub use backtest_path_set::*;

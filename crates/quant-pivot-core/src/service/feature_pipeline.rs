@@ -37,8 +37,8 @@ use quant_pivot_models::{
     types::{DomainInstrumentKey, IcaoStation, MarketId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{
-    BasisAlertRepository, FeatureRepository, MarketLinkageRepository,
-    TradeTapeBlockCursorRepository,
+    BasisAlertRepository, CalibrationArtifactRepository, FeatureRepository,
+    MarketLinkageRepository, TradeTapeBlockCursorRepository,
 };
 use quant_pivot_research::{
     domain::{
@@ -127,6 +127,7 @@ pub struct FeaturePipelineService {
     block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     basis_alert_repo: Arc<dyn BasisAlertRepository>,
+    calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
@@ -139,6 +140,7 @@ pub struct FeaturePipelineDeps {
     pub block_cursor_repo: Arc<dyn TradeTapeBlockCursorRepository>,
     pub linkage_repo: Arc<dyn MarketLinkageRepository>,
     pub basis_alert_repo: Arc<dyn BasisAlertRepository>,
+    pub calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     pub trade_tape_on_chain: TradeTapeOnChainConfig,
 }
 
@@ -154,6 +156,7 @@ impl FeaturePipelineService {
             block_cursor_repo: deps.block_cursor_repo,
             linkage_repo: deps.linkage_repo,
             basis_alert_repo: deps.basis_alert_repo,
+            calibration_repo: deps.calibration_repo,
             trade_tape_on_chain: deps.trade_tape_on_chain,
         }
     }
@@ -531,6 +534,13 @@ impl FeaturePipelineService {
                 linkages.weather_valid_to,
             )
             .await?;
+        let weather_calibrations = if linkages.weather_stations.is_empty() {
+            Vec::new()
+        } else {
+            self.calibration_repo
+                .published_weather_through(request.boundary.decision_at())
+                .await?
+        };
         let mut inputs = HashMap::new();
         for market in mapped {
             if let Some(slice_inputs) = build_domain_slice_inputs(
@@ -546,6 +556,7 @@ impl FeaturePipelineService {
                     crypto_reports: &crypto_reports,
                     weather_observations: &weather_observations,
                     weather_forecasts: &weather_forecasts,
+                    weather_calibrations: &weather_calibrations,
                 },
             )? {
                 inputs.insert(market.market_id.clone(), slice_inputs);

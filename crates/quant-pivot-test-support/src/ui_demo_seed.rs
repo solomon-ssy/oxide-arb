@@ -565,7 +565,12 @@ async fn seed_cancelled(
     let mut record = base_record("cancelled", &ids);
     let intent_id = seed_manual_approved_intent(db, &ids).await;
     PgOrderIntentRepository::new(db.clone())
-        .cancel(&intent_id, "ui-demo operator cancelled".to_owned())
+        .cancel(
+            &intent_id,
+            "ui-demo operator cancelled".to_owned(),
+            Utc::now(),
+            report_operation_log(&ids),
+        )
         .await
         .expect("cancel intent");
     attach_intent_meta(db, &mut record, intent_id).await;
@@ -1202,7 +1207,7 @@ async fn seed_expired_report(
     let ids = seed_report(db, infra, "report-expired").await;
     let recommendation_repo = PgRecommendationRepository::new(db.clone());
     recommendation_repo
-        .expire(&ids.recommendation, report_operation_log(&ids))
+        .expire(&ids.recommendation, Utc::now(), report_operation_log(&ids))
         .await
         .expect("expire recommendation");
     let report_repo = PgRecommendationReportRepository::new(db.clone());

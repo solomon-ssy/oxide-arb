@@ -8,11 +8,11 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
         BookMicrostructureRow, BookSnapshotRow, CryptoPriceReportRow, DomainObservationRow,
-        MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
-        WeatherForecastPointRow, WeatherObservationReportRow,
+        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow,
+        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
     },
     enums::clickhouse::{ChBookEventType, ChTradeTapeSource},
-    types::{DomainInstrumentKey, DomainSourceId, MarketId, TokenId},
+    types::{DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
 
@@ -33,6 +33,30 @@ impl ChQuantFactReadRepository {
 
 #[async_trait]
 impl QuantFactReadRepository for ChQuantFactReadRepository {
+    async fn latest_applied_entry_condition_evaluation(
+        &self,
+        instance_id: &EntryConditionInstanceId,
+    ) -> Result<Option<EntryConditionEvaluationEventRow>, StorageError> {
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM (\
+                     SELECT *, row_number() OVER (\
+                         PARTITION BY evaluation_id \
+                         ORDER BY evaluated_at DESC\
+                     ) AS dedupe_rank \
+                     FROM quant_entry_condition_evaluation_event \
+                     WHERE condition_instance_id = ? AND trace_kind = 'applied'\
+                 ) WHERE dedupe_rank = 1 \
+                 ORDER BY applied_revision DESC, evaluated_at DESC, evaluation_id DESC \
+                 LIMIT 1",
+            )
+            .bind(instance_id.clone())
+            .fetch_optional::<EntryConditionEvaluationEventRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
     async fn crypto_price_report_at(
         &self,
         source_id: &DomainSourceId,
@@ -44,11 +68,17 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .pool
             .client()
             .query(
-                "SELECT ?fields FROM quant_crypto_price_report \
-                 WHERE source_id = ? \
-                 AND instrument_key = ? \
-                 AND ifNull(observations_timestamp, event_time) <= fromUnixTimestamp64Milli(?) \
-                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                "SELECT ?fields FROM (\
+                     SELECT *, row_number() OVER (\
+                         PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
+                         ORDER BY available_at DESC\
+                     ) AS dedupe_rank \
+                     FROM quant_crypto_price_report \
+                     WHERE source_id = ? \
+                     AND instrument_key = ? \
+                     AND ifNull(observations_timestamp, event_time) <= fromUnixTimestamp64Milli(?) \
+                     AND available_at <= fromUnixTimestamp64Milli(?)\
+                 ) WHERE dedupe_rank = 1 \
                  ORDER BY ifNull(observations_timestamp, event_time) DESC, \
                  available_at DESC, source_sequence DESC, report_hash DESC \
                  LIMIT 1",
@@ -76,18 +106,59 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         self.pool
             .client()
             .query(
-                "SELECT ?fields FROM quant_crypto_price_report \
-                 WHERE instrument_key IN ? \
-                 AND event_time >= fromUnixTimestamp64Milli(?) \
-                 AND event_time < fromUnixTimestamp64Milli(?) \
-                 AND published_at <= fromUnixTimestamp64Milli(?) \
-                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                "SELECT ?fields FROM (\
+                     SELECT *, row_number() OVER (\
+                         PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
+                         ORDER BY available_at DESC\
+                     ) AS dedupe_rank \
+                     FROM quant_crypto_price_report \
+                     WHERE instrument_key IN ? \
+                     AND event_time >= fromUnixTimestamp64Milli(?) \
+                     AND event_time < fromUnixTimestamp64Milli(?) \
+                     AND published_at <= fromUnixTimestamp64Milli(?) \
+                     AND available_at <= fromUnixTimestamp64Milli(?)\
+                 ) WHERE dedupe_rank = 1 \
                  ORDER BY instrument_key, event_time, available_at, source_sequence, report_hash",
             )
             .bind(instrument_keys)
             .bind(from_ms)
             .bind(to_ms)
             .bind(publish_cutoff_ms)
+            .bind(decision_at_ms)
+            .fetch_all::<CryptoPriceReportRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn crypto_price_reports_available_between(
+        &self,
+        instrument_keys: Vec<DomainInstrumentKey>,
+        available_from_ms: i64,
+        available_to_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<CryptoPriceReportRow>, StorageError> {
+        if instrument_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM (\
+                     SELECT *, row_number() OVER (\
+                         PARTITION BY source_id, instrument_key, source_sequence, event_time, report_hash \
+                         ORDER BY available_at DESC\
+                     ) AS dedupe_rank \
+                     FROM quant_crypto_price_report \
+                     WHERE instrument_key IN ? \
+                     AND available_at >= fromUnixTimestamp64Milli(?) \
+                     AND available_at < fromUnixTimestamp64Milli(?) \
+                     AND available_at <= fromUnixTimestamp64Milli(?)\
+                 ) WHERE dedupe_rank = 1 \
+                 ORDER BY instrument_key, available_at, event_time, source_sequence, report_hash",
+            )
+            .bind(instrument_keys)
+            .bind(available_from_ms)
+            .bind(available_to_ms)
             .bind(decision_at_ms)
             .fetch_all::<CryptoPriceReportRow>()
             .await
@@ -108,12 +179,18 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         self.pool
             .client()
             .query(
-                "SELECT ?fields FROM quant_weather_observation_report \
-                 WHERE station IN ? \
-                 AND observation_time >= fromUnixTimestamp64Milli(?) \
-                 AND observation_time < fromUnixTimestamp64Milli(?) \
-                 AND published_at <= fromUnixTimestamp64Milli(?) \
-                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                "SELECT ?fields FROM (\
+                     SELECT *, row_number() OVER (\
+                         PARTITION BY station, local_date, observation_time, revision, report_hash \
+                         ORDER BY available_at DESC\
+                     ) AS dedupe_rank \
+                     FROM quant_weather_observation_report \
+                     WHERE station IN ? \
+                     AND observation_time >= fromUnixTimestamp64Milli(?) \
+                     AND observation_time < fromUnixTimestamp64Milli(?) \
+                     AND published_at <= fromUnixTimestamp64Milli(?) \
+                     AND available_at <= fromUnixTimestamp64Milli(?)\
+                 ) WHERE dedupe_rank = 1 \
                  ORDER BY station, local_date, observation_time, revision, available_at, report_hash",
             )
             .bind(stations)
@@ -140,12 +217,18 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         self.pool
             .client()
             .query(
-                "SELECT ?fields FROM quant_weather_forecast_point \
-                 WHERE station IN ? \
-                 AND valid_time >= fromUnixTimestamp64Milli(?) \
-                 AND valid_time < fromUnixTimestamp64Milli(?) \
-                 AND reference_time <= fromUnixTimestamp64Milli(?) \
-                 AND available_at <= fromUnixTimestamp64Milli(?) \
+                "SELECT ?fields FROM (\
+                     SELECT *, row_number() OVER (\
+                         PARTITION BY station, reference_time, valid_time, member, run_manifest_hash \
+                         ORDER BY available_at DESC\
+                     ) AS dedupe_rank \
+                     FROM quant_weather_forecast_point \
+                     WHERE station IN ? \
+                     AND valid_time >= fromUnixTimestamp64Milli(?) \
+                     AND valid_time < fromUnixTimestamp64Milli(?) \
+                     AND reference_time <= fromUnixTimestamp64Milli(?) \
+                     AND available_at <= fromUnixTimestamp64Milli(?)\
+                 ) WHERE dedupe_rank = 1 \
                  ORDER BY station, reference_time, valid_time, member, available_at, run_manifest_hash",
             )
             .bind(stations)

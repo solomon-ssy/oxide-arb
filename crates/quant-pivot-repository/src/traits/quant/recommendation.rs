@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewOperationLog, RecommendationInfo},
+    domain::{NewOperationLog, OrderIntentInfo, RecommendationInfo},
     types::{RecommendationId, RecommendationReportId},
 };
 
@@ -48,13 +48,15 @@ pub trait RecommendationRepository: Send + Sync {
     ) -> Result<Vec<(RecommendationId, DateTime<Utc>)>, StorageError>;
 
     /// Expire a single recommendation (`Published` / `IntentCreated` ->
-    /// `Expired`), writing the operation-log row in the same transaction. Returns
-    /// a `Conflict` if the recommendation is already terminal.
+    /// `Expired`), atomically invalidating every pre-submission intent, releasing
+    /// its capital, and writing WORM logs. Returns the invalidated intents for
+    /// post-commit event publication. A terminal recommendation is a conflict.
     async fn expire(
         &self,
         recommendation_id: &RecommendationId,
+        expired_at: DateTime<Utc>,
         operation_log: NewOperationLog,
-    ) -> Result<RecommendationInfo, StorageError>;
+    ) -> Result<(RecommendationInfo, Vec<OrderIntentInfo>), StorageError>;
 
     /// Expired recommendations with no final attribution row. This covers the
     /// report-only / never-intended path where the recommendation simply aged out

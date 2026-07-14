@@ -431,6 +431,9 @@ async fn observe_book_inner(
         &artifact.payload_json,
         &EntryConditionInputSet {
             binding: artifact.payload_json.binding.clone(),
+            binding_revision: artifact.content_hash.clone(),
+            binding_unavailable_reason: None,
+            fold_state: instance.fold_state_json.clone(),
             evaluated_at: request.observed_at,
             prices: vec![ExecutablePriceInput {
                 token_id: recommendation.token_id,
@@ -469,16 +472,24 @@ async fn observe_book_inner(
                 evaluation_hash: evaluation.evaluation_hash,
                 input_fingerprint: evaluation.input_fingerprint,
                 continuity_hash: evaluation.continuity_hash,
+                fold_state: evaluation.fold_state,
                 confirmation_started_at: decision.confirmation_started_at,
                 evaluated_at: request.observed_at,
                 next_evaluation_at: Some(request.observed_at + Duration::seconds(1)),
+                evaluator_version: u32::try_from(artifact.evaluator_version).map_err(|error| {
+                    QuantError::config(format!("invalid condition evaluator version: {error}"))
+                })?,
+                tree_json: serde_json::to_string(&evaluation.tree).map_err(|error| {
+                    QuantError::config(format!("condition tree serialization failed: {error}"))
+                })?,
             },
         )
         .await?;
     Ok(BookObservationResponse {
-        entry_condition_state: updated.state,
-        confirming_since: updated.confirmation_started_at,
-        ready_at: (updated.state == EntryConditionState::Qualified).then_some(request.observed_at),
+        entry_condition_state: updated.instance.state,
+        confirming_since: updated.instance.confirmation_started_at,
+        ready_at: (updated.instance.state == EntryConditionState::Qualified)
+            .then_some(request.observed_at),
     })
 }
 
@@ -709,6 +720,9 @@ async fn serve_protected_ui_e2e() {
     env.state.market_data = Arc::new(E2eMarketData {
         books: Arc::clone(&books),
     });
+    env.state.quant_facts = Arc::new(harness::MockQuantFactRead::with_evaluation_outbox(
+        env.db.clone(),
+    ));
     env.state.trade_policies = Arc::new(E2eTradePolicyPort::new(env.db.clone()));
     env.state.research_catalog = Arc::new(E2eResearchCatalogPort::new(env.db.clone()));
     env.state.model_training = Arc::new(E2eModelTrainingPort::new(env.db.clone()));

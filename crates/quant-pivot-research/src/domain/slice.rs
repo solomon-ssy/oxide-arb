@@ -22,8 +22,9 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
         CryptoPriceReport, DecisionBoundary, DecisionSource, DomainAvailability, DomainObservation,
-        MarketLinkage, MarketSubject, ResolvedBinding, ResolvedSourceBinding, WeatherForecastPoint,
-        WeatherObservationFact, WeatherObservationReportKind,
+        MarketLinkage, MarketSubject, PublishedWeatherStationLeadBias, ResolvedBinding,
+        ResolvedSourceBinding, WeatherForecastPoint, WeatherObservationFact,
+        WeatherObservationReportKind,
     },
     enums::{
         common::MarketCategory,
@@ -190,6 +191,7 @@ pub struct DomainFactWindows<'a> {
     pub crypto_reports: &'a HashMap<DomainInstrumentKey, Vec<CryptoPriceReport>>,
     pub weather_observations: &'a HashMap<IcaoStation, Vec<WeatherObservationFact>>,
     pub weather_forecasts: &'a HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+    pub weather_calibrations: &'a [PublishedWeatherStationLeadBias],
 }
 
 pub fn build_domain_slice_inputs(
@@ -270,10 +272,17 @@ pub fn build_domain_slice_inputs(
                 })
                 .cloned()
                 .collect();
+            let calibration = facts
+                .weather_calibrations
+                .iter()
+                .filter(|artifact| artifact.published_at <= boundary.decision_at())
+                .max_by_key(|artifact| (artifact.published_at, artifact.artifact_id.as_uuid()))
+                .cloned();
             DomainSliceData::Weather(WeatherFactWindow {
                 decision_at: boundary.decision_at(),
                 observations,
                 forecasts,
+                calibration,
             })
         }
         _ => return Ok(None),
@@ -433,6 +442,7 @@ mod tests {
                 crypto_reports: $reports,
                 weather_observations: $weather,
                 weather_forecasts: $forecasts,
+                weather_calibrations: &[],
             }
         };
     }

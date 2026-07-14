@@ -12,8 +12,8 @@ use crate::{
     enums::quant::{EntryConditionAuditAction, EntryConditionState},
     types::{
         ConditionTruth, ContentHash, DomainInstrumentKey, DomainSourceId, EntryConditionArtifactId,
-        EntryConditionArtifactV1, EntryConditionAuditId, EntryConditionInstanceId, OrderIntentId,
-        RecommendationId, TemperatureCelsius, Usd,
+        EntryConditionArtifactV1, EntryConditionAuditId, EntryConditionFoldState,
+        EntryConditionInstanceId, OrderIntentId, RecommendationId, TemperatureCelsius, Usd,
     },
 };
 
@@ -64,6 +64,7 @@ pub struct EntryConditionInstanceInfo {
     pub evaluation_hash: Option<ContentHash>,
     pub input_fingerprint: Option<ContentHash>,
     pub continuity_hash: Option<ContentHash>,
+    pub fold_state_json: EntryConditionFoldState,
     pub confirmation_started_at: Option<DateTime<Utc>>,
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub next_evaluation_at: Option<DateTime<Utc>>,
@@ -92,6 +93,7 @@ info_from_model!(
         evaluation_hash,
         input_fingerprint,
         continuity_hash,
+        fold_state_json,
         confirmation_started_at,
         last_evaluated_at,
         next_evaluation_at,
@@ -120,6 +122,7 @@ pub struct NewEntryConditionInstance {
     pub evaluation_hash: Option<ContentHash>,
     pub input_fingerprint: Option<ContentHash>,
     pub continuity_hash: Option<ContentHash>,
+    pub fold_state_json: EntryConditionFoldState,
     pub confirmation_started_at: Option<DateTime<Utc>>,
     pub last_evaluated_at: Option<DateTime<Utc>>,
     pub next_evaluation_at: Option<DateTime<Utc>>,
@@ -196,9 +199,20 @@ pub struct ApplyEntryConditionEvaluation {
     pub evaluation_hash: ContentHash,
     pub input_fingerprint: ContentHash,
     pub continuity_hash: ContentHash,
+    pub fold_state: EntryConditionFoldState,
     pub confirmation_started_at: Option<DateTime<Utc>>,
     pub evaluated_at: DateTime<Utc>,
     pub next_evaluation_at: Option<DateTime<Utc>>,
+    pub evaluator_version: u32,
+    pub tree_json: String,
+}
+
+/// Result of one evaluation CAS. `transitioned` is true only when durable
+/// semantic state changed and a new WORM audit revision was appended.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyEntryConditionEvaluationOutcome {
+    pub instance: EntryConditionInstanceInfo,
+    pub transitioned: bool,
 }
 
 /// Exact evidence revalidated by the submission claim transaction.

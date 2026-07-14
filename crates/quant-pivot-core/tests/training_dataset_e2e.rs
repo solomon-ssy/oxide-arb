@@ -62,10 +62,11 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgAttributionRepository, PgCatalogVersionRepository, PgFeatureRepository,
-        PgMarketLinkageRepository, PgMarketRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgPositionRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository, PgTradePolicyRepository, PgTrainingDatasetRepository,
+        PgAttributionRepository, PgCalibrationArtifactRepository, PgCatalogVersionRepository,
+        PgFeatureRepository, PgMarketLinkageRepository, PgMarketRepository,
+        PgMarketSelectionRepository, PgModelRegistryRepository, PgPositionRepository,
+        PgRecommendationRepository, PgRuntimeConfigVersionRepository, PgTradePolicyRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         CatalogVersionRepository, MarketLinkageRepository, ModelRegistryRepository,
@@ -874,6 +875,7 @@ fn service_with_selection_and_linkage(
             linkage_repo,
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
             trade_policy_repo: Arc::new(PgTradePolicyRepository::new(db.clone())),
+            calibration_repo: Arc::new(PgCalibrationArtifactRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features,

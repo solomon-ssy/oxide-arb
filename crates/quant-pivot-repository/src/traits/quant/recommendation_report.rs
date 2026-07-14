@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        NewOperationLog, NewReportTransaction, Paginated, QuantReportListQuery,
+        NewOperationLog, NewReportTransaction, OrderIntentInfo, Paginated, QuantReportListQuery,
         RecommendationReportInfo, ReportDataQualitySnapshotInfo,
     },
     enums::quant::ReportKind,
@@ -103,5 +103,5 @@ pub trait RecommendationReportRepository: Send + Sync {
         reason: &str,
         revoked_at: DateTime<Utc>,
         operation_log: NewOperationLog,
-    ) -> Result<RecommendationReportInfo, StorageError>;
+    ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError>;
 }

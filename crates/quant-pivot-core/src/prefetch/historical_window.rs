@@ -30,15 +30,17 @@ use quant_pivot_models::{
     },
     domain::{
         CatalogWindowInfo, CryptoPriceReport, DecisionBoundary, DecisionClock, DecisionSource,
-        DomainObservation, MarketLinkage, MarketRegistryInfo, MarketSubject, TradeTapePrint,
-        WeatherForecastPoint, WeatherObservationFact, WeatherSubject,
+        DomainObservation, MarketLinkage, MarketRegistryInfo, MarketSubject,
+        PublishedWeatherStationLeadBias, TradeTapePrint, WeatherForecastPoint,
+        WeatherObservationFact, WeatherSubject,
     },
     enums::domain::DomainFamily,
     runtime_config::DomainConfig,
     types::{DomainInstrumentKey, IcaoStation, MarketId, TokenId},
 };
 use quant_pivot_repository::traits::{
-    CatalogVersionRepository, MarketLinkageRepository, QuantFactReadRepository,
+    CalibrationArtifactRepository, CatalogVersionRepository, MarketLinkageRepository,
+    QuantFactReadRepository,
 };
 use quant_pivot_research::{
     domain::{crypto_lookback_secs, oracle_instrument},
@@ -97,6 +99,8 @@ pub struct Prefetched {
     pub weather_observations: HashMap<IcaoStation, Vec<WeatherObservationFact>>,
     /// Raw GEFS points per station, including calibration history and target days.
     pub weather_forecasts: HashMap<IcaoStation, Vec<WeatherForecastPoint>>,
+    /// Immutable Weather calibration publication ledger visible through the window end.
+    pub weather_calibrations: Vec<PublishedWeatherStationLeadBias>,
     /// Frozen linkage ledger records per market covering the window (any
     /// derivation order; PIT selection happens per `as_of`).
     pub linkages: HashMap<MarketId, Vec<MarketLinkage>>,
@@ -120,6 +124,7 @@ pub struct HistoricalWindowLoader {
     fact_read: Arc<dyn QuantFactReadRepository>,
     catalog_repo: Arc<dyn CatalogVersionRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
+    calibration_repo: Arc<dyn CalibrationArtifactRepository>,
     max_book_staleness: Duration,
 }
 
@@ -131,12 +136,14 @@ impl HistoricalWindowLoader {
         fact_read: Arc<dyn QuantFactReadRepository>,
         catalog_repo: Arc<dyn CatalogVersionRepository>,
         linkage_repo: Arc<dyn MarketLinkageRepository>,
+        calibration_repo: Arc<dyn CalibrationArtifactRepository>,
         max_book_staleness: Duration,
     ) -> Self {
         Self {
             fact_read,
             catalog_repo,
             linkage_repo,
+            calibration_repo,
             max_book_staleness,
         }
     }
@@ -232,19 +239,9 @@ impl HistoricalWindowLoader {
             .await
             .map_err(QuantError::from)?;
 
-        let mut books: HashMap<TokenId, Vec<BookSnapshotRow>> = HashMap::new();
-        for row in book_rows {
-            books.entry(row.token_id.clone()).or_default().push(row);
-        }
+        let (books, resolutions) = group_book_and_resolution_rows(book_rows, resolution_rows);
         let micro = group_micro_rows(micro_rows);
         let trade_tape = group_trade_tape_rows(trade_rows);
-        let mut resolutions: HashMap<MarketId, Vec<MarketResolutionRow>> = HashMap::new();
-        for row in resolution_rows {
-            resolutions
-                .entry(row.market_id.clone())
-                .or_default()
-                .push(row);
-        }
 
         let (
             linkages,
@@ -254,6 +251,10 @@ impl HistoricalWindowLoader {
             weather_forecasts,
         ) = self
             .prefetch_domain(spec, &end_boundary, &markets, &catalog_markets)
+            .await?;
+        let weather_calibrations = self
+            .calibration_repo
+            .published_weather_through(end_boundary.decision_at())
             .await?;
 
         Ok(Prefetched {
@@ -266,6 +267,7 @@ impl HistoricalWindowLoader {
             crypto_reports,
             weather_observations,
             weather_forecasts,
+            weather_calibrations,
             linkages,
         })
     }
@@ -375,6 +377,27 @@ impl HistoricalWindowLoader {
             weather_forecasts,
         ))
     }
+}
+
+fn group_book_and_resolution_rows(
+    book_rows: Vec<BookSnapshotRow>,
+    resolution_rows: Vec<MarketResolutionRow>,
+) -> (
+    HashMap<TokenId, Vec<BookSnapshotRow>>,
+    HashMap<MarketId, Vec<MarketResolutionRow>>,
+) {
+    let mut books: HashMap<TokenId, Vec<BookSnapshotRow>> = HashMap::new();
+    for row in book_rows {
+        books.entry(row.token_id.clone()).or_default().push(row);
+    }
+    let mut resolutions: HashMap<MarketId, Vec<MarketResolutionRow>> = HashMap::new();
+    for row in resolution_rows {
+        resolutions
+            .entry(row.market_id.clone())
+            .or_default()
+            .push(row);
+    }
+    (books, resolutions)
 }
 
 struct DomainLinkageWindow {

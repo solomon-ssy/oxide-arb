@@ -2,7 +2,12 @@
 
 use super::equity_snapshot::insert_equity_snapshot_monotonic;
 use crate::{
-    postgres::{error, quant::feature_parity, query::paginate_mapped, state_hash},
+    postgres::{
+        error,
+        quant::{feature_parity, order_intent::invalidate_pre_submission_for_recommendation},
+        query::paginate_mapped,
+        state_hash,
+    },
     traits::RecommendationReportRepository,
 };
 use chrono::{DateTime, Utc};
@@ -11,8 +16,9 @@ use quant_pivot_models::{
     domain::{
         FeatureParityJobParams, NewEntryConditionArtifact, NewEntryConditionAudit,
         NewEntryConditionInstance, NewOperationLog, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportFeatureParity, NewReportTransaction, PageWindow,
-        Paginated, QuantReportListQuery, RecommendationReportInfo, ReportDataQualitySnapshotInfo,
+        NewReportDataQualitySnapshot, NewReportFeatureParity, NewReportTransaction,
+        OrderIntentInfo, PageWindow, Paginated, QuantReportListQuery, RecommendationReportInfo,
+        ReportDataQualitySnapshotInfo,
     },
     entities::{
         operation_log, quant_account_snapshot, quant_entry_condition_artifact,
@@ -20,12 +26,14 @@ use quant_pivot_models::{
         quant_portfolio_plan, quant_recommendation, quant_recommendation_report,
         quant_report_data_quality_snapshot, quant_research_job,
     },
-    enums::quant::{
-        EntryConditionAuditAction, EntryConditionState, FeatureParityRunKind,
-        FeatureParityRunStatus, RecommendationReportStatus, RecommendationStatus, ReportKind,
-        ResearchJobKind, ResearchJobStatus,
+    enums::{
+        execution::ApprovalInvalidation,
+        quant::{
+            EntryConditionAuditAction, EntryConditionState, FeatureParityRunKind,
+            FeatureParityRunStatus, RecommendationReportStatus, RecommendationStatus, ReportKind,
+            ResearchJobKind, ResearchJobStatus,
+        },
     },
-    schema::column,
     types::{
         EntryConditionArtifactId, EntryConditionAuditId, EntryConditionPlan, FeatureParityStateId,
         ModelRunId, RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
@@ -674,7 +682,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         reason: &str,
         revoked_at: DateTime<Utc>,
         operation_log: NewOperationLog,
-    ) -> Result<RecommendationReportInfo, StorageError> {
+    ) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
         transition_report_status(
             &self.db,
             report_id,
@@ -730,10 +738,11 @@ async fn transition_report_status(
     reason: &str,
     occurred_at: DateTime<Utc>,
     operation_log: NewOperationLog,
-) -> Result<RecommendationReportInfo, StorageError> {
+) -> Result<(RecommendationReportInfo, Vec<OrderIntentInfo>), StorageError> {
     let txn = db.begin().await.map_err(StorageError::from)?;
 
     let Some(row) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+        .lock_exclusive()
         .one(&txn)
         .await
         .map_err(StorageError::from)?
@@ -743,15 +752,13 @@ async fn transition_report_status(
             report_id,
         ));
     };
-    if row.status == report_status {
-        let info = row.into();
-        txn.commit().await.map_err(StorageError::from)?;
-        return Ok(info);
-    }
-    if !matches!(
-        row.status,
-        RecommendationReportStatus::Published | RecommendationReportStatus::PublishedEmpty
-    ) {
+    let idempotent = row.status == report_status;
+    if !idempotent
+        && !matches!(
+            row.status,
+            RecommendationReportStatus::Published | RecommendationReportStatus::PublishedEmpty
+        )
+    {
         return Err(error::illegal_transition(
             entity::QUANT_RECOMMENDATION_REPORT,
             Some(report_id),
@@ -760,37 +767,56 @@ async fn transition_report_status(
         ));
     }
 
-    let before_info: RecommendationReportInfo = row.clone().into();
-    let mut active = row.into_active_model();
-    active.status = ActiveValue::Set(report_status);
-    active.status_reason = ActiveValue::Set(Some(reason.to_owned()));
-    match report_status {
-        RecommendationReportStatus::Revoked => {
-            active.revoked_at = ActiveValue::Set(Some(occurred_at));
-        }
-        RecommendationReportStatus::Expired => {
-            active.expired_at = ActiveValue::Set(Some(occurred_at));
-        }
-        _ => {}
-    }
-    let report_model = active.update(&txn).await.map_err(StorageError::from)?;
-    let after_info: RecommendationReportInfo = report_model.clone().into();
-
-    // Only transition still-actionable recommendations; terminal ones
-    // (`Executed` / `Attributed` / `Expired` / `Revoked`) are left intact.
-    quant_recommendation::Entity::update_many()
+    let recommendations = quant_recommendation::Entity::find()
         .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
         .filter(quant_recommendation::Column::Status.is_in([
             RecommendationStatus::Published,
             RecommendationStatus::IntentCreated,
         ]))
-        .col_expr(
-            quant_recommendation::Column::Status,
-            column::pg_enum_value(&recommendation_status),
-        )
-        .exec(&txn)
+        .order_by_asc(quant_recommendation::Column::RecommendationId)
+        .lock_exclusive()
+        .all(&txn)
         .await
         .map_err(StorageError::from)?;
+    let invalidation = match report_status {
+        RecommendationReportStatus::Revoked => ApprovalInvalidation::ReportRevoked,
+        _ => {
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "composite report terminal command only supports revoke",
+            ));
+        }
+    };
+    let mut invalidated_intents = Vec::new();
+    for recommendation in recommendations {
+        invalidated_intents.extend(
+            invalidate_pre_submission_for_recommendation(
+                &txn,
+                &recommendation.recommendation_id,
+                invalidation,
+                occurred_at,
+                &operation_log,
+            )
+            .await?,
+        );
+        let mut active = recommendation.into_active_model();
+        active.status = ActiveValue::Set(recommendation_status);
+        active.update(&txn).await.map_err(StorageError::from)?;
+    }
+
+    if idempotent {
+        let info = row.into();
+        txn.commit().await.map_err(StorageError::from)?;
+        return Ok((info, invalidated_intents));
+    }
+
+    let before_info: RecommendationReportInfo = row.clone().into();
+    let mut active = row.into_active_model();
+    active.status = ActiveValue::Set(report_status);
+    active.status_reason = ActiveValue::Set(Some(reason.to_owned()));
+    active.revoked_at = ActiveValue::Set(Some(occurred_at));
+    let report_model = active.update(&txn).await.map_err(StorageError::from)?;
+    let after_info: RecommendationReportInfo = report_model.clone().into();
 
     let operation_log =
         state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
@@ -800,7 +826,7 @@ async fn transition_report_status(
         .map_err(StorageError::from)?;
 
     txn.commit().await.map_err(StorageError::from)?;
-    Ok(report_model.into())
+    Ok((report_model.into(), invalidated_intents))
 }
 
 #[cfg(test)]
