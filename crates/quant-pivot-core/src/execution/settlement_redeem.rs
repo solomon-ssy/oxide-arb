@@ -1262,8 +1262,9 @@ mod tests {
         },
         types::{
             Bps, ContentHash, EntryConditionInstanceId, EntryOrderSpec, EventId, ExitPolicySpec,
-            ModelVersionId, OrderAmount, OrderIntentId, PositionId, Price, Probability,
-            RecommendationId, RuntimeConfigVersionId, ScaleOutState, ThesisInvalidationPolicy,
+            ModelVersionId, OpportunisticExitPolicy, OrderAmount, OrderIntentId, PositionId, Price,
+            Probability, RecommendationId, RuntimeConfigVersionId, ScaleOutState,
+            ThesisInvalidationPolicy,
         },
     };
     use rust_decimal_macros::dec;
@@ -1428,6 +1429,13 @@ mod tests {
                     min_score_retention: dec!(0.6),
                     min_expected_return_bps: Bps::ZERO,
                     require_execution_eligibility: true,
+                },
+                opportunistic_exit: OpportunisticExitPolicy {
+                    min_confidence: Probability::new(dec!(0.65)),
+                    min_expected_alpha_bps: Bps::new(dec!(50)),
+                    min_p_exit_better: Probability::new(dec!(0.5)),
+                    max_cumulative_exit_pct: dec!(1),
+                    min_incremental_exit_pct: dec!(0.1),
                 },
                 scale_out_targets: Vec::new(),
                 settlement_mode: ExitSettlementMode::HoldToResolution,

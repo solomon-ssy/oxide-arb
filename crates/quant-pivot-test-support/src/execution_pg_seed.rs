@@ -43,30 +43,32 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
-        ConditionTruth, ConfidenceSummary, ConfirmationPolicy, ContentHash, DataQualitySummary,
-        ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary,
-        EntryConditionArtifactId, EntryConditionArtifactV1, EntryConditionBinding,
-        EntryConditionFoldState, EntryConditionInstanceId, EntryConditionPlan,
-        EntryConditionTemplate, EntryConditionV1, EntryOrderPolicy, EntryOrderSpec,
-        EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec,
-        ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId, FeatureVectorId,
-        MarketContext, MarketId, MarketSelectionId, ModelInputContract, ModelRunId, ModelSpecId,
-        ModelTrainingContract, ModelVersionId, OperationLogId, OrderAmount, OrderId, OrderIntentId,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, PriceCondition,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
-        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, ThesisInvalidationPolicy, TokenId,
-        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCohort,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance,
-        TradePolicyConditionCandidate, TradePolicyExecutionEvidence, TradePolicyFitContract,
-        TradePolicyGovernanceAuditId, TradePolicyPitCutoffEvidence, TradePolicyQualityGate,
-        TradePolicyValidationEvidence, TrainingDatasetId, Usd, VerticalActivationTarget,
+        AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
+        CapitalAllocationId, ConditionTruth, ConfidenceSummary, ConfirmationPolicy, ContentHash,
+        DataQualitySummary, ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
+        EligibilitySummary, EntryConditionArtifactId, EntryConditionArtifactV1,
+        EntryConditionBinding, EntryConditionFoldState, EntryConditionInstanceId,
+        EntryConditionPlan, EntryConditionTemplate, EntryConditionV1, EntryOrderPolicy,
+        EntryOrderSpec, EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
+        ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId, ExitExecutionTemplate,
+        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
+        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
+        OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        PositionSnapshot, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary, ResidualSharePolicy,
+        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
+        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
+        TradePolicyCandidateSpec, TradePolicyCohort, TradePolicyCohortDimension,
+        TradePolicyCohortKey, TradePolicyCohortProvenance, TradePolicyEvidenceBundleRef,
+        TradePolicyExecutionEvidence, TradePolicyExitTemplate, TradePolicyFitContract,
+        TradePolicyGovernanceAuditId, TradePolicyParameterSource, TradePolicyPitCutoffEvidence,
+        TradePolicyQualityGate, TradePolicyValidationEvidence, TrainingDatasetId, Usd,
+        VerticalActivationTarget,
     },
 };
 use quant_pivot_repository::{
@@ -536,6 +538,7 @@ pub async fn seed_pending_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds)
                 None,
             ),
             new_capital_allocation(order_intent_id.clone(), ids),
+            None,
         )
         .await
         .expect("create pending intent")
@@ -579,6 +582,7 @@ pub async fn seed_approved_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds
                 None,
             ),
             new_capital_allocation(order_intent_id.clone(), ids),
+            None,
         )
         .await
         .expect("create approved intent")
@@ -766,6 +770,7 @@ fn new_order_intent(
                 min_expected_return_bps: Bps::ZERO,
                 require_execution_eligibility: true,
             },
+            opportunistic_exit: opportunistic_exit_policy(),
             scale_out_targets: Vec::new(),
             settlement_mode: ExitSettlementMode::ExitBeforeResolution,
             redeem_policy: RedeemPolicy::Manual,
@@ -975,10 +980,10 @@ fn executable_policy_fixture_key() -> TradePolicyCohortKey {
     };
     TradePolicyCohortKey {
         category: MarketCategory::Politics,
-        horizon_secs: 86_400,
+        horizon_secs: 3_600,
         entry_price_min: Price::new(dec!(0.01)),
         entry_price_max: Price::new(dec!(0.99)),
-        notional_tier: Usd::new(EXECUTION_NOTIONAL),
+        notional_tier: Usd::new(dec!(25)),
         liquidity: dimension.clone(),
         volatility: dimension,
     }
@@ -986,43 +991,65 @@ fn executable_policy_fixture_key() -> TradePolicyCohortKey {
 
 const fn executable_policy_fixture_gate() -> TradePolicyQualityGate {
     TradePolicyQualityGate {
-        min_cohort_samples: 1,
-        min_executable_coverage: dec!(0.8),
-        min_full_l2_coverage: dec!(0.8),
-        min_cpcv_paths: 1,
-        min_deflated_sharpe_ratio: Decimal::ZERO,
-        max_probability_of_backtest_overfitting: Decimal::ONE,
-        max_ambiguous_touch_rate: Decimal::ONE,
-        max_depth_failure_rate: Decimal::ONE,
-        min_lower_confidence_utility_bps: Bps::new(dec!(1)),
+        min_effective_sample_size: 100,
+        min_full_l2_coverage: dec!(0.95),
+        min_common_candidate_support: dec!(0.95),
+        min_passive_reconciled_trade_coverage: dec!(0.95),
+        min_fee_catalog_coverage: Decimal::ONE,
+        min_universe_coverage: dec!(0.95),
+        min_cpcv_paths: 21,
+        min_deflated_sharpe_ratio: dec!(0.95),
+        max_probability_of_backtest_overfitting: dec!(0.5),
+        max_ambiguous_touch_rate: dec!(0.05),
+        max_depth_failure_rate: dec!(0.05),
+        min_lower_confidence_utility_bps: Bps::ZERO,
     }
 }
 
-const fn executable_policy_fixture_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
+fn executable_policy_fixture_cohort(key: TradePolicyCohortKey) -> TradePolicyCohort {
     TradePolicyCohort {
         key,
         entry_condition: EntryConditionTemplate::Immediate,
         entry_order: EntryOrderTemplate::Aggressive {
             fill_requirement: FillRequirement::AllOrNothing,
+            max_slippage_bps: Bps::new(dec!(50)),
+            max_book_age_ms: 2_000,
         },
         max_slippage_bps: Bps::new(dec!(50)),
         max_book_age_ms: 2_000,
         upper_barrier_bps: Bps::new(dec!(1_000)),
         lower_barrier_bps: Bps::new(dec!(1_000)),
-        vertical_barrier_secs: 86_400,
+        vertical_barrier_secs: 3_600,
         scale_out_targets: Vec::new(),
         trailing_stop: None,
         min_score_retention: dec!(0.6),
         min_expected_return_bps: Bps::ZERO,
         require_execution_eligibility: true,
+        opportunistic_exit: opportunistic_exit_policy(),
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
-        sample_count: 1,
-        effective_sample_size: Decimal::ONE,
-        executable_sample_count: 1,
+        sample_count: 100,
+        effective_sample_size: Decimal::from(100),
+        executable_sample_count: 100,
         executable_coverage: Decimal::ONE,
+        selected_candidate_id: "immediate".to_owned(),
+        full_l2_coverage: Decimal::ONE,
+        common_candidate_support: Decimal::ONE,
+        passive_reconciled_trade_coverage: None,
+        fee_catalog_coverage: Decimal::ONE,
+        cpcv_path_count: 21,
+        trial_count: 1,
+        deflated_sharpe_ratio: Decimal::ONE,
+        probability_of_backtest_overfitting: Decimal::ZERO,
+        ambiguous_touch_rate: Decimal::ZERO,
+        depth_failure_rate: Decimal::ZERO,
         lower_confidence_utility_bps: Some(Bps::new(dec!(1))),
-        shrink_path: Vec::new(),
+        parameter_source: TradePolicyParameterSource {
+            relaxed_dimensions: Vec::new(),
+            source_sample_count: 100,
+            source_effective_sample_size: Decimal::from(100),
+            source_selector_hash: content_hash('8'),
+        },
     }
 }
 
@@ -1031,12 +1058,44 @@ fn executable_policy_fixture_payload(
     runtime_config_version_id: &RuntimeConfigVersionId,
     cohort_key: &TradePolicyCohortKey,
 ) -> TradePolicyArtifactPayload {
-    let condition_candidates = vec![TradePolicyConditionCandidate {
+    let exit = TradePolicyExitTemplate {
+        upper_barrier_bps: Bps::new(dec!(1_000)),
+        lower_barrier_bps: Bps::new(dec!(1_000)),
+        vertical_barrier_secs: 3_600,
+        scale_out_targets: Vec::new(),
+        trailing_stop: None,
+        min_score_retention: dec!(0.6),
+        min_expected_return_bps: Bps::ZERO,
+        require_execution_eligibility: true,
+        opportunistic_exit: opportunistic_exit_policy(),
+        settlement_mode: ExitSettlementMode::HoldToResolution,
+        redeem_policy: RedeemPolicy::Manual,
+        reason_execution: ExitReason::ALL
+            .into_iter()
+            .map(|reason| ExitExecutionTemplate {
+                reason,
+                fill_requirement: FillRequirement::AllowPartial,
+                max_attempts: 3,
+                retry_cadence_ms: 1_000,
+                max_slippage_bps: Bps::new(dec!(50)),
+                residual_share_policy: ResidualSharePolicy::HoldToSettlement,
+            })
+            .collect(),
+    };
+    let candidates = vec![TradePolicyCandidateSpec {
         candidate_id: "immediate".to_owned(),
-        condition: EntryConditionTemplate::Immediate,
+        entry_condition: EntryConditionTemplate::Immediate,
+        entry_execution: EntryOrderTemplate::Aggressive {
+            fill_requirement: FillRequirement::AllOrNothing,
+            max_slippage_bps: Bps::new(dec!(50)),
+            max_book_age_ms: 2_000,
+        },
+        exit,
     }];
-    let condition_candidate_set_hash =
-        ResearchHasher::canonical(&condition_candidates).expect("condition candidate hash");
+    let candidate_set_hash = ResearchHasher::canonical(&candidates).expect("candidate hash");
+    let methodology_hash = content_hash('9');
+    let latency_profile_hash = content_hash('a');
+    let trial_ledger_hash = content_hash('6');
     TradePolicyArtifactPayload {
         format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
         activation_target: VerticalActivationTarget::SemiAuto,
@@ -1046,15 +1105,17 @@ fn executable_policy_fixture_payload(
             fit_window_start: now - chrono::Duration::days(30),
             fit_window_end: now - chrono::Duration::days(2),
             pit_cutoff: now - chrono::Duration::days(1),
-            embargo_secs: 86_400,
-            notional_tiers: vec![Usd::new(EXECUTION_NOTIONAL)],
-            maximum_scale_out_targets: 3,
+            horizon_secs: 3_600,
+            notional_tiers: vec![Usd::new(dec!(25)), Usd::new(dec!(100)), Usd::new(dec!(500))],
+            methodology_hash: methodology_hash.clone(),
+            latency_profile_hash: latency_profile_hash.clone(),
             quality_gate: executable_policy_fixture_gate(),
         },
         source_dataset_hash: content_hash('1'),
         feature_schema_hash: content_hash('2'),
         label_schema_hash: content_hash('3'),
         fill_simulator_version: "test-only-v1".to_owned(),
+        embargo_secs: 86_400,
         pit_cutoff_evidence: Some(TradePolicyPitCutoffEvidence {
             filtered_sample_count: 1,
             labels_matured_by_cutoff: 1,
@@ -1065,23 +1126,39 @@ fn executable_policy_fixture_payload(
             entry_basis: Some(ExecutablePriceBasis::FullL2Vwap),
             exit_basis: Some(ExecutablePriceBasis::FullL2Vwap),
             full_l2_sample_count: 1,
-            degraded_top_of_book_sample_count: 0,
             full_l2_coverage: Some(Decimal::ONE),
             fee_model_hash: Some(content_hash('5')),
             gaps: Vec::new(),
         },
-        condition_candidate_set_hash,
-        condition_candidates,
+        candidate_set_hash,
+        candidates,
+        evidence_bundle: Some(TradePolicyEvidenceBundleRef {
+            manifest_uri: ArtifactUri::parse("s3://fixture/policy-evidence/manifest.json")
+                .expect("artifact uri"),
+            manifest_hash: content_hash('b'),
+            simulator_hash: content_hash('c'),
+            code_hash: content_hash('d'),
+            methodology_hash,
+            latency_profile_hash,
+            catalog_ledger_hash: content_hash('e'),
+            archive_manifest_set_hash: content_hash('f'),
+            trial_ledger_hash: trial_ledger_hash.clone(),
+        }),
         vertical_gate_evidence: Vec::new(),
         cohorts: vec![executable_policy_fixture_cohort(cohort_key.clone())],
         validation: TradePolicyValidationEvidence {
-            trial_ledger_hash: Some(content_hash('6')),
-            cpcv_path_count: Some(1),
-            deflated_sharpe_ratio: Some(Decimal::ZERO),
+            trial_ledger_cutoff: Some(now),
+            trial_ledger_hash: Some(trial_ledger_hash),
+            attempted_candidate_count: Some(1),
+            cpcv_path_count: Some(21),
+            deflated_sharpe_ratio: Some(Decimal::ONE),
             probability_of_backtest_overfitting: Some(Decimal::ZERO),
-            effective_sample_size: Some(Decimal::ONE),
+            effective_sample_size: Some(Decimal::from(100)),
             ambiguous_touch_rate: Some(Decimal::ZERO),
             depth_failure_rate: Some(Decimal::ZERO),
+            common_candidate_support: Some(Decimal::ONE),
+            fee_catalog_coverage: Some(Decimal::ONE),
+            universe_coverage: Some(Decimal::ONE),
         },
     }
 }
@@ -1544,10 +1621,21 @@ fn exit_plan() -> ExitPlan {
             min_expected_return_bps: Bps::ZERO,
             require_execution_eligibility: true,
         },
+        opportunistic_exit: opportunistic_exit_policy(),
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
+    }
+}
+
+const fn opportunistic_exit_policy() -> OpportunisticExitPolicy {
+    OpportunisticExitPolicy {
+        min_confidence: Probability::new(dec!(0.65)),
+        min_expected_alpha_bps: Bps::new(dec!(50)),
+        min_p_exit_better: Probability::new(dec!(0.5)),
+        max_cumulative_exit_pct: Decimal::ONE,
+        min_incremental_exit_pct: dec!(0.1),
     }
 }
 
@@ -1626,8 +1714,9 @@ fn evidence_refs(ids: &ExecutionTxnIds) -> EvidenceRefs {
         model_run_id: ids.model_run.clone(),
         market_selection_id: ids.market_selection.clone(),
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
-            "book:ch:{}:1700000000:1700000000:1:1@blake3:{}",
+            "book:l2|{}|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
             ids.token,
+            "1".repeat(64),
             "0".repeat(64)
         ))
         .expect("book ref"),

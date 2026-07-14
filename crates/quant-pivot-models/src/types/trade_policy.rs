@@ -11,6 +11,7 @@ use crate::{
     enums::{
         common::MarketCategory,
         domain::DomainFamily,
+        execution::ExitReason,
         quant::{
             ExitSettlementMode, FillRequirement, PriceComparison, RedeemPolicy, TradePolicyStatus,
         },
@@ -18,23 +19,30 @@ use crate::{
     hashing::CanonicalDigest,
     jsonb_active,
     types::{
-        Bps, ClockAnchor, ContentHash, ENTRY_CONDITION_MAX_CANDIDATES, ENTRY_CONDITION_MAX_DEPTH,
+        Bps, ClockAnchor, ContentHash, ENTRY_CONDITION_MAX_DEPTH,
         ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
-        ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure, Price,
-        RuntimeConfigVersionId, TradePolicyArtifactId, TrainingDatasetId, Usd,
+        ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure,
+        OpportunisticExitPolicy, Price, RuntimeConfigVersionId, TradePolicyArtifactId,
+        TrainingDatasetId, Usd,
     },
 };
 
 /// Breaking wire version for the standalone policy artifact family.
-pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 2;
+pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 1;
+pub const TRADE_POLICY_MAX_CANDIDATES: usize = 32;
+pub const TRADE_POLICY_HORIZON_SECS: u64 = 3_600;
 
 /// Immutable statistical and execution-quality thresholds used for publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyQualityGate {
-    pub min_cohort_samples: u64,
-    pub min_executable_coverage: Decimal,
+    pub min_effective_sample_size: u64,
     pub min_full_l2_coverage: Decimal,
+    pub min_common_candidate_support: Decimal,
+    pub min_passive_reconciled_trade_coverage: Decimal,
+    pub min_fee_catalog_coverage: Decimal,
+    pub min_universe_coverage: Decimal,
     pub min_cpcv_paths: u32,
     pub min_deflated_sharpe_ratio: Decimal,
     pub max_probability_of_backtest_overfitting: Decimal,
@@ -44,17 +52,31 @@ pub struct TradePolicyQualityGate {
 }
 
 impl TradePolicyQualityGate {
-    fn validate(&self) -> Result<(), String> {
-        if self.min_cohort_samples == 0 || self.min_cpcv_paths == 0 {
-            return Err("trade-policy sample and CPCV path gates must be positive".to_owned());
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min_effective_sample_size < 100 {
+            return Err("min_effective_sample_size cannot be lower than 100".to_owned());
+        }
+        if self.min_cpcv_paths != 21 {
+            return Err("min_cpcv_paths must equal the 21 complete N=8,k=3 paths".to_owned());
         }
         for (name, value, allow_zero) in [
+            ("min_full_l2_coverage", self.min_full_l2_coverage, false),
             (
-                "min_executable_coverage",
-                self.min_executable_coverage,
+                "min_common_candidate_support",
+                self.min_common_candidate_support,
                 false,
             ),
-            ("min_full_l2_coverage", self.min_full_l2_coverage, false),
+            (
+                "min_passive_reconciled_trade_coverage",
+                self.min_passive_reconciled_trade_coverage,
+                false,
+            ),
+            (
+                "min_fee_catalog_coverage",
+                self.min_fee_catalog_coverage,
+                false,
+            ),
+            ("min_universe_coverage", self.min_universe_coverage, false),
             (
                 "max_probability_of_backtest_overfitting",
                 self.max_probability_of_backtest_overfitting,
@@ -75,8 +97,38 @@ impl TradePolicyQualityGate {
                 ));
             }
         }
-        if self.min_lower_confidence_utility_bps <= Bps::ZERO {
-            return Err("min_lower_confidence_utility_bps must be positive".to_owned());
+        for (name, value) in [
+            ("min_full_l2_coverage", self.min_full_l2_coverage),
+            (
+                "min_common_candidate_support",
+                self.min_common_candidate_support,
+            ),
+            (
+                "min_passive_reconciled_trade_coverage",
+                self.min_passive_reconciled_trade_coverage,
+            ),
+            ("min_universe_coverage", self.min_universe_coverage),
+        ] {
+            if value < Decimal::new(95, 2) {
+                return Err(format!("{name} cannot be lower than 0.95"));
+            }
+        }
+        if self.min_fee_catalog_coverage != Decimal::ONE {
+            return Err("min_fee_catalog_coverage must equal 1".to_owned());
+        }
+        if self.min_deflated_sharpe_ratio < Decimal::new(95, 2) {
+            return Err("min_deflated_sharpe_ratio cannot be lower than 0.95".to_owned());
+        }
+        if self.max_probability_of_backtest_overfitting > Decimal::new(5, 1) {
+            return Err("max_probability_of_backtest_overfitting cannot exceed 0.5".to_owned());
+        }
+        if self.max_ambiguous_touch_rate > Decimal::new(5, 2)
+            || self.max_depth_failure_rate > Decimal::new(5, 2)
+        {
+            return Err("ambiguity and depth-failure gates cannot exceed 0.05".to_owned());
+        }
+        if self.min_lower_confidence_utility_bps < Bps::ZERO {
+            return Err("min_lower_confidence_utility_bps cannot be negative".to_owned());
         }
         Ok(())
     }
@@ -92,9 +144,10 @@ pub struct TradePolicyFitContract {
     pub fit_window_end: DateTime<Utc>,
     /// Latest point-in-time instant from which any fit evidence may be consumed.
     pub pit_cutoff: DateTime<Utc>,
-    pub embargo_secs: u64,
+    pub horizon_secs: u64,
     pub notional_tiers: Vec<Usd>,
-    pub maximum_scale_out_targets: u8,
+    pub methodology_hash: ContentHash,
+    pub latency_profile_hash: ContentHash,
     pub quality_gate: TradePolicyQualityGate,
 }
 
@@ -105,6 +158,9 @@ impl TradePolicyFitContract {
         }
         if self.fit_window_end > self.pit_cutoff {
             return Err("trade-policy fit window must end at or before pit_cutoff".to_owned());
+        }
+        if self.horizon_secs != TRADE_POLICY_HORIZON_SECS {
+            return Err("the first policy-fit release supports only a 1h horizon".to_owned());
         }
         if self.notional_tiers.is_empty()
             || self.notional_tiers.iter().any(|tier| !tier.is_positive())
@@ -118,8 +174,13 @@ impl TradePolicyFitContract {
         {
             return Err("trade-policy notional tiers must be strictly increasing".to_owned());
         }
-        if self.maximum_scale_out_targets > 3 {
-            return Err("trade-policy supports at most three scale-out targets".to_owned());
+        let required_tiers = [
+            Usd::new(Decimal::new(25, 0)),
+            Usd::new(Decimal::new(100, 0)),
+            Usd::new(Decimal::new(500, 0)),
+        ];
+        if self.notional_tiers != required_tiers {
+            return Err("policy fit tiers must be exactly $25/$100/$500".to_owned());
         }
         self.quality_gate.validate()
     }
@@ -334,8 +395,23 @@ fn canonicalize_template_group(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum EntryOrderTemplate {
-    Passive { post_only: bool },
-    Aggressive { fill_requirement: FillRequirement },
+    PassivePostOnly {
+        placement: PassivePlacement,
+        good_til_secs: u64,
+        max_book_age_ms: u64,
+    },
+    Aggressive {
+        fill_requirement: FillRequirement,
+        max_slippage_bps: Bps,
+        max_book_age_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PassivePlacement {
+    JoinBestBid,
+    ImproveBestBidByTicks { ticks: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,11 +427,59 @@ pub struct TrailingStopTemplate {
     pub activation_return_bps: Bps,
 }
 
-/// One deterministic parent-cohort step used to shrink a sparse leaf.
+/// One reason-specific FAK liquidation rule. Protective reasons always target
+/// all remaining shares; scale-out is governed by its cumulative target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TradePolicyShrinkStep {
-    pub parent_cohort_index: u32,
-    pub relaxed_dimension: TradePolicyShrinkDimension,
+pub struct ExitExecutionTemplate {
+    pub reason: ExitReason,
+    pub fill_requirement: FillRequirement,
+    pub max_attempts: u32,
+    pub retry_cadence_ms: u64,
+    pub max_slippage_bps: Bps,
+    pub residual_share_policy: ResidualSharePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidualSharePolicy {
+    RetryUntilVertical,
+    HoldToSettlement,
+    RedeemAfterResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradePolicyExitTemplate {
+    pub upper_barrier_bps: Bps,
+    pub lower_barrier_bps: Bps,
+    pub vertical_barrier_secs: u64,
+    pub scale_out_targets: Vec<ScaleOutTemplate>,
+    pub trailing_stop: Option<TrailingStopTemplate>,
+    pub min_score_retention: Decimal,
+    pub min_expected_return_bps: Bps,
+    pub require_execution_eligibility: bool,
+    pub opportunistic_exit: OpportunisticExitPolicy,
+    pub settlement_mode: ExitSettlementMode,
+    pub redeem_policy: RedeemPolicy,
+    pub reason_execution: Vec<ExitExecutionTemplate>,
+}
+
+/// One complete candidate. Research never creates an implicit Cartesian
+/// product from partial UI parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradePolicyCandidateSpec {
+    pub candidate_id: String,
+    pub entry_condition: EntryConditionTemplate,
+    pub entry_execution: EntryOrderTemplate,
+    pub exit: TradePolicyExitTemplate,
+}
+
+/// Inline provenance for parameters borrowed by a sparse serving leaf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradePolicyParameterSource {
+    pub relaxed_dimensions: Vec<TradePolicyShrinkDimension>,
+    pub source_sample_count: u64,
+    pub source_effective_sample_size: Decimal,
+    pub source_selector_hash: ContentHash,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,6 +495,7 @@ pub enum TradePolicyShrinkDimension {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradePolicyCohort {
     pub key: TradePolicyCohortKey,
+    pub selected_candidate_id: String,
     pub entry_condition: EntryConditionTemplate,
     pub entry_order: EntryOrderTemplate,
     pub max_slippage_bps: Bps,
@@ -383,26 +508,153 @@ pub struct TradePolicyCohort {
     pub min_score_retention: Decimal,
     pub min_expected_return_bps: Bps,
     pub require_execution_eligibility: bool,
+    pub opportunistic_exit: OpportunisticExitPolicy,
     pub settlement_mode: ExitSettlementMode,
     pub redeem_policy: RedeemPolicy,
     pub sample_count: u64,
     pub effective_sample_size: Decimal,
     pub executable_sample_count: u64,
     pub executable_coverage: Decimal,
+    pub full_l2_coverage: Decimal,
+    pub common_candidate_support: Decimal,
+    pub passive_reconciled_trade_coverage: Option<Decimal>,
+    pub fee_catalog_coverage: Decimal,
+    pub cpcv_path_count: u32,
+    pub trial_count: u32,
+    pub deflated_sharpe_ratio: Decimal,
+    pub probability_of_backtest_overfitting: Decimal,
+    pub ambiguous_touch_rate: Decimal,
+    pub depth_failure_rate: Decimal,
     pub lower_confidence_utility_bps: Option<Bps>,
-    pub shrink_path: Vec<TradePolicyShrinkStep>,
+    pub parameter_source: TradePolicyParameterSource,
 }
 
 /// Validation evidence. Missing evidence is represented by `None`, never a fake zero.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradePolicyValidationEvidence {
+    pub trial_ledger_cutoff: Option<DateTime<Utc>>,
     pub trial_ledger_hash: Option<ContentHash>,
+    pub attempted_candidate_count: Option<u32>,
     pub cpcv_path_count: Option<u32>,
     pub deflated_sharpe_ratio: Option<Decimal>,
     pub probability_of_backtest_overfitting: Option<Decimal>,
     pub effective_sample_size: Option<Decimal>,
     pub ambiguous_touch_rate: Option<Decimal>,
     pub depth_failure_rate: Option<Decimal>,
+    pub common_candidate_support: Option<Decimal>,
+    pub fee_catalog_coverage: Option<Decimal>,
+    pub universe_coverage: Option<Decimal>,
+}
+
+/// Durable row-level evidence referenced by a compact policy artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradePolicyEvidenceBundleRef {
+    pub manifest_uri: crate::types::ArtifactUri,
+    pub manifest_hash: ContentHash,
+    pub simulator_hash: ContentHash,
+    pub code_hash: ContentHash,
+    pub methodology_hash: ContentHash,
+    pub latency_profile_hash: ContentHash,
+    pub catalog_ledger_hash: ContentHash,
+    pub archive_manifest_set_hash: ContentHash,
+    pub trial_ledger_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePolicyEvidenceObjectKind {
+    ObservationEligibility,
+    Fills,
+    CandidateTrials,
+    CohortTrials,
+    CpcvPaths,
+    CoverageGaps,
+    StatisticalSummaries,
+}
+
+impl TradePolicyEvidenceObjectKind {
+    pub const REQUIRED: [Self; 7] = [
+        Self::ObservationEligibility,
+        Self::Fills,
+        Self::CandidateTrials,
+        Self::CohortTrials,
+        Self::CpcvPaths,
+        Self::CoverageGaps,
+        Self::StatisticalSummaries,
+    ];
+}
+
+/// One immutable Parquet object in a policy evidence bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradePolicyEvidenceObjectRef {
+    pub kind: TradePolicyEvidenceObjectKind,
+    pub uri: crate::types::ArtifactUri,
+    pub byte_hash: ContentHash,
+    pub row_count: u64,
+}
+
+/// Small canonical JSON manifest whose referenced row-level objects are
+/// verified again at Validate and Publish boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradePolicyEvidenceBundleManifest {
+    pub format_version: u32,
+    pub source_dataset_hash: ContentHash,
+    pub candidate_set_hash: ContentHash,
+    pub simulator_hash: ContentHash,
+    pub code_hash: ContentHash,
+    pub methodology_hash: ContentHash,
+    pub latency_profile_hash: ContentHash,
+    pub catalog_ledger_hash: ContentHash,
+    pub archive_manifest_set_hash: ContentHash,
+    pub trial_ledger_cutoff: DateTime<Utc>,
+    pub trial_ledger_hash: ContentHash,
+    pub objects: Vec<TradePolicyEvidenceObjectRef>,
+}
+
+impl TradePolicyEvidenceBundleManifest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.format_version != TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION {
+            return Err(format!(
+                "unsupported policy evidence bundle format {}",
+                self.format_version
+            ));
+        }
+        if self.objects.len() != TradePolicyEvidenceObjectKind::REQUIRED.len() {
+            return Err(
+                "policy evidence bundle must contain every required object once".to_owned(),
+            );
+        }
+        let mut prior = None;
+        let mut uris = BTreeSet::new();
+        for object in &self.objects {
+            if prior.is_some_and(|kind| kind >= object.kind) {
+                return Err(
+                    "policy evidence objects must be unique and sorted by canonical kind"
+                        .to_owned(),
+                );
+            }
+            if !uris.insert(object.uri.as_str()) || !object.uri.as_str().ends_with(".parquet") {
+                return Err(
+                    "policy evidence objects must use unique immutable Parquet URIs".to_owned(),
+                );
+            }
+            if object.kind != TradePolicyEvidenceObjectKind::CoverageGaps && object.row_count == 0 {
+                return Err(format!("policy evidence object {:?} is empty", object.kind));
+            }
+            prior = Some(object.kind);
+        }
+        if self
+            .objects
+            .iter()
+            .map(|object| object.kind)
+            .ne(TradePolicyEvidenceObjectKind::REQUIRED)
+        {
+            return Err("policy evidence bundle object set is incomplete".to_owned());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,7 +682,6 @@ pub struct TradePolicyExecutionEvidence {
     pub entry_basis: Option<ExecutablePriceBasis>,
     pub exit_basis: Option<ExecutablePriceBasis>,
     pub full_l2_sample_count: u64,
-    pub degraded_top_of_book_sample_count: u64,
     pub full_l2_coverage: Option<Decimal>,
     pub fee_model_hash: Option<ContentHash>,
     pub gaps: Vec<TradePolicyEvidenceGap>,
@@ -463,6 +714,8 @@ pub enum TradePolicyPublicationBlocker {
     MissingFullL2Coverage,
     InsufficientFullL2Coverage,
     MissingFeeModel,
+    MissingEvidenceBundle,
+    EvidenceBundleIdentityMismatch,
     MissingTrialLedger,
     MissingCpcvPathCount,
     InsufficientCpcvPaths,
@@ -474,29 +727,37 @@ pub enum TradePolicyPublicationBlocker {
     AmbiguousTouchRateAboveGate,
     MissingDepthFailureRate,
     DepthFailureRateAboveGate,
-    InsufficientCohortSamples { cohort_index: u32 },
+    MissingCommonCandidateSupport,
+    InsufficientCommonCandidateSupport,
+    MissingFeeCatalogCoverage,
+    InsufficientFeeCatalogCoverage,
+    MissingUniverseCoverage,
+    InsufficientUniverseCoverage,
+    InsufficientCohortEffectiveSampleSize { cohort_index: u32 },
     InsufficientCohortCoverage { cohort_index: u32 },
+    InsufficientCohortFullL2Coverage { cohort_index: u32 },
+    InsufficientCohortCommonSupport { cohort_index: u32 },
+    InsufficientPassiveTradeCoverage { cohort_index: u32 },
+    InsufficientCohortFeeCoverage { cohort_index: u32 },
+    InsufficientCohortCpcvPaths { cohort_index: u32 },
+    CohortDeflatedSharpeRatioBelowGate { cohort_index: u32 },
+    CohortPboAboveGate { cohort_index: u32 },
+    CohortAmbiguityAboveGate { cohort_index: u32 },
+    CohortDepthFailureAboveGate { cohort_index: u32 },
     MissingUtilityLowerBound { cohort_index: u32 },
     UtilityLowerBoundBelowGate { cohort_index: u32 },
-    InvalidParentProvenance { cohort_index: u32 },
-}
-
-/// One fit candidate. `Immediate` must exist exactly once and cannot be removed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TradePolicyConditionCandidate {
-    pub candidate_id: String,
-    pub condition: EntryConditionTemplate,
+    InvalidParameterSource { cohort_index: u32 },
 }
 
 /// Canonicalize and validate one fit candidate set. Candidate order is not a
 /// semantic dimension; ids are unique and exactly one Immediate baseline is
 /// mandatory.
-pub fn canonicalize_condition_candidates(
-    mut candidates: Vec<TradePolicyConditionCandidate>,
-) -> Result<Vec<TradePolicyConditionCandidate>, String> {
-    if candidates.is_empty() || candidates.len() > ENTRY_CONDITION_MAX_CANDIDATES {
+pub fn canonicalize_policy_candidates(
+    mut candidates: Vec<TradePolicyCandidateSpec>,
+) -> Result<Vec<TradePolicyCandidateSpec>, String> {
+    if candidates.is_empty() || candidates.len() > TRADE_POLICY_MAX_CANDIDATES {
         return Err(format!(
-            "condition candidate count must be in 1..={ENTRY_CONDITION_MAX_CANDIDATES}"
+            "policy candidate count must be in 1..={TRADE_POLICY_MAX_CANDIDATES}"
         ));
     }
     let mut ids = BTreeSet::new();
@@ -509,7 +770,7 @@ pub fn canonicalize_condition_candidates(
         if !ids.insert(id.to_owned()) {
             return Err(format!("duplicate condition candidate id `{id}`"));
         }
-        match &mut candidate.condition {
+        match &mut candidate.entry_condition {
             EntryConditionTemplate::Immediate => immediate_count += 1,
             EntryConditionTemplate::Conditional {
                 root,
@@ -527,12 +788,99 @@ pub fn canonicalize_condition_candidates(
                 *root = root.clone().canonicalized()?;
             }
         }
+        validate_entry_execution(&candidate.entry_execution)?;
+        validate_exit_template(&candidate.exit)?;
     }
     if immediate_count != 1 {
-        return Err("condition candidates must contain exactly one Immediate baseline".to_owned());
+        return Err("policy candidates must contain exactly one Immediate baseline".to_owned());
     }
     candidates.sort_by(|left, right| left.candidate_id.cmp(&right.candidate_id));
     Ok(candidates)
+}
+
+fn validate_entry_execution(entry: &EntryOrderTemplate) -> Result<(), String> {
+    match entry {
+        EntryOrderTemplate::PassivePostOnly {
+            placement,
+            good_til_secs,
+            max_book_age_ms,
+        } => {
+            if *good_til_secs == 0 || *max_book_age_ms == 0 {
+                return Err("passive GTD and book freshness must be positive".to_owned());
+            }
+            if matches!(
+                placement,
+                PassivePlacement::ImproveBestBidByTicks { ticks: 0 }
+            ) {
+                return Err("passive improve ticks must be positive".to_owned());
+            }
+        }
+        EntryOrderTemplate::Aggressive {
+            max_slippage_bps,
+            max_book_age_ms,
+            ..
+        } => {
+            if *max_slippage_bps < Bps::ZERO || *max_book_age_ms == 0 {
+                return Err(
+                    "aggressive slippage must be non-negative and freshness positive".to_owned(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_exit_template(exit: &TradePolicyExitTemplate) -> Result<(), String> {
+    if exit.vertical_barrier_secs == 0
+        || exit.scale_out_targets.len() > 3
+        || !(Decimal::ZERO..=Decimal::ONE).contains(&exit.min_score_retention)
+    {
+        return Err("exit vertical/scale-out/retention contract is invalid".to_owned());
+    }
+    let opportunistic = &exit.opportunistic_exit;
+    if opportunistic.min_expected_alpha_bps < Bps::ZERO
+        || opportunistic.max_cumulative_exit_pct <= Decimal::ZERO
+        || opportunistic.max_cumulative_exit_pct > Decimal::ONE
+        || opportunistic.min_incremental_exit_pct <= Decimal::ZERO
+        || opportunistic.min_incremental_exit_pct > opportunistic.max_cumulative_exit_pct
+    {
+        return Err("opportunistic exit policy bounds are invalid".to_owned());
+    }
+    let mut prior = Decimal::ZERO;
+    let mut target_ids = BTreeSet::new();
+    for target in &exit.scale_out_targets {
+        if target.target_id.trim().is_empty()
+            || !target_ids.insert(target.target_id.as_str())
+            || target.target_cumulative_exit_pct <= prior
+            || target.target_cumulative_exit_pct > Decimal::ONE
+        {
+            return Err(
+                "scale-out targets must be unique and strictly cumulative in (0,1]".to_owned(),
+            );
+        }
+        prior = target.target_cumulative_exit_pct;
+    }
+    let mut reasons = BTreeSet::new();
+    for execution in &exit.reason_execution {
+        if !reasons.insert(execution.reason.as_str())
+            || execution.fill_requirement != FillRequirement::AllowPartial
+            || execution.max_attempts == 0
+            || execution.retry_cadence_ms == 0
+            || execution.max_slippage_bps < Bps::ZERO
+        {
+            return Err(
+                "exit reason execution must be unique, FAK, bounded and non-negative".to_owned(),
+            );
+        }
+    }
+    if reasons.len() != ExitReason::ALL.len()
+        || ExitReason::ALL
+            .iter()
+            .any(|reason| !reasons.contains(reason.as_str()))
+    {
+        return Err("exit policy must freeze exactly one rule for every exit reason".to_owned());
+    }
+    Ok(())
 }
 
 /// Publication target governed by source-specific shadow evidence.
@@ -675,10 +1023,13 @@ pub struct TradePolicyArtifactPayload {
     pub feature_schema_hash: ContentHash,
     pub label_schema_hash: ContentHash,
     pub fill_simulator_version: String,
+    /// Server-derived `max(2% fit span, maximum feature lookback)`.
+    pub embargo_secs: u64,
     pub pit_cutoff_evidence: Option<TradePolicyPitCutoffEvidence>,
     pub execution_evidence: TradePolicyExecutionEvidence,
-    pub condition_candidate_set_hash: ContentHash,
-    pub condition_candidates: Vec<TradePolicyConditionCandidate>,
+    pub candidate_set_hash: ContentHash,
+    pub candidates: Vec<TradePolicyCandidateSpec>,
+    pub evidence_bundle: Option<TradePolicyEvidenceBundleRef>,
     pub vertical_gate_evidence: Vec<VerticalGateEvidence>,
     pub cohorts: Vec<TradePolicyCohort>,
     pub validation: TradePolicyValidationEvidence,
@@ -704,11 +1055,11 @@ impl TradePolicyArtifactPayload {
         if let Err(detail) = self.fit_contract.validate() {
             blockers.push(TradePolicyPublicationBlocker::InvalidFitContract { detail });
         }
-        if let Err(detail) = self.validate_condition_candidates() {
+        if let Err(detail) = self.validate_candidates() {
             blockers.push(TradePolicyPublicationBlocker::InvalidConditionCandidates { detail });
         } else {
-            match CanonicalDigest::content_hash_json(&self.condition_candidates) {
-                Ok(hash) if hash == self.condition_candidate_set_hash => {}
+            match CanonicalDigest::content_hash_json(&self.candidates) {
+                Ok(hash) if hash == self.candidate_set_hash => {}
                 Ok(_) | Err(_) => {
                     blockers.push(TradePolicyPublicationBlocker::ConditionCandidateSetHashMismatch);
                 }
@@ -749,6 +1100,18 @@ impl TradePolicyArtifactPayload {
         if self.pit_cutoff_evidence.is_none() {
             blockers.push(TradePolicyPublicationBlocker::MissingPitCutoffEvidence);
         }
+        match &self.evidence_bundle {
+            None => blockers.push(TradePolicyPublicationBlocker::MissingEvidenceBundle),
+            Some(bundle)
+                if bundle.methodology_hash != self.fit_contract.methodology_hash
+                    || bundle.latency_profile_hash != self.fit_contract.latency_profile_hash
+                    || self.validation.trial_ledger_hash.as_ref()
+                        != Some(&bundle.trial_ledger_hash) =>
+            {
+                blockers.push(TradePolicyPublicationBlocker::EvidenceBundleIdentityMismatch);
+            }
+            Some(_) => {}
+        }
         if self.cohorts.is_empty() {
             blockers.push(TradePolicyPublicationBlocker::EmptyCohorts);
         }
@@ -771,10 +1134,10 @@ impl TradePolicyArtifactPayload {
         blockers
     }
 
-    fn validate_condition_candidates(&self) -> Result<(), String> {
-        let canonical = canonicalize_condition_candidates(self.condition_candidates.clone())?;
-        if canonical != self.condition_candidates {
-            return Err("condition candidates are not canonical".to_owned());
+    fn validate_candidates(&self) -> Result<(), String> {
+        let canonical = canonicalize_policy_candidates(self.candidates.clone())?;
+        if canonical != self.candidates {
+            return Err("policy candidates are not canonical".to_owned());
         }
         Ok(())
     }
@@ -844,6 +1207,27 @@ impl TradePolicyArtifactPayload {
             }
             Some(_) => {}
         }
+        match validation.common_candidate_support {
+            None => blockers.push(TradePolicyPublicationBlocker::MissingCommonCandidateSupport),
+            Some(value) if value < gate.min_common_candidate_support => {
+                blockers.push(TradePolicyPublicationBlocker::InsufficientCommonCandidateSupport);
+            }
+            Some(_) => {}
+        }
+        match validation.fee_catalog_coverage {
+            None => blockers.push(TradePolicyPublicationBlocker::MissingFeeCatalogCoverage),
+            Some(value) if value < gate.min_fee_catalog_coverage => {
+                blockers.push(TradePolicyPublicationBlocker::InsufficientFeeCatalogCoverage);
+            }
+            Some(_) => {}
+        }
+        match validation.universe_coverage {
+            None => blockers.push(TradePolicyPublicationBlocker::MissingUniverseCoverage),
+            Some(value) if value < gate.min_universe_coverage => {
+                blockers.push(TradePolicyPublicationBlocker::InsufficientUniverseCoverage);
+            }
+            Some(_) => {}
+        }
         blockers
     }
 
@@ -854,13 +1238,71 @@ impl TradePolicyArtifactPayload {
             let Ok(cohort_index) = u32::try_from(index) else {
                 continue;
             };
-            if cohort.sample_count < gate.min_cohort_samples {
-                blockers.push(TradePolicyPublicationBlocker::InsufficientCohortSamples {
+            if cohort.effective_sample_size < Decimal::from(gate.min_effective_sample_size) {
+                blockers.push(
+                    TradePolicyPublicationBlocker::InsufficientCohortEffectiveSampleSize {
+                        cohort_index,
+                    },
+                );
+            }
+            if cohort.executable_coverage < gate.min_common_candidate_support {
+                blockers.push(TradePolicyPublicationBlocker::InsufficientCohortCoverage {
                     cohort_index,
                 });
             }
-            if cohort.executable_coverage < gate.min_executable_coverage {
-                blockers.push(TradePolicyPublicationBlocker::InsufficientCohortCoverage {
+            if cohort.full_l2_coverage < gate.min_full_l2_coverage {
+                blockers.push(
+                    TradePolicyPublicationBlocker::InsufficientCohortFullL2Coverage {
+                        cohort_index,
+                    },
+                );
+            }
+            if cohort.common_candidate_support < gate.min_common_candidate_support {
+                blockers.push(
+                    TradePolicyPublicationBlocker::InsufficientCohortCommonSupport { cohort_index },
+                );
+            }
+            if matches!(
+                cohort.entry_order,
+                EntryOrderTemplate::PassivePostOnly { .. }
+            ) && cohort
+                .passive_reconciled_trade_coverage
+                .is_none_or(|value| value < gate.min_passive_reconciled_trade_coverage)
+            {
+                blockers.push(
+                    TradePolicyPublicationBlocker::InsufficientPassiveTradeCoverage {
+                        cohort_index,
+                    },
+                );
+            }
+            if cohort.fee_catalog_coverage < gate.min_fee_catalog_coverage {
+                blockers.push(
+                    TradePolicyPublicationBlocker::InsufficientCohortFeeCoverage { cohort_index },
+                );
+            }
+            if cohort.cpcv_path_count < gate.min_cpcv_paths {
+                blockers.push(TradePolicyPublicationBlocker::InsufficientCohortCpcvPaths {
+                    cohort_index,
+                });
+            }
+            if cohort.deflated_sharpe_ratio < gate.min_deflated_sharpe_ratio {
+                blockers.push(
+                    TradePolicyPublicationBlocker::CohortDeflatedSharpeRatioBelowGate {
+                        cohort_index,
+                    },
+                );
+            }
+            if cohort.probability_of_backtest_overfitting
+                > gate.max_probability_of_backtest_overfitting
+            {
+                blockers.push(TradePolicyPublicationBlocker::CohortPboAboveGate { cohort_index });
+            }
+            if cohort.ambiguous_touch_rate > gate.max_ambiguous_touch_rate {
+                blockers
+                    .push(TradePolicyPublicationBlocker::CohortAmbiguityAboveGate { cohort_index });
+            }
+            if cohort.depth_failure_rate > gate.max_depth_failure_rate {
+                blockers.push(TradePolicyPublicationBlocker::CohortDepthFailureAboveGate {
                     cohort_index,
                 });
             }
@@ -870,7 +1312,7 @@ impl TradePolicyArtifactPayload {
                         cohort_index,
                     });
                 }
-                Some(value) if value < gate.min_lower_confidence_utility_bps => {
+                Some(value) if value <= gate.min_lower_confidence_utility_bps => {
                     blockers.push(TradePolicyPublicationBlocker::UtilityLowerBoundBelowGate {
                         cohort_index,
                     });
@@ -878,12 +1320,14 @@ impl TradePolicyArtifactPayload {
                 Some(_) => {}
             }
             if cohort
-                .shrink_path
-                .iter()
-                .any(|step| step.parent_cohort_index >= cohort_index)
+                .parameter_source
+                .relaxed_dimensions
+                .windows(2)
+                .any(|pair| shrink_rank(pair[0]) >= shrink_rank(pair[1]))
+                || cohort.parameter_source.source_effective_sample_size <= Decimal::ZERO
             {
                 blockers
-                    .push(TradePolicyPublicationBlocker::InvalidParentProvenance { cohort_index });
+                    .push(TradePolicyPublicationBlocker::InvalidParameterSource { cohort_index });
             }
         }
         blockers
@@ -892,6 +1336,15 @@ impl TradePolicyArtifactPayload {
     #[must_use]
     pub fn is_publishable(&self) -> bool {
         self.publication_blockers().is_empty()
+    }
+}
+
+const fn shrink_rank(dimension: TradePolicyShrinkDimension) -> u8 {
+    match dimension {
+        TradePolicyShrinkDimension::Category => 0,
+        TradePolicyShrinkDimension::Volatility => 1,
+        TradePolicyShrinkDimension::Liquidity => 2,
+        TradePolicyShrinkDimension::EntryPrice => 3,
     }
 }
 
@@ -932,19 +1385,23 @@ mod tests {
             fit_window_start: Utc.timestamp_opt(1_700_000_000, 0).single().expect("time"),
             fit_window_end,
             pit_cutoff: fit_window_end,
-            embargo_secs: 3_600,
-            notional_tiers: vec![Usd::new(dec!(25)), Usd::new(dec!(100))],
-            maximum_scale_out_targets: 3,
+            horizon_secs: 3_600,
+            notional_tiers: vec![Usd::new(dec!(25)), Usd::new(dec!(100)), Usd::new(dec!(500))],
+            methodology_hash: hash('8'),
+            latency_profile_hash: hash('9'),
             quality_gate: TradePolicyQualityGate {
-                min_cohort_samples: 100,
-                min_executable_coverage: dec!(0.8),
-                min_full_l2_coverage: dec!(0.8),
-                min_cpcv_paths: 16,
-                min_deflated_sharpe_ratio: dec!(0.5),
-                max_probability_of_backtest_overfitting: dec!(0.2),
-                max_ambiguous_touch_rate: dec!(0.01),
+                min_effective_sample_size: 100,
+                min_full_l2_coverage: dec!(0.95),
+                min_common_candidate_support: dec!(0.95),
+                min_passive_reconciled_trade_coverage: dec!(0.95),
+                min_fee_catalog_coverage: dec!(1),
+                min_universe_coverage: dec!(0.95),
+                min_cpcv_paths: 21,
+                min_deflated_sharpe_ratio: dec!(0.95),
+                max_probability_of_backtest_overfitting: dec!(0.5),
+                max_ambiguous_touch_rate: dec!(0.05),
                 max_depth_failure_rate: dec!(0.05),
-                min_lower_confidence_utility_bps: Bps::new(dec!(1)),
+                min_lower_confidence_utility_bps: Bps::ZERO,
             },
         }
     }
@@ -966,28 +1423,34 @@ mod tests {
             feature_schema_hash: hash('2'),
             label_schema_hash: hash('3'),
             fill_simulator_version: "unavailable-v1".to_owned(),
+            embargo_secs: 3_600,
             pit_cutoff_evidence: None,
             execution_evidence: TradePolicyExecutionEvidence {
                 entry_basis: None,
                 exit_basis: None,
                 full_l2_sample_count: 0,
-                degraded_top_of_book_sample_count: 100,
                 full_l2_coverage: None,
                 fee_model_hash: None,
                 gaps: Vec::new(),
             },
-            condition_candidate_set_hash: hash('4'),
-            condition_candidates: Vec::new(),
+            candidate_set_hash: hash('4'),
+            candidates: Vec::new(),
+            evidence_bundle: None,
             vertical_gate_evidence: Vec::new(),
             cohorts: Vec::new(),
             validation: TradePolicyValidationEvidence {
+                trial_ledger_cutoff: None,
                 trial_ledger_hash: None,
+                attempted_candidate_count: None,
                 cpcv_path_count: None,
                 deflated_sharpe_ratio: None,
                 probability_of_backtest_overfitting: None,
                 effective_sample_size: None,
                 ambiguous_touch_rate: None,
                 depth_failure_rate: None,
+                common_candidate_support: None,
+                fee_catalog_coverage: None,
+                universe_coverage: None,
             },
         };
 

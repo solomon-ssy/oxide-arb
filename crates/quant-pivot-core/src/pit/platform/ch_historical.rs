@@ -6,7 +6,11 @@
 //! already-frozen source cutoff; feature-specific staleness policy is evaluated
 //! by the shared feature builder, never hidden inside this storage adapter.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,15 +19,22 @@ use quant_pivot_error::{
     research::{PitResolutionStorageError, ResearchError},
 };
 use quant_pivot_models::{
-    clickhouse::BookSnapshotRow,
+    clickhouse::{BookL2CheckpointRow, BookL2EventRow, BookStreamSessionRow, TradeTapeRow},
     domain::{DecisionBoundary, DecisionSource, market::book::BookLevel},
+    enums::{
+        clickhouse::{ChCanonicalBookEventType, ChStreamSessionState},
+        common::Side,
+    },
     types::{MarketId, Price, Shares, TokenId},
 };
 use quant_pivot_repository::traits::{CatalogVersionRepository, QuantFactReadRepository};
 use quant_pivot_research::pit::{
-    BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot, resolve_catalog_snapshot,
+    BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
+    resolve_catalog_snapshot,
 };
 use rust_decimal::Decimal;
+
+use crate::ingest::order_book::OrderBook;
 
 /// Outcome of decoding persisted book level JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +104,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         let source_cutoff = boundary.cutoff_for(DecisionSource::Book);
         let Some(row) = self
             .fact_read
-            .book_snapshot_at(
+            .book_checkpoint_at(
                 token_id,
                 source_cutoff.timestamp_millis(),
                 boundary.decision_at().timestamp_millis(),
@@ -103,7 +114,8 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         else {
             return Ok(None);
         };
-        decode_book_row(row, source_cutoff, boundary.decision_at())
+        self.reconstruct_book_row(row, source_cutoff, boundary.decision_at())
+            .await
     }
 
     async fn books_at_boundary(
@@ -114,7 +126,7 @@ impl PointInTimeSnapshotSource for DurablePitSource {
         let cutoff = boundary.cutoff_for(DecisionSource::Book);
         let rows = self
             .fact_read
-            .book_snapshots_at(
+            .book_checkpoints_at(
                 token_ids.to_vec(),
                 cutoff.timestamp_millis(),
                 boundary.decision_at().timestamp_millis(),
@@ -123,7 +135,10 @@ impl PointInTimeSnapshotSource for DurablePitSource {
             .map_err(PitResolutionStorageError::from)?;
         let mut books = HashMap::with_capacity(rows.len());
         for row in rows {
-            if let Some(book) = decode_book_row(row, cutoff, boundary.decision_at())? {
+            if let Some(book) = self
+                .reconstruct_book_row(row, cutoff, boundary.decision_at())
+                .await?
+            {
                 books.insert(book.token_id.clone(), book);
             }
         }
@@ -157,8 +172,292 @@ impl PointInTimeSnapshotSource for DurablePitSource {
     }
 }
 
+impl DurablePitSource {
+    async fn reconstruct_book_row(
+        &self,
+        checkpoint: BookL2CheckpointRow,
+        source_cutoff: DateTime<Utc>,
+        decision_at: DateTime<Utc>,
+    ) -> QuantResult<Option<BookSnapshotAt>> {
+        let token_id = checkpoint.token_id.clone();
+        let session = self
+            .fact_read
+            .book_stream_session_at(checkpoint.stream_session_id, decision_at.timestamp_millis())
+            .await
+            .map_err(PitResolutionStorageError::from)?
+            .ok_or_else(|| replay_error(&token_id, "stream session ledger is unavailable"))?;
+        if session.state == ChStreamSessionState::Invalidated {
+            return Err(replay_error(&token_id, "stream session is invalidated").into());
+        }
+        let events = self
+            .fact_read
+            .book_l2_events_from(
+                &token_id,
+                checkpoint.stream_session_id,
+                checkpoint.token_sequence,
+                source_cutoff.timestamp_millis(),
+                decision_at.timestamp_millis(),
+            )
+            .await
+            .map_err(PitResolutionStorageError::from)?;
+        let trades = self
+            .fact_read
+            .market_ws_trades_from(
+                &token_id,
+                checkpoint.stream_session_id,
+                checkpoint.token_sequence,
+                source_cutoff.timestamp_millis(),
+                decision_at.timestamp_millis(),
+            )
+            .await
+            .map_err(PitResolutionStorageError::from)?;
+        reconstruct_checkpoint(
+            checkpoint,
+            &session,
+            &events,
+            &trades,
+            source_cutoff,
+            decision_at,
+        )
+    }
+}
+
+fn replay_error(token_id: &TokenId, detail: &str) -> ResearchError {
+    ResearchError::PitResolution {
+        detail: format!("canonical book replay for token {token_id} failed: {detail}"),
+    }
+}
+
+fn reconstruct_checkpoint(
+    checkpoint: BookL2CheckpointRow,
+    session: &BookStreamSessionRow,
+    events: &[BookL2EventRow],
+    trades: &[TradeTapeRow],
+    source_cutoff: DateTime<Utc>,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<Option<BookSnapshotAt>> {
+    let token_id = checkpoint.token_id.clone();
+    let anchor_sequence = checkpoint.token_sequence;
+    validate_replay_identity(&checkpoint, session, events, trades)?;
+    let (snapshot, status) = snapshot_from_row(checkpoint, source_cutoff, decision_at);
+    if status.counts_as_failure() {
+        return Err(
+            replay_error(&token_id, &format!("checkpoint decode status {status:?}")).into(),
+        );
+    }
+    let Some(anchor) = snapshot else {
+        return Ok(None);
+    };
+    let mut book = OrderBook::new(token_id.clone());
+    book.apply_snapshot_validated(anchor.bids, anchor.asks, anchor.timestamp_ms);
+    let mut latest_event_time = anchor.timestamp_ms;
+    let mut latest_available_at = anchor.available_at;
+    let mut latest_version = anchor.version;
+    let mut latest_sequence = anchor.sequence;
+    let mut latest_source_event = anchor.source_event;
+    for event in events
+        .iter()
+        .filter(|event| event.token_sequence > anchor_sequence)
+    {
+        apply_replay_event(&mut book, event, &token_id)?;
+        latest_event_time = u64::try_from(event.venue_event_time)
+            .map_err(|_| replay_error(&token_id, "event timestamp is negative"))?;
+        latest_available_at = DateTime::from_timestamp_millis(event.persisted_time)
+            .ok_or_else(|| replay_error(&token_id, "persisted timestamp is invalid"))?;
+        latest_version = event.book_version;
+        latest_sequence = event.token_sequence;
+        latest_source_event = Some(CanonicalBookEventRef {
+            stream_session_id: event.stream_session_id,
+            token_sequence: event.token_sequence,
+            source_event_hash: event.payload_hash.clone(),
+        });
+    }
+    Ok(Some(BookSnapshotAt {
+        token_id,
+        source_cutoff,
+        decision_at,
+        bids: Arc::from(book.bids()),
+        asks: Arc::from(book.asks()),
+        timestamp_ms: latest_event_time,
+        version: latest_version,
+        sequence: latest_sequence,
+        source_event: latest_source_event,
+        available_at: latest_available_at,
+    }))
+}
+
+fn validate_replay_identity(
+    checkpoint: &BookL2CheckpointRow,
+    session: &BookStreamSessionRow,
+    events: &[BookL2EventRow],
+    trades: &[TradeTapeRow],
+) -> QuantResult<()> {
+    let token_id = &checkpoint.token_id;
+    if session.stream_session_id != checkpoint.stream_session_id {
+        return Err(replay_error(token_id, "checkpoint/session identity mismatch").into());
+    }
+    let Some(anchor) = events.first() else {
+        return Err(replay_error(token_id, "checkpoint source event is unavailable").into());
+    };
+    if anchor.token_sequence != checkpoint.token_sequence
+        || anchor.event_type != ChCanonicalBookEventType::Snapshot
+        || anchor.payload_hash != checkpoint.source_event_hash
+    {
+        return Err(replay_error(
+            token_id,
+            "checkpoint source event hash or sequence mismatch",
+        )
+        .into());
+    }
+    let mut sequence_identities = BTreeMap::<u64, String>::new();
+    for event in events {
+        insert_sequence_identity(
+            &mut sequence_identities,
+            event.token_sequence,
+            event.payload_hash.as_str(),
+            token_id,
+        )?;
+    }
+    for trade in trades {
+        let sequence = trade
+            .token_sequence
+            .ok_or_else(|| replay_error(token_id, "Market WS trade has no token sequence"))?;
+        insert_sequence_identity(
+            &mut sequence_identities,
+            sequence,
+            &trade.source_event_id,
+            token_id,
+        )?;
+    }
+    if let Some(last) = sequence_identities
+        .last_key_value()
+        .map(|(sequence, _)| *sequence)
+    {
+        for sequence in checkpoint.token_sequence..=last {
+            if !sequence_identities.contains_key(&sequence) {
+                return Err(
+                    replay_error(token_id, &format!("missing token sequence {sequence}")).into(),
+                );
+            }
+        }
+        validate_sealed_session_boundaries(session, token_id, last)?;
+    }
+    Ok(())
+}
+
+fn insert_sequence_identity(
+    identities: &mut BTreeMap<u64, String>,
+    sequence: u64,
+    identity: &str,
+    token_id: &TokenId,
+) -> QuantResult<()> {
+    if let Some(existing) = identities.insert(sequence, identity.to_owned())
+        && existing != identity
+    {
+        return Err(
+            replay_error(token_id, &format!("conflicting token sequence {sequence}")).into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_sealed_session_boundaries(
+    session: &BookStreamSessionRow,
+    token_id: &TokenId,
+    visible_last_sequence: u64,
+) -> QuantResult<()> {
+    if session.state != ChStreamSessionState::Sealed {
+        return Ok(());
+    }
+    let received: BTreeMap<String, u64> = serde_json::from_str(&session.received_sequence_json)
+        .map_err(|_| replay_error(token_id, "received sequence ledger is malformed"))?;
+    let persisted: BTreeMap<String, u64> =
+        serde_json::from_str(&session.persisted_sequence_json)
+            .map_err(|_| replay_error(token_id, "persisted sequence ledger is malformed"))?;
+    if received != persisted {
+        return Err(replay_error(token_id, "received/persisted sequence boundaries differ").into());
+    }
+    if persisted
+        .get(token_id.as_str())
+        .is_none_or(|last| *last < visible_last_sequence)
+    {
+        return Err(replay_error(token_id, "sealed session boundary is behind replay").into());
+    }
+    Ok(())
+}
+
+fn apply_replay_event(
+    book: &mut OrderBook,
+    event: &BookL2EventRow,
+    token_id: &TokenId,
+) -> QuantResult<()> {
+    let timestamp_ms = u64::try_from(event.venue_event_time)
+        .map_err(|_| replay_error(token_id, "event timestamp is negative"))?;
+    match event.event_type {
+        ChCanonicalBookEventType::Snapshot => {
+            let (bids, asks) = decode_event_levels(event, token_id)?;
+            book.apply_snapshot(bids, asks, timestamp_ms);
+        }
+        ChCanonicalBookEventType::Delta => {
+            if event.bid_prices.len() != event.bid_sizes.len()
+                || event.ask_prices.len() != event.ask_sizes.len()
+            {
+                return Err(
+                    replay_error(token_id, "delta price/size vector lengths differ").into(),
+                );
+            }
+            let bids = event
+                .bid_prices
+                .iter()
+                .zip(&event.bid_sizes)
+                .map(|(price, size)| (Side::Buy, price.to_price(), size.to_shares()));
+            let asks = event
+                .ask_prices
+                .iter()
+                .zip(&event.ask_sizes)
+                .map(|(price, size)| (Side::Sell, price.to_price(), size.to_shares()));
+            book.apply_delta(bids.chain(asks), timestamp_ms);
+        }
+        ChCanonicalBookEventType::TickSizeChange => {}
+        ChCanonicalBookEventType::Gap => {
+            return Err(replay_error(token_id, "gap event encountered").into());
+        }
+    }
+    Ok(())
+}
+
+fn decode_event_levels(
+    event: &BookL2EventRow,
+    token_id: &TokenId,
+) -> QuantResult<(Vec<BookLevel>, Vec<BookLevel>)> {
+    if event.bid_prices.len() != event.bid_sizes.len()
+        || event.ask_prices.len() != event.ask_sizes.len()
+    {
+        return Err(replay_error(token_id, "snapshot price/size vector lengths differ").into());
+    }
+    let decode = |price: &quant_pivot_models::clickhouse::ChPrice,
+                  size: &quant_pivot_models::clickhouse::ChShares| {
+        BookLevel::from_decimal(price.to_price(), size.to_shares())
+            .map_err(|_| replay_error(token_id, "snapshot contains invalid level"))
+    };
+    let bids = event
+        .bid_prices
+        .iter()
+        .zip(&event.bid_sizes)
+        .map(|(price, size)| decode(price, size))
+        .collect::<Result<Vec<_>, _>>()?;
+    let asks = event
+        .ask_prices
+        .iter()
+        .zip(&event.ask_sizes)
+        .map(|(price, size)| decode(price, size))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((bids, asks))
+}
+
+#[cfg(test)]
 fn decode_book_row(
-    row: BookSnapshotRow,
+    row: BookL2CheckpointRow,
     source_cutoff: DateTime<Utc>,
     decision_at: DateTime<Utc>,
 ) -> QuantResult<Option<BookSnapshotAt>> {
@@ -205,7 +504,7 @@ fn decode_book_row(
 /// both sides decode to empty — treated as a missing book for PIT resolution.
 #[must_use]
 pub fn snapshot_from_row(
-    row: BookSnapshotRow,
+    row: BookL2CheckpointRow,
     source_cutoff: DateTime<Utc>,
     decision_at: DateTime<Utc>,
 ) -> (Option<BookSnapshotAt>, BookDecodeStatus) {
@@ -218,6 +517,11 @@ pub fn snapshot_from_row(
     if status.counts_as_failure() || (bids.is_empty() && asks.is_empty()) {
         return (None, status);
     }
+    let source_event = CanonicalBookEventRef {
+        stream_session_id: row.stream_session_id,
+        token_sequence: row.token_sequence,
+        source_event_hash: row.source_event_hash.clone(),
+    };
     (
         Some(BookSnapshotAt {
             token_id: row.token_id,
@@ -227,8 +531,9 @@ pub fn snapshot_from_row(
             asks,
             timestamp_ms,
             version: row.book_version,
-            sequence: row.sequence,
-            available_at: match DateTime::from_timestamp_millis(row.ingestion_time) {
+            sequence: row.token_sequence,
+            source_event: Some(source_event),
+            available_at: match DateTime::from_timestamp_millis(row.created_at) {
                 Some(value) => value,
                 None => return (None, BookDecodeStatus::InvalidTimestamp),
             },
@@ -265,30 +570,27 @@ mod tests {
     use super::{BookDecodeStatus, decode_book_row, decode_levels, snapshot_from_row};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        clickhouse::{BookSnapshotRow, ChSchemaVersion},
-        enums::clickhouse::{ChFactSource, ChSnapshotReason},
-        types::TokenId,
+        clickhouse::{BookL2CheckpointRow, ChSchemaVersion},
+        types::{ContentHash, TokenId},
     };
+    use uuid::Uuid;
 
-    fn sample_row(bids_json: &str, asks_json: &str) -> BookSnapshotRow {
-        BookSnapshotRow {
+    fn sample_row(bids_json: &str, asks_json: &str) -> BookL2CheckpointRow {
+        BookL2CheckpointRow {
             token_id: TokenId::new("tok"),
             market_id: None,
-            snapshot_reason: ChSnapshotReason::Startup,
-            top_n: 5,
+            stream_session_id: Uuid::nil(),
+            token_sequence: 1,
             bids_json: bids_json.to_owned(),
             asks_json: asks_json.to_owned(),
-            bid_depth_usd: None,
-            ask_depth_usd: None,
-            mid_price: None,
-            spread_bps: None,
             book_version: 1,
-            levels_count: 1,
+            source_event_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
+                .expect("source hash"),
+            checkpoint_hash: ContentHash::parse(format!("blake3:{}", "2".repeat(64)))
+                .expect("checkpoint hash"),
             event_time: 1_000_000,
-            ingestion_time: 1_000_000,
-            sequence: 1,
-            source: ChFactSource::WsSnapshot,
-            schema_version: ChSchemaVersion::FIRST,
+            created_at: 1_000_000,
+            schema_version: ChSchemaVersion(2),
         }
     }
 
@@ -353,7 +655,7 @@ mod tests {
         assert!(decode_book_row(future_effective, decision_at, decision_at).is_err());
 
         let mut future_available = sample_row(r#"[["0.48","100"]]"#, r#"[["0.52","100"]]"#);
-        future_available.ingestion_time += 1;
+        future_available.created_at += 1;
         assert!(decode_book_row(future_available, decision_at, decision_at).is_err());
     }
 }

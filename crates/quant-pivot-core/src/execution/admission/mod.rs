@@ -144,6 +144,8 @@ pub struct AdmissionInput {
     pub allocation: Option<CapitalAllocationInfo>,
     /// Latest published L2 book for the intent's token (`None` = absent).
     pub book: Option<Arc<BookSnapshot>>,
+    /// Point-in-time fee schedule visible before this admission decision.
+    pub fee_schedule: quant_pivot_research::execution_semantics::PitFeeSchedule,
     /// Governed total budget cap (`portfolio.budget.total_budget_usd`), distilled
     /// from the active config at build time.
     pub budget_total_usd: Usd,

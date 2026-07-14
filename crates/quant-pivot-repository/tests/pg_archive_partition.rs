@@ -39,19 +39,31 @@ async fn seal_is_required_before_drop_claim_and_worm_rows_reject_mutation() {
     let partition_key = "202401".to_owned();
     let retention_days = 90;
     let row_count = 42;
+    let partition_start_at = now - Duration::days(180);
+    let partition_end_at = now - Duration::days(150);
     let parquet_uri =
         ArtifactUri::parse("file:///tmp/quant_crypto_price_report-202401.parquet").expect("uri");
     let byte_hash = hash('1');
     let content_hash = hash('2');
+    let source_schema_hash = hash('3');
+    let parquet_byte_count = 1_024;
+    let object_etag: Option<String> = None;
+    let object_version_id: Option<String> = None;
     let sealed_at = now;
     let manifest_hash = CanonicalDigest::content_hash_json(&(
         &table_name,
         &partition_key,
+        partition_start_at,
+        partition_end_at,
         retention_days,
         row_count,
         &parquet_uri,
+        parquet_byte_count,
+        &object_etag,
+        &object_version_id,
         &byte_hash,
         &content_hash,
+        &source_schema_hash,
         sealed_at,
     ))
     .expect("manifest hash");
@@ -60,16 +72,33 @@ async fn seal_is_required_before_drop_claim_and_worm_rows_reject_mutation() {
             manifest_id: Uuid::now_v7(),
             table_name,
             partition_key,
+            partition_start_at,
+            partition_end_at,
             retention_days,
             row_count,
             parquet_uri,
+            parquet_byte_count,
+            object_etag,
+            object_version_id,
             byte_hash,
             content_hash,
+            source_schema_hash,
             manifest_hash,
             sealed_at,
         })
         .await
         .expect("seal manifest");
+    assert_eq!(
+        repo.find_manifests_in_range(
+            "quant_crypto_price_report",
+            partition_start_at,
+            partition_end_at,
+        )
+        .await
+        .expect("range query")
+        .len(),
+        1
+    );
 
     let second_repo = PgArchivePartitionRepository::new(db.clone());
     let second_worker = Uuid::now_v7();

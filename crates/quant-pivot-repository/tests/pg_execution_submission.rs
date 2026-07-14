@@ -56,8 +56,8 @@ use quant_pivot_models::{
         ExecutionOrderId, ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry,
         FeatureParityStateId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
         ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
-        OperationLogId, OrderAmount, OrderId, OrderIntentId, PendingScaleOut,
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId,
+        PendingScaleOut, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
@@ -194,6 +194,7 @@ async fn concurrent_approval_has_one_winner_and_one_amount_truth() {
         .create_with_allocation(
             new_pending_intent_with_id(&ids, intent_id.clone()),
             new_allocation_for(&ids, intent_id.clone()),
+            None,
         )
         .await
         .expect("create pending intent");
@@ -1033,6 +1034,7 @@ async fn create_rejects_when_recommendation_executed() {
         .create_with_allocation(
             new_pending_intent_with_id(&ids, intent_id.clone()),
             new_allocation_for(&ids, intent_id),
+            None,
         )
         .await
         .expect_err("executed rec must block create");
@@ -1067,6 +1069,7 @@ async fn create_rejects_when_submitted_intent_blocks() {
         .create_with_allocation(
             new_pending_intent_with_id(&ids, second_id.clone()),
             new_allocation_for(&ids, second_id),
+            None,
         )
         .await
         .expect_err("submitted intent must block create");
@@ -1120,6 +1123,7 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
                 min_expected_return_bps: Bps::ZERO,
                 require_execution_eligibility: true,
             },
+            opportunistic_exit: opportunistic_exit_policy(),
             scale_out_targets: Vec::new(),
             settlement_mode: ExitSettlementMode::ExitBeforeResolution,
             redeem_policy: RedeemPolicy::Manual,
@@ -1712,6 +1716,7 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                         min_expected_return_bps: Bps::ZERO,
                         require_execution_eligibility: true,
                     },
+                    opportunistic_exit: opportunistic_exit_policy(),
                     scale_out_targets: Vec::new(),
                     settlement_mode: ExitSettlementMode::ExitBeforeResolution,
                     redeem_policy: RedeemPolicy::Manual,
@@ -1734,6 +1739,7 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 released_usd: Usd::ZERO,
                 reason: "intent created".to_owned(),
             },
+            None,
         )
         .await
         .expect("create approved intent")
@@ -2264,10 +2270,21 @@ fn exit_plan() -> ExitPlan {
             min_expected_return_bps: Bps::ZERO,
             require_execution_eligibility: true,
         },
+        opportunistic_exit: opportunistic_exit_policy(),
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
+    }
+}
+
+const fn opportunistic_exit_policy() -> OpportunisticExitPolicy {
+    OpportunisticExitPolicy {
+        min_confidence: Probability::new(dec!(0.65)),
+        min_expected_alpha_bps: Bps::new(dec!(50)),
+        min_p_exit_better: Probability::new(dec!(0.5)),
+        max_cumulative_exit_pct: dec!(1),
+        min_incremental_exit_pct: dec!(0.1),
     }
 }
 
@@ -2365,8 +2382,9 @@ fn evidence_refs() -> EvidenceRefs {
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
         book_snapshot_ref: BookSnapshotRef::from_str(&format!(
-            "book:ch:token-1:1700000000:1700000000:1:1@blake3:{}",
-            "0".repeat(64)
+            "book:l2|token-1|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
+            "1".repeat(64),
+            "0".repeat(64),
         ))
         .expect("book ref"),
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),

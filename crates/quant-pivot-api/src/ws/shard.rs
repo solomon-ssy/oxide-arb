@@ -7,11 +7,11 @@
 //! shard. An empty token set parks the actor instead of busy-looping.
 
 use super::{
-    drop_hook::WsEventDropHook,
-    health::{ShardHealthBoard, TokenFreshnessBoard},
+    health::ShardHealthBoard,
     ingest_hooks::BookLevelRejectHook,
     normalize::normalize_ws_message,
     reconnect::{ReconnectPolicy, ReconnectState},
+    session_hook::WsSessionInvalidationHook,
 };
 use futures_util::StreamExt;
 use polymarket_client_sdk_v2::{
@@ -20,10 +20,13 @@ use polymarket_client_sdk_v2::{
     ws::config::Config as SdkWsConfig,
 };
 use quant_pivot_models::{
-    domain::pipeline::PipelineEvent, enums::system::ShardConnectionStatus, types::TokenId,
+    domain::pipeline::{PipelineEvent, StreamSessionEndReason},
+    enums::system::ShardConnectionStatus,
+    hashing::CanonicalDigest,
+    types::{ContentHash, TokenId},
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Display,
     str::FromStr,
     sync::Arc,
@@ -31,9 +34,10 @@ use std::{
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch},
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// Debounce window for token-set changes: bursts of assign/remove during a
 /// catalog sync coalesce into a single teardown + resubscribe.
@@ -48,6 +52,8 @@ const CONNECT_PERMIT_GRACE: Duration = Duration::from_secs(10);
 /// connection attempt so dozens of shards never handshake simultaneously.
 const STARTUP_STAGGER_STEP: Duration = Duration::from_millis(250);
 const STARTUP_STAGGER_SLOTS: usize = 16;
+const OUTPUT_ENQUEUE_TIMEOUT: Duration = Duration::from_millis(250);
+const SESSION_LEDGER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Shared construction dependencies, owned by the router and cloned per shard.
 #[derive(Clone)]
@@ -56,7 +62,7 @@ pub(super) struct ShardDeps {
     pub ws_url: String,
     pub shutdown: CancellationToken,
     pub last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
-    pub on_events_dropped: Option<WsEventDropHook>,
+    pub on_session_invalidated: Option<WsSessionInvalidationHook>,
     pub on_book_level_rejected: Option<BookLevelRejectHook>,
     /// Shard-level reconnect backoff (from `[market_data.websocket]`).
     pub reconnect_policy: ReconnectPolicy,
@@ -67,8 +73,6 @@ pub(super) struct ShardDeps {
     pub connect_limiter: Arc<Semaphore>,
     /// Aggregated connection-state board for health summaries.
     pub health: Arc<ShardHealthBoard>,
-    /// Token-level freshness used by market-aware risk gates.
-    pub token_freshness: Arc<TokenFreshnessBoard>,
 }
 
 /// Why a streaming session ended.
@@ -79,6 +83,8 @@ enum StreamEnd {
     Resubscribe,
     /// Connection / subscription failure — back off before retrying.
     Failed(String),
+    /// A bounded output queue timed out. The session is invalid and must reconnect.
+    Overflow(String),
     /// The router dropped the token channel (manager torn down).
     RouterDropped,
 }
@@ -155,7 +161,7 @@ impl WsShard {
             match end {
                 StreamEnd::Shutdown | StreamEnd::RouterDropped => break,
                 StreamEnd::Resubscribe => reconnect.reset(),
-                StreamEnd::Failed(error) => {
+                StreamEnd::Failed(error) | StreamEnd::Overflow(error) => {
                     let Some(delay) = reconnect.next_delay() else {
                         tracing::error!(shard_id, "WS shard reconnection budget exhausted");
                         break;
@@ -272,31 +278,63 @@ async fn connect_and_stream(
     reconnect.reset();
     deps.health.set_connected(shard_id, true);
     emit_status(deps, shard_id, ShardConnectionStatus::Connected);
+    let stream_session_id = Uuid::now_v7();
+    let opened_at_ms = chrono::Utc::now().timestamp_millis();
+    let subscription_token_hash = match subscription_token_hash(&tokens) {
+        Ok(hash) => hash,
+        Err(error) => return StreamEnd::Failed(error),
+    };
+    let subscription_token_count = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
+    if !send_session_event(
+        deps,
+        PipelineEvent::StreamSessionOpened {
+            stream_session_id,
+            shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
+            subscription_token_hash: subscription_token_hash.clone(),
+            subscription_token_count,
+            opened_at_ms,
+        },
+    )
+    .await
+    {
+        return StreamEnd::Overflow("stream-session open ledger enqueue timed out".to_owned());
+    }
+    let mut token_sequences = HashMap::<TokenId, u64>::new();
 
     macro_rules! stream_arm {
         ($item:expr, $name:literal, $variant:expr) => {
-            match on_stream_item(deps, shard_id, $item, $name, $variant) {
+            match on_stream_item(
+                deps,
+                shard_id,
+                stream_session_id,
+                &mut token_sequences,
+                $item,
+                $name,
+                $variant,
+            )
+            .await
+            {
                 Ok(()) => {
                     // First traffic observed — release the connect permit.
                     if let Some(tx) = traffic_tx.take() {
                         let _ = tx.send(());
                     }
                 }
-                Err(error) => return StreamEnd::Failed(error),
+                Err(error) => break StreamEnd::Overflow(error),
             }
         };
     }
 
-    loop {
+    let end = loop {
         tokio::select! {
-            () = deps.shutdown.cancelled() => return StreamEnd::Shutdown,
+            () = deps.shutdown.cancelled() => break StreamEnd::Shutdown,
             changed = tokens_rx.changed() => {
                 if changed.is_err() {
-                    return StreamEnd::RouterDropped;
+                    break StreamEnd::RouterDropped;
                 }
                 debounce_token_changes(tokens_rx, &deps.shutdown).await;
                 if tokens_rx.borrow_and_update().as_ref() != tokens.as_ref() {
-                    return StreamEnd::Resubscribe;
+                    break StreamEnd::Resubscribe;
                 }
             }
             item = book_stream.next() =>
@@ -312,7 +350,17 @@ async fn connect_and_stream(
             item = bbo_stream.next() =>
                 stream_arm!(item, "best bid/ask", WsMessage::BestBidAsk),
         }
-    }
+    };
+    let closing = ClosingStreamSession {
+        stream_session_id,
+        shard_id,
+        subscription_token_hash,
+        subscription_token_count,
+        opened_at_ms,
+        token_sequences: &token_sequences,
+    };
+    close_stream_session(deps, closing, stream_end_reason(&end)).await;
+    end
 }
 
 /// Park the connect permit in a detached holder task.
@@ -339,9 +387,11 @@ fn spawn_permit_holder(
 
 /// Handle one multiplexed stream item: normalize + dispatch payloads, log
 /// transient errors, and treat a closed stream as a reconnect signal.
-fn on_stream_item<T, E: Display>(
+async fn on_stream_item<T, E: Display>(
     deps: &ShardDeps,
     shard_id: usize,
+    stream_session_id: Uuid,
+    token_sequences: &mut HashMap<TokenId, u64>,
     item: Option<Result<T, E>>,
     stream: &'static str,
     into_message: impl FnOnce(T) -> WsMessage,
@@ -352,13 +402,15 @@ fn on_stream_item<T, E: Display>(
             dispatch_events(
                 deps,
                 shard_id,
+                stream_session_id,
+                token_sequences,
                 normalize_ws_message(
                     into_message(payload),
                     ws_ingress,
                     deps.on_book_level_rejected.as_ref(),
                 ),
-            );
-            Ok(())
+            )
+            .await
         }
         Some(Err(error)) => {
             tracing::debug!(shard_id, %error, stream, "stream error");
@@ -368,34 +420,115 @@ fn on_stream_item<T, E: Display>(
     }
 }
 
-fn dispatch_events(deps: &ShardDeps, shard_id: usize, events: Vec<PipelineEvent>) {
+async fn dispatch_events(
+    deps: &ShardDeps,
+    shard_id: usize,
+    stream_session_id: Uuid,
+    token_sequences: &mut HashMap<TokenId, u64>,
+    events: Vec<PipelineEvent>,
+) -> Result<(), String> {
     let received_at = Instant::now();
     if !events.is_empty() {
         *deps.last_message_at.lock() = Some(received_at);
     }
-    let mut dropped = 0u64;
-    for event in events {
-        mark_event_tokens(&deps.token_freshness, &event, received_at);
-        if deps.output_tx.try_send(event).is_err() {
-            dropped += 1;
+    for mut event in events {
+        let token_sequence = event.asset_id().map_or(0, |token_id| {
+            let sequence = token_sequences.entry(token_id.clone()).or_insert(0);
+            *sequence = sequence.saturating_add(1);
+            *sequence
+        });
+        event.assign_stream_provenance(
+            stream_session_id,
+            u32::try_from(shard_id).unwrap_or(u32::MAX),
+            token_sequence,
+        );
+        let send = deps.output_tx.send_async(event);
+        if !matches!(timeout(OUTPUT_ENQUEUE_TIMEOUT, send).await, Ok(Ok(()))) {
+            if let Some(hook) = &deps.on_session_invalidated {
+                hook(1);
+            }
+            return Err("WS output queue timed out; canonical session invalidated".to_owned());
         }
     }
-    if dropped > 0 {
-        tracing::error!(shard_id, dropped, "WS output channel full — events dropped");
-        if let Some(hook) = &deps.on_events_dropped {
-            hook(dropped);
-        }
+    Ok(())
+}
+
+fn subscription_token_hash(tokens: &HashSet<TokenId>) -> Result<ContentHash, String> {
+    let mut token_ids = tokens.iter().map(TokenId::as_str).collect::<Vec<_>>();
+    token_ids.sort_unstable();
+    CanonicalDigest::content_hash_json(&token_ids).map_err(|error| error.to_string())
+}
+
+const fn stream_end_reason(end: &StreamEnd) -> StreamSessionEndReason {
+    match end {
+        StreamEnd::Shutdown | StreamEnd::RouterDropped => StreamSessionEndReason::Shutdown,
+        StreamEnd::Resubscribe => StreamSessionEndReason::Resubscribe,
+        StreamEnd::Overflow(_) => StreamSessionEndReason::Overflow,
+        StreamEnd::Failed(_) => StreamSessionEndReason::Disconnect,
     }
 }
 
-fn mark_event_tokens(freshness: &TokenFreshnessBoard, event: &PipelineEvent, received_at: Instant) {
-    if let Some(token_id) = event.asset_id() {
-        freshness.mark_token(token_id, received_at);
+async fn send_session_event(deps: &ShardDeps, event: PipelineEvent) -> bool {
+    matches!(
+        timeout(SESSION_LEDGER_TIMEOUT, deps.output_tx.send_async(event)).await,
+        Ok(Ok(()))
+    )
+}
+
+struct ClosingStreamSession<'a> {
+    stream_session_id: Uuid,
+    shard_id: usize,
+    subscription_token_hash: ContentHash,
+    subscription_token_count: u32,
+    opened_at_ms: i64,
+    token_sequences: &'a HashMap<TokenId, u64>,
+}
+
+async fn close_stream_session(
+    deps: &ShardDeps,
+    session: ClosingStreamSession<'_>,
+    reason: StreamSessionEndReason,
+) {
+    let ClosingStreamSession {
+        stream_session_id,
+        shard_id,
+        subscription_token_hash,
+        subscription_token_count,
+        opened_at_ms,
+        token_sequences,
+    } = session;
+    let closed_at_ms = chrono::Utc::now().timestamp_millis();
+    let mut received_sequences = token_sequences
+        .iter()
+        .map(|(token_id, sequence)| (token_id.clone(), *sequence))
+        .collect::<Vec<_>>();
+    received_sequences.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+    let closed = PipelineEvent::StreamSessionClosed {
+        stream_session_id,
+        shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
+        subscription_token_hash,
+        subscription_token_count,
+        received_sequences: Arc::from(received_sequences.clone()),
+        opened_at_ms,
+        closed_at_ms,
+        reason,
+    };
+    if !send_session_event(deps, closed).await {
+        tracing::error!(%stream_session_id, shard_id, "failed to enqueue invalid stream-session close ledger");
+    }
+    if reason == StreamSessionEndReason::Normal {
         return;
     }
-    if let PipelineEvent::MarketResolved { asset_ids, .. } = event {
-        for token_id in asset_ids.iter() {
-            freshness.mark_token(token_id, received_at);
+    for (token_id, last_received_sequence) in received_sequences {
+        let gap = PipelineEvent::StreamGap {
+            asset_id: token_id,
+            stream_session_id,
+            shard_id: u32::try_from(shard_id).unwrap_or(u32::MAX),
+            last_received_sequence,
+            timestamp_ms: u64::try_from(closed_at_ms).unwrap_or(0),
+        };
+        if !send_session_event(deps, gap).await {
+            tracing::error!(%stream_session_id, shard_id, "failed to enqueue stream gap");
         }
     }
 }
@@ -413,29 +546,28 @@ mod tests {
 
     fn test_deps(
         output_tx: flume::Sender<PipelineEvent>,
-        hook: Option<WsEventDropHook>,
+        hook: Option<WsSessionInvalidationHook>,
     ) -> ShardDeps {
         ShardDeps {
             output_tx,
             ws_url: "ws://test".into(),
             shutdown: CancellationToken::new(),
             last_message_at: Arc::new(parking_lot::Mutex::new(None)),
-            on_events_dropped: hook,
+            on_session_invalidated: hook,
             on_book_level_rejected: None,
             reconnect_policy: ReconnectPolicy::default(),
             sdk_initial_backoff: Duration::from_secs(1),
             sdk_max_backoff: Duration::from_secs(30),
             connect_limiter: Arc::new(Semaphore::new(4)),
             health: Arc::new(ShardHealthBoard::default()),
-            token_freshness: Arc::new(TokenFreshnessBoard::default()),
         }
     }
 
-    #[test]
-    fn continues_dispatch_on_full_channel_and_invokes_drop_hook() {
-        let (tx, rx) = flume::bounded(1);
+    #[tokio::test]
+    async fn dispatch_preserves_every_event_when_capacity_is_available() {
+        let (tx, rx) = flume::bounded(3);
         let dropped = Arc::new(AtomicU64::new(0));
-        let hook: WsEventDropHook = {
+        let hook: WsSessionInvalidationHook = {
             let dropped = Arc::clone(&dropped);
             Arc::new(move |n| {
                 dropped.fetch_add(n, Ordering::Relaxed);
@@ -448,10 +580,19 @@ mod tests {
             status: ShardConnectionStatus::Connected,
         };
 
-        dispatch_events(&deps, 0, vec![status(1), status(2), status(3)]);
+        let mut sequences = HashMap::new();
+        dispatch_events(
+            &deps,
+            0,
+            Uuid::new_v4(),
+            &mut sequences,
+            vec![status(1), status(2), status(3)],
+        )
+        .await
+        .expect("dispatch");
 
-        assert_eq!(rx.len(), 1);
-        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        assert_eq!(rx.len(), 3);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(start_paused = true)]

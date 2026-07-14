@@ -17,6 +17,9 @@ pub enum InfraError {
     #[error("channel closed: {name}")]
     ChannelClosed { name: &'static str },
 
+    #[error("bounded channel timed out: {name}")]
+    ChannelTimeout { name: &'static str },
+
     #[error("blocking task join failed: {detail}")]
     BlockingTaskJoin { detail: String },
 

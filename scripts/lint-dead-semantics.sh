@@ -45,7 +45,7 @@ require_live 'FAK' \
     'OrderType::Fak' \
     'OrderType::Fak|OrderTypeKind::Fak'
 require_live 'policy_net_positive' \
-    'TripleBarrierLabelKind::PolicyNetPositive' \
+    'PolicySimulationLabelKind::NetPositive' \
     'policy_net_positive'
 require_live 'RecommendationTradePlan' \
     'RecommendationTradePlan::Unavailable' \

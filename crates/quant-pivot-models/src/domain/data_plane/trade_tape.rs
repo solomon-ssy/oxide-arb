@@ -9,10 +9,12 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow},
+    clickhouse::{ChPrice, ChShares, ChUsd, TradeTapeRow},
     entities::quant_trade_tape_block_cursor,
     enums::{
-        clickhouse::{ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource},
+        clickhouse::{
+            ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+        },
         common::Side,
     },
     types::{MarketId, Price, Shares, TokenId, Usd},
@@ -51,13 +53,15 @@ impl From<ChTradeParticipantRole> for TradeParticipantRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeTapeSourceKind {
+    MarketWs,
     OnChain,
 }
 
 impl From<TradeTapeSourceKind> for ChTradeTapeSource {
     fn from(value: TradeTapeSourceKind) -> Self {
         match value {
-            TradeTapeSourceKind::OnChain => Self::OnChain,
+            TradeTapeSourceKind::MarketWs => Self::MarketWs,
+            TradeTapeSourceKind::OnChain => Self::OnChainOrderFilled,
         }
     }
 }
@@ -65,7 +69,8 @@ impl From<TradeTapeSourceKind> for ChTradeTapeSource {
 impl From<ChTradeTapeSource> for TradeTapeSourceKind {
     fn from(value: ChTradeTapeSource) -> Self {
         match value {
-            ChTradeTapeSource::OnChain => Self::OnChain,
+            ChTradeTapeSource::MarketWs => Self::MarketWs,
+            ChTradeTapeSource::OnChainOrderFilled => Self::OnChain,
         }
     }
 }
@@ -74,6 +79,7 @@ impl TradeTapeSourceKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::MarketWs => "market_ws",
             Self::OnChain => "on_chain",
         }
     }
@@ -88,6 +94,9 @@ pub mod trade_tape_coverage {
     pub const PARTICIPANT_ROLE: u16 = 1 << 4;
     pub const SIDE: u16 = 1 << 5;
     pub const TX_HASH: u16 = 1 << 6;
+    pub const PRICE: u16 = 1 << 7;
+    pub const SIZE: u16 = 1 << 8;
+    pub const FEE_RATE: u16 = 1 << 9;
 }
 
 /// One normalized participant observation in the market trade tape.
@@ -209,9 +218,9 @@ impl TradeTapePrint {
             size_shares: row.size_shares.to_shares(),
             notional_usd: row.notional_usd.to_usd(),
             tx_hash: row.tx_hash.clone(),
-            trade_id: row.trade_id.clone(),
+            trade_id: row.source_event_id.clone(),
             source: TradeTapeSourceKind::from(row.source),
-            coverage_flags: row.coverage_flags,
+            coverage_flags: row.observed_field_flags,
             raw_payload_json: row.raw_payload_json.clone(),
         }
     }
@@ -224,6 +233,8 @@ impl TradeTapePrint {
             token_id: self.token_id,
             event_time: self.event_time.timestamp_millis(),
             ingestion_time: ingestion_time.timestamp_millis(),
+            stream_session_id: None,
+            token_sequence: None,
             participant_address: self.participant_address,
             participant_role: self.participant_role.into(),
             side: ch_trade_side(self.side),
@@ -231,11 +242,16 @@ impl TradeTapePrint {
             size_shares: ChShares::from(self.size_shares),
             notional_usd: ChUsd::from(self.notional_usd),
             tx_hash: self.tx_hash,
-            trade_id: self.trade_id,
+            source_event_id: self.trade_id,
             source: self.source.into(),
-            coverage_flags: self.coverage_flags,
+            observed_field_flags: self.coverage_flags,
+            fee_rate_bps: None,
+            reconciliation_status: ChTradeReconciliationStatus::OnChainOnly,
+            matched_source_event_id: None,
+            revision: 1,
+            reconciled_at: None,
             raw_payload_json: self.raw_payload_json,
-            schema_version: ChSchemaVersion::FIRST,
+            schema_version: TradeTapeRow::SCHEMA_VERSION,
         }
     }
 

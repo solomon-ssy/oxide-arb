@@ -8,11 +8,15 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::types::ArtifactUri;
-use tokio::fs;
+use tokio::{fs, io::AsyncWriteExt};
+use tokio_util::io::ReaderStream;
 
-use super::{ArtifactKey, ArtifactStore};
+use super::{
+    ArtifactByteStream, ArtifactDurability, ArtifactKey, ArtifactObjectMetadata, ArtifactStore,
+};
 
 /// URI scheme served by this backend.
 const FILE_SCHEME: &str = "file://";
@@ -63,7 +67,11 @@ impl LocalArtifactStore {
 
 #[async_trait]
 impl ArtifactStore for LocalArtifactStore {
-    async fn put(&self, key: ArtifactKey, bytes: &[u8]) -> QuantResult<ArtifactUri> {
+    async fn put_stream(
+        &self,
+        key: ArtifactKey,
+        mut stream: ArtifactByteStream,
+    ) -> QuantResult<ArtifactUri> {
         let path = self.absolute_path(&key)?;
         let parent = path.parent().ok_or_else(|| ResearchError::ArtifactIo {
             uri: path.display().to_string(),
@@ -76,9 +84,19 @@ impl ArtifactStore for LocalArtifactStore {
         // Atomic publish: write a uniquely-named temp file, then rename onto the
         // final path so readers never observe a partial write.
         let temp = parent.join(temp_file_name(&key));
-        fs::write(&temp, bytes)
+        let mut file = fs::File::create(&temp)
             .await
             .map_err(|error| io_error(&temp, &error))?;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| io_error(&temp, &error))?;
+        }
+        file.sync_all()
+            .await
+            .map_err(|error| io_error(&temp, &error))?;
+        drop(file);
         if let Err(error) = fs::rename(&temp, &path).await {
             let _ = fs::remove_file(&temp).await;
             return Err(io_error(&path, &error).into());
@@ -87,10 +105,22 @@ impl ArtifactStore for LocalArtifactStore {
         ArtifactUri::parse(format!("{FILE_SCHEME}{}", path.display())).map_err(Into::into)
     }
 
-    async fn get(&self, uri: &ArtifactUri) -> QuantResult<Vec<u8>> {
+    async fn get_stream(&self, uri: &ArtifactUri) -> QuantResult<ArtifactByteStream> {
         let path = self.path_from_uri(uri)?;
-        match fs::read(&path).await {
-            Ok(bytes) => Ok(bytes),
+        match fs::File::open(&path).await {
+            Ok(file) => {
+                let display = path.display().to_string();
+                let stream = ReaderStream::new(file).map(move |result| {
+                    result.map_err(|error| {
+                        ResearchError::ArtifactIo {
+                            uri: display.clone(),
+                            detail: error.to_string(),
+                        }
+                        .into()
+                    })
+                });
+                Ok(Box::pin(stream))
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 Err(ResearchError::ArtifactNotFound {
                     uri: uri.as_str().to_owned(),
@@ -99,6 +129,31 @@ impl ArtifactStore for LocalArtifactStore {
             }
             Err(error) => Err(io_error(&path, &error).into()),
         }
+    }
+
+    async fn durability(&self, _uri: &ArtifactUri) -> QuantResult<ArtifactDurability> {
+        Ok(ArtifactDurability {
+            remote: false,
+            versioned: false,
+            object_locked: false,
+        })
+    }
+
+    async fn metadata(&self, uri: &ArtifactUri) -> QuantResult<ArtifactObjectMetadata> {
+        let path = self.path_from_uri(uri)?;
+        let metadata = fs::metadata(&path)
+            .await
+            .map_err(|error| io_error(&path, &error))?;
+        Ok(ArtifactObjectMetadata {
+            byte_size: metadata.len(),
+            etag: None,
+            version_id: None,
+            durability: ArtifactDurability {
+                remote: false,
+                versioned: false,
+                object_locked: false,
+            },
+        })
     }
 
     async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool> {

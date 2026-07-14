@@ -27,7 +27,8 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_research::pit::{
-    BookSnapshotAt, MarketContextAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
+    BookSnapshotAt, CanonicalBookEventRef, MarketContextAt, PointInTimeSnapshotSource,
+    ResolvedMarketSnapshot,
 };
 
 /// Frozen test-only projection of current in-memory ingest state.
@@ -113,6 +114,17 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             timestamp_ms: snapshot.timestamp_ms,
             version: snapshot.version,
             sequence: snapshot.version,
+            source_event: Some(CanonicalBookEventRef {
+                stream_session_id: uuid::Uuid::from_u128(1),
+                token_sequence: snapshot.version,
+                source_event_hash: CanonicalDigest::content_hash_json(&(
+                    token_id,
+                    snapshot.timestamp_ms,
+                    snapshot.version,
+                    snapshot.bids.as_ref(),
+                    snapshot.asks.as_ref(),
+                ))?,
+            }),
             available_at,
         }))
     }
@@ -141,6 +153,7 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             start_date: market.start_date,
             end_date: market.end_date,
             created_at: market.created_at,
+            fee_schedule: None,
         };
         Ok(Some(ResolvedMarketSnapshot {
             boundary: boundary.clone(),

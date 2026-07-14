@@ -584,12 +584,9 @@ fn cpcv_config_from_runtime(
             "research.validation.gates.dsr_significance",
             &validation.gates.dsr_significance.value,
         )?,
-        // Sell-side lot replay (Phase 11.5.1) fires on the exact same
-        // opportunistic-exit thresholds production uses — never a parallel
-        // CPCV-only policy that could drift from the live decision rule.
-        sell_policy: SellSignalPolicy::try_from_runtime(
-            &runtime.execution.exit_monitor.opportunistic_sell,
-        )?,
+        // Validate the scorer without policy thresholds. Executable policy
+        // fitting selects and validates the live thresholds later.
+        sell_policy: SellSignalPolicy::research_baseline(),
     })
 }
 

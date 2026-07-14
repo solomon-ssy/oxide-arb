@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 12),
+# They live in the versioned runtime configuration (schema_version = 13),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -168,6 +168,14 @@ max_blocks_per_tick = 2000
 max_blocks_per_request = 2000
 # Purpose: ClickHouse batch size. Default: 1000.
 batch_size = 1000
+# Purpose: PIT window re-read by the one-to-one WS/on-chain reconciler.
+reconciliation_lookback_secs = 3600
+# Purpose: maximum absolute event-time distance for an exact match.
+reconciliation_match_window_ms = 2000
+# Purpose: unmatched WS prints remain Pending until this age, then become unavailable.
+reconciliation_terminal_age_secs = 600
+# Purpose: hard row cap per reconciliation cycle; overflow fails, never truncates.
+reconciliation_max_rows = 100000
 
 # ── External Domain Sources (Phase 11.2.2 crypto vertical) ───────────────────
 # Runtime tunables (family enablement, availability lag, backfill depth, basis
@@ -324,11 +332,15 @@ wallet_kind = "eoa"
 
 # ── Research Plane (Phase 3) ──────────────────────────────────────────────────
 
-[research]
-# Purpose: local filesystem root for the artifact store (training datasets,
-# serialized model artifacts), addressed as `file://<artifact_root>/...`.
-# Default: "./var/artifacts".
-artifact_root = "./var/artifacts"
+[research.artifact_store]
+# Local: filesystem root. S3/MinIO: object key prefix.
+kind = "local"
+prefix = "./var/artifacts"
+bucket = ""
+region = "us-east-1"
+path_style = true
+require_object_lock = false
+require_versioning = false
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #

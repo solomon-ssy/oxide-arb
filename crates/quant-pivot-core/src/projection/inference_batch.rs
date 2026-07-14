@@ -111,7 +111,7 @@ pub fn build_runtime_input(
     }
 }
 
-/// Assemble a runtime batch directly from immutable v2 Parquet rows.
+/// Assemble a runtime batch directly from immutable v4 Parquet rows.
 ///
 /// This is the only training-dataset backtest input path. It consumes the
 /// frozen `FeatureCell`/factor bytes and frozen selection context verbatim;

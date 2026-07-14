@@ -420,17 +420,9 @@ pub struct OpportunisticSellPolicy {
     /// When true, the scorer runs and is audited but never submits an exit
     /// (fail-safe hold; SL/time/trailing/invalidation still apply).
     pub shadow_mode: bool,
-    /// Minimum scorer confidence to act (below ⇒ hold).
-    pub min_confidence: DecimalString,
-    /// Minimum expected exit alpha (bps over holding) to act (below ⇒ hold).
-    pub min_expected_alpha_bps: i64,
-    /// Minimum P(exit now beats hold) to act (below ⇒ hold).
-    pub min_p_exit_better: DecimalString,
-    /// Upper bound on the target cumulative exit fraction the model may request.
-    pub max_sell_pct: DecimalString,
-    /// Minimum incremental fraction (of entry-filled shares) worth submitting;
-    /// deltas below this are held to avoid dust exits and fee churn.
-    pub min_opportunistic_clip_pct: DecimalString,
+    /// Runtime safety cap on the policy-requested cumulative exit fraction.
+    /// It may only tighten the value frozen in the intent.
+    pub max_cumulative_exit_pct: DecimalString,
 }
 
 impl Default for OpportunisticSellPolicy {
@@ -438,11 +430,7 @@ impl Default for OpportunisticSellPolicy {
         Self {
             enabled: false,
             shadow_mode: true,
-            min_confidence: DecimalString::new("0.65"),
-            min_expected_alpha_bps: 50,
-            min_p_exit_better: DecimalString::new("0.50"),
-            max_sell_pct: DecimalString::new("1.0"),
-            min_opportunistic_clip_pct: DecimalString::new("0.1"),
+            max_cumulative_exit_pct: DecimalString::new("1.0"),
         }
     }
 }

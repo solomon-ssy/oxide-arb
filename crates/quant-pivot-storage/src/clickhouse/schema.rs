@@ -2,9 +2,9 @@
 
 pub fn all_ddl() -> Vec<String> {
     [
-        include_str!("sql/tick_events.sql"),
-        include_str!("sql/book_l2_replay_hot.sql"),
-        include_str!("sql/book_snapshots.sql"),
+        include_str!("sql/quant_book_stream_session.sql"),
+        include_str!("sql/quant_book_l2_event.sql"),
+        include_str!("sql/quant_book_l2_checkpoint.sql"),
         include_str!("sql/book_microstructure_1s.sql"),
         include_str!("sql/book_microstructure_1m.sql"),
         include_str!("sql/book_microstructure_1m_mv.sql"),

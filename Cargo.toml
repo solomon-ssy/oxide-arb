@@ -44,10 +44,15 @@ future_not_send = "allow"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
 # Pin to match polymarket_client_sdk_v2's `futures = "^0.3.32"` (futures-* crates
 # must share the same patch version).
 futures-util = "0.3.32"
+bytes = "1"
+bytecount = "0.6"
+object_store = { version = "0.14", features = ["aws", "tokio"] }
+aws-config = { version = "=1.8.14", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "=1.124.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "rustls"] }
 tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"] }
 
 # Serialization

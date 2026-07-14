@@ -160,6 +160,19 @@ pub struct SizingPlan {
 
 // ── Exit plan (parent §10 "when / how much to sell") ─────────────────────────
 
+/// Policy-fitted opportunistic exit rule frozen into recommendation and intent.
+///
+/// Runtime configuration may disable/shadow it or tighten the cumulative cap,
+/// but never supplies these decision thresholds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpportunisticExitPolicy {
+    pub min_confidence: Probability,
+    pub min_expected_alpha_bps: Bps,
+    pub min_p_exit_better: Probability,
+    pub max_cumulative_exit_pct: Decimal,
+    pub min_incremental_exit_pct: Decimal,
+}
+
 /// When and how a recommendation should be exited.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct ExitPlan {
@@ -181,6 +194,8 @@ pub struct ExitPlan {
     pub trailing_stop: Option<TrailingStopPolicy>,
     /// Frozen, machine-evaluable thesis invalidation policy.
     pub thesis_invalidation: ThesisInvalidationPolicy,
+    /// Policy-fitted advisory exit thresholds.
+    pub opportunistic_exit: OpportunisticExitPolicy,
     /// Whether the lot exits before resolution or holds through resolution.
     pub settlement_mode: ExitSettlementMode,
     /// Whether a resolved hold-to-resolution lot is redeemed automatically.
@@ -209,9 +224,11 @@ pub enum TradePlanBlocker {
     ArtifactHashMismatch,
     ArtifactFormatUnsupported,
     CohortNotFound,
+    CohortSelectorAmbiguous,
     NotionalTierUnavailable,
     CohortCoverageInsufficient,
     LiquidityInsufficient,
+    FeeScheduleUnavailable,
     TickMismatch,
     PriceOutsideVenueRange,
     ReturnModelUncalibrated,

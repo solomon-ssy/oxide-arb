@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
-        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, IntentCreationLimits, NewCapitalAllocation,
+        NewOperationLog, NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
     },
     enums::{execution::ApprovalInvalidation, quant::OrderIntentStatus},
     types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
@@ -25,6 +25,7 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         intent: NewOrderIntent,
         allocation: NewCapitalAllocation,
+        limits: Option<IntentCreationLimits>,
     ) -> Result<OrderIntentInfo, StorageError>;
 
     /// Approve a `PendingApproval` intent. Re-reads recommendation, report,

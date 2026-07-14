@@ -10,20 +10,20 @@ use quant_pivot_models::{
         MarketSubject, NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance,
         NewEquitySnapshot, NewOperationLog, NewPortfolioPlan, NewRecommendation,
         NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
-        PriceComparator, TradePolicyArtifactInfo, market::book::BookLevel,
+        PriceComparator, TradePolicyArtifactInfo,
     },
     enums::{
         common::{MarketCategory, TickSize},
         domain::LinkageSourceRole,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EmptyReportReason, EntryConditionState, IneligibilityReason, OutcomeSide,
-            PriceComparison, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
-            ReportKind,
+            EmptyReportReason, EntryConditionState, FillRequirement, IneligibilityReason,
+            OutcomeSide, PriceComparison, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, ReportKind,
         },
         rbac::ResourceType,
     },
-    hashing::canonical_state_hash,
+    hashing::{CanonicalDigest, canonical_state_hash},
     runtime_config::RuntimeConfig,
     types::{
         Bps, ClockAnchor, ClockCondition, ConditionTruth, ConfidenceSummary, ConfirmationPolicy,
@@ -40,13 +40,14 @@ use quant_pivot_models::{
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, PriceCondition, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
         RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, ScaleOutTarget, SizingPlan, ThesisInvalidationPolicy,
-        TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
-        WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
+        RiskEnvelope, RuntimeConfigVersionId, ScaleOutTarget, Shares, SizingPlan,
+        ThesisInvalidationPolicy, TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance,
+        TrailingStopPolicy, Usd, WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
         WeatherObservationDayClosedOutsideBand,
     },
 };
 use quant_pivot_research::{
+    execution_semantics::{BookWalkFill, LiquidityRole, PitFeeSchedule, walk_buy_exact_usd},
     features::MarketDecisionCapture,
     model::SignalCandidate,
     portfolio::{AccountSnapshot, PlannedRecommendation, RejectedCandidate},
@@ -484,6 +485,8 @@ struct ResolvedRecommendationPolicy {
     cohort: TradePolicyCohort,
     executable_entry_price: Price,
     worst_ask_price: Price,
+    notional_tier: Usd,
+    entry_shares: Shares,
 }
 
 fn resolve_recommendation_policy(
@@ -495,13 +498,16 @@ fn resolve_recommendation_policy(
     let Some(artifact) = input.trade_policy else {
         return Err(vec![TradePlanBlocker::ModelPolicyBindingMissing]);
     };
-    let (entry_price, worst_ask_price) =
-        ask_vwap_for_usd(&capture.book.asks, planned.sizing.suggested_usd)
-            .ok_or_else(|| vec![TradePlanBlocker::LiquidityInsufficient])?;
-    let liquidity_tier = match capture.market_context.depth_usd.inner() {
-        value if value >= Decimal::from(10_000) => "deep",
-        value if value >= Decimal::from(1_000) => "medium",
-        _ => "shallow",
+    let notional_tier = select_validated_tier(
+        &artifact.payload_json.cohorts,
+        capture.identity.category,
+        horizon_secs,
+        planned.sizing.suggested_usd,
+        planned.sizing.min_usd,
+    )?;
+    let fill = executable_entry_fill(capture, notional_tier, input.decision_at)?;
+    let (Some(entry_price), Some(worst_ask_price)) = (fill.vwap, fill.worst_price) else {
+        return Err(vec![TradePlanBlocker::LiquidityInsufficient]);
     };
     let candidates = artifact
         .payload_json
@@ -511,22 +517,25 @@ fn resolve_recommendation_policy(
         .filter(|(_, cohort)| {
             cohort.key.category == capture.identity.category
                 && cohort.key.horizon_secs == horizon_secs
-                && cohort.key.notional_tier == planned.sizing.suggested_usd
-                && cohort.key.liquidity.bucket_id == liquidity_tier
+                && cohort.key.notional_tier == notional_tier
                 && entry_price >= cohort.key.entry_price_min
                 && (entry_price < cohort.key.entry_price_max
                     || (cohort.key.entry_price_max == Price::ONE && entry_price == Price::ONE))
         })
         .collect::<Vec<_>>();
     let [(cohort_index, cohort)] = candidates.as_slice() else {
-        return Err(vec![TradePlanBlocker::CohortNotFound]);
+        return Err(vec![if candidates.is_empty() {
+            TradePlanBlocker::CohortNotFound
+        } else {
+            TradePlanBlocker::CohortSelectorAmbiguous
+        }]);
     };
     if cohort.executable_coverage
         < artifact
             .payload_json
             .fit_contract
             .quality_gate
-            .min_executable_coverage
+            .min_common_candidate_support
         || cohort.lower_confidence_utility_bps
             < Some(
                 artifact
@@ -550,34 +559,75 @@ fn resolve_recommendation_policy(
         cohort: (*cohort).clone(),
         executable_entry_price: entry_price,
         worst_ask_price,
+        notional_tier,
+        entry_shares: fill.filled_shares,
     })
 }
 
-fn ask_vwap_for_usd(asks: &[BookLevel], target: Usd) -> Option<(Price, Price)> {
-    if !target.is_positive() {
-        return None;
+fn select_validated_tier(
+    cohorts: &[TradePolicyCohort],
+    category: MarketCategory,
+    horizon_secs: u64,
+    risk_budget: Usd,
+    minimum_useful: Usd,
+) -> Result<Usd, Vec<TradePlanBlocker>> {
+    let mut tiers = cohorts
+        .iter()
+        .filter(|cohort| {
+            cohort.key.category == category
+                && cohort.key.horizon_secs == horizon_secs
+                && cohort.key.notional_tier <= risk_budget
+                && cohort.key.notional_tier >= minimum_useful
+        })
+        .map(|cohort| cohort.key.notional_tier)
+        .collect::<Vec<_>>();
+    tiers.sort_unstable();
+    tiers.dedup();
+    tiers
+        .pop()
+        .ok_or_else(|| vec![TradePlanBlocker::NotionalTierUnavailable])
+}
+
+fn executable_entry_fill(
+    capture: &MarketDecisionCapture,
+    target: Usd,
+    decision_at: DateTime<Utc>,
+) -> Result<BookWalkFill, Vec<TradePlanBlocker>> {
+    let fee = capture
+        .market
+        .fee_schedule
+        .as_ref()
+        .ok_or_else(|| vec![TradePlanBlocker::FeeScheduleUnavailable])?;
+    let schedule_hash = CanonicalDigest::content_hash_json(fee)
+        .map_err(|_| vec![TradePlanBlocker::FeeScheduleUnavailable])?;
+    let schedule = PitFeeSchedule {
+        schedule_hash,
+        effective_at: capture.market.effective_at,
+        available_at: capture.market.available_at,
+        platform_rate: if fee.fees_enabled {
+            fee.fee_rate
+        } else {
+            Decimal::ZERO
+        },
+        exponent: fee.exponent,
+        taker_only: fee.taker_only,
+        builder_maker_fee_bps: Bps::ZERO,
+        builder_taker_fee_bps: Bps::ZERO,
+    };
+    let fill = walk_buy_exact_usd(
+        &capture.book.asks,
+        target,
+        Price::ONE,
+        FillRequirement::AllOrNothing,
+        &schedule,
+        LiquidityRole::Taker,
+        decision_at,
+    )
+    .map_err(|_| vec![TradePlanBlocker::FeeScheduleUnavailable])?;
+    if fill.vwap.is_none() || fill.worst_price.is_none() {
+        return Err(vec![TradePlanBlocker::LiquidityInsufficient]);
     }
-    let mut remaining = target.inner();
-    let mut shares = Decimal::ZERO;
-    let mut worst = None;
-    for level in asks {
-        if remaining <= Decimal::ZERO {
-            break;
-        }
-        let price = level.price_decimal();
-        if !price.is_positive() || !level.size_decimal().is_positive() {
-            continue;
-        }
-        let available_usd = price.inner() * level.size_decimal().inner();
-        let spend = available_usd.min(remaining);
-        shares += spend / price.inner();
-        remaining -= spend;
-        worst = Some(price);
-    }
-    if remaining > Decimal::ZERO || shares <= Decimal::ZERO {
-        return None;
-    }
-    Some((Price::new(target.inner() / shares), worst?))
+    Ok(fill)
 }
 
 struct MaterializedEntryPlan {
@@ -644,11 +694,13 @@ fn policy_entry_plan(context: EntryPlanMaterialization<'_>) -> QuantResult<Mater
         }
     };
     let order_policy = match policy.cohort.entry_order {
-        EntryOrderTemplate::Passive { post_only } => EntryOrderPolicy::Passive {
-            limit_price: policy.executable_entry_price,
-            post_only,
+        EntryOrderTemplate::PassivePostOnly { placement, .. } => EntryOrderPolicy::Passive {
+            limit_price: passive_limit_price(&capture.book, tick_size, placement)?,
+            post_only: true,
         },
-        EntryOrderTemplate::Aggressive { fill_requirement } => EntryOrderPolicy::Aggressive {
+        EntryOrderTemplate::Aggressive {
+            fill_requirement, ..
+        } => EntryOrderPolicy::Aggressive {
             worst_price: policy.worst_ask_price,
             fill_requirement,
         },
@@ -669,6 +721,45 @@ fn policy_entry_plan(context: EntryPlanMaterialization<'_>) -> QuantResult<Mater
     };
     align_entry_plan_to_tick(&mut plan, tick_size);
     Ok(MaterializedEntryPlan { plan, artifact })
+}
+
+fn passive_limit_price(
+    book: &quant_pivot_research::features::ResolvedBook,
+    tick_size: TickSize,
+    placement: quant_pivot_models::types::PassivePlacement,
+) -> QuantResult<Price> {
+    let best_bid = book
+        .bids
+        .first()
+        .map(|level| level.price_decimal())
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "entry_execution",
+            detail: "passive entry requires a best bid".to_owned(),
+        })?;
+    let best_ask = book
+        .asks
+        .first()
+        .map(|level| level.price_decimal())
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "entry_execution",
+            detail: "passive entry requires a best ask".to_owned(),
+        })?;
+    let price = match placement {
+        quant_pivot_models::types::PassivePlacement::JoinBestBid => best_bid,
+        quant_pivot_models::types::PassivePlacement::ImproveBestBidByTicks { ticks } => {
+            let improved = best_bid.inner() + tick_size.as_decimal() * Decimal::from(ticks);
+            Price::new(improved.min(best_ask.inner() - tick_size.as_decimal()))
+        }
+    };
+    if price <= Price::ZERO || price >= best_ask {
+        return Err(ReportError::InvariantViolation {
+            stage: "entry_execution",
+            detail: "passive post-only placement would cross or leave the valid price range"
+                .to_owned(),
+        }
+        .into());
+    }
+    Ok(price)
 }
 
 struct ConditionArtifactInput<'a> {
@@ -1131,6 +1222,7 @@ fn policy_exit_plan(
             min_expected_return_bps: policy.cohort.min_expected_return_bps,
             require_execution_eligibility: policy.cohort.require_execution_eligibility,
         },
+        opportunistic_exit: policy.cohort.opportunistic_exit.clone(),
         settlement_mode: policy.cohort.settlement_mode,
         redeem_policy: policy.cohort.redeem_policy,
         manual_review_at: None,
@@ -1357,6 +1449,7 @@ fn build_recommendation_trade_plan(
     let trade_policy_available = policy.is_ok();
     let (trade_plan, artifact) = match policy {
         Ok(policy) => {
+            let sizing = tier_aligned_sizing(&planned.sizing, &policy);
             let entry = policy_entry_plan(EntryPlanMaterialization {
                 recommendation_id,
                 published_at: input.published_at,
@@ -1373,7 +1466,7 @@ fn build_recommendation_trade_plan(
                 RecommendationTradePlan::Frozen {
                     policy: Box::new(policy.provenance),
                     entry: entry.plan,
-                    sizing: Box::new(planned.sizing.clone()),
+                    sizing: Box::new(sizing),
                     exit: Box::new(exit),
                     risk_envelope: Box::new(risk_envelope),
                 },
@@ -1383,6 +1476,28 @@ fn build_recommendation_trade_plan(
         Err(blockers) => (RecommendationTradePlan::Unavailable { blockers }, None),
     };
     Ok((trade_plan, artifact, trade_policy_available))
+}
+
+fn tier_aligned_sizing(sizing: &SizingPlan, policy: &ResolvedRecommendationPolicy) -> SizingPlan {
+    let ratio = policy.notional_tier.inner() / sizing.suggested_usd.inner();
+    let replace_allocation = |exposure: Usd| {
+        Usd::new(
+            (exposure.inner() - sizing.suggested_usd.inner() + policy.notional_tier.inner())
+                .max(Decimal::ZERO),
+        )
+    };
+    let mut aligned = sizing.clone();
+    aligned.suggested_usd = policy.notional_tier;
+    aligned.suggested_shares = policy.entry_shares;
+    aligned.portfolio_weight_pct *= ratio;
+    aligned.market_exposure_after_usd = replace_allocation(sizing.market_exposure_after_usd);
+    aligned.event_exposure_after_usd = replace_allocation(sizing.event_exposure_after_usd);
+    aligned.category_exposure_after_usd = replace_allocation(sizing.category_exposure_after_usd);
+    aligned.sizing_reason = format!(
+        "{}; rounded down to validated policy tier {}",
+        sizing.sizing_reason, policy.notional_tier
+    );
+    aligned
 }
 
 struct ConditionInstanceProjection {

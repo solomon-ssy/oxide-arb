@@ -50,23 +50,53 @@ impl ArchivePartitionRepository for PgArchivePartitionRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn find_manifests_in_range(
+        &self,
+        table_name: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<ArchivePartitionManifestInfo>, StorageError> {
+        if from >= to {
+            return Err(invariant("archive manifest query range must be non-empty"));
+        }
+        quant_archive_partition_manifest::Entity::find()
+            .filter(quant_archive_partition_manifest::Column::TableName.eq(table_name))
+            .filter(quant_archive_partition_manifest::Column::PartitionStartAt.lt(to))
+            .filter(quant_archive_partition_manifest::Column::PartitionEndAt.gt(from))
+            .order_by_asc(quant_archive_partition_manifest::Column::PartitionStartAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
     async fn seal_manifest(
         &self,
         manifest: NewArchivePartitionManifest,
     ) -> Result<ArchivePartitionManifestInfo, StorageError> {
-        if manifest.row_count <= 0 || manifest.retention_days <= 0 {
+        if manifest.row_count <= 0
+            || manifest.parquet_byte_count <= 0
+            || manifest.retention_days <= 0
+            || manifest.partition_start_at >= manifest.partition_end_at
+        {
             return Err(invariant(
-                "archive manifest count and retention must be positive",
+                "archive manifest range, counts, and retention are invalid",
             ));
         }
         let expected_hash = CanonicalDigest::content_hash_json(&(
             &manifest.table_name,
             &manifest.partition_key,
+            manifest.partition_start_at,
+            manifest.partition_end_at,
             manifest.retention_days,
             manifest.row_count,
             &manifest.parquet_uri,
+            manifest.parquet_byte_count,
+            &manifest.object_etag,
+            &manifest.object_version_id,
             &manifest.byte_hash,
             &manifest.content_hash,
+            &manifest.source_schema_hash,
             manifest.sealed_at,
         ))
         .map_err(|error| invariant(error.to_string()))?;
@@ -99,9 +129,15 @@ impl ArchivePartitionRepository for PgArchivePartitionRepository {
             .ok_or_else(|| invariant("sealed archive manifest disappeared"))?;
         if stored.row_count != manifest.row_count
             || stored.retention_days != manifest.retention_days
+            || stored.partition_start_at != manifest.partition_start_at
+            || stored.partition_end_at != manifest.partition_end_at
             || stored.parquet_uri != manifest.parquet_uri
+            || stored.parquet_byte_count != manifest.parquet_byte_count
+            || stored.object_etag != manifest.object_etag
+            || stored.object_version_id != manifest.object_version_id
             || stored.byte_hash != manifest.byte_hash
             || stored.content_hash != manifest.content_hash
+            || stored.source_schema_hash != manifest.source_schema_hash
         {
             return Err(invariant(
                 "partition already has a different immutable archive manifest",

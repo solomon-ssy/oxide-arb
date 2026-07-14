@@ -243,7 +243,9 @@ impl From<QuantError> for WebError {
             QuantError::Execution(execution) => execution.into(),
             QuantError::NotImplemented(detail) => Self::NotImplemented(detail),
             QuantError::Infra(ref infra) => match infra {
-                InfraError::MetricsRegistration { .. } | InfraError::ChannelClosed { .. } => {
+                InfraError::MetricsRegistration { .. }
+                | InfraError::ChannelClosed { .. }
+                | InfraError::ChannelTimeout { .. } => {
                     Self::ServiceUnavailable("service temporarily unavailable".to_owned())
                 }
                 InfraError::ServerBind { .. }

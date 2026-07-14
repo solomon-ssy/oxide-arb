@@ -217,7 +217,6 @@ impl ExitMonitorService {
         .await;
 
         let emergency_policy = self.emergency_policy();
-        let min_opportunistic_clip_pct = self.opportunistic_clip_pct();
         let input = ExitMonitorInput {
             lot: lot.clone(),
             exit_policy: intent.exit_policy_json.clone(),
@@ -229,7 +228,6 @@ impl ExitMonitorService {
             peak_mark_price,
             signal: signal.verdict.clone(),
             scale_out_state: intent.scale_out_state.clone(),
-            min_opportunistic_clip_pct,
             now,
         };
 
@@ -279,21 +277,6 @@ impl ExitMonitorService {
             .kill_switch
             .emergency_exit
             .clone()
-    }
-
-    /// The live opportunistic min-clip fraction (fail-safe `0` on a malformed
-    /// snapshot — config validation rejects that at load).
-    fn opportunistic_clip_pct(&self) -> rust_decimal::Decimal {
-        self.deps
-            .config
-            .current()
-            .execution
-            .exit_monitor
-            .opportunistic_sell
-            .min_opportunistic_clip_pct
-            .value
-            .parse()
-            .unwrap_or(rust_decimal::Decimal::ZERO)
     }
 
     async fn touch_lot_monitor(

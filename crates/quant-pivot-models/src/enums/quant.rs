@@ -969,9 +969,7 @@ wire_enum! {
     /// A single variant today (`MfeMae`): the system's Kelly/TP-SL structure
     /// already treats "downside" as a stop distance, not a binary-settlement
     /// full loss, so `MfeMae` (the empirical max-adverse-excursion label) is
-    /// the semantically correct v1 source. `EmpiricalCVaR` is added as a real
-    /// second variant once Phase 11.7 triple-barrier labeling lands (not
-    /// pre-declared now — zero dead semantics).
+    /// the semantically correct source.
     @derive(Default, schemars::JsonSchema)
     pub enum DownsideSource {
         /// Mean `max_adverse_excursion_bps` observed in the calibration split's
@@ -996,6 +994,8 @@ pg_enum! {
         #[default]
         Training => "training",
         Calibration => "calibration",
+        /// Raw PIT observations used exclusively to fit an executable policy.
+        PolicyFit => "policy_fit",
     }
 }
 

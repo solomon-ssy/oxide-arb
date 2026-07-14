@@ -248,7 +248,16 @@ impl ResearchJobPort for CoreResearchJobPort {
         request: FitTradePolicyRequest,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
-        let runtime_config_version_id = Some(request.contract.runtime_config_version_id.clone());
+        let dataset = self
+            .training_datasets
+            .find_by_id(&request.selection.source_dataset_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "training_dataset",
+                id: request.selection.source_dataset_id.to_string(),
+            })?;
+        let runtime_config_version_id = Some(dataset.runtime_config_version_id);
         let params = to_params(&request)?;
         let job = self.new_job(
             ResearchJobKind::TradePolicyFit,

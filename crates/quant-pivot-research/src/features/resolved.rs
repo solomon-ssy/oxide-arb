@@ -22,7 +22,7 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 
-use crate::pit::{BookSnapshotAt, MarketContextAt};
+use crate::pit::{BookSnapshotAt, CanonicalBookEventRef, MarketContextAt};
 
 /// A pre-fetched, point-in-time-bounded trade-tape window for one market.
 #[derive(Debug, Clone)]
@@ -130,6 +130,8 @@ pub struct ResolvedBook {
     pub version: u64,
     /// Stable source sequence of the persisted snapshot.
     pub sequence: u64,
+    /// Canonical L2 event identity for governed replay evidence.
+    pub source_event: Option<CanonicalBookEventRef>,
     /// Source-effective timestamp of the snapshot (`<= source_cutoff`).
     pub effective_at: DateTime<Utc>,
     /// Time at which the snapshot became visible (`<= decision_at`).
@@ -279,6 +281,7 @@ impl TryFrom<BookSnapshotAt> for ResolvedBook {
             timestamp_ms: snapshot.timestamp_ms,
             version: snapshot.version,
             sequence: snapshot.sequence,
+            source_event: snapshot.source_event,
             effective_at,
             available_at: snapshot.available_at,
         })
@@ -313,6 +316,8 @@ pub struct ResolvedMarketContext {
     pub end_date: Option<DateTime<Utc>>,
     /// Upstream catalog creation time, when the source supplied one.
     pub created_at: Option<DateTime<Utc>>,
+    /// Point-in-time fee schedule from the same catalog revision.
+    pub fee_schedule: Option<quant_pivot_models::domain::fee::MarketFeeSchedule>,
 }
 
 impl ResolvedMarketContext {
@@ -328,6 +333,7 @@ impl ResolvedMarketContext {
             start_date: info.start_date,
             end_date: info.end_date,
             created_at: info.created_at,
+            fee_schedule: info.fee_schedule.clone(),
         }
     }
 }
@@ -343,6 +349,7 @@ impl From<MarketContextAt> for ResolvedMarketContext {
             start_date: context.start_date,
             end_date: context.end_date,
             created_at: context.created_at,
+            fee_schedule: context.fee_schedule,
         }
     }
 }

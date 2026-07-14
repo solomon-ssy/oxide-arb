@@ -218,10 +218,7 @@ pub async fn microstructure(
             no.push(MicrostructureBucket::from_row(row));
         }
     }
-    let trades = trades
-        .into_iter()
-        .filter_map(MarketTradeTick::from_row)
-        .collect();
+    let trades = trades.into_iter().map(MarketTradeTick::from_row).collect();
     Ok(WebResponse::ok(MarketMicrostructureView {
         market_id: market.market_id.clone(),
         yes_token_id: market.yes_token_id.clone(),

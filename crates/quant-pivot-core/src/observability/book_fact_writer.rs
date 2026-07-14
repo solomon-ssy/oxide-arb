@@ -4,43 +4,63 @@ use chrono::Utc;
 use dashmap::{DashMap, mapref::entry::Entry};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice,
-        ChSchemaVersion, ChShares, ChUsd, MarketResolutionRow, TickEventRow,
+        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow, ChBps,
+        ChDecimal64, ChPrice, ChSchemaVersion, ChShares, ChUsd, MarketResolutionRow, TradeTapeRow,
     },
     domain::{
         book::{BookLevel, BookSnapshot, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
-        pipeline::{BookSnapshotCmd, PriceDeltaCmd},
+        pipeline::{BookSnapshotCmd, IngressTrace, PriceDeltaCmd},
+        trade_tape::trade_tape_coverage,
     },
-    enums::clickhouse::{ChBookEventType, ChFactSource, ChSnapshotReason},
+    enums::clickhouse::{
+        ChBookEventType, ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason,
+        ChStreamSessionState, ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide,
+        ChTradeTapeSource,
+    },
     enums::common::{Side, TickSize},
-    enums::system::ShardConnectionStatus,
     hashing::CanonicalDigest,
-    types::{ContentHash, MarketId, Price, TokenId, Usd},
+    types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
 };
-use quant_pivot_storage::write::AsyncWriter;
+use quant_pivot_storage::write::{AsyncWriter, DurableWriter};
 use rust_decimal::Decimal;
 use serde::Serialize;
-use std::{mem, sync::Arc};
+use std::{mem, sync::Arc, time::Duration};
+use uuid::Uuid;
+
+const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+const L2_SCHEMA_VERSION: ChSchemaVersion = ChSchemaVersion(2);
 
 pub struct BookFactWriter {
-    ticks: Arc<AsyncWriter<TickEventRow>>,
-    l2: Arc<AsyncWriter<BookL2ReplayRow>>,
-    snapshots: Arc<AsyncWriter<BookSnapshotRow>>,
+    l2: Arc<DurableWriter<BookL2EventRow>>,
+    checkpoints: Arc<DurableWriter<BookL2CheckpointRow>>,
+    sessions: Arc<DurableWriter<BookStreamSessionRow>>,
+    trades: Arc<DurableWriter<TradeTapeRow>>,
     microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
     resolutions: Arc<AsyncWriter<MarketResolutionRow>>,
     microstructure_pending: DashMap<TokenId, BookMicrostructureRow>,
 }
 
+pub(crate) struct MarketWsTradeFact<'a> {
+    pub token_id: &'a TokenId,
+    pub market_id: MarketId,
+    pub price: Price,
+    pub side: Option<Side>,
+    pub trade_size: Option<Shares>,
+    pub fee_rate_bps: Option<Decimal>,
+    pub timestamp_ms: u64,
+    pub trace: IngressTrace,
+}
+
 struct SnapshotLevels<'a> {
     token_id: &'a TokenId,
     market_id: Option<MarketId>,
-    reason: ChSnapshotReason,
     bids: &'a [BookLevel],
     asks: &'a [BookLevel],
     event_time: i64,
-    ingestion_time: i64,
+    stream_session_id: Uuid,
+    token_sequence: u64,
     book_version: u64,
-    source: ChFactSource,
+    source_event_hash: ContentHash,
 }
 
 #[derive(Serialize)]
@@ -75,16 +95,18 @@ struct HashChange {
 
 impl BookFactWriter {
     pub fn new(
-        tick_writer: Arc<AsyncWriter<TickEventRow>>,
-        l2_writer: Arc<AsyncWriter<BookL2ReplayRow>>,
-        snapshot_writer: Arc<AsyncWriter<BookSnapshotRow>>,
+        l2_writer: Arc<DurableWriter<BookL2EventRow>>,
+        checkpoint_writer: Arc<DurableWriter<BookL2CheckpointRow>>,
+        session_writer: Arc<DurableWriter<BookStreamSessionRow>>,
+        trade_writer: Arc<DurableWriter<TradeTapeRow>>,
         microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
         resolution_writer: Arc<AsyncWriter<MarketResolutionRow>>,
     ) -> Self {
         Self {
-            ticks: tick_writer,
             l2: l2_writer,
-            snapshots: snapshot_writer,
+            checkpoints: checkpoint_writer,
+            sessions: session_writer,
+            trades: trade_writer,
             microstructure_1s: microstructure_1s_writer,
             resolutions: resolution_writer,
             microstructure_pending: DashMap::new(),
@@ -105,19 +127,20 @@ impl BookFactWriter {
         }
     }
 
-    pub fn write_snapshot(
+    pub fn write_snapshot_event(
         &self,
         cmd: &BookSnapshotCmd,
         market_id: Option<MarketId>,
-        book_version: u64,
-    ) {
-        let ingestion_time = Utc::now().timestamp_millis();
-        let levels_count =
-            u16::try_from(cmd.bids.levels.len() + cmd.asks.levels.len()).unwrap_or(u16::MAX);
-        let l2 = BookL2ReplayRow {
+    ) -> Option<ContentHash> {
+        let payload_hash = snapshot_feed_event_hash(cmd)?;
+        let persisted_time = Utc::now().timestamp_millis();
+        let l2 = BookL2EventRow {
+            stream_session_id: cmd.trace.stream_session_id,
+            shard_id: cmd.trace.shard_id,
             token_id: cmd.asset_id.clone(),
-            market_id: market_id.clone(),
-            event_type: ChBookEventType::Snapshot,
+            market_id,
+            token_sequence: cmd.trace.token_sequence,
+            event_type: ChCanonicalBookEventType::Snapshot,
             bid_prices: cmd
                 .bids
                 .levels
@@ -142,66 +165,50 @@ impl BookFactWriter {
                 .iter()
                 .map(|level| ChShares::from(level.size_decimal()))
                 .collect(),
-            book_version,
-            levels_count,
-            is_full_snapshot: true,
-            event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time,
-            sequence: book_version,
-            source: ChFactSource::WsSnapshot,
-            feed_event_hash: snapshot_feed_event_hash(cmd),
-            schema_version: ChSchemaVersion::FIRST,
+            book_version: cmd.trace.token_sequence,
+            old_tick_size: None,
+            new_tick_size: None,
+            venue_event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
+            ingress_time: cmd.trace.ingress_time_ms,
+            persisted_time,
+            payload_hash: payload_hash.clone(),
+            schema_version: L2_SCHEMA_VERSION,
         };
-        self.l2.write(l2);
-        let snapshot = BookSnapshot::new(
-            Arc::clone(&cmd.bids.levels),
-            Arc::clone(&cmd.asks.levels),
-            cmd.timestamp_ms,
-            book_version,
-        );
-        self.write_microstructure_observation(
-            &cmd.asset_id,
-            market_id.clone(),
-            &snapshot,
-            ChBookEventType::Snapshot,
-            0,
-        );
-        self.write_snapshot_levels(SnapshotLevels {
-            token_id: &cmd.asset_id,
-            market_id,
-            reason: ChSnapshotReason::WsSnapshot,
-            bids: &cmd.bids.levels,
-            asks: &cmd.asks.levels,
-            event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time,
-            book_version,
-            source: ChFactSource::WsSnapshot,
-        });
+        self.l2
+            .write_timeout(l2, CANONICAL_WRITE_TIMEOUT)
+            .ok()
+            .map(|()| payload_hash)
     }
 
-    pub fn write_published_snapshot(
+    pub fn write_checkpoint(
         &self,
         token_id: &TokenId,
         market_id: Option<MarketId>,
-        reason: ChSnapshotReason,
         snapshot: &BookSnapshot,
-    ) {
-        let now_ms = Utc::now().timestamp_millis();
+        stream_session_id: Uuid,
+        token_sequence: u64,
+        source_event_hash: ContentHash,
+    ) -> bool {
         self.write_snapshot_levels(SnapshotLevels {
             token_id,
             market_id,
-            reason,
             bids: &snapshot.bids,
             asks: &snapshot.asks,
             event_time: i64::try_from(snapshot.timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time: now_ms,
+            stream_session_id,
+            token_sequence,
             book_version: snapshot.version,
-            source: ChFactSource::QuantPipeline,
-        });
+            source_event_hash,
+        })
     }
 
-    pub fn write_delta(&self, cmd: &PriceDeltaCmd, market_id: Option<MarketId>, book_version: u64) {
-        let ingestion_time = Utc::now().timestamp_millis();
+    pub fn write_delta_event(
+        &self,
+        cmd: &PriceDeltaCmd,
+        market_id: Option<MarketId>,
+    ) -> Option<ContentHash> {
+        let payload_hash = delta_feed_event_hash(cmd)?;
+        let persisted_time = Utc::now().timestamp_millis();
         let mut bid_prices = Vec::new();
         let mut bid_sizes = Vec::new();
         let mut ask_prices = Vec::new();
@@ -215,28 +222,30 @@ impl BookFactWriter {
                 ask_sizes.push(ChShares::from(change.size));
             }
         }
-        let row = BookL2ReplayRow {
+        let row = BookL2EventRow {
+            stream_session_id: cmd.trace.stream_session_id,
+            shard_id: cmd.trace.shard_id,
             token_id: cmd.asset_id.clone(),
             market_id,
-            event_type: ChBookEventType::Delta,
+            token_sequence: cmd.trace.token_sequence,
+            event_type: ChCanonicalBookEventType::Delta,
             bid_prices,
             bid_sizes,
             ask_prices,
             ask_sizes,
-            book_version,
-            levels_count: u16::try_from(cmd.changes.len()).unwrap_or(u16::MAX),
-            is_full_snapshot: false,
-            event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time,
-            sequence: book_version,
-            source: ChFactSource::WsDelta,
-            feed_event_hash: delta_feed_event_hash(cmd),
-            schema_version: ChSchemaVersion::FIRST,
+            book_version: cmd.trace.token_sequence,
+            old_tick_size: None,
+            new_tick_size: None,
+            venue_event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
+            ingress_time: cmd.trace.ingress_time_ms,
+            persisted_time,
+            payload_hash: payload_hash.clone(),
+            schema_version: L2_SCHEMA_VERSION,
         };
-        self.l2.write(row);
-        // Full-book microstructure must be generated from the published
-        // snapshot after deltas are applied; callers pass it via
-        // `write_microstructure_snapshot`.
+        self.l2
+            .write_timeout(row, CANONICAL_WRITE_TIMEOUT)
+            .ok()
+            .map(|()| payload_hash)
     }
 
     pub fn write_microstructure_snapshot(
@@ -256,93 +265,130 @@ impl BookFactWriter {
         );
     }
 
-    pub fn write_bbo(
-        &self,
-        token_id: &TokenId,
-        market_id: Option<MarketId>,
-        best_bid: Price,
-        best_ask: Price,
-        timestamp_ms: u64,
-    ) {
-        self.ticks.write(TickEventRow {
-            token_id: token_id.clone(),
-            market_id,
-            event_type: ChBookEventType::Bbo,
-            best_bid: Some(ChPrice::from(best_bid)),
-            best_ask: Some(ChPrice::from(best_ask)),
-            last_trade_price: None,
-            bid_depth_usd: None,
-            ask_depth_usd: None,
-            spread_bps: spread_bps(Some(best_bid), Some(best_ask)).map(ChBps::from),
-            book_version: 0,
-            raw_payload_json: None,
-            event_time: i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time: Utc::now().timestamp_millis(),
-            sequence: timestamp_ms,
-            source: ChFactSource::WsBbo,
-            schema_version: ChSchemaVersion::FIRST,
-        });
-    }
-
     pub fn write_tick_size_change(
         &self,
         token_id: &TokenId,
         market_id: Option<MarketId>,
         old_tick: TickSize,
         new_tick: TickSize,
-    ) {
+        trace: quant_pivot_models::domain::pipeline::IngressTrace,
+    ) -> bool {
+        let payload_hash = CanonicalDigest::content_hash_json(&serde_json::json!({
+            "event_type": "tick_size_change",
+            "token_id": token_id,
+            "old_tick": old_tick,
+            "new_tick": new_tick,
+            "token_sequence": trace.token_sequence,
+        }));
+        let Ok(payload_hash) = payload_hash else {
+            return false;
+        };
         let now_ms = Utc::now().timestamp_millis();
-        self.ticks.write(TickEventRow {
-            token_id: token_id.clone(),
-            market_id,
-            event_type: ChBookEventType::TickSizeChange,
-            best_bid: None,
-            best_ask: None,
-            last_trade_price: None,
-            bid_depth_usd: None,
-            ask_depth_usd: None,
-            spread_bps: None,
-            book_version: 0,
-            raw_payload_json: Some(
-                serde_json::json!({
-                    "old_tick": old_tick,
-                    "new_tick": new_tick,
-                })
-                .to_string(),
-            ),
-            event_time: now_ms,
-            ingestion_time: now_ms,
-            sequence: u64::try_from(now_ms).unwrap_or(u64::MAX),
-            source: ChFactSource::WsTickSize,
-            schema_version: ChSchemaVersion::FIRST,
-        });
+        self.l2
+            .write_timeout(
+                BookL2EventRow {
+                    stream_session_id: trace.stream_session_id,
+                    shard_id: trace.shard_id,
+                    token_id: token_id.clone(),
+                    market_id,
+                    token_sequence: trace.token_sequence,
+                    event_type: ChCanonicalBookEventType::TickSizeChange,
+                    bid_prices: Vec::new(),
+                    bid_sizes: Vec::new(),
+                    ask_prices: Vec::new(),
+                    ask_sizes: Vec::new(),
+                    book_version: trace.token_sequence,
+                    old_tick_size: Some(ChPrice::from(Price::new(old_tick.as_decimal()))),
+                    new_tick_size: Some(ChPrice::from(Price::new(new_tick.as_decimal()))),
+                    venue_event_time: i64::try_from(trace.ws_timestamp_ms).unwrap_or(i64::MAX),
+                    ingress_time: trace.ingress_time_ms,
+                    persisted_time: now_ms,
+                    payload_hash,
+                    schema_version: L2_SCHEMA_VERSION,
+                },
+                CANONICAL_WRITE_TIMEOUT,
+            )
+            .is_ok()
     }
 
-    pub fn write_last_trade(
-        &self,
-        token_id: &TokenId,
-        market_id: Option<MarketId>,
-        price: Price,
-        timestamp_ms: u64,
-    ) {
-        self.ticks.write(TickEventRow {
-            token_id: token_id.clone(),
+    pub(crate) fn write_last_trade(&self, fact: MarketWsTradeFact<'_>) -> bool {
+        let MarketWsTradeFact {
+            token_id,
             market_id,
-            event_type: ChBookEventType::LastTrade,
-            best_bid: None,
-            best_ask: None,
-            last_trade_price: Some(ChPrice::from(price)),
-            bid_depth_usd: None,
-            ask_depth_usd: None,
-            spread_bps: None,
-            book_version: 0,
-            raw_payload_json: Some(serde_json::json!({ "price": price }).to_string()),
-            event_time: i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time: Utc::now().timestamp_millis(),
-            sequence: timestamp_ms,
-            source: ChFactSource::WsLastTrade,
-            schema_version: ChSchemaVersion::FIRST,
+            price,
+            side,
+            trade_size,
+            fee_rate_bps,
+            timestamp_ms,
+            trace,
+        } = fact;
+        let payload = serde_json::json!({
+            "event_type": "last_trade",
+            "market_id": market_id,
+            "token_id": token_id,
+            "price": price,
+            "side": side,
+            "size": trade_size,
+            "fee_rate_bps": fee_rate_bps,
+            "timestamp_ms": timestamp_ms,
+            "stream_session_id": trace.stream_session_id,
+            "token_sequence": trace.token_sequence,
         });
+        let Ok(source_event_id) = CanonicalDigest::content_hash_json(&payload) else {
+            return false;
+        };
+        let size_shares = trade_size.unwrap_or(Shares::ZERO);
+        let mut observed_field_flags = trade_tape_coverage::MARKET_ID
+            | trade_tape_coverage::TOKEN_ID
+            | trade_tape_coverage::PRICE
+            | trade_tape_coverage::TRADE_ID;
+        if side.is_some() {
+            observed_field_flags |= trade_tape_coverage::SIDE;
+        }
+        if trade_size.is_some() {
+            observed_field_flags |= trade_tape_coverage::SIZE;
+        }
+        if fee_rate_bps.is_some() {
+            observed_field_flags |= trade_tape_coverage::FEE_RATE;
+        }
+        self.trades
+            .write_timeout(
+                TradeTapeRow {
+                    market_id,
+                    token_id: token_id.clone(),
+                    event_time: i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
+                    ingestion_time: Utc::now().timestamp_millis(),
+                    stream_session_id: Some(trace.stream_session_id),
+                    token_sequence: Some(trace.token_sequence),
+                    participant_address: String::new(),
+                    participant_role: ChTradeParticipantRole::Unknown,
+                    side: match side {
+                        Some(Side::Buy) => ChTradeSide::Buy,
+                        Some(Side::Sell) => ChTradeSide::Sell,
+                        None => ChTradeSide::Unknown,
+                    },
+                    price: ChPrice::from(price),
+                    size_shares: ChShares::from(size_shares),
+                    notional_usd: ChUsd::from(Usd::new(price.inner() * size_shares.inner())),
+                    tx_hash: None,
+                    source_event_id: source_event_id.to_string(),
+                    source: ChTradeTapeSource::MarketWs,
+                    observed_field_flags,
+                    fee_rate_bps: fee_rate_bps.map(ChBps::from),
+                    reconciliation_status: if side.is_some() && trade_size.is_some() {
+                        ChTradeReconciliationStatus::Pending
+                    } else {
+                        ChTradeReconciliationStatus::Unavailable
+                    },
+                    matched_source_event_id: None,
+                    revision: 1,
+                    reconciled_at: None,
+                    raw_payload_json: Some(payload.to_string()),
+                    schema_version: TradeTapeRow::SCHEMA_VERSION,
+                },
+                CANONICAL_WRITE_TIMEOUT,
+            )
+            .is_ok()
     }
 
     /// Append the authoritative settlement event to the typed
@@ -373,61 +419,124 @@ impl BookFactWriter {
         });
     }
 
-    pub fn write_shard_status(&self, shard_id: usize, status: ShardConnectionStatus) {
-        let now_ms = Utc::now().timestamp_millis();
-        self.ticks.write(TickEventRow {
-            token_id: TokenId::new(format!("__ws_shard_{shard_id}")),
-            market_id: None,
-            event_type: ChBookEventType::ShardStatus,
-            best_bid: None,
-            best_ask: None,
-            last_trade_price: None,
-            bid_depth_usd: None,
-            ask_depth_usd: None,
-            spread_bps: None,
-            book_version: 0,
-            raw_payload_json: Some(
-                serde_json::json!({
-                    "shard_id": shard_id,
-                    "status": status,
-                })
-                .to_string(),
-            ),
-            event_time: now_ms,
-            ingestion_time: now_ms,
-            sequence: u64::try_from(now_ms).unwrap_or(u64::MAX),
-            source: ChFactSource::WsShardStatus,
-            schema_version: ChSchemaVersion::FIRST,
-        });
+    pub fn write_stream_session_open(
+        &self,
+        stream_session_id: Uuid,
+        shard_id: u32,
+        subscription_token_hash: ContentHash,
+        subscription_token_count: u32,
+        opened_at_ms: i64,
+    ) -> bool {
+        self.write_stream_session(BookStreamSessionRow {
+            stream_session_id,
+            shard_id,
+            ledger_sequence: 1,
+            state: ChStreamSessionState::Open,
+            end_reason: ChStreamSessionEndReason::None,
+            subscription_token_hash,
+            subscription_token_count,
+            received_sequence_json: "{}".to_owned(),
+            persisted_sequence_json: "{}".to_owned(),
+            opened_at: opened_at_ms,
+            recorded_at: Utc::now().timestamp_millis(),
+            schema_version: L2_SCHEMA_VERSION,
+        })
     }
 
-    fn write_snapshot_levels(&self, input: SnapshotLevels<'_>) {
+    pub fn write_stream_session_close(&self, row: BookStreamSessionRow) -> bool {
+        self.write_stream_session(row)
+    }
+
+    fn write_stream_session(&self, row: BookStreamSessionRow) -> bool {
+        self.sessions
+            .write_timeout(row, CANONICAL_WRITE_TIMEOUT)
+            .is_ok()
+    }
+
+    pub fn write_gap(
+        &self,
+        token_id: &TokenId,
+        market_id: Option<MarketId>,
+        stream_session_id: Uuid,
+        shard_id: u32,
+        token_sequence: u64,
+        timestamp_ms: u64,
+    ) -> bool {
+        let payload = serde_json::json!({
+            "event_type": "gap",
+            "token_id": token_id,
+            "stream_session_id": stream_session_id,
+            "token_sequence": token_sequence,
+        });
+        let Ok(payload_hash) = CanonicalDigest::content_hash_json(&payload) else {
+            return false;
+        };
+        self.l2
+            .write_timeout(
+                BookL2EventRow {
+                    stream_session_id,
+                    shard_id,
+                    token_id: token_id.clone(),
+                    market_id,
+                    token_sequence,
+                    event_type: ChCanonicalBookEventType::Gap,
+                    bid_prices: Vec::new(),
+                    bid_sizes: Vec::new(),
+                    ask_prices: Vec::new(),
+                    ask_sizes: Vec::new(),
+                    book_version: token_sequence,
+                    old_tick_size: None,
+                    new_tick_size: None,
+                    venue_event_time: i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
+                    ingress_time: i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
+                    persisted_time: Utc::now().timestamp_millis(),
+                    payload_hash,
+                    schema_version: L2_SCHEMA_VERSION,
+                },
+                CANONICAL_WRITE_TIMEOUT,
+            )
+            .is_ok()
+    }
+
+    fn write_snapshot_levels(&self, input: SnapshotLevels<'_>) -> bool {
         let bids_json = levels_to_pairs(input.bids);
         let asks_json = levels_to_pairs(input.asks);
-        let bid_depth_usd = depth_usd(input.bids);
-        let ask_depth_usd = depth_usd(input.asks);
-        let best_bid = input.bids.first().map(|level| level.price_decimal());
-        let best_ask = input.asks.first().map(|level| level.price_decimal());
-        let levels_count = u16::try_from(input.bids.len() + input.asks.len()).unwrap_or(u16::MAX);
-        self.snapshots.write(BookSnapshotRow {
-            token_id: input.token_id.clone(),
-            market_id: input.market_id,
-            snapshot_reason: input.reason,
-            top_n: levels_count,
-            bids_json: serde_json::to_string(&bids_json).unwrap_or_else(|_| "[]".to_owned()),
-            asks_json: serde_json::to_string(&asks_json).unwrap_or_else(|_| "[]".to_owned()),
-            bid_depth_usd: Some(ChUsd::from(bid_depth_usd)),
-            ask_depth_usd: Some(ChUsd::from(ask_depth_usd)),
-            mid_price: mid_price(best_bid, best_ask).map(ChPrice::from),
-            spread_bps: spread_bps(best_bid, best_ask).map(ChBps::from),
-            book_version: input.book_version,
-            levels_count,
-            event_time: input.event_time,
-            ingestion_time: input.ingestion_time,
-            sequence: input.book_version,
-            source: input.source,
-            schema_version: ChSchemaVersion::FIRST,
+        let Ok(bids_json) = serde_json::to_string(&bids_json) else {
+            return false;
+        };
+        let Ok(asks_json) = serde_json::to_string(&asks_json) else {
+            return false;
+        };
+        let checkpoint_payload = serde_json::json!({
+            "token_id": input.token_id,
+            "stream_session_id": input.stream_session_id,
+            "token_sequence": input.token_sequence,
+            "bids": bids_json,
+            "asks": asks_json,
+            "source_event_hash": input.source_event_hash,
         });
+        let Ok(checkpoint_hash) = CanonicalDigest::content_hash_json(&checkpoint_payload) else {
+            return false;
+        };
+        self.checkpoints
+            .write_timeout(
+                BookL2CheckpointRow {
+                    token_id: input.token_id.clone(),
+                    market_id: input.market_id,
+                    stream_session_id: input.stream_session_id,
+                    token_sequence: input.token_sequence,
+                    bids_json,
+                    asks_json,
+                    book_version: input.book_version,
+                    source_event_hash: input.source_event_hash,
+                    checkpoint_hash,
+                    event_time: input.event_time,
+                    created_at: Utc::now().timestamp_millis(),
+                    schema_version: L2_SCHEMA_VERSION,
+                },
+                CANONICAL_WRITE_TIMEOUT,
+            )
+            .is_ok()
     }
 
     fn write_microstructure_observation(
@@ -637,12 +746,6 @@ fn levels_to_pairs(levels: &[BookLevel]) -> Vec<(String, String)> {
             (price, size)
         })
         .collect()
-}
-
-fn depth_usd(levels: &[BookLevel]) -> Decimal {
-    levels.iter().fold(Decimal::ZERO, |acc, level| {
-        acc + level.depth_usd().to_decimal()
-    })
 }
 
 fn top_depth_usd(levels: &[BookLevel], top_n: usize) -> Decimal {

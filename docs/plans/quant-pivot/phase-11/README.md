@@ -20,7 +20,8 @@
 > 11.7 的基础执行/control contract 已收口；11.7.1 正在破坏式落地 Recommendation-owned typed
 > condition 与 Crypto/Weather source/event/shadow 闭环；真实登录/RBAC/BookStore 状态驱动的受保护 UI/E2E
 > 与当前 golden 已通过，不以静态页面替代；仓库中不存在改造前历史截图，不伪造 before evidence。
-> 真实 Published research policy 与端到端激活仍受 11.7.2 full-L2/fee/policy-validation 门禁阻断；
+> 11.7.2 的 Runtime v13、L2/trade/WORM 数据底座、共享执行语义与新契约已开始落地；真实 Published
+> research policy 与端到端激活仍受 fitter/统计验证/真实数据门禁阻断；
 > 11.0/11.2.1/11.3/11.7.2/11.8–11.11 其余工作仍在设计、实施或部分落地阶段。
 >
 > 父文档（概念真理）：
@@ -40,11 +41,11 @@
 
 | Contract | 当前版本 | 下一位 owner |
 |---|---:|---|
-| Runtime config | **v12** | 11.9 首次加入 feedback 字段时 `v12 → v13` |
+| Runtime config | **v13** | 11.9 首次加入 feedback/retraining 字段时 `v13 → v14` |
 | Feature schema | **v6** | 仅真实 schema 变更时 bump |
-| Dataset artifact | **v3** | 不双读旧 v2 |
-| Model artifact | **v3** | 不双读旧 v2 |
-| Trade policy artifact | **v2** | 11.7.2 在 v2 内补真实 research evidence，不制造兼容 loader |
+| Dataset artifact | **v4** | 不双读旧 v2/v3 |
+| Model artifact | **v4** | 不双读旧 v2/v3 |
+| Trade policy artifact | **v3** | evidence bundle ref + serving cohort summary；不读旧 v2 |
 
 11.11 只能引用本账本在实施当时的值，不得复制一份“当前版本”。项目未生产部署，schema、ClickHouse
 表和 artifacts 从空基线重建；不提供旧 runtime parser、artifact loader、JSONB 双读、alias 或 re-export。
@@ -112,9 +113,9 @@ Phase 11 的唯一目标:**把阿尔法层与研究反馈闭环拉到与执行�
 | 11.6 | Training-Serving Parity & No-Silent-Zero | 决策时钟、PIT catalog、FeatureCell、frozen transform、运行期 parity/latch — **W0–W4/W6 与全部本地/容器门禁已完成；W5 空库首次激活待执行** | 10, 11 | [11.6](11.6-training-serving-parity-and-no-silent-zero.md) |
 | 11.7 | Executable Labeling, Entry & Exit Closed-Loop | TradePolicyArtifact + 可执行标签 + 审批即 Arm + 冻结退出策略 — **执行/control/operational closeout 与受保护 UI/E2E 已完成；真实 Published policy 激活受 11.7.2 阻断** | 14, 15, 16, 18 | [11.7](11.7-labeling-entry-exit-closed-loop.md) |
 | 11.7.1 | Composable Entry Conditions + Crypto/Weather Events | typed AST + PIT facts/events + Recommendation shadow + vertical gates — **实施中** | — | [11.7.1](11.7.1-composable-entry-event-triggers.md) |
-| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility + exact-tier + PIT fee + purged CPCV/uniqueness/DSR/PBO，产出首个真实 Published policy — **设计冻结、待实施** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
+| 11.7.2 | Executable L2 Policy Validation & Research Activation | 完整冻结路径模拟 + structural volatility + exact-tier + PIT fee + purged CPCV/uniqueness/DSR/PBO，产出首个真实 Published policy — **实施中：契约/数据/WORM/共享语义已落地，fitter 与真实激活待完成** | — (11.7 research activation gate) | [11.7.2](11.7.2-executable-l2-policy-validation.md) |
 | 11.8 | Report Lifecycle FSM Completion | 报告生命周期语义 | 17 | [11.8](11.8-report-lifecycle-fsm-completion.md) |
-| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance — **设计冻结、尚未实施；未来 v12→v13** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
+| 11.9 | Attribution Feedback & Auto-Retraining | 研究反馈闭环 + factor governance — **设计冻结、尚未实施；未来 v13→v14** | 19, 21 | [11.9](11.9-attribution-feedback-and-auto-retraining.md) |
 | 11.10 | Counterfactual Factor Attribution | 反事实归因 + MAE 回填 | 20 | [11.10](11.10-counterfactual-factor-attribution.md) |
 | 11.11 | Execution Governance Hardening | 执行治理探针硬化 | 22 | [11.11](11.11-execution-governance-hardening.md) |
 
@@ -188,11 +189,11 @@ flowchart TD
   治理(见 [11.3 §3.4](11.3-probabilistic-calibration-and-kelly.md))。runtime-config 由 11.2.1 bump 至 v4、
   11.2.2 再 bump 至 **v5**（历史里程碑）；`feature_schema_version` 由 11.2.1 bump 至 4、11.2.2
   再 bump 至 **5**（两层向量重构在 11.2.2）。当前实际 runtime config 已由后续已落地工作推进至
-  **v12**，feature schema 保持 **v6**；这是 11.7.1 的唯一有效版本组合。Tier 2 LLM linkage
+  **v13**，feature schema 保持 **v6**；这是 11.7.2 的唯一有效版本组合。Tier 2 LLM linkage
   不改 feature schema，但若实现时新增 runtime wire 字段，必须从届时当前版本显式 bump，
-  不得静默改写 v12（见 11.2.3）。11.9 尚未实现；其 `feedback` 段首次获得真实字段时才执行未来的
-  **v12 → v13**。Dataset Parquet 与 model artifact 只接受
-  `format_version = 3`；runtime v12 不意味着 feature v7。TradePolicy artifact 只接受 v2。
+  不得静默改写 v13（见 11.2.3）。11.9 尚未实现；其 `feedback` 段首次获得真实字段时才执行未来的
+  **v13 → v14**。Dataset Parquet 与 model artifact 只接受
+  `format_version = 4`；runtime v13 不意味着 feature v7。TradePolicy artifact 只接受 v3。
 
 ## 4. 全局设计基线(贯穿全部子phase)
 
@@ -303,7 +304,7 @@ attribution)是**设计文档,未落地**(审计点 19/20)。Phase 11 采取**�
 
 **标注 / 元标注 / 退出(11.7)**
 
-- Triple-Barrier method: <https://paperswithbacktest.com/course/triple-barrier-method>
+- Triple-Barrier method（历史方法参考；11.7.2 不采用其语义作为 executable policy label）: <https://paperswithbacktest.com/course/triple-barrier-method>
 - Meta-labeling: <https://paperswithbacktest.com/course/meta-labeling>
 - Triple-barrier & meta-labeling(mlfinlab docs): <https://random-docs.readthedocs.io/en/latest/implementations/tb_meta_labeling.html>
 

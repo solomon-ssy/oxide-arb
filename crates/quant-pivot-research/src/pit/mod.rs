@@ -20,6 +20,7 @@ use quant_pivot_models::{
         MarketCatalogVersionInfo,
         market::{
             book::BookLevel,
+            fee::MarketFeeSchedule,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
     },
@@ -30,8 +31,18 @@ use quant_pivot_models::{
     },
 };
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::hashing::ResearchHasher;
+
+/// Immutable identity of the latest canonical L2 event applied to a resolved
+/// book state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalBookEventRef {
+    pub stream_session_id: Uuid,
+    pub token_sequence: u64,
+    pub source_event_hash: ContentHash,
+}
 
 /// A book snapshot resolved strictly as of a past decision time.
 ///
@@ -64,6 +75,10 @@ pub struct BookSnapshotAt {
     pub version: u64,
     /// Stable source sequence for rows sharing effective and availability time.
     pub sequence: u64,
+    /// Canonical event identity proving the state belongs to one stream
+    /// session. Synthetic/test sources may omit it, but governed evidence
+    /// capture fails closed when it is absent.
+    pub source_event: Option<CanonicalBookEventRef>,
     /// Time at which the snapshot became visible to the system.
     pub available_at: DateTime<Utc>,
 }
@@ -91,6 +106,8 @@ pub struct MarketContextAt {
     /// Upstream catalog creation time (event-age proxy). `None` means Gamma did
     /// not publish a source clock; callers must preserve Missing.
     pub created_at: Option<DateTime<Utc>>,
+    /// Fee schedule carried by the same immutable catalog revision.
+    pub fee_schedule: Option<MarketFeeSchedule>,
 }
 
 /// One immutable catalog projection used by selection, feature computation,
@@ -193,6 +210,7 @@ pub fn resolve_catalog_snapshot(
         start_date: market.start_date,
         end_date: market.end_date,
         created_at: snapshot.market.source_created_at,
+        fee_schedule: market.fee_schedule.clone(),
     };
     Ok(ResolvedMarketSnapshot {
         boundary: boundary.clone(),

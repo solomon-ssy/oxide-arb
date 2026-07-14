@@ -21,8 +21,8 @@ use crate::{
     },
     jsonb_active,
     types::{
-        Bps, ContentHash, ModelVersionId, Price, Probability, ScaleOutTarget, Shares,
-        ThesisInvalidationPolicy, TokenId, TrailingStopPolicy, Usd,
+        Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Price, Probability,
+        ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId, TrailingStopPolicy, Usd,
     },
 };
 
@@ -162,6 +162,8 @@ pub struct ExitPolicySpec {
     pub trailing_stop: Option<TrailingStopPolicy>,
     /// Machine-evaluable thesis invalidation thresholds.
     pub thesis_invalidation: ThesisInvalidationPolicy,
+    /// Policy-fitted advisory exit thresholds.
+    pub opportunistic_exit: OpportunisticExitPolicy,
     /// Monotone cumulative scale-out targets.
     pub scale_out_targets: Vec<ScaleOutTarget>,
     /// Whether the lot exits before resolution or holds through resolution.

@@ -256,9 +256,18 @@ pub fn recommendation_identity_from_resolved(
 ///
 /// Propagates canonical JSON serialization failures for the level digest.
 pub fn book_snapshot_ref_from_resolved(book: &ResolvedBook) -> QuantResult<BookSnapshotRef> {
+    let source_event = book
+        .source_event
+        .as_ref()
+        .ok_or_else(|| ResearchError::PitResolution {
+            detail: format!("book {} has no canonical L2 event identity", book.token_id),
+        })?;
     Ok(BookSnapshotRef {
         token_id: book.token_id.clone(),
-        source: BookSnapshotSource::ClickHouse {
+        source: BookSnapshotSource::CanonicalL2 {
+            stream_session_id: source_event.stream_session_id,
+            token_sequence: source_event.token_sequence,
+            source_event_hash: source_event.source_event_hash.clone(),
             event_time_ms: i64::try_from(book.timestamp_ms).map_err(|error| {
                 ResearchError::PitResolution {
                     detail: format!(
@@ -268,8 +277,6 @@ pub fn book_snapshot_ref_from_resolved(book: &ResolvedBook) -> QuantResult<BookS
                 }
             })?,
             ingestion_time_ms: book.available_at.timestamp_millis(),
-            sequence: book.sequence,
-            book_version: book.version,
         },
         content_hash: book_levels_content_hash(book)?,
     })
@@ -496,6 +503,7 @@ mod tests {
     };
     use crate::{
         features::{ResolvedBook, resolved::ResolvedMarketContext},
+        pit::CanonicalBookEventRef,
         selection::SelectedMarket,
     };
     use chrono::Utc;
@@ -508,7 +516,7 @@ mod tests {
             common::{CategorySet, MarketCategory, TickSize},
             market::MarketStatus,
         },
-        types::{EventId, MarketId, Price, Shares, TokenId, Usd},
+        types::{ContentHash, EventId, MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal_macros::dec;
     use std::sync::Arc;
@@ -530,6 +538,12 @@ mod tests {
             timestamp_ms: 1_700_000_000_000,
             version: 42,
             sequence: 42,
+            source_event: Some(CanonicalBookEventRef {
+                stream_session_id: uuid::Uuid::from_u128(1),
+                token_sequence: 42,
+                source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                    .expect("canonical event hash"),
+            }),
             effective_at: Utc::now(),
             available_at: Utc::now(),
         }
@@ -582,7 +596,7 @@ mod tests {
         let first = book_snapshot_ref_from_resolved(&book).expect("hash");
         let second = book_snapshot_ref_from_resolved(&book).expect("hash");
         assert_eq!(first, second);
-        assert!(first.canonical_string().starts_with("book:ch:"));
+        assert!(first.canonical_string().starts_with("book:l2|"));
     }
 
     #[test]
@@ -598,6 +612,7 @@ mod tests {
             start_date: None,
             end_date: None,
             created_at: Some(as_of),
+            fee_schedule: None,
         };
         let selected = SelectedMarket {
             market_id: MarketId::new("0xm"),
@@ -651,6 +666,7 @@ mod tests {
             timestamp_ms: 1,
             version: 1,
             sequence: 1,
+            source_event: None,
             effective_at: Utc::now(),
             available_at: Utc::now(),
         };

@@ -96,25 +96,9 @@ impl RuntimeModeGate for DefaultRuntimeModeGate {
             QuantRuntimeMode::SemiAuto => Ok(IntentPolicyDecision::RequiresApproval {
                 approval_ttl: Duration::from_secs(semi_auto.approval_ttl_secs),
             }),
-            QuantRuntimeMode::AutoExecution => {
-                // 4. Auto-execution requires both the envelope flag and the
-                //    config switch, plus a concrete policy id to attribute.
-                if !envelope.auto_execution_allowed || !config.execution.auto_execution.enabled {
-                    return Ok(IntentPolicyDecision::Denied {
-                        reason: ModeDenialReason::AutoExecutionNotAllowed,
-                    });
-                }
-                let Some(policy_id) = eligibility.auto_policy_id.clone() else {
-                    return Ok(IntentPolicyDecision::Denied {
-                        reason: ModeDenialReason::AutoExecutionNotAllowed,
-                    });
-                };
-                Ok(IntentPolicyDecision::ApprovedByPolicy {
-                    policy_id,
-                    policy_hash: Some(envelope.envelope_hash.clone()),
-                    reason: "auto-execution policy approved eligible recommendation".to_owned(),
-                })
-            }
+            QuantRuntimeMode::AutoExecution => Ok(IntentPolicyDecision::Denied {
+                reason: ModeDenialReason::AutoExecutionNotAllowed,
+            }),
         }
     }
 }
@@ -208,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_execution_policy_approves_when_allowed() {
+    async fn runtime_v13_blocks_auto_execution_even_when_legacy_flags_allow_it() {
         let mut config = RuntimeConfig::default();
         config.execution.auto_execution.enabled = true;
         let gate = gate(config);
@@ -217,22 +201,16 @@ mod tests {
         rec.execution_eligibility.ineligibility_reasons = Vec::new();
         rec.execution_eligibility.auto_policy_id = Some("policy-7".to_owned());
         risk_envelope(&mut rec).auto_execution_allowed = true;
-        let expected_hash = risk_envelope(&mut rec).envelope_hash.clone();
         let decision = gate
             .evaluate_intent_policy(QuantRuntimeMode::AutoExecution, &rec)
             .await
             .expect("policy");
-        match decision {
-            IntentPolicyDecision::ApprovedByPolicy {
-                policy_id,
-                policy_hash,
-                ..
-            } => {
-                assert_eq!(policy_id, "policy-7");
-                assert_eq!(policy_hash, Some(expected_hash));
+        assert_eq!(
+            decision,
+            IntentPolicyDecision::Denied {
+                reason: ModeDenialReason::AutoExecutionNotAllowed,
             }
-            other => panic!("expected ApprovedByPolicy, got {other:?}"),
-        }
+        );
     }
 
     #[tokio::test]

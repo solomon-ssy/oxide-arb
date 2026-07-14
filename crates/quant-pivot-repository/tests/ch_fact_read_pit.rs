@@ -2,10 +2,10 @@
 
 use chrono::Utc;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd},
+    clickhouse::{BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion},
     config::ClickHouseConfig,
-    enums::clickhouse::{ChFactSource, ChSnapshotReason},
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    enums::clickhouse::ChFactSource,
+    types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::{
     clickhouse::ChQuantFactReadRepository, traits::QuantFactReadRepository,
@@ -18,6 +18,7 @@ use testcontainers::{
     core::{WaitFor, wait::HttpWaitStrategy},
     runners::AsyncRunner,
 };
+use uuid::Uuid;
 
 fn test_ch_config(port: u16) -> ClickHouseConfig {
     ClickHouseConfig {
@@ -58,9 +59,9 @@ async fn setup_clickhouse() -> (
     (pool, client, container)
 }
 
-async fn insert_book_rows(client: &clickhouse::Client, rows: &[BookSnapshotRow]) {
+async fn insert_book_rows(client: &clickhouse::Client, rows: &[BookL2CheckpointRow]) {
     let mut insert = client
-        .insert::<BookSnapshotRow>("book_snapshots")
+        .insert::<BookL2CheckpointRow>("quant_book_l2_checkpoint")
         .await
         .expect("insert");
     for row in rows {
@@ -80,7 +81,7 @@ async fn insert_microstructure_rows(client: &clickhouse::Client, rows: &[BookMic
     insert.end().await.expect("end microstructure insert");
 }
 
-/// Wait until inserted `book_snapshots` rows are query-visible.
+/// Wait until inserted checkpoint rows are query-visible.
 ///
 /// Fresh `MergeTree` parts can lag briefly behind HTTP insert ack on a cold
 /// testcontainer; PIT reads that race this window return `None`.
@@ -89,17 +90,17 @@ async fn wait_for_book_snapshot_rows(client: &clickhouse::Client, token: &TokenI
     const PAUSE: Duration = Duration::from_millis(50);
     for attempt in 1..=ATTEMPTS {
         let count: u64 = client
-            .query("SELECT count() FROM book_snapshots WHERE token_id = ?")
+            .query("SELECT count() FROM quant_book_l2_checkpoint WHERE token_id = ?")
             .bind(token.clone())
             .fetch_one()
             .await
-            .expect("count book_snapshots");
+            .expect("count quant_book_l2_checkpoint");
         if count >= expected {
             return;
         }
         assert!(
             attempt < ATTEMPTS,
-            "book_snapshots rows for {} not visible after insert \
+            "checkpoint rows for {} not visible after insert \
              (count={count}, expected>={expected}, attempts={ATTEMPTS})",
             token.as_str()
         );
@@ -107,11 +108,7 @@ async fn wait_for_book_snapshot_rows(client: &clickhouse::Client, token: &TokenI
     }
 }
 
-/// Epoch millis inside the `book_snapshots` 180-day TTL window.
-///
-/// Fixed 2023 fixtures are deleted by `TTL snapshot_date + INTERVAL 180 DAY`
-/// once wall-clock time advances past that horizon (observed as intermittent
-/// `book_snapshot_at` → `None`).
+/// Current epoch millis for deterministic point-in-time visibility checks.
 fn fresh_event_time_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
@@ -122,25 +119,24 @@ fn book_row(
     ingestion_time_ms: i64,
     sequence: u64,
     mid: Decimal,
-) -> BookSnapshotRow {
-    BookSnapshotRow {
+) -> BookL2CheckpointRow {
+    let source_event_hash =
+        ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("source event hash");
+    let checkpoint_hash =
+        ContentHash::parse(format!("blake3:{}", "2".repeat(64))).expect("checkpoint hash");
+    BookL2CheckpointRow {
         token_id: TokenId::new(token),
         market_id: Some(MarketId::new("0xchpit")),
-        snapshot_reason: ChSnapshotReason::Startup,
-        top_n: 5,
-        bids_json: r#"[["0.48","100"]]"#.to_owned(),
+        stream_session_id: Uuid::nil(),
+        token_sequence: sequence,
+        bids_json: format!(r#"[["{mid}","100"]]"#),
         asks_json: r#"[["0.52","100"]]"#.to_owned(),
-        bid_depth_usd: Some(ChUsd::from(Decimal::from(500))),
-        ask_depth_usd: None,
-        mid_price: Some(ChPrice::from(Price::new(mid))),
-        spread_bps: None,
         book_version: 1,
-        levels_count: 1,
+        source_event_hash,
+        checkpoint_hash,
         event_time: event_time_ms,
-        ingestion_time: ingestion_time_ms,
-        sequence,
-        source: ChFactSource::WsSnapshot,
-        schema_version: ChSchemaVersion::FIRST,
+        created_at: ingestion_time_ms,
+        schema_version: ChSchemaVersion(2),
     }
 }
 
@@ -218,30 +214,28 @@ async fn ch_read_orders_by_event_time_with_tiebreaker() {
     wait_for_book_snapshot_rows(&client, &token, 2).await;
 
     let before_late_arrival = read
-        .book_snapshot_at(&token, event_time + 5, event_time + 1)
+        .book_checkpoint_at(&token, event_time + 5, event_time + 1)
         .await
         .expect("read before late arrival")
         .expect("earlier visible revision");
     assert_eq!(
-        before_late_arrival.mid_price.map(ChPrice::to_price),
-        Some(Price::new(Decimal::new(49, 2))),
+        before_late_arrival.bids_json, r#"[["0.49","100"]]"#,
         "a backdated revision must not be visible before its ingestion time"
     );
 
     let row = read
-        .book_snapshot_at(&token, event_time + 5, event_time + 5)
+        .book_checkpoint_at(&token, event_time + 5, event_time + 5)
         .await
         .expect("read")
         .unwrap_or_else(|| {
             panic!(
-                "PIT book_snapshot_at returned None for token={} as_of={}",
+                "PIT book_checkpoint_at returned None for token={} as_of={}",
                 token.as_str(),
                 event_time + 5
             )
         });
     assert_eq!(
-        row.mid_price.map(ChPrice::to_price),
-        Some(Price::new(Decimal::new(50, 2))),
+        row.bids_json, r#"[["0.50","100"]]"#,
         "tie-breaker must prefer later ingestion_time at same event_time"
     );
 }
@@ -488,14 +482,14 @@ async fn domain_observation_preserves_prior_revisions_after_merge() {
 async fn trade_tape_preserves_prior_revisions_after_merge() {
     use quant_pivot_models::clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow};
     use quant_pivot_models::enums::clickhouse::{
-        ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource,
+        ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     };
 
     let (pool, client, _container) = setup_clickhouse().await;
     let read = ChQuantFactReadRepository::new(Arc::clone(&pool));
     let market_id = MarketId::new("0xtrade-tape-dedupe");
     let token_id = TokenId::new("tok-dedupe");
-    // Stay inside `quant_trade_tape` 365-day TTL.
+    // Keep the test partition close to wall clock for compact integration scans.
     let event_time = fresh_event_time_ms();
 
     let base = TradeTapeRow {
@@ -503,6 +497,8 @@ async fn trade_tape_preserves_prior_revisions_after_merge() {
         token_id: token_id.clone(),
         event_time,
         ingestion_time: event_time,
+        stream_session_id: None,
+        token_sequence: None,
         participant_address: "0xparticipant".to_owned(),
         participant_role: ChTradeParticipantRole::Maker,
         side: ChTradeSide::Buy,
@@ -510,16 +506,25 @@ async fn trade_tape_preserves_prior_revisions_after_merge() {
         size_shares: ChShares::from(Shares::new(Decimal::from(10))),
         notional_usd: ChUsd::from(Usd::new(Decimal::from(5))),
         tx_hash: Some("0xtx".to_owned()),
-        trade_id: "trade-dedupe-1".to_owned(),
-        source: ChTradeTapeSource::OnChain,
-        coverage_flags: 0,
+        source_event_id: "trade-dedupe-1".to_owned(),
+        source: ChTradeTapeSource::OnChainOrderFilled,
+        observed_field_flags: u16::MAX,
+        fee_rate_bps: None,
+        reconciliation_status: ChTradeReconciliationStatus::OnChainOnly,
+        matched_source_event_id: None,
+        revision: 1,
+        reconciled_at: None,
         raw_payload_json: None,
-        schema_version: ChSchemaVersion::FIRST,
+        schema_version: ChSchemaVersion(2),
     };
     let mut stale = base.clone();
     stale.ingestion_time = event_time - 1_000;
     let mut fresh = base.clone();
     fresh.ingestion_time = event_time + 1_000;
+    fresh.revision = 2;
+    fresh.reconciliation_status = ChTradeReconciliationStatus::Matched;
+    fresh.matched_source_event_id = Some("ws:trade-dedupe-1".to_owned());
+    fresh.reconciled_at = Some(fresh.ingestion_time);
 
     let mut insert = client
         .insert::<TradeTapeRow>("quant_trade_tape")
@@ -543,8 +548,7 @@ async fn trade_tape_preserves_prior_revisions_after_merge() {
         )
         .await
         .expect("read before revision");
-    assert_eq!(rows_before_revision.len(), 1);
-    assert_eq!(rows_before_revision[0].ingestion_time, stale.ingestion_time);
+    assert!(rows_before_revision.is_empty());
 
     let rows = read
         .trade_tape_window_by_market(

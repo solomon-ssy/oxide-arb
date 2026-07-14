@@ -1122,12 +1122,53 @@ impl Default for EntryConditionWorkerConfig {
 pub struct SemiAutoConfig {
     /// Approval time-to-live in seconds.
     pub approval_ttl_secs: u64,
+    /// Policy-bound, fail-closed production canary limits.
+    pub canary: SemiAutoCanaryConfig,
 }
 
 impl Default for SemiAutoConfig {
     fn default() -> Self {
         Self {
             approval_ttl_secs: 900,
+            canary: SemiAutoCanaryConfig::default(),
+        }
+    }
+}
+
+/// Runtime v13 policy-bound `SemiAuto` canary.
+///
+/// An enabled canary is intentionally narrower than a published policy. It
+/// authorizes only an exact policy identity and explicit notional tiers; it
+/// never acts as an implicit active-policy pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SemiAutoCanaryConfig {
+    /// Whether this exact policy-bound authorization admits new `SemiAuto` intents.
+    pub enabled: bool,
+    /// Content-addressed Published trade-policy artifact id authorized to run.
+    pub policy_artifact_id: Option<String>,
+    /// Canonical content hash that must match the authorized policy artifact.
+    pub policy_content_hash: Option<String>,
+    /// Exact validated USD tiers admitted by this canary (v13: only `$25`).
+    pub allowed_tiers_usd: Vec<DecimalString>,
+    /// Transactional global cap on capital-holding or in-flight intents.
+    pub max_open_intents: u32,
+    /// Transactional cumulative intent-notional cap for one report.
+    pub max_total_usd_per_report: DecimalString,
+    /// RFC3339 authorization deadline; intents may not outlive this instant.
+    pub expires_at: Option<String>,
+}
+
+impl Default for SemiAutoCanaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            policy_artifact_id: None,
+            policy_content_hash: None,
+            allowed_tiers_usd: Vec::new(),
+            max_open_intents: 0,
+            max_total_usd_per_report: DecimalString::new("0"),
+            expires_at: None,
         }
     }
 }
@@ -1382,6 +1423,88 @@ pub struct ResearchValidationConfig {
     pub gates: ResearchValidationGatesConfig,
 }
 
+/// Runtime v13 methodology and immutable publication safety floors for policy fit.
+///
+/// Fit requests may only tighten the gate subset. Split construction, purge,
+/// trial accounting, and latency stress remain runtime-owned so callers cannot
+/// manufacture an easier experiment definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyValidationConfig {
+    /// Frozen CPCV contiguous partition count (v13: `8`).
+    pub cpcv_n_groups: u32,
+    /// Frozen CPCV test partitions per combination (v13: `3`).
+    pub cpcv_k_test: u32,
+    /// Frozen CSCV/PBO block count (v13: `8`).
+    pub pbo_block_count: u32,
+    /// DSR significance level; publication requires probability `>= 1 - alpha`.
+    pub dsr_significance: DecimalString,
+    /// Maximum Probability of Backtest Overfitting.
+    pub max_pbo: DecimalString,
+    /// Minimum concurrency-adjusted effective sample size for every cohort.
+    pub min_effective_sample_size: u64,
+    /// Minimum observation coverage backed by continuous full-L2 replay.
+    pub min_full_l2_coverage: DecimalString,
+    /// Minimum common observation support shared by every attempted candidate.
+    pub min_common_candidate_support: DecimalString,
+    /// Minimum reconciled trade-print coverage for passive queue simulation.
+    pub min_passive_reconciled_trade_coverage: DecimalString,
+    /// Minimum point-in-time fee/catalog coverage across simulated fills.
+    pub min_fee_catalog_coverage: DecimalString,
+    /// Minimum coverage across the complete target universe, including failed leaves.
+    pub min_universe_coverage: DecimalString,
+    /// Maximum rate of source-event ordering ambiguity.
+    pub max_ambiguity_rate: DecimalString,
+    /// Maximum rate of insufficient canonical book depth.
+    pub max_depth_failure_rate: DecimalString,
+    /// One-sided market-cluster bootstrap confidence level.
+    pub utility_confidence: DecimalString,
+    /// Utility boundary; observed lower confidence bounds must be strictly greater.
+    pub min_utility_lower_bound_bps: DecimalString,
+    /// Minimum timeline-span embargo before feature-lookback maxing.
+    pub embargo_time_pct: DecimalString,
+    /// Maximum complete candidates in one immutable experiment.
+    pub max_candidates_per_experiment: u32,
+    /// Minimum signed production latency-probe history in seconds.
+    pub min_latency_profile_secs: u64,
+    /// Mandatory stress multiplier applied to the latency simulation floor.
+    pub latency_stress_multiplier: DecimalString,
+}
+
+impl PolicyValidationConfig {
+    /// Number of complete CPCV paths implied by N=8, k=3.
+    pub const COMPLETE_PATH_COUNT: u32 = 21;
+
+    /// Number of CPCV folds implied by C(8, 3).
+    pub const FOLD_COUNT: u32 = 56;
+}
+
+impl Default for PolicyValidationConfig {
+    fn default() -> Self {
+        Self {
+            cpcv_n_groups: 8,
+            cpcv_k_test: 3,
+            pbo_block_count: 8,
+            dsr_significance: DecimalString::new("0.05"),
+            max_pbo: DecimalString::new("0.5"),
+            min_effective_sample_size: 100,
+            min_full_l2_coverage: DecimalString::new("0.95"),
+            min_common_candidate_support: DecimalString::new("0.95"),
+            min_passive_reconciled_trade_coverage: DecimalString::new("0.95"),
+            min_fee_catalog_coverage: DecimalString::new("1"),
+            min_universe_coverage: DecimalString::new("0.95"),
+            max_ambiguity_rate: DecimalString::new("0.05"),
+            max_depth_failure_rate: DecimalString::new("0.05"),
+            utility_confidence: DecimalString::new("0.95"),
+            min_utility_lower_bound_bps: DecimalString::new("0"),
+            embargo_time_pct: DecimalString::new("0.02"),
+            max_candidates_per_experiment: 32,
+            min_latency_profile_secs: 86_400,
+            latency_stress_multiplier: DecimalString::new("2"),
+        }
+    }
+}
+
 /// Research plane configuration (training objective + validation methodology).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -1390,6 +1513,8 @@ pub struct ResearchConfig {
     pub training: ResearchTrainingConfig,
     /// Governed leakage-aware validation & overfitting-control methodology.
     pub validation: ResearchValidationConfig,
+    /// Executable L2 policy-fit methodology and publication safety floors.
+    pub policy_validation: PolicyValidationConfig,
 }
 
 /// Research-feedback plane configuration (attribution feedback + auto-retraining).

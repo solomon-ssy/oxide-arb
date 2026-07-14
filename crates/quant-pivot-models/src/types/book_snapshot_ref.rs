@@ -9,6 +9,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::types::{ContentHash, TokenId};
 
@@ -16,12 +17,14 @@ use crate::types::{ContentHash, TokenId};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BookSnapshotSource {
-    /// Durable `ClickHouse` `book_snapshots` fact.
-    ClickHouse {
+    /// Durable canonical L2 state reconstructed from a checkpoint and its
+    /// contiguous event stream, anchored to the latest applied book event.
+    CanonicalL2 {
+        stream_session_id: Uuid,
+        token_sequence: u64,
+        source_event_hash: ContentHash,
         event_time_ms: i64,
         ingestion_time_ms: i64,
-        sequence: u64,
-        book_version: u64,
     },
 }
 
@@ -45,19 +48,21 @@ impl BookSnapshotRef {
 impl Display for BookSnapshotRef {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match &self.source {
-            BookSnapshotSource::ClickHouse {
+            BookSnapshotSource::CanonicalL2 {
+                stream_session_id,
+                token_sequence,
+                source_event_hash,
                 event_time_ms,
                 ingestion_time_ms,
-                sequence,
-                book_version,
             } => write!(
                 f,
-                "book:ch:{}:{}:{}:{}:{}@{}",
+                "book:l2|{}|{}|{}|{}|{}|{}@{}",
                 self.token_id,
+                stream_session_id,
+                token_sequence,
+                source_event_hash,
                 event_time_ms,
                 ingestion_time_ms,
-                sequence,
-                book_version,
                 self.content_hash
             ),
         }
@@ -73,9 +78,22 @@ impl FromStr for BookSnapshotRef {
         let rest = body
             .strip_prefix("book:")
             .ok_or(BookSnapshotRefParseError)?;
-        if let Some(ch) = rest.strip_prefix("ch:") {
-            let mut parts = ch.split(':');
+        if let Some(l2) = rest.strip_prefix("l2|") {
+            let mut parts = l2.split('|');
             let token_id = TokenId::new(parts.next().ok_or(BookSnapshotRefParseError)?);
+            let stream_session_id = parts
+                .next()
+                .ok_or(BookSnapshotRefParseError)?
+                .parse::<Uuid>()
+                .map_err(|_| BookSnapshotRefParseError)?;
+            let token_sequence: u64 = parts
+                .next()
+                .ok_or(BookSnapshotRefParseError)?
+                .parse()
+                .map_err(|_| BookSnapshotRefParseError)?;
+            let source_event_hash =
+                ContentHash::parse(parts.next().ok_or(BookSnapshotRefParseError)?)
+                    .map_err(|_| BookSnapshotRefParseError)?;
             let event_time_ms: i64 = parts
                 .next()
                 .ok_or(BookSnapshotRefParseError)?
@@ -86,26 +104,17 @@ impl FromStr for BookSnapshotRef {
                 .ok_or(BookSnapshotRefParseError)?
                 .parse()
                 .map_err(|_| BookSnapshotRefParseError)?;
-            let sequence: u64 = parts
-                .next()
-                .ok_or(BookSnapshotRefParseError)?
-                .parse()
-                .map_err(|_| BookSnapshotRefParseError)?;
-            let book_version: u64 = parts
-                .next()
-                .ok_or(BookSnapshotRefParseError)?
-                .parse()
-                .map_err(|_| BookSnapshotRefParseError)?;
             if parts.next().is_some() {
                 return Err(BookSnapshotRefParseError);
             }
             return Ok(Self {
                 token_id,
-                source: BookSnapshotSource::ClickHouse {
+                source: BookSnapshotSource::CanonicalL2 {
+                    stream_session_id,
+                    token_sequence,
+                    source_event_hash,
                     event_time_ms,
                     ingestion_time_ms,
-                    sequence,
-                    book_version,
                 },
                 content_hash,
             });

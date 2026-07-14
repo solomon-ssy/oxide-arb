@@ -10,28 +10,65 @@ use crate::{
     domain::{TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, pagination::PageRequest},
     enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
     types::{
-        ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TradePolicyConditionCandidate, TradePolicyFitContract, TradePolicyGovernanceAuditId,
-        TradePolicyPublicationBlocker, TrainingDatasetId, VerticalActivationTarget,
+        ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
+        TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TradePolicyQualityGate,
+        TrainingDatasetId, Usd, VerticalActivationTarget,
     },
 };
 
+/// Caller-owned fit boundary. Runtime version, methodology, horizon, embargo,
+/// latency profile, and publication floors are resolved by the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradePolicyFitSelection {
+    pub source_dataset_id: TrainingDatasetId,
+    pub fit_window_start: DateTime<Utc>,
+    pub fit_window_end: DateTime<Utc>,
+    pub pit_cutoff: DateTime<Utc>,
+    pub notional_tiers: Vec<Usd>,
+    /// Optional caller tightening; `None` means the frozen Runtime v13 floors.
+    pub quality_gate: Option<TradePolicyQualityGate>,
+}
+
+impl TradePolicyFitSelection {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.fit_window_start >= self.fit_window_end {
+            return Err("trade-policy fit window must be half-open and non-empty".to_owned());
+        }
+        if self.fit_window_end > self.pit_cutoff {
+            return Err("trade-policy fit window must end at or before pit_cutoff".to_owned());
+        }
+        let required_tiers = [
+            Usd::new(rust_decimal::Decimal::new(25, 0)),
+            Usd::new(rust_decimal::Decimal::new(100, 0)),
+            Usd::new(rust_decimal::Decimal::new(500, 0)),
+        ];
+        if self.notional_tiers != required_tiers {
+            return Err("policy fit tiers must be exactly $25/$100/$500".to_owned());
+        }
+        if let Some(gate) = &self.quality_gate {
+            gate.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct FitTradePolicyRequest {
-    pub contract: TradePolicyFitContract,
+    pub selection: TradePolicyFitSelection,
     pub activation_target: VerticalActivationTarget,
-    #[validate(length(min = 1, max = 16))]
-    pub condition_candidates: Vec<TradePolicyConditionCandidate>,
+    #[validate(length(min = 1, max = 32))]
+    pub candidates: Vec<TradePolicyCandidateSpec>,
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct TradePolicyFitPreflightRequest {
-    pub contract: TradePolicyFitContract,
+    pub selection: TradePolicyFitSelection,
     pub activation_target: VerticalActivationTarget,
-    #[validate(length(min = 1, max = 16))]
-    pub condition_candidates: Vec<TradePolicyConditionCandidate>,
+    #[validate(length(min = 1, max = 32))]
+    pub candidates: Vec<TradePolicyCandidateSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -170,17 +207,22 @@ impl From<TradePolicyArtifactInfo> for TradePolicyDetailView {
 pub struct TradePolicyFitPreflightView {
     pub contract_valid: TradePolicyPreflightCheckStatus,
     pub source_dataset_ready: TradePolicyPreflightCheckStatus,
+    pub source_dataset_policy_fit: TradePolicyPreflightCheckStatus,
     pub raw_trajectory_labels_present: TradePolicyPreflightCheckStatus,
     pub fit_window_contained: TradePolicyPreflightCheckStatus,
-    pub runtime_config_matches: TradePolicyPreflightCheckStatus,
+    pub requested_gate_tight_enough: TradePolicyPreflightCheckStatus,
+    pub runtime_quality_gate: Option<TradePolicyQualityGate>,
+    pub runtime_config_version_id: Option<crate::types::RuntimeConfigVersionId>,
+    pub methodology_hash: Option<ContentHash>,
+    pub latency_profile_present: TradePolicyPreflightCheckStatus,
     pub pit_cutoff_valid: TradePolicyPreflightCheckStatus,
     pub labels_matured_by_cutoff: u64,
     pub labels_excluded_after_cutoff: u64,
     pub full_l2_trajectory_present: TradePolicyPreflightCheckStatus,
     pub fee_model_present: TradePolicyPreflightCheckStatus,
     pub publishable_input: TradePolicyPreflightCheckStatus,
-    pub canonical_condition_candidates: Option<Vec<TradePolicyConditionCandidate>>,
-    pub condition_candidate_set_hash: Option<ContentHash>,
+    pub canonical_candidates: Option<Vec<TradePolicyCandidateSpec>>,
+    pub candidate_set_hash: Option<ContentHash>,
     pub messages: Vec<String>,
 }
 

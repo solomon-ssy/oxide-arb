@@ -15,7 +15,7 @@ use std::sync::Arc;
 pub use quant_pivot_error::fee::FeeQuoteError;
 
 /// Fee schedule observed for a Polymarket market.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketFeeSchedule {
     pub market_id: MarketId,
     pub fees_enabled: bool,
@@ -28,7 +28,7 @@ pub struct MarketFeeSchedule {
 }
 
 /// Persistable fee columns on the `market` table.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketFeeColumns {
     pub fees_enabled: bool,
     pub fee_rate: Option<Decimal>,
@@ -44,7 +44,7 @@ impl MarketFeeColumns {
     #[must_use]
     pub const fn disabled() -> Self {
         Self {
-            fees_enabled: true,
+            fees_enabled: false,
             fee_rate: None,
             fee_exponent: None,
             fee_taker_only: None,

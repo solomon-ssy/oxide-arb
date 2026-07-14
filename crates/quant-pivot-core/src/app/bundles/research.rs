@@ -43,7 +43,7 @@ use quant_pivot_repository::{
     },
 };
 use quant_pivot_research::{
-    artifact::{ArtifactStore, LocalArtifactStore},
+    artifact::{ArtifactStore, build_artifact_store},
     gates::{DefaultModelQualityGate, ModelQualityGate},
     model::{
         CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder,
@@ -212,12 +212,10 @@ impl ResearchBundle {
     /// No report scheduler or trigger is wired here — periodic report generation
     /// is a Phase 4 concern. The feature and factor pipelines are ready for
     /// on-demand invocation with a frozen runtime-config snapshot per round.
-    #[must_use]
-    pub fn assemble(deps: &ResearchBundleDeps<'_>) -> Self {
+    pub fn assemble(deps: &ResearchBundleDeps<'_>) -> QuantResult<Self> {
         let repos = &deps.infra.repos;
-        let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
-            deps.deploy.research.artifact_root.clone(),
-        ));
+        let artifact_store: Arc<dyn ArtifactStore> =
+            build_artifact_store(&deps.deploy.research.artifact_store)?;
         let market_selector: Arc<dyn MarketSelector> = Arc::new(ConfiguredMarketSelector::new());
         let market_selection_repo: Arc<dyn MarketSelectionRepository> =
             Arc::clone(&repos.market_selection) as Arc<dyn MarketSelectionRepository>;
@@ -281,7 +279,7 @@ impl ResearchBundle {
         let calibration_artifact_fit =
             assemble_calibration_artifact_fit(deps, &market_linkage_repo, &offline);
 
-        Self {
+        Ok(Self {
             artifact_store,
             market_selector,
             market_selection_repo,
@@ -317,7 +315,7 @@ impl ResearchBundle {
             calibration_artifact_fit,
             calibration_artifact_repo: Arc::clone(&repos.calibration_artifact)
                 as Arc<dyn CalibrationArtifactRepository>,
-        }
+        })
     }
 
     /// Construct an offline training-dataset service bound to a frozen

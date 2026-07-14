@@ -20,10 +20,9 @@ mod planner;
 pub use labeler::{
     HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LiquidityExitLabeler,
     MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS, MaxAdverseExcursionLabeler,
-    MaxFavorableExcursionLabeler, POLICY_NET_POSITIVE, RETURN_TO_HORIZON, ReturnToHorizonLabeler,
-    SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, TRIPLE_BARRIER_RETURN_BPS, TRIPLE_BARRIER_TOUCH,
-    TripleBarrierLabelKind, TripleBarrierLabeler, TripleBarrierPolicy, label_names,
-    label_names_for_sources,
+    MaxFavorableExcursionLabeler, POLICY_ENTRY_FILL_RATIO, POLICY_EXIT_FILL_RATIO,
+    POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON, ReturnToHorizonLabeler,
+    SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, label_names, label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
@@ -49,11 +48,11 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionSource, ExitTrainingLotRow, LotExitEventRow,
-        market::book::BookLevel,
+        market::{book::BookLevel, fee::MarketFeeSchedule},
     },
     enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
     types::{
-        ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
         ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId, SchemaVersion,
         Shares, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
         TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
@@ -63,7 +62,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    execution_sim::BookFidelity,
+    execution_semantics::BookFidelity,
     factors::FactorValue,
     features::{DecisionCaptureEvidence, EvidenceSourceRef, FeatureVector},
     hashing::ResearchHasher,
@@ -169,8 +168,6 @@ pub struct LotTrainingContext {
 pub enum DecisionBook {
     /// Full L2 bid ladder (best-first).
     L2 { bids: Arc<[BookLevel]> },
-    /// Best bid + aggregate depth fallback.
-    Microstructure { best_bid: Price, depth: Shares },
 }
 
 /// Pre-fetched hold-vs-exit label inputs for one lot decision point.
@@ -178,9 +175,8 @@ pub enum DecisionBook {
 pub struct ExitDecisionLabelContext {
     pub remaining_shares: Shares,
     pub avg_price: Price,
-    /// Effective venue fee at the executable decision-book bid. `None` means
-    /// no executable quote existed; the label must remain unavailable.
-    pub fee_bps: Option<Bps>,
+    /// Exact market schedule visible at the decision boundary.
+    pub fee_schedule: Option<MarketFeeSchedule>,
     pub terminal: LotTerminalSnapshot,
     pub decision_book: Option<DecisionBook>,
 }
@@ -231,8 +227,6 @@ pub struct TrainingLabel {
     /// `hold_vs_exit_alpha_bps`. This is the conservative upper bound
     /// `PurgedSplitter` purges against — a training row whose `matured_at`
     /// overlaps a test window's span leaks the test outcome into training.
-    /// Refined (not reinterpreted) by 11.7's triple-barrier first-touch time
-    /// when it lands; the field and its consumers are unaffected.
     pub matured_at: DateTime<Utc>,
 }
 
@@ -254,8 +248,6 @@ pub enum MissingLabelReason {
     NoForwardData,
     /// No forward price could be read at the horizon.
     NoExitPrice,
-    /// A coarse bucket crossed both horizontal barriers, so first touch is unknowable.
-    AmbiguousBarrierTouch,
     /// No published, quality-gated policy cohort matched this sample.
     NoTradePolicyCohort,
 }
@@ -350,12 +342,106 @@ pub struct LabelBuildInput<'a> {
     pub horizon_secs: u64,
     /// Minimum USD depth required for a "liquidity exit possible" label.
     pub min_exit_depth_usd: Usd,
-    /// Cohort-selected horizontal barriers for executable policy labels.
-    pub triple_barrier_policy: Option<TripleBarrierPolicy>,
     /// Pre-fetched forward observations + settlement for this sample.
     pub forward: &'a ForwardWindow,
     /// Hold-vs-exit lot context (`ExitDecision` rows only).
     pub exit_decision: Option<&'a ExitDecisionLabelContext>,
+}
+
+/// Atomic output of one policy state-machine simulation for an observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicySimulationOutcome {
+    pub net_return_bps: Decimal,
+    pub entry_fill_ratio: Decimal,
+    pub exit_fill_ratio: Decimal,
+    pub terminal_at: DateTime<Utc>,
+}
+
+/// All policy-dependent labels produced from one simulation, or one atomic
+/// failure applying to the complete set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicySimulationLabels {
+    Available(Box<[TrainingLabel; 4]>),
+    NotMature { available_after: DateTime<Utc> },
+    Invalid { detail: String },
+}
+
+/// Atomic projection of one verified policy state-machine outcome.
+///
+/// The simulator runs exactly once per observation. This function validates
+/// that one outcome and returns the four policy-dependent labels together, so
+/// callers cannot mix values produced by different execution paths.
+pub fn policy_simulation_labels(
+    outcome: &PolicySimulationOutcome,
+    decision_at: DateTime<Utc>,
+    horizon_secs: u64,
+    data_available_until: DateTime<Utc>,
+) -> PolicySimulationLabels {
+    let Ok(horizon_seconds_i64) = i64::try_from(horizon_secs) else {
+        return PolicySimulationLabels::Invalid {
+            detail: "policy simulation horizon does not fit chrono seconds".to_owned(),
+        };
+    };
+    let Some(horizon_end) =
+        decision_at.checked_add_signed(chrono::Duration::seconds(horizon_seconds_i64))
+    else {
+        return PolicySimulationLabels::Invalid {
+            detail: "policy simulation horizon overflows its decision time".to_owned(),
+        };
+    };
+    if outcome.terminal_at < decision_at || outcome.terminal_at > horizon_end {
+        return PolicySimulationLabels::Invalid {
+            detail: "policy simulation terminal time is outside its decision/horizon interval"
+                .to_owned(),
+        };
+    }
+    if outcome.terminal_at > data_available_until {
+        return PolicySimulationLabels::NotMature {
+            available_after: outcome.terminal_at,
+        };
+    }
+    if !(Decimal::ZERO..=Decimal::ONE).contains(&outcome.entry_fill_ratio)
+        || !(Decimal::ZERO..=Decimal::ONE).contains(&outcome.exit_fill_ratio)
+    {
+        return PolicySimulationLabels::Invalid {
+            detail: "policy simulation fill ratios must both be within [0, 1]".to_owned(),
+        };
+    }
+    let positive = if outcome.net_return_bps > Decimal::ZERO {
+        Decimal::ONE
+    } else {
+        Decimal::ZERO
+    };
+    PolicySimulationLabels::Available(Box::new([
+        TrainingLabel {
+            label_name: POLICY_NET_RETURN_BPS,
+            horizon_secs,
+            value: outcome.net_return_bps,
+            is_resolved: true,
+            matured_at: outcome.terminal_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_NET_POSITIVE,
+            horizon_secs,
+            value: positive,
+            is_resolved: true,
+            matured_at: outcome.terminal_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_ENTRY_FILL_RATIO,
+            horizon_secs,
+            value: outcome.entry_fill_ratio,
+            is_resolved: true,
+            matured_at: outcome.terminal_at,
+        },
+        TrainingLabel {
+            label_name: POLICY_EXIT_FILL_RATIO,
+            horizon_secs,
+            value: outcome.exit_fill_ratio,
+            is_resolved: true,
+            matured_at: outcome.terminal_at,
+        },
+    ]))
 }
 
 // ── Example / artifact ─────────────────────────────────────────────────────
@@ -996,11 +1082,12 @@ pub(crate) mod fixtures {
                 },
                 book_snapshot_ref: BookSnapshotRef {
                     token_id,
-                    source: BookSnapshotSource::ClickHouse {
+                    source: BookSnapshotSource::CanonicalL2 {
+                        stream_session_id: Uuid::from_u128(4),
+                        token_sequence: 1,
+                        source_event_hash: hash('5'),
                         event_time_ms: book_effective_at.timestamp_millis(),
                         ingestion_time_ms: decision_at.timestamp_millis(),
-                        sequence: 1,
-                        book_version: 1,
                     },
                     content_hash: hash('4'),
                 },
@@ -1035,8 +1122,10 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatasetHashContract, TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint,
+        DatasetHashContract, PolicySimulationLabels, PolicySimulationOutcome,
+        TrainingDatasetArtifact, TrainingExample, dataset_source_fingerprint,
         fixtures::{bind_capture_to_boundary, example},
+        policy_simulation_labels,
     };
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
@@ -1045,6 +1134,7 @@ mod tests {
         hashing::CanonicalDigest,
         types::{ContentHash, ModelSpecId},
     };
+    use rust_decimal::Decimal;
 
     fn hashes() -> (ContentHash, ContentHash, ContentHash) {
         (
@@ -1052,6 +1142,28 @@ mod tests {
             CanonicalDigest::content_hash_json("factor").expect("h"),
             CanonicalDigest::content_hash_json("label").expect("h"),
         )
+    }
+
+    #[test]
+    fn policy_simulation_projects_four_labels_atomically() {
+        let terminal_at = Utc.timestamp_opt(1_000_060, 0).single().expect("ts");
+        let outcome = PolicySimulationOutcome {
+            net_return_bps: Decimal::from(250),
+            entry_fill_ratio: Decimal::ONE,
+            exit_fill_ratio: Decimal::new(8, 1),
+            terminal_at,
+        };
+        let decision_at = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        let output = policy_simulation_labels(&outcome, decision_at, 3_600, terminal_at);
+        let PolicySimulationLabels::Available(labels) = output else {
+            panic!("valid atomic policy outcome must produce all labels");
+        };
+        assert_eq!(labels.len(), 4);
+        assert!(labels.iter().all(|label| label.matured_at == terminal_at));
+        assert_eq!(labels[0].value, Decimal::from(250));
+        assert_eq!(labels[1].value, Decimal::ONE);
+        assert_eq!(labels[2].value, Decimal::ONE);
+        assert_eq!(labels[3].value, Decimal::new(8, 1));
     }
 
     fn dataset_hash(model_spec_id: &ModelSpecId, examples: &[TrainingExample]) -> ContentHash {

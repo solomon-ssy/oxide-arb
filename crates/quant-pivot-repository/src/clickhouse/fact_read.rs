@@ -7,14 +7,16 @@ use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, CryptoPriceReportRow, DomainObservationRow,
-        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow,
-        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
+        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
+        CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
+        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow, WeatherForecastPointRow,
+        WeatherObservationReportRow,
     },
-    enums::clickhouse::{ChBookEventType, ChTradeTapeSource},
+    enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
     types::{DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
+use uuid::Uuid;
 
 use crate::traits::QuantFactReadRepository;
 
@@ -318,7 +320,7 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         from_ms: i64,
         to_ms: i64,
         limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -326,21 +328,21 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .pool
             .client()
             .query(
-                "SELECT ?fields FROM tick_events \
+                "SELECT ?fields FROM quant_trade_tape \
                  WHERE token_id IN ? \
-                 AND event_type = ? \
-                 AND last_trade_price IS NOT NULL \
+                 AND source = ? \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
                  AND event_time < fromUnixTimestamp64Milli(?) \
-                 ORDER BY event_time DESC, ingestion_time DESC, sequence DESC \
+                 ORDER BY event_time DESC, revision DESC, ingestion_time DESC, token_sequence DESC \
+                 LIMIT 1 BY market_id, token_id, participant_role, event_time, source_event_id, participant_address \
                  LIMIT ?",
             )
             .bind(token_ids)
-            .bind(ChBookEventType::LastTrade)
+            .bind(ChTradeTapeSource::MarketWs)
             .bind(from_ms)
             .bind(to_ms)
             .bind(limit)
-            .fetch_all::<TickEventRow>()
+            .fetch_all::<TradeTapeRow>()
             .await?;
         Ok(rows)
     }
@@ -362,17 +364,20 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                 "SELECT ?fields FROM quant_trade_tape \
                  WHERE market_id IN ? \
                  AND source = ? \
+                 AND reconciliation_status = ? \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
                  AND event_time < fromUnixTimestamp64Milli(?) \
                  AND ingestion_time <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY ingestion_time DESC, \
+                 ORDER BY ingestion_time DESC, revision DESC, \
                  cityHash64(tuple(side, price, size_shares, notional_usd, \
-                     ifNull(tx_hash, ''), source, coverage_flags, \
+                     ifNull(tx_hash, ''), source, observed_field_flags, \
+                     reconciliation_status, ifNull(matched_source_event_id, ''), \
                      ifNull(raw_payload_json, ''), schema_version)) DESC \
-                 LIMIT 1 BY market_id, token_id, participant_role, event_time, trade_id, participant_address",
+                 LIMIT 1 BY market_id, token_id, participant_role, event_time, source_event_id, participant_address",
             )
             .bind(market_ids)
-            .bind(ChTradeTapeSource::OnChain)
+            .bind(ChTradeTapeSource::OnChainOrderFilled)
+            .bind(ChTradeReconciliationStatus::Matched)
             .bind(from_ms)
             .bind(to_ms)
             .bind(decision_at_ms)
@@ -383,14 +388,14 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
                 left.market_id.as_str(),
                 left.event_time,
                 left.ingestion_time,
-                left.trade_id.as_str(),
+                left.source_event_id.as_str(),
                 left.participant_role as i8,
             )
                 .cmp(&(
                     right.market_id.as_str(),
                     right.event_time,
                     right.ingestion_time,
-                    right.trade_id.as_str(),
+                    right.source_event_id.as_str(),
                     right.participant_role as i8,
                 ))
         });
@@ -451,37 +456,119 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         Ok(rows)
     }
 
-    async fn book_snapshot_at(
+    async fn book_checkpoint_at(
         &self,
         token_id: &TokenId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
         let rows = self
             .pool
             .client()
             .query(
-                "SELECT ?fields FROM book_snapshots \
+                "SELECT ?fields FROM quant_book_l2_checkpoint \
                  WHERE token_id = ? \
                  AND event_time <= fromUnixTimestamp64Milli(?) \
-                 AND ingestion_time <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY event_time DESC, ingestion_time DESC, sequence DESC \
+                 AND created_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY event_time DESC, created_at DESC, token_sequence DESC \
                  LIMIT 1",
             )
             .bind(token_id.clone())
             .bind(source_cutoff_ms)
             .bind(decision_at_ms)
-            .fetch_all::<BookSnapshotRow>()
+            .fetch_all::<BookL2CheckpointRow>()
             .await?;
         Ok(rows.into_iter().next())
     }
 
-    async fn book_snapshots_at(
+    async fn book_l2_events_from(
+        &self,
+        token_id: &TokenId,
+        stream_session_id: Uuid,
+        from_sequence: u64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<BookL2EventRow>, StorageError> {
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_book_l2_event \
+                 WHERE token_id = ? \
+                 AND stream_session_id = ? \
+                 AND token_sequence >= ? \
+                 AND venue_event_time <= fromUnixTimestamp64Milli(?) \
+                 AND persisted_time <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_sequence, persisted_time, payload_hash",
+            )
+            .bind(token_id.clone())
+            .bind(stream_session_id)
+            .bind(from_sequence)
+            .bind(source_cutoff_ms)
+            .bind(decision_at_ms)
+            .fetch_all::<BookL2EventRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn market_ws_trades_from(
+        &self,
+        token_id: &TokenId,
+        stream_session_id: Uuid,
+        from_sequence: u64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_trade_tape \
+                 WHERE token_id = ? \
+                 AND stream_session_id = ? \
+                 AND source = ? \
+                 AND token_sequence >= ? \
+                 AND event_time <= fromUnixTimestamp64Milli(?) \
+                 AND ingestion_time <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_sequence, source_event_id, ingestion_time DESC, revision DESC \
+                 LIMIT 1 BY market_id, token_id, participant_role, event_time, source_event_id, participant_address",
+            )
+            .bind(token_id.clone())
+            .bind(stream_session_id)
+            .bind(ChTradeTapeSource::MarketWs)
+            .bind(from_sequence)
+            .bind(source_cutoff_ms)
+            .bind(decision_at_ms)
+            .fetch_all::<TradeTapeRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn book_stream_session_at(
+        &self,
+        stream_session_id: Uuid,
+        decision_at_ms: i64,
+    ) -> Result<Option<BookStreamSessionRow>, StorageError> {
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_book_stream_session \
+                 WHERE stream_session_id = ? \
+                 AND recorded_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY ledger_sequence DESC, recorded_at DESC \
+                 LIMIT 1",
+            )
+            .bind(stream_session_id)
+            .bind(decision_at_ms)
+            .fetch_optional::<BookStreamSessionRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn book_checkpoints_at(
         &self,
         token_ids: Vec<TokenId>,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -489,28 +576,28 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .pool
             .client()
             .query(
-                "SELECT ?fields FROM book_snapshots \
+                "SELECT ?fields FROM quant_book_l2_checkpoint \
                  WHERE token_id IN ? \
                  AND event_time <= fromUnixTimestamp64Milli(?) \
-                 AND ingestion_time <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY token_id, event_time DESC, ingestion_time DESC, sequence DESC \
+                 AND created_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_id, event_time DESC, created_at DESC, token_sequence DESC \
                  LIMIT 1 BY token_id",
             )
             .bind(token_ids)
             .bind(source_cutoff_ms)
             .bind(decision_at_ms)
-            .fetch_all::<BookSnapshotRow>()
+            .fetch_all::<BookL2CheckpointRow>()
             .await?;
         Ok(rows)
     }
 
-    async fn book_snapshots_between(
+    async fn book_checkpoints_between(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         available_by_ms: i64,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
         if token_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -518,18 +605,18 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .pool
             .client()
             .query(
-                "SELECT ?fields FROM book_snapshots \
+                "SELECT ?fields FROM quant_book_l2_checkpoint \
                  WHERE token_id IN ? \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
                  AND event_time <= fromUnixTimestamp64Milli(?) \
-                 AND ingestion_time <= fromUnixTimestamp64Milli(?) \
-                 ORDER BY token_id, event_time, ingestion_time, sequence",
+                 AND created_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_id, event_time, created_at, token_sequence",
             )
             .bind(token_ids)
             .bind(from_ms)
             .bind(to_ms)
             .bind(available_by_ms)
-            .fetch_all::<BookSnapshotRow>()
+            .fetch_all::<BookL2CheckpointRow>()
             .await?;
         Ok(rows)
     }
@@ -595,17 +682,17 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
         to_ms: i64,
         decision_at_ms: i64,
     ) -> Result<Vec<MarketId>, StorageError> {
-        // `market_id` is Nullable in `book_snapshots`; `assumeNotNull` after the
+        // `market_id` is Nullable in the checkpoint; `assumeNotNull` after the
         // `IS NOT NULL` guard yields a non-nullable column the row can decode.
         let rows = self
             .pool
             .client()
             .query(
-                "SELECT DISTINCT assumeNotNull(market_id) AS market_id FROM book_snapshots \
+                "SELECT DISTINCT assumeNotNull(market_id) AS market_id FROM quant_book_l2_checkpoint \
                  WHERE market_id IS NOT NULL \
                  AND event_time >= fromUnixTimestamp64Milli(?) \
                  AND event_time <= fromUnixTimestamp64Milli(?) \
-                 AND ingestion_time <= fromUnixTimestamp64Milli(?) \
+                 AND created_at <= fromUnixTimestamp64Milli(?) \
                  ORDER BY market_id",
             )
             .bind(from_ms)

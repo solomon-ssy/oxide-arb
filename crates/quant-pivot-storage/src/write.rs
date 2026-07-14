@@ -122,6 +122,185 @@ pub struct AsyncWriter<T: Send + 'static> {
     last_warn_at: Mutex<Option<Instant>>,
 }
 
+/// Failure observed by a canonical-fact producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableWriteError {
+    QueueTimeout,
+    QueueClosed,
+    PersistenceFailed,
+    AcknowledgementTimeout,
+}
+
+struct DurableQueued<T> {
+    item: T,
+    enqueued: Instant,
+    acknowledgement: flume::Sender<bool>,
+}
+
+/// Bounded writer whose producer observes both queue admission and persistence.
+///
+/// This is reserved for canonical evidence. A timeout is not converted into a
+/// drop: callers must invalidate the enclosing stream session and reconnect.
+pub struct DurableWriter<T: Send + 'static> {
+    tx: flume::Sender<DurableQueued<T>>,
+    name: &'static str,
+    observability: AsyncWriterObservability,
+}
+
+impl<T: Send + 'static> DurableWriter<T> {
+    pub fn new<F>(
+        config: AsyncWriterConfig,
+        flush: F,
+        observability: AsyncWriterObservability,
+    ) -> (Self, DurableWriterWorker<T>)
+    where
+        F: Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let (tx, rx) = flume::bounded(config.capacity);
+        let writer = Self {
+            tx,
+            name: config.name,
+            observability: observability.clone(),
+        };
+        let worker = DurableWriterWorker {
+            rx,
+            flush: Box::new(flush),
+            name: config.name,
+            batch_size: config.batch_size,
+            flush_interval: config.flush_interval,
+            observability,
+        };
+        (writer, worker)
+    }
+
+    pub fn write_timeout(&self, item: T, timeout: Duration) -> Result<(), DurableWriteError> {
+        let (acknowledgement, ack_rx) = flume::bounded(1);
+        let queued = DurableQueued {
+            item,
+            enqueued: Instant::now(),
+            acknowledgement,
+        };
+        self.tx
+            .send_timeout(queued, timeout)
+            .map_err(|error| match error {
+                flume::SendTimeoutError::Timeout(_) => DurableWriteError::QueueTimeout,
+                flume::SendTimeoutError::Disconnected(_) => DurableWriteError::QueueClosed,
+            })?;
+        self.publish_queue_depth();
+        ack_rx
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                flume::RecvTimeoutError::Timeout => DurableWriteError::AcknowledgementTimeout,
+                flume::RecvTimeoutError::Disconnected => DurableWriteError::QueueClosed,
+            })?
+            .then_some(())
+            .ok_or(DurableWriteError::PersistenceFailed)
+    }
+
+    fn publish_queue_depth(&self) {
+        if let Some(gauge) = &self.observability.queue_depth {
+            gauge.set(i64::try_from(self.tx.len()).unwrap_or(i64::MAX));
+        }
+    }
+
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+pub struct DurableWriterWorker<T: Send + 'static> {
+    rx: flume::Receiver<DurableQueued<T>>,
+    flush: FlushFn<T>,
+    name: &'static str,
+    batch_size: usize,
+    flush_interval: Duration,
+    observability: AsyncWriterObservability,
+}
+
+impl<T: Send + 'static> DurableWriterWorker<T> {
+    pub async fn run(self, shutdown: CancellationToken) {
+        let Self {
+            rx,
+            flush,
+            name,
+            batch_size,
+            flush_interval,
+            observability,
+        } = self;
+        let mut buffer = Vec::with_capacity(batch_size);
+        let mut interval = tokio::time::interval(flush_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    while let Ok(item) = rx.try_recv() {
+                        buffer.push(item);
+                    }
+                    Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+                    return;
+                }
+                item = rx.recv_async() => {
+                    let Ok(item) = item else {
+                        Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+                        return;
+                    };
+                    buffer.push(item);
+                    if buffer.len() >= batch_size {
+                        Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+                    }
+                }
+                _ = interval.tick() => {
+                    Self::flush_batch(&flush, name, &observability, &mut buffer).await;
+                }
+            }
+            if let Some(gauge) = &observability.queue_depth {
+                gauge.set(i64::try_from(rx.len()).unwrap_or(i64::MAX));
+            }
+        }
+    }
+
+    async fn flush_batch(
+        flush: &FlushFn<T>,
+        name: &'static str,
+        observability: &AsyncWriterObservability,
+        buffer: &mut Vec<DurableQueued<T>>,
+    ) {
+        if buffer.is_empty() {
+            return;
+        }
+        let queued = mem::take(buffer);
+        let oldest_enqueued = queued.iter().map(|item| item.enqueued).min();
+        let (batch, acknowledgements): (Vec<T>, Vec<flume::Sender<bool>>) = queued
+            .into_iter()
+            .map(|item| (item.item, item.acknowledgement))
+            .unzip();
+        let persisted = match flush(batch).await {
+            Ok(()) => {
+                if let (Some(report), Some(oldest)) = (&observability.flush_lag_ms, oldest_enqueued)
+                {
+                    report(u64::try_from(oldest.elapsed().as_millis()).unwrap_or(u64::MAX));
+                }
+                true
+            }
+            Err(error) => {
+                if let Some(counter) = &observability.flush_failed {
+                    counter.inc();
+                }
+                warn!(writer = name, %error, "canonical batch persistence failed");
+                false
+            }
+        };
+        for acknowledgement in acknowledgements {
+            let _ = acknowledgement.send(persisted);
+        }
+    }
+}
+
 impl<T: Send + 'static> AsyncWriter<T> {
     /// Build a writer handle and its paired worker.
     ///

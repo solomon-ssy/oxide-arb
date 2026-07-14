@@ -12,9 +12,7 @@ use crate::{
         market_filter::MarketFilter,
         market_registry::MarketRegistry,
     },
-    observability::{
-        backpressure::BackpressurePolicy, book_fact_writer::BookFactWriter, metrics_hub::MetricsHub,
-    },
+    observability::{book_fact_writer::BookFactWriter, metrics_hub::MetricsHub},
     pit::platform::ch_historical::DurablePitSource,
     service::{
         catalog_readiness::CatalogReadiness,
@@ -26,7 +24,7 @@ use crate::{
 use quant_pivot_api::{
     fees::FeeCalculator,
     gamma::GammaClient,
-    ws::{ClobWsManager, WsEventDropHook, WsShardHealthPort},
+    ws::{ClobWsManager, WsSessionInvalidationHook, WsShardHealthPort},
 };
 use quant_pivot_models::{
     config::DeployConfig, domain::CoreEventPublisher, runtime_config::RuntimeConfig,
@@ -82,14 +80,17 @@ pub struct DataBundle {
 impl DataBundle {
     /// Wire the full Polymarket ingest stack from deploy config and infra handles.
     pub fn assemble(deps: &DataBundleDeps<'_>) -> Self {
-        let drop_metrics = Arc::clone(deps.metrics);
-        let on_events_dropped: WsEventDropHook =
-            Arc::new(move |n| drop_metrics.ws_events_dropped.inc_by(n));
+        let invalidation_metrics = Arc::clone(deps.metrics);
+        let on_session_invalidated: WsSessionInvalidationHook = Arc::new(move |n| {
+            invalidation_metrics
+                .ws_session_backpressure_invalidations
+                .inc_by(n);
+        });
         let ws_manager = Arc::new(ClobWsManager::new(
             &deps.deploy.polymarket,
             &deps.deploy.market_data.websocket,
             deps.shutdown.clone(),
-            Some(on_events_dropped),
+            Some(on_session_invalidated),
             None,
         ));
         let gamma_client = Arc::new(GammaClient::new(deps.deploy.market_data.gamma.clone()));
@@ -276,10 +277,6 @@ fn build_data_pipeline(
         book_store: Arc::clone(book_store),
         market_registry: Arc::clone(market_registry),
         metrics: Arc::clone(metrics),
-        backpressure: Arc::new(BackpressurePolicy::new(
-            Arc::clone(metrics),
-            data_pipeline::DEFAULT_BOOK_SHARD_COUNT,
-        )),
         book_fact_writer,
         book_shard_count: data_pipeline::DEFAULT_BOOK_SHARD_COUNT,
         book_channel_capacity: data_pipeline::DEFAULT_BOOK_CHANNEL_CAPACITY,

@@ -22,9 +22,9 @@ use quant_pivot_models::{
     types::{
         BookSnapshotRef, Bps, ContentHash, EligibilitySummary, EntryConditionArtifactId,
         EntryConditionPlan, EntryOrderPolicy, EntryPlan, EquitySnapshotId, EvidenceRefs,
-        ExecutionEligibility, ExitPlan, Price, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, ReportSummary, ScaleOutTarget, ThesisInvalidationPolicy,
-        TrailingStopPolicy, Usd,
+        ExecutionEligibility, ExitPlan, OpportunisticExitPolicy, Price, Probability,
+        RecommendationId, RecommendationReportId, RecommendationTradePlan, ReportSummary,
+        ScaleOutTarget, ThesisInvalidationPolicy, TrailingStopPolicy, Usd,
     },
 };
 
@@ -69,8 +69,9 @@ where
 
 fn book_snapshot_ref() -> BookSnapshotRef {
     BookSnapshotRef::from_str(&format!(
-        "book:ch:token-abc:1700000000:1700000000:1:1@blake3:{}",
-        "0".repeat(64)
+        "book:l2|token-abc|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
+        "1".repeat(64),
+        "0".repeat(64),
     ))
     .expect("valid book snapshot ref")
 }
@@ -202,6 +203,13 @@ fn partial_exit_plan() -> ExitPlan {
             min_score_retention: dec!(0.6),
             min_expected_return_bps: Bps::ZERO,
             require_execution_eligibility: true,
+        },
+        opportunistic_exit: OpportunisticExitPolicy {
+            min_confidence: Probability::new(dec!(0.65)),
+            min_expected_alpha_bps: Bps::new(dec!(50)),
+            min_p_exit_better: Probability::new(dec!(0.5)),
+            max_cumulative_exit_pct: dec!(1),
+            min_incremental_exit_pct: dec!(0.1),
         },
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,

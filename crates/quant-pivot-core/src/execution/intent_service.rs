@@ -14,14 +14,16 @@
 use std::{fmt::Display, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::{QuantResult, execution::ExecutionError, storage::StorageError};
+use chrono::{DateTime, Duration, FixedOffset, Utc};
+use quant_pivot_error::{
+    QuantError, QuantResult, execution::ExecutionError, storage::StorageError,
+};
 use quant_pivot_models::{
     domain::{
         ApproveIntentCommand, ApproveOrderIntent, ApproveOrderIntentOutcome, CancelIntentCommand,
-        CreateIntentCommand, IntentEventKind, NewCapitalAllocation, NewOperationLog,
-        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, OrderIntentPort, Paginated,
-        RecommendationInfo, RecommendationReportInfo, RejectIntentCommand,
+        CreateIntentCommand, IntentCreationLimits, IntentEventKind, NewCapitalAllocation,
+        NewOperationLog, NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, OrderIntentPort,
+        Paginated, RecommendationInfo, RecommendationReportInfo, RejectIntentCommand,
     },
     enums::{
         common::{OrderType, Side},
@@ -36,7 +38,8 @@ use quant_pivot_models::{
     types::{
         CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
         EntryOrderSpec, ExitPolicySpec, ModelVersionId, OperationLogId, OrderAmount, OrderIntentId,
-        Price, RecommendationId, RecommendationReportId, Usd,
+        Price, RecommendationId, RecommendationReportId, RecommendationTradePlan,
+        TradePolicyArtifactId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -47,6 +50,7 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     model::{CalibrationArtifactLoader, load_hash_verified_artifact},
 };
+use rust_decimal::Decimal;
 
 use crate::{
     execution::{
@@ -57,6 +61,7 @@ use crate::{
     },
     governance::{KillSwitchHandle, RuntimeModeHandle, resolve_return_model_calibration},
     observability::metrics_hub::MetricsHub,
+    runtime_config::RuntimeConfigStore,
     service::feature_integrity::FeatureParityGatePort,
 };
 /// Post-commit event sink for terminally invalidated intents.
@@ -71,6 +76,7 @@ pub trait IntentTerminalEventSink: Send + Sync {
 pub struct OrderIntentServiceDeps {
     pub mode_gate: Arc<dyn RuntimeModeGate>,
     pub runtime_mode: RuntimeModeHandle,
+    pub runtime_config: Arc<RuntimeConfigStore>,
     pub kill_switch: KillSwitchHandle,
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub reports: Arc<dyn RecommendationReportRepository>,
@@ -101,6 +107,7 @@ pub struct OrderIntentServiceDeps {
 pub struct CoreOrderIntentService {
     mode_gate: Arc<dyn RuntimeModeGate>,
     runtime_mode: RuntimeModeHandle,
+    runtime_config: Arc<RuntimeConfigStore>,
     kill_switch: KillSwitchHandle,
     recommendations: Arc<dyn RecommendationRepository>,
     reports: Arc<dyn RecommendationReportRepository>,
@@ -116,6 +123,17 @@ pub struct CoreOrderIntentService {
     feature_parity_gate: Arc<dyn FeatureParityGatePort>,
 }
 
+struct SemiAutoCanaryAuthorization {
+    policy_id: TradePolicyArtifactId,
+    policy_hash: ContentHash,
+    expires_at: DateTime<Utc>,
+    limits: IntentCreationLimits,
+}
+
+fn malformed_canary(detail: impl Display) -> QuantError {
+    QuantError::config(format!("active SemiAuto canary is malformed: {detail}"))
+}
+
 impl CoreOrderIntentService {
     /// Assemble the service from its dependencies.
     #[must_use]
@@ -123,6 +141,7 @@ impl CoreOrderIntentService {
         Self {
             mode_gate: deps.mode_gate,
             runtime_mode: deps.runtime_mode,
+            runtime_config: deps.runtime_config,
             kill_switch: deps.kill_switch,
             recommendations: deps.recommendations,
             reports: deps.reports,
@@ -175,6 +194,105 @@ impl CoreOrderIntentService {
         require_frozen_trade_policy(self.trade_policies.as_ref(), &version, recommendation).await
     }
 
+    fn require_semi_auto_canary(
+        &self,
+        recommendation: &RecommendationInfo,
+        report: &RecommendationReportInfo,
+        now: DateTime<Utc>,
+    ) -> QuantResult<SemiAutoCanaryAuthorization> {
+        let config = self.runtime_config.current();
+        let canary = &config.execution.semi_auto.canary;
+        if !canary.enabled {
+            return Err(ExecutionError::IntentDenied {
+                reason: "SemiAuto canary is not enabled".to_owned(),
+            }
+            .into());
+        }
+        let policy_id = canary
+            .policy_artifact_id
+            .as_deref()
+            .ok_or_else(|| malformed_canary("policy_artifact_id is missing"))?
+            .parse::<TradePolicyArtifactId>()
+            .map_err(|error| malformed_canary(format!("policy_artifact_id is invalid: {error}")))?;
+        let policy_hash = canary
+            .policy_content_hash
+            .as_deref()
+            .ok_or_else(|| malformed_canary("policy_content_hash is missing"))?
+            .parse::<ContentHash>()
+            .map_err(|error| {
+                malformed_canary(format!("policy_content_hash is invalid: {error}"))
+            })?;
+        let expires_at = canary
+            .expires_at
+            .as_deref()
+            .ok_or_else(|| malformed_canary("expires_at is missing"))?
+            .parse::<DateTime<FixedOffset>>()
+            .map_err(|error| malformed_canary(format!("expires_at is invalid: {error}")))?
+            .with_timezone(&Utc);
+        if expires_at <= now {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!("SemiAuto canary expired at {expires_at}"),
+            }
+            .into());
+        }
+        let RecommendationTradePlan::Frozen { policy, sizing, .. } = &recommendation.trade_plan
+        else {
+            return Err(ExecutionError::IntentDenied {
+                reason: "recommendation has no frozen trade policy".to_owned(),
+            }
+            .into());
+        };
+        if policy.artifact_id != policy_id || policy.artifact_hash != policy_hash {
+            return Err(ExecutionError::IntentDenied {
+                reason:
+                    "recommendation policy identity is not authorized by the active SemiAuto canary"
+                        .to_owned(),
+            }
+            .into());
+        }
+        let allowed_tier = canary
+            .allowed_tiers_usd
+            .iter()
+            .map(|tier| tier.value.parse::<Decimal>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| malformed_canary(format!("allowed tier is invalid: {error}")))?
+            .into_iter()
+            .any(|tier| Usd::new(tier) == sizing.suggested_usd);
+        if !allowed_tier {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!(
+                    "recommendation tier {} is not authorized by the active SemiAuto canary",
+                    sizing.suggested_usd
+                ),
+            }
+            .into());
+        }
+        let max_total_usd_per_report = Usd::new(
+            canary
+                .max_total_usd_per_report
+                .value
+                .parse::<Decimal>()
+                .map_err(|error| {
+                    malformed_canary(format!("max_total_usd_per_report is invalid: {error}"))
+                })?,
+        );
+        if canary.max_open_intents == 0 || !max_total_usd_per_report.is_positive() {
+            return Err(malformed_canary(
+                "open-intent and report-notional limits must be positive",
+            ));
+        }
+        Ok(SemiAutoCanaryAuthorization {
+            policy_id,
+            policy_hash,
+            expires_at,
+            limits: IntentCreationLimits {
+                recommendation_report_id: report.recommendation_report_id.clone(),
+                max_open_intents: canary.max_open_intents,
+                max_total_usd_per_report,
+            },
+        })
+    }
+
     /// Create an intent from a recommendation at `now` (mode-gated, atomic with
     /// the capital reservation).
     pub async fn create_at(
@@ -198,10 +316,20 @@ impl CoreOrderIntentService {
             self.ensure_return_model_still_calibrated(&rec.evidence_refs.model_version_id)
                 .await?;
         }
+        let canary = if mode == QuantRuntimeMode::SemiAuto {
+            Some(self.require_semi_auto_canary(&rec, &report, now)?)
+        } else {
+            None
+        };
         let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
         let entry = project_entry_order_spec(&rec, now)?;
         let exit = project_exit_policy_spec(&rec, entry.limit_price)?;
-        let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
+        let mut resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
+        if let Some(canary) = canary.as_ref() {
+            resolved.expires_at = resolved.expires_at.min(canary.expires_at);
+            resolved.policy_id = Some(canary.policy_id.to_string());
+            resolved.policy_hash = Some(canary.policy_hash.clone());
+        }
         let condition = self
             .conditions
             .find_by_recommendation(&rec.recommendation_id)
@@ -221,7 +349,7 @@ impl CoreOrderIntentService {
 
         let intent = self
             .intents
-            .create_with_allocation(new_intent, allocation)
+            .create_with_allocation(new_intent, allocation, canary.map(|value| value.limits))
             .await?;
         self.metrics
             .inc_order_intent_created(intent.runtime_mode.as_str(), intent.intent_kind.as_str());
@@ -309,6 +437,29 @@ impl CoreOrderIntentService {
                 ),
             }
             .into());
+        }
+        if intent.runtime_mode == QuantRuntimeMode::SemiAuto {
+            let recommendation = self.load_recommendation(&intent.recommendation_id).await?;
+            let report = self
+                .load_report(&recommendation.recommendation_report_id)
+                .await?;
+            self.ensure_trade_policy_still_executable(&recommendation)
+                .await?;
+            self.ensure_return_model_still_calibrated(
+                &recommendation.evidence_refs.model_version_id,
+            )
+            .await?;
+            let canary = self.require_semi_auto_canary(&recommendation, &report, now)?;
+            let canary_policy_id = canary.policy_id.to_string();
+            if intent.policy_id.as_deref() != Some(canary_policy_id.as_str())
+                || intent.policy_hash.as_ref() != Some(&canary.policy_hash)
+            {
+                return Err(ExecutionError::IntentDenied {
+                    reason: "pending intent is not bound to the active SemiAuto canary identity"
+                        .to_owned(),
+                }
+                .into());
+            }
         }
 
         let (entry_override, allocated_override) =
@@ -765,6 +916,7 @@ fn project_exit_policy_spec(
         max_hold_secs: exit.max_hold_secs,
         trailing_stop: exit.trailing_stop.clone(),
         thesis_invalidation: exit.thesis_invalidation.clone(),
+        opportunistic_exit: exit.opportunistic_exit.clone(),
         scale_out_targets: exit.scale_out_targets.clone(),
         settlement_mode: exit.settlement_mode,
         redeem_policy: exit.redeem_policy,

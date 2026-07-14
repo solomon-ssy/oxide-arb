@@ -36,6 +36,7 @@ impl AppContext {
         Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
             mode_gate,
             runtime_mode: self.runtime_mode(),
+            runtime_config: self.runtime_config(),
             kill_switch: self.kill_switch_handle(),
             recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             reports: Arc::clone(&repos.recommendation_report)

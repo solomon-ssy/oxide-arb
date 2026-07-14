@@ -18,11 +18,11 @@ use prometheus::IntCounter;
 use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow,
-        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
-        QuantFactorEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
-        QuantRecommendationEventRow, QuantServingEvidenceCompletionRow,
-        QuantSignalCandidateEventRow, TickEventRow,
+        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
+        MarketResolutionRow, QuantCapitalAllocationEventRow, QuantExecutionEventRow,
+        QuantExitSignalEvaluationEventRow, QuantFactorEventRow, QuantPositionEventRow,
+        QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
+        QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, TradeTapeRow,
     },
     config::DeployConfig,
 };
@@ -39,7 +39,7 @@ use quant_pivot_storage::{
         PostgresPool,
         migration::{Migrator, MigratorTrait},
     },
-    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, DurableWriter},
 };
 use quant_pivot_web::jwt::RedisTokenBlacklist;
 use std::{sync::Arc, time::Duration};
@@ -300,41 +300,49 @@ fn build_book_fact_writer(
         obs
     };
 
-    let ticks = spawn_fact_stream::<TickEventRow>(
+    let sessions = spawn_durable_fact_stream::<BookStreamSessionRow>(
         &queue,
-        TaskId::TickEventsWriter,
+        TaskId::BookStreamSessionWriter,
         Arc::new(ChFactWriter::new(
             Arc::clone(ch_pool),
             Arc::clone(write_manager),
-            "tick_events",
+            "quant_book_stream_session",
         )),
-        drops("tick_events"),
-        lag_obs("tick_events"),
-        config("tick_events"),
+        lag_obs("quant_book_stream_session"),
+        config("quant_book_stream_session"),
     );
-    let l2 = spawn_fact_stream::<BookL2ReplayRow>(
+    let l2 = spawn_durable_fact_stream::<BookL2EventRow>(
         &queue,
-        TaskId::BookL2ReplayWriter,
+        TaskId::BookL2EventWriter,
         Arc::new(ChFactWriter::new(
             Arc::clone(ch_pool),
             Arc::clone(write_manager),
-            "book_l2_replay_hot",
+            "quant_book_l2_event",
         )),
-        drops("book_l2_replay_hot"),
-        lag_obs("book_l2_replay_hot"),
-        config("book_l2_replay_hot"),
+        lag_obs("quant_book_l2_event"),
+        config("quant_book_l2_event"),
     );
-    let snapshots = spawn_fact_stream::<BookSnapshotRow>(
+    let checkpoints = spawn_durable_fact_stream::<BookL2CheckpointRow>(
         &queue,
-        TaskId::BookSnapshotWriter,
+        TaskId::BookL2CheckpointWriter,
         Arc::new(ChFactWriter::new(
             Arc::clone(ch_pool),
             Arc::clone(write_manager),
-            "book_snapshots",
+            "quant_book_l2_checkpoint",
         )),
-        drops("book_snapshots"),
-        lag_obs("book_snapshots"),
-        config("book_snapshots"),
+        lag_obs("quant_book_l2_checkpoint"),
+        config("quant_book_l2_checkpoint"),
+    );
+    let trades = spawn_durable_fact_stream::<TradeTapeRow>(
+        &queue,
+        TaskId::TradeTapeWsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_trade_tape",
+        )),
+        lag_obs("quant_trade_tape"),
+        config("quant_trade_tape"),
     );
     let microstructure = spawn_fact_stream::<BookMicrostructureRow>(
         &queue,
@@ -362,9 +370,10 @@ fn build_book_fact_writer(
     );
 
     let writer = Arc::new(BookFactWriter::new(
-        ticks,
         l2,
-        snapshots,
+        checkpoints,
+        sessions,
+        trades,
         microstructure,
         resolutions,
     ));
@@ -709,6 +718,28 @@ where
             Box::pin(async move { sink.write_batch(rows).await })
         },
         drops,
+        observability,
+    );
+    queue.push(task, move |token| worker.run(token));
+    Arc::new(writer)
+}
+
+fn spawn_durable_fact_stream<T>(
+    queue: &PendingTaskQueue,
+    task: TaskId,
+    sink: Arc<dyn FactWriter<T>>,
+    observability: AsyncWriterObservability,
+    config: AsyncWriterConfig,
+) -> Arc<DurableWriter<T>>
+where
+    T: Send + 'static,
+{
+    let (writer, worker) = DurableWriter::new(
+        config,
+        move |rows| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move { sink.write_batch(rows).await })
+        },
         observability,
     );
     queue.push(task, move |token| worker.run(token));

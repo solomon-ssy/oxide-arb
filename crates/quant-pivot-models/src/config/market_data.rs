@@ -164,6 +164,14 @@ pub struct TradeTapeOnChainConfig {
     pub max_blocks_per_request: u64,
     /// Maximum rows written per `ClickHouse` batch. Default: 1000.
     pub batch_size: usize,
+    /// Re-read horizon for WS/on-chain reconciliation. Default: 3600 seconds.
+    pub reconciliation_lookback_secs: u64,
+    /// Maximum absolute event-time distance for an exact match. Default: 2000 ms.
+    pub reconciliation_match_window_ms: u64,
+    /// Age after which a still-unmatched WS print becomes unavailable. Default: 600 seconds.
+    pub reconciliation_terminal_age_secs: u64,
+    /// Hard row cap per reconciliation cycle; overflow fails without truncation.
+    pub reconciliation_max_rows: usize,
 }
 
 impl Default for TradeTapeOnChainConfig {
@@ -175,6 +183,10 @@ impl Default for TradeTapeOnChainConfig {
             max_blocks_per_tick: 2_000,
             max_blocks_per_request: 2_000,
             batch_size: 1_000,
+            reconciliation_lookback_secs: 3_600,
+            reconciliation_match_window_ms: 2_000,
+            reconciliation_terminal_age_secs: 600,
+            reconciliation_max_rows: 100_000,
         }
     }
 }

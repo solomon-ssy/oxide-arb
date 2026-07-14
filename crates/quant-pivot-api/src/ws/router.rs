@@ -84,6 +84,19 @@ impl ShardRouter {
         drop(ledger);
     }
 
+    /// Force the owning shard to tear down and establish a fresh stream session.
+    pub fn restart_token(&self, token: &TokenId) {
+        let ledger = self.ledger.lock();
+        let Some(shard_id) = ledger.assignments.get(token).copied() else {
+            return;
+        };
+        let slot = &ledger.shards[shard_id];
+        let tokens_tx = slot.tokens_tx.clone();
+        let assigned = Arc::new(slot.assigned.clone());
+        drop(ledger);
+        tokens_tx.send_replace(assigned);
+    }
+
     /// Number of shards spawned so far.
     pub fn shard_count(&self) -> usize {
         self.ledger.lock().shards.len()
@@ -137,10 +150,7 @@ fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ws::{
-        health::{ShardHealthBoard, TokenFreshnessBoard},
-        reconnect::ReconnectPolicy,
-    };
+    use crate::ws::{health::ShardHealthBoard, reconnect::ReconnectPolicy};
     use std::{sync::Arc, time::Duration};
     use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
@@ -154,14 +164,13 @@ mod tests {
                 ws_url: "ws://test".into(),
                 shutdown: CancellationToken::new(),
                 last_message_at: Arc::new(parking_lot::Mutex::new(None)),
-                on_events_dropped: None,
+                on_session_invalidated: None,
                 on_book_level_rejected: None,
                 reconnect_policy: ReconnectPolicy::default(),
                 sdk_initial_backoff: Duration::from_secs(1),
                 sdk_max_backoff: Duration::from_secs(30),
                 connect_limiter: Arc::new(Semaphore::new(4)),
                 health: Arc::new(ShardHealthBoard::default()),
-                token_freshness: Arc::new(TokenFreshnessBoard::default()),
             },
         )
     }

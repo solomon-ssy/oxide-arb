@@ -26,6 +26,7 @@ pub mod settlement_redeem_worker;
 pub mod system_status_broadcaster;
 pub mod task_id;
 pub mod task_registry;
+pub mod trade_tape_reconciliation_worker;
 pub mod trade_tape_worker;
 pub mod web_services;
 
@@ -90,7 +91,7 @@ impl AppContext {
         self.governance.kill_switch_handle.clone()
     }
 
-    /// Content-addressed artifact store (`deploy.research.artifact_root`).
+    /// Content-addressed Local or S3-compatible artifact store.
     pub fn artifact_store(&self) -> Arc<dyn ArtifactStore> {
         Arc::clone(&self.research.artifact_store)
     }

@@ -9,6 +9,7 @@ use crate::{
         domain_live_ingest_worker::{DomainLiveIngestDeps, DomainLiveIngestWorker},
         task_id::TaskId,
         task_registry::AppRunner,
+        trade_tape_reconciliation_worker::TradeTapeReconciliationWorker,
         trade_tape_worker::TradeTapeWorker,
     },
     service::domain_ingest::DomainIngestor,
@@ -53,6 +54,16 @@ impl AppContext {
                     tracing::error!(%error, "TradeTapeWorker exited with error");
                 }
             });
+        }
+        if let Some(worker) = self.build_trade_tape_reconciliation_worker() {
+            runner.spawn(
+                TaskId::TradeTapeReconciliationWorker,
+                move |token| async move {
+                    if let Err(error) = worker.run(token).await {
+                        tracing::error!(%error, "TradeTapeReconciliationWorker exited with error");
+                    }
+                },
+            );
         }
         if let Some(worker) = self.build_domain_ingest_worker() {
             runner.spawn(TaskId::DomainIngestWorker, move |token| async move {
@@ -211,6 +222,21 @@ impl AppContext {
             )),
             config.clone(),
         )))
+    }
+
+    fn build_trade_tape_reconciliation_worker(&self) -> Option<Arc<TradeTapeReconciliationWorker>> {
+        let config = &self.config.market_data.trade_tape_on_chain;
+        config.enabled.then(|| {
+            Arc::new(TradeTapeReconciliationWorker::new(
+                Arc::clone(&self.infra.ch),
+                Arc::new(ChFactWriter::<TradeTapeRow>::new(
+                    Arc::clone(&self.infra.ch),
+                    Arc::clone(&self.infra.ch_write_manager),
+                    "quant_trade_tape",
+                )),
+                config.clone(),
+            ))
+        })
     }
 
     fn build_domain_ingest_worker(&self) -> Option<Arc<DomainIngestWorker>> {

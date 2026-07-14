@@ -5,17 +5,52 @@
 //! only metadata + [`ContentHash`](quant_pivot_models::types::ContentHash) +
 //! [`ArtifactUri`]; the bytes live behind this trait. The local backend
 //! ([`LocalArtifactStore`]) writes `file://` URIs under a deploy-configured
-//! root; an object-store backend (`s3://`) slots in later without changing the
-//! trait or any caller.
+//! root; production evidence uses a versioned, Object-Lock-enabled S3-compatible
+//! backend.
 
 mod local;
+mod s3;
 
 pub use local::LocalArtifactStore;
+pub use s3::S3ArtifactStore;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt, stream};
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::types::ArtifactUri;
-use std::fmt::{self, Display, Formatter};
+use quant_pivot_models::{
+    config::{ArtifactStoreDeployConfig, ArtifactStoreKind},
+    types::ArtifactUri,
+};
+use std::{
+    fmt::{self, Display, Formatter},
+    pin::Pin,
+    sync::Arc,
+};
+
+pub type ArtifactByteStream = Pin<Box<dyn Stream<Item = QuantResult<Bytes>> + Send>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactDurability {
+    pub remote: bool,
+    pub versioned: bool,
+    pub object_locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactObjectMetadata {
+    pub byte_size: u64,
+    pub etag: Option<String>,
+    pub version_id: Option<String>,
+    pub durability: ArtifactDurability,
+}
+
+impl ArtifactDurability {
+    #[must_use]
+    pub const fn permits_production_publish(self) -> bool {
+        self.remote && self.versioned && self.object_locked
+    }
+}
 
 /// Logical grouping for an artifact, mapped to a sub-directory / key prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,6 +63,8 @@ pub enum ArtifactNamespace {
     Model,
     /// Point-in-time backtest reports (`backtests/`).
     Backtest,
+    /// Row-level executable-policy evidence bundles.
+    PolicyEvidence,
 }
 
 impl ArtifactNamespace {
@@ -39,6 +76,7 @@ impl ArtifactNamespace {
             Self::Dataset => "datasets",
             Self::Model => "models",
             Self::Backtest => "backtests",
+            Self::PolicyEvidence => "policy-evidence",
         }
     }
 }
@@ -99,13 +137,15 @@ impl ArtifactKey {
 
     fn validate_segment(field: &'static str, value: &str) -> QuantResult<()> {
         let invalid = value.is_empty()
-            || value.contains('/')
-            || value.contains('\\')
-            || value.contains("..")
-            || value.contains('\0');
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            || value.contains("..");
         if invalid {
             return Err(ResearchError::InvalidArtifactKey {
-                detail: format!("{field} must be non-empty and free of path separators: {value:?}"),
+                detail: format!(
+                    "{field} must use ASCII letters, digits, dot, dash, or underscore without traversal: {value:?}"
+                ),
             }
             .into());
         }
@@ -119,11 +159,39 @@ impl ArtifactKey {
 /// typed [`ResearchError`], never a panic.
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
-    /// Store `bytes` under `key`, returning the resolved location.
-    async fn put(&self, key: ArtifactKey, bytes: &[u8]) -> QuantResult<ArtifactUri>;
+    /// Stream an artifact into an atomic backend object.
+    async fn put_stream(
+        &self,
+        key: ArtifactKey,
+        stream: ArtifactByteStream,
+    ) -> QuantResult<ArtifactUri>;
 
-    /// Read the bytes previously stored at `uri`.
-    async fn get(&self, uri: &ArtifactUri) -> QuantResult<Vec<u8>>;
+    /// Stream an artifact without materializing it as one process-sized buffer.
+    async fn get_stream(&self, uri: &ArtifactUri) -> QuantResult<ArtifactByteStream>;
+
+    /// Prove the durability properties required by a publication boundary.
+    async fn durability(&self, uri: &ArtifactUri) -> QuantResult<ArtifactDurability>;
+
+    /// Read immutable object identity used by archive/evidence manifests.
+    async fn metadata(&self, uri: &ArtifactUri) -> QuantResult<ArtifactObjectMetadata>;
+
+    /// Convenience for small objects; large evidence/archive paths call
+    /// [`Self::put_stream`] directly.
+    async fn put(&self, key: ArtifactKey, bytes: &[u8]) -> QuantResult<ArtifactUri> {
+        let bytes = Bytes::copy_from_slice(bytes);
+        self.put_stream(key, Box::pin(stream::once(async move { Ok(bytes) })))
+            .await
+    }
+
+    /// Convenience for bounded metadata/model objects.
+    async fn get(&self, uri: &ArtifactUri) -> QuantResult<Vec<u8>> {
+        let mut stream = self.get_stream(uri).await?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(&chunk?);
+        }
+        Ok(bytes)
+    }
 
     /// Whether an artifact exists at `uri`.
     async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool>;
@@ -135,4 +203,13 @@ pub trait ArtifactStore: Send + Sync {
 
     /// Whether an artifact exists under a content-addressed `key`.
     async fn exists_by_key(&self, key: &ArtifactKey) -> QuantResult<bool>;
+}
+
+pub fn build_artifact_store(
+    config: &ArtifactStoreDeployConfig,
+) -> QuantResult<Arc<dyn ArtifactStore>> {
+    match config.kind {
+        ArtifactStoreKind::Local => Ok(Arc::new(LocalArtifactStore::new(&config.prefix))),
+        ArtifactStoreKind::S3 => Ok(Arc::new(S3ArtifactStore::new(config)?)),
+    }
 }

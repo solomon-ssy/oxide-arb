@@ -18,8 +18,8 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, ChDecimal64, ChPrice, ChSchemaVersion, ChUsd,
-        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        BookL2CheckpointRow, BookMicrostructureRow, ChDecimal64, ChPrice, ChSchemaVersion, ChUsd,
+        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     config::GammaConfig,
     domain::{
@@ -37,7 +37,7 @@ use quant_pivot_models::{
         quant_market_linkage::{Column as LinkageColumn, Entity as LinkageEntity},
     },
     enums::{
-        clickhouse::{ChFactSource, ChSnapshotReason},
+        clickhouse::ChFactSource,
         common::{CategorySet, MarketCategory, TickSize},
         domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
         factor::FactorFamily,
@@ -76,7 +76,9 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     features::{EvidenceSourceKind, FeatureName},
-    pit::{BookSnapshotAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot},
+    pit::{
+        BookSnapshotAt, CanonicalBookEventRef, PointInTimeSnapshotSource, ResolvedMarketSnapshot,
+    },
     training::{
         DatasetPlan, DatasetPlanRequest, LabelName, TrainingDatasetArtifact,
         TrainingDatasetBuilder, TrainingDatasetPlanner, dataset_manifest_hash,
@@ -91,6 +93,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 const EVENT_ID: &str = "evt-dataset-e2e";
 const MARKET_ID: &str = "0xdatasete2e";
@@ -169,7 +172,7 @@ fn ledger_manifest(
 
 #[derive(Default)]
 struct FactScenario {
-    books: HashMap<TokenId, Vec<BookSnapshotRow>>,
+    books: HashMap<TokenId, Vec<BookL2CheckpointRow>>,
     micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
     resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
     domain_observations: HashMap<DomainInstrumentKey, Vec<DomainObservationRow>>,
@@ -238,34 +241,34 @@ impl QuantFactReadRepository for ControllableFactRead {
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
 
-    async fn book_snapshot_at(
+    async fn book_checkpoint_at(
         &self,
         token_id: &TokenId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         Ok(scenario.books.get(token_id).and_then(|rows| {
             rows.iter()
                 .filter(|row| {
-                    row.event_time <= source_cutoff_ms && row.ingestion_time <= decision_at_ms
+                    row.event_time <= source_cutoff_ms && row.created_at <= decision_at_ms
                 })
-                .max_by_key(|row| (row.event_time, row.ingestion_time, row.sequence))
+                .max_by_key(|row| (row.event_time, row.created_at, row.token_sequence))
                 .cloned()
         }))
     }
 
-    async fn book_snapshots_between(
+    async fn book_checkpoints_between(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         available_by_ms: i64,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
         let scenario = self.scenario.lock().expect("lock");
         let mut rows = Vec::new();
         for token_id in token_ids {
@@ -273,7 +276,7 @@ impl QuantFactReadRepository for ControllableFactRead {
                 for row in series {
                     if row.event_time >= from_ms
                         && row.event_time <= to_ms
-                        && row.ingestion_time <= available_by_ms
+                        && row.created_at <= available_by_ms
                     {
                         rows.push(row.clone());
                     }
@@ -339,7 +342,7 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .filter(|row| {
                     row.event_time >= from_ms
                         && row.event_time <= to_ms
-                        && row.ingestion_time <= decision_at_ms
+                        && row.created_at <= decision_at_ms
                 })
                 .filter_map(|row| row.market_id.clone())
                 .collect()
@@ -448,6 +451,12 @@ impl PointInTimeSnapshotSource for LeakyPitEngine {
             timestamp_ms: u64::try_from(observed_ms).expect("positive test timestamp"),
             version: 1,
             sequence: 1,
+            source_event: Some(CanonicalBookEventRef {
+                stream_session_id: Uuid::from_u128(1),
+                token_sequence: 1,
+                source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                    .expect("canonical event hash"),
+            }),
             available_at: boundary.decision_at(),
         }))
     }
@@ -468,25 +477,20 @@ impl PointInTimeSnapshotSource for LeakyPitEngine {
     }
 }
 
-fn book_row(token: &str, event_time_ms: i64) -> BookSnapshotRow {
-    BookSnapshotRow {
+fn book_row(token: &str, event_time_ms: i64) -> BookL2CheckpointRow {
+    BookL2CheckpointRow {
         token_id: TokenId::new(token),
         market_id: Some(MarketId::new(MARKET_ID)),
-        snapshot_reason: ChSnapshotReason::Startup,
-        top_n: 5,
+        stream_session_id: Uuid::nil(),
+        token_sequence: 1,
         bids_json: r#"[["0.48","100"]]"#.to_owned(),
         asks_json: r#"[["0.52","100"]]"#.to_owned(),
-        bid_depth_usd: None,
-        ask_depth_usd: None,
-        mid_price: Some(ChPrice::from(Price::new(Decimal::new(50, 2)))),
-        spread_bps: None,
         book_version: 1,
-        levels_count: 1,
+        source_event_hash: catalog_fixture_hash('1'),
+        checkpoint_hash: catalog_fixture_hash('2'),
         event_time: event_time_ms,
-        ingestion_time: event_time_ms,
-        sequence: 1,
-        source: ChFactSource::WsSnapshot,
-        schema_version: ChSchemaVersion::FIRST,
+        created_at: event_time_ms,
+        schema_version: ChSchemaVersion(2),
     }
 }
 

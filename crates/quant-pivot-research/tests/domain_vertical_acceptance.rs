@@ -56,6 +56,7 @@ use quant_pivot_research::{
         CryptoSubjectParser, DefaultSubjectValidator, LayeredResolver, SubjectExtractor,
         SubjectValidator, Tier0SlugExtractor, ValidationOutcome, WeatherStationCatalog,
     },
+    pit::CanonicalBookEventRef,
     selection::SelectedMarket,
     training::{
         DatasetHashContract, LabelName, TrainingDatasetArtifact, TrainingExample, TrainingLabel,
@@ -178,6 +179,12 @@ fn domain_test_book(market: &SelectedMarket, cutoff: chrono::DateTime<Utc>) -> R
         timestamp_ms: u64::try_from(cutoff.timestamp_millis()).expect("positive timestamp"),
         version: 1,
         sequence: 1,
+        source_event: Some(CanonicalBookEventRef {
+            stream_session_id: uuid::Uuid::from_u128(1),
+            token_sequence: 1,
+            source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+                .expect("canonical event hash"),
+        }),
         effective_at: cutoff,
         available_at: cutoff,
     }
@@ -240,6 +247,7 @@ fn build_domain_test_vector(
         start_date: Some(as_of - Duration::hours(1)),
         end_date: Some(as_of + Duration::days(1)),
         created_at: Some(as_of - Duration::days(1)),
+        fee_schedule: None,
     };
     let registry = domain_test_registry(&market, &market_ctx, cutoff);
     let lag_secs = u64::try_from((as_of - cutoff).num_seconds()).map_err(|error| {

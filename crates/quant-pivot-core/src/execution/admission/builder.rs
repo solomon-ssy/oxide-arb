@@ -20,7 +20,8 @@ use quant_pivot_models::{
         RecommendationInfo, RecommendationReportInfo, RuntimeConfigVersionInfo,
     },
     enums::{market::MarketStatus, quant::PublicationStatus},
-    types::Usd,
+    hashing::CanonicalDigest,
+    types::{Bps, Usd},
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, EntryConditionRepository, ExecutionOrderRepository,
@@ -30,6 +31,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
+    execution_semantics::PitFeeSchedule,
     model::{CalibrationArtifactLoader, load_hash_verified_artifact},
     portfolio::AccountSnapshot,
 };
@@ -167,6 +169,7 @@ impl AdmissionInputBuilder {
             book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
             kill_switch_state: kill_switch,
         };
+        let fee_schedule = pit_fee_schedule(&fetched.market_fee_schedule, now)?;
 
         Ok(AdmissionInput {
             intent: intent.clone(),
@@ -178,6 +181,7 @@ impl AdmissionInputBuilder {
             account: fetched.account,
             allocation: fetched.allocation,
             book,
+            fee_schedule,
             budget_total_usd,
             open_intent_count: fetched.open_intent_count,
             max_open_intents,
@@ -249,6 +253,12 @@ impl AdmissionInputBuilder {
         let market = market_result?
             .ok_or_else(|| not_found("market", recommendation.market_id.to_string()))?;
         let manual_block = market.status == MarketStatus::ManuallyBlocked;
+        let market_fee_schedule =
+            market
+                .fee_schedule()
+                .ok_or_else(|| ExecutionError::IntentDenied {
+                    reason: "market fee schedule is incomplete".to_owned(),
+                })?;
         let venue_metadata = venue_metadata_result?;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
@@ -260,6 +270,7 @@ impl AdmissionInputBuilder {
             allocation: allocation_result?,
             account: account_result?,
             manual_block,
+            market_fee_schedule,
             active_version,
             open_intent_count: open_intent_result?,
             venue_metadata: AdmissionVenueMetadata {
@@ -309,9 +320,37 @@ struct ParallelAdmissionFetch {
     allocation: Option<CapitalAllocationInfo>,
     account: AccountSnapshot,
     manual_block: bool,
+    market_fee_schedule: quant_pivot_models::domain::MarketFeeSchedule,
     active_version: RuntimeConfigVersionInfo,
     open_intent_count: u64,
     venue_metadata: AdmissionVenueMetadata,
+}
+
+fn pit_fee_schedule(
+    schedule: &quant_pivot_models::domain::MarketFeeSchedule,
+    decision_at: DateTime<Utc>,
+) -> QuantResult<PitFeeSchedule> {
+    if schedule.observed_at > decision_at {
+        return Err(ExecutionError::IntentDenied {
+            reason: "market fee schedule was not point-in-time visible".to_owned(),
+        }
+        .into());
+    }
+    let schedule_hash = CanonicalDigest::content_hash_json(schedule)?;
+    Ok(PitFeeSchedule {
+        schedule_hash,
+        effective_at: schedule.observed_at,
+        available_at: schedule.observed_at,
+        platform_rate: if schedule.fees_enabled {
+            schedule.fee_rate
+        } else {
+            Decimal::ZERO
+        },
+        exponent: schedule.exponent,
+        taker_only: schedule.taker_only,
+        builder_maker_fee_bps: Bps::ZERO,
+        builder_taker_fee_bps: Bps::ZERO,
+    })
 }
 
 fn not_found(entity: &'static str, id: String) -> QuantError {

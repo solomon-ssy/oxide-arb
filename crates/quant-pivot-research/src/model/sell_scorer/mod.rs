@@ -29,9 +29,8 @@ pub use trainer::{SellScorerTrainer, TrainSellScorerRequest};
 use std::collections::BTreeMap;
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
-use quant_pivot_models::{
-    runtime_config::OpportunisticSellPolicy,
-    types::{Bps, ContentHash, ModelVersionId, Probability},
+use quant_pivot_models::types::{
+    Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Probability,
 };
 use rust_decimal::{
     Decimal,
@@ -201,8 +200,7 @@ impl SellScorerRuntime for WeightedSellScorerRuntime {
     }
 }
 
-/// Governed opportunistic-exit thresholds, frozen from
-/// `execution.exit_monitor.opportunistic_sell` runtime-config.
+/// Governed opportunistic-exit thresholds.
 ///
 /// The single source of truth for "should this score trigger an exit" —
 /// consumed identically by the live opportunistic-sell evaluator
@@ -221,34 +219,31 @@ pub struct SellSignalPolicy {
 }
 
 impl SellSignalPolicy {
-    /// Parse the governed `execution.exit_monitor.opportunistic_sell` section
-    /// into the pure research policy used by both live evaluation and CPCV
-    /// lot replay. Fail-closed on malformed decimals — never invent a
-    /// fallback that could open the live gate while CPCV rejects (or vice
-    /// versa).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ResearchError::ValidationMethodology`] when any decimal
-    /// field cannot be parsed.
-    pub fn try_from_runtime(policy: &OpportunisticSellPolicy) -> QuantResult<Self> {
-        let parse = |field: &'static str, value: &str| -> QuantResult<Decimal> {
-            value.trim().parse::<Decimal>().map_err(|error| {
-                ResearchError::ValidationMethodology {
-                    detail: format!(
-                        "`execution.exit_monitor.opportunistic_sell.{field}` = `{value}` \
-                         is not a valid decimal: {error}"
-                    ),
-                }
-                .into()
-            })
-        };
-        Ok(Self {
-            min_confidence: parse("min_confidence", &policy.min_confidence.value)?,
-            min_p_exit_better: parse("min_p_exit_better", &policy.min_p_exit_better.value)?,
-            min_expected_alpha_bps: Decimal::from(policy.min_expected_alpha_bps),
-            max_sell_pct: parse("max_sell_pct", &policy.max_sell_pct.value)?,
-        })
+    /// Threshold-free research baseline used to validate the scorer itself.
+    /// Policy fitting owns threshold selection after model validation.
+    #[must_use]
+    pub const fn research_baseline() -> Self {
+        Self {
+            min_confidence: Decimal::ZERO,
+            min_p_exit_better: Decimal::ZERO,
+            min_expected_alpha_bps: Decimal::ZERO,
+            max_sell_pct: Decimal::ONE,
+        }
+    }
+
+    /// Build the live decision rule from the intent-frozen policy. The runtime
+    /// cap may only tighten the fitted cumulative exit bound.
+    #[must_use]
+    pub fn from_frozen(policy: &OpportunisticExitPolicy, runtime_cap: Decimal) -> Self {
+        Self {
+            min_confidence: policy.min_confidence.inner(),
+            min_p_exit_better: policy.min_p_exit_better.inner(),
+            min_expected_alpha_bps: policy.min_expected_alpha_bps.inner(),
+            max_sell_pct: policy
+                .max_cumulative_exit_pct
+                .min(runtime_cap)
+                .clamp(Decimal::ZERO, Decimal::ONE),
+        }
     }
 }
 
@@ -303,7 +298,6 @@ mod tests {
     };
     use quant_pivot_models::{
         enums::{factor::FactorFamily, quant::FactorDirection},
-        runtime_config::{DecimalString, OpportunisticSellPolicy},
         types::{ContentHash, FactorDefinitionId, ModelInputContract, ModelVersionId, Probability},
     };
     use rust_decimal_macros::dec;
@@ -425,25 +419,11 @@ mod tests {
     }
 
     #[test]
-    fn sell_signal_policy_try_from_runtime_parses_defaults() {
-        let policy = OpportunisticSellPolicy::default();
-        let parsed = SellSignalPolicy::try_from_runtime(&policy).expect("parse");
-        assert_eq!(parsed.min_confidence, dec!(0.65));
-        assert_eq!(parsed.min_p_exit_better, dec!(0.50));
-        assert_eq!(parsed.min_expected_alpha_bps, dec!(50));
-        assert_eq!(parsed.max_sell_pct, dec!(1.0));
-    }
-
-    #[test]
-    fn sell_signal_policy_try_from_runtime_rejects_malformed_decimal() {
-        let policy = OpportunisticSellPolicy {
-            min_confidence: DecimalString::new("not-a-decimal"),
-            ..Default::default()
-        };
-        let err = SellSignalPolicy::try_from_runtime(&policy).expect_err("malformed");
-        assert!(
-            err.to_string().contains("min_confidence"),
-            "expected field name in error, got: {err}"
-        );
+    fn sell_signal_policy_research_baseline_has_no_thresholds() {
+        let policy = SellSignalPolicy::research_baseline();
+        assert_eq!(policy.min_confidence, dec!(0));
+        assert_eq!(policy.min_p_exit_better, dec!(0));
+        assert_eq!(policy.min_expected_alpha_bps, dec!(0));
+        assert_eq!(policy.max_sell_pct, dec!(1));
     }
 }

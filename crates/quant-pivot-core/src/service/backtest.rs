@@ -1,6 +1,6 @@
 //! Offline backtest orchestration (Phase 3.6).
 //!
-//! Replays a registered model over the exact immutable v2 Parquet rows. Frozen
+//! Replays a registered model over the exact immutable v4 Parquet rows. Frozen
 //! selection context, `FeatureCell`s, factor values, and labels are the sole
 //! evaluation input. Historical rematerialization is a separate parity job and
 //! can never replace bytes consumed by training, CPCV, or backtest.
@@ -627,7 +627,7 @@ async fn run_backtest_replay(
     Ok(Some(result))
 }
 
-/// Assemble replay ticks directly from immutable v2 Parquet examples.
+/// Assemble replay ticks directly from immutable v4 Parquet examples.
 ///
 /// Shared by single-path backtest and CPCV. No database, current config, or
 /// rematerialized feature/factor value participates in the scored input.

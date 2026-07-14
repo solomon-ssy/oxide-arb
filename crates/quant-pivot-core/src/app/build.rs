@@ -46,13 +46,13 @@ impl AppContext {
             data: &data,
             runtime,
             events: events.clone(),
-        });
+        })?;
         let research = ResearchBundle::assemble(&ResearchBundleDeps {
             deploy: &deploy,
             infra: &infra,
             data: &data,
             governance: &governance,
-        });
+        })?;
         // One authenticated CLOB client (single L1+L2 identity) shared by the
         // account (collateral reads) and execution (order writes) bundles. Fails
         // closed at boot if the private key is missing or auth fails — report_only

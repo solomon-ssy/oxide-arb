@@ -1458,7 +1458,7 @@ pub enum ModelArtifact {
 }
 
 /// Breaking stored-model wire version. No legacy parser is provided.
-pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 4;
 
 #[derive(Serialize)]
 pub(crate) struct StoredModelArtifactRef<'a> {

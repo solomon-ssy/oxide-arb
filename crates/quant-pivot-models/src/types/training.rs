@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Breaking dataset artifact and manifest wire version.
-pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 3;
+pub const DATASET_ARTIFACT_FORMAT_VERSION: u32 = 4;
 
 /// Immutable manifest embedded in a frozen dataset artifact and ledger.
 ///

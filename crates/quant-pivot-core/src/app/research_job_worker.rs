@@ -335,6 +335,8 @@ impl AppContext {
                 Arc::clone(&self.research.training_dataset_repo),
                 Arc::clone(&self.research.artifact_store),
                 Arc::clone(&self.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+                Arc::clone(&self.infra.repos.runtime_config)
+                    as Arc<dyn RuntimeConfigVersionRepository>,
             )),
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {

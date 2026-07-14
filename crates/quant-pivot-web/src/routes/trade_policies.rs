@@ -6,7 +6,7 @@ use quant_pivot_models::{
         FitTradePolicyRequest, JobSubmitContext, Paginated, ResearchJobView,
         TradePolicyAuditListQuery, TradePolicyDetailView, TradePolicyFitPreflightRequest,
         TradePolicyFitPreflightView, TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest,
-        TradePolicyListQuery, TradePolicySummaryView,
+        TradePolicyListQuery, TradePolicyPreflightCheckStatus, TradePolicySummaryView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -154,6 +154,20 @@ pub async fn fit(
     body: ValidatedJson<FitTradePolicyRequest>,
 ) -> Result<WebResponse<ResearchJobView>, WebError> {
     let request = body.into_inner();
+    let preflight = state
+        .trade_policies
+        .preflight(&TradePolicyFitPreflightRequest {
+            selection: request.selection.clone(),
+            activation_target: request.activation_target,
+            candidates: request.candidates.clone(),
+        })
+        .await?;
+    if preflight.publishable_input != TradePolicyPreflightCheckStatus::Pass {
+        return Err(WebError::BadRequest(format!(
+            "trade-policy fit preflight blocked enqueue: {}",
+            preflight.messages.join("; ")
+        )));
+    }
     let reason = request.reason.clone();
     let job = state
         .research_jobs

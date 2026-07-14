@@ -1,0 +1,2 @@
+# Raise the default (100) so large but cohesive handlers / builders stay intact.
+too-many-lines-threshold = 150

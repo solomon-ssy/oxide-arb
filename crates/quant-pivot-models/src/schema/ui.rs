@@ -1,4 +1,4 @@
-//! Runtime-config v12 UI metadata.
+//! Runtime-config v13 UI metadata.
 //!
 //! Two artifacts, one authored source of truth:
 //!
@@ -493,6 +493,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         quality_gate_fields(),
         research_training_fields(),
         research_validation_fields(),
+        research_policy_validation_fields(),
         training_fields(),
         report_fields(),
         portfolio_fields(),
@@ -1487,6 +1488,161 @@ fn research_validation_fields() -> Vec<FieldUiEntry> {
     fields
 }
 
+fn research_policy_validation_fields() -> Vec<FieldUiEntry> {
+    let mut fields = research_policy_methodology_fields();
+    fields.extend(research_policy_coverage_fields());
+    fields.extend(research_policy_robustness_fields());
+    fields
+}
+
+fn research_policy_methodology_fields() -> Vec<FieldUiEntry> {
+    vec![
+        integer(
+            "research.policy_validation.cpcv_n_groups",
+            "Policy CPCV partitions (N)",
+            "Policy CPCV 分区数 (N)",
+            "Frozen Runtime v13 CPCV partition count. It must remain 8; fit requests cannot override the split methodology.",
+            "Runtime v13 冻结的 CPCV 分区数。必须保持为 8；拟合请求不能覆盖拆分方法。",
+        ),
+        integer(
+            "research.policy_validation.cpcv_k_test",
+            "Policy CPCV test folds (k)",
+            "Policy CPCV 测试折数 (k)",
+            "Frozen Runtime v13 test-fold count. N=8,k=3 yields 56 folds and 21 complete paths.",
+            "Runtime v13 冻结的测试折数。N=8,k=3 产生 56 个 fold 与 21 条完整路径。",
+        ),
+        integer(
+            "research.policy_validation.pbo_block_count",
+            "Policy PBO blocks",
+            "Policy PBO 块数",
+            "Frozen CSCV block count used to estimate policy backtest overfitting probability.",
+            "用于估计 policy 回测过拟合概率的冻结 CSCV 块数。",
+        ),
+        ratio(
+            "research.policy_validation.dsr_significance",
+            "Policy DSR significance",
+            "Policy DSR 显著性",
+            "Maximum DSR significance level. At 0.05 the deflated Sharpe probability must be at least 0.95.",
+            "DSR 显著性水平上限。取 0.05 时，deflated Sharpe 概率必须至少为 0.95。",
+        ),
+        ratio(
+            "research.policy_validation.max_pbo",
+            "Policy maximum PBO",
+            "Policy PBO 上限",
+            "Hard upper bound on Probability of Backtest Overfitting across every attempted candidate.",
+            "覆盖所有真实尝试候选的回测过拟合概率硬上限。",
+        ),
+        integer(
+            "research.policy_validation.max_candidates_per_experiment",
+            "Policy candidate cap",
+            "Policy 候选上限",
+            "Maximum complete candidates in one immutable experiment. Exceeding it fails preflight; candidates are never truncated.",
+            "单个不可重置 experiment 的完整候选上限。超过即预检失败，绝不截断候选。",
+        ),
+    ]
+}
+
+fn research_policy_coverage_fields() -> Vec<FieldUiEntry> {
+    vec![
+        integer(
+            "research.policy_validation.min_effective_sample_size",
+            "Minimum cohort effective N",
+            "Cohort 最小有效样本量",
+            "Minimum concurrency-adjusted effective sample size required independently for each serving cohort.",
+            "每个 serving cohort 独立要求的、经并发唯一性调整后的最小有效样本量。",
+        ),
+        ratio(
+            "research.policy_validation.min_full_l2_coverage",
+            "Minimum full-L2 coverage",
+            "完整 L2 最低覆盖率",
+            "Minimum eligible-observation coverage backed by continuous canonical L2 replay.",
+            "由连续 canonical L2 重放支持的合格 observation 最低覆盖率。",
+        ),
+        ratio(
+            "research.policy_validation.min_common_candidate_support",
+            "Minimum common candidate support",
+            "候选共同支持集下限",
+            "Minimum observation support shared by every candidate, preventing missing-data selection bias.",
+            "所有候选共同拥有的 observation 支持集下限，防止缺失数据选择偏差。",
+        ),
+        ratio(
+            "research.policy_validation.min_passive_reconciled_trade_coverage",
+            "Minimum passive trade coverage",
+            "Passive 对账成交覆盖率下限",
+            "Minimum reconciled opposite-side trade-print coverage for passive queue simulation.",
+            "Passive 排队模拟所需的、已对账反向成交打印覆盖率下限。",
+        ),
+        ratio(
+            "research.policy_validation.min_fee_catalog_coverage",
+            "Minimum PIT fee coverage",
+            "PIT 费率覆盖率下限",
+            "Required point-in-time fee/catalog coverage for every simulated fill. Runtime v13 fixes this at 100%.",
+            "所有模拟成交所需的 PIT 费率/目录覆盖率。Runtime v13 固定为 100%。",
+        ),
+        ratio(
+            "research.policy_validation.min_universe_coverage",
+            "Minimum target-universe coverage",
+            "目标 universe 覆盖率下限",
+            "Minimum publishable coverage across the complete target universe, including failed leaves.",
+            "完整目标 universe（含失败 leaf）的最低可发布覆盖率。",
+        ),
+    ]
+}
+
+fn research_policy_robustness_fields() -> Vec<FieldUiEntry> {
+    vec![
+        ratio(
+            "research.policy_validation.max_ambiguity_rate",
+            "Maximum ambiguous-order rate",
+            "最大顺序歧义率",
+            "Maximum fraction of observations whose source-event order cannot be determined.",
+            "无法确定 source-event 顺序的 observation 最高比例。",
+        ),
+        ratio(
+            "research.policy_validation.max_depth_failure_rate",
+            "Maximum depth-failure rate",
+            "最大深度失败率",
+            "Maximum fraction of simulations lacking enough canonical book depth for the requested tier.",
+            "请求 tier 缺少足够 canonical 盘口深度的模拟最高比例。",
+        ),
+        ratio_confidence(
+            "research.policy_validation.utility_confidence",
+            "Utility lower-bound confidence",
+            "Utility 下界置信水平",
+            "One-sided confidence level for market-cluster bootstrap utility lower bounds.",
+            "market-cluster bootstrap utility 单侧下界的置信水平。",
+        ),
+        bps(
+            "research.policy_validation.min_utility_lower_bound_bps",
+            "Minimum utility lower bound",
+            "Utility 下界门槛",
+            "Frozen zero-bps boundary; the observed one-sided lower bound must be strictly greater than it.",
+            "冻结的 0 bps 边界；实际观测的单侧下界必须严格大于该值。",
+        ),
+        ratio(
+            "research.policy_validation.embargo_time_pct",
+            "Minimum policy embargo fraction",
+            "Policy 最小 embargo 比例",
+            "Minimum time-span embargo; effective embargo is the maximum of this span and feature lookback.",
+            "最小时间跨度 embargo；实际 embargo 取该跨度与 feature lookback 的较大值。",
+        ),
+        secs(
+            "research.policy_validation.min_latency_profile_secs",
+            "Minimum latency profile duration",
+            "最短延迟画像时长",
+            "Minimum signed authenticated production-probe history required before policy fitting.",
+            "Policy 拟合前要求的签名、认证生产探针历史最短时长。",
+        ),
+        decimal(
+            "research.policy_validation.latency_stress_multiplier",
+            "Latency stress multiplier",
+            "延迟压力倍数",
+            "Multiplier applied to the observed/runtime latency floor for the mandatory stress utility gate.",
+            "强制压力 utility 门禁中应用于 observed/runtime 延迟下限的倍数。",
+        ),
+    ]
+}
+
 fn research_validation_purge_cpcv_fields() -> Vec<FieldUiEntry> {
     vec![
         ratio(
@@ -1991,13 +2147,73 @@ fn execution_entry_condition_fields() -> Vec<FieldUiEntry> {
 }
 
 fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
-    vec![secs(
-        "execution.semi_auto.approval_ttl_secs",
-        "Approval TTL",
-        "审批有效期",
-        "How long a pending semi-auto approval stays actionable before it expires. Shorter windows reduce stale-approval risk but demand faster operator response.",
-        "半自动待审批意图在过期前保持可操作的时长。窗口越短陈旧审批风险越小，但要求操作员更快响应。",
-    )]
+    vec![
+        secs(
+            "execution.semi_auto.approval_ttl_secs",
+            "Approval TTL",
+            "审批有效期",
+            "How long a pending semi-auto approval stays actionable before it expires. Shorter windows reduce stale-approval risk but demand faster operator response.",
+            "半自动待审批意图在过期前保持可操作的时长。窗口越短陈旧审批风险越小，但要求操作员更快响应。",
+        ),
+        boolean(
+            "execution.semi_auto.canary.enabled",
+            "Policy canary enabled",
+            "启用 Policy canary",
+            "Master authorization for policy-bound SemiAuto intent creation. When off, SemiAuto remains fail-closed even if the runtime mode is selected.",
+            "Policy 绑定的 SemiAuto intent 创建总授权。关闭时即使运行模式为 SemiAuto 也保持 fail-closed。",
+        )
+        .critical(),
+        plain(
+            "execution.semi_auto.canary.policy_artifact_id",
+            "Canary policy artifact ID",
+            "Canary policy artifact ID",
+            "Exact Published trade-policy artifact authorized by this canary. No active-pointer or wildcard resolution is permitted.",
+            "该 canary 精确授权的 Published trade-policy artifact。禁止 active pointer 或通配解析。",
+        )
+        .visible_when(enabled("execution.semi_auto.canary.enabled")),
+        plain(
+            "execution.semi_auto.canary.policy_content_hash",
+            "Canary policy content hash",
+            "Canary policy 内容哈希",
+            "Canonical content hash paired with the policy artifact ID and rechecked at intent creation.",
+            "与 policy artifact ID 配对、在 intent 创建时重新校验的 canonical 内容哈希。",
+        )
+        .visible_when(enabled("execution.semi_auto.canary.enabled")),
+        f(
+            "execution.semi_auto.canary.allowed_tiers_usd",
+            "Canary allowed USD tiers",
+            "Canary 允许的 USD tiers",
+            "Exact validated notional tiers allowed by the canary. Runtime v13 permits only $25.",
+            "Canary 允许的精确 validated notional tiers。Runtime v13 仅允许 $25。",
+        )
+        .widget(FieldWidget::StringList)
+        .visible_when(enabled("execution.semi_auto.canary.enabled")),
+        integer(
+            "execution.semi_auto.canary.max_open_intents",
+            "Canary maximum open intents",
+            "Canary 最大开放 intents",
+            "Transactional cap on capital-holding or in-flight intents. Runtime v13 fixes this at one.",
+            "持有资金或在途 intent 的事务级上限。Runtime v13 固定为一个。",
+        )
+        .visible_when(enabled("execution.semi_auto.canary.enabled")),
+        usd(
+            "execution.semi_auto.canary.max_total_usd_per_report",
+            "Canary USD cap per report",
+            "Canary 单 report USD 上限",
+            "Transactional cumulative notional cap across intents created from one report. Runtime v13 fixes this at $25.",
+            "同一 report 所创建 intents 的事务级累计名义金额上限。Runtime v13 固定为 $25。",
+        )
+        .critical()
+        .visible_when(enabled("execution.semi_auto.canary.enabled")),
+        plain(
+            "execution.semi_auto.canary.expires_at",
+            "Canary expiry",
+            "Canary 到期时间",
+            "RFC3339 instant after which intent creation is denied and pending intents cannot outlive the authorization.",
+            "RFC3339 时间点；超过后拒绝创建 intent，待审批 intent 也不得晚于该授权到期。",
+        )
+        .visible_when(enabled("execution.semi_auto.canary.enabled")),
+    ]
 }
 
 fn execution_auto_fields() -> Vec<FieldUiEntry> {
@@ -2180,56 +2396,12 @@ fn execution_opportunistic_sell_fields() -> Vec<FieldUiEntry> {
             "execution.exit_monitor.enabled",
             "execution.exit_monitor.opportunistic_sell.enabled",
         )),
-        ratio(
-            "execution.exit_monitor.opportunistic_sell.min_confidence",
-            "Opportunistic sell min confidence",
-            "机会性卖出最低置信度",
-            "Minimum Sell-scorer confidence to act ([0, 1]); below it the lot is held. Higher demands stronger conviction before scaling out.",
-            "触发动作所需的卖出评分模型最低置信度（[0,1]）；低于则持有。调高要求更强确定性才减仓。",
-        )
-        .visible_when(enabled2(
-            "execution.exit_monitor.enabled",
-            "execution.exit_monitor.opportunistic_sell.enabled",
-        )),
-        bps(
-            "execution.exit_monitor.opportunistic_sell.min_expected_alpha_bps",
-            "Opportunistic sell min expected alpha",
-            "机会性卖出最低预期超额",
-            "Minimum expected exit alpha (basis points over holding) to act; below it the lot is held. Sets the edge threshold for scaling out early.",
-            "触发动作所需的最低预期退出超额收益（相对持有的基点）；低于则持有。设定提前减仓的 edge 门槛。",
-        )
-        .visible_when(enabled2(
-            "execution.exit_monitor.enabled",
-            "execution.exit_monitor.opportunistic_sell.enabled",
-        )),
-        ratio(
-            "execution.exit_monitor.opportunistic_sell.min_p_exit_better",
-            "Opportunistic sell min P(exit better)",
-            "机会性卖出最低退出更优概率",
-            "Minimum probability that exiting now beats holding ([0, 1]) to act; below it the lot is held.",
-            "触发动作所需的『现在退出优于持有』最低概率（[0,1]）；低于则持有。",
-        )
-        .visible_when(enabled2(
-            "execution.exit_monitor.enabled",
-            "execution.exit_monitor.opportunistic_sell.enabled",
-        )),
         ratio_half_open(
-            "execution.exit_monitor.opportunistic_sell.max_sell_pct",
-            "Opportunistic sell max cumulative fraction",
-            "机会性卖出最大累计比例",
-            "Upper bound on the target cumulative exit fraction the model may request, in (0, 1]. Caps how much of a lot opportunistic exits can drain.",
-            "模型可请求的目标累计退出比例上限，(0,1]。限制机会性退出最多能减掉一个持仓的多少。",
-        )
-        .visible_when(enabled2(
-            "execution.exit_monitor.enabled",
-            "execution.exit_monitor.opportunistic_sell.enabled",
-        )),
-        ratio_half_open(
-            "execution.exit_monitor.opportunistic_sell.min_opportunistic_clip_pct",
-            "Opportunistic sell min clip fraction",
-            "机会性卖出最小增量比例",
-            "Minimum incremental fraction (of entry-filled shares) worth submitting, in (0, 1]. Deltas below this are held to avoid dust exits and fee churn.",
-            "值得提交的最小增量比例（占入场成交股数），(0,1]。低于此的增量会被持有，避免尘埃退出与手续费空耗。",
+            "execution.exit_monitor.opportunistic_sell.max_cumulative_exit_pct",
+            "Runtime cumulative safety cap",
+            "Runtime 累计安全上限",
+            "Runtime-only ceiling that may tighten the policy-fitted cumulative opportunistic exit ratio. Confidence, alpha, probability, and clip thresholds are frozen on each policy cohort and intent.",
+            "仅由 Runtime 收紧的机会退出累计比例上限。置信度、alpha、概率与 clip 阈值冻结在 policy cohort 和 intent 上。",
         )
         .visible_when(enabled2(
             "execution.exit_monitor.enabled",
@@ -2782,6 +2954,39 @@ fn research_section() -> SchemaNode {
                     "research.validation.gates.min_tail_loss_bps",
                 ]),
             ),
+            subsection(
+                section_spec(
+                    "research.policy_validation",
+                    30,
+                    "lucide:shield-ellipsis",
+                    ls("Executable-policy validation", "可执行 Policy 验证"),
+                    ls(
+                        "Runtime v13 CPCV, trial-accounting, evidence-coverage, utility, and latency-stress publication floors.",
+                        "Runtime v13 的 CPCV、trial 记账、证据覆盖、utility 与延迟压力发布下限。",
+                    ),
+                ),
+                fields_in_order(&[
+                    "research.policy_validation.cpcv_n_groups",
+                    "research.policy_validation.cpcv_k_test",
+                    "research.policy_validation.pbo_block_count",
+                    "research.policy_validation.dsr_significance",
+                    "research.policy_validation.max_pbo",
+                    "research.policy_validation.min_effective_sample_size",
+                    "research.policy_validation.min_full_l2_coverage",
+                    "research.policy_validation.min_common_candidate_support",
+                    "research.policy_validation.min_passive_reconciled_trade_coverage",
+                    "research.policy_validation.min_fee_catalog_coverage",
+                    "research.policy_validation.min_universe_coverage",
+                    "research.policy_validation.max_ambiguity_rate",
+                    "research.policy_validation.max_depth_failure_rate",
+                    "research.policy_validation.utility_confidence",
+                    "research.policy_validation.min_utility_lower_bound_bps",
+                    "research.policy_validation.embargo_time_pct",
+                    "research.policy_validation.max_candidates_per_experiment",
+                    "research.policy_validation.min_latency_profile_secs",
+                    "research.policy_validation.latency_stress_multiplier",
+                ]),
+            ),
         ],
     )
 }
@@ -3014,7 +3219,16 @@ fn execution_children_head() -> Vec<SchemaNode> {
                     "半自动执行的操作员审批策略。",
                 ),
             ),
-            fields_in_order(&["execution.semi_auto.approval_ttl_secs"]),
+            fields_in_order(&[
+                "execution.semi_auto.approval_ttl_secs",
+                "execution.semi_auto.canary.enabled",
+                "execution.semi_auto.canary.policy_artifact_id",
+                "execution.semi_auto.canary.policy_content_hash",
+                "execution.semi_auto.canary.allowed_tiers_usd",
+                "execution.semi_auto.canary.max_open_intents",
+                "execution.semi_auto.canary.max_total_usd_per_report",
+                "execution.semi_auto.canary.expires_at",
+            ]),
         ),
         subsection(
             section_spec(
@@ -3265,11 +3479,7 @@ fn exit_monitor_subsection() -> SchemaNode {
         fields_in_order(&[
             "execution.exit_monitor.opportunistic_sell.enabled",
             "execution.exit_monitor.opportunistic_sell.shadow_mode",
-            "execution.exit_monitor.opportunistic_sell.min_confidence",
-            "execution.exit_monitor.opportunistic_sell.min_expected_alpha_bps",
-            "execution.exit_monitor.opportunistic_sell.min_p_exit_better",
-            "execution.exit_monitor.opportunistic_sell.max_sell_pct",
-            "execution.exit_monitor.opportunistic_sell.min_opportunistic_clip_pct",
+            "execution.exit_monitor.opportunistic_sell.max_cumulative_exit_pct",
         ]),
     ));
     section_node(

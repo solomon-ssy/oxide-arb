@@ -33,7 +33,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, ChPrice, ChUsd},
+    clickhouse::{BookMicrostructureRow, ChPrice},
     domain::{
         CompleteTrainingDatasetBuild, DecisionBoundary, DecisionClock, DecisionSource,
         ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo,
@@ -55,7 +55,7 @@ use quant_pivot_models::{
         TrainingConfig,
     },
     types::{
-        ArtifactUri, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetFeatureStateCounts,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetFeatureStateCounts,
         DatasetManifest, FeatureVectorId, MarketId, MarketSelectionId, ModelInputContract,
         ModelSpecId, Price, RecommendationId, Shares, TokenId, TradePolicyArtifactId,
         TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
@@ -70,7 +70,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    execution_sim::BookFidelity,
+    execution_semantics::BookFidelity,
     factors::{
         FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue,
         MarketFactorOutcome, NormalizedFactor,
@@ -93,9 +93,8 @@ use quant_pivot_research::{
         LotTerminalSnapshot, LotTrainingContext, MaxAdverseExcursionLabeler,
         MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
         SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
-        TrainingDatasetPlanner, TrainingExample, TrainingLabel, TripleBarrierLabelKind,
-        TripleBarrierLabeler, TripleBarrierPolicy, assert_no_future_leakage, count_samples,
-        dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
+        TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
+        count_samples, dataset_manifest_hash, dataset_source_fingerprint, label_names_for_sources,
         plan_lot_timeline_samples, plan_samples, probe_matrix_coverage, remaining_shares_at,
     },
 };
@@ -307,11 +306,6 @@ pub fn default_labelers() -> Vec<Box<dyn Labeler>> {
         Box::new(MaxAdverseExcursionLabeler),
         Box::new(LiquidityExitLabeler),
         Box::new(SettlementOutcomeLabeler),
-        Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::Touch)),
-        Box::new(TripleBarrierLabeler::new(TripleBarrierLabelKind::ReturnBps)),
-        Box::new(TripleBarrierLabeler::new(
-            TripleBarrierLabelKind::PolicyNetPositive,
-        )),
     ]
 }
 
@@ -324,7 +318,7 @@ pub fn exit_decision_labelers() -> Vec<Box<dyn Labeler>> {
     ]
 }
 
-/// Verify exact bytes, the embedded v2 manifest and semantic rows against the
+/// Verify exact bytes, the embedded v4 manifest and semantic rows against the
 /// immutable dataset ledger.
 ///
 /// This gate runs before any trainer, calibrator or backtest consumes the
@@ -682,12 +676,11 @@ impl TrainingDatasetService {
             }
             .into());
         }
-        let embargo =
-            i64::try_from(artifact.payload_json.fit_contract.embargo_secs).map_err(|error| {
-                ResearchError::DatasetPlan {
-                    detail: format!("trade-policy embargo does not fit chrono seconds: {error}"),
-                }
-            })?;
+        let embargo = i64::try_from(artifact.payload_json.embargo_secs).map_err(|error| {
+            ResearchError::DatasetPlan {
+                detail: format!("trade-policy embargo does not fit chrono seconds: {error}"),
+            }
+        })?;
         let training_not_before = artifact
             .payload_json
             .fit_contract
@@ -1437,7 +1430,6 @@ impl TrainingDatasetService {
             selection: self.selection.clone(),
             model_requirements,
             labelers: Arc::clone(&self.labelers),
-            trade_policy: plan.trade_policy.clone(),
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: self.bias_table.as_ref().map(Arc::clone),
             context: ReplayContext::new(plan, &self.features)?,
@@ -1471,7 +1463,6 @@ impl TrainingDatasetService {
             selection: &self.selection,
             model_requirements,
             labelers: &self.labelers,
-            trade_policy: plan.trade_policy.as_ref(),
             min_exit_depth_usd: self.min_exit_depth_usd,
             bias_table: &self.bias_table,
             context: ReplayContext::new(plan, &self.features)?,
@@ -1788,7 +1779,6 @@ impl TrainingDatasetService {
                 request: input.request,
                 forward: &forward,
                 exit_decision: Some(&evidence.label_context),
-                trade_policy: None,
             },
             self.min_exit_depth_usd,
             sink.coverage,
@@ -1863,10 +1853,10 @@ impl TrainingDatasetService {
             decision_book_at(input.pit, &input.sample.token_id, &boundary, micro).await?;
         // Quote fees from the actual executable bid used by the label. The lot
         // cost basis and non-executable mid are never substitutes.
-        let fee_bps = decision_book
+        let fee_schedule = decision_book
             .as_ref()
             .and_then(decision_book_quote_price)
-            .map(|price| self.exit_fee_bps(remaining, price, market, &input.sample.token_id))
+            .map(|price| self.exit_fee_schedule(remaining, price, market, &input.sample.token_id))
             .transpose()?;
         Ok(ResolvedExitDecisionEvidence {
             peak_mark,
@@ -1874,7 +1864,7 @@ impl TrainingDatasetService {
             label_context: ExitDecisionLabelContext {
                 remaining_shares: remaining,
                 avg_price: input.lot.avg_price,
-                fee_bps,
+                fee_schedule,
                 terminal: LotTerminalSnapshot::from(input.lot),
                 decision_book,
             },
@@ -1886,13 +1876,13 @@ impl TrainingDatasetService {
     /// governed venue fee calculator (same schedule the live exit dispatcher
     /// uses). A missing schedule or invalid notional fails the dataset build;
     /// only an explicit fee-disabled schedule produces a legitimate zero.
-    fn exit_fee_bps(
+    fn exit_fee_schedule(
         &self,
         shares: Shares,
         price: Price,
         market: &SelectedMarket,
         token_id: &TokenId,
-    ) -> QuantResult<Bps> {
+    ) -> QuantResult<quant_pivot_models::domain::fee::MarketFeeSchedule> {
         let notional = shares.inner() * price.inner();
         if notional <= Decimal::ZERO {
             return Err(ResearchError::LabelResolution {
@@ -1912,7 +1902,7 @@ impl TrainingDatasetService {
                 liquidity_role: FeeLiquidityRole::Taker,
                 shares,
                 price,
-                allow_category_fallback: true,
+                allow_category_fallback: false,
             })
             .map_err(|error| ResearchError::LabelResolution {
                 detail: format!(
@@ -1920,18 +1910,7 @@ impl TrainingDatasetService {
                     market.market_id, token_id
                 ),
             })?;
-        let bps = quote
-            .fee_usd
-            .inner()
-            .checked_div(notional)
-            .and_then(|fraction| fraction.checked_mul(Decimal::from(10_000)))
-            .ok_or_else(|| ResearchError::LabelResolution {
-                detail: format!(
-                    "exit fee bps conversion overflow for market {} token {}",
-                    market.market_id, token_id
-                ),
-            })?;
-        Ok(Bps::new(bps))
+        Ok(quote.schedule.as_ref().clone())
     }
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
@@ -2262,12 +2241,6 @@ fn build_labels_for(
             vec![0]
         };
         for horizon_secs in horizons {
-            let triple_barrier_policy = select_triple_barrier_policy(
-                params.trade_policy,
-                params.market,
-                params.entry_price,
-                horizon_secs,
-            );
             let input = LabelBuildInput {
                 market_id: &params.market.market_id,
                 token_id: &params.market.primary_token_id,
@@ -2276,7 +2249,6 @@ fn build_labels_for(
                 entry_price: params.entry_price,
                 horizon_secs,
                 min_exit_depth_usd,
-                triple_barrier_policy,
                 forward: params.forward,
                 exit_decision: params.exit_decision,
             };
@@ -2302,18 +2274,6 @@ fn build_labels_for(
         }
     }
     Ok(labels)
-}
-
-const fn select_triple_barrier_policy(
-    _artifact: Option<&TradePolicyArtifactPayload>,
-    _market: &SelectedMarket,
-    _entry_price: Option<Price>,
-    _horizon_secs: u64,
-) -> Option<TripleBarrierPolicy> {
-    // Exact notional-tier and structural-regime selection is activated by
-    // 11.7.2. Returning no policy is the only truthful behavior until those
-    // serving inputs and the full-L2 simulator exist.
-    None
 }
 
 /// Accumulated examples + distinct markets from the historical spine, merged
@@ -2349,7 +2309,6 @@ struct HistoricalSpineParams<'a> {
     /// Target `ModelSpec`'s resolved feature requirements (R7).
     model_requirements: ModelFeatureRequirements,
     labelers: &'a [Box<dyn Labeler>],
-    trade_policy: Option<&'a TradePolicyArtifactPayload>,
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
     bias_table: &'a Option<Arc<FavoriteLongshotBiasTable>>,
@@ -2374,7 +2333,6 @@ struct HistoricalSpineInputs {
     /// Target `ModelSpec`'s resolved feature requirements (R7).
     model_requirements: ModelFeatureRequirements,
     labelers: Arc<Vec<Box<dyn Labeler>>>,
-    trade_policy: Option<TradePolicyArtifactPayload>,
     min_exit_depth_usd: Usd,
     /// Frozen favorite-longshot bias table bound to the spine factor engine.
     bias_table: Option<Arc<FavoriteLongshotBiasTable>>,
@@ -2406,7 +2364,6 @@ fn run_historical_spine_blocking(
             selection: &inputs.selection,
             model_requirements: inputs.model_requirements,
             labelers: &inputs.labelers,
-            trade_policy: inputs.trade_policy.as_ref(),
             min_exit_depth_usd: inputs.min_exit_depth_usd,
             bias_table: &inputs.bias_table,
             context: inputs.context,
@@ -2505,7 +2462,6 @@ async fn run_historical_spine(
                 prefetched: params.prefetched,
                 request: params.request,
                 max_horizon_secs: params.context.max_horizon_secs,
-                trade_policy: params.trade_policy,
             },
             params.labelers,
             params.min_exit_depth_usd,
@@ -2628,7 +2584,6 @@ fn append_historical_examples(
                 request: input.request,
                 forward: &forward,
                 exit_decision: None,
-                trade_policy: input.trade_policy,
             },
             min_exit_depth_usd,
             sink.coverage,
@@ -3045,7 +3000,6 @@ fn group_lot_samples(samples: &[LotSamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&
 fn decision_book_quote_price(book: &DecisionBook) -> Option<Price> {
     match book {
         DecisionBook::L2 { bids } => bids.first().map(|level| level.price_decimal()),
-        DecisionBook::Microstructure { best_bid, .. } => Some(*best_bid),
     }
 }
 
@@ -3053,7 +3007,7 @@ async fn decision_book_at(
     pit: &dyn PointInTimeSnapshotSource,
     token_id: &TokenId,
     boundary: &DecisionBoundary,
-    micro: &[BookMicrostructureRow],
+    _micro: &[BookMicrostructureRow],
 ) -> QuantResult<(Option<DecisionBook>, Option<BookFidelity>)> {
     if let Some(snapshot) = pit.book_at_boundary(token_id, boundary).await?
         && !snapshot.bids.is_empty()
@@ -3062,17 +3016,7 @@ async fn decision_book_at(
             Some(DecisionBook::L2 {
                 bids: Arc::clone(&snapshot.bids),
             }),
-            Some(BookFidelity::L2),
-        ));
-    }
-    // No L2 depth at the source cutoff: fall back to the latest visible
-    // microstructure bucket (best bid + aggregate depth), tagged degraded so
-    // the sell quality gate can bound the fallback ratio. Under-estimates slippage
-    // (single-price walk) — acceptable for a coverage-recovering degraded row.
-    if let Some((best_bid, depth)) = microstructure_fallback(micro, boundary) {
-        return Ok((
-            Some(DecisionBook::Microstructure { best_bid, depth }),
-            Some(BookFidelity::MicrostructureFallback),
+            Some(BookFidelity::FullL2),
         ));
     }
     Ok((None, None))
@@ -3105,46 +3049,11 @@ fn peak_mark_to(
         .max()
 }
 
-/// Best bid + aggregate share depth from the latest microstructure bucket that
-/// is both effective before its source cutoff and available by decision time.
-/// Share depth is the top-of-book USD depth divided by the best bid.
-fn microstructure_fallback(
-    micro: &[BookMicrostructureRow],
-    boundary: &DecisionBoundary,
-) -> Option<(Price, Shares)> {
-    let cutoff_ms = boundary
-        .cutoff_for(DecisionSource::Microstructure)
-        .timestamp_millis();
-    let decision_ms = boundary.decision_at().timestamp_millis();
-    let row = micro
-        .iter()
-        .filter(|row| row.bucket_time <= cutoff_ms && row.available_at <= decision_ms)
-        .max_by_key(|row| row.bucket_time)?;
-    let best_bid = row
-        .best_bid_close
-        .or(row.best_bid_open)
-        .or(row.mid_price_close)
-        .map(ChPrice::to_price)?;
-    if best_bid.inner() <= Decimal::ZERO {
-        return None;
-    }
-    let depth_usd = row
-        .top5_depth_usd_avg
-        .or(row.top1_depth_usd_avg)
-        .map(ChUsd::to_usd)?;
-    let depth_shares = depth_usd.inner() / best_bid.inner();
-    if depth_shares <= Decimal::ZERO {
-        return None;
-    }
-    Some((best_bid, Shares::new(depth_shares)))
-}
-
 struct CrossSectionAppendInput<'a> {
     cross_section: &'a ReplayCrossSection,
     prefetched: &'a Prefetched,
     request: &'a DatasetPlanRequest,
     max_horizon_secs: u64,
-    trade_policy: Option<&'a TradePolicyArtifactPayload>,
 }
 
 /// The post-spine tail shared by both build paths: point-in-time source,
@@ -3164,7 +3073,6 @@ struct LabelBuildParams<'a> {
     request: &'a DatasetPlanRequest,
     forward: &'a ForwardWindow,
     exit_decision: Option<&'a ExitDecisionLabelContext>,
-    trade_policy: Option<&'a TradePolicyArtifactPayload>,
 }
 
 struct ExitDecisionAppendInput<'a> {
@@ -3322,7 +3230,7 @@ fn eligible_factor_values(outcome: &MarketFactorOutcome) -> Vec<FactorValue> {
 }
 
 fn record_exit_fill_fidelity(coverage: &mut DatasetCoverage, book_fidelity: Option<BookFidelity>) {
-    if book_fidelity == Some(BookFidelity::L2) {
+    if book_fidelity == Some(BookFidelity::FullL2) {
         coverage.exit_fill_l2_rows += 1;
     } else if book_fidelity.is_some() {
         coverage.exit_fill_fallback_rows += 1;
@@ -3436,15 +3344,13 @@ mod keep_rate_tests {
 mod decision_book_tests {
     use std::sync::Arc;
 
-    use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        clickhouse::{BookMicrostructureRow, ChPrice, ChSchemaVersion, ChUsd},
-        domain::{DecisionClock, market::book::BookLevel},
-        types::{MarketId, Price, Shares, TokenId},
+        domain::market::book::BookLevel,
+        types::{Price, Shares},
     };
     use rust_decimal::Decimal;
 
-    use super::{DecisionBook, decision_book_quote_price, microstructure_fallback, peak_mark_to};
+    use super::{DecisionBook, decision_book_quote_price};
 
     #[test]
     fn fee_quote_price_comes_from_executable_decision_bid() {
@@ -3464,66 +3370,5 @@ mod decision_book_tests {
             decision_book_quote_price(&book),
             Some(Price::new(Decimal::new(55, 2)))
         );
-    }
-
-    #[test]
-    fn microstructure_fallback_honors_effective_and_available_cutoffs() {
-        let decision_at = Utc.timestamp_opt(1_000, 0).single().expect("decision time");
-        let boundary = DecisionClock::new(10)
-            .boundary(decision_at)
-            .expect("decision boundary");
-        let rows = vec![
-            micro_row(985_000, 999_000, Decimal::new(4, 1)),
-            micro_row(995_000, 995_000, Decimal::new(6, 1)),
-            micro_row(980_000, 1_001_000, Decimal::new(7, 1)),
-        ];
-
-        let (price, _) = microstructure_fallback(&rows, &boundary).expect("visible fallback");
-        assert_eq!(price, Price::new(Decimal::new(4, 1)));
-        assert_eq!(
-            peak_mark_to(
-                &rows,
-                Utc.timestamp_opt(970, 0).single().expect("opened at"),
-                &boundary,
-            ),
-            Some(Price::new(Decimal::new(4, 1)))
-        );
-    }
-
-    fn micro_row(bucket_time: i64, available_at: i64, price: Decimal) -> BookMicrostructureRow {
-        let price = Price::new(price);
-        BookMicrostructureRow {
-            token_id: TokenId::new("yes"),
-            market_id: Some(MarketId::new("0xmarket")),
-            bucket_time,
-            best_bid_open: Some(ChPrice::from(price)),
-            best_bid_high: Some(ChPrice::from(price)),
-            best_bid_low: Some(ChPrice::from(price)),
-            best_bid_close: Some(ChPrice::from(price)),
-            best_ask_open: None,
-            best_ask_high: None,
-            best_ask_low: None,
-            best_ask_close: None,
-            spread_bps_min: None,
-            spread_bps_avg: None,
-            spread_bps_max: None,
-            mid_price_open: Some(ChPrice::from(price)),
-            mid_price_close: Some(ChPrice::from(price)),
-            top1_depth_usd_avg: Some(ChUsd::from(Decimal::from(500))),
-            top5_depth_usd_avg: None,
-            top20_depth_usd_avg: None,
-            imbalance_avg: None,
-            update_count: 1,
-            snapshot_count: 1,
-            delta_count: 0,
-            delete_count: 0,
-            crossed_count: 0,
-            invalid_level_count: 0,
-            gap_count: 0,
-            last_trade_count: 0,
-            max_book_age_ms: 0,
-            schema_version: ChSchemaVersion::FIRST,
-            available_at,
-        }
     }
 }

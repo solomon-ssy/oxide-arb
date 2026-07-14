@@ -39,7 +39,7 @@ pub mod stats;
 pub mod artifact;
 pub mod backtest;
 pub mod domain;
-pub mod execution_sim;
+pub mod execution_semantics;
 pub mod factors;
 pub mod features;
 pub mod gates;

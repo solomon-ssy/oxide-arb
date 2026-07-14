@@ -182,7 +182,7 @@ pub async fn sync_rollback_production_active(
     reason: &str,
     activated_by: &str,
 ) -> Result<(), RollbackPointerSyncFailure> {
-    persist_and_apply_rollback(RollbackPointerTransition {
+    Box::pin(persist_and_apply_rollback(RollbackPointerTransition {
         deps,
         target_config: preflight.target_config,
         previous_config: preflight.previous_config,
@@ -193,7 +193,7 @@ pub async fn sync_rollback_production_active(
         route: preflight.route,
         reason,
         activated_by,
-    })
+    }))
     .await
 }
 

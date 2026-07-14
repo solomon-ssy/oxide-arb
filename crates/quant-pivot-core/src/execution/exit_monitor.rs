@@ -277,9 +277,6 @@ pub struct ExitMonitorInput {
     pub signal: ExitSignalVerdict,
     /// Unified cumulative state for deterministic and opportunistic scale-outs.
     pub scale_out_state: ScaleOutState,
-    /// Minimum incremental fraction (of the shared entry-filled denominator) worth
-    /// submitting; smaller deltas hold to avoid dust exits / fee churn.
-    pub min_opportunistic_clip_pct: Decimal,
     /// Evaluation time.
     pub now: DateTime<Utc>,
 }
@@ -490,7 +487,11 @@ fn opportunistic_delta(input: &ExitMonitorInput, target_pct: Decimal) -> Option<
     }
     let target = target_pct.clamp(Decimal::ZERO, Decimal::ONE);
     let delta = state.delta_to_target(target).inner();
-    let min_clip = denominator.inner() * input.min_opportunistic_clip_pct;
+    let min_clip = denominator.inner()
+        * input
+            .exit_policy
+            .opportunistic_exit
+            .min_incremental_exit_pct;
     if delta <= Decimal::ZERO || delta < min_clip {
         return None;
     }

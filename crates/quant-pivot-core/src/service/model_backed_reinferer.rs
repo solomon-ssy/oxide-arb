@@ -914,6 +914,7 @@ mod tests {
                 start_date: None,
                 end_date: None,
                 created_at: Some(now - ChronoDuration::days(1)),
+                fee_schedule: None,
             },
             neg_risk_leg_set: NegRiskLegSet::empty(),
             catalog_sync_batch_id: CatalogSyncBatchId::from_v7(),

@@ -66,6 +66,33 @@ impl MarketInfo {
     pub fn fee_category(&self) -> MarketCategory {
         self.category_set().fee_category()
     }
+
+    /// Reconstruct the complete fee schedule persisted with this catalog row.
+    #[must_use]
+    pub fn fee_schedule(&self) -> Option<MarketFeeSchedule> {
+        let (fee_rate, exponent, taker_only, source, observed_at) = (
+            self.fee_rate,
+            self.fee_exponent,
+            self.fee_taker_only,
+            self.fee_source,
+            self.fee_observed_at,
+        );
+        match (fee_rate, exponent, taker_only, source, observed_at) {
+            (Some(fee_rate), Some(exponent), Some(taker_only), Some(source), Some(observed_at)) => {
+                Some(MarketFeeSchedule {
+                    market_id: self.market_id.clone(),
+                    fees_enabled: self.fees_enabled,
+                    fee_rate,
+                    exponent,
+                    taker_only,
+                    rebate_rate: self.fee_rebate_rate,
+                    source,
+                    observed_at,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Upsert payload for a Polymarket market catalog row.

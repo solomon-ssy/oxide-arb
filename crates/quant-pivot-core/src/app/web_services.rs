@@ -218,6 +218,7 @@ fn build_trade_policy_port(ctx: &AppContext) -> Arc<dyn TradePolicyPort> {
         Arc::clone(&ctx.research.training_dataset_repo),
         Arc::clone(&ctx.research.artifact_store),
         Arc::clone(&ctx.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+        Arc::clone(&ctx.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
     ))
 }
 

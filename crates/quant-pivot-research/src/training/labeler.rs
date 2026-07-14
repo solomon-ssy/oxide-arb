@@ -7,11 +7,15 @@
 //! into [`LabelBuildInput::forward`]; a labeler never reads a database.
 
 use chrono::Duration;
-use quant_pivot_models::types::Price;
+use quant_pivot_models::{
+    enums::quant::FillRequirement,
+    hashing::CanonicalDigest,
+    types::{Bps, Price},
+};
 use rust_decimal::Decimal;
 
 use crate::{
-    execution_sim::ExitFillSimulator,
+    execution_semantics::{LiquidityRole, PitFeeSchedule, walk_sell_exact_shares},
     training::{DecisionBook, hold_terminal_proceeds},
 };
 
@@ -31,10 +35,10 @@ pub const MAX_ADVERSE_EXCURSION_BPS: LabelName =
 pub const LIQUIDITY_EXIT_POSSIBLE: LabelName = LabelName::from_static("liquidity_exit_possible");
 /// `settlement_outcome`: terminal `settled_yes` (1.0) / `settled_no` (0.0).
 pub const SETTLEMENT_OUTCOME: LabelName = LabelName::from_static("settlement_outcome");
-pub const TRIPLE_BARRIER_TOUCH: LabelName = LabelName::from_static("triple_barrier_touch");
-pub const TRIPLE_BARRIER_RETURN_BPS: LabelName =
-    LabelName::from_static("triple_barrier_return_bps");
+pub const POLICY_NET_RETURN_BPS: LabelName = LabelName::from_static("policy_net_return_bps");
 pub const POLICY_NET_POSITIVE: LabelName = LabelName::from_static("policy_net_positive");
+pub const POLICY_ENTRY_FILL_RATIO: LabelName = LabelName::from_static("policy_entry_fill_ratio");
+pub const POLICY_EXIT_FILL_RATIO: LabelName = LabelName::from_static("policy_exit_fill_ratio");
 /// `hold_vs_exit_alpha_bps`: bps advantage of exiting now (simulated fill @ t)
 /// over holding through the lot's terminal outcome (Phase 06.1).
 pub const HOLD_VS_EXIT_ALPHA_BPS: LabelName = LabelName::from_static("hold_vs_exit_alpha_bps");
@@ -68,9 +72,10 @@ pub fn label_names_for_sources(
         labels.extend(label_names());
         if include_trade_policy_labels {
             labels.extend([
-                TRIPLE_BARRIER_TOUCH,
-                TRIPLE_BARRIER_RETURN_BPS,
+                POLICY_NET_RETURN_BPS,
                 POLICY_NET_POSITIVE,
+                POLICY_ENTRY_FILL_RATIO,
+                POLICY_EXIT_FILL_RATIO,
             ]);
         }
     }
@@ -104,149 +109,6 @@ fn return_bps(entry: Decimal, value: Decimal) -> Option<Decimal> {
         return None;
     }
     Some((value - entry) / entry * bps_denominator())
-}
-
-/// Horizontal barriers frozen from one published trade-policy cohort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TripleBarrierPolicy {
-    pub upper_bps: Decimal,
-    pub lower_bps: Decimal,
-}
-
-impl TripleBarrierPolicy {
-    pub fn validate(self) -> Result<Self, String> {
-        if self.upper_bps <= Decimal::ZERO || self.lower_bps <= Decimal::ZERO {
-            return Err("triple-barrier distances must be positive".to_owned());
-        }
-        Ok(self)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TripleBarrierLabelKind {
-    Touch,
-    ReturnBps,
-    PolicyNetPositive,
-}
-
-/// First-touch labeler using executable best-bid observations.
-pub struct TripleBarrierLabeler {
-    kind: TripleBarrierLabelKind,
-}
-
-impl TripleBarrierLabeler {
-    #[must_use]
-    pub const fn new(kind: TripleBarrierLabelKind) -> Self {
-        Self { kind }
-    }
-}
-
-impl Labeler for TripleBarrierLabeler {
-    fn label_name(&self) -> LabelName {
-        match self.kind {
-            TripleBarrierLabelKind::Touch => TRIPLE_BARRIER_TOUCH,
-            TripleBarrierLabelKind::ReturnBps => TRIPLE_BARRIER_RETURN_BPS,
-            TripleBarrierLabelKind::PolicyNetPositive => POLICY_NET_POSITIVE,
-        }
-    }
-
-    fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput {
-        let Some(policy) = input.triple_barrier_policy else {
-            return LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoTradePolicyCohort,
-            };
-        };
-        let policy = match policy.validate() {
-            Ok(policy) => policy,
-            Err(detail) => return LabelBuildOutput::Invalid { detail },
-        };
-        let Some(entry) = input.entry_price else {
-            return LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoEntryPrice,
-            };
-        };
-        let cutoff = match horizon_end(input) {
-            Ok(cutoff) => cutoff,
-            Err(detail) => return LabelBuildOutput::Invalid { detail },
-        };
-        if input.forward.data_available_until < cutoff {
-            return LabelBuildOutput::NotMature {
-                available_after: cutoff,
-                reason: LabelDelayReason::HorizonNotElapsed,
-            };
-        }
-        let denominator = bps_denominator();
-        let upper = entry.inner() * (Decimal::ONE + policy.upper_bps / denominator);
-        let lower = entry.inner() * (Decimal::ONE - policy.lower_bps / denominator);
-        let mut vertical_exit = None;
-        for sample in input
-            .forward
-            .samples
-            .iter()
-            .filter(|sample| sample.at <= cutoff)
-        {
-            let upper_touched = sample
-                .best_bid_high
-                .is_some_and(|price| price.inner() >= upper);
-            let lower_touched = sample
-                .best_bid_low
-                .is_some_and(|price| price.inner() <= lower);
-            if upper_touched && lower_touched {
-                return LabelBuildOutput::Unavailable {
-                    reason: MissingLabelReason::AmbiguousBarrierTouch,
-                };
-            }
-            if upper_touched {
-                return self.output(input, sample.at, Decimal::ONE, policy.upper_bps);
-            }
-            if lower_touched {
-                return self.output(input, sample.at, -Decimal::ONE, -policy.lower_bps);
-            }
-            if let Some(close) = sample.best_bid_close {
-                vertical_exit = Some(close);
-            }
-        }
-        let Some(exit) = vertical_exit else {
-            return LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoExitPrice,
-            };
-        };
-        let Some(value) = return_bps(entry.inner(), exit.inner()) else {
-            return LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::NoEntryPrice,
-            };
-        };
-        self.output(input, cutoff, Decimal::ZERO, value)
-    }
-}
-
-impl TripleBarrierLabeler {
-    fn output(
-        &self,
-        input: &LabelBuildInput<'_>,
-        matured_at: chrono::DateTime<chrono::Utc>,
-        touch: Decimal,
-        return_value: Decimal,
-    ) -> LabelBuildOutput {
-        let value = match self.kind {
-            TripleBarrierLabelKind::Touch => touch,
-            TripleBarrierLabelKind::ReturnBps => return_value,
-            TripleBarrierLabelKind::PolicyNetPositive => {
-                if return_value > Decimal::ZERO {
-                    Decimal::ONE
-                } else {
-                    Decimal::ZERO
-                }
-            }
-        };
-        LabelBuildOutput::Available(TrainingLabel {
-            label_name: self.label_name(),
-            horizon_secs: input.horizon_secs,
-            value,
-            is_resolved: true,
-            matured_at,
-        })
-    }
 }
 
 /// The horizon cutoff for a sample.
@@ -497,24 +359,55 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         };
-        let Some(fee_bps) = ctx.fee_bps else {
+        let Some(fee_schedule) = &ctx.fee_schedule else {
             return LabelBuildOutput::Unavailable {
                 reason: MissingLabelReason::NoExitPrice,
             };
         };
-        let sim = ExitFillSimulator::new(fee_bps);
-        let fill = match book {
-            DecisionBook::L2 { bids } => sim.simulate_l2(bids, ctx.remaining_shares),
-            DecisionBook::Microstructure { best_bid, depth } => {
-                sim.simulate_fallback(*best_bid, *depth, ctx.remaining_shares)
-            }
+        let DecisionBook::L2 { bids } = book;
+        let Some(limit_price) = bids.last().map(|level| level.price_decimal()) else {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoForwardData,
+            };
+        };
+        let Ok(schedule_hash) = CanonicalDigest::content_hash_json(fee_schedule) else {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoExitPrice,
+            };
+        };
+        let schedule = PitFeeSchedule {
+            schedule_hash,
+            effective_at: fee_schedule.observed_at,
+            available_at: fee_schedule.observed_at,
+            platform_rate: if fee_schedule.fees_enabled {
+                fee_schedule.fee_rate
+            } else {
+                Decimal::ZERO
+            },
+            exponent: fee_schedule.exponent,
+            taker_only: fee_schedule.taker_only,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+        };
+        let Ok(fill) = walk_sell_exact_shares(
+            bids,
+            ctx.remaining_shares,
+            limit_price,
+            FillRequirement::AllowPartial,
+            &schedule,
+            LiquidityRole::Taker,
+            input.decision_at,
+        ) else {
+            return LabelBuildOutput::Unavailable {
+                reason: MissingLabelReason::NoExitPrice,
+            };
         };
         if !fill.filled_shares.is_positive() {
             return LabelBuildOutput::Unavailable {
                 reason: MissingLabelReason::NoForwardData,
             };
         }
-        let exit_proceeds = fill.net_proceeds.inner();
+        let exit_proceeds = fill.gross_notional.inner() - fill.fee.inner();
         let hold_terminal = hold_terminal_proceeds(&ctx.terminal, input.decision_at).inner();
         let alpha = (exit_proceeds - hold_terminal) / cost_basis * bps_denominator();
         LabelBuildOutput::Available(TrainingLabel {
@@ -576,8 +469,9 @@ mod tests {
     use crate::training::{ForwardSample, ForwardWindow, MarketResolution};
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
-        domain::BookLevel,
-        types::{Bps, MarketId, Price, Shares, TokenId, Usd},
+        domain::{BookLevel, MarketFeeSchedule},
+        enums::fee::FeeSource,
+        types::{MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -621,7 +515,6 @@ mod tests {
             entry_price,
             horizon_secs,
             min_exit_depth_usd: Usd::new(Decimal::from(100)),
-            triple_barrier_policy: None,
             forward,
             exit_decision: None,
         }
@@ -714,69 +607,6 @@ mod tests {
         assert!(matches!(mae, LabelBuildOutput::Available(l) if l.value == Decimal::from(-2000)));
     }
 
-    fn barrier_input<'a>(
-        market: &'a MarketId,
-        token: &'a TokenId,
-        window: &'a ForwardWindow,
-    ) -> LabelBuildInput<'a> {
-        let mut input = input(market, token, Some(price("0.50")), 60, window);
-        input.triple_barrier_policy = Some(TripleBarrierPolicy {
-            upper_bps: Decimal::from(1_000),
-            lower_bps: Decimal::from(1_000),
-        });
-        input
-    }
-
-    #[test]
-    fn triple_barrier_records_first_provable_touch_time() {
-        let market = MarketId::new("m");
-        let token = TokenId::new("t");
-        let window = forward(
-            vec![
-                sample(20, "0.52", "0.54", "0.49"),
-                sample(40, "0.56", "0.56", "0.50"),
-            ],
-            120,
-            None,
-        );
-        let out = TripleBarrierLabeler::new(TripleBarrierLabelKind::Touch)
-            .build_label(&barrier_input(&market, &token, &window));
-        assert!(matches!(
-            out,
-            LabelBuildOutput::Available(label)
-                if label.value == Decimal::ONE && label.matured_at == at(40)
-        ));
-    }
-
-    #[test]
-    fn triple_barrier_vertical_uses_executable_bid_close() {
-        let market = MarketId::new("m");
-        let token = TokenId::new("t");
-        let window = forward(vec![sample(60, "0.52", "0.54", "0.47")], 120, None);
-        let out = TripleBarrierLabeler::new(TripleBarrierLabelKind::ReturnBps)
-            .build_label(&barrier_input(&market, &token, &window));
-        assert!(matches!(
-            out,
-            LabelBuildOutput::Available(label)
-                if label.value == Decimal::from(400) && label.matured_at == at(60)
-        ));
-    }
-
-    #[test]
-    fn triple_barrier_rejects_same_bucket_double_touch() {
-        let market = MarketId::new("m");
-        let token = TokenId::new("t");
-        let window = forward(vec![sample(20, "0.50", "0.56", "0.44")], 120, None);
-        let out = TripleBarrierLabeler::new(TripleBarrierLabelKind::PolicyNetPositive)
-            .build_label(&barrier_input(&market, &token, &window));
-        assert!(matches!(
-            out,
-            LabelBuildOutput::Unavailable {
-                reason: MissingLabelReason::AmbiguousBarrierTouch
-            }
-        ));
-    }
-
     #[test]
     fn settlement_keys_on_winning_token() {
         let market = MarketId::new("m");
@@ -842,7 +672,16 @@ mod tests {
         let ctx = ExitDecisionLabelContext {
             remaining_shares: Shares::new(dec!(100)),
             avg_price: price("0.50"),
-            fee_bps: Some(Bps::ZERO),
+            fee_schedule: Some(MarketFeeSchedule {
+                market_id: market.clone(),
+                fees_enabled: false,
+                fee_rate: Decimal::ZERO,
+                exponent: Decimal::ONE,
+                taker_only: true,
+                rebate_rate: None,
+                source: FeeSource::GammaFeeSchedule,
+                observed_at: at(0),
+            }),
             terminal,
             decision_book: Some(DecisionBook::L2 {
                 bids: Arc::new([BookLevel::from_decimal_unchecked(

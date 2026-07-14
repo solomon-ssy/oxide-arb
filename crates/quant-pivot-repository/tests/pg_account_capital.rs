@@ -48,15 +48,15 @@ use quant_pivot_models::{
         ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
         FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
         ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
-        OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan,
-        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyCohortDimension,
-        TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
+        OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary, RiskEnvelope,
+        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
+        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -429,6 +429,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                         min_expected_return_bps: Bps::ZERO,
                         require_execution_eligibility: true,
                     },
+                    opportunistic_exit: opportunistic_exit_policy(),
                     scale_out_targets: Vec::new(),
                     settlement_mode: ExitSettlementMode::ExitBeforeResolution,
                     redeem_policy: RedeemPolicy::Manual,
@@ -451,6 +452,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 released_usd: Usd::ZERO,
                 reason: "intent created".to_owned(),
             },
+            None,
         )
         .await
         .expect("create intent with allocation");
@@ -796,6 +798,7 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                         min_expected_return_bps: Bps::ZERO,
                         require_execution_eligibility: true,
                     },
+                    opportunistic_exit: opportunistic_exit_policy(),
                     scale_out_targets: Vec::new(),
                     settlement_mode: ExitSettlementMode::ExitBeforeResolution,
                     redeem_policy: RedeemPolicy::Manual,
@@ -818,6 +821,7 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                 released_usd: Usd::ZERO,
                 reason: "intent created".to_owned(),
             },
+            None,
         )
         .await
         .expect("create intent with allocation")
@@ -1217,10 +1221,21 @@ fn exit_plan() -> ExitPlan {
             min_expected_return_bps: Bps::ZERO,
             require_execution_eligibility: true,
         },
+        opportunistic_exit: opportunistic_exit_policy(),
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
+    }
+}
+
+const fn opportunistic_exit_policy() -> OpportunisticExitPolicy {
+    OpportunisticExitPolicy {
+        min_confidence: Probability::new(dec!(0.65)),
+        min_expected_alpha_bps: Bps::new(dec!(50)),
+        min_p_exit_better: Probability::new(dec!(0.5)),
+        max_cumulative_exit_pct: dec!(1),
+        min_incremental_exit_pct: dec!(0.1),
     }
 }
 
@@ -1313,8 +1328,9 @@ const fn market_context() -> MarketContext {
 
 fn book_snapshot_ref() -> BookSnapshotRef {
     BookSnapshotRef::from_str(&format!(
-        "book:ch:token-1:1700000000:1700000000:1:1@blake3:{}",
-        "0".repeat(64)
+        "book:l2|token-1|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
+        "1".repeat(64),
+        "0".repeat(64),
     ))
     .expect("valid book snapshot ref")
 }

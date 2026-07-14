@@ -2,27 +2,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     clickhouse::{ChPrice, ChSchemaVersion, ChShares},
-    enums::clickhouse::{ChBookEventType, ChFactSource},
+    enums::clickhouse::ChCanonicalBookEventType,
     types::{ContentHash, MarketId, TokenId},
 };
+use uuid::Uuid;
 
-/// Short-retention L2 replay fact for recent exact book reconstruction.
+/// Canonical, loss-intolerant L2 event used for replay and policy evidence.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
-pub struct BookL2ReplayRow {
+pub struct BookL2EventRow {
+    pub stream_session_id: Uuid,
+    pub shard_id: u32,
     pub token_id: TokenId,
     pub market_id: Option<MarketId>,
-    pub event_type: ChBookEventType,
+    pub token_sequence: u64,
+    pub event_type: ChCanonicalBookEventType,
     pub bid_prices: Vec<ChPrice>,
     pub bid_sizes: Vec<ChShares>,
     pub ask_prices: Vec<ChPrice>,
     pub ask_sizes: Vec<ChShares>,
     pub book_version: u64,
-    pub levels_count: u16,
-    pub is_full_snapshot: bool,
-    pub event_time: i64,
-    pub ingestion_time: i64,
-    pub sequence: u64,
-    pub source: ChFactSource,
-    pub feed_event_hash: Option<ContentHash>,
+    pub old_tick_size: Option<ChPrice>,
+    pub new_tick_size: Option<ChPrice>,
+    pub venue_event_time: i64,
+    pub ingress_time: i64,
+    pub persisted_time: i64,
+    pub payload_hash: ContentHash,
     pub schema_version: ChSchemaVersion,
 }

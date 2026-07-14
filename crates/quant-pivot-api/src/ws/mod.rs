@@ -5,19 +5,19 @@
 //! All events are normalized into [`PipelineEvent`] and dispatched to a
 //! unified bounded channel.
 
-mod drop_hook;
 mod health;
 mod ingest_hooks;
 pub mod normalize;
 mod reconnect;
 mod router;
+mod session_hook;
 mod shard;
 mod token_intern;
 
-pub use drop_hook::WsEventDropHook;
 pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard, WsShardHealthPort};
 pub use ingest_hooks::BookLevelRejectHook;
 pub use reconnect::ReconnectPolicy;
+pub use session_hook::WsSessionInvalidationHook;
 pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 
 use crate::infra::retry::RetryPolicy;
@@ -157,7 +157,7 @@ impl ClobWsManager {
         polymarket_config: &PolymarketConfig,
         ws_config: &WebSocketConfig,
         shutdown: tokio_util::sync::CancellationToken,
-        on_events_dropped: Option<WsEventDropHook>,
+        on_session_invalidated: Option<WsSessionInvalidationHook>,
         on_book_level_rejected: Option<BookLevelRejectHook>,
     ) -> Self {
         let (output_tx, output_rx) = flume::bounded(8192);
@@ -189,14 +189,13 @@ impl ClobWsManager {
                 ws_url: polymarket_config.clob_ws_url.clone(),
                 shutdown,
                 last_message_at: Arc::clone(&last_message_at),
-                on_events_dropped,
+                on_session_invalidated,
                 on_book_level_rejected,
                 reconnect_policy,
                 sdk_initial_backoff: initial_backoff,
                 sdk_max_backoff: max_backoff,
                 connect_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
                 health: Arc::clone(&health),
-                token_freshness: Arc::clone(&token_freshness),
             },
         );
 
@@ -287,6 +286,17 @@ impl ClobWsManager {
     /// Returns the unified event receiver for all shards.
     pub const fn events(&self) -> &Receiver<PipelineEvent> {
         &self.output_rx
+    }
+
+    /// Advance token freshness only after canonical persistence and book apply.
+    pub fn mark_token_applied(&self, token_id: &TokenId, at: Instant) {
+        self.token_freshness.mark_token(token_id, at);
+    }
+
+    /// Fail closed when a stream/session boundary invalidates token continuity.
+    pub fn invalidate_token(&self, token_id: &TokenId) {
+        self.token_freshness.invalidate_token(token_id);
+        self.router.restart_token(token_id);
     }
 
     /// Returns the number of active shards.

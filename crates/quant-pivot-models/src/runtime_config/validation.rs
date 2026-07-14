@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    DecimalString, ResearchValidationConfig, ResearchValidationTrialsConfig, RuntimeConfig,
-    SizingModelConfig,
+    DecimalString, PolicyValidationConfig, ResearchValidationConfig,
+    ResearchValidationTrialsConfig, RuntimeConfig, SizingModelConfig,
     sections::{FeaturesConfig, KellySafetyConfig},
     validate_schedule_cadence,
 };
@@ -912,6 +912,13 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
             detail: "must be less than lease_duration_secs".to_owned(),
         });
     }
+    if config.execution.auto_execution.enabled {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.auto_execution.enabled",
+            detail: "Runtime v13 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
+                .to_owned(),
+        });
+    }
     decimal(
         "execution.auto_execution.max_total_usd_per_report",
         &config.execution.auto_execution.max_total_usd_per_report,
@@ -927,6 +934,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
         &config.execution.auto_execution.min_confidence,
         report,
     );
+    validate_semi_auto_canary(config, report);
     non_negative_decimal(
         "execution.capital.max_reserved_usd",
         &config.execution.capital.max_reserved_usd,
@@ -946,6 +954,66 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     }
     validate_opportunistic_sell(config, report);
     validate_settlement_redeem(config, report);
+}
+
+fn validate_semi_auto_canary(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let canary = &config.execution.semi_auto.canary;
+    non_negative_decimal(
+        "execution.semi_auto.canary.max_total_usd_per_report",
+        &canary.max_total_usd_per_report,
+        report,
+    );
+    for tier in &canary.allowed_tiers_usd {
+        positive_decimal("execution.semi_auto.canary.allowed_tiers_usd", tier, report);
+    }
+    if !canary.enabled {
+        return;
+    }
+    if canary
+        .policy_artifact_id
+        .as_deref()
+        .is_none_or(str::is_empty)
+        || canary
+            .policy_content_hash
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.semi_auto.canary",
+            detail: "an enabled canary must bind both policy_artifact_id and policy_content_hash"
+                .to_owned(),
+        });
+    }
+    let only_first_tier = canary.allowed_tiers_usd.len() == 1
+        && canary.allowed_tiers_usd[0].value.parse::<Decimal>() == Ok(Decimal::new(25, 0));
+    if !only_first_tier {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.semi_auto.canary.allowed_tiers_usd",
+            detail: "runtime v13 canary must contain exactly the $25 tier".to_owned(),
+        });
+    }
+    if canary.max_open_intents != 1 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.semi_auto.canary.max_open_intents",
+            detail: "runtime v13 canary must allow exactly one open intent".to_owned(),
+        });
+    }
+    if canary.max_total_usd_per_report.value.parse::<Decimal>() != Ok(Decimal::new(25, 0)) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.semi_auto.canary.max_total_usd_per_report",
+            detail: "runtime v13 canary must cap each report at exactly $25".to_owned(),
+        });
+    }
+    if canary
+        .expires_at
+        .as_deref()
+        .is_none_or(|value| chrono::DateTime::parse_from_rfc3339(value).is_err())
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.semi_auto.canary.expires_at",
+            detail: "an enabled canary requires an RFC3339 expiry".to_owned(),
+        });
+    }
 }
 
 fn validate_execution_breaker(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -1030,6 +1098,137 @@ fn validate_research(config: &RuntimeConfig, report: &mut ConfigValidationReport
         }
     }
     validate_research_validation(config, report);
+    validate_policy_validation(&config.research.policy_validation, report);
+}
+
+fn validate_policy_validation(
+    policy: &PolicyValidationConfig,
+    report: &mut ConfigValidationReport,
+) {
+    for (field, actual, required) in [
+        (
+            "research.policy_validation.cpcv_n_groups",
+            policy.cpcv_n_groups,
+            8,
+        ),
+        (
+            "research.policy_validation.cpcv_k_test",
+            policy.cpcv_k_test,
+            3,
+        ),
+        (
+            "research.policy_validation.pbo_block_count",
+            policy.pbo_block_count,
+            8,
+        ),
+    ] {
+        if actual != required {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: format!("runtime v13 methodology fixes this value at {required}"),
+            });
+        }
+    }
+    upper_bounded_positive_decimal(
+        "research.policy_validation.dsr_significance",
+        &policy.dsr_significance,
+        Decimal::new(5, 2),
+        report,
+    );
+    upper_bounded_positive_decimal(
+        "research.policy_validation.max_pbo",
+        &policy.max_pbo,
+        Decimal::new(5, 1),
+        report,
+    );
+    for (field, value, floor) in [
+        (
+            "research.policy_validation.min_full_l2_coverage",
+            &policy.min_full_l2_coverage,
+            Decimal::new(95, 2),
+        ),
+        (
+            "research.policy_validation.min_common_candidate_support",
+            &policy.min_common_candidate_support,
+            Decimal::new(95, 2),
+        ),
+        (
+            "research.policy_validation.min_passive_reconciled_trade_coverage",
+            &policy.min_passive_reconciled_trade_coverage,
+            Decimal::new(95, 2),
+        ),
+        (
+            "research.policy_validation.min_fee_catalog_coverage",
+            &policy.min_fee_catalog_coverage,
+            Decimal::ONE,
+        ),
+        (
+            "research.policy_validation.min_universe_coverage",
+            &policy.min_universe_coverage,
+            Decimal::new(95, 2),
+        ),
+        (
+            "research.policy_validation.utility_confidence",
+            &policy.utility_confidence,
+            Decimal::new(95, 2),
+        ),
+    ] {
+        lower_bounded_unit_decimal(field, value, floor, report);
+    }
+    for (field, value) in [
+        (
+            "research.policy_validation.max_ambiguity_rate",
+            &policy.max_ambiguity_rate,
+        ),
+        (
+            "research.policy_validation.max_depth_failure_rate",
+            &policy.max_depth_failure_rate,
+        ),
+    ] {
+        upper_bounded_non_negative_decimal(field, value, Decimal::new(5, 2), report);
+    }
+    lower_bounded_unit_decimal(
+        "research.policy_validation.embargo_time_pct",
+        &policy.embargo_time_pct,
+        Decimal::new(2, 2),
+        report,
+    );
+    if policy.min_utility_lower_bound_bps.value.parse::<Decimal>() != Ok(Decimal::ZERO) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.policy_validation.min_utility_lower_bound_bps",
+            detail: "must equal 0; publication requires the observed one-sided lower bound to be strictly greater"
+                .to_owned(),
+        });
+    }
+    if policy.min_effective_sample_size < 100 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.policy_validation.min_effective_sample_size",
+            detail: "must be >= 100".to_owned(),
+        });
+    }
+    if policy.max_candidates_per_experiment == 0 || policy.max_candidates_per_experiment > 32 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.policy_validation.max_candidates_per_experiment",
+            detail: "must be in 1..=32; excess candidates fail the whole preflight".to_owned(),
+        });
+    }
+    if policy.min_latency_profile_secs < 86_400 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.policy_validation.min_latency_profile_secs",
+            detail: "must cover at least 24 hours".to_owned(),
+        });
+    }
+    match policy.latency_stress_multiplier.value.parse::<Decimal>() {
+        Ok(value) if value >= Decimal::TWO => {}
+        Ok(value) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.policy_validation.latency_stress_multiplier",
+            detail: format!("`{value}` must be >= 2"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "research.policy_validation.latency_stress_multiplier",
+            detail: "must be a valid decimal string".to_owned(),
+        }),
+    }
 }
 
 /// Phase 11.5 `research.validation.*` methodology config validation.
@@ -1172,34 +1371,11 @@ fn validate_research_validation_pbo_gates(
 
 fn validate_opportunistic_sell(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     let policy = &config.execution.exit_monitor.opportunistic_sell;
-    unit_ratio(
-        "execution.exit_monitor.opportunistic_sell.min_confidence",
-        &policy.min_confidence,
-        report,
-    );
-    // The target cumulative exit fraction is capped at this value; a zero cap
-    // would make every opportunistic verdict a no-op, and > 1 is nonsensical.
     half_open_unit(
-        "execution.exit_monitor.opportunistic_sell.max_sell_pct",
-        &policy.max_sell_pct,
+        "execution.exit_monitor.opportunistic_sell.max_cumulative_exit_pct",
+        &policy.max_cumulative_exit_pct,
         report,
     );
-    half_open_unit(
-        "execution.exit_monitor.opportunistic_sell.min_opportunistic_clip_pct",
-        &policy.min_opportunistic_clip_pct,
-        report,
-    );
-    unit_ratio(
-        "execution.exit_monitor.opportunistic_sell.min_p_exit_better",
-        &policy.min_p_exit_better,
-        report,
-    );
-    if policy.min_expected_alpha_bps < 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.exit_monitor.opportunistic_sell.min_expected_alpha_bps",
-            detail: "must be >= 0".to_owned(),
-        });
-    }
 }
 
 fn validate_settlement_redeem(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -1294,6 +1470,63 @@ fn unit_ratio(field: &'static str, value: &DecimalString, report: &mut ConfigVal
         Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
             field,
             detail: format!("`{parsed}` must be within [0, 1]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
+fn lower_bounded_unit_decimal(
+    field: &'static str,
+    value: &DecimalString,
+    floor: Decimal,
+    report: &mut ConfigValidationReport,
+) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if (floor..=Decimal::ONE).contains(&parsed) => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within [{floor}, 1]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
+fn upper_bounded_positive_decimal(
+    field: &'static str,
+    value: &DecimalString,
+    ceiling: Decimal,
+    report: &mut ConfigValidationReport,
+) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if parsed > Decimal::ZERO && parsed <= ceiling => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within (0, {ceiling}]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
+fn upper_bounded_non_negative_decimal(
+    field: &'static str,
+    value: &DecimalString,
+    ceiling: Decimal,
+    report: &mut ConfigValidationReport,
+) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if (Decimal::ZERO..=ceiling).contains(&parsed) => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within [0, {ceiling}]"),
         }),
         Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
             field,

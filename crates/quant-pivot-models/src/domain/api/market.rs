@@ -2,7 +2,7 @@
 //! (including the order-book projection).
 
 use crate::{
-    clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd, TickEventRow},
+    clickhouse::{BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd, TradeTapeRow},
     domain::{
         BookLevel, MarketInfo, NormalizePageQuery, market::book::BookSnapshot,
         pagination::PageRequest,
@@ -364,14 +364,14 @@ pub struct MarketTradeTick {
 }
 
 impl MarketTradeTick {
-    /// Project a `LastTrade` tick-event row, dropping rows without a price.
+    /// Project a canonical Market-WS trade-tape row.
     #[must_use]
-    pub fn from_row(row: TickEventRow) -> Option<Self> {
-        row.last_trade_price.map(|price| Self {
+    pub fn from_row(row: TradeTapeRow) -> Self {
+        Self {
             token_id: row.token_id,
             ts_ms: row.event_time,
-            price: price.to_price(),
-        })
+            price: row.price.to_price(),
+        }
     }
 }
 

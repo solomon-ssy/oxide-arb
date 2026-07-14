@@ -20,7 +20,8 @@ use crate::{
     types::{
         ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
         ExitReinferenceObservation, MarketId, ModelVersionId, OrderId, OrderIntentId, Price,
-        RecommendationId, RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
+        RecommendationId, RecommendationReportId, RuntimeConfigVersionId, ScaleOutState, Shares,
+        TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -96,6 +97,18 @@ pub struct NewOrderIntent {
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Transactional limits attached to one policy-bound `SemiAuto` canary intent.
+///
+/// The repository evaluates these limits under the same lock and transaction
+/// that reserve capital, so concurrent requests cannot both pass a stale
+/// process-local count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentCreationLimits {
+    pub recommendation_report_id: RecommendationReportId,
+    pub max_open_intents: u32,
+    pub max_total_usd_per_report: Usd,
 }
 
 /// Approval transition payload for an order intent.

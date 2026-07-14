@@ -14,6 +14,13 @@ pub trait ArchivePartitionRepository: Send + Sync {
         partition_key: &str,
     ) -> Result<Option<ArchivePartitionManifestInfo>, StorageError>;
 
+    async fn find_manifests_in_range(
+        &self,
+        table_name: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<ArchivePartitionManifestInfo>, StorageError>;
+
     async fn seal_manifest(
         &self,
         manifest: NewArchivePartitionManifest,

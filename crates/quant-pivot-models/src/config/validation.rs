@@ -224,16 +224,23 @@ fn validate_market_data(deploy: &DeployConfig, report: &mut ConfigValidationRepo
             detail: "must be lower than db.postgres.lock_timeout_ms".into(),
         });
     }
-    if deploy.market_data.trade_tape_on_chain.max_blocks_per_tick == 0
-        || deploy
-            .market_data
-            .trade_tape_on_chain
-            .max_blocks_per_request
-            == 0
+    let trade_tape = &deploy.market_data.trade_tape_on_chain;
+    if trade_tape.max_blocks_per_tick == 0
+        || trade_tape.max_blocks_per_request == 0
+        || trade_tape.batch_size == 0
+        || trade_tape.reconciliation_match_window_ms == 0
+        || trade_tape.reconciliation_terminal_age_secs == 0
+        || trade_tape.reconciliation_max_rows == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.trade_tape_on_chain",
-            detail: "max_blocks_per_tick and max_blocks_per_request must be > 0".into(),
+            detail: "block, batch, match-window, terminal-age, and row limits must be > 0".into(),
+        });
+    }
+    if trade_tape.reconciliation_lookback_secs <= trade_tape.reconciliation_terminal_age_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.trade_tape_on_chain.reconciliation_lookback_secs",
+            detail: "must exceed reconciliation_terminal_age_secs".into(),
         });
     }
 }

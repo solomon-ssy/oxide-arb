@@ -278,6 +278,7 @@ mod tests {
             timestamp_ms: u64::try_from(ts_ms).expect("positive test timestamp"),
             version: 1,
             sequence: 1,
+            source_event: None,
             available_at: timestamp,
         }
     }

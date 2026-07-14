@@ -21,7 +21,7 @@ use super::{TrainingExample, verify_dataset_manifest};
 const MANIFEST_ROW: &str = "manifest";
 const EXAMPLE_ROW: &str = "example";
 
-/// Fully decoded v2 Parquet envelope.
+/// Fully decoded v4 Parquet envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedDatasetParquet {
     pub manifest: DatasetManifest,
@@ -470,8 +470,8 @@ mod tests {
     }
 
     #[test]
-    fn dataset_artifact_version_is_three() {
-        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 3);
+    fn dataset_artifact_version_is_four() {
+        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 4);
     }
 
     #[tokio::test(flavor = "multi_thread")]

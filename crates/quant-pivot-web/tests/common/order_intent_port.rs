@@ -58,6 +58,7 @@ pub fn build_order_intent_service(
     Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
         mode_gate,
         runtime_mode,
+        runtime_config: config,
         kill_switch,
         recommendations: Arc::new(PgRecommendationRepository::new(db.clone()))
             as Arc<dyn RecommendationRepository>,

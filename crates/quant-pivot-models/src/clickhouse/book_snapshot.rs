@@ -1,32 +1,24 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd},
-    enums::clickhouse::{ChFactSource, ChSnapshotReason},
-    types::{MarketId, TokenId},
+    clickhouse::ChSchemaVersion,
+    types::{ContentHash, MarketId, TokenId},
 };
+use uuid::Uuid;
 
-/// `ClickHouse` row for `book_snapshots` table.
+/// Rebuild checkpoint anchored to one canonical L2 event.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
-pub struct BookSnapshotRow {
+pub struct BookL2CheckpointRow {
     pub token_id: TokenId,
     pub market_id: Option<MarketId>,
-    pub snapshot_reason: ChSnapshotReason,
-    pub top_n: u16,
+    pub stream_session_id: Uuid,
+    pub token_sequence: u64,
     pub bids_json: String,
     pub asks_json: String,
-    pub bid_depth_usd: Option<ChUsd>,
-    pub ask_depth_usd: Option<ChUsd>,
-    pub mid_price: Option<ChPrice>,
-    pub spread_bps: Option<ChBps>,
     pub book_version: u64,
-    pub levels_count: u16,
-    /// Business event time in epoch milliseconds.
+    pub source_event_hash: ContentHash,
+    pub checkpoint_hash: ContentHash,
     pub event_time: i64,
-    /// Writer ingestion time in epoch milliseconds.
-    pub ingestion_time: i64,
-    /// Stable tie-breaker for same event/ingestion time rows.
-    pub sequence: u64,
-    pub source: ChFactSource,
+    pub created_at: i64,
     pub schema_version: ChSchemaVersion,
 }

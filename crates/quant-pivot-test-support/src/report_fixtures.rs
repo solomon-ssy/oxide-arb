@@ -32,12 +32,13 @@ use quant_pivot_models::{
         DataQualitySummary, EligibilitySummary, EntryConditionPlan, EntryOrderPolicy, EntryPlan,
         EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
         FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
-        ReportSummary, ResearchJobId, RiskEnvelope, RuntimeConfigVersionId, Shares,
-        SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
-        TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
+        MarketSelectionId, ModelRunId, ModelVersionId, OpportunisticExitPolicy, PortfolioPlanId,
+        Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
+        ReportDataQualitySnapshotId, ReportSummary, ResearchJobId, RiskEnvelope,
+        RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
+        TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, Usd,
     },
 };
 
@@ -297,6 +298,13 @@ fn exit_plan() -> ExitPlan {
             min_expected_return_bps: Bps::ZERO,
             require_execution_eligibility: true,
         },
+        opportunistic_exit: OpportunisticExitPolicy {
+            min_confidence: Probability::new(dec!(0.65)),
+            min_expected_alpha_bps: Bps::new(dec!(50)),
+            min_p_exit_better: Probability::new(dec!(0.5)),
+            max_cumulative_exit_pct: dec!(1),
+            min_incremental_exit_pct: dec!(0.1),
+        },
         settlement_mode: ExitSettlementMode::HoldToResolution,
         redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
@@ -387,8 +395,9 @@ const fn market_context() -> MarketContext {
 
 fn book_snapshot_ref() -> BookSnapshotRef {
     BookSnapshotRef::from_str(&format!(
-        "book:ch:token-abc:1700000000:1700000000:1:1@blake3:{}",
-        "0".repeat(64)
+        "book:l2|token-abc|00000000-0000-0000-0000-000000000001|1|blake3:{}|1700000000|1700000000@blake3:{}",
+        "1".repeat(64),
+        "0".repeat(64),
     ))
     .expect("valid book snapshot ref")
 }

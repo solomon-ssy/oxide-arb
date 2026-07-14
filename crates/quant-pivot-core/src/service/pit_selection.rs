@@ -343,6 +343,7 @@ mod tests {
             start_date: market.start_date,
             end_date: market.end_date,
             created_at: market.created_at,
+            fee_schedule: None,
         }
     }
 
@@ -365,6 +366,7 @@ mod tests {
             timestamp_ms: 1_995_000,
             version: 1,
             sequence: 1,
+            source_event: None,
             available_at: as_of,
         })
         .expect("resolved book");
@@ -518,6 +520,7 @@ mod tests {
             timestamp_ms: u64::try_from(as_of.timestamp_millis()).unwrap_or(0),
             version: 1,
             sequence: 1,
+            source_event: None,
             available_at: as_of,
         }
     }

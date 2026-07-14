@@ -134,8 +134,8 @@ pub struct TrainingDatasetView {
     pub label_schema_hash: Option<ContentHash>,
     pub dataset_hash: Option<ContentHash>,
     pub manifest_hash: Option<ContentHash>,
-    /// Structured projection of the exact frozen artifact manifest. `None`
-    /// means the legacy audit row predates v2 manifest persistence.
+    /// Structured projection of the exact frozen v4 artifact manifest. `None`
+    /// means materialization did not complete successfully.
     pub manifest: Option<DatasetManifestView>,
     pub artifact_bytes_hash: Option<ContentHash>,
     pub parquet_uri: Option<String>,

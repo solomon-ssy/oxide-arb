@@ -27,6 +27,8 @@ pub enum TaskId {
     DataPipeline,
     /// Periodically ingests Polygon `OrderFilled` logs into `quant_trade_tape`.
     TradeTapeWorker,
+    /// Reconciles Market WS prints with finalized on-chain fills one-to-one.
+    TradeTapeReconciliationWorker,
     /// Periodically ingests external domain observations into `quant_domain_observation`.
     DomainIngestWorker,
     /// Dynamically ingests source-native Crypto/Weather live events from active linkages.
@@ -91,9 +93,10 @@ pub enum TaskId {
     // ── Audit / analytics / persistence writers ───────────────────────
     RiskAuditBatch,
     DetectionWriter,
-    TickEventsWriter,
-    BookL2ReplayWriter,
-    BookSnapshotWriter,
+    BookStreamSessionWriter,
+    BookL2EventWriter,
+    BookL2CheckpointWriter,
+    TradeTapeWsWriter,
     BookMicrostructure1sWriter,
     MarketResolutionWriter,
     FactorEventsWriter,
@@ -143,6 +146,7 @@ impl TaskId {
             | Self::DomainLiveIngestWorker => TaskKind::WsIngress,
             Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
+            Self::TradeTapeReconciliationWorker => TaskKind::BookReconciliation,
             Self::PotentialLossEscalation
             | Self::LedgerReconciliation
             | Self::MarketSettlement
@@ -171,9 +175,10 @@ impl TaskId {
             | Self::ArchivePartitionWorker
             | Self::DomainEventOutboxWorker
             | Self::EntryConditionEvaluationOutboxWorker
-            | Self::TickEventsWriter
-            | Self::BookL2ReplayWriter
-            | Self::BookSnapshotWriter
+            | Self::BookStreamSessionWriter
+            | Self::BookL2EventWriter
+            | Self::BookL2CheckpointWriter
+            | Self::TradeTapeWsWriter
             | Self::BookMicrostructure1sWriter
             | Self::MarketResolutionWriter
             | Self::FactorEventsWriter

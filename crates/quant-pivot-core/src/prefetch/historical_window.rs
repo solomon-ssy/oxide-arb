@@ -25,7 +25,7 @@ use chrono_tz::Tz;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice, ChUsd,
+        BookL2CheckpointRow, BookMicrostructureRow, ChBps, ChDecimal64, ChPrice, ChUsd,
         MarketResolutionRow, TradeTapeRow,
     },
     domain::{
@@ -82,7 +82,7 @@ pub struct WindowSpec {
 /// Batch-prefetched historical facts for an offline replay window.
 pub struct Prefetched {
     /// Book snapshots per token (ascending by observation time).
-    pub books: HashMap<TokenId, Vec<BookSnapshotRow>>,
+    pub books: HashMap<TokenId, Vec<BookL2CheckpointRow>>,
     /// Microstructure buckets per token (trailing + forward).
     pub micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
     /// Trade-tape participant rows per market.
@@ -220,7 +220,7 @@ impl HistoricalWindowLoader {
 
         let book_rows = self
             .fact_read
-            .book_snapshots_between(book_tokens, book_from, book_to, book_to)
+            .book_checkpoints_between(book_tokens, book_from, book_to, book_to)
             .await
             .map_err(QuantError::from)?;
         let micro_rows = self
@@ -380,13 +380,13 @@ impl HistoricalWindowLoader {
 }
 
 fn group_book_and_resolution_rows(
-    book_rows: Vec<BookSnapshotRow>,
+    book_rows: Vec<BookL2CheckpointRow>,
     resolution_rows: Vec<MarketResolutionRow>,
 ) -> (
-    HashMap<TokenId, Vec<BookSnapshotRow>>,
+    HashMap<TokenId, Vec<BookL2CheckpointRow>>,
     HashMap<MarketId, Vec<MarketResolutionRow>>,
 ) {
-    let mut books: HashMap<TokenId, Vec<BookSnapshotRow>> = HashMap::new();
+    let mut books: HashMap<TokenId, Vec<BookL2CheckpointRow>> = HashMap::new();
     for row in book_rows {
         books.entry(row.token_id.clone()).or_default().push(row);
     }
@@ -758,7 +758,7 @@ fn build_materialized_pit(
         let mut series = Vec::with_capacity(rows.len());
         for row in rows {
             let source_cutoff = timestamp_millis(row.event_time, "book event_time")?;
-            let decision_at = timestamp_millis(row.ingestion_time, "book ingestion_time")?;
+            let decision_at = timestamp_millis(row.created_at, "book checkpoint created_at")?;
             let (snapshot, status) = snapshot_from_row(row.clone(), source_cutoff, decision_at);
             if status.counts_as_failure() {
                 book_decode_failures += 1;

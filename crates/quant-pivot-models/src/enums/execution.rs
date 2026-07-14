@@ -178,6 +178,25 @@ pg_enum! {
     }
 }
 
+impl ExitReason {
+    /// Closed runtime reason set every policy candidate must govern explicitly.
+    pub const ALL: [Self; 13] = [
+        Self::TakeProfit,
+        Self::StopLoss,
+        Self::TimeExit,
+        Self::PartialExit,
+        Self::SignalInvalidated,
+        Self::Opportunistic,
+        Self::Manual,
+        Self::SettlementHold,
+        Self::ResolutionRedeem,
+        Self::KillSwitchEmergency,
+        Self::RiskEnvelopeBreached,
+        Self::MarketAbnormal,
+        Self::DataStale,
+    ];
+}
+
 wire_enum! {
     pub enum AdmissionOutcome {
         Allow => "allow",

@@ -5,7 +5,7 @@
 //! convert via [`BookLevel::from_decimal`] / [`BookLevel::price_decimal`].
 
 use crate::types::{
-    MicroConversionError, MicroPrice, MicroShares, MicroUsd, Price, Shares, TokenId, Usd,
+    MicroConversionError, MicroPrice, MicroShares, MicroUsd, Price, Shares, TokenId,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -130,17 +130,6 @@ pub fn top_n_share_depth(levels: &[BookLevel], n: usize) -> Shares {
     })
 }
 
-/// Sum ask-side share depth at prices at or below `limit_price` (buy walk).
-#[must_use]
-pub fn ask_depth_up_to(levels: &[BookLevel], limit_price: Price) -> Shares {
-    levels
-        .iter()
-        .take_while(|level| level.price_decimal() <= limit_price)
-        .fold(Shares::ZERO, |acc, level| {
-            Shares::new(acc.inner() + level.size.to_decimal())
-        })
-}
-
 /// Sum bid-side share depth at prices at or above `limit_price` (sell walk).
 #[must_use]
 pub fn bid_depth_down_to(levels: &[BookLevel], limit_price: Price) -> Shares {
@@ -149,17 +138,6 @@ pub fn bid_depth_down_to(levels: &[BookLevel], limit_price: Price) -> Shares {
         .take_while(|level| level.price_decimal() >= limit_price)
         .fold(Shares::ZERO, |acc, level| {
             Shares::new(acc.inner() + level.size.to_decimal())
-        })
-}
-
-/// Sum ask-side notional at prices at or below `limit_price` (market BUY walk).
-#[must_use]
-pub fn ask_notional_up_to(levels: &[BookLevel], limit_price: Price) -> Usd {
-    levels
-        .iter()
-        .take_while(|level| level.price_decimal() <= limit_price)
-        .fold(Usd::ZERO, |acc, level| {
-            Usd::new(acc.inner() + level.price_decimal().inner() * level.size_decimal().inner())
         })
 }
 
@@ -228,20 +206,6 @@ impl BookSnapshot {
     #[inline]
     pub fn best_ask(&self) -> Option<Price> {
         self.asks.first().map(|l| l.price_decimal())
-    }
-
-    /// Available ask depth fillable at or below `limit_price`.
-    #[must_use]
-    #[inline]
-    pub fn ask_depth_up_to(&self, limit_price: Price) -> Shares {
-        ask_depth_up_to(&self.asks, limit_price)
-    }
-
-    /// Available ask notional fillable at or below `limit_price`.
-    #[must_use]
-    #[inline]
-    pub fn ask_notional_up_to(&self, limit_price: Price) -> Usd {
-        ask_notional_up_to(&self.asks, limit_price)
     }
 
     /// Available bid depth fillable at or above `limit_price`.
@@ -497,21 +461,6 @@ mod tests {
         let asks = Arc::from([level(dec!(0.97))]);
         let snap = BookSnapshot::new(Arc::from([]), asks, 0, 0);
         assert_eq!(snap.total_ask_depth_usd.to_decimal(), dec!(9.7));
-    }
-
-    #[test]
-    fn ask_depth_up_to_walks_sorted_levels() {
-        let asks = Arc::from([
-            level_with_size(dec!(0.90), dec!(5)),
-            level_with_size(dec!(0.92), dec!(10)),
-            level_with_size(dec!(0.95), dec!(20)),
-        ]);
-        let snap = BookSnapshot::new(Arc::from([]), asks, 0, 0);
-        assert_eq!(
-            snap.ask_depth_up_to(Price::new(dec!(0.92))),
-            Shares::new(dec!(15))
-        );
-        assert_eq!(snap.ask_depth_up_to(Price::new(dec!(0.89))), Shares::ZERO);
     }
 
     #[test]

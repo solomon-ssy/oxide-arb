@@ -28,9 +28,8 @@ use quant_pivot_error::{
 };
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, DomainObservationRow,
-        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow,
-        TradeTapeRow,
+        BookL2CheckpointRow, BookMicrostructureRow, DomainObservationRow,
+        EntryConditionEvaluationEventRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -508,7 +507,7 @@ impl QuantFactReadRepository for MockQuantFactRead {
         _from_ms: i64,
         _to_ms: i64,
         _limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -523,22 +522,22 @@ impl QuantFactReadRepository for MockQuantFactRead {
         Ok(Vec::new())
     }
 
-    async fn book_snapshot_at(
+    async fn book_checkpoint_at(
         &self,
         _token_id: &TokenId,
         _as_of_ms: i64,
         _decision_at_ms: i64,
-    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
         Ok(None)
     }
 
-    async fn book_snapshots_between(
+    async fn book_checkpoints_between(
         &self,
         _token_ids: Vec<TokenId>,
         _from_ms: i64,
         _to_ms: i64,
         _available_by_ms: i64,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
         Ok(Vec::new())
     }
 

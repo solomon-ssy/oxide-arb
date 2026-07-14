@@ -5,7 +5,7 @@ use crate::clob::ClobSide;
 use ahash::AHashMap;
 use num_traits::ToPrimitive;
 use polymarket_client_sdk_v2::clob::ws::types::response::{
-    BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
+    BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
 };
 use quant_pivot_models::{
     domain::{
@@ -37,7 +37,6 @@ pub fn normalize_ws_message(
     match msg {
         WsMessage::Book(book) => vec![book_update_to_event(&book, ws_ingress, on_level_rejected)],
         WsMessage::PriceChange(pc) => price_change_events(&pc, ws_ingress, on_level_rejected),
-        WsMessage::BestBidAsk(bba) => vec![best_bid_ask_event(&bba, ws_ingress)],
         WsMessage::TickSizeChange(tsc) => tick_size_events(&tsc, ws_ingress),
         WsMessage::LastTradePrice(ltp) => vec![last_trade_event(&ltp, ws_ingress)],
         WsMessage::MarketResolved(mr) => vec![market_resolved_event(&mr, ws_ingress)],
@@ -46,7 +45,7 @@ pub fn normalize_ws_message(
 }
 
 #[inline]
-const fn ingress_trace(ws_ingress: Instant, ws_timestamp_ms: u64) -> IngressTrace {
+fn ingress_trace(ws_ingress: Instant, ws_timestamp_ms: u64) -> IngressTrace {
     IngressTrace::new(ws_ingress, ws_timestamp_ms)
 }
 
@@ -132,14 +131,13 @@ fn price_change_events(
                 }
             };
             match BookLevel::from_decimal(price, share_qty) {
-                Ok(level) if level.size.is_positive() => {
+                Ok(level) => {
                     grouped.entry(asset_id).or_default().push(PriceLevelDelta {
                         price: level.price_decimal(),
                         size: level.size_decimal(),
                         side: book_side,
                     });
                 }
-                Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(%error, ?price, ?share_qty, "rejecting invalid WS price change");
                     if let Some(hook) = on_level_rejected {
@@ -161,17 +159,6 @@ fn price_change_events(
             })
             .collect()
     })
-}
-
-fn best_bid_ask_event(bba: &BestBidAsk, ws_ingress: Instant) -> PipelineEvent {
-    let timestamp_ms = ToPrimitive::to_u64(&bba.timestamp.max(0)).unwrap_or(0);
-    PipelineEvent::BestBidAsk {
-        asset_id: intern_u256(bba.asset_id),
-        best_bid: Price::new(bba.best_bid),
-        best_ask: Price::new(bba.best_ask),
-        timestamp_ms,
-        trace: ingress_trace(ws_ingress, timestamp_ms),
-    }
 }
 
 fn tick_size_events(tsc: &TickSizeChange, ws_ingress: Instant) -> Vec<PipelineEvent> {
@@ -203,9 +190,16 @@ fn tick_size_events(tsc: &TickSizeChange, ws_ingress: Instant) -> Vec<PipelineEv
 
 fn last_trade_event(ltp: &LastTradePrice, ws_ingress: Instant) -> PipelineEvent {
     let timestamp_ms = ToPrimitive::to_u64(&ltp.timestamp.max(0)).unwrap_or(0);
+    let side = ltp
+        .side
+        .and_then(|side| ClobSide::try_from(side).ok().map(|side| side.0));
     PipelineEvent::LastTradePrice {
+        market_id: MarketId::new(format!("{:#x}", ltp.market)),
         asset_id: intern_u256(ltp.asset_id),
         price: Price::new(ltp.price),
+        side,
+        size: ltp.size.map(Shares::new),
+        fee_rate_bps: ltp.fee_rate_bps,
         timestamp_ms,
         trace: ingress_trace(ws_ingress, timestamp_ms),
     }

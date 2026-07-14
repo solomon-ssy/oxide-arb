@@ -43,7 +43,7 @@ use quant_pivot_repository::{
         ShadowComparisonRepository, SystemRuntimeStateRepository,
     },
 };
-use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
+use quant_pivot_research::artifact::{ArtifactStore, build_artifact_store};
 use std::sync::{Arc, OnceLock};
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
@@ -118,7 +118,7 @@ pub struct GovernanceBundle {
 
 impl GovernanceBundle {
     /// Finish governance wiring once infra and data bundles are assembled.
-    pub fn assemble(deps: GovernanceBundleDeps<'_>) -> Self {
+    pub fn assemble(deps: GovernanceBundleDeps<'_>) -> QuantResult<Self> {
         let GovernanceBundleDeps {
             deploy,
             metrics,
@@ -142,9 +142,8 @@ impl GovernanceBundle {
             &infra.repos.calibration_artifact,
         )
             as Arc<dyn CalibrationArtifactRepository>));
-        let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
-            deploy.research.artifact_root.clone(),
-        ));
+        let artifact_store: Arc<dyn ArtifactStore> =
+            build_artifact_store(&deploy.research.artifact_store)?;
         let category_pointer_guard = Arc::new(CategoryPointerGuard::new(
             Arc::clone(&infra.repos.model_registry) as Arc<dyn ModelRegistryRepository>,
             artifact_store,
@@ -182,7 +181,7 @@ impl GovernanceBundle {
             reconciliation_repo: &reconciliation_repo,
         });
 
-        Self {
+        Ok(Self {
             runtime_config,
             applicator,
             runtime_mode,
@@ -196,7 +195,7 @@ impl GovernanceBundle {
             exit_monitor_health,
             execution_recovery,
             status_publisher,
-        }
+        })
     }
 
     /// Bootstrap the execution recovery summary from live reconciliation state.

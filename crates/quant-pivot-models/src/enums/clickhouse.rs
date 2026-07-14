@@ -17,6 +17,35 @@ pub enum ChBookEventType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
+pub enum ChCanonicalBookEventType {
+    Snapshot = 1,
+    Delta = 2,
+    TickSizeChange = 3,
+    Gap = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChStreamSessionState {
+    Open = 1,
+    Sealed = 2,
+    Invalidated = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChStreamSessionEndReason {
+    None = 0,
+    Normal = 1,
+    Resubscribe = 2,
+    Overflow = 3,
+    Disconnect = 4,
+    Shutdown = 5,
+    CrashRecovery = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
 pub enum ChFactSource {
     WsSnapshot = 1,
     WsDelta = 2,
@@ -54,7 +83,18 @@ pub enum ChTradeParticipantRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChTradeTapeSource {
-    OnChain = 1,
+    MarketWs = 1,
+    OnChainOrderFilled = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChTradeReconciliationStatus {
+    Pending = 1,
+    Matched = 2,
+    Unavailable = 3,
+    Ambiguous = 4,
+    OnChainOnly = 5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]

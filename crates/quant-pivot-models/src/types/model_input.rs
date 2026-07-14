@@ -98,7 +98,10 @@ impl ModelTrainingContract {
         }
         let requires_policy = matches!(
             self.target_label_name.as_str(),
-            "triple_barrier_touch" | "triple_barrier_return_bps" | "policy_net_positive"
+            "policy_net_return_bps"
+                | "policy_net_positive"
+                | "policy_entry_fill_ratio"
+                | "policy_exit_fill_ratio"
         );
         if requires_policy != self.trade_policy_artifact_id.is_some() {
             return Err(

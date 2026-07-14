@@ -7,10 +7,14 @@ use quant_pivot_models::{
         common::OrderType,
         execution::AdmissionCheckId,
         quant::{
-            EntryConditionState, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus,
+            EntryConditionState, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
+            RecommendationReportStatus,
         },
     },
-    types::{Bps, Price, Shares, Usd},
+    types::{Bps, OrderAmount, Usd},
+};
+use quant_pivot_research::execution_semantics::{
+    BookWalkFill, BookWalkOutcome, LiquidityRole, walk_buy_exact_shares, walk_buy_exact_usd,
 };
 use rust_decimal::Decimal;
 
@@ -552,18 +556,41 @@ impl AdmissionCheck for LiquidityDepthCheck {
             return AdmissionCheckTrace::deny(self.id(), "no book snapshot for token");
         };
         let spec = &input.intent.entry_order_json;
-        let required_shares = spec.projected_shares();
-        let fillable = book.ask_depth_up_to(spec.limit_price);
-        if fillable < required_shares && !matches!(spec.order_type, OrderType::Fak) {
-            return AdmissionCheckTrace::defer(self.id(), "insufficient ask depth to fill size")
-                .with_threshold(required_shares.to_string())
-                .with_actual(fillable.to_string());
+        if spec.post_only {
+            if book.best_ask().is_some_and(|ask| spec.limit_price >= ask) {
+                return AdmissionCheckTrace::deny(
+                    self.id(),
+                    "post-only entry would cross the best ask",
+                );
+            }
+        } else {
+            let Ok(fill) = entry_walk(input) else {
+                return AdmissionCheckTrace::deny(
+                    self.id(),
+                    "entry book walk or fee schedule is invalid",
+                );
+            };
+            if fill.outcome == BookWalkOutcome::Unfilled {
+                return AdmissionCheckTrace::defer(
+                    self.id(),
+                    "insufficient ask depth at the price cap",
+                );
+            }
         }
-        let visible = book.ask_notional_up_to(spec.limit_price);
         let Some((_, entry, _, _, _)) = input.recommendation.trade_plan.frozen() else {
             return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
         };
         let min_depth = entry.min_depth_usd;
+        let visible = walk_buy_exact_usd(
+            &book.asks,
+            min_depth,
+            spec.limit_price,
+            FillRequirement::AllowPartial,
+            &input.fee_schedule,
+            LiquidityRole::Taker,
+            input.now,
+        )
+        .map_or(Usd::ZERO, |fill| fill.gross_notional);
         if visible < min_depth {
             return AdmissionCheckTrace::defer(self.id(), "visible depth below minimum")
                 .with_threshold(min_depth.to_string())
@@ -589,46 +616,27 @@ impl AdmissionCheck for SlippageCheck {
             return AdmissionCheckTrace::deny(self.id(), "no book snapshot for token");
         };
         let spec = &input.intent.entry_order_json;
-        let projected_shares = spec.projected_shares();
-        if projected_shares <= Shares::ZERO {
-            return AdmissionCheckTrace::deny(self.id(), "non-positive order size");
+        if spec.post_only {
+            return if book.best_ask().is_some_and(|ask| spec.limit_price >= ask) {
+                AdmissionCheckTrace::deny(self.id(), "post-only entry would cross the best ask")
+            } else {
+                AdmissionCheckTrace::pass(self.id(), "post-only entry does not take ask liquidity")
+                    .with_threshold(Bps::ZERO.to_string())
+                    .with_actual(Bps::ZERO.to_string())
+            };
         }
         let Some(best_ask) = book.best_ask() else {
             return AdmissionCheckTrace::defer(self.id(), "ask side empty");
         };
-
-        // Walk the asks at or below the limit, accumulating fill cost.
-        let mut remaining = projected_shares;
-        let mut cost = Usd::ZERO;
-        for level in book.asks.iter() {
-            if remaining <= Shares::ZERO {
-                break;
-            }
-            let price = level.price_decimal();
-            if price > spec.limit_price {
-                break;
-            }
-            let available = level.size_decimal();
-            let take = if available < remaining {
-                available
-            } else {
-                remaining
-            };
-            cost += take * price;
-            remaining -= take;
-        }
-        if remaining > Shares::ZERO && !matches!(spec.order_type, OrderType::Fak) {
-            return AdmissionCheckTrace::defer(
+        let Ok(fill) = entry_walk(input) else {
+            return AdmissionCheckTrace::deny(
                 self.id(),
-                "insufficient depth at or below limit to estimate fill",
+                "entry book walk or fee schedule is invalid",
             );
-        }
-
-        let filled = projected_shares - remaining;
-        if filled <= Shares::ZERO {
+        };
+        let Some(vwap) = fill.vwap else {
             return AdmissionCheckTrace::defer(self.id(), "no executable shares at limit");
-        }
-        let vwap = Price::new(cost.inner() / filled.inner());
+        };
         let Some(slippage) = Bps::spread(vwap, best_ask) else {
             return AdmissionCheckTrace::deny(self.id(), "degenerate best-ask price");
         };
@@ -641,6 +649,37 @@ impl AdmissionCheck for SlippageCheck {
             .with_threshold(spec.max_slippage_bps.to_string())
             .with_actual(slippage.to_string())
     }
+}
+
+fn entry_walk(input: &AdmissionInput) -> Result<BookWalkFill, ()> {
+    let book = input.book.as_ref().ok_or(())?;
+    let spec = &input.intent.entry_order_json;
+    let requirement = match spec.order_type {
+        OrderType::Fok => FillRequirement::AllOrNothing,
+        OrderType::Fak => FillRequirement::AllowPartial,
+        OrderType::Gtc | OrderType::Gtd { .. } => return Err(()),
+    };
+    let fill = match spec.amount {
+        OrderAmount::Usd(usd) => walk_buy_exact_usd(
+            &book.asks,
+            usd,
+            spec.limit_price,
+            requirement,
+            &input.fee_schedule,
+            LiquidityRole::Taker,
+            input.now,
+        ),
+        OrderAmount::Shares(shares) => walk_buy_exact_shares(
+            &book.asks,
+            shares,
+            spec.limit_price,
+            requirement,
+            &input.fee_schedule,
+            LiquidityRole::Taker,
+            input.now,
+        ),
+    };
+    fill.map_err(|_| ())
 }
 
 // 16 ─────────────────────────────────────────────────────────────────────────

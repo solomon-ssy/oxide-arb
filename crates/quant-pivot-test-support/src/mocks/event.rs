@@ -2,7 +2,8 @@
 
 use flume::{Receiver, Sender};
 use quant_pivot_core::ingest::event_source::PipelineEventSource;
-use quant_pivot_models::domain::pipeline::PipelineEvent;
+use quant_pivot_models::{domain::pipeline::PipelineEvent, types::TokenId};
+use std::time::Instant;
 
 /// Bounded in-memory pipeline event bus for tests.
 ///
@@ -43,6 +44,10 @@ impl PipelineEventSource for MockEventSource {
     fn events(&self) -> &Receiver<PipelineEvent> {
         Self::receiver(self)
     }
+
+    fn mark_token_applied(&self, _token_id: &TokenId, _at: Instant) {}
+
+    fn invalidate_token(&self, _token_id: &TokenId) {}
 }
 
 #[cfg(test)]

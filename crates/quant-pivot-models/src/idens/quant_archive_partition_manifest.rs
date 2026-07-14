@@ -18,11 +18,17 @@ pub enum QuantArchivePartitionManifest {
     ManifestId,
     TableName,
     PartitionKey,
+    PartitionStartAt,
+    PartitionEndAt,
     RetentionDays,
     RowCount,
     ParquetUri,
+    ParquetByteCount,
+    ObjectEtag,
+    ObjectVersionId,
     ByteHash,
     ContentHash,
+    SourceSchemaHash,
     ManifestHash,
     SealedAt,
     CreatedAt,
@@ -44,6 +50,16 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(QuantArchivePartitionManifest::PartitionStartAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantArchivePartitionManifest::PartitionEndAt)
+                .timestamp_with_time_zone()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(QuantArchivePartitionManifest::RetentionDays)
                 .integer()
                 .not_null(),
@@ -59,12 +75,24 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(QuantArchivePartitionManifest::ParquetByteCount)
+                .big_integer()
+                .not_null(),
+        )
+        .col(ColumnDef::new(QuantArchivePartitionManifest::ObjectEtag).text())
+        .col(ColumnDef::new(QuantArchivePartitionManifest::ObjectVersionId).text())
+        .col(
             ColumnDef::new(QuantArchivePartitionManifest::ByteHash)
                 .text()
                 .not_null(),
         )
         .col(
             ColumnDef::new(QuantArchivePartitionManifest::ContentHash)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantArchivePartitionManifest::SourceSchemaHash)
                 .text()
                 .not_null(),
         )
@@ -98,6 +126,19 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .unique()
                 .to_owned(),
             "one immutable sealed manifest per ClickHouse partition",
+        ),
+        IndexSpec::sea_query(
+            "idx_quant_archive_partition_manifest_time_range",
+            table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_archive_partition_manifest_time_range")
+                .table(QuantArchivePartitionManifest::Table)
+                .col(QuantArchivePartitionManifest::TableName)
+                .col(QuantArchivePartitionManifest::PartitionStartAt)
+                .col(QuantArchivePartitionManifest::PartitionEndAt)
+                .to_owned(),
+            "time-range lookup for hot-plus-archive point-in-time readers",
         ),
         IndexSpec::sea_query(
             "uq_quant_archive_partition_manifest_hash",

@@ -86,7 +86,7 @@ impl ShardHealthBoard {
 }
 
 impl TokenFreshnessBoard {
-    /// Record that a token received at least one normalized WS event.
+    /// Record that a token event was durably persisted and successfully applied.
     pub fn mark_token(&self, token_id: &TokenId, at: Instant) {
         self.tokens.write().insert(
             token_id.clone(),
@@ -94,6 +94,11 @@ impl TokenFreshnessBoard {
                 last_message_at: at,
             },
         );
+    }
+
+    /// Remove freshness immediately when continuity is no longer provable.
+    pub fn invalidate_token(&self, token_id: &TokenId) {
+        self.tokens.write().remove(token_id);
     }
 
     /// Milliseconds since the last WS event for a token.

@@ -89,16 +89,11 @@ pub struct MetricsHub {
     pub ws_events_received: IntCounter,
     pub book_snapshots_applied: IntCounter,
     pub price_changes_applied: IntCounter,
-    pub ws_events_dropped: IntCounter,
+    pub ws_session_backpressure_invalidations: IntCounter,
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
     pub ws_shard_connected: IntGaugeVec,
     pub book_store_token_count: IntGauge,
-
-    // ── Backpressure (book apply latest-wins coalesce) ──────────────────
-    pub book_apply_dropped: IntCounter,
-    pub book_apply_coalesced_total: IntCounter,
-    pub backpressure_events: IntCounterVec,
 
     // ── Gamma catalog sync ──────────────────────────────────────────────
     pub gamma_sync_duration_ms: IntGauge,
@@ -187,17 +182,11 @@ struct PipelineMetrics {
     ws_events_received: IntCounter,
     book_snapshots_applied: IntCounter,
     price_changes_applied: IntCounter,
-    ws_events_dropped: IntCounter,
+    ws_session_backpressure_invalidations: IntCounter,
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
     ws_shard_connected: IntGaugeVec,
     book_store_token_count: IntGauge,
-}
-
-struct BackpressureMetrics {
-    book_apply_dropped: IntCounter,
-    book_apply_coalesced_total: IntCounter,
-    backpressure_events: IntCounterVec,
 }
 
 struct GammaMetrics {
@@ -275,10 +264,10 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             "quant_pivot_pipeline_price_changes_applied_total",
             "Price-change events applied"
         ),
-        ws_events_dropped: register_counter!(
+        ws_session_backpressure_invalidations: register_counter!(
             registry,
-            "quant_pivot_pipeline_ws_events_dropped_total",
-            "WebSocket events dropped when output channel full"
+            "quant_pivot_ws_session_backpressure_invalidations_total",
+            "WebSocket sessions invalidated after bounded output enqueue timeout"
         ),
         markets_resolved_ws: register_counter!(
             registry,
@@ -300,27 +289,6 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             registry,
             "quant_pivot_pipeline_book_store_token_count",
             "Tokens tracked in book store"
-        ),
-    }
-}
-
-fn register_backpressure_metrics(registry: &Registry) -> BackpressureMetrics {
-    BackpressureMetrics {
-        book_apply_dropped: register_counter!(
-            registry,
-            "quant_pivot_pipeline_book_apply_dropped_total",
-            "WS events dropped when book apply queue full (non-coalescable)"
-        ),
-        book_apply_coalesced_total: register_counter!(
-            registry,
-            "quant_pivot_book_apply_coalesced_total",
-            "Book apply events coalesced under backpressure"
-        ),
-        backpressure_events: register_counter_vec!(
-            registry,
-            "quant_pivot_backpressure_events_total",
-            "Backpressure actions by site",
-            &["site", "action"]
         ),
     }
 }
@@ -581,7 +549,6 @@ impl MetricsHub {
     pub fn new() -> Self {
         let registry = Registry::new();
         let pipeline = register_pipeline_metrics(&registry);
-        let backpressure = register_backpressure_metrics(&registry);
         let gamma = register_gamma_metrics(&registry);
         let subscription = register_subscription_metrics(&registry);
         let infra = register_infra_metrics(&registry);
@@ -612,14 +579,11 @@ impl MetricsHub {
             ws_events_received: pipeline.ws_events_received,
             book_snapshots_applied: pipeline.book_snapshots_applied,
             price_changes_applied: pipeline.price_changes_applied,
-            ws_events_dropped: pipeline.ws_events_dropped,
+            ws_session_backpressure_invalidations: pipeline.ws_session_backpressure_invalidations,
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,
             ws_shard_connected: pipeline.ws_shard_connected,
             book_store_token_count: pipeline.book_store_token_count,
-            book_apply_dropped: backpressure.book_apply_dropped,
-            book_apply_coalesced_total: backpressure.book_apply_coalesced_total,
-            backpressure_events: backpressure.backpressure_events,
             gamma_sync_duration_ms: gamma.gamma_sync_duration_ms,
             gamma_markets_total: gamma.gamma_markets_total,
             gamma_last_sync_success: gamma.gamma_last_sync_success,

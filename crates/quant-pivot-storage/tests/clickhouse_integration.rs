@@ -3,10 +3,12 @@
 use chrono::Utc;
 use prometheus::IntCounter;
 use quant_pivot_models::{
-    clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd, TickEventRow},
+    clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow},
     config::ClickHouseConfig,
-    enums::clickhouse::{ChBookEventType, ChFactSource},
-    types::{Price, TokenId, Usd},
+    enums::clickhouse::{
+        ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+    },
+    types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_storage::{
     clickhouse::{ChWriteManager, ClickHousePool},
@@ -114,39 +116,23 @@ struct TableDdl {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn clickhouse_table_ttl_policies() {
+async fn canonical_evidence_tables_have_no_delete_ttl() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
 
-    let expected: [(&str, [&str; 2]); 2] = [
-        (
-            "tick_events",
-            [
-                "event_date + INTERVAL 90 DAY",
-                "event_date + toIntervalDay(90)",
-            ],
-        ),
-        (
-            "book_snapshots",
-            [
-                "snapshot_date + INTERVAL 180 DAY",
-                "snapshot_date + toIntervalDay(180)",
-            ],
-        ),
-    ];
-
-    for (table, ttl_fragments) in expected {
+    for table in [
+        "quant_book_l2_event",
+        "quant_book_l2_checkpoint",
+        "quant_book_stream_session",
+        "quant_trade_tape",
+    ] {
         let ddl: TableDdl = client
             .query(&format!("SHOW CREATE TABLE {table}"))
             .fetch_one()
             .await
             .unwrap_or_else(|e| panic!("SHOW CREATE TABLE {table} failed: {e}"));
         assert!(
-            ddl.statement.contains("TTL")
-                && ttl_fragments
-                    .iter()
-                    .any(|fragment| ddl.statement.contains(fragment)),
-            "table {table} should define the expected TTL; got:\n{}",
-            ddl.statement
+            !ddl.statement.contains(" TTL "),
+            "{table} must be seal-first"
         );
     }
 }
@@ -157,19 +143,19 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let expected: [(&str, &[&str]); 8] = [
         (
-            "tick_events",
-            &[
-                "`best_bid` Nullable(Decimal(18, 8))",
-                "`last_trade_price` Nullable(Decimal(18, 8))",
-                "'ShardStatus' = 7",
-                "'WsShardStatus' = 9",
-            ],
-        ),
-        (
-            "book_l2_replay_hot",
+            "quant_book_l2_event",
             &[
                 "`bid_prices` Array(Decimal(18, 8))",
                 "`bid_sizes` Array(Decimal(38, 18))",
+                "`token_sequence` UInt64",
+            ],
+        ),
+        (
+            "quant_book_l2_checkpoint",
+            &[
+                "`bid_prices` Array(Decimal(18, 8))",
+                "`bid_sizes` Array(Decimal(38, 18))",
+                "`source_event_hash` String",
             ],
         ),
         (
@@ -237,41 +223,48 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
     }
 }
 
-fn sample_tick(token_id: &str, received_at: i64) -> TickEventRow {
-    TickEventRow {
+fn sample_trade(token_id: &str, received_at: i64) -> TradeTapeRow {
+    TradeTapeRow {
+        market_id: MarketId::new("market-integration"),
         token_id: TokenId::new(token_id),
-        market_id: None,
-        event_type: ChBookEventType::Bbo,
-        best_bid: Some(ChPrice::from(Price::new(dec!(0.95)))),
-        best_ask: Some(ChPrice::from(Price::new(dec!(0.96)))),
-        last_trade_price: None,
-        bid_depth_usd: Some(ChUsd::from(Usd::new(dec!(1000)))),
-        ask_depth_usd: Some(ChUsd::from(Usd::new(dec!(800)))),
-        spread_bps: Some(ChBps::from(dec!(10))),
-        book_version: 1,
-        raw_payload_json: Some(r#"{"test":true}"#.into()),
         event_time: received_at,
         ingestion_time: received_at,
-        sequence: 1,
-        source: ChFactSource::WsBbo,
-        schema_version: ChSchemaVersion::FIRST,
+        stream_session_id: None,
+        token_sequence: Some(1),
+        participant_address: String::new(),
+        participant_role: ChTradeParticipantRole::Unknown,
+        side: ChTradeSide::Buy,
+        price: ChPrice::from(Price::new(dec!(0.95))),
+        size_shares: ChShares::from(Shares::new(dec!(10))),
+        notional_usd: ChUsd::from(Usd::new(dec!(9.5))),
+        tx_hash: None,
+        source_event_id: format!("ws:{token_id}:{received_at}"),
+        source: ChTradeTapeSource::MarketWs,
+        observed_field_flags: u16::MAX,
+        fee_rate_bps: None,
+        reconciliation_status: ChTradeReconciliationStatus::Pending,
+        matched_source_event_id: None,
+        revision: 1,
+        reconciled_at: None,
+        raw_payload_json: Some(r#"{"test":true}"#.into()),
+        schema_version: ChSchemaVersion(2),
     }
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn tick_events_direct_insert_roundtrip() {
+async fn trade_tape_direct_insert_roundtrip() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
-    let row = sample_tick("tok-direct", Utc::now().timestamp_millis());
+    let row = sample_trade("tok-direct", Utc::now().timestamp_millis());
     let mut insert = client
-        .insert::<TickEventRow>("tick_events")
+        .insert::<TradeTapeRow>("quant_trade_tape")
         .await
         .expect("insert start");
     insert.write(&row).await.expect("write row");
     insert.end().await.expect("end insert");
 
     let count: u64 = client
-        .query("SELECT count() FROM tick_events WHERE token_id = 'tok-direct'")
+        .query("SELECT count() FROM quant_trade_tape WHERE token_id = 'tok-direct'")
         .fetch_one()
         .await
         .expect("count");
@@ -279,21 +272,21 @@ async fn tick_events_direct_insert_roundtrip() {
 }
 
 /// Build a tick-event `AsyncWriter` whose flush sink is `ChWriteManager::write_batch`.
-fn tick_writer(
+fn trade_writer(
     client: clickhouse::Client,
     write_manager: Arc<ChWriteManager>,
-) -> (AsyncWriter<TickEventRow>, AsyncWriterWorker<TickEventRow>) {
+) -> (AsyncWriter<TradeTapeRow>, AsyncWriterWorker<TradeTapeRow>) {
     AsyncWriter::new(
-        AsyncWriterConfig::new("tick_events")
+        AsyncWriterConfig::new("quant_trade_tape")
             .capacity(10_000)
             .batch_size(10_000)
             .flush_interval(Duration::from_hours(1)),
-        move |rows: Vec<TickEventRow>| {
+        move |rows: Vec<TradeTapeRow>| {
             let write_manager = Arc::clone(&write_manager);
             let client = client.clone();
             Box::pin(async move {
                 write_manager
-                    .write_batch(&client, "tick_events", rows)
+                    .write_batch(&client, "quant_trade_tape", rows)
                     .await
             })
         },
@@ -309,19 +302,19 @@ async fn async_writer_shutdown_drains_buffer() {
     let shutdown = CancellationToken::new();
     let write_manager = Arc::new(ChWriteManager::new(4));
 
-    let (writer, worker) = tick_writer(client.clone(), write_manager);
+    let (writer, worker) = trade_writer(client.clone(), write_manager);
     let handle = tokio::spawn(worker.run(shutdown.clone()));
 
     let now = Utc::now().timestamp_millis();
     for i in 0..3 {
-        assert!(writer.write(sample_tick(&format!("tok-drain-{i}"), now + i * 1000)));
+        assert!(writer.write(sample_trade(&format!("tok-drain-{i}"), now + i * 1000)));
     }
 
     shutdown.cancel();
     let _ = handle.await;
 
     let count: u64 = client
-        .query("SELECT count() FROM tick_events WHERE token_id LIKE 'tok-drain-%'")
+        .query("SELECT count() FROM quant_trade_tape WHERE token_id LIKE 'tok-drain-%'")
         .fetch_one()
         .await
         .expect("count rows");
@@ -334,19 +327,19 @@ async fn async_writer_channel_close_drains_buffer() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let write_manager = Arc::new(ChWriteManager::new(4));
 
-    let (writer, worker) = tick_writer(client.clone(), write_manager);
+    let (writer, worker) = trade_writer(client.clone(), write_manager);
     // Shutdown never fires; dropping the writer must still drain the tail.
     let handle = tokio::spawn(worker.run(CancellationToken::new()));
 
     let now = Utc::now().timestamp_millis();
-    assert!(writer.write(sample_tick("tok-close-1", now)));
-    assert!(writer.write(sample_tick("tok-close-2", now + 1_000)));
+    assert!(writer.write(sample_trade("tok-close-1", now)));
+    assert!(writer.write(sample_trade("tok-close-2", now + 1_000)));
 
     drop(writer);
     let _ = handle.await;
 
     let count: u64 = client
-        .query("SELECT count() FROM tick_events WHERE token_id LIKE 'tok-close-%'")
+        .query("SELECT count() FROM quant_trade_tape WHERE token_id LIKE 'tok-close-%'")
         .fetch_one()
         .await
         .expect("count");

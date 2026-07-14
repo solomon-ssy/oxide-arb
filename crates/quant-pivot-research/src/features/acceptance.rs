@@ -58,7 +58,10 @@ use crate::{
         writer::feature_events,
     },
     hashing::ResearchHasher,
-    pit::{BookSnapshotAt, MarketContextAt, PointInTimeSnapshotSource, ResolvedMarketSnapshot},
+    pit::{
+        BookSnapshotAt, CanonicalBookEventRef, MarketContextAt, PointInTimeSnapshotSource,
+        ResolvedMarketSnapshot,
+    },
     selection::{
         FilterChain, FilterOutcome, MarketCandidateCtx, ModelFeatureRequirements, SelectedMarket,
         SelectionThresholds,
@@ -79,6 +82,7 @@ fn test_context(
         start_date: None,
         end_date: Some(boundary.decision_at() + ChronoDuration::days(7)),
         created_at: Some(boundary.decision_at() - ChronoDuration::days(30)),
+        fee_schedule: None,
     }
 }
 
@@ -175,6 +179,15 @@ fn generic_event_id(market_id: &MarketId) -> EventId {
     }
 }
 
+fn canonical_book_event(sequence: u64) -> CanonicalBookEventRef {
+    CanonicalBookEventRef {
+        stream_session_id: uuid::Uuid::from_u128(1),
+        token_sequence: sequence,
+        source_event_hash: ContentHash::parse(format!("blake3:{}", "d".repeat(64)))
+            .expect("canonical event hash"),
+    }
+}
+
 fn healthy_book(token_id: &TokenId, as_of: DateTime<Utc>) -> BookSnapshotAt {
     BookSnapshotAt {
         token_id: token_id.clone(),
@@ -191,6 +204,7 @@ fn healthy_book(token_id: &TokenId, as_of: DateTime<Utc>) -> BookSnapshotAt {
         timestamp_ms: u64::try_from(as_of.timestamp_millis()).expect("positive test time"),
         version: 1,
         sequence: 1,
+        source_event: Some(canonical_book_event(1)),
         available_at: as_of,
     }
 }
@@ -224,6 +238,7 @@ fn book_at_times(
         timestamp_ms: u64::try_from(effective_at.timestamp_millis()).expect("positive test time"),
         version,
         sequence: version,
+        source_event: Some(canonical_book_event(version)),
         available_at: decision_at - ChronoDuration::milliseconds(100),
     }
 }
@@ -360,6 +375,7 @@ async fn feature_pit_visibility_excludes_future_book() {
                 timestamp_ms: u64::try_from(past.timestamp_millis()).unwrap_or(0),
                 version: 1,
                 sequence: 1,
+                source_event: Some(canonical_book_event(1)),
                 available_at: as_of,
             },
             BookSnapshotAt {
@@ -371,6 +387,7 @@ async fn feature_pit_visibility_excludes_future_book() {
                 timestamp_ms: u64::try_from(future.timestamp_millis()).unwrap_or(0),
                 version: 2,
                 sequence: 2,
+                source_event: Some(canonical_book_event(2)),
                 available_at: future,
             },
         ],
@@ -1214,6 +1231,7 @@ async fn online_offline_feature_parity() {
             timestamp_ms: u64::try_from(as_of.timestamp_millis()).unwrap_or(0),
             version: 7,
             sequence: 7,
+            source_event: Some(canonical_book_event(7)),
             available_at: as_of,
         },
         market: MarketContextAt {
@@ -1225,6 +1243,7 @@ async fn online_offline_feature_parity() {
             start_date: None,
             end_date: Some(as_of + ChronoDuration::days(3)),
             created_at: Some(as_of - ChronoDuration::days(10)),
+            fee_schedule: None,
         },
     };
 
@@ -1417,6 +1436,7 @@ async fn feature_stale_book_rejects_market() {
             timestamp_ms: u64::try_from(stale_ts.timestamp_millis()).unwrap_or(0),
             version: 1,
             sequence: 1,
+            source_event: Some(canonical_book_event(1)),
             available_at: stale_ts,
         }],
     };
@@ -1565,6 +1585,7 @@ async fn feature_out_of_valid_range_rejects() {
             timestamp_ms: u64::try_from(as_of.timestamp_millis()).unwrap_or(0),
             version: 1,
             sequence: 1,
+            source_event: Some(canonical_book_event(1)),
             available_at: as_of,
         }],
     };
@@ -1685,6 +1706,7 @@ async fn online_offline_parity_full_families_with_window() {
             timestamp_ms: u64::try_from(as_of.timestamp_millis()).unwrap_or(0),
             version: 9,
             sequence: 9,
+            source_event: Some(canonical_book_event(9)),
             available_at: as_of,
         },
         market: MarketContextAt {
@@ -1696,6 +1718,7 @@ async fn online_offline_parity_full_families_with_window() {
             start_date: None,
             end_date: Some(as_of + ChronoDuration::days(3)),
             created_at: Some(as_of - ChronoDuration::days(10)),
+            fee_schedule: None,
         },
     };
     let buckets: Vec<MicrostructureBucket> = (1_i64..=5)
@@ -1798,6 +1821,7 @@ fn sibling_book(token_id: &TokenId, as_of: DateTime<Utc>, ask: Decimal) -> BookS
         timestamp_ms: u64::try_from(as_of.timestamp_millis()).unwrap_or(0),
         version: 1,
         sequence: 1,
+        source_event: Some(canonical_book_event(1)),
         available_at: as_of,
     }
 }
@@ -1923,6 +1947,7 @@ fn sibling_leg_parity_fixture() -> (SiblingLegParityFixture, [NegRiskLeg; 3], Se
             start_date: None,
             end_date: Some(as_of + ChronoDuration::days(7)),
             created_at: Some(as_of - ChronoDuration::days(30)),
+            fee_schedule: None,
         },
     };
     let sibling_legs = [

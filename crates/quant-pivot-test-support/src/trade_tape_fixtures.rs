@@ -8,11 +8,13 @@ use quant_pivot_api::exchange::EXCHANGE_CONTRACTS;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChShares, ChUsd,
-        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TickEventRow, TradeTapeRow,
+        BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion, ChShares, ChUsd,
+        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     domain::{TradeTapeBlockCursorInfo, UpsertTradeTapeBlockCursor},
-    enums::clickhouse::{ChTradeParticipantRole, ChTradeSide, ChTradeTapeSource},
+    enums::clickhouse::{
+        ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
+    },
     types::{DomainInstrumentKey, MarketId, Price, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::traits::{QuantFactReadRepository, TradeTapeBlockCursorRepository};
@@ -100,6 +102,8 @@ fn maker_trade_tape_row(
         token_id: token_id.clone(),
         event_time: event_time_ms,
         ingestion_time: event_time_ms,
+        stream_session_id: None,
+        token_sequence: None,
         participant_address: address.to_owned(),
         participant_role: ChTradeParticipantRole::Maker,
         side: ChTradeSide::Buy,
@@ -107,11 +111,16 @@ fn maker_trade_tape_row(
         size_shares: ChShares::from(shares),
         notional_usd: ChUsd::from(Usd::new(notional)),
         tx_hash: Some(format!("0xfixture{sequence:04}")),
-        trade_id: format!("fixture:{address}:{sequence}"),
-        source: ChTradeTapeSource::OnChain,
-        coverage_flags: 0,
+        source_event_id: format!("fixture:{address}:{sequence}"),
+        source: ChTradeTapeSource::OnChainOrderFilled,
+        observed_field_flags: u16::MAX,
+        fee_rate_bps: Some(quant_pivot_models::clickhouse::ChBps::from(Decimal::ZERO)),
+        reconciliation_status: ChTradeReconciliationStatus::Matched,
+        matched_source_event_id: Some(format!("ws:fixture:{sequence}")),
+        revision: 2,
+        reconciled_at: Some(event_time_ms),
         raw_payload_json: None,
-        schema_version: ChSchemaVersion::FIRST,
+        schema_version: ChSchemaVersion(2),
     }
 }
 
@@ -202,26 +211,26 @@ impl QuantFactReadRepository for ConfigurableFactRead {
             .await
     }
 
-    async fn book_snapshot_at(
+    async fn book_checkpoint_at(
         &self,
         token_id: &TokenId,
         source_cutoff_ms: i64,
         decision_at_ms: i64,
-    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+    ) -> Result<Option<BookL2CheckpointRow>, StorageError> {
         self.inner
-            .book_snapshot_at(token_id, source_cutoff_ms, decision_at_ms)
+            .book_checkpoint_at(token_id, source_cutoff_ms, decision_at_ms)
             .await
     }
 
-    async fn book_snapshots_between(
+    async fn book_checkpoints_between(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
         available_by_ms: i64,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+    ) -> Result<Vec<BookL2CheckpointRow>, StorageError> {
         self.inner
-            .book_snapshots_between(token_ids, from_ms, to_ms, available_by_ms)
+            .book_checkpoints_between(token_ids, from_ms, to_ms, available_by_ms)
             .await
     }
 
@@ -285,7 +294,7 @@ impl QuantFactReadRepository for ConfigurableFactRead {
         from_ms: i64,
         to_ms: i64,
         limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
+    ) -> Result<Vec<TradeTapeRow>, StorageError> {
         self.inner
             .last_trades(token_ids, from_ms, to_ms, limit)
             .await

@@ -313,19 +313,15 @@ impl<S: OpportunisticSellScorer> ExitSignalEvaluator for OpportunisticSellSignal
             return ExitSignalEvaluation::verdict(ExitSignalVerdict::Holds);
         };
 
-        let signal_policy = SellSignalPolicy::try_from_runtime(&policy).unwrap_or_else(|error| {
-            tracing::error!(
-                error = %error,
-                "opportunistic_sell policy decimals are malformed — fail-safe hold thresholds"
-            );
-            // Unreachable confidence so a corrupt snapshot never opens the gate.
-            SellSignalPolicy {
-                min_confidence: Decimal::ONE,
-                min_p_exit_better: Decimal::ONE,
-                min_expected_alpha_bps: Decimal::from(i64::MAX / 2),
-                max_sell_pct: Decimal::ZERO,
-            }
-        });
+        let runtime_cap = policy
+            .max_cumulative_exit_pct
+            .value
+            .parse::<Decimal>()
+            .unwrap_or(Decimal::ZERO);
+        let signal_policy = SellSignalPolicy::from_frozen(
+            &ctx.intent.exit_policy_json.opportunistic_exit,
+            runtime_cap,
+        );
         let target = sell_signal_target(&score, &signal_policy);
         let fires = sell_signal_fires(&score, &signal_policy);
 
