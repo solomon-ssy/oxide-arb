@@ -12,7 +12,9 @@ use quant_pivot_models::{
         RunBacktestRequest,
     },
     runtime_config::RuntimeConfig,
-    types::{BacktestReportId, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId},
+    types::{
+        BacktestReportId, Bps, ModelComparisonReportId, ModelVersionId, RuntimeConfigVersionId,
+    },
 };
 use quant_pivot_repository::traits::{
     BacktestReportRepository, CalibrationArtifactRepository, ModelComparisonReportRepository,
@@ -20,6 +22,7 @@ use quant_pivot_repository::traits::{
     TrainingDatasetRepository,
 };
 use quant_pivot_research::{artifact::ArtifactStore, model::ModelRuntimeFactoryBuilder};
+use rust_decimal::Decimal;
 
 use crate::{
     app::bundles::ResearchBundle,
@@ -87,6 +90,9 @@ impl CoreBacktestPort {
             },
             &runtime.portfolio,
             bias_table.map(|table| table.content_hash.clone()),
+            Bps::new(Decimal::from(
+                runtime.execution.entry_order_policy.max_slippage_bps,
+            )),
         )
     }
 

@@ -18,13 +18,12 @@
 //!
 //! ```text
 //! q = win_probability                             // calibrated P(win), same q as E[r]
-//! p = entry_price_ref                             // executable market price
+//! p = (walk gross cash + PIT fee) / filled shares // all-in executable price
 //! f* = (q − p) / (1 − p)                           // binary Kelly, b = (1-p)/p odds
 //! ```
 //!
-//! This is the standard closed-form simplification of `f* = p·b − (1-p)` (Kelly
-//! criterion, <https://en.wikipedia.org/wiki/Kelly_criterion>) when the net odds
-//! `b = (1-p)/p` come from a market price rather than a bookmaker's line.
+//! This is the binary Kelly identity `f* = (q·b − (1-q)) / b` after
+//! substituting the executable net odds `b = (1-p)/p`.
 //! `f* ≤ 0` (i.e. `q ≤ p`, no edge over the market) ⇒ **rejected**, never funded.
 //!
 //! `win_probability = None` is an uncalibrated model and is rejected before
@@ -37,10 +36,11 @@
 //! to edge mis-estimation (fractional Kelly + uncertainty shrinkage):
 //!
 //! ```text
-//! f = clamp(kelly_fraction · confidence_shrink(confidence) · drawdown_scale
-//!           · edge_uncertainty_shrink · correlation_shrink,
-//!           0, max_position_pct)
-//! desired_usd = round(f · f* · equity)
+//! multiplier = kelly_fraction · confidence_shrink(confidence) · drawdown_scale
+//!              · edge_uncertainty_shrink · correlation_shrink
+//! raw_fraction = multiplier · f*
+//! position_fraction = clamp(raw_fraction, 0, max_position_pct)
+//! desired tier = largest executable cash tier ≤ round(position_fraction · equity)
 //! ```
 //!
 //! Every intermediate stays in [`Decimal`]; `f64` never appears, so no precision
@@ -52,14 +52,15 @@ use quant_pivot_models::{
     runtime_config::{
         ConfidenceSizeCurve, DrawdownMultiplierPolicy, KellySafetyConfig, SizingModelConfig,
     },
-    types::{Bps, Usd},
+    types::{Bps, Probability, Shares, Usd},
 };
 use rust_decimal::Decimal;
 
-use crate::{model::signal::SignalCandidate, precision::RESEARCH_DECIMAL_SCALE};
-
-/// Basis-point denominator (`1 bps = 1/10_000`).
-const BPS_PER_UNIT: i64 = 10_000;
+use crate::{
+    execution_semantics::{BookWalkFill, ResolutionBuyEconomics},
+    model::signal::SignalCandidate,
+    precision::RESEARCH_DECIMAL_SCALE,
+};
 
 /// Decision-time drawdown state driving the conservative scaling policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +102,18 @@ pub struct CorrelationShrinkInput {
     pub mean_rho: Decimal,
 }
 
+/// One policy-validated cash tier walked against decision-time L2 and PIT fees.
+///
+/// `cash_budget` is the governed reservation tier. `fill.total_cash_delta` is
+/// the expected account debit and may be smaller only for a partial-fill entry
+/// template; Kelly uses the fill economics while the allocator reserves the
+/// whole governed tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutableSizingTier {
+    pub cash_budget: Usd,
+    pub fill: BookWalkFill,
+}
+
 /// Inputs to one sizing decision (borrowed candidate + capital base).
 pub struct SizingInput<'a> {
     /// The scored candidate being sized.
@@ -113,6 +126,8 @@ pub struct SizingInput<'a> {
     pub edge_uncertainty_half_width: Option<Decimal>,
     /// Correlation-cluster shrink inputs, when correlation cap is enabled.
     pub correlation: Option<CorrelationShrinkInput>,
+    /// Policy-validated executable tiers for this exact candidate/capture.
+    pub executable_tiers: Vec<ExecutableSizingTier>,
 }
 
 /// The outcome of sizing one candidate.
@@ -129,6 +144,8 @@ pub enum SizingOutcome {
 pub struct SizingSuggestion {
     /// Desired USD size before portfolio caps / liquidity / available cash.
     pub desired_usd: Usd,
+    /// Shares produced by the same walk that selected `desired_usd`.
+    pub desired_shares: Shares,
     /// Per-unit edge in basis points (`None` for the edge-free curve model).
     pub edge_bps: Option<Bps>,
     /// Fractional-Kelly multiplier applied (`kelly_fraction · shrink · drawdown`);
@@ -147,6 +164,20 @@ pub struct SizingSuggestion {
     /// step rather than only the already-merged product. `None` for the
     /// edge-free curve model (mirrors `kelly_fraction_applied`).
     pub provenance: Option<SizingProvenance>,
+    /// Every Kelly-eligible discrete tier, retained so the planner can safely
+    /// snap a constrained allocation down without inventing an unwalked size.
+    pub executable_tiers: Vec<ExecutableTierSuggestion>,
+}
+
+/// Fee/depth-adjusted Kelly result for one discrete policy tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutableTierSuggestion {
+    pub cash_budget: Usd,
+    pub filled_shares: Shares,
+    pub edge_bps: Bps,
+    pub f_star: Decimal,
+    pub raw_fraction: Decimal,
+    pub binding_kelly_cap: bool,
 }
 
 /// Every intermediate factor between the raw full-Kelly fraction `f*` and the
@@ -255,7 +286,6 @@ impl SizingModel for KellySizingModel {
     }
 
     fn suggest(&self, input: &SizingInput<'_>) -> QuantResult<SizingOutcome> {
-        let bps = Decimal::from(BPS_PER_UNIT);
         let candidate = input.candidate;
 
         let Some(win_probability) = candidate.win_probability else {
@@ -263,23 +293,14 @@ impl SizingModel for KellySizingModel {
                 RejectionReason::ReturnModelUncalibrated,
             ));
         };
-        let (f_star, edge) = {
-            // Resolution bet structure (Phase 11.3 §4 redesign): `q` is the
-            // *same* calibrated `P(win)` that produced `expected_return_bps`
-            // (`E[r] = q·(1-p)/p − (1-q)`), so `f*` and `E[r]` always share
-            // one probability — never two independently-derived numbers.
-            let market_price = candidate.entry_price_ref.inner();
-            if market_price <= Decimal::ZERO || market_price >= Decimal::ONE {
-                return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
-            }
-            let q = win_probability.inner();
-            if q <= market_price {
-                return Ok(SizingOutcome::Rejected(RejectionReason::NoPositiveSignal));
-            }
-            let f_star = (q - market_price) / (Decimal::ONE - market_price);
-            let edge = candidate.expected_return_bps / bps;
-            (f_star, edge)
-        };
+        if win_probability <= Probability::ZERO || win_probability > Probability::ONE {
+            return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
+        }
+        if input.executable_tiers.is_empty() {
+            return Ok(SizingOutcome::Rejected(
+                RejectionReason::ExecutableEntryUnavailable,
+            ));
+        }
 
         let shrink = confidence_shrink(candidate.confidence.inner(), self.confidence_weighting);
         let drawdown = drawdown_scale(input.drawdown_state, self.drawdown_scaling);
@@ -296,12 +317,46 @@ impl SizingModel for KellySizingModel {
             * correlation_shrink)
             .max(Decimal::ZERO);
 
-        let raw_fraction = multiplier * f_star;
-        let binding_kelly_cap = raw_fraction > self.max_position_pct;
-        let fraction = raw_fraction.min(self.max_position_pct).max(Decimal::ZERO);
-
-        let desired_usd = (input.capital_base_usd * fraction).round_dp(RESEARCH_DECIMAL_SCALE);
-        let edge_bps = Bps::new((edge * bps).round_dp(RESEARCH_DECIMAL_SCALE));
+        let mut saw_valid_fill = false;
+        let mut saw_positive_edge = false;
+        let mut executable_tiers = Vec::new();
+        for tier in &input.executable_tiers {
+            let Ok(economics) = ResolutionBuyEconomics::from_fill(&tier.fill) else {
+                continue;
+            };
+            saw_valid_fill = true;
+            let edge = economics.edge(win_probability);
+            if edge.expected_pnl <= Usd::ZERO {
+                continue;
+            }
+            saw_positive_edge = true;
+            let raw_fraction = multiplier * edge.full_kelly_fraction;
+            let binding_kelly_cap = raw_fraction > self.max_position_pct;
+            let fraction = raw_fraction.min(self.max_position_pct).max(Decimal::ZERO);
+            let max_budget = (input.capital_base_usd * fraction).round_dp(RESEARCH_DECIMAL_SCALE);
+            if tier.cash_budget > max_budget {
+                continue;
+            }
+            executable_tiers.push(ExecutableTierSuggestion {
+                cash_budget: tier.cash_budget,
+                filled_shares: edge.economics.filled_shares,
+                edge_bps: edge.expected_return_bps.round_dp(RESEARCH_DECIMAL_SCALE),
+                f_star: edge.full_kelly_fraction,
+                raw_fraction,
+                binding_kelly_cap,
+            });
+        }
+        if !saw_valid_fill {
+            return Ok(SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs));
+        }
+        if !saw_positive_edge {
+            return Ok(SizingOutcome::Rejected(RejectionReason::NoPositiveSignal));
+        }
+        executable_tiers.sort_by_key(|tier| tier.cash_budget);
+        executable_tiers.dedup_by_key(|tier| tier.cash_budget);
+        let Some(selected) = executable_tiers.last().copied() else {
+            return Ok(SizingOutcome::Rejected(RejectionReason::BelowMinSize));
+        };
         let kelly_stage_binding = resolve_kelly_stage_binding(
             shrink,
             drawdown,
@@ -311,23 +366,25 @@ impl SizingModel for KellySizingModel {
 
         let round = |value: Decimal| value.round_dp(RESEARCH_DECIMAL_SCALE);
         Ok(SizingOutcome::Sized(Box::new(SizingSuggestion {
-            desired_usd,
-            edge_bps: Some(edge_bps),
+            desired_usd: selected.cash_budget,
+            desired_shares: selected.filled_shares,
+            edge_bps: Some(selected.edge_bps),
             kelly_fraction_applied: Some(round(multiplier)),
-            binding_kelly_cap,
+            binding_kelly_cap: selected.binding_kelly_cap,
             edge_uncertainty_shrink_applied: Some(round(edge_uncertainty_shrink)),
             correlation_shrink_applied: Some(round(correlation_shrink)),
             kelly_stage_binding,
             provenance: Some(SizingProvenance {
-                f_star: round(f_star),
+                f_star: round(selected.f_star),
                 kelly_fraction_config: round(self.kelly_fraction),
                 confidence_shrink: round(shrink),
                 drawdown_shrink: round(drawdown),
                 edge_uncertainty_shrink: round(edge_uncertainty_shrink),
                 correlation_shrink: round(correlation_shrink),
-                raw_fraction: round(raw_fraction),
+                raw_fraction: round(selected.raw_fraction),
                 position_cap_fraction: round(self.max_position_pct),
             }),
+            executable_tiers,
         })))
     }
 }
@@ -457,19 +514,29 @@ fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use super::{
         ConfidenceSizeCurve, CorrelationShrinkInput, DrawdownMultiplierPolicy, DrawdownState,
-        KellySafetyParams, KellySizingModel, SizingInput, SizingModel, SizingOutcome,
+        ExecutableSizingTier, KellySafetyParams, KellySizingModel, SizingInput, SizingModel,
+        SizingOutcome,
     };
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{BindingConstraint, OutcomeSide, RejectionReason, SizingModelKind},
-        types::{MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId, Usd},
+        domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
+        enums::quant::{
+            BindingConstraint, FillRequirement, OutcomeSide, RejectionReason, SizingModelKind,
+        },
+        hashing::CanonicalDigest,
+        types::{
+            Bps, MarketId, ModelRunId, Price, Probability, Shares, SignalCandidateId, TokenId, Usd,
+        },
     };
-    use rust_decimal::Decimal;
+    use rust_decimal::{Decimal, prelude::ToPrimitive};
     use rust_decimal_macros::dec;
 
     use crate::{
+        execution_semantics::{LiquidityRole, PitFeeSchedule, walk_buy_cash_budget},
         model::signal::{ModelExplanation, SignalCandidate},
         portfolio::SizingSuggestion,
         precision::RESEARCH_DECIMAL_SCALE,
@@ -565,7 +632,45 @@ mod tests {
             drawdown_state: DrawdownState::neutral(),
             edge_uncertainty_half_width: None,
             correlation: None,
+            executable_tiers: executable_tiers(candidate, capital),
         }
+    }
+
+    fn executable_tiers(candidate: &SignalCandidate, capital: Usd) -> Vec<ExecutableSizingTier> {
+        let price = candidate.entry_price_ref;
+        if !price.is_positive() {
+            return Vec::new();
+        }
+        let Some(level) = BookLevel::try_from_decimal(price, capital / price * Decimal::TWO) else {
+            return Vec::new();
+        };
+        let schedule = PitFeeSchedule {
+            schedule_hash: CanonicalDigest::content_hash_json(&"zero-fee").expect("hash"),
+            effective_at: candidate.decision_at,
+            available_at: candidate.decision_at,
+            platform_rate: Decimal::ZERO,
+            exponent: Decimal::ONE,
+            taker_only: true,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+        };
+        (1..=capital.inner().floor().to_u64().unwrap_or_default())
+            .filter_map(|cash| {
+                let cash_budget = Usd::new(Decimal::from(cash));
+                walk_buy_cash_budget(
+                    slice::from_ref(&level),
+                    cash_budget,
+                    price,
+                    FillRequirement::AllOrNothing,
+                    &schedule,
+                    LiquidityRole::Taker,
+                    candidate.decision_at,
+                )
+                .ok()
+                .map(|fill| ExecutableSizingTier { cash_budget, fill })
+            })
+            .collect()
     }
 
     fn kelly() -> KellySizingModel {
@@ -601,9 +706,9 @@ mod tests {
         // multiplier = 0.5 (kelly_fraction) * f* ≈ 0.495 > max_position_pct (0.1) -> capped.
         assert_eq!(s.desired_usd, Usd::new(dec!(1000)));
         assert!(s.binding_kelly_cap, "max_position_pct must bind");
-        // edge_bps == expected_return_bps: Kelly's audit edge is the *same*
-        // E[r] the calibrator produced, never a re-derived number.
-        assert_eq!(s.edge_bps.expect("edge").inner(), dec!(200));
+        // The audit edge is recomputed from the executable fill and calibrated
+        // q, never trusted from a quote-price model-output field.
+        assert_eq!(s.edge_bps.expect("edge").inner(), dec!(980000));
         assert!(s.provenance.is_some());
     }
 
@@ -659,19 +764,72 @@ mod tests {
     #[test]
     fn kelly_invalid_market_price_rejects() {
         let model = kelly();
-        for invalid_price in [dec!(0), dec!(1)] {
-            let outcome = model
-                .suggest(&sizing_input(
-                    &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.9), invalid_price),
-                    Usd::new(dec!(10000)),
-                ))
-                .expect("suggest");
-            assert_eq!(
-                outcome,
-                SizingOutcome::Rejected(RejectionReason::InvalidEdgeInputs),
-                "market_price={invalid_price} must be rejected"
-            );
-        }
+        let zero = model
+            .suggest(&sizing_input(
+                &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.9), dec!(0)),
+                Usd::new(dec!(10000)),
+            ))
+            .expect("suggest");
+        assert_eq!(
+            zero,
+            SizingOutcome::Rejected(RejectionReason::ExecutableEntryUnavailable)
+        );
+
+        let one = model
+            .suggest(&sizing_input(
+                &resolution_candidate(dec!(200), dec!(100), dec!(1), dec!(0.9), dec!(1)),
+                Usd::new(dec!(10000)),
+            ))
+            .expect("suggest");
+        assert_eq!(
+            one,
+            SizingOutcome::Rejected(RejectionReason::NoPositiveSignal)
+        );
+    }
+
+    #[test]
+    fn kelly_rejects_quote_edge_consumed_by_pit_fee() {
+        let candidate = resolution_candidate(dec!(600), dec!(100), dec!(1), dec!(0.53), dec!(0.5));
+        let schedule = PitFeeSchedule {
+            schedule_hash: CanonicalDigest::content_hash_json(&"fee-aware").expect("hash"),
+            effective_at: candidate.decision_at,
+            available_at: candidate.decision_at,
+            platform_rate: dec!(0.2),
+            exponent: Decimal::ONE,
+            taker_only: true,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+        };
+        let level =
+            BookLevel::from_decimal_unchecked(candidate.entry_price_ref, Shares::new(dec!(1000)));
+        let cash_budget = Usd::new(dec!(25));
+        let fill = walk_buy_cash_budget(
+            &[level],
+            cash_budget,
+            candidate.entry_price_ref,
+            FillRequirement::AllOrNothing,
+            &schedule,
+            LiquidityRole::Taker,
+            candidate.decision_at,
+        )
+        .expect("walk");
+        let outcome = kelly()
+            .suggest(&SizingInput {
+                candidate: &candidate,
+                capital_base_usd: Usd::new(dec!(10000)),
+                drawdown_state: DrawdownState::neutral(),
+                edge_uncertainty_half_width: None,
+                correlation: None,
+                executable_tiers: vec![ExecutableSizingTier { cash_budget, fill }],
+            })
+            .expect("suggest");
+
+        assert_eq!(
+            outcome,
+            SizingOutcome::Rejected(RejectionReason::NoPositiveSignal),
+            "q=0.53 beats the 0.50 ask but not the fee-adjusted all-in price"
+        );
     }
 
     #[test]
@@ -683,6 +841,7 @@ mod tests {
                 drawdown_state: DrawdownState::neutral(),
                 edge_uncertainty_half_width: None,
                 correlation: None,
+                executable_tiers: Vec::new(),
             })
             .expect("suggest");
         assert_eq!(
@@ -703,6 +862,7 @@ mod tests {
                 drawdown_state: DrawdownState::neutral(),
                 edge_uncertainty_half_width: None,
                 correlation: None,
+                executable_tiers: Vec::new(),
             })
             .expect("suggest");
         assert_eq!(
@@ -721,6 +881,7 @@ mod tests {
                 drawdown_state: DrawdownState::neutral(),
                 edge_uncertainty_half_width: None,
                 correlation: None,
+                executable_tiers: Vec::new(),
             })
             .expect("suggest");
         assert_eq!(
@@ -749,6 +910,10 @@ mod tests {
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(1)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -760,6 +925,10 @@ mod tests {
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(0.4)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -789,6 +958,10 @@ mod tests {
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(0.4)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -800,6 +973,10 @@ mod tests {
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(0.6)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -835,6 +1012,7 @@ mod tests {
                     },
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
                 })
                 .expect("fixed suggest"),
         );
@@ -848,6 +1026,7 @@ mod tests {
                     },
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
                 })
                 .expect("conservative suggest"),
         );
@@ -876,6 +1055,7 @@ mod tests {
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
                 })
                 .expect("neutral suggest"),
         );
@@ -889,6 +1069,7 @@ mod tests {
                     },
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(&input_candidate, Usd::new(dec!(10000))),
                 })
                 .expect("drawdown suggest"),
         );
@@ -919,6 +1100,10 @@ mod tests {
                     drawdown_state: DrawdownState::neutral(),
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(1)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -948,6 +1133,10 @@ mod tests {
                     },
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(0.7)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -990,6 +1179,7 @@ mod tests {
                         drawdown_state: DrawdownState::neutral(),
                         edge_uncertainty_half_width: half_width,
                         correlation: None,
+                        executable_tiers: executable_tiers(&candidate, capital),
                     })
                     .expect("sized"),
             );
@@ -1051,6 +1241,7 @@ mod tests {
                             cluster_size,
                             mean_rho: dec!(0.5),
                         }),
+                        executable_tiers: executable_tiers(&candidate, capital),
                     })
                     .expect("sized"),
             );
@@ -1106,6 +1297,10 @@ mod tests {
                         cluster_size: 3,
                         mean_rho: dec!(0.3),
                     }),
+                    executable_tiers: executable_tiers(
+                        &candidate(dec!(10), dec!(200), dec!(0.8)),
+                        Usd::new(dec!(10000)),
+                    ),
                 })
                 .expect("suggest"),
         );
@@ -1149,6 +1344,7 @@ mod tests {
                     },
                     edge_uncertainty_half_width: None,
                     correlation: None,
+                    executable_tiers: executable_tiers(&candidate, Usd::new(dec!(10000))),
                 })
                 .expect("suggest"),
         );

@@ -105,6 +105,36 @@ pub struct ReplayPage {
 }
 
 impl ReplayPage {
+    /// Resolve the latest market-info version visible for this token at the
+    /// decision boundary. Fee consumers must use this bitemporal lookup and
+    /// may never consult a current cache while replaying historical fills.
+    #[must_use]
+    pub fn market_info_at(
+        &self,
+        market_id: &MarketId,
+        token_id: &TokenId,
+        boundary: &DecisionBoundary,
+    ) -> Option<&ClobMarketInfoVersion> {
+        self.clob_market_info
+            .iter()
+            .filter(|version| {
+                &version.market_id == market_id
+                    && version
+                        .tokens
+                        .iter()
+                        .any(|token| &token.token_id == token_id)
+                    && version.effective_at <= boundary.knowledge_cutoff()
+                    && version.available_at <= boundary.decision_at()
+            })
+            .max_by(|left, right| {
+                (left.effective_at, left.available_at, &left.payload_hash).cmp(&(
+                    right.effective_at,
+                    right.available_at,
+                    &right.payload_hash,
+                ))
+            })
+    }
+
     /// Reconstruct the exact snapshot visible at one decision boundary without
     /// touching a repository. The page must carry the pre-window checkpoint,
     /// all intervening canonical events/trades, and its session ledger.
@@ -884,6 +914,9 @@ mod tests {
             linkages: HashMap::new(),
         };
         let source = FrozenSourceSlice {
+            window_start: Utc.timestamp_opt(100, 0).single().expect("source start"),
+            window_end: Utc.timestamp_opt(120, 0).single().expect("source end"),
+            pit_cutoff: Utc.timestamp_opt(130, 0).single().expect("source cutoff"),
             prefetched,
             clob_market_info: Vec::new(),
             l2_events: vec![

@@ -33,23 +33,42 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
+    domain::market::book::BookLevel,
     enums::{
         common::MarketCategory,
         quant::{DataQualityStatus, OutcomeSide},
     },
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, ContentHash, EventId, MarketId, ModelVersionId, Probability,
-        RuntimeConfigVersionId, TokenId, Usd,
+        BacktestReportId, ContentHash, EventId, MarketId, ModelVersionId, Price, Probability,
+        RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    execution_semantics::PitFeeSchedule,
     features::NullReason,
     model::{QuantModelRuntime, runtime::ModelRuntimeInput},
 };
+
+/// Exact decision-time execution inputs for one outcome token.
+///
+/// Core reconstructs these from the Dataset-bound Source Slice. The pure
+/// backtester can therefore walk the same full L2 and PIT fee schedule as
+/// report composition, policy replay, and admission without any repository or
+/// live-book access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacktestExecutionSnapshot {
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub asks: Vec<BookLevel>,
+    pub fee_schedule: PitFeeSchedule,
+    pub fill_at: DateTime<Utc>,
+    pub limit_price: Price,
+    pub book_hash: ContentHash,
+}
 
 /// Identity + window of a backtest run (the report's stable header).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +132,8 @@ pub struct BacktestTick {
     pub outcomes: Vec<MarketOutcome>,
     /// Per-market metadata for allocation + breakdown.
     pub market_meta: Vec<BacktestMarketMeta>,
+    /// Full-L2/PIT-fee execution inputs for every outcome token a model may buy.
+    pub execution: Vec<BacktestExecutionSnapshot>,
 }
 
 /// Portfolio budget / exposure / liquidity caps (projected from `PortfolioConfig`).
@@ -336,6 +357,14 @@ pub struct SampleOutcome {
     pub max_adverse_excursion_bps: Option<Decimal>,
     /// Capital allocated to this candidate (USD).
     pub allocated_usd: Usd,
+    /// Exact entry fee charged by the PIT schedule at walk precision.
+    pub entry_fee_usd: Usd,
+    /// Shares actually acquired by the cash-budget walk.
+    pub filled_shares: Shares,
+    /// Content identity of the PIT fee schedule used by the walk.
+    pub fee_schedule_hash: ContentHash,
+    /// Content identity of the full L2 snapshot used by the walk.
+    pub book_hash: ContentHash,
     /// Whether the allocation respected the liquidity-usage cap.
     pub liquidity_feasible: bool,
     /// Data-quality stratum the candidate was scored under (calibration input —

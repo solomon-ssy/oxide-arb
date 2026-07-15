@@ -234,7 +234,7 @@ mod tests {
         },
         types::{
             BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
-            RuntimeConfigVersionId, TokenId, Usd,
+            RuntimeConfigVersionId, Shares, TokenId, Usd,
         },
     };
     use rust_decimal::Decimal;
@@ -268,6 +268,10 @@ mod tests {
             settled_yes: realized > Decimal::ZERO,
             max_adverse_excursion_bps: None,
             allocated_usd: Usd::new(dec!(100)),
+            entry_fee_usd: Usd::ZERO,
+            filled_shares: Shares::new(dec!(200)),
+            fee_schedule_hash: hash("fee"),
+            book_hash: hash("b"),
             liquidity_feasible: true,
             data_quality: DataQualityStatus::Fresh,
             liquidity_usd: None,

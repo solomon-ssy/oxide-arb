@@ -49,7 +49,7 @@ use quant_pivot_models::{
         StructuralFeaturesConfig, TrainingOptimizerKind, wire::DecimalString,
     },
     types::{
-        BacktestPathSetId, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
+        BacktestPathSetId, Bps, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
         DatasetManifest, EventId, FactorDefinitionId, MarketId, ModelInputContract, ModelSpecId,
         ModelTrainingContract, ModelVersionId, Probability, RuntimeConfigVersionId, SchemaVersion,
         TokenId, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSource,
@@ -758,6 +758,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         },
         &portfolio(),
         None,
+        Bps::new(dec!(100)),
     )
     .expect("backtest service");
 

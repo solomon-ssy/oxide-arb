@@ -29,7 +29,7 @@ use quant_pivot_models::{
         Bps, ContentHash, EventId, MarketId, MarketSelectionId, ModelRunId,
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, Probability, RejectionReasonCount,
-        RiskEnvelope, RiskEnvelopeHashInput, Shares, SignalCandidateId, SizingPlan, Usd,
+        RiskEnvelope, RiskEnvelopeHashInput, SignalCandidateId, SizingPlan, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -45,8 +45,8 @@ use crate::{
         correlation::CorrelationConstraint,
         optimizer::OptimizerOutcome,
         sizing::{
-            CorrelationShrinkInput, DrawdownState, SizingInput, SizingModel, SizingOutcome,
-            SizingSuggestion,
+            CorrelationShrinkInput, DrawdownState, ExecutableSizingTier, ExecutableTierSuggestion,
+            SizingInput, SizingModel, SizingOutcome, SizingSuggestion,
         },
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -78,6 +78,8 @@ pub struct PlanCandidate<'a> {
     pub liquidity_usd: Option<Usd>,
     /// Normalized visible liquidity score in `[0, 1]` from decision capture.
     pub liquidity_score: Probability,
+    /// Unique policy tiers walked from this candidate's decision capture.
+    pub executable_tiers: Vec<ExecutableSizingTier>,
 }
 
 /// All inputs to one portfolio plan.
@@ -281,6 +283,7 @@ fn size_candidates<'a>(
             drawdown_state,
             edge_uncertainty_half_width: edge_half_width,
             correlation,
+            executable_tiers: plan_candidate.executable_tiers.clone(),
         })?;
         match outcome {
             SizingOutcome::Rejected(reason) => rejected.push(RejectedCandidate {
@@ -316,8 +319,8 @@ fn classify_allocations<'a>(
 ) -> Vec<Scored<'a>> {
     let min_rec = caps.min_recommendation_usd.max(Decimal::ZERO);
     let mut scored: Vec<Scored<'a>> = Vec::new();
-    for alloc in allocation.allocations {
-        let Some((suggestion, plan_candidate)) =
+    for mut alloc in allocation.allocations {
+        let Some((mut suggestion, plan_candidate)) =
             sized.remove(&alloc.signal_candidate_id.to_string())
         else {
             continue;
@@ -341,6 +344,30 @@ fn classify_allocations<'a>(
             });
             continue;
         }
+        let selected = suggestion
+            .executable_tiers
+            .iter()
+            .rev()
+            .find(|tier| tier.cash_budget <= alloc.allocated_usd)
+            .copied();
+        let Some(selected) = selected else {
+            let reason = if alloc.binding_constraint == BindingConstraint::None {
+                RejectionReason::BelowMinSize
+            } else {
+                rejection_for_binding(alloc.binding_constraint)
+            };
+            rejected.push(RejectedCandidate {
+                signal_candidate_id: candidate.signal_candidate_id.clone(),
+                market_id: candidate.market_id.clone(),
+                reason,
+                detail: format!(
+                    "allocated {} cannot fund the smallest Kelly-eligible executable tier",
+                    alloc.allocated_usd
+                ),
+            });
+            continue;
+        };
+        align_allocation_to_executable_tier(&mut alloc, &mut suggestion, selected);
         let binding = resolve_binding(&suggestion, alloc.binding_constraint);
         let risk_adjusted = risk_adjusted_score(candidate, binding, alloc.liquidity_feasible);
         scored.push(Scored {
@@ -355,6 +382,31 @@ fn classify_allocations<'a>(
         });
     }
     scored
+}
+
+/// Snap an optimizer allocation down to an already-walked discrete tier.
+///
+/// This deliberately happens before `SizingPlan` and risk-envelope creation,
+/// so no downstream layer can publish an arbitrary fractional cash amount that
+/// never passed the shared execution kernel.
+fn align_allocation_to_executable_tier(
+    allocation: &mut Allocation,
+    suggestion: &mut SizingSuggestion,
+    selected: ExecutableTierSuggestion,
+) {
+    let released = allocation.allocated_usd - selected.cash_budget;
+    allocation.allocated_usd = selected.cash_budget;
+    allocation.market_exposure_after_usd -= released;
+    allocation.event_exposure_after_usd -= released;
+    allocation.category_exposure_after_usd -= released;
+    suggestion.desired_usd = selected.cash_budget;
+    suggestion.desired_shares = selected.filled_shares;
+    suggestion.edge_bps = Some(selected.edge_bps);
+    suggestion.binding_kelly_cap = selected.binding_kelly_cap;
+    if let Some(provenance) = suggestion.provenance.as_mut() {
+        provenance.f_star = selected.f_star.round_dp(RESEARCH_DECIMAL_SCALE);
+        provenance.raw_fraction = selected.raw_fraction.round_dp(RESEARCH_DECIMAL_SCALE);
+    }
 }
 
 /// Stable ranking order (parent §21.5): risk-adjusted desc → composite desc →
@@ -508,12 +560,6 @@ fn build_sizing_plan(
     sizing_model: SizingModelKind,
 ) -> SizingPlan {
     let allocated = item.allocation.allocated_usd;
-    let entry = item.candidate.entry_price_ref;
-    let suggested_shares = if entry.inner() > Decimal::ZERO {
-        (allocated / entry).round_dp(RESEARCH_DECIMAL_SCALE)
-    } else {
-        Shares::ZERO
-    };
     let weight = if equity.inner() > Decimal::ZERO {
         (allocated.inner() / equity.inner()).round_dp(RESEARCH_DECIMAL_SCALE)
     } else {
@@ -521,7 +567,7 @@ fn build_sizing_plan(
     };
     SizingPlan {
         suggested_usd: allocated,
-        suggested_shares,
+        suggested_shares: item.suggestion.desired_shares,
         max_usd: Usd::new(caps.max_single_recommendation_usd),
         min_usd: Usd::new(caps.min_recommendation_usd),
         portfolio_weight_pct: weight,

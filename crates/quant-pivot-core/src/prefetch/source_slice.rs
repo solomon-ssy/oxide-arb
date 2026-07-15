@@ -65,6 +65,9 @@ pub struct SourceSliceMaterializer {
 /// Fully verified immutable inputs. Consumers receive owned in-memory facts and
 /// cannot reach a live repository while replaying rows.
 pub struct FrozenSourceSlice {
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub pit_cutoff: DateTime<Utc>,
     pub prefetched: Prefetched,
     pub clob_market_info: Vec<ClobMarketInfoVersion>,
     pub l2_events: Vec<BookL2EventRow>,
@@ -94,6 +97,21 @@ impl SourceSliceReader {
 
     pub async fn read(&self, source_slice: &SourceSliceInfo) -> QuantResult<FrozenSourceSlice> {
         let manifest = self.read_manifest(source_slice).await?;
+        let records = self.read_objects(&manifest).await?;
+        decode_frozen_source_slice(&manifest, records)
+    }
+
+    /// Independently verify and read a Dataset-bound Source Slice reference.
+    ///
+    /// Backtest and CPCV artifacts bind the immutable manifest URI/hash rather
+    /// than a mutable ledger id. This path validates the exact manifest bytes,
+    /// object versions, hashes, schema, row counts, and PIT cutoffs before
+    /// exposing any L2 or fee fact to the pure replay engine.
+    pub async fn read_ref(
+        &self,
+        source_slice: &SourceSliceManifestRef,
+    ) -> QuantResult<FrozenSourceSlice> {
+        let manifest = self.read_manifest_artifact(source_slice).await?;
         let records = self.read_objects(&manifest).await?;
         decode_frozen_source_slice(&manifest, records)
     }
@@ -134,7 +152,27 @@ impl SourceSliceReader {
                 "Ready Source Slice has no manifest hash",
             )
         })?;
-        let manifest_metadata = self.artifacts.metadata(manifest_uri).await?;
+        let manifest_ref = SourceSliceManifestRef {
+            manifest_uri: manifest_uri.clone(),
+            manifest_hash: manifest_hash.clone(),
+        };
+        let decoded = self.read_manifest_artifact(&manifest_ref).await?;
+        if decoded != *manifest {
+            return Err(ResearchError::DatasetBuild {
+                detail: "Source Slice manifest bytes do not match its frozen ledger binding"
+                    .to_owned(),
+            }
+            .into());
+        }
+
+        Ok(decoded)
+    }
+
+    async fn read_manifest_artifact(
+        &self,
+        source_slice: &SourceSliceManifestRef,
+    ) -> QuantResult<SourceSliceManifestV2> {
+        let manifest_metadata = self.artifacts.metadata(&source_slice.manifest_uri).await?;
         if manifest_metadata.durability.remote
             && !manifest_metadata.durability.permits_production_publish()
         {
@@ -144,24 +182,35 @@ impl SourceSliceReader {
             }
             .into());
         }
-        let manifest_bytes = self.artifacts.get(manifest_uri).await?;
+        let manifest_bytes = self.artifacts.get(&source_slice.manifest_uri).await?;
         let actual_manifest_hash =
             ContentHash::parse(CanonicalDigest::prefixed_bytes(&manifest_bytes))?;
-        if &actual_manifest_hash != manifest_hash
-            || serde_json::from_slice::<SourceSliceManifestV2>(&manifest_bytes).map_err(
-                |error| ResearchError::DatasetBuild {
-                    detail: format!("Source Slice manifest JSON is invalid: {error}"),
-                },
-            )? != *manifest
-        {
+        if actual_manifest_hash != source_slice.manifest_hash {
             return Err(ResearchError::DatasetBuild {
-                detail: "Source Slice manifest bytes do not match its frozen ledger binding"
+                detail: "Source Slice manifest bytes do not match the Dataset binding".to_owned(),
+            }
+            .into());
+        }
+        let manifest =
+            serde_json::from_slice::<SourceSliceManifestV2>(&manifest_bytes).map_err(|error| {
+                ResearchError::DatasetBuild {
+                    detail: format!("Source Slice manifest JSON is invalid: {error}"),
+                }
+            })?;
+        manifest
+            .validate()
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+        let semantic_hash = manifest
+            .content_hash()
+            .map_err(|detail| ResearchError::DatasetBuild { detail })?;
+        if semantic_hash != source_slice.manifest_hash {
+            return Err(ResearchError::DatasetBuild {
+                detail: "Source Slice manifest semantic hash differs from its byte binding"
                     .to_owned(),
             }
             .into());
         }
-
-        Ok(manifest.clone())
+        Ok(manifest)
     }
 
     async fn read_objects(
@@ -320,6 +369,9 @@ fn decode_frozen_source_slice(
         .into());
     }
     Ok(FrozenSourceSlice {
+        window_start: manifest.window_start,
+        window_end: manifest.window_end,
+        pit_cutoff: manifest.pit_cutoff,
         prefetched: Prefetched {
             books,
             micro,
@@ -902,16 +954,19 @@ fn source_boundary(identity: &SourceSliceIdentity) -> QuantResult<DecisionBounda
 }
 
 fn replay_samples(versions: &[MarketCatalogVersionInfo]) -> QuantResult<Vec<ReplaySample>> {
-    let mut samples = Vec::with_capacity(versions.len());
+    let mut samples = Vec::with_capacity(versions.len().saturating_mul(2));
     for version in versions {
         let market = serde_json::from_value::<MarketRegistryInfo>(version.payload.clone())
             .map_err(|error| ResearchError::DatasetBuild {
                 detail: format!("catalog market {} is invalid: {error}", version.market_id),
             })?;
-        samples.push(ReplaySample {
-            market_id: market.market_id,
-            token_id: market.token_yes,
-        });
+        let market_id = market.market_id;
+        for token_id in [market.token_yes, market.token_no] {
+            samples.push(ReplaySample {
+                market_id: market_id.clone(),
+                token_id,
+            });
+        }
     }
     samples.sort_by(|left, right| {
         (&left.market_id, &left.token_id).cmp(&(&right.market_id, &right.token_id))

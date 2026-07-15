@@ -8,7 +8,7 @@ use quant_pivot_models::{
     },
     enums::{clickhouse::ChTradeReconciliationStatus, common::Side, quant::FillRequirement},
     hashing::CanonicalDigest,
-    types::{Bps, ContentHash, Price, Shares, Usd},
+    types::{Bps, ContentHash, Price, Probability, Shares, Usd},
 };
 use rust_decimal::{Decimal, MathematicalOps, RoundingStrategy};
 use serde::{Deserialize, Serialize};
@@ -120,6 +120,107 @@ pub enum FeeError {
     InvalidSchedule,
     InvalidFill,
     CashBudgetInvariant,
+}
+
+/// Resolution economics of one already-walked binary-token BUY.
+///
+/// `cash_outlay` is the exact principal-plus-fee account debit. Dividing it by
+/// `filled_shares` therefore yields the only entry probability that Kelly and
+/// realized-return metrics may consume: the all-in executable price, not a
+/// midpoint, top-of-book quote, or fee-blind VWAP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionBuyEconomics {
+    pub cash_outlay: Usd,
+    pub filled_shares: Shares,
+    pub entry_fee: Usd,
+    pub all_in_price: Price,
+}
+
+impl ResolutionBuyEconomics {
+    /// Derive binary-resolution economics from a successful cash-budget walk.
+    pub fn from_fill(fill: &BookWalkFill) -> Result<Self, FeeError> {
+        let cash_outlay = -fill.total_cash_delta;
+        if fill.outcome == BookWalkOutcome::Unfilled
+            || !fill.filled_shares.is_positive()
+            || cash_outlay <= Decimal::ZERO
+            || fill.gross_order_amount.inner() + fill.expected_fee.inner() != cash_outlay
+        {
+            return Err(FeeError::InvalidFill);
+        }
+        let all_in = cash_outlay / fill.filled_shares.inner();
+        if all_in <= Decimal::ZERO || all_in > Decimal::ONE {
+            return Err(FeeError::InvalidFill);
+        }
+        Ok(Self {
+            cash_outlay: Usd::new(cash_outlay),
+            filled_shares: fill.filled_shares,
+            entry_fee: fill.expected_fee,
+            all_in_price: Price::new(all_in),
+        })
+    }
+
+    /// Expected net return and full-Kelly fraction for calibrated `P(win)`.
+    pub fn edge(self, win_probability: Probability) -> ResolutionBuyEdge {
+        let q = win_probability.inner();
+        let all_in = self.all_in_price.inner();
+        let expected_pnl = q * self.filled_shares.inner() - self.cash_outlay.inner();
+        let expected_return = expected_pnl / self.cash_outlay.inner();
+        let full_kelly_fraction = if expected_pnl > Decimal::ZERO && all_in < Decimal::ONE {
+            (q - all_in) / (Decimal::ONE - all_in)
+        } else {
+            Decimal::ZERO
+        };
+        ResolutionBuyEdge {
+            economics: self,
+            expected_pnl: Usd::new(expected_pnl),
+            expected_return_bps: Bps::new(expected_return * Decimal::from(10_000)),
+            full_kelly_fraction,
+        }
+    }
+
+    /// Settle the bought token at its binary `0`/`1` payout.
+    #[must_use]
+    pub fn settle(self, won: bool) -> ResolutionBuySettlement {
+        let cash_outlay = self.cash_outlay.inner();
+        let payout = if won {
+            self.filled_shares.inner()
+        } else {
+            Decimal::ZERO
+        };
+        let realized_pnl = payout - cash_outlay;
+        ResolutionBuySettlement {
+            economics: self,
+            payout_usd: Usd::new(payout),
+            realized_pnl_usd: Usd::new(realized_pnl),
+            realized_return_bps: Bps::new(realized_pnl / cash_outlay * Decimal::from(10_000)),
+        }
+    }
+}
+
+/// Fee- and depth-adjusted Kelly inputs for one executable cash tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionBuyEdge {
+    pub economics: ResolutionBuyEconomics,
+    pub expected_pnl: Usd,
+    pub expected_return_bps: Bps,
+    pub full_kelly_fraction: Decimal,
+}
+
+/// Realized cash flows of an executable BUY held to binary resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionBuySettlement {
+    pub economics: ResolutionBuyEconomics,
+    pub payout_usd: Usd,
+    pub realized_pnl_usd: Usd,
+    pub realized_return_bps: Bps,
+}
+
+/// Worst-price limit for an aggressive BUY relative to the visible best ask.
+#[must_use]
+pub fn aggressive_buy_limit(best_ask: Price, max_slippage_bps: Bps) -> Price {
+    Price::new(
+        (best_ask.inner() * (Decimal::ONE + max_slippage_bps.to_fraction())).min(Decimal::ONE),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

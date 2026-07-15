@@ -33,6 +33,6 @@ pub use planner::{
     PortfolioPlanOutput, PortfolioPlanner, RejectedCandidate,
 };
 pub use sizing::{
-    DrawdownState, KellySizingModel, SizingInput, SizingModel, SizingOutcome, SizingSuggestion,
-    sizing_model_from_config,
+    DrawdownState, ExecutableSizingTier, KellySizingModel, SizingInput, SizingModel, SizingOutcome,
+    SizingSuggestion, sizing_model_from_config,
 };

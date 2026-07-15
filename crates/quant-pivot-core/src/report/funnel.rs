@@ -427,6 +427,10 @@ const fn planner_terminal(reason: RejectionReason) -> (ReportFunnelStage, Report
             ReportFunnelStage::SizingEligible,
             ReportFunnelReason::ReturnModelUncalibrated,
         ),
+        RejectionReason::ExecutableEntryUnavailable => (
+            ReportFunnelStage::SizingEligible,
+            ReportFunnelReason::ExecutableEntryUnavailable,
+        ),
         RejectionReason::BelowMinSize => (
             ReportFunnelStage::SizingEligible,
             ReportFunnelReason::BelowMinSize,

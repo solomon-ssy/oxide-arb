@@ -985,6 +985,8 @@ wire_enum! {
         InvalidEdgeInputs => "invalid_edge_inputs",
         /// The return model did not provide a calibrated win probability.
         ReturnModelUncalibrated => "return_model_uncalibrated",
+        /// No unique policy-validated decision-time entry tier could be walked.
+        ExecutableEntryUnavailable => "executable_entry_unavailable",
         /// The allocated size fell below `min_recommendation_usd`.
         BelowMinSize => "below_min_size",
         /// The total deployable budget room was exhausted.

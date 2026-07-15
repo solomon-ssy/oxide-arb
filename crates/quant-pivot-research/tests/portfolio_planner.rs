@@ -23,12 +23,13 @@ use quant_pivot_models::{
 };
 use quant_pivot_research::{
     backtest::PortfolioCaps,
+    execution_semantics::{BookWalkFill, BookWalkOutcome},
     model::signal::{ModelExplanation, SignalCandidate},
     portfolio::sizing::KellySafetyParams,
     portfolio::{
-        AccountSnapshot, DefaultPortfolioPlanner, DrawdownState, KellySizingModel,
-        LinearProgrammingPortfolioAllocator, OptimizerConfig, PlanCandidate, PortfolioPlanInput,
-        PortfolioPlanner, SizingModel,
+        AccountSnapshot, DefaultPortfolioPlanner, DrawdownState, ExecutableSizingTier,
+        KellySizingModel, LinearProgrammingPortfolioAllocator, OptimizerConfig, PlanCandidate,
+        PortfolioPlanInput, PortfolioPlanner, SizingModel,
     },
 };
 use rust_decimal::Decimal;
@@ -135,7 +136,7 @@ const fn kelly() -> KellySizingModel {
     )
 }
 
-const fn plan_candidate(
+fn plan_candidate(
     candidate: &SignalCandidate,
     category: MarketCategory,
     liquidity: Option<Usd>,
@@ -146,6 +147,26 @@ const fn plan_candidate(
         event_id: None,
         liquidity_usd: liquidity,
         liquidity_score: Probability::ZERO,
+        executable_tiers: (1..=20)
+            .map(|multiple| {
+                let cash_budget = Usd::new(Decimal::from(multiple) * dec!(50));
+                let shares = cash_budget / candidate.entry_price_ref;
+                ExecutableSizingTier {
+                    cash_budget,
+                    fill: BookWalkFill {
+                        outcome: BookWalkOutcome::Filled,
+                        vwap: Some(candidate.entry_price_ref),
+                        worst_price: Some(candidate.entry_price_ref),
+                        filled_shares: shares,
+                        gross_order_amount: cash_budget,
+                        expected_fee: Usd::ZERO,
+                        total_cash_delta: -cash_budget.inner(),
+                        unfilled_cash_budget: Usd::ZERO,
+                        unfilled_shares: Shares::ZERO,
+                    },
+                }
+            })
+            .collect(),
     }
 }
 

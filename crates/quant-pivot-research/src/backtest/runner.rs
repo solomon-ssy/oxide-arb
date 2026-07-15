@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::DataQualityStatus,
+    enums::quant::{DataQualityStatus, FillRequirement},
     types::{
         BacktestReportId, ContentHash, ExposureBreakdown, ModelVersionId, Probability,
         RuntimeConfigVersionId, Usd,
@@ -25,10 +25,12 @@ use serde::Serialize;
 
 use crate::{
     backtest::{
-        BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRequest, BacktestRunResult,
-        BacktestTick, Backtester, CategoryMetric, ExpectedVsRealized, MarketOutcome, PnlCurvePoint,
-        PnlSimulation, PortfolioCaps, SampleOutcome, metrics, simulator,
+        BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
+        BacktestRequest, BacktestRunResult, BacktestTick, Backtester, CategoryMetric,
+        ExpectedVsRealized, MarketOutcome, PnlCurvePoint, PnlSimulation, PortfolioCaps,
+        SampleOutcome, metrics, simulator,
     },
+    execution_semantics::{BookWalkOutcome, LiquidityRole, walk_buy_cash_budget},
     hashing::ResearchHasher,
     model::runtime::{MarketInferenceContext, ModelInputAuditState, ModelRuntimeOutput},
     portfolio::{
@@ -150,6 +152,11 @@ fn process_tick(
         .into_iter()
         .map(|(market_id, context)| (market_id.as_str(), context))
         .collect();
+    let execution: BTreeMap<&str, &BacktestExecutionSnapshot> = tick
+        .execution
+        .iter()
+        .map(|snapshot| (snapshot.token_id.as_str(), snapshot))
+        .collect();
 
     let allocation = allocate_tick(output, allocator, caps, &meta)?;
     let alloc_by_id: BTreeMap<String, &Allocation> = allocation
@@ -157,11 +164,9 @@ fn process_tick(
         .iter()
         .map(|a| (a.signal_candidate_id.to_string(), a))
         .collect();
-    acc.tick_weights
-        .push(weights_for_tick(&allocation.allocations));
-
     let mut tick_pnl = Decimal::ZERO;
     let mut tick_allocated = Decimal::ZERO;
+    let mut executed_allocations = Vec::new();
     for candidate in &output.candidates {
         let (Some(market), Some(outcome)) = (
             meta.get(candidate.market_id.as_str()),
@@ -172,22 +177,62 @@ fn process_tick(
         if !outcome.matured {
             continue;
         }
-        let realized = simulator::realized_return_bps(
-            candidate.outcome_side,
-            candidate.entry_price_ref,
-            outcome.settled_yes,
-        );
-        let allocation = alloc_by_id.get(&candidate.signal_candidate_id.to_string());
-        let allocated_usd = allocation.map_or(Usd::ZERO, |a| a.allocated_usd);
-        let liquidity_feasible = allocation.is_none_or(|a| a.liquidity_feasible);
-        tick_pnl += simulator::realized_pnl_usd(
-            allocated_usd.inner(),
-            candidate.outcome_side,
-            candidate.entry_price_ref,
-            outcome.settled_yes,
-        );
+        let Some(allocation) = alloc_by_id.get(&candidate.signal_candidate_id.to_string()) else {
+            continue;
+        };
+        if !allocation.allocated_usd.is_positive() {
+            continue;
+        }
+        let snapshot = execution.get(candidate.token_id.as_str()).ok_or_else(|| {
+            ResearchError::ValidationMethodology {
+                detail: format!(
+                    "backtest tick {} has no executable PIT snapshot for token {}",
+                    tick.decision_at, candidate.token_id
+                ),
+            }
+        })?;
+        if snapshot.market_id != candidate.market_id {
+            return Err(ResearchError::ValidationMethodology {
+                detail: format!(
+                    "backtest execution snapshot token {} is bound to market {}, expected {}",
+                    candidate.token_id, snapshot.market_id, candidate.market_id
+                ),
+            }
+            .into());
+        }
+        let fill = walk_buy_cash_budget(
+            &snapshot.asks,
+            allocation.allocated_usd,
+            snapshot.limit_price,
+            FillRequirement::AllOrNothing,
+            &snapshot.fee_schedule,
+            LiquidityRole::Taker,
+            snapshot.fill_at,
+        )
+        .map_err(|error| ResearchError::ValidationMethodology {
+            detail: format!(
+                "backtest executable entry walk failed for token {}: {error:?}",
+                candidate.token_id
+            ),
+        })?;
+        if fill.outcome == BookWalkOutcome::Unfilled {
+            continue;
+        }
+        let settlement =
+            simulator::settle_executed_buy(&fill, candidate.outcome_side, outcome.settled_yes)
+                .map_err(|error| ResearchError::ValidationMethodology {
+                    detail: format!(
+                        "backtest executable settlement failed for token {}: {error:?}",
+                        candidate.token_id
+                    ),
+                })?;
+        let allocated_usd = settlement.economics.cash_outlay;
+        let realized = settlement.realized_return_bps.inner();
+        let liquidity_feasible = allocation.liquidity_feasible;
+        tick_pnl += settlement.realized_pnl_usd.inner();
         acc.total_allocated += allocated_usd.inner();
         tick_allocated += allocated_usd.inner();
+        executed_allocations.push((candidate.market_id.as_str(), allocated_usd.inner()));
         let market_context = context.get(candidate.market_id.as_str());
         acc.samples.push(SampleOutcome {
             decision_at: tick.decision_at,
@@ -202,6 +247,10 @@ fn process_tick(
             settled_yes: outcome.settled_yes,
             max_adverse_excursion_bps: outcome.max_adverse_excursion_bps,
             allocated_usd,
+            entry_fee_usd: settlement.economics.entry_fee,
+            filled_shares: settlement.economics.filled_shares,
+            fee_schedule_hash: snapshot.fee_schedule.schedule_hash.clone(),
+            book_hash: snapshot.book_hash.clone(),
             liquidity_feasible,
             data_quality: market_context
                 .map_or(DataQualityStatus::Insufficient, |c| c.data_quality),
@@ -212,6 +261,8 @@ fn process_tick(
                 .map_or_else(Vec::new, |c| c.substitution_reasons.clone()),
         });
     }
+    acc.tick_weights
+        .push(weights_for_executed_tick(&executed_allocations));
     acc.realized_pnl += tick_pnl;
     acc.pnl_curve.push(PnlCurvePoint {
         decision_at: tick.decision_at,
@@ -302,16 +353,15 @@ fn backtest_candidate_metas<'a>(
 }
 
 /// Per-market allocation weights for one tick (normalized to the tick total).
-fn weights_for_tick(allocations: &[Allocation]) -> BTreeMap<String, Decimal> {
-    let total: Decimal = allocations.iter().map(|a| a.allocated_usd.inner()).sum();
+fn weights_for_executed_tick(allocations: &[(&str, Decimal)]) -> BTreeMap<String, Decimal> {
+    let total: Decimal = allocations.iter().map(|(_, amount)| *amount).sum();
     let mut weights = BTreeMap::new();
     if total > Decimal::ZERO {
-        for allocation in allocations {
-            let amount = allocation.allocated_usd.inner();
-            if amount > Decimal::ZERO {
+        for (market_id, amount) in allocations {
+            if *amount > Decimal::ZERO {
                 *weights
-                    .entry(allocation.market_id.as_str().to_owned())
-                    .or_insert(Decimal::ZERO) += amount / total;
+                    .entry((*market_id).to_owned())
+                    .or_insert(Decimal::ZERO) += *amount / total;
             }
         }
     }
@@ -439,6 +489,7 @@ mod tests {
     use super::PortfolioReplayBacktester;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
+        domain::market::{book::BookLevel, fee::BuilderFeeAttribution},
         enums::{
             common::MarketCategory,
             factor::FactorFamily,
@@ -446,18 +497,20 @@ mod tests {
         },
         runtime_config::FactorCrossSectionConfig,
         types::{
-            BacktestReportId, ContentHash, FactorDefinitionId, MarketId, ModelInputContract,
-            ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, TokenId, Usd,
-            builtin_research_profiles,
+            BacktestReportId, Bps, ContentHash, FactorDefinitionId, MarketId, ModelInputContract,
+            ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, Shares,
+            TokenId, Usd, builtin_research_profiles,
         },
     };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use crate::{
         backtest::{
-            BacktestInputs, BacktestMarketMeta, BacktestRequest, BacktestTick, Backtester,
-            MarketOutcome, PortfolioCaps,
+            BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestRequest,
+            BacktestTick, Backtester, MarketOutcome, PortfolioCaps,
         },
+        execution_semantics::PitFeeSchedule,
         factors::{
             FactorExplanation, FactorValue, FrozenReferenceQuantiles, NormalizedFactor,
             names::MOMENTUM_ROC,
@@ -596,6 +649,40 @@ mod tests {
                 },
             ],
             market_meta: meta,
+            execution: vec![
+                execution_snapshot("0xbull", "yes", as_of, dec!(0.5)),
+                execution_snapshot("0xbear", "no", as_of, dec!(0.52)),
+            ],
+        }
+    }
+
+    fn execution_snapshot(
+        market_id: &str,
+        token_id: &str,
+        at: chrono::DateTime<Utc>,
+        price: Decimal,
+    ) -> BacktestExecutionSnapshot {
+        BacktestExecutionSnapshot {
+            market_id: MarketId::new(market_id),
+            token_id: TokenId::new(token_id),
+            asks: vec![BookLevel::from_decimal_unchecked(
+                Price::new(price),
+                Shares::new(dec!(100000)),
+            )],
+            fee_schedule: PitFeeSchedule {
+                schedule_hash: hash("fee"),
+                effective_at: at,
+                available_at: at,
+                platform_rate: dec!(0.05),
+                exponent: Decimal::ONE,
+                taker_only: true,
+                builder_maker_fee_bps: Bps::ZERO,
+                builder_taker_fee_bps: Bps::ZERO,
+                builder_attribution: BuilderFeeAttribution::NoBuilderCode,
+            },
+            fill_at: at,
+            limit_price: Price::new(price),
+            book_hash: hash(if token_id == "yes" { "1" } else { "2" }),
         }
     }
 

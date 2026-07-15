@@ -66,7 +66,9 @@ use crate::{
 };
 
 use super::{
-    composer::{ComposeReportInput, RecommendationComposer, empty_plan_for_report},
+    composer::{
+        ComposeReportInput, RecommendationComposer, empty_plan_for_report, executable_sizing_tiers,
+    },
     readiness::ReportReadinessGate,
     types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
 };
@@ -233,6 +235,7 @@ impl DefaultReportBuilder {
             &context,
             &selection,
             &model_outcome,
+            &features.captures,
             &account,
             equity.drawdown_state,
             correlation.as_ref(),
@@ -755,6 +758,7 @@ impl DefaultReportBuilder {
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         model_outcome: &ModelRunOutcome,
+        captures: &HashMap<MarketId, MarketDecisionCapture>,
         account: &AccountSnapshot,
         drawdown_state: DrawdownState,
         correlation: Option<&CorrelationConstraint>,
@@ -768,7 +772,13 @@ impl DefaultReportBuilder {
         // runtime config, so a config change takes effect on the next run.
         let allocator = optimizer_from_config(&context.config.portfolio.optimizer)?;
         let planner = DefaultPortfolioPlanner::new(allocator);
-        let plan_candidates = plan_candidates(&model_outcome.accepted, &selection.included);
+        let plan_candidates = plan_candidates(
+            &model_outcome.accepted,
+            &selection.included,
+            captures,
+            context.trade_policy.as_ref(),
+            context.boundary.decision_at(),
+        );
         planner.plan(PortfolioPlanInput {
             portfolio_plan_id: PortfolioPlanId::from_v7(),
             model_run_id: model_outcome.model_run_id.clone(),
@@ -1206,6 +1216,9 @@ pub(super) async fn report_decision_at(
 fn plan_candidates<'a>(
     candidates: &'a [SignalCandidate],
     selected: &'a [SelectedMarket],
+    captures: &HashMap<MarketId, MarketDecisionCapture>,
+    trade_policy: Option<&TradePolicyArtifactInfo>,
+    decision_at: chrono::DateTime<Utc>,
 ) -> Vec<PlanCandidate<'a>> {
     candidates
         .iter()
@@ -1219,6 +1232,17 @@ fn plan_candidates<'a>(
                     event_id: Some(market.event_id.clone()),
                     liquidity_usd: market.liquidity_usd,
                     liquidity_score: candidate.liquidity_score,
+                    executable_tiers: captures
+                        .get(&candidate.market_id)
+                        .zip(trade_policy)
+                        .map_or_else(Vec::new, |(capture, artifact)| {
+                            executable_sizing_tiers(
+                                capture,
+                                artifact,
+                                candidate.suggested_horizon_secs,
+                                decision_at,
+                            )
+                        }),
                 })
         })
         .collect()

@@ -1,6 +1,7 @@
 //! Offline backtest orchestration (Phase 3.6).
 //!
-//! Replays a registered model over the exact immutable v4 Parquet rows. Frozen
+//! Replays a registered model over exact immutable v5 Parquet rows plus their
+//! Dataset-bound Source Slice execution facts. Frozen
 //! selection context, `FeatureCell`s, factor values, and labels are the sole
 //! evaluation input. Historical rematerialization is a separate parity job and
 //! can never replace bytes consumed by training, CPCV, or backtest.
@@ -10,6 +11,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    iter,
     sync::Arc,
 };
 
@@ -27,10 +29,11 @@ use quant_pivot_models::{
     enums::quant::{
         ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
     },
+    hashing::CanonicalDigest,
     runtime_config::PortfolioConfig,
     types::{
-        BacktestReportId, ContentHash, ModelComparisonReportId, ModelRunId, ModelVersionId,
-        RuntimeConfigVersionId, TrainingDatasetId, Usd,
+        BacktestReportId, Bps, ContentHash, MarketId, ModelComparisonReportId, ModelRunId,
+        ModelVersionId, RuntimeConfigVersionId, TokenId, TrainingDatasetId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -40,10 +43,12 @@ use quant_pivot_repository::traits::{
 use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
-        BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRequest, BacktestRunResult,
-        BacktestTick, Backtester, MarketOutcome, ModelComparisonReport, PortfolioCaps,
-        PortfolioReplayBacktester, SampleOutcome, compare_reports,
+        BacktestExecutionSnapshot, BacktestInputs, BacktestMarketMeta, BacktestReport,
+        BacktestRequest, BacktestRunResult, BacktestTick, Backtester, MarketOutcome,
+        ModelComparisonReport, PortfolioCaps, PortfolioReplayBacktester, SampleOutcome,
+        compare_reports,
     },
+    execution_semantics::{PitFeeSchedule, aggressive_buy_limit},
     model::{
         ActiveSchemaBinding, CalibrationSample, ModelArtifact, ModelRuntimeFactoryBuilder,
         QuantModelRuntime, calibrate_weighted_artifact,
@@ -52,6 +57,10 @@ use quant_pivot_research::{
 };
 
 use crate::{
+    prefetch::{
+        replay_page::{MAX_REPLAY_PAGE_MARKETS, ReplayPage, ReplayPageRequest},
+        source_slice::{FrozenSourceSlice, SourceSliceReader},
+    },
     projection::inference_batch::build_frozen_runtime_input,
     service::training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
 };
@@ -93,6 +102,7 @@ pub struct BacktestService {
     deps: BacktestServiceDeps,
     caps: PortfolioCaps,
     bias_table_hash: Option<ContentHash>,
+    entry_max_slippage_bps: Bps,
 }
 
 impl BacktestService {
@@ -106,11 +116,13 @@ impl BacktestService {
         deps: BacktestServiceDeps,
         portfolio: &PortfolioConfig,
         bias_table_hash: Option<ContentHash>,
+        entry_max_slippage_bps: Bps,
     ) -> QuantResult<Self> {
         Ok(Self {
             deps,
             caps: PortfolioCaps::try_from(portfolio)?,
             bias_table_hash,
+            entry_max_slippage_bps,
         })
     }
 
@@ -339,6 +351,17 @@ impl BacktestService {
             .get(materialization.parquet_uri)
             .await?;
         let examples = verify_frozen_dataset_artifact(dataset, &bytes)?;
+        let source_slice = dataset
+            .manifest_json
+            .as_ref()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "backtest dataset has no immutable v5 manifest".to_owned(),
+            })?
+            .source_slice
+            .clone();
+        let frozen_source = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
+            .read_ref(&source_slice)
+            .await?;
 
         let request = BacktestRequest {
             backtest_report_id: backtest_report_id.clone(),
@@ -359,6 +382,8 @@ impl BacktestService {
             model_run_id: model_run_id.clone(),
             sink: Arc::clone(progress),
             cancel: cancel.clone(),
+            frozen_source,
+            entry_max_slippage_bps: self.entry_max_slippage_bps,
         };
         let result = task::spawn_blocking(move || run_backtest_replay_blocking(inputs))
             .await
@@ -585,6 +610,8 @@ struct BacktestReplayInputs {
     model_run_id: ModelRunId,
     sink: Arc<dyn JobProgressSink>,
     cancel: CancellationToken,
+    frozen_source: FrozenSourceSlice,
+    entry_max_slippage_bps: Bps,
 }
 
 /// Run the backtest replay on a blocking thread.
@@ -604,6 +631,8 @@ async fn run_backtest_replay(
 ) -> QuantResult<Option<BacktestRunResult>> {
     let Some(ticks) = frozen_ticks(
         &inputs.examples,
+        &inputs.frozen_source,
+        inputs.entry_max_slippage_bps,
         inputs.model.as_ref(),
         &inputs.model_run_id,
         &inputs.cancel,
@@ -628,7 +657,7 @@ async fn run_backtest_replay(
     Ok(Some(result))
 }
 
-/// Assemble replay ticks directly from immutable v4 Parquet examples.
+/// Assemble replay ticks from immutable v5 Parquet examples and Source Slice.
 ///
 /// Shared by single-path backtest and CPCV. No database, current config, or
 /// rematerialized feature/factor value participates in the scored input.
@@ -639,11 +668,14 @@ async fn run_backtest_replay(
 /// model-input bindings.
 pub(crate) fn frozen_ticks(
     examples: &[TrainingExample],
+    frozen_source: &FrozenSourceSlice,
+    entry_max_slippage_bps: Bps,
     model: &dyn QuantModelRuntime,
     model_run_id: &ModelRunId,
     cancel: &CancellationToken,
     sink: &dyn JobProgressSink,
 ) -> QuantResult<Option<Vec<BacktestTick>>> {
+    let execution = frozen_execution_snapshots(examples, frozen_source, entry_max_slippage_bps)?;
     let mut by_decision: BTreeMap<DateTime<Utc>, Vec<&TrainingExample>> = BTreeMap::new();
     for example in examples {
         by_decision
@@ -685,6 +717,7 @@ pub(crate) fn frozen_ticks(
         }
         let mut market_meta = Vec::with_capacity(contexts.len());
         let mut outcomes = Vec::with_capacity(contexts.len());
+        let mut execution_snapshots = Vec::new();
         for example in group {
             let Some(context) = contexts.get(&example.market_id) else {
                 continue;
@@ -702,18 +735,165 @@ pub(crate) fn frozen_ticks(
                 matured,
                 max_adverse_excursion_bps: max_adverse_excursion(example, &mae_label),
             });
+            for token_id in iter::once(&example.selected_market.primary_token_id)
+                .chain(example.selected_market.secondary_token_id.as_ref())
+            {
+                let key = (decision_at, token_id.as_str());
+                let snapshot = execution.get(&key).ok_or_else(|| {
+                    ResearchError::DatasetBuild {
+                        detail: format!(
+                            "backtest execution snapshot is missing for token {token_id} at {decision_at}"
+                        ),
+                    }
+                })?;
+                if !execution_snapshots
+                    .iter()
+                    .any(|existing: &BacktestExecutionSnapshot| existing.token_id == *token_id)
+                {
+                    execution_snapshots.push(snapshot.clone());
+                }
+            }
         }
         ticks.push(BacktestTick {
             decision_at,
             model_input,
             outcomes,
             market_meta,
+            execution: execution_snapshots,
         });
     }
     if cancel.is_cancelled() {
         return Ok(None);
     }
     Ok(Some(ticks))
+}
+
+fn frozen_execution_snapshots<'a>(
+    examples: &'a [TrainingExample],
+    source: &FrozenSourceSlice,
+    max_slippage_bps: Bps,
+) -> QuantResult<HashMap<(DateTime<Utc>, &'a str), BacktestExecutionSnapshot>> {
+    let pages = replay_pages_for_examples(examples, source)?;
+    let page_by_market = pages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, page)| {
+            page.market_ids
+                .iter()
+                .map(move |market_id| (market_id.as_str(), index))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut snapshots = HashMap::new();
+    for example in examples {
+        let page_index = page_by_market
+            .get(example.market_id.as_str())
+            .copied()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: format!(
+                    "Source Slice replay page is missing market {}",
+                    example.market_id
+                ),
+            })?;
+        let page = &pages[page_index];
+        for token_id in iter::once(&example.selected_market.primary_token_id)
+            .chain(example.selected_market.secondary_token_id.as_ref())
+        {
+            let boundary = &example.decision_boundary;
+            let book = page.book_at_boundary(token_id, boundary)?.ok_or_else(|| {
+                ResearchError::DatasetBuild {
+                    detail: format!(
+                        "Source Slice has no full L2 for token {token_id} at {}",
+                        example.decision_at()
+                    ),
+                }
+            })?;
+            let market_info = page
+                .market_info_at(&example.market_id, token_id, boundary)
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "Source Slice has no PIT fee schedule for token {token_id} at {}",
+                        example.decision_at()
+                    ),
+                })?;
+            let fee_schedule = PitFeeSchedule::from_market_fee_schedule(
+                &market_info.fee_schedule(),
+            )
+            .map_err(|error| ResearchError::DatasetBuild {
+                detail: format!("invalid PIT fee schedule for token {token_id}: {error:?}"),
+            })?;
+            let best_ask = book
+                .asks
+                .first()
+                .map(|level| level.price_decimal())
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: format!(
+                        "Source Slice full L2 has no ask for token {token_id} at {}",
+                        example.decision_at()
+                    ),
+                })?;
+            let book_hash = CanonicalDigest::content_hash_json(&(
+                book.token_id.clone(),
+                book.timestamp_ms,
+                book.version,
+                book.sequence,
+                book.bids.as_ref(),
+                book.asks.as_ref(),
+            ))?;
+            snapshots.insert(
+                (example.decision_at(), token_id.as_str()),
+                BacktestExecutionSnapshot {
+                    market_id: example.market_id.clone(),
+                    token_id: token_id.clone(),
+                    asks: book.asks.to_vec(),
+                    fee_schedule,
+                    fill_at: example.decision_at(),
+                    limit_price: aggressive_buy_limit(best_ask, max_slippage_bps),
+                    book_hash,
+                },
+            );
+        }
+    }
+    Ok(snapshots)
+}
+
+fn replay_pages_for_examples(
+    examples: &[TrainingExample],
+    source: &FrozenSourceSlice,
+) -> QuantResult<Vec<ReplayPage>> {
+    let mut by_market = BTreeMap::<MarketId, Vec<TokenId>>::new();
+    for example in examples {
+        let tokens = by_market.entry(example.market_id.clone()).or_default();
+        for token_id in iter::once(&example.selected_market.primary_token_id)
+            .chain(example.selected_market.secondary_token_id.as_ref())
+        {
+            if !tokens.contains(token_id) {
+                tokens.push(token_id.clone());
+            }
+        }
+    }
+    let markets = by_market.into_iter().collect::<Vec<_>>();
+    markets
+        .chunks(MAX_REPLAY_PAGE_MARKETS)
+        .map(|chunk| {
+            let market_ids = chunk
+                .iter()
+                .map(|(market_id, _)| market_id.clone())
+                .collect::<Vec<_>>();
+            let mut token_ids = chunk
+                .iter()
+                .flat_map(|(_, tokens)| tokens.iter().cloned())
+                .collect::<Vec<_>>();
+            token_ids.sort();
+            token_ids.dedup();
+            source.replay_page(&ReplayPageRequest {
+                market_ids,
+                token_ids,
+                window_start: source.window_start,
+                window_end: source.window_end,
+                available_by: source.pit_cutoff,
+            })
+        })
+        .collect()
 }
 
 fn settlement_outcome(example: &TrainingExample, label: &LabelName) -> (bool, bool) {

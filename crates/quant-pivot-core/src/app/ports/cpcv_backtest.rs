@@ -19,7 +19,7 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     runtime_config::{DecimalString, RuntimeConfig},
     types::{
-        BacktestPathSetId, ContentHash, ModelInputContract, ModelRunId, ModelVersionId,
+        BacktestPathSetId, Bps, ContentHash, ModelInputContract, ModelRunId, ModelVersionId,
         RuntimeConfigVersionId, TrainingDatasetId,
     },
 };
@@ -584,6 +584,9 @@ fn cpcv_config_from_runtime(
             "research.validation.gates.dsr_significance",
             &validation.gates.dsr_significance.value,
         )?,
+        entry_max_slippage_bps: Bps::new(Decimal::from(
+            runtime.execution.entry_order_policy.max_slippage_bps,
+        )),
         // Validate the scorer without policy thresholds. Executable policy
         // fitting selects and validates the live thresholds later.
         sell_policy: SellSignalPolicy::research_baseline(),

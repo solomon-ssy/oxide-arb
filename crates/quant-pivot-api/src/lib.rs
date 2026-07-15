@@ -5,7 +5,6 @@
 //! - **CLOB REST** — order placement, cancellation, book snapshots
 //! - **CLOB WebSocket** — sharded real-time orderbook streaming
 //! - **Gamma API** — market/event discovery and metadata sync
-//! - **Fee Calculator** — Polymarket fee formula with rate caching
 //! - **Keystore** — EIP-712 signing and L2 HMAC credential management
 //!
 //! All types propagate errors through [`quant_pivot_error`]'s sub-error system.

@@ -35,7 +35,7 @@ use quant_pivot_models::{
     enums::{common::MarketCategory, quant::TrainingDatasetStatus},
     runtime_config::{FactorCrossSectionConfig, PortfolioConfig, sections::FactorsConfig},
     types::{
-        BacktestPathSetId, BacktestReportId, ContentHash, ModelInputContract, ModelRunId,
+        BacktestPathSetId, BacktestReportId, Bps, ContentHash, ModelInputContract, ModelRunId,
         ModelVersionId, PositionId, RuntimeConfigVersionId, TrainingDatasetId,
         TrainingSampleSource,
     },
@@ -76,11 +76,14 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 #[cfg(feature = "ml-classical")]
 use crate::service::model_training;
-use crate::service::{
-    backtest::frozen_ticks,
-    historical_replay::ReplayConfig,
-    model_training::weighted_seed_weights,
-    training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
+use crate::{
+    prefetch::source_slice::SourceSliceReader,
+    service::{
+        backtest::frozen_ticks,
+        historical_replay::ReplayConfig,
+        model_training::weighted_seed_weights,
+        training_dataset::{require_dataset_materialization, verify_frozen_dataset_artifact},
+    },
 };
 
 /// Coarse CPCV job progress budget (units of work for `ResearchJobProgress`).
@@ -130,6 +133,8 @@ pub struct CpcvBacktestConfig {
     pub pbo: PboInput,
     /// `MinTRL` target significance (`research.validation.gates.dsr_significance`).
     pub dsr_significance: Decimal,
+    /// Frozen aggressive-entry slippage cap shared with report composition.
+    pub entry_max_slippage_bps: Bps,
     /// Governed opportunistic-exit thresholds Sell-side lot replay fires on
     /// (Phase 11.5.1) — the exact same thresholds
     /// `OpportunisticSellSignalEvaluator` uses live, frozen from
@@ -375,8 +380,21 @@ impl CpcvBacktestService {
             feature_schema_hash: header_template.feature_schema_hash.clone(),
             input_contract: input.input_contract.clone(),
         };
+        let source_slice = dataset
+            .manifest_json
+            .as_ref()
+            .ok_or_else(|| ResearchError::DatasetBuild {
+                detail: "CPCV dataset has no immutable v5 manifest".to_owned(),
+            })?
+            .source_slice
+            .clone();
+        let frozen_source = SourceSliceReader::new(Arc::clone(&self.deps.artifact_store))
+            .read_ref(&source_slice)
+            .await?;
         let ticks = frozen_ticks(
             &parquet_examples,
+            &frozen_source,
+            self.config.entry_max_slippage_bps,
             &probe_runtime,
             &input.model_run_id,
             cancel,
@@ -1503,6 +1521,14 @@ fn evaluate_portfolio_groups(
         })
         .collect();
     ticks.sort_by_key(|tick| tick.decision_at);
+    // Distinguish an explicitly materialized no-trade/no-fill tick (zero
+    // strategy PnL) from a missing replay tick (methodology failure). This is
+    // calendar-time CPCV, so silently dropping flat periods would inflate the
+    // activity-conditioned Sharpe distribution.
+    let mut by_as_of = ticks
+        .iter()
+        .map(|tick| (tick.decision_at, TickAccumulator::default()))
+        .collect::<BTreeMap<_, _>>();
 
     let request = BacktestRequest {
         backtest_report_id: BacktestReportId::from_v7(),
@@ -1520,7 +1546,6 @@ fn evaluate_portfolio_groups(
             caps: template.caps.clone(),
         }))?;
 
-    let mut by_as_of: BTreeMap<DateTime<Utc>, TickAccumulator> = BTreeMap::new();
     for sample in &result.sample_outcomes {
         let entry = by_as_of.entry(sample.decision_at).or_default();
         entry.allocated += sample.allocated_usd.inner();
