@@ -7,7 +7,7 @@ use crate::{
     types::{
         AccountSnapshotId, EquitySnapshotId, MarketSelectionId, ModelRunId, ModelVersionId,
         PortfolioPlanId, RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary,
-        RuntimeConfigVersionId, Usd,
+        ResearchProfileRef, RuntimeConfigVersionId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -18,6 +18,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_report_id: RecommendationReportId,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
@@ -99,6 +101,8 @@ pub enum Relation {
     DataQualitySnapshot,
     #[sea_orm(has_many = "super::quant_recommendation::Entity")]
     Recommendation,
+    #[sea_orm(has_one = "super::quant_report_fact_delivery::Entity")]
+    FactDelivery,
 }
 
 impl Related<super::quant_model_version::Entity> for Entity {
@@ -146,6 +150,12 @@ impl Related<super::quant_report_data_quality_snapshot::Entity> for Entity {
 impl Related<super::quant_recommendation::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Recommendation.def()
+    }
+}
+
+impl Related<super::quant_report_fact_delivery::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::FactDelivery.def()
     }
 }
 

@@ -21,7 +21,8 @@ use quant_pivot_models::{
     types::{
         Bps, ContentHash, EntryConditionTemplate, EntryConditionTemplateV1, FeatureVectorId,
         MarketEventTemplate, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, Usd,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportFunnelReason,
+        ReportFunnelStage, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -118,6 +119,7 @@ struct EmptyComposeInput<'a> {
     context: &'a BuildContext,
     market_selection_id: MarketSelectionId,
     market_selection_hash: ContentHash,
+    selection: &'a MarketSelectionSnapshot,
     account: &'a AccountSnapshot,
     equity: &'a ReportEquitySnapshot,
     empty: EmptyReportContext,
@@ -130,6 +132,9 @@ struct EmptyComposeInput<'a> {
     /// provenance + rejected summary) instead of synthesizing a default plan.
     portfolio_plan: Option<NewPortfolioPlan>,
     planner_rejected: &'a [RejectedCandidate],
+    feature_rejected: &'a [crate::service::feature_pipeline::RejectedMarket],
+    model_decisions: &'a [crate::service::model_runner::ModelMarketDecision],
+    early_funnel_terminal: Option<(ReportFunnelStage, ReportFunnelReason)>,
 }
 
 struct PublishedComposeInput<'a> {
@@ -200,6 +205,11 @@ impl DefaultReportBuilder {
         {
             return Ok(report);
         }
+        if let Some(report) = self.compose_if_trade_policy_unavailable(
+            &request, &context, &selection, &account, &equity,
+        )? {
+            return Ok(report);
+        }
 
         let features = self
             .build_features(&context, &selection, decision_snapshot.as_ref())
@@ -233,6 +243,7 @@ impl DefaultReportBuilder {
                 context: &context,
                 market_selection_id: selection.market_selection_id.clone(),
                 market_selection_hash: selection.selector_hash.clone(),
+                selection: &selection,
                 account: &account,
                 equity: &equity,
                 empty: EmptyReportContext {
@@ -254,6 +265,9 @@ impl DefaultReportBuilder {
                 data_quality_snapshot: artifacts.data_quality_snapshot,
                 portfolio_plan: Some(plan.plan_row),
                 planner_rejected: &plan.rejected,
+                feature_rejected: &features.rejected,
+                model_decisions: &model_outcome.decisions,
+                early_funnel_terminal: None,
             });
         }
 
@@ -324,6 +338,7 @@ impl DefaultReportBuilder {
             context,
             market_selection_id: selection.market_selection_id.clone(),
             market_selection_hash: selection.selector_hash.clone(),
+            selection,
             account,
             equity,
             empty: EmptyReportContext {
@@ -342,6 +357,12 @@ impl DefaultReportBuilder {
             ),
             portfolio_plan: None,
             planner_rejected: &[],
+            feature_rejected: &[],
+            model_decisions: &[],
+            early_funnel_terminal: Some((
+                ReportFunnelStage::FeatureReady,
+                ReportFunnelReason::SystemDegraded,
+            )),
         })
         .map(Some)
     }
@@ -362,6 +383,7 @@ impl DefaultReportBuilder {
             context,
             market_selection_id: selection.market_selection_id.clone(),
             market_selection_hash: selection.selector_hash.clone(),
+            selection,
             account,
             equity,
             empty: EmptyReportContext {
@@ -383,6 +405,61 @@ impl DefaultReportBuilder {
             ),
             portfolio_plan: None,
             planner_rejected: &[],
+            feature_rejected: &[],
+            model_decisions: &[],
+            early_funnel_terminal: None,
+        })
+        .map(Some)
+    }
+
+    fn compose_if_trade_policy_unavailable(
+        &self,
+        request: &BuildReportRequest,
+        context: &BuildContext,
+        selection: &MarketSelectionSnapshot,
+        account: &AccountSnapshot,
+        equity: &ReportEquitySnapshot,
+    ) -> QuantResult<Option<ComposedReport>> {
+        if context.trade_policy.is_some() {
+            return Ok(None);
+        }
+        let blocked_count = count_u32(
+            selection.included.len(),
+            "report.trade_policy_blocked_count",
+        )?;
+        self.compose_empty(EmptyComposeInput {
+            request,
+            context,
+            market_selection_id: selection.market_selection_id.clone(),
+            market_selection_hash: selection.selector_hash.clone(),
+            selection,
+            account,
+            equity,
+            empty: EmptyReportContext {
+                reason: EmptyReportReason::TradePolicyUnavailable,
+                candidate_count: blocked_count,
+                rejected_count: blocked_count,
+                warnings: vec![
+                    "active model has no Published, hash-consistent trade policy binding"
+                        .to_owned(),
+                ],
+            },
+            model_run_id: None,
+            market_selection_count: market_selection_count(&selection.included)?,
+            captures: HashMap::new(),
+            feature_vector_by_market: HashMap::new(),
+            data_quality_snapshot: empty_data_quality_snapshot(
+                context,
+                context.boundary.decision_at(),
+            ),
+            portfolio_plan: None,
+            planner_rejected: &[],
+            feature_rejected: &[],
+            model_decisions: &[],
+            early_funnel_terminal: Some((
+                ReportFunnelStage::PolicyReady,
+                ReportFunnelReason::TradePolicyUnavailable,
+            )),
         })
         .map(Some)
     }
@@ -399,6 +476,7 @@ impl DefaultReportBuilder {
             context: stage.context,
             market_selection_id: stage.selection.market_selection_id.clone(),
             market_selection_hash: stage.selection.selector_hash.clone(),
+            selection: stage.selection,
             account: stage.account,
             equity: stage.equity,
             empty: EmptyReportContext {
@@ -417,6 +495,9 @@ impl DefaultReportBuilder {
             data_quality_snapshot: stage.features.data_quality_snapshot.clone(),
             portfolio_plan: None,
             planner_rejected: &[],
+            feature_rejected: &stage.features.rejected,
+            model_decisions: &[],
+            early_funnel_terminal: None,
         })
         .map(Some)
     }
@@ -435,6 +516,7 @@ impl DefaultReportBuilder {
             context: stage.context,
             market_selection_id: stage.selection.market_selection_id.clone(),
             market_selection_hash: stage.selection.selector_hash.clone(),
+            selection: stage.selection,
             account: stage.account,
             equity: stage.equity,
             empty: EmptyReportContext {
@@ -450,6 +532,9 @@ impl DefaultReportBuilder {
             data_quality_snapshot: artifacts.data_quality_snapshot,
             portfolio_plan: None,
             planner_rejected: &[],
+            feature_rejected: &stage.features.rejected,
+            model_decisions: &model_outcome.decisions,
+            early_funnel_terminal: None,
         })
         .map(Some)
     }
@@ -578,6 +663,10 @@ impl DefaultReportBuilder {
             .candidate_provider
             .candidates(&context.boundary, &context.config.domain)
             .await?;
+        enforce_candidate_ceiling(
+            batch.candidates.len(),
+            context.config.reports.hard_candidate_ceiling,
+        )?;
         let selection = self
             .deps
             .market_selector
@@ -869,14 +958,19 @@ impl DefaultReportBuilder {
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
             model_version_id: input.context.active.model_version_id.clone(),
+            profile_ref: input.context.active.version.profile_ref.clone(),
             market_selection_id: input.selection.market_selection_id.clone(),
             market_selection_hash: input.selection.selector_hash.clone(),
+            selection: input.selection,
             account: input.account,
             account_snapshot: input.equity.account_snapshot.clone(),
             equity_snapshot: input.equity.equity_snapshot.clone(),
             portfolio_plan: plan_row,
             planned: &planned,
             planner_rejected: &rejected,
+            feature_rejected: &input.features.rejected,
+            model_decisions: &input.model_outcome.decisions,
+            early_funnel_terminal: None,
             captures: input.features.captures.clone(),
             feature_vector_by_market: feature_vector_by_market(input.features),
             data_quality_snapshot: input.features.data_quality_snapshot.clone(),
@@ -946,14 +1040,19 @@ impl DefaultReportBuilder {
             runtime_config: &input.context.config,
             runtime_mode: self.deps.runtime_mode.current(),
             model_version_id: input.context.active.model_version_id.clone(),
+            profile_ref: input.context.active.version.profile_ref.clone(),
             market_selection_id: input.market_selection_id,
             market_selection_hash: input.market_selection_hash,
+            selection: input.selection,
             account: input.account,
             account_snapshot: input.equity.account_snapshot.clone(),
             equity_snapshot: input.equity.equity_snapshot.clone(),
             portfolio_plan,
             planned: &[],
             planner_rejected: input.planner_rejected,
+            feature_rejected: input.feature_rejected,
+            model_decisions: input.model_decisions,
+            early_funnel_terminal: input.early_funnel_terminal,
             captures: input.captures,
             feature_vector_by_market: input.feature_vector_by_market,
             data_quality_snapshot: input.data_quality_snapshot,
@@ -1129,6 +1228,18 @@ fn market_selection_count(selected: &[SelectedMarket]) -> QuantResult<u32> {
     count_u32(selected.len(), "report.market_selection_count")
 }
 
+fn enforce_candidate_ceiling(actual: usize, configured_ceiling: u32) -> QuantResult<()> {
+    let ceiling =
+        usize::try_from(configured_ceiling).map_err(|error| ReportError::NumericOverflow {
+            field: "reports.hard_candidate_ceiling",
+            detail: error.to_string(),
+        })?;
+    if actual > ceiling {
+        return Err(ReportError::ResourceCapacityExceeded { actual, ceiling }.into());
+    }
+    Ok(())
+}
+
 fn count_u32(count: usize, field: &'static str) -> QuantResult<u32> {
     u32::try_from(count)
         .map_err(|error| ReportError::NumericOverflow {
@@ -1260,13 +1371,14 @@ fn empty_reason_from_planner_rejections(
 
 #[cfg(test)]
 mod tests {
+    use quant_pivot_error::{QuantError, report::ReportError};
     use quant_pivot_models::{
         enums::quant::{EmptyReportReason, OptimizerSolverStatus, RejectionReason},
         types::{MarketId, SignalCandidateId},
     };
     use quant_pivot_research::portfolio::RejectedCandidate;
 
-    use super::empty_reason_from_planner_rejections;
+    use super::{empty_reason_from_planner_rejections, enforce_candidate_ceiling};
 
     fn rejected(reason: RejectionReason) -> RejectedCandidate {
         RejectedCandidate {
@@ -1326,5 +1438,17 @@ mod tests {
             ),
             EmptyReportReason::SystemDegraded
         );
+    }
+
+    #[test]
+    fn catalog_capacity_ceiling_fails_the_report_instead_of_truncating() {
+        assert!(enforce_candidate_ceiling(100_000, 100_000).is_ok());
+        assert!(matches!(
+            enforce_candidate_ceiling(100_001, 100_000),
+            Err(QuantError::Report(ReportError::ResourceCapacityExceeded {
+                actual: 100_001,
+                ceiling: 100_000,
+            }))
+        ));
     }
 }

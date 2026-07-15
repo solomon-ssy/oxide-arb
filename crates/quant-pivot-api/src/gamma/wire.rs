@@ -222,7 +222,7 @@ impl WireMarket {
     }
 }
 
-/// Fee schedule block on a Gamma market.
+/// Provider-only Gamma fee payload retained for source audit; never canonical.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireFeeSchedule {

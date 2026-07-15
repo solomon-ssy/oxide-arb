@@ -4,6 +4,11 @@ expression: empty_report()
 ---
 {
   "recommendation_report_id": "75e4373b-661a-59d3-94a9-3739d1217a10",
+  "profile_ref": {
+    "id": "weather_forecast_24h",
+    "version": 1,
+    "content_hash": "blake3:83126ef2768a070066cd8c022d6902f9bfab0c69c0316402531237bb95b2916d"
+  },
   "report_kind": "top_n",
   "trigger_kind": "scheduled",
   "trigger_key": "scheduled:daily-topn:2023-11-14T22:13:20Z",
@@ -56,6 +61,7 @@ expression: empty_report()
       "no candidates passed score floor"
     ]
   },
+  "fact_delivery": null,
   "published_at": "2023-11-14T22:13:20Z",
   "revoked_at": null,
   "expired_at": null,

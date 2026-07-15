@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    clickhouse::QuantRecommendationEventRow,
+    clickhouse::{QuantRecommendationEventRow, ReportMarketFunnelRow},
     domain::NewReportTransaction,
     enums::quant::{
         EmptyReportReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind,
@@ -88,6 +88,7 @@ pub struct ReportNotificationPayload {
 pub struct ComposedReport {
     pub transaction: NewReportTransaction,
     pub ch_rows: Vec<QuantRecommendationEventRow>,
+    pub funnel_rows: Vec<ReportMarketFunnelRow>,
     pub notification: ReportNotificationPayload,
     pub delivery_policy: ReportDeliveryPolicy,
     pub notify_operators: bool,

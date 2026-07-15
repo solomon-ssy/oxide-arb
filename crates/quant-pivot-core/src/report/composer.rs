@@ -35,29 +35,35 @@ use quant_pivot_models::{
         EntryConditionV1, EntryOrderPolicy, EntryOrderTemplate, EntryPlan, EventId, EvidenceRefs,
         EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorCondition,
         FactorDefinitionId, FeatureVectorId, MarketEventCondition, MarketEventTemplate, MarketId,
-        MarketSelectionId, ModelRunId, ModelVersionId, OperationLogId,
+        MarketSelectionId, ModelRunId, ModelVersionId, OperationLogId, PassivePlacement,
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, PriceCondition, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, ScaleOutTarget, Shares, SizingPlan,
-        ThesisInvalidationPolicy, TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance,
-        TrailingStopPolicy, Usd, WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
+        RecommendationTradePlan, RejectionReasonCount, ReportDataQualitySnapshotId,
+        ReportFunnelReason, ReportFunnelStage, ReportSummary, ResearchProfileRef, RiskEnvelope,
+        RuntimeConfigVersionId, ScaleOutTarget, Shares, SizingPlan, ThesisInvalidationPolicy,
+        TradePlanBlocker, TradePolicyCohort, TradePolicyCohortProvenance, TrailingStopPolicy, Usd,
+        WeatherDailyHighEnteredBand, WeatherDailyHighExceededBandUpper,
         WeatherObservationDayClosedOutsideBand,
     },
 };
 use quant_pivot_research::{
-    execution_semantics::{BookWalkFill, LiquidityRole, PitFeeSchedule, walk_buy_exact_usd},
-    features::MarketDecisionCapture,
+    execution_semantics::{BookWalkFill, LiquidityRole, PitFeeSchedule, walk_buy_cash_budget},
+    features::{MarketDecisionCapture, ResolvedBook},
     model::SignalCandidate,
     portfolio::{AccountSnapshot, PlannedRecommendation, RejectedCandidate},
+    selection::MarketSelectionSnapshot,
 };
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
-use super::types::{
-    ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
-    ReportTrigger,
+use super::{
+    funnel::{ReportFunnelInput, build_report_market_funnel},
+    types::{
+        ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
+        ReportTrigger,
+    },
 };
+use crate::service::{feature_pipeline::RejectedMarket, model_runner::ModelMarketDecision};
 
 /// Inputs required to compose one report artifact.
 pub struct ComposeReportInput<'a> {
@@ -71,14 +77,19 @@ pub struct ComposeReportInput<'a> {
     pub runtime_config: &'a RuntimeConfig,
     pub runtime_mode: QuantRuntimeMode,
     pub model_version_id: ModelVersionId,
+    pub profile_ref: ResearchProfileRef,
     pub market_selection_id: MarketSelectionId,
     pub market_selection_hash: ContentHash,
+    pub selection: &'a MarketSelectionSnapshot,
     pub account: &'a AccountSnapshot,
     pub account_snapshot: NewAccountSnapshot,
     pub equity_snapshot: NewEquitySnapshot,
     pub portfolio_plan: NewPortfolioPlan,
     pub planned: &'a [PlannedRecommendation],
     pub planner_rejected: &'a [RejectedCandidate],
+    pub feature_rejected: &'a [RejectedMarket],
+    pub model_decisions: &'a [ModelMarketDecision],
+    pub early_funnel_terminal: Option<(ReportFunnelStage, ReportFunnelReason)>,
     pub captures: HashMap<MarketId, MarketDecisionCapture>,
     pub feature_vector_by_market: HashMap<MarketId, FeatureVectorId>,
     pub data_quality_snapshot: NewReportDataQualitySnapshot,
@@ -181,6 +192,21 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         )?;
         let operation_log = operation_log(&report_id, &input, status, &report)?;
         let ch_rows = recommendation_events(&report_id, &recommendations, input.published_at)?;
+        let funnel_rows = build_report_market_funnel(ReportFunnelInput {
+            report_id: &report_id,
+            profile_ref: &input.profile_ref,
+            runtime_config_version_id: &input.runtime_config_version_id,
+            model_version_id: &input.model_version_id,
+            model_run_id: input.model_run_id.as_ref(),
+            selection: input.selection,
+            feature_rejected: input.feature_rejected,
+            feature_vector_by_market: &input.feature_vector_by_market,
+            model_decisions: input.model_decisions,
+            planner_rejected: input.planner_rejected,
+            recommendations: &recommendations,
+            early_terminal: input.early_funnel_terminal,
+            event_time: input.published_at,
+        })?;
 
         Ok(ComposedReport {
             transaction: NewReportTransaction {
@@ -194,9 +220,11 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 entry_condition_artifacts,
                 entry_condition_instances,
                 sampled_feature_parity: None,
+                fact_delivery: None,
                 operation_log,
             },
             ch_rows,
+            funnel_rows,
             notification,
             delivery_policy: input.runtime_config.reports.delivery_policy,
             notify_operators: input.runtime_config.notification.policies.report_published,
@@ -215,6 +243,7 @@ fn build_report_header(
     let fallback_horizon_secs = input.runtime_config.reports.fallback_horizon_secs;
     Ok(NewRecommendationReport {
         recommendation_report_id: report_id.clone(),
+        profile_ref: input.profile_ref.clone(),
         report_kind: ReportKind::TopN,
         trigger_kind: input.trigger.kind(),
         trigger_key: input.trigger_key.clone(),
@@ -485,7 +514,7 @@ struct ResolvedRecommendationPolicy {
     cohort: TradePolicyCohort,
     executable_entry_price: Price,
     worst_ask_price: Price,
-    notional_tier: Usd,
+    cash_budget_tier: Usd,
     entry_shares: Shares,
 }
 
@@ -498,14 +527,14 @@ fn resolve_recommendation_policy(
     let Some(artifact) = input.trade_policy else {
         return Err(vec![TradePlanBlocker::ModelPolicyBindingMissing]);
     };
-    let notional_tier = select_validated_tier(
+    let cash_budget_tier = select_validated_tier(
         &artifact.payload_json.cohorts,
         capture.identity.category,
         horizon_secs,
         planned.sizing.suggested_usd,
         planned.sizing.min_usd,
     )?;
-    let fill = executable_entry_fill(capture, notional_tier, input.decision_at)?;
+    let fill = executable_entry_fill(capture, cash_budget_tier, input.decision_at)?;
     let (Some(entry_price), Some(worst_ask_price)) = (fill.vwap, fill.worst_price) else {
         return Err(vec![TradePlanBlocker::LiquidityInsufficient]);
     };
@@ -517,7 +546,7 @@ fn resolve_recommendation_policy(
         .filter(|(_, cohort)| {
             cohort.key.category == capture.identity.category
                 && cohort.key.horizon_secs == horizon_secs
-                && cohort.key.notional_tier == notional_tier
+                && cohort.key.cash_budget_tier == cash_budget_tier
                 && entry_price >= cohort.key.entry_price_min
                 && (entry_price < cohort.key.entry_price_max
                     || (cohort.key.entry_price_max == Price::ONE && entry_price == Price::ONE))
@@ -536,14 +565,14 @@ fn resolve_recommendation_policy(
             .fit_contract
             .quality_gate
             .min_common_candidate_support
-        || cohort.lower_confidence_utility_bps
-            < Some(
-                artifact
+        || cohort.lower_confidence_utility_bps.is_none_or(|value| {
+            value
+                <= artifact
                     .payload_json
                     .fit_contract
                     .quality_gate
-                    .min_lower_confidence_utility_bps,
-            )
+                    .min_lower_confidence_utility_bps
+        })
     {
         return Err(vec![TradePlanBlocker::CohortCoverageInsufficient]);
     }
@@ -559,7 +588,7 @@ fn resolve_recommendation_policy(
         cohort: (*cohort).clone(),
         executable_entry_price: entry_price,
         worst_ask_price,
-        notional_tier,
+        cash_budget_tier,
         entry_shares: fill.filled_shares,
     })
 }
@@ -576,16 +605,16 @@ fn select_validated_tier(
         .filter(|cohort| {
             cohort.key.category == category
                 && cohort.key.horizon_secs == horizon_secs
-                && cohort.key.notional_tier <= risk_budget
-                && cohort.key.notional_tier >= minimum_useful
+                && cohort.key.cash_budget_tier <= risk_budget
+                && cohort.key.cash_budget_tier >= minimum_useful
         })
-        .map(|cohort| cohort.key.notional_tier)
+        .map(|cohort| cohort.key.cash_budget_tier)
         .collect::<Vec<_>>();
     tiers.sort_unstable();
     tiers.dedup();
     tiers
         .pop()
-        .ok_or_else(|| vec![TradePlanBlocker::NotionalTierUnavailable])
+        .ok_or_else(|| vec![TradePlanBlocker::CashBudgetTierUnavailable])
 }
 
 fn executable_entry_fill(
@@ -613,8 +642,9 @@ fn executable_entry_fill(
         taker_only: fee.taker_only,
         builder_maker_fee_bps: Bps::ZERO,
         builder_taker_fee_bps: Bps::ZERO,
+        builder_attributed: false,
     };
-    let fill = walk_buy_exact_usd(
+    let fill = walk_buy_cash_budget(
         &capture.book.asks,
         target,
         Price::ONE,
@@ -711,7 +741,7 @@ fn policy_entry_plan(context: EntryPlanMaterialization<'_>) -> QuantResult<Mater
         max_slippage_bps: policy.cohort.max_slippage_bps,
         valid_from: published_at,
         valid_until,
-        min_depth_usd: policy.cohort.key.notional_tier,
+        min_depth_usd: policy.cohort.key.cash_budget_tier,
         max_book_age_ms: policy.cohort.max_book_age_ms,
         cancel_if_not_triggered: true,
         entry_reason: format!(
@@ -724,9 +754,9 @@ fn policy_entry_plan(context: EntryPlanMaterialization<'_>) -> QuantResult<Mater
 }
 
 fn passive_limit_price(
-    book: &quant_pivot_research::features::ResolvedBook,
+    book: &ResolvedBook,
     tick_size: TickSize,
-    placement: quant_pivot_models::types::PassivePlacement,
+    placement: PassivePlacement,
 ) -> QuantResult<Price> {
     let best_bid = book
         .bids
@@ -745,8 +775,8 @@ fn passive_limit_price(
             detail: "passive entry requires a best ask".to_owned(),
         })?;
     let price = match placement {
-        quant_pivot_models::types::PassivePlacement::JoinBestBid => best_bid,
-        quant_pivot_models::types::PassivePlacement::ImproveBestBidByTicks { ticks } => {
+        PassivePlacement::JoinBestBid => best_bid,
+        PassivePlacement::ImproveBestBidByTicks { ticks } => {
             let improved = best_bid.inner() + tick_size.as_decimal() * Decimal::from(ticks);
             Price::new(improved.min(best_ask.inner() - tick_size.as_decimal()))
         }
@@ -1363,6 +1393,7 @@ fn build_new_recommendation(
     let condition = condition_instance_projection(&trade_plan, input.published_at);
     let recommendation = NewRecommendation {
         recommendation_id: recommendation_id.clone(),
+        profile_ref: input.profile_ref.clone(),
         recommendation_report_id: report_id.clone(),
         rank: i32::try_from(planned.rank).map_err(|error| ReportError::NumericOverflow {
             field: "recommendation.rank",
@@ -1479,15 +1510,15 @@ fn build_recommendation_trade_plan(
 }
 
 fn tier_aligned_sizing(sizing: &SizingPlan, policy: &ResolvedRecommendationPolicy) -> SizingPlan {
-    let ratio = policy.notional_tier.inner() / sizing.suggested_usd.inner();
+    let ratio = policy.cash_budget_tier.inner() / sizing.suggested_usd.inner();
     let replace_allocation = |exposure: Usd| {
         Usd::new(
-            (exposure.inner() - sizing.suggested_usd.inner() + policy.notional_tier.inner())
+            (exposure.inner() - sizing.suggested_usd.inner() + policy.cash_budget_tier.inner())
                 .max(Decimal::ZERO),
         )
     };
     let mut aligned = sizing.clone();
-    aligned.suggested_usd = policy.notional_tier;
+    aligned.suggested_usd = policy.cash_budget_tier;
     aligned.suggested_shares = policy.entry_shares;
     aligned.portfolio_weight_pct *= ratio;
     aligned.market_exposure_after_usd = replace_allocation(sizing.market_exposure_after_usd);
@@ -1495,7 +1526,7 @@ fn tier_aligned_sizing(sizing: &SizingPlan, policy: &ResolvedRecommendationPolic
     aligned.category_exposure_after_usd = replace_allocation(sizing.category_exposure_after_usd);
     aligned.sizing_reason = format!(
         "{}; rounded down to validated policy tier {}",
-        sizing.sizing_reason, policy.notional_tier
+        sizing.sizing_reason, policy.cash_budget_tier
     );
     aligned
 }
@@ -2104,7 +2135,7 @@ mod tests {
     use quant_pivot_models::{
         domain::quant::{NewAccountSnapshot, NewEquitySnapshot, NewReportDataQualitySnapshot},
         enums::{
-            common::TickSize,
+            common::{MarketCategory, TickSize},
             quant::{
                 AccountSource, BindingConstraint, EmptyReportReason, IneligibilityReason,
                 OutcomeSide, QuantRuntimeMode, SizingModelKind,
@@ -2112,16 +2143,19 @@ mod tests {
         },
         runtime_config::RuntimeConfig,
         types::{
-            AccountPositions, AccountSnapshotId, Bps, ContentHash, EquitySnapshotId, MarketId,
-            MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
+            AccountPositions, AccountSnapshotId, Bps, ContentHash, EquitySnapshotId, EventId,
+            MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
             ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
-            RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
+            RuntimeConfigVersionId, SelectionExclusionSummary, Shares, SignalCandidateId,
+            SizingPlan, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
         model::{ModelExplanation, SignalCandidate},
         portfolio::{AccountSnapshot, PlannedRecommendation},
+        selection::{MarketSelectionSnapshot, SelectedMarket},
     };
+    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
@@ -2442,6 +2476,26 @@ mod tests {
             Vec::new(),
         );
         let market_selection_id = MarketSelectionId::from_v7();
+        let market_selection_hash =
+            ContentHash::parse(format!("blake3:{}", "a".repeat(64))).expect("selection hash");
+        let selection = MarketSelectionSnapshot {
+            market_selection_id: market_selection_id.clone(),
+            decision_at: as_of,
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            selector_hash: market_selection_hash.clone(),
+            included: vec![SelectedMarket {
+                market_id: MarketId::new("market-1"),
+                event_id: EventId::new("event-1"),
+                category: MarketCategory::Politics,
+                primary_token_id: TokenId::new("token-1"),
+                secondary_token_id: None,
+                liquidity_usd: None,
+                volume_24h_usd: None,
+                source_refs: Vec::new(),
+            }],
+            excluded: Vec::new(),
+            exclusion_summary: SelectionExclusionSummary::default(),
+        };
         let model_run_id = ModelRunId::from_v7();
         let planned = vec![planned_recommendation(candidate())];
         let portfolio_plan = empty_plan_for_report(
@@ -2500,15 +2554,19 @@ mod tests {
             runtime_config: &config,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             model_version_id: ModelVersionId::from_v7(),
+            profile_ref: fixture_profile_ref(),
             market_selection_id,
-            market_selection_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
-                .expect("selection hash"),
+            market_selection_hash,
+            selection: &selection,
             account: &account,
             account_snapshot,
             equity_snapshot,
             portfolio_plan,
             planned: &planned,
             planner_rejected: &[],
+            feature_rejected: &[],
+            model_decisions: &[],
+            early_funnel_terminal: None,
             captures: HashMap::new(),
             feature_vector_by_market: HashMap::new(),
             data_quality_snapshot,

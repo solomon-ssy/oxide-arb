@@ -19,15 +19,36 @@ use validator::Validate;
 
 use crate::{
     domain::{
-        ResearchJobInfo, RunBacktestRequest, RunCpcvBacktestRequest, RunFullFeatureParityRequest,
-        TrainModelRequest, pagination::PageRequest,
+        FitTradePolicyRequest, ResearchJobInfo, RunBacktestRequest, RunCpcvBacktestRequest,
+        RunFullFeatureParityRequest, TrainModelRequest, pagination::PageRequest,
     },
     enums::quant::{ResearchJobKind, ResearchJobStatus},
     types::{
         DatasetCoverage, FeatureParityRunId, ModelSpecId, ModelVersionId, ResearchJobError,
-        ResearchJobId, ResearchJobProgress, RuntimeConfigVersionId,
+        ResearchJobId, ResearchJobProgress, RuntimeConfigVersionId, TradePolicyArtifactId,
+        TradePolicyValidationRunId, TrainingDatasetId,
     },
 };
+
+/// Server-owned durable envelope for one trade-policy fit.
+///
+/// The Dataset id is assigned once at enqueue and survives lease recovery and
+/// explicit job retry. It is not accepted from the HTTP fit request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradePolicyFitJobParams {
+    pub training_dataset_id: TrainingDatasetId,
+    #[serde(flatten)]
+    pub request: FitTradePolicyRequest,
+}
+
+/// Frozen governance identity for an independently executed policy validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradePolicyValidationJobParams {
+    pub validation_run_id: TradePolicyValidationRunId,
+    pub artifact_id: TradePolicyArtifactId,
+    pub actor_id: Uuid,
+    pub reason: String,
+}
 
 /// Frozen params for a deterministic feature-parity replay job.
 #[derive(Debug, Clone, Serialize, Deserialize)]

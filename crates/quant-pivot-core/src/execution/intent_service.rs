@@ -31,7 +31,7 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             ApprovalStatus, FillRequirement, OrderIntentStatus, QuantRuntimeMode,
-            RecommendationReportStatus,
+            RecommendationReportStatus, ReportFactDeliveryStatus,
         },
         rbac::ResourceType,
     },
@@ -39,7 +39,7 @@ use quant_pivot_models::{
         CapitalAllocationId, ContentHash, EntryConditionInstanceId, EntryOrderPolicy,
         EntryOrderSpec, ExitPolicySpec, ModelVersionId, OperationLogId, OrderAmount, OrderIntentId,
         Price, RecommendationId, RecommendationReportId, RecommendationTradePlan,
-        TradePolicyArtifactId, Usd,
+        ResearchProfileRef, TradePolicyArtifactId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -183,7 +183,7 @@ impl CoreOrderIntentService {
     async fn ensure_trade_policy_still_executable(
         &self,
         recommendation: &RecommendationInfo,
-    ) -> QuantResult<()> {
+    ) -> QuantResult<ResearchProfileRef> {
         let version = self
             .model_registry
             .find_model_version_by_id(&recommendation.evidence_refs.model_version_id)
@@ -251,7 +251,7 @@ impl CoreOrderIntentService {
             .into());
         }
         let allowed_tier = canary
-            .allowed_tiers_usd
+            .allowed_cash_budget_tiers_usd
             .iter()
             .map(|tier| tier.value.parse::<Decimal>())
             .collect::<Result<Vec<_>, _>>()
@@ -267,18 +267,18 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-        let max_total_usd_per_report = Usd::new(
+        let max_total_cash_per_report = Usd::new(
             canary
-                .max_total_usd_per_report
+                .max_total_cash_per_report
                 .value
                 .parse::<Decimal>()
                 .map_err(|error| {
-                    malformed_canary(format!("max_total_usd_per_report is invalid: {error}"))
+                    malformed_canary(format!("max_total_cash_per_report is invalid: {error}"))
                 })?,
         );
-        if canary.max_open_intents == 0 || !max_total_usd_per_report.is_positive() {
+        if canary.max_open_intents == 0 || !max_total_cash_per_report.is_positive() {
             return Err(malformed_canary(
-                "open-intent and report-notional limits must be positive",
+                "open-intent and report cash-budget limits must be positive",
             ));
         }
         Ok(SemiAutoCanaryAuthorization {
@@ -288,7 +288,7 @@ impl CoreOrderIntentService {
             limits: IntentCreationLimits {
                 recommendation_report_id: report.recommendation_report_id.clone(),
                 max_open_intents: canary.max_open_intents,
-                max_total_usd_per_report,
+                max_total_cash_per_report,
             },
         })
     }
@@ -305,17 +305,22 @@ impl CoreOrderIntentService {
             .await?;
         let rec = self.load_recommendation(&command.recommendation_id).await?;
         let report = self.load_report(&rec.recommendation_report_id).await?;
+        self.ensure_report_facts_verified(&rec.recommendation_report_id)
+            .await?;
         self.ensure_create_allowed(&rec, &report, now).await?;
 
         let mode = self.runtime_mode.current();
-        if matches!(
+        let profile_ref = if matches!(
             mode,
             QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution
         ) {
-            self.ensure_trade_policy_still_executable(&rec).await?;
+            let profile_ref = self.ensure_trade_policy_still_executable(&rec).await?;
             self.ensure_return_model_still_calibrated(&rec.evidence_refs.model_version_id)
                 .await?;
-        }
+            profile_ref
+        } else {
+            self.ensure_trade_policy_still_executable(&rec).await?
+        };
         let canary = if mode == QuantRuntimeMode::SemiAuto {
             Some(self.require_semi_auto_canary(&rec, &report, now)?)
         } else {
@@ -337,15 +342,16 @@ impl CoreOrderIntentService {
             .ok_or_else(|| ExecutionError::IntentDenied {
                 reason: "recommendation has no entry-condition instance".to_owned(),
             })?;
-        let (new_intent, allocation) = compose_create_rows(
-            &rec,
-            &report,
+        let (new_intent, allocation) = compose_create_rows(ComposeCreateRowsInput {
+            recommendation: &rec,
+            report: &report,
+            profile_ref,
             mode,
             resolved,
             entry,
             exit,
-            condition.condition_instance_id,
-        )?;
+            condition_instance_id: condition.condition_instance_id,
+        })?;
 
         let intent = self
             .intents
@@ -396,6 +402,12 @@ impl CoreOrderIntentService {
             }
             .into());
         }
+        if rec.profile_ref != report.profile_ref {
+            return Err(ExecutionError::IntentDenied {
+                reason: "recommendation research profile does not match its report".to_owned(),
+            }
+            .into());
+        }
         if !self.kill_switch.allows_new_entry() {
             return Err(ExecutionError::KillSwitchBlocks {
                 state: self.kill_switch.current().as_str().to_owned(),
@@ -442,6 +454,8 @@ impl CoreOrderIntentService {
             let recommendation = self.load_recommendation(&intent.recommendation_id).await?;
             let report = self
                 .load_report(&recommendation.recommendation_report_id)
+                .await?;
+            self.ensure_report_facts_verified(&recommendation.recommendation_report_id)
                 .await?;
             self.ensure_trade_policy_still_executable(&recommendation)
                 .await?;
@@ -587,6 +601,20 @@ impl CoreOrderIntentService {
         })
     }
 
+    async fn ensure_report_facts_verified(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<()> {
+        let delivery = self.reports.find_fact_delivery(report_id).await?;
+        if delivery.as_ref().map(|row| row.status) != Some(ReportFactDeliveryStatus::Verified) {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!("report {report_id} facts are not verified"),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     async fn load_intent(&self, intent_id: &OrderIntentId) -> QuantResult<OrderIntentInfo> {
         self.intents.find_by_id(intent_id).await?.ok_or_else(|| {
             StorageError::NotFound {
@@ -685,15 +713,30 @@ struct ResolvedPolicy {
     expires_at: DateTime<Utc>,
 }
 
-fn compose_create_rows(
-    rec: &RecommendationInfo,
-    report: &RecommendationReportInfo,
+struct ComposeCreateRowsInput<'a> {
+    recommendation: &'a RecommendationInfo,
+    report: &'a RecommendationReportInfo,
+    profile_ref: ResearchProfileRef,
     mode: QuantRuntimeMode,
     resolved: ResolvedPolicy,
     entry: EntryOrderSpec,
     exit: ExitPolicySpec,
     condition_instance_id: EntryConditionInstanceId,
+}
+
+fn compose_create_rows(
+    input: ComposeCreateRowsInput<'_>,
 ) -> Result<(NewOrderIntent, NewCapitalAllocation), ExecutionError> {
+    let ComposeCreateRowsInput {
+        recommendation: rec,
+        report,
+        profile_ref,
+        mode,
+        resolved,
+        entry,
+        exit,
+        condition_instance_id,
+    } = input;
     let intent_id = OrderIntentId::from_v7();
     let (_, _, _, _, risk_envelope) =
         rec.trade_plan
@@ -708,6 +751,7 @@ fn compose_create_rows(
         runtime_mode: mode,
         runtime_config_version_id: report.runtime_config_version_id.clone(),
         model_version_id: report.model_version_id.clone(),
+        profile_ref,
         intent_kind: OrderIntentKind::Buy,
         status: resolved.status,
         approval_status: resolved.approval_status,
@@ -837,7 +881,7 @@ fn project_entry_order_spec(
             (
                 worst_price,
                 order_type,
-                OrderAmount::Usd(sizing.suggested_usd),
+                OrderAmount::CashBudget(sizing.suggested_usd),
                 false,
             )
         }
@@ -950,18 +994,18 @@ fn resolve_downscale(
     }
     let new_amount = match (frozen.amount, command.override_amount) {
         (current, None) => current,
-        (OrderAmount::Usd(current), Some(OrderAmount::Usd(value)))
+        (OrderAmount::CashBudget(current), Some(OrderAmount::CashBudget(value)))
             if value.is_positive() && value <= current =>
         {
-            OrderAmount::Usd(value)
+            OrderAmount::CashBudget(value)
         }
         (OrderAmount::Shares(current), Some(OrderAmount::Shares(value)))
             if value.is_positive() && value <= current =>
         {
             OrderAmount::Shares(value)
         }
-        (OrderAmount::Usd(_), Some(OrderAmount::Shares(_)))
-        | (OrderAmount::Shares(_), Some(OrderAmount::Usd(_))) => {
+        (OrderAmount::CashBudget(_), Some(OrderAmount::Shares(_)))
+        | (OrderAmount::Shares(_), Some(OrderAmount::CashBudget(_))) => {
             return Err(ExecutionError::IntentDenied {
                 reason: "approval amount unit must match the frozen order amount".to_owned(),
             });
@@ -1152,7 +1196,10 @@ mod tests {
         let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fok);
         assert!(!spec.post_only);
-        assert_eq!(spec.amount, OrderAmount::Usd(sizing(&rec).suggested_usd));
+        assert_eq!(
+            spec.amount,
+            OrderAmount::CashBudget(sizing(&rec).suggested_usd)
+        );
     }
 
     #[test]
@@ -1165,7 +1212,10 @@ mod tests {
         let spec = project_entry_order_spec(&rec, Utc::now()).expect("projection");
         assert_eq!(spec.order_type, OrderType::Fak);
         assert!(!spec.post_only);
-        assert_eq!(spec.amount, OrderAmount::Usd(sizing(&rec).suggested_usd));
+        assert_eq!(
+            spec.amount,
+            OrderAmount::CashBudget(sizing(&rec).suggested_usd)
+        );
     }
 
     #[test]
@@ -1243,11 +1293,11 @@ mod tests {
         let mut cmd = approve_command();
         cmd.override_price = Some(Price::new(dec!(0.55)));
         let mut frozen = frozen_entry();
-        frozen.amount = OrderAmount::Usd(Usd::new(dec!(60)));
+        frozen.amount = OrderAmount::CashBudget(Usd::new(dec!(60)));
         let (entry, allocation) = resolve_downscale(&cmd, &frozen).expect("tighten USD order");
         assert_eq!(
             entry.expect("override").amount,
-            OrderAmount::Usd(Usd::new(dec!(60)))
+            OrderAmount::CashBudget(Usd::new(dec!(60)))
         );
         assert_eq!(allocation, Some(Usd::new(dec!(60))));
     }
@@ -1266,7 +1316,7 @@ mod tests {
     #[test]
     fn downscale_rejects_amount_unit_mismatch() {
         let mut cmd = approve_command();
-        cmd.override_amount = Some(OrderAmount::Usd(Usd::new(dec!(10))));
+        cmd.override_amount = Some(OrderAmount::CashBudget(Usd::new(dec!(10))));
         assert!(resolve_downscale(&cmd, &frozen_entry()).is_err());
     }
 
@@ -1540,6 +1590,7 @@ mod tests {
                 model_input_contract_hash,
             },
         };
+        use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
 
         struct FakeRegistry {
             version: Option<ModelVersionInfo>,
@@ -1702,6 +1753,7 @@ mod tests {
         fn header(model_version_id: ModelVersionId) -> ModelArtifactHeader {
             ModelArtifactHeader {
                 model_version_id,
+                profile_ref: fixture_profile_ref(),
                 model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
                     .expect("hash"),
@@ -1763,6 +1815,7 @@ mod tests {
                 model_family: ModelFamily::WeightedFactor,
                 version: 1,
                 artifact_hash: digest,
+                profile_ref: fixture_profile_ref(),
                 training_dataset_id: None,
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,

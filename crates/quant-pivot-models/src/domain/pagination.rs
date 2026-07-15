@@ -121,7 +121,7 @@ impl PageRequest {
     /// Default page size when omitted by the caller.
     pub const DEFAULT_SIZE: u64 = 20;
     /// Hard upper bound on `size`, the fail-safe against unbounded queries.
-    pub const MAX_SIZE: u64 = 200;
+    pub const MAX_SIZE: u64 = 100;
 
     /// `serde` default for [`PageRequest::page`].
     const fn default_page() -> u64 {

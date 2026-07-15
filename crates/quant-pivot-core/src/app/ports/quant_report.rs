@@ -20,25 +20,30 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
         QuantFeatureEventRow, QuantModelInputEventRow, QuantServingEvidenceCompletionRow,
+        ReportMarketFunnelCountRow, ReportMarketFunnelRow,
     },
     domain::{
         AdHocReportCommand, AdHocReportEnqueued, DecisionBoundary, DecisionBoundaryEvidenceView,
         FeatureCellEvidenceView, FeatureVectorInfo, ModelInputEvidenceView, ModelRouteEvidenceView,
-        Paginated, QuantEvidenceView, QuantRecommendationView, QuantReportDiagnosticsView,
-        QuantReportListQuery, QuantReportPort, RecommendationInfo, RecommendationReportInfo,
-        RecommendationViewContext, ReportDataQualitySnapshotInfo, ReportDiagnosticsSubject,
-        ReportDiff, compute_report_diff,
+        PageWindow, Paginated, QuantEvidenceView, QuantRecommendationView,
+        QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery, QuantReportPort,
+        RecommendationInfo, RecommendationReportInfo, RecommendationViewContext,
+        ReportDataQualitySnapshotInfo, ReportDiagnosticsSubject, ReportDiff,
+        ReportFactDeliveryInfo, ReportFunnelMarketListQuery, ReportFunnelMarketView,
+        ReportFunnelStageView, compute_report_diff,
     },
     enums::quant::{EmptyReportReason, FeatureParityStage, RecommendationReportStatus, ReportKind},
     runtime_config::RuntimeConfig,
     types::{
-        FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId, RecommendationReportId,
+        ContentHash, FeatureVectorId, ModelRunId, OrderIntentId, RecommendationId,
+        RecommendationReportId, ReportFunnelReason, ReportFunnelStage, ResearchProfileRef,
         TokenDataQualityRecord,
     },
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    FeatureRepository, OrderIntentRepository, QuantFactReadRepository,
+    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    ServingEvidenceRepository,
 };
 
 use crate::{
@@ -58,6 +63,7 @@ pub struct CoreQuantReportPort {
     serving_evidence: Arc<dyn ServingEvidenceRepository>,
     feature_repo: Arc<dyn FeatureRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    quant_fact_read: Arc<dyn QuantFactReadRepository>,
 }
 
 /// Explicit dependency bundle for [`CoreQuantReportPort`].
@@ -73,6 +79,7 @@ pub struct CoreQuantReportPortDeps {
     pub serving_evidence: Arc<dyn ServingEvidenceRepository>,
     pub feature_repo: Arc<dyn FeatureRepository>,
     pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
+    pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
 }
 
 impl CoreQuantReportPort {
@@ -88,6 +95,7 @@ impl CoreQuantReportPort {
             serving_evidence: deps.serving_evidence,
             feature_repo: deps.feature_repo,
             runtime_config_repo: deps.runtime_config_repo,
+            quant_fact_read: deps.quant_fact_read,
         }
     }
 
@@ -334,6 +342,13 @@ impl QuantReportPort for CoreQuantReportPort {
         Ok(self.report_repo.find_by_id(report_id).await?)
     }
 
+    async fn find_report_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<ReportFactDeliveryInfo>> {
+        Ok(self.report_repo.find_fact_delivery(report_id).await?)
+    }
+
     async fn find_report_diagnostics(
         &self,
         report_id: &RecommendationReportId,
@@ -410,6 +425,52 @@ impl QuantReportPort for CoreQuantReportPort {
             &boundary,
             selection_count,
         )?))
+    }
+
+    async fn find_report_funnel(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<QuantReportFunnelView>> {
+        if self.report_repo.find_by_id(report_id).await?.is_none() {
+            return Ok(None);
+        }
+        let counts = self
+            .quant_fact_read
+            .report_market_funnel_counts(report_id)
+            .await?;
+        Ok(Some(funnel_summary(report_id.clone(), counts)?))
+    }
+
+    async fn page_report_funnel_markets(
+        &self,
+        report_id: &RecommendationReportId,
+        query: ReportFunnelMarketListQuery,
+    ) -> QuantResult<Option<Paginated<ReportFunnelMarketView>>> {
+        let Some(report) = self.report_repo.find_by_id(report_id).await? else {
+            return Ok(None);
+        };
+        let window = PageWindow::from_query(&query);
+        let terminal_stage = query.terminal_stage.map(ReportFunnelStage::as_str);
+        let primary_reason = query.primary_reason.map(ReportFunnelReason::as_str);
+        let total = self
+            .quant_fact_read
+            .report_market_funnel_count(report_id, terminal_stage, primary_reason)
+            .await?;
+        let rows = self
+            .quant_fact_read
+            .report_market_funnel_page(
+                report_id,
+                terminal_stage,
+                primary_reason,
+                window.offset(),
+                window.size(),
+            )
+            .await?;
+        let items = rows
+            .into_iter()
+            .map(|row| funnel_market_view(&report, row))
+            .collect::<QuantResult<Vec<_>>>()?;
+        Ok(Some(Paginated::from_window(items, total, window)))
     }
 
     async fn latest_report(
@@ -594,6 +655,159 @@ impl QuantReportPort for CoreQuantReportPort {
     ) -> QuantResult<RecommendationReportInfo> {
         self.lifecycle.revoke(report_id, reason, Utc::now()).await
     }
+}
+
+fn funnel_summary(
+    report_id: RecommendationReportId,
+    rows: Vec<ReportMarketFunnelCountRow>,
+) -> QuantResult<QuantReportFunnelView> {
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        let stage = row
+            .terminal_stage
+            .parse::<ReportFunnelStage>()
+            .map_err(|detail| ResearchError::Determinism {
+                detail: format!("report {report_id} funnel contains {detail}"),
+            })?;
+        if counts.insert(stage, row.row_count).is_some() {
+            return Err(ResearchError::Determinism {
+                detail: format!("report {report_id} funnel contains duplicate stage counts"),
+            }
+            .into());
+        }
+    }
+    let checked_sum = |values: Vec<u64>| -> QuantResult<u64> {
+        values.into_iter().try_fold(0_u64, |sum, value| {
+            sum.checked_add(value).ok_or_else(|| {
+                ResearchError::Determinism {
+                    detail: format!("report {report_id} funnel count overflow"),
+                }
+                .into()
+            })
+        })
+    };
+    let catalog_visible_count = checked_sum(counts.values().copied().collect())?;
+    let mut stages = Vec::with_capacity(ReportFunnelStage::ALL.len());
+    let mut prior_output = None;
+    let mut conserved = true;
+    for stage in ReportFunnelStage::ALL {
+        let input_count = if stage == ReportFunnelStage::Published {
+            counts.get(&stage).copied().unwrap_or(0)
+        } else {
+            checked_sum(
+                counts
+                    .iter()
+                    .filter_map(|(terminal, count)| (*terminal >= stage).then_some(*count))
+                    .collect(),
+            )?
+        };
+        let excluded_count = if stage == ReportFunnelStage::Published {
+            0
+        } else {
+            counts.get(&stage).copied().unwrap_or(0)
+        };
+        let output_count =
+            input_count
+                .checked_sub(excluded_count)
+                .ok_or_else(|| ResearchError::Determinism {
+                    detail: format!("report {report_id} funnel stage subtraction underflow"),
+                })?;
+        conserved &= input_count == output_count + excluded_count;
+        if let Some(prior) = prior_output {
+            conserved &= prior == input_count;
+        }
+        prior_output = Some(output_count);
+        stages.push(ReportFunnelStageView {
+            stage,
+            input_count,
+            output_count,
+            excluded_count,
+        });
+    }
+    let published_count = counts
+        .get(&ReportFunnelStage::Published)
+        .copied()
+        .unwrap_or(0);
+    Ok(QuantReportFunnelView {
+        recommendation_report_id: report_id,
+        catalog_visible_count,
+        published_count,
+        conserved,
+        stages,
+    })
+}
+
+fn funnel_market_view(
+    report: &RecommendationReportInfo,
+    row: ReportMarketFunnelRow,
+) -> QuantResult<ReportFunnelMarketView> {
+    let profile_content_hash =
+        row.profile_content_hash
+            .parse::<ContentHash>()
+            .map_err(|error| ResearchError::Determinism {
+                detail: format!("invalid funnel profile hash: {error}"),
+            })?;
+    let profile_ref = ResearchProfileRef {
+        id: row.profile_id,
+        version: row.profile_version,
+        content_hash: profile_content_hash,
+    };
+    if row.recommendation_report_id != report.recommendation_report_id
+        || row.market_selection_id != report.market_selection_id
+        || row.runtime_config_version_id != report.runtime_config_version_id
+        || row.model_version_id != report.model_version_id
+        || profile_ref != report.profile_ref
+    {
+        return Err(ResearchError::Determinism {
+            detail: format!(
+                "report {} funnel row lineage does not match its report header",
+                report.recommendation_report_id
+            ),
+        }
+        .into());
+    }
+    let terminal_stage =
+        row.terminal_stage
+            .parse()
+            .map_err(|detail| ResearchError::Determinism {
+                detail: format!("report funnel {detail}"),
+            })?;
+    let primary_reason =
+        row.primary_reason
+            .parse()
+            .map_err(|detail| ResearchError::Determinism {
+                detail: format!("report funnel {detail}"),
+            })?;
+    let secondary_diagnostics =
+        serde_json::from_str(&row.secondary_diagnostics_json).map_err(|error| {
+            ResearchError::Determinism {
+                detail: format!("invalid report funnel secondary diagnostics: {error}"),
+            }
+        })?;
+    let row_hash =
+        row.row_hash
+            .parse::<ContentHash>()
+            .map_err(|error| ResearchError::Determinism {
+                detail: format!("invalid report funnel row hash: {error}"),
+            })?;
+    Ok(ReportFunnelMarketView {
+        recommendation_report_id: row.recommendation_report_id,
+        market_selection_id: row.market_selection_id,
+        profile_ref,
+        runtime_config_version_id: row.runtime_config_version_id,
+        model_version_id: row.model_version_id,
+        model_run_id: row.model_run_id,
+        market_id: row.market_id,
+        event_id: row.event_id,
+        token_id: row.token_id,
+        terminal_stage,
+        primary_reason,
+        secondary_diagnostics,
+        feature_vector_id: row.feature_vector_id,
+        signal_candidate_id: row.signal_candidate_id,
+        recommendation_id: row.recommendation_id,
+        row_hash,
+    })
 }
 
 struct RunServingEvidence {

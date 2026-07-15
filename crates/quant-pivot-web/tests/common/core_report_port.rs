@@ -21,8 +21,9 @@ use quant_pivot_repository::postgres::{
     PgFeatureRepository, PgOrderIntentRepository, PgRuntimeConfigVersionRepository,
 };
 use quant_pivot_repository::traits::{
-    FeatureRepository, OrderIntentRepository, RecommendationReportRepository,
-    RecommendationRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
+    FeatureRepository, OrderIntentRepository, QuantFactReadRepository,
+    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    ServingEvidenceRepository,
 };
 use quant_pivot_test_support::report_pipeline_harness::FixtureReportSeedContext;
 use quant_pivot_test_support::report_pipeline_harness::{HarnessOptions, ReportPipelineHarness};
@@ -124,6 +125,8 @@ pub async fn build_core_report_stack(
         feature_repo: Arc::new(PgFeatureRepository::new(db.clone())) as Arc<dyn FeatureRepository>,
         runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
             as Arc<dyn RuntimeConfigVersionRepository>,
+        quant_fact_read: Arc::new(crate::harness::MockQuantFactRead::default())
+            as Arc<dyn QuantFactReadRepository>,
     }));
 
     CoreReportTestHandle {

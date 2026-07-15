@@ -278,6 +278,7 @@ fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation
         venue_ref: order.venue_order_id.as_ref().map(ToString::to_string),
         shares: None,
         price: None,
+        fee_evidence: None,
     }]);
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
@@ -291,7 +292,12 @@ fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation
         evidence_json: evidence,
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }

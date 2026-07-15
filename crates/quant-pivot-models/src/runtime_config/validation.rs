@@ -94,12 +94,6 @@ fn validate_selection(config: &RuntimeConfig, report: &mut ConfigValidationRepor
             detail: "must be <= selection.max_time_to_resolution_secs".to_owned(),
         });
     }
-    if config.selection.max_selection_size == 0 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "selection.max_selection_size",
-            detail: "must be greater than zero".to_owned(),
-        });
-    }
 }
 
 fn validate_data_quality(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -721,6 +715,14 @@ fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport
 }
 
 fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    if config.reports.hard_candidate_ceiling < 100_000
+        || !config.reports.hard_candidate_ceiling.is_multiple_of(1_000)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "reports.hard_candidate_ceiling",
+            detail: "must be at least 100000 and rounded up to a multiple of 1000".to_owned(),
+        });
+    }
     if config.reports.max_top_n == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "reports.max_top_n",
@@ -915,7 +917,7 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
     if config.execution.auto_execution.enabled {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.auto_execution.enabled",
-            detail: "Runtime v13 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
+            detail: "Runtime v14 keeps AutoExecution blocked; Phase 11.11 owns its final governance gate"
                 .to_owned(),
         });
     }
@@ -959,12 +961,16 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
 fn validate_semi_auto_canary(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     let canary = &config.execution.semi_auto.canary;
     non_negative_decimal(
-        "execution.semi_auto.canary.max_total_usd_per_report",
-        &canary.max_total_usd_per_report,
+        "execution.semi_auto.canary.max_total_cash_per_report",
+        &canary.max_total_cash_per_report,
         report,
     );
-    for tier in &canary.allowed_tiers_usd {
-        positive_decimal("execution.semi_auto.canary.allowed_tiers_usd", tier, report);
+    for tier in &canary.allowed_cash_budget_tiers_usd {
+        positive_decimal(
+            "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
+            tier,
+            report,
+        );
     }
     if !canary.enabled {
         return;
@@ -984,24 +990,27 @@ fn validate_semi_auto_canary(config: &RuntimeConfig, report: &mut ConfigValidati
                 .to_owned(),
         });
     }
-    let only_first_tier = canary.allowed_tiers_usd.len() == 1
-        && canary.allowed_tiers_usd[0].value.parse::<Decimal>() == Ok(Decimal::new(25, 0));
+    let only_first_tier = canary.allowed_cash_budget_tiers_usd.len() == 1
+        && canary.allowed_cash_budget_tiers_usd[0]
+            .value
+            .parse::<Decimal>()
+            == Ok(Decimal::new(25, 0));
     if !only_first_tier {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary.allowed_tiers_usd",
-            detail: "runtime v13 canary must contain exactly the $25 tier".to_owned(),
+            field: "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
+            detail: "runtime v14 canary must contain exactly the $25 cash-budget tier".to_owned(),
         });
     }
     if canary.max_open_intents != 1 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "execution.semi_auto.canary.max_open_intents",
-            detail: "runtime v13 canary must allow exactly one open intent".to_owned(),
+            detail: "runtime v14 canary must allow exactly one open intent".to_owned(),
         });
     }
-    if canary.max_total_usd_per_report.value.parse::<Decimal>() != Ok(Decimal::new(25, 0)) {
+    if canary.max_total_cash_per_report.value.parse::<Decimal>() != Ok(Decimal::new(25, 0)) {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.semi_auto.canary.max_total_usd_per_report",
-            detail: "runtime v13 canary must cap each report at exactly $25".to_owned(),
+            field: "execution.semi_auto.canary.max_total_cash_per_report",
+            detail: "runtime v14 canary must cap each report at exactly $25 total cash".to_owned(),
         });
     }
     if canary
@@ -1105,107 +1114,6 @@ fn validate_policy_validation(
     policy: &PolicyValidationConfig,
     report: &mut ConfigValidationReport,
 ) {
-    for (field, actual, required) in [
-        (
-            "research.policy_validation.cpcv_n_groups",
-            policy.cpcv_n_groups,
-            8,
-        ),
-        (
-            "research.policy_validation.cpcv_k_test",
-            policy.cpcv_k_test,
-            3,
-        ),
-        (
-            "research.policy_validation.pbo_block_count",
-            policy.pbo_block_count,
-            8,
-        ),
-    ] {
-        if actual != required {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field,
-                detail: format!("runtime v13 methodology fixes this value at {required}"),
-            });
-        }
-    }
-    upper_bounded_positive_decimal(
-        "research.policy_validation.dsr_significance",
-        &policy.dsr_significance,
-        Decimal::new(5, 2),
-        report,
-    );
-    upper_bounded_positive_decimal(
-        "research.policy_validation.max_pbo",
-        &policy.max_pbo,
-        Decimal::new(5, 1),
-        report,
-    );
-    for (field, value, floor) in [
-        (
-            "research.policy_validation.min_full_l2_coverage",
-            &policy.min_full_l2_coverage,
-            Decimal::new(95, 2),
-        ),
-        (
-            "research.policy_validation.min_common_candidate_support",
-            &policy.min_common_candidate_support,
-            Decimal::new(95, 2),
-        ),
-        (
-            "research.policy_validation.min_passive_reconciled_trade_coverage",
-            &policy.min_passive_reconciled_trade_coverage,
-            Decimal::new(95, 2),
-        ),
-        (
-            "research.policy_validation.min_fee_catalog_coverage",
-            &policy.min_fee_catalog_coverage,
-            Decimal::ONE,
-        ),
-        (
-            "research.policy_validation.min_universe_coverage",
-            &policy.min_universe_coverage,
-            Decimal::new(95, 2),
-        ),
-        (
-            "research.policy_validation.utility_confidence",
-            &policy.utility_confidence,
-            Decimal::new(95, 2),
-        ),
-    ] {
-        lower_bounded_unit_decimal(field, value, floor, report);
-    }
-    for (field, value) in [
-        (
-            "research.policy_validation.max_ambiguity_rate",
-            &policy.max_ambiguity_rate,
-        ),
-        (
-            "research.policy_validation.max_depth_failure_rate",
-            &policy.max_depth_failure_rate,
-        ),
-    ] {
-        upper_bounded_non_negative_decimal(field, value, Decimal::new(5, 2), report);
-    }
-    lower_bounded_unit_decimal(
-        "research.policy_validation.embargo_time_pct",
-        &policy.embargo_time_pct,
-        Decimal::new(2, 2),
-        report,
-    );
-    if policy.min_utility_lower_bound_bps.value.parse::<Decimal>() != Ok(Decimal::ZERO) {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "research.policy_validation.min_utility_lower_bound_bps",
-            detail: "must equal 0; publication requires the observed one-sided lower bound to be strictly greater"
-                .to_owned(),
-        });
-    }
-    if policy.min_effective_sample_size < 100 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "research.policy_validation.min_effective_sample_size",
-            detail: "must be >= 100".to_owned(),
-        });
-    }
     if policy.max_candidates_per_experiment == 0 || policy.max_candidates_per_experiment > 32 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "research.policy_validation.max_candidates_per_experiment",
@@ -1217,17 +1125,6 @@ fn validate_policy_validation(
             field: "research.policy_validation.min_latency_profile_secs",
             detail: "must cover at least 24 hours".to_owned(),
         });
-    }
-    match policy.latency_stress_multiplier.value.parse::<Decimal>() {
-        Ok(value) if value >= Decimal::TWO => {}
-        Ok(value) => report.errors.push(ConfigValidationError::InvalidValue {
-            field: "research.policy_validation.latency_stress_multiplier",
-            detail: format!("`{value}` must be >= 2"),
-        }),
-        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
-            field: "research.policy_validation.latency_stress_multiplier",
-            detail: "must be a valid decimal string".to_owned(),
-        }),
     }
 }
 
@@ -1470,63 +1367,6 @@ fn unit_ratio(field: &'static str, value: &DecimalString, report: &mut ConfigVal
         Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
             field,
             detail: format!("`{parsed}` must be within [0, 1]"),
-        }),
-        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{}` is not a valid decimal string", value.value),
-        }),
-    }
-}
-
-fn lower_bounded_unit_decimal(
-    field: &'static str,
-    value: &DecimalString,
-    floor: Decimal,
-    report: &mut ConfigValidationReport,
-) {
-    match value.value.parse::<Decimal>() {
-        Ok(parsed) if (floor..=Decimal::ONE).contains(&parsed) => {}
-        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{parsed}` must be within [{floor}, 1]"),
-        }),
-        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{}` is not a valid decimal string", value.value),
-        }),
-    }
-}
-
-fn upper_bounded_positive_decimal(
-    field: &'static str,
-    value: &DecimalString,
-    ceiling: Decimal,
-    report: &mut ConfigValidationReport,
-) {
-    match value.value.parse::<Decimal>() {
-        Ok(parsed) if parsed > Decimal::ZERO && parsed <= ceiling => {}
-        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{parsed}` must be within (0, {ceiling}]"),
-        }),
-        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{}` is not a valid decimal string", value.value),
-        }),
-    }
-}
-
-fn upper_bounded_non_negative_decimal(
-    field: &'static str,
-    value: &DecimalString,
-    ceiling: Decimal,
-    report: &mut ConfigValidationReport,
-) {
-    match value.value.parse::<Decimal>() {
-        Ok(parsed) if (Decimal::ZERO..=ceiling).contains(&parsed) => {}
-        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
-            field,
-            detail: format!("`{parsed}` must be within [0, {ceiling}]"),
         }),
         Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
             field,

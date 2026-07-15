@@ -9,6 +9,8 @@
 //! | GET  | `/quant/reports/{id}` | `quant_report:read` | Report detail (header + summary) |
 //! | GET  | `/quant/reports/{id}/recommendations` | `quant_report:read` | Report recommendations |
 //! | GET  | `/quant/reports/{id}/diagnostics` | `quant_report:read` | Durable serving diagnostics |
+//! | GET  | `/quant/reports/{id}/funnel` | `quant_report:read` | Conserved stage counts |
+//! | GET  | `/quant/reports/{id}/funnel/markets` | `quant_report:read` | Row-level market decisions |
 //! | GET  | `/quant/reports/{id}/diff/{other_id}` | `quant_report:read` | Structural diff vs another report |
 //! | POST | `/quant/reports/run` | `quant_report:enqueue` (governed) | Enqueue an ad-hoc report (202) |
 //! | POST | `/quant/reports/{id}/revoke` | `quant_report:revoke` (governed) | Revoke a published report |
@@ -22,8 +24,9 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         AdHocReportCommand, Paginated, QuantRecommendationView, QuantReportDetailView,
-        QuantReportDiagnosticsView, QuantReportListQuery, QuantReportView, ReportDiffView,
-        RevokeReportRequest, RunReportAccepted, RunReportRequest,
+        QuantReportDiagnosticsView, QuantReportFunnelView, QuantReportListQuery, QuantReportView,
+        ReportDiffView, ReportFunnelMarketListQuery, ReportFunnelMarketView, RevokeReportRequest,
+        RunReportAccepted, RunReportRequest,
     },
     enums::{
         operation_log::OperationCategory,
@@ -87,6 +90,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
+            "/quant/reports/{id}/funnel",
+            Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
+            funnel,
+        ),
+        spec(
+            Method::GET,
+            "/quant/reports/{id}/funnel/markets",
+            Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
+            funnel_markets,
+        ),
+        spec(
+            Method::GET,
             "/quant/reports/{id}/diff/{other_id}",
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
             diff,
@@ -118,7 +133,13 @@ pub async fn latest(
         .latest_report(ReportKind::TopN)
         .await?
         .ok_or_else(|| WebError::NotFound("no published report".to_owned()))?;
-    Ok(WebResponse::ok(QuantReportDetailView::from(info)))
+    let delivery = state
+        .quant_reports
+        .find_report_fact_delivery(&info.recommendation_report_id)
+        .await?;
+    Ok(WebResponse::ok(QuantReportDetailView::from_parts(
+        info, delivery,
+    )))
 }
 
 /// `GET /api/quant/reports/{id}` — report detail.
@@ -131,7 +152,10 @@ pub async fn detail(
         .find_report(&id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("report not found: {id}")))?;
-    Ok(WebResponse::ok(QuantReportDetailView::from(info)))
+    let delivery = state.quant_reports.find_report_fact_delivery(&id).await?;
+    Ok(WebResponse::ok(QuantReportDetailView::from_parts(
+        info, delivery,
+    )))
 }
 
 /// `GET /api/quant/reports/{id}/recommendations` — the report's recommendations.
@@ -154,6 +178,31 @@ pub async fn diagnostics(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("report not found: {id}")))?;
     Ok(WebResponse::ok(view))
+}
+
+pub async fn funnel(
+    state: web::Data<AppState>,
+    id: web::Path<RecommendationReportId>,
+) -> Result<WebResponse<QuantReportFunnelView>, WebError> {
+    let view = state
+        .quant_reports
+        .find_report_funnel(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("report not found: {id}")))?;
+    Ok(WebResponse::ok(view))
+}
+
+pub async fn funnel_markets(
+    state: web::Data<AppState>,
+    id: web::Path<RecommendationReportId>,
+    query: web::Query<ReportFunnelMarketListQuery>,
+) -> Result<WebResponse<Paginated<ReportFunnelMarketView>>, WebError> {
+    let page = state
+        .quant_reports
+        .page_report_funnel_markets(&id, query.into_inner())
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("report not found: {id}")))?;
+    Ok(WebResponse::ok(page))
 }
 
 /// `GET /api/quant/reports/{id}/diff/{other_id}` — structural diff.

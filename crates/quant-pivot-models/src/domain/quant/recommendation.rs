@@ -14,7 +14,7 @@ use crate::{
         MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId,
         Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, RecommendationTradePlan, ReportDataQualitySnapshotId,
-        ReportSummary, RuntimeConfigVersionId, TokenId, Usd,
+        ReportSummary, ResearchProfileRef, RuntimeConfigVersionId, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::quant_recommendation_report::Entity")]
 pub struct RecommendationReportInfo {
     pub recommendation_report_id: RecommendationReportId,
+    pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
@@ -62,6 +63,7 @@ info_from_model!(
     quant_recommendation_report::Model,
     {
         recommendation_report_id,
+        profile_ref,
         report_kind,
         trigger_kind,
         trigger_key,
@@ -97,6 +99,7 @@ info_from_model!(
 #[sea_orm(active_model = "crate::entities::quant_recommendation_report::ActiveModel")]
 pub struct NewRecommendationReport {
     pub recommendation_report_id: RecommendationReportId,
+    pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
@@ -130,6 +133,7 @@ pub struct NewRecommendationReport {
 #[sea_orm(entity = "crate::entities::quant_recommendation::Entity")]
 pub struct RecommendationInfo {
     pub recommendation_id: RecommendationId,
+    pub profile_ref: ResearchProfileRef,
     pub recommendation_report_id: RecommendationReportId,
     pub rank: i32,
     pub market_id: MarketId,
@@ -159,6 +163,7 @@ pub struct RecommendationInfo {
 
 info_from_model!(RecommendationInfo, crate::entities::quant_recommendation::Model, {
     recommendation_id, recommendation_report_id, rank, market_id, event_id, token_id,
+    profile_ref,
     outcome_side, composite_score, risk_adjusted_score, confidence, expected_return_bps,
     downside_bps, identity, market_context, rank_before_portfolio, liquidity_score,
     data_quality_score, model_score_percentile, trade_plan,
@@ -171,6 +176,7 @@ info_from_model!(RecommendationInfo, crate::entities::quant_recommendation::Mode
 #[sea_orm(active_model = "crate::entities::quant_recommendation::ActiveModel")]
 pub struct NewRecommendation {
     pub recommendation_id: RecommendationId,
+    pub profile_ref: ResearchProfileRef,
     pub recommendation_report_id: RecommendationReportId,
     pub rank: i32,
     pub market_id: MarketId,

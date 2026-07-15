@@ -12,15 +12,13 @@ use quant_pivot_models::{
 use crate::observability::{
     alert_dispatcher::{Alert, AlertDispatcher},
     metrics_hub::MetricsHub,
-    recommendation_fact_writer::RecommendationEventWriter,
 };
 
-use super::types::{ComposedReport, ReportNotificationPayload};
+use super::types::ReportNotificationPayload;
 
 /// Dependencies for [`ReportPublisher`].
 pub struct ReportPublisherDeps {
     pub events: CoreEventPublisher,
-    pub recommendation_writer: Arc<RecommendationEventWriter>,
     pub alerts: Arc<AlertDispatcher>,
     pub metrics: Arc<MetricsHub>,
 }
@@ -28,7 +26,6 @@ pub struct ReportPublisherDeps {
 /// Publishes non-authoritative side effects after the report PG transaction commits.
 pub struct ReportPublisher {
     events: CoreEventPublisher,
-    recommendation_writer: Arc<RecommendationEventWriter>,
     alerts: Arc<AlertDispatcher>,
     metrics: Arc<MetricsHub>,
 }
@@ -39,18 +36,19 @@ impl ReportPublisher {
     pub fn new(deps: ReportPublisherDeps) -> Self {
         Self {
             events: deps.events,
-            recommendation_writer: deps.recommendation_writer,
             alerts: deps.alerts,
             metrics: deps.metrics,
         }
     }
 
-    /// Publish all post-commit side effects. Best-effort mirrors never change PG
-    /// authority; failures are recorded as metrics/logs.
-    pub async fn publish_committed(
+    /// Publish side effects only after both `ClickHouse` fact commitments have
+    /// been independently verified and acknowledged in Postgres.
+    pub async fn publish_verified(
         &self,
         report: &RecommendationReportInfo,
-        composed: &ComposedReport,
+        notification: &ReportNotificationPayload,
+        delivery_policy: ReportDeliveryPolicy,
+        notify_operators: bool,
     ) {
         let status = report.status.as_str();
         let kind = report.report_kind.as_str();
@@ -65,14 +63,10 @@ impl ReportPublisher {
             .with_label_values(&[kind, status])
             .inc_by(u64::from(published_count));
 
-        self.recommendation_writer
-            .write_batch(composed.ch_rows.clone());
-
         self.events
             .publish(CoreEvent::Report(ReportLifecycleEvent::committed(report)));
 
-        if composed.delivery_policy == ReportDeliveryPolicy::StoreOnly || !composed.notify_operators
-        {
+        if delivery_policy == ReportDeliveryPolicy::StoreOnly || !notify_operators {
             return;
         }
 
@@ -84,7 +78,7 @@ impl ReportPublisher {
                     AlertCategory::OperatorNotice,
                     AlertSource::ReportGenerator,
                     format!("Quant report {}", report.recommendation_report_id),
-                    notification_body(report, &composed.notification),
+                    notification_body(report, notification),
                     Utc::now(),
                 )
                 .with_affects_trading(false)

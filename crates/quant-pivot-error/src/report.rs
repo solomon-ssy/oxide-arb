@@ -17,6 +17,11 @@ pub enum ReportError {
     #[error("report pipeline contract violation: {detail}")]
     ContractViolation { detail: String },
 
+    /// The complete catalog exceeded the deployment-proven report capacity.
+    /// The caller must fail the entire report; truncation is forbidden.
+    #[error("report resource capacity exceeded: catalog_visible={actual}, ceiling={ceiling}")]
+    ResourceCapacityExceeded { actual: usize, ceiling: usize },
+
     /// An empty report was built but suppressed by `publish_empty_reports=false`.
     #[error("empty report suppressed: {reason}")]
     EmptyReportSuppressed { reason: String },

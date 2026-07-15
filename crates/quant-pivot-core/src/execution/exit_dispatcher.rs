@@ -25,24 +25,33 @@ use quant_pivot_models::{
     },
     enums::{
         clickhouse::ChQuantLedgerEventKind,
-        common::Side,
+        common::{OrderType, Side},
         execution::{ExecutionOrderPhase, ExitReason, ExitState, ReconciliationEvidenceKind},
-        quant::ExecutionOrderState,
+        quant::{ExecutionOrderState, FillRequirement},
     },
+    hashing::CanonicalDigest,
     types::{
-        ExecutionOrderId, OrderAmount, OrderIntentId, PendingScaleOut, Price, RecommendationId,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Usd,
+        ExecutionOrderId, PendingScaleOut, PreparedFeeSchedule, PreparedVenueOrder, Price,
+        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, ResearchProfileRef,
+        Usd, VenueOrderAmount,
     },
 };
-use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
+use quant_pivot_repository::traits::{
+    ClobMarketInfoRepository, ExecutionSubmissionRepository, OrderIntentRepository,
+};
+use quant_pivot_research::execution_semantics::{
+    BookWalkOutcome, LiquidityRole, walk_sell_exact_shares,
+};
 
 use crate::{
     execution::{
+        admission::pit_fee_schedule,
         breaker::ExecutionBreaker,
         dispatcher::{gtd_expiration_at, order_type_kind},
         exit_monitor::ExitOrderSpec,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
+    ingest::book_store::BookStore,
     observability::{
         execution_fact_writer::ExecutionEventWriter,
         ledger_fact_projection::project_execution_event, metrics_hub::MetricsHub,
@@ -69,6 +78,8 @@ pub struct ExitDispatcherDeps {
     pub metrics: Arc<MetricsHub>,
     pub execution_events: Arc<ExecutionEventWriter>,
     pub intents: Arc<dyn OrderIntentRepository>,
+    pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
+    pub book_store: Arc<BookStore>,
 }
 
 /// Submits exit (Sell) orders and settles their venue outcome atomically.
@@ -93,16 +104,26 @@ impl CoreExitDispatcher {
             pending_scale_out,
         } = request;
 
+        let intent = self
+            .deps
+            .intents
+            .find_by_id(&lot.order_intent_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::not_found(entity::QUANT_ORDER_INTENT, &lot.order_intent_id)
+            })?;
+        let prepared_order = self
+            .prepare_exit_order(&lot, &order, &intent.profile_ref)
+            .await?;
+
         // 1. Write-ahead the Exit order (Submitted) + lot Open->Closing + exit FSM.
-        let new_order = build_exit_order(&lot, &order)?;
+        let new_order = build_exit_order(&lot, &order, prepared_order.clone())?;
         let execution_order = self
             .deps
             .submission
             .create_exit_order_and_mark_closing(new_order, reason, pending_scale_out)
             .await?;
-        let recommendation_id = self
-            .recommendation_id_for_intent(&lot.order_intent_id)
-            .await?;
+        let recommendation_id = intent.recommendation_id;
         self.deps.execution_events.write(project_execution_event(
             &execution_order,
             recommendation_id.clone(),
@@ -113,13 +134,14 @@ impl CoreExitDispatcher {
         // 2. Venue submission — NO DB lock held across this network call.
         let venue_order = VenueOrder {
             market_id: lot.market_id.clone(),
-            token_id: lot.token_id.clone(),
-            side: Side::Sell,
-            price: order.limit_price,
-            amount: OrderAmount::Shares(order.shares),
-            order_type: order.order_type,
-            post_only: false,
-            category: lot.category,
+            token_id: prepared_order.token_id.clone(),
+            side: prepared_order.side,
+            price: prepared_order.worst_price,
+            amount: prepared_order.venue_amount,
+            order_type: prepared_order.order_type,
+            post_only: prepared_order.post_only,
+            expected_fee: prepared_order.expected_fee,
+            fee_schedule_hash: prepared_order.fee_schedule.schedule_hash.clone(),
         };
         let result = self
             .deps
@@ -163,17 +185,102 @@ impl CoreExitDispatcher {
         Ok(recorded)
     }
 
-    async fn recommendation_id_for_intent(
+    async fn prepare_exit_order(
         &self,
-        intent_id: &OrderIntentId,
-    ) -> QuantResult<RecommendationId> {
-        let intent = self
+        lot: &PositionInfo,
+        order: &ExitOrderSpec,
+        profile_ref: &ResearchProfileRef,
+    ) -> QuantResult<PreparedVenueOrder> {
+        let now = Utc::now();
+        let book = self.deps.book_store.load(&lot.token_id).ok_or_else(|| {
+            ExecutionError::IntentDenied {
+                reason: "cannot prepare exit without a current L2 book".to_owned(),
+            }
+        })?;
+        let market_info = self
             .deps
-            .intents
-            .find_by_id(intent_id)
+            .clob_market_info
+            .at(&lot.market_id, now, now)
             .await?
-            .ok_or_else(|| StorageError::not_found(entity::QUANT_ORDER_INTENT, intent_id))?;
-        Ok(intent.recommendation_id)
+            .ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "cannot prepare exit without PIT CLOB market info".to_owned(),
+            })?;
+        let schedule = pit_fee_schedule(&market_info, now)?;
+        let requirement = match order.order_type {
+            OrderType::Fok => FillRequirement::AllOrNothing,
+            OrderType::Fak | OrderType::Gtc | OrderType::Gtd { .. } => {
+                FillRequirement::AllowPartial
+            }
+        };
+        let fill = walk_sell_exact_shares(
+            &book.bids,
+            order.shares,
+            order.limit_price,
+            requirement,
+            &schedule,
+            LiquidityRole::Taker,
+            now,
+        )
+        .map_err(|error| ExecutionError::IntentDenied {
+            reason: format!("exit execution preparation failed: {error:?}"),
+        })?;
+        if order.order_type == OrderType::Fok && fill.outcome == BookWalkOutcome::Unfilled {
+            return Err(ExecutionError::IntentDenied {
+                reason: "FOK exit cannot fill from the current L2 book".to_owned(),
+            }
+            .into());
+        }
+        let book_hash = CanonicalDigest::content_hash_json(&(
+            book.timestamp_ms,
+            book.version,
+            book.bids.as_ref(),
+            book.asks.as_ref(),
+        ))?;
+        let clob_market_info_hash = market_info.payload_hash;
+        let valid_until = match order.order_type {
+            OrderType::Gtd { expiration } => chrono::DateTime::from_timestamp(
+                i64::try_from(expiration).map_err(|error| ExecutionError::TimeConversion {
+                    field: "exit.gtd.expiration",
+                    value: expiration.to_string(),
+                    detail: error.to_string(),
+                })?,
+                0,
+            )
+            .ok_or_else(|| ExecutionError::TimeConversion {
+                field: "exit.gtd.expiration",
+                value: expiration.to_string(),
+                detail: "timestamp is outside chrono range".to_owned(),
+            })?,
+            OrderType::Fok | OrderType::Fak | OrderType::Gtc => now + chrono::Duration::minutes(1),
+        };
+        Ok(PreparedVenueOrder {
+            profile_ref: profile_ref.clone(),
+            token_id: lot.token_id.clone(),
+            side: Side::Sell,
+            order_type: order.order_type,
+            post_only: false,
+            worst_price: fill.worst_price.unwrap_or(order.limit_price),
+            cash_budget: None,
+            venue_amount: VenueOrderAmount::Shares(order.shares),
+            expected_fee: fill.expected_fee,
+            total_cash_delta: fill.total_cash_delta,
+            expected_filled_shares: fill.filled_shares,
+            book_hash,
+            clob_market_info_hash,
+            fee_schedule: PreparedFeeSchedule {
+                schedule_hash: schedule.schedule_hash,
+                effective_at: schedule.effective_at,
+                available_at: schedule.available_at,
+                platform_rate: schedule.platform_rate,
+                exponent: schedule.exponent,
+                taker_only: schedule.taker_only,
+                builder_maker_fee_bps: schedule.builder_maker_fee_bps,
+                builder_taker_fee_bps: schedule.builder_taker_fee_bps,
+                builder_attributed: schedule.builder_attributed,
+            },
+            prepared_at: now,
+            valid_until,
+        })
     }
 }
 
@@ -181,6 +288,7 @@ impl CoreExitDispatcher {
 fn build_exit_order(
     lot: &PositionInfo,
     order: &ExitOrderSpec,
+    prepared_order_json: PreparedVenueOrder,
 ) -> Result<NewExecutionOrder, ExecutionError> {
     Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
@@ -193,6 +301,7 @@ fn build_exit_order(
         price: order.limit_price,
         shares: order.shares,
         cost_usd: order.shares * order.limit_price,
+        prepared_order_json,
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -223,7 +332,7 @@ fn build_exit_ledger_write(
     let exit_avg = exit_avg_price(result, execution_order.price);
 
     // Exact per-lot average-cost realized PnL, net the venue exit fee.
-    let proceeds_usd = filled * exit_avg - result.fee_paid;
+    let proceeds_usd = filled * exit_avg - result.expected_fee;
     let cost_basis = lot.avg_price * filled;
     let realized_pnl_usd = proceeds_usd - cost_basis;
     let fully_exited = filled >= lot.shares;
@@ -388,6 +497,7 @@ fn exit_reconciliation_row(
         venue_ref: result.venue_order_id.as_ref().map(ToString::to_string),
         shares: Some(result.filled_shares),
         price: result.avg_fill_price,
+        fee_evidence: Some(result.fee_evidence.clone()),
     }]);
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
@@ -397,7 +507,14 @@ fn exit_reconciliation_row(
         evidence_json: evidence,
         venue_filled_shares: Some(result.filled_shares),
         venue_avg_price: result.avg_fill_price,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: Some(Usd::new(
+            execution_order.prepared_order_json.total_cash_delta,
+        )),
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: Some(result.expected_fee),
+        observed_fee_usd: result.observed_fee,
+        fee_delta_usd: result.observed_fee.map(|fee| fee - result.expected_fee),
         resolved_by: None,
         resolved_at: None,
     }

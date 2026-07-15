@@ -301,7 +301,6 @@ fn registry_market(catalog: &Catalog) -> MarketRegistryInfo {
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
         volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        fee_schedule: None,
         start_date: Some(Utc::now() - ChronoDuration::days(2)),
         end_date: Some(Utc::now() + ChronoDuration::days(5)),
         resolved_at: None,

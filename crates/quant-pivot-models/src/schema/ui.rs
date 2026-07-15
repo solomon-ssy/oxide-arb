@@ -562,13 +562,6 @@ fn selection_fields() -> Vec<FieldUiEntry> {
             "Markets resolving later than this are excluded. Caps capital lock-up in very long-dated markets; must be greater than the minimum.",
             "结算剩余时间长于此值的市场会被剔除。限制资金被超长周期市场占用；必须大于下限。",
         ),
-        integer(
-            "selection.max_selection_size",
-            "Maximum selection size",
-            "最大市场池规模",
-            "Hard cap on the number of markets carried into the feature / scoring pipeline per run. Lower values cut compute cost but may drop viable candidates; must be > 0.",
-            "每次运行进入特征/打分管线的市场数量硬上限。调低可降低计算开销，但可能丢弃可行候选；必须大于 0。",
-        ),
     ]
 }
 
@@ -1489,49 +1482,7 @@ fn research_validation_fields() -> Vec<FieldUiEntry> {
 }
 
 fn research_policy_validation_fields() -> Vec<FieldUiEntry> {
-    let mut fields = research_policy_methodology_fields();
-    fields.extend(research_policy_coverage_fields());
-    fields.extend(research_policy_robustness_fields());
-    fields
-}
-
-fn research_policy_methodology_fields() -> Vec<FieldUiEntry> {
     vec![
-        integer(
-            "research.policy_validation.cpcv_n_groups",
-            "Policy CPCV partitions (N)",
-            "Policy CPCV 分区数 (N)",
-            "Frozen Runtime v13 CPCV partition count. It must remain 8; fit requests cannot override the split methodology.",
-            "Runtime v13 冻结的 CPCV 分区数。必须保持为 8；拟合请求不能覆盖拆分方法。",
-        ),
-        integer(
-            "research.policy_validation.cpcv_k_test",
-            "Policy CPCV test folds (k)",
-            "Policy CPCV 测试折数 (k)",
-            "Frozen Runtime v13 test-fold count. N=8,k=3 yields 56 folds and 21 complete paths.",
-            "Runtime v13 冻结的测试折数。N=8,k=3 产生 56 个 fold 与 21 条完整路径。",
-        ),
-        integer(
-            "research.policy_validation.pbo_block_count",
-            "Policy PBO blocks",
-            "Policy PBO 块数",
-            "Frozen CSCV block count used to estimate policy backtest overfitting probability.",
-            "用于估计 policy 回测过拟合概率的冻结 CSCV 块数。",
-        ),
-        ratio(
-            "research.policy_validation.dsr_significance",
-            "Policy DSR significance",
-            "Policy DSR 显著性",
-            "Maximum DSR significance level. At 0.05 the deflated Sharpe probability must be at least 0.95.",
-            "DSR 显著性水平上限。取 0.05 时，deflated Sharpe 概率必须至少为 0.95。",
-        ),
-        ratio(
-            "research.policy_validation.max_pbo",
-            "Policy maximum PBO",
-            "Policy PBO 上限",
-            "Hard upper bound on Probability of Backtest Overfitting across every attempted candidate.",
-            "覆盖所有真实尝试候选的回测过拟合概率硬上限。",
-        ),
         integer(
             "research.policy_validation.max_candidates_per_experiment",
             "Policy candidate cap",
@@ -1539,106 +1490,12 @@ fn research_policy_methodology_fields() -> Vec<FieldUiEntry> {
             "Maximum complete candidates in one immutable experiment. Exceeding it fails preflight; candidates are never truncated.",
             "单个不可重置 experiment 的完整候选上限。超过即预检失败，绝不截断候选。",
         ),
-    ]
-}
-
-fn research_policy_coverage_fields() -> Vec<FieldUiEntry> {
-    vec![
-        integer(
-            "research.policy_validation.min_effective_sample_size",
-            "Minimum cohort effective N",
-            "Cohort 最小有效样本量",
-            "Minimum concurrency-adjusted effective sample size required independently for each serving cohort.",
-            "每个 serving cohort 独立要求的、经并发唯一性调整后的最小有效样本量。",
-        ),
-        ratio(
-            "research.policy_validation.min_full_l2_coverage",
-            "Minimum full-L2 coverage",
-            "完整 L2 最低覆盖率",
-            "Minimum eligible-observation coverage backed by continuous canonical L2 replay.",
-            "由连续 canonical L2 重放支持的合格 observation 最低覆盖率。",
-        ),
-        ratio(
-            "research.policy_validation.min_common_candidate_support",
-            "Minimum common candidate support",
-            "候选共同支持集下限",
-            "Minimum observation support shared by every candidate, preventing missing-data selection bias.",
-            "所有候选共同拥有的 observation 支持集下限，防止缺失数据选择偏差。",
-        ),
-        ratio(
-            "research.policy_validation.min_passive_reconciled_trade_coverage",
-            "Minimum passive trade coverage",
-            "Passive 对账成交覆盖率下限",
-            "Minimum reconciled opposite-side trade-print coverage for passive queue simulation.",
-            "Passive 排队模拟所需的、已对账反向成交打印覆盖率下限。",
-        ),
-        ratio(
-            "research.policy_validation.min_fee_catalog_coverage",
-            "Minimum PIT fee coverage",
-            "PIT 费率覆盖率下限",
-            "Required point-in-time fee/catalog coverage for every simulated fill. Runtime v13 fixes this at 100%.",
-            "所有模拟成交所需的 PIT 费率/目录覆盖率。Runtime v13 固定为 100%。",
-        ),
-        ratio(
-            "research.policy_validation.min_universe_coverage",
-            "Minimum target-universe coverage",
-            "目标 universe 覆盖率下限",
-            "Minimum publishable coverage across the complete target universe, including failed leaves.",
-            "完整目标 universe（含失败 leaf）的最低可发布覆盖率。",
-        ),
-    ]
-}
-
-fn research_policy_robustness_fields() -> Vec<FieldUiEntry> {
-    vec![
-        ratio(
-            "research.policy_validation.max_ambiguity_rate",
-            "Maximum ambiguous-order rate",
-            "最大顺序歧义率",
-            "Maximum fraction of observations whose source-event order cannot be determined.",
-            "无法确定 source-event 顺序的 observation 最高比例。",
-        ),
-        ratio(
-            "research.policy_validation.max_depth_failure_rate",
-            "Maximum depth-failure rate",
-            "最大深度失败率",
-            "Maximum fraction of simulations lacking enough canonical book depth for the requested tier.",
-            "请求 tier 缺少足够 canonical 盘口深度的模拟最高比例。",
-        ),
-        ratio_confidence(
-            "research.policy_validation.utility_confidence",
-            "Utility lower-bound confidence",
-            "Utility 下界置信水平",
-            "One-sided confidence level for market-cluster bootstrap utility lower bounds.",
-            "market-cluster bootstrap utility 单侧下界的置信水平。",
-        ),
-        bps(
-            "research.policy_validation.min_utility_lower_bound_bps",
-            "Minimum utility lower bound",
-            "Utility 下界门槛",
-            "Frozen zero-bps boundary; the observed one-sided lower bound must be strictly greater than it.",
-            "冻结的 0 bps 边界；实际观测的单侧下界必须严格大于该值。",
-        ),
-        ratio(
-            "research.policy_validation.embargo_time_pct",
-            "Minimum policy embargo fraction",
-            "Policy 最小 embargo 比例",
-            "Minimum time-span embargo; effective embargo is the maximum of this span and feature lookback.",
-            "最小时间跨度 embargo；实际 embargo 取该跨度与 feature lookback 的较大值。",
-        ),
         secs(
             "research.policy_validation.min_latency_profile_secs",
             "Minimum latency profile duration",
             "最短延迟画像时长",
             "Minimum signed authenticated production-probe history required before policy fitting.",
             "Policy 拟合前要求的签名、认证生产探针历史最短时长。",
-        ),
-        decimal(
-            "research.policy_validation.latency_stress_multiplier",
-            "Latency stress multiplier",
-            "延迟压力倍数",
-            "Multiplier applied to the observed/runtime latency floor for the mandatory stress utility gate.",
-            "强制压力 utility 门禁中应用于 observed/runtime 延迟下限的倍数。",
         ),
     ]
 }
@@ -1811,6 +1668,13 @@ fn report_fields() -> Vec<FieldUiEntry> {
             "周期性报告计划。每行包含稳定 id、触发节奏（固定间隔或带可选时区的 cron）、TopN 规模（≤ 最大 TopN）、PIT 知识延迟以及启用开关。停用的计划会在激活时从实时调度器移除。",
         )
         .widget(FieldWidget::ScheduleList),
+        integer(
+            "reports.hard_candidate_ceiling",
+            "Catalog-visible capacity ceiling",
+            "全市场容量上限",
+            "Deployment-proven maximum catalog-visible market count for one report. Production sets ceil_to_1000(max(100000, 2 × recent 30-day p99)). Exceeding it fails the whole report and never truncates candidates.",
+            "单份报告经过部署压测证明可处理的 catalog-visible 市场数上限。生产环境取 ceil_to_1000(max(100000, 2 × 最近 30 天 p99))。超过时整份报告失败，绝不截断候选。",
+        ),
         integer(
             "reports.max_top_n",
             "Maximum TopN",
@@ -2180,11 +2044,11 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
         )
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
         f(
-            "execution.semi_auto.canary.allowed_tiers_usd",
-            "Canary allowed USD tiers",
-            "Canary 允许的 USD tiers",
-            "Exact validated notional tiers allowed by the canary. Runtime v13 permits only $25.",
-            "Canary 允许的精确 validated notional tiers。Runtime v13 仅允许 $25。",
+            "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
+            "Canary allowed cash-budget tiers",
+            "Canary 允许的现金预算 tiers",
+            "Exact validated maximum total cash-spend tiers. Runtime v14 permits only $25.",
+            "精确验证的最大总现金支出 tiers。Runtime v14 仅允许 $25。",
         )
         .widget(FieldWidget::StringList)
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2192,16 +2056,16 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "execution.semi_auto.canary.max_open_intents",
             "Canary maximum open intents",
             "Canary 最大开放 intents",
-            "Transactional cap on capital-holding or in-flight intents. Runtime v13 fixes this at one.",
-            "持有资金或在途 intent 的事务级上限。Runtime v13 固定为一个。",
+            "Transactional cap on capital-holding or in-flight intents. Runtime v14 fixes this at one.",
+            "持有资金或在途 intent 的事务级上限。Runtime v14 固定为一个。",
         )
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
         usd(
-            "execution.semi_auto.canary.max_total_usd_per_report",
-            "Canary USD cap per report",
-            "Canary 单 report USD 上限",
-            "Transactional cumulative notional cap across intents created from one report. Runtime v13 fixes this at $25.",
-            "同一 report 所创建 intents 的事务级累计名义金额上限。Runtime v13 固定为 $25。",
+            "execution.semi_auto.canary.max_total_cash_per_report",
+            "Canary total cash cap per report",
+            "Canary 单 report 总现金上限",
+            "Transactional cumulative maximum cash spend across intents from one report. Runtime v14 fixes this at $25.",
+            "同一 report 所创建 intents 的事务级累计最大现金支出。Runtime v14 固定为 $25。",
         )
         .critical()
         .visible_when(enabled("execution.semi_auto.canary.enabled")),
@@ -2681,7 +2545,6 @@ fn selection_section() -> SchemaNode {
             "selection.allow_near_resolution",
             "selection.min_time_to_resolution_secs",
             "selection.max_time_to_resolution_secs",
-            "selection.max_selection_size",
         ]),
     )
 }
@@ -2959,32 +2822,15 @@ fn research_section() -> SchemaNode {
                     "research.policy_validation",
                     30,
                     "lucide:shield-ellipsis",
-                    ls("Executable-policy validation", "可执行 Policy 验证"),
+                    ls("Executable-policy limits", "可执行 Policy 运行上限"),
                     ls(
-                        "Runtime v13 CPCV, trial-accounting, evidence-coverage, utility, and latency-stress publication floors.",
-                        "Runtime v13 的 CPCV、trial 记账、证据覆盖、utility 与延迟压力发布下限。",
+                        "Runtime v14 operational limits. Methodology is versioned code; publication gates come only from the immutable research profile.",
+                        "Runtime v14 运行上限。方法由代码版本化；发布门槛仅来自不可变 research profile。",
                     ),
                 ),
                 fields_in_order(&[
-                    "research.policy_validation.cpcv_n_groups",
-                    "research.policy_validation.cpcv_k_test",
-                    "research.policy_validation.pbo_block_count",
-                    "research.policy_validation.dsr_significance",
-                    "research.policy_validation.max_pbo",
-                    "research.policy_validation.min_effective_sample_size",
-                    "research.policy_validation.min_full_l2_coverage",
-                    "research.policy_validation.min_common_candidate_support",
-                    "research.policy_validation.min_passive_reconciled_trade_coverage",
-                    "research.policy_validation.min_fee_catalog_coverage",
-                    "research.policy_validation.min_universe_coverage",
-                    "research.policy_validation.max_ambiguity_rate",
-                    "research.policy_validation.max_depth_failure_rate",
-                    "research.policy_validation.utility_confidence",
-                    "research.policy_validation.min_utility_lower_bound_bps",
-                    "research.policy_validation.embargo_time_pct",
                     "research.policy_validation.max_candidates_per_experiment",
                     "research.policy_validation.min_latency_profile_secs",
-                    "research.policy_validation.latency_stress_multiplier",
                 ]),
             ),
         ],
@@ -3005,6 +2851,7 @@ fn reports_section() -> SchemaNode {
         ),
         fields_in_order(&[
             "reports.schedules",
+            "reports.hard_candidate_ceiling",
             "reports.max_top_n",
             "reports.fallback_horizon_secs",
             "reports.publish_empty_reports",
@@ -3224,9 +3071,9 @@ fn execution_children_head() -> Vec<SchemaNode> {
                 "execution.semi_auto.canary.enabled",
                 "execution.semi_auto.canary.policy_artifact_id",
                 "execution.semi_auto.canary.policy_content_hash",
-                "execution.semi_auto.canary.allowed_tiers_usd",
+                "execution.semi_auto.canary.allowed_cash_budget_tiers_usd",
                 "execution.semi_auto.canary.max_open_intents",
-                "execution.semi_auto.canary.max_total_usd_per_report",
+                "execution.semi_auto.canary.max_total_cash_per_report",
                 "execution.semi_auto.canary.expires_at",
             ]),
         ),

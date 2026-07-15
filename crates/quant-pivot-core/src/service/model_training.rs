@@ -359,19 +359,21 @@ impl ModelTrainerService {
         examples: &[TrainingExample],
     ) -> QuantResult<ModelVersionInfo> {
         let materialization = require_dataset_materialization(dataset)?;
+        let manifest =
+            dataset
+                .manifest_json
+                .as_ref()
+                .ok_or_else(|| ResearchError::DatasetBuild {
+                    detail: "v5 dataset is missing its immutable manifest".to_owned(),
+                })?;
         let header = ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
+            profile_ref: manifest.profile_ref.clone(),
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
             factor_schema_hash: materialization.factor_schema_hash.clone(),
-            trade_policy_artifact_id: dataset
-                .manifest_json
-                .as_ref()
-                .and_then(|manifest| manifest.trade_policy_artifact_id.clone()),
-            trade_policy_hash: dataset
-                .manifest_json
-                .as_ref()
-                .and_then(|manifest| manifest.trade_policy_hash.clone()),
+            trade_policy_artifact_id: manifest.trade_policy_artifact_id.clone(),
+            trade_policy_hash: manifest.trade_policy_hash.clone(),
         };
 
         let (artifact, metrics_json, training_objective_json) =
@@ -414,6 +416,7 @@ impl ModelTrainerService {
                 model_spec_id: input.model_spec_id.clone(),
                 version,
                 artifact_hash,
+                profile_ref: manifest.profile_ref.clone(),
                 training_dataset_id: Some(input.training_dataset_id.clone()),
                 trade_policy_artifact_id,
                 trade_policy_hash,

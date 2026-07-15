@@ -146,8 +146,9 @@ mod tests {
     use quant_pivot_models::{
         enums::quant::DatasetPurpose,
         types::{
-            MarketId, ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId,
-            SchemaVersion, Shares, TokenId, Usd, default_sample_sources,
+            ArtifactUri, ContentHash, MarketId, ModelSpecId, OrderIntentId, PositionId, Price,
+            RuntimeConfigVersionId, SchemaVersion, Shares, SourceSliceManifestRef, TokenId, Usd,
+            builtin_research_profiles, default_sample_sources,
         },
     };
     use rust_decimal::Decimal;
@@ -156,9 +157,21 @@ mod tests {
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         DatasetPlanRequest {
             model_spec_id: ModelSpecId::from_v7(),
+            profile_ref: builtin_research_profiles()
+                .expect("built-in profiles")
+                .remove(0)
+                .profile_ref,
+            research_program_hash: ContentHash::parse(format!("blake3:{}", "4".repeat(64)))
+                .expect("hash"),
+            source_slice: SourceSliceManifestRef {
+                manifest_uri: ArtifactUri::parse("s3://fixture/source-slice.json").expect("URI"),
+                manifest_hash: ContentHash::parse(format!("blake3:{}", "5".repeat(64)))
+                    .expect("hash"),
+            },
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             window_start: start,
             window_end: start + Duration::seconds(300),
+            pit_cutoff: start + Duration::seconds(360),
             sample_interval_secs: interval_secs,
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,

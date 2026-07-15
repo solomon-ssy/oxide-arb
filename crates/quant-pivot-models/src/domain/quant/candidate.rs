@@ -69,7 +69,7 @@ pub struct MarketCandidate {
     pub market_id: MarketId,
     /// Owning event (always present in the registry projection).
     pub event_id: EventId,
-    /// Deterministic fee/selection category for this market.
+    /// Deterministic primary category for single-cohort selection and scoring.
     pub category: MarketCategory,
     /// Registry lifecycle status at `decision_at`.
     pub status: MarketStatus,

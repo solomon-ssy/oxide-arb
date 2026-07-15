@@ -5,7 +5,7 @@
 //! Rows are tagged with the `ui-demo-research-*` prefix so they are easy to spot
 //! in the admin catalog pages.
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{
         CompleteTrainingDatasetBuild, NewBacktestReport, NewFactorDefinition,
@@ -47,7 +47,10 @@ use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
 };
 
-use crate::execution_pg_seed::SharedDemoInfra;
+use crate::{
+    execution_pg_seed::{SharedDemoInfra, fixture_profile_ref, source_slice_ref},
+    seeded_uuid,
+};
 
 const RESEARCH_MARKER_SPEC: &str = "ui-demo-research-spec-secondary";
 const PRIMARY_SPEC_NAME: &str = "ui-demo-seed-model";
@@ -322,6 +325,7 @@ async fn seed_training_datasets(
             slug,
             status,
             built_samples,
+            DatasetPurpose::Training,
         )
         .await;
 
@@ -330,7 +334,18 @@ async fn seed_training_datasets(
         }
     }
 
-    scenarios.len()
+    seed_training_dataset_scenario(
+        repo,
+        model_spec_id,
+        runtime_config_version_id,
+        "policy-fit-blocked",
+        TrainingDatasetStatus::Ready,
+        11_200,
+        DatasetPurpose::PolicyFit,
+    )
+    .await;
+
+    scenarios.len() + 1
 }
 
 async fn seed_training_dataset_scenario(
@@ -340,19 +355,42 @@ async fn seed_training_dataset_scenario(
     slug: &str,
     status: TrainingDatasetStatus,
     built_samples: i64,
+    purpose: DatasetPurpose,
 ) -> TrainingDatasetId {
-    let dataset_id = TrainingDatasetId::from_v7();
-    let window_start = Utc::now() - ChronoDuration::days(14);
+    let dataset_id = if purpose == DatasetPurpose::PolicyFit {
+        TrainingDatasetId::new(seeded_uuid("ui-demo-policy-fit-blocked-dataset"))
+    } else {
+        TrainingDatasetId::from_v7()
+    };
+    let now = if purpose == DatasetPurpose::PolicyFit {
+        "2026-07-14T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("fixed policy-fit fixture time")
+    } else {
+        Utc::now()
+    };
+    let (window_start, window_end) = if purpose == DatasetPurpose::PolicyFit {
+        let end = now - ChronoDuration::days(1);
+        (end - ChronoDuration::days(90), end)
+    } else {
+        let start = now - ChronoDuration::days(14);
+        (start, start + ChronoDuration::days(7))
+    };
+    let horizons_secs = if purpose == DatasetPurpose::PolicyFit {
+        vec![86_400]
+    } else {
+        vec![3_600, 86_400]
+    };
     let hash = content_hash(&format!("dataset-{slug}"));
     repo.create_plan(NewTrainingDatasetPlan {
         training_dataset_id: dataset_id.clone(),
         model_spec_id: model_spec_id.clone(),
         window_start,
-        window_end: window_start + ChronoDuration::days(7),
-        purpose: DatasetPurpose::Training,
+        window_end,
+        purpose,
         knowledge_lag_secs: 10,
         sample_interval_secs: 3_600,
-        horizons_secs: TrainingHorizonsSecs(vec![3_600, 86_400]),
+        horizons_secs: TrainingHorizonsSecs(horizons_secs.clone()),
         feature_schema_version: Some(SchemaVersion::new(6)),
         sample_sources: Some(TrainingSampleSources(default_sample_sources())),
         runtime_config_version_id: runtime_config_version_id.clone(),
@@ -372,16 +410,19 @@ async fn seed_training_dataset_scenario(
             let manifest = DatasetManifest {
                 format_version: DATASET_ARTIFACT_FORMAT_VERSION,
                 training_dataset_id: dataset_id.clone(),
+                profile_ref: fixture_profile_ref(),
+                research_program_hash: content_hash(&format!("dataset-program-{slug}")),
+                source_slice: source_slice_ref('5'),
                 model_spec_id: model_spec_id.clone(),
                 trade_policy_artifact_id: None,
                 trade_policy_hash: None,
                 runtime_config_version_id: runtime_config_version_id.clone(),
                 window_start,
-                window_end: window_start + ChronoDuration::days(7),
-                purpose: DatasetPurpose::Training,
+                window_end,
+                purpose,
                 knowledge_lag_secs: 10,
                 sample_interval_secs: 3_600,
-                horizons_secs: vec![3_600, 86_400],
+                horizons_secs,
                 feature_schema_hash: hash.clone(),
                 factor_schema_hash: hash.clone(),
                 label_schema_hash: hash.clone(),
@@ -502,6 +543,7 @@ async fn create_model_version(
             model_spec_id: model_spec_id.clone(),
             version,
             artifact_hash: content_hash(&format!("artifact-research-{artifact_seed}")),
+            profile_ref: fixture_profile_ref(),
             training_dataset_id,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

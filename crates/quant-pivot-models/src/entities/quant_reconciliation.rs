@@ -22,7 +22,12 @@ pub struct Model {
     pub evidence_json: ReconciliationEvidenceChain,
     pub venue_filled_shares: Option<Shares>,
     pub venue_avg_price: Option<Price>,
-    pub discrepancy_usd: Option<Usd>,
+    pub expected_cash_delta_usd: Option<Usd>,
+    pub venue_cash_delta_usd: Option<Usd>,
+    pub realized_pnl_usd: Option<Usd>,
+    pub expected_fee_usd: Option<Usd>,
+    pub observed_fee_usd: Option<Usd>,
+    pub fee_delta_usd: Option<Usd>,
     #[sea_orm(column_type = "Text", nullable)]
     pub resolved_by: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,

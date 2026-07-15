@@ -64,6 +64,7 @@ async fn seed_model_version(
             model_spec_id: model_spec_id.clone(),
             version,
             artifact_hash: content_hash(artifact_seed),
+            profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

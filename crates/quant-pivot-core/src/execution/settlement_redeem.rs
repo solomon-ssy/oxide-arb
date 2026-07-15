@@ -1267,6 +1267,7 @@ mod tests {
             ThesisInvalidationPolicy,
         },
     };
+    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal_macros::dec;
 
     fn test_content_hash(seed: u8) -> ContentHash {
@@ -1396,6 +1397,7 @@ mod tests {
             runtime_mode: QuantRuntimeMode::AutoExecution,
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             model_version_id: ModelVersionId::from_v7(),
+            profile_ref: fixture_profile_ref(),
             intent_kind: OrderIntentKind::Buy,
             status: OrderIntentStatus::Filled,
             approval_status: ApprovalStatus::NotRequired,
@@ -1478,13 +1480,6 @@ mod tests {
             start_date: None,
             end_date: None,
             resolved_at: Some(now),
-            fees_enabled: false,
-            fee_rate: None,
-            fee_exponent: None,
-            fee_taker_only: None,
-            fee_rebate_rate: None,
-            fee_source: None,
-            fee_observed_at: None,
             created_at: now,
             updated_at: now,
         }

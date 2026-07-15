@@ -100,6 +100,9 @@ async fn seed_training_dataset(
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: training_dataset_id.clone(),
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
+        research_program_hash: content_hash('4'),
+        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
@@ -176,6 +179,7 @@ async fn seed_model_version_and_run(
             model_spec_id,
             version: 1,
             artifact_hash: content_hash('a'),
+            profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: Some(training_dataset_id.clone()),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

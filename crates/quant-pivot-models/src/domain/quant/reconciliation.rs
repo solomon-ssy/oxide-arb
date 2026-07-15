@@ -30,7 +30,12 @@ pub struct ReconciliationInfo {
     pub evidence_json: ReconciliationEvidenceChain,
     pub venue_filled_shares: Option<Shares>,
     pub venue_avg_price: Option<Price>,
-    pub discrepancy_usd: Option<Usd>,
+    pub expected_cash_delta_usd: Option<Usd>,
+    pub venue_cash_delta_usd: Option<Usd>,
+    pub realized_pnl_usd: Option<Usd>,
+    pub expected_fee_usd: Option<Usd>,
+    pub observed_fee_usd: Option<Usd>,
+    pub fee_delta_usd: Option<Usd>,
     pub resolved_by: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -48,7 +53,12 @@ info_from_model!(
         evidence_json,
         venue_filled_shares,
         venue_avg_price,
-        discrepancy_usd,
+        expected_cash_delta_usd,
+        venue_cash_delta_usd,
+        realized_pnl_usd,
+        expected_fee_usd,
+        observed_fee_usd,
+        fee_delta_usd,
         resolved_by,
         resolved_at,
         created_at,
@@ -67,7 +77,12 @@ pub struct NewReconciliation {
     pub evidence_json: ReconciliationEvidenceChain,
     pub venue_filled_shares: Option<Shares>,
     pub venue_avg_price: Option<Price>,
-    pub discrepancy_usd: Option<Usd>,
+    pub expected_cash_delta_usd: Option<Usd>,
+    pub venue_cash_delta_usd: Option<Usd>,
+    pub realized_pnl_usd: Option<Usd>,
+    pub expected_fee_usd: Option<Usd>,
+    pub observed_fee_usd: Option<Usd>,
+    pub fee_delta_usd: Option<Usd>,
     pub resolved_by: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,
 }
@@ -78,7 +93,12 @@ pub struct ReconciliationPatch {
     pub result: Patch<ReconciliationResult>,
     pub venue_filled_shares: NullablePatch<Shares>,
     pub venue_avg_price: NullablePatch<Price>,
-    pub discrepancy_usd: NullablePatch<Usd>,
+    pub expected_cash_delta_usd: NullablePatch<Usd>,
+    pub venue_cash_delta_usd: NullablePatch<Usd>,
+    pub realized_pnl_usd: NullablePatch<Usd>,
+    pub expected_fee_usd: NullablePatch<Usd>,
+    pub observed_fee_usd: NullablePatch<Usd>,
+    pub fee_delta_usd: NullablePatch<Usd>,
     pub resolved_by: NullablePatch<String>,
     pub resolved_at: NullablePatch<DateTime<Utc>>,
 }
@@ -158,8 +178,18 @@ pub struct ReconciliationLedgerWrite {
     pub venue_filled_shares: Option<Shares>,
     /// Venue-confirmed average fill price, when known.
     pub venue_avg_price: Option<Price>,
-    /// Signed ledger-vs-venue discrepancy, when computed.
-    pub discrepancy_usd: Option<Usd>,
+    /// Cash movement predicted from the frozen decision-time execution plan.
+    pub expected_cash_delta_usd: Option<Usd>,
+    /// Cash movement reconstructed from venue-observed fills and fees.
+    pub venue_cash_delta_usd: Option<Usd>,
+    /// Realized `PnL` for exit fills only.
+    pub realized_pnl_usd: Option<Usd>,
+    /// Fee recomputed from the frozen decision-time schedule.
+    pub expected_fee_usd: Option<Usd>,
+    /// Strongest authenticated/on-chain venue fee observation.
+    pub observed_fee_usd: Option<Usd>,
+    /// Signed `observed_fee_usd - expected_fee_usd` when both are known.
+    pub fee_delta_usd: Option<Usd>,
     /// Who resolved (machine `system:reconciliation_worker` or an operator).
     /// `None` while the verdict is non-terminal or `Unresolvable`.
     pub resolved_by: Option<String>,

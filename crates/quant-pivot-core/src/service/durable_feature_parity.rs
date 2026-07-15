@@ -905,6 +905,7 @@ impl DurableFeatureParitySource {
             .load(&WindowSpec {
                 window_start: boundary.decision_at(),
                 window_end,
+                available_by: window_end,
                 samples: samples.clone(),
                 lookback,
                 knowledge_lag: boundary.knowledge_lag(),

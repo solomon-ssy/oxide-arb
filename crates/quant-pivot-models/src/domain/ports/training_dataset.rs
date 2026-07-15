@@ -10,9 +10,21 @@ use crate::{
         BuildTrainingDatasetRequest, JobProgressSink, TrainingDatasetInfo, TrainingDatasetPlanView,
         TrainingDatasetView,
     },
-    types::TrainingDatasetId,
+    types::{ContentHash, ResearchEvaluationTrack, TrainingDatasetId},
 };
 use quant_pivot_error::QuantResult;
+
+/// Server-frozen input for the internal `PolicyFit` Dataset build.
+///
+/// The HTTP Dataset API can never construct this authority: the trade-policy
+/// workflow supplies the exact preflight program hash and evaluation track so
+/// Source Slice identity cannot drift between preflight and materialization.
+#[derive(Debug, Clone)]
+pub struct PolicyFitDatasetBuildRequest {
+    pub dataset: BuildTrainingDatasetRequest,
+    pub evaluation_track: ResearchEvaluationTrack,
+    pub research_program_hash: ContentHash,
+}
 
 /// Dependency-inversion boundary between the HTTP layer and core research services.
 ///
@@ -41,6 +53,19 @@ pub trait TrainingDatasetPort: Send + Sync {
     async fn build(
         &self,
         request: BuildTrainingDatasetRequest,
+        progress: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetView>;
+
+    /// Materialize the Dataset owned by one trade-policy fit.
+    ///
+    /// This is intentionally absent from the HTTP route surface. Implementers
+    /// must preserve the frozen program/track supplied by preflight and must
+    /// reject `PolicyFit` through the generic [`Self::plan`] / [`Self::build`]
+    /// methods.
+    async fn build_policy_fit(
+        &self,
+        request: PolicyFitDatasetBuildRequest,
         progress: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetView>;

@@ -225,7 +225,7 @@ pub enum TradePlanBlocker {
     ArtifactFormatUnsupported,
     CohortNotFound,
     CohortSelectorAmbiguous,
-    NotionalTierUnavailable,
+    CashBudgetTierUnavailable,
     CohortCoverageInsufficient,
     LiquidityInsufficient,
     FeeScheduleUnavailable,

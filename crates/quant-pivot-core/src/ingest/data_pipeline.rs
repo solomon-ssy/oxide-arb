@@ -23,7 +23,7 @@ use quant_pivot_models::{
         clickhouse::{ChBookEventType, ChStreamSessionEndReason, ChStreamSessionState},
         system::ShardConnectionStatus,
     },
-    types::{Shares, TokenId},
+    types::{ContentHash, Shares, TokenId},
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -190,7 +190,7 @@ struct TokenStreamState {
 struct SessionClose {
     stream_session_id: uuid::Uuid,
     shard_id: u32,
-    subscription_token_hash: quant_pivot_models::types::ContentHash,
+    subscription_token_hash: ContentHash,
     subscription_token_count: u32,
     received_sequences: Arc<[(TokenId, u64)]>,
     opened_at_ms: i64,

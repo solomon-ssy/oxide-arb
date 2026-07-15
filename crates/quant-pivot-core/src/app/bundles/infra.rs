@@ -10,7 +10,6 @@ use crate::{
         fact_lag::IngestPipelineLagTracker, factor_fact_writer::FactorEventWriter,
         feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
         model_input_fact_writer::ModelInputEventWriter, position_fact_writer::PositionEventWriter,
-        recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
 };
@@ -21,8 +20,8 @@ use quant_pivot_models::{
         BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
         MarketResolutionRow, QuantCapitalAllocationEventRow, QuantExecutionEventRow,
         QuantExitSignalEvaluationEventRow, QuantFactorEventRow, QuantPositionEventRow,
-        QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
-        QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, TradeTapeRow,
+        QuantRecommendationAttributionEventRow, QuantServingEvidenceCompletionRow,
+        QuantSignalCandidateEventRow, TradeTapeRow,
     },
     config::DeployConfig,
 };
@@ -65,8 +64,6 @@ pub struct InfraBundle {
     pub model_input_event_writer: Arc<ModelInputEventWriter>,
     /// Pre-portfolio signal-candidate sink (`quant_signal_candidate_event`).
     pub signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
-    /// Published recommendation sink (`quant_recommendation_event`).
-    pub recommendation_event_writer: Arc<RecommendationEventWriter>,
     /// Final attribution sink (`quant_recommendation_attribution_event`).
     pub attribution_event_writer: Arc<AttributionEventWriter>,
     /// Execution-order lifecycle sink (`quant_execution_event`).
@@ -111,7 +108,6 @@ impl InfraBundle {
             factor_event_writer: analytics.factor_event_writer,
             model_input_event_writer: analytics.model_input_event_writer,
             signal_candidate_event_writer: analytics.signal_candidate_event_writer,
-            recommendation_event_writer: analytics.recommendation_event_writer,
             attribution_event_writer: analytics.attribution_event_writer,
             execution_event_writer: analytics.execution_event_writer,
             capital_allocation_event_writer: analytics.capital_allocation_event_writer,
@@ -197,7 +193,6 @@ struct AnalyticsWriters {
     factor_event_writer: Arc<FactorEventWriter>,
     model_input_event_writer: Arc<ModelInputEventWriter>,
     signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
-    recommendation_event_writer: Arc<RecommendationEventWriter>,
     attribution_event_writer: Arc<AttributionEventWriter>,
     execution_event_writer: Arc<ExecutionEventWriter>,
     capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
@@ -226,13 +221,6 @@ fn build_analytics_writers(
         deploy,
         &fact_writer_queue,
     );
-    let recommendation_event_writer = build_recommendation_event_writer(
-        ch,
-        ch_write_manager,
-        metrics,
-        deploy,
-        &fact_writer_queue,
-    );
     let attribution_event_writer =
         build_attribution_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
     let exit_signal_evaluation_event_writer = build_exit_signal_evaluation_event_writer(
@@ -254,7 +242,6 @@ fn build_analytics_writers(
         factor_event_writer,
         model_input_event_writer,
         signal_candidate_event_writer,
-        recommendation_event_writer,
         attribution_event_writer,
         execution_event_writer,
         capital_allocation_event_writer,
@@ -476,39 +463,6 @@ fn build_signal_candidate_event_writer(
         config,
     );
     Arc::new(SignalCandidateEventWriter::new(stream))
-}
-
-/// Wire the published recommendation async writer (`quant_recommendation_event`).
-fn build_recommendation_event_writer(
-    ch_pool: &Arc<ClickHousePool>,
-    write_manager: &Arc<ChWriteManager>,
-    metrics: &Arc<MetricsHub>,
-    deploy: &DeployConfig,
-    queue: &PendingTaskQueue,
-) -> Arc<RecommendationEventWriter> {
-    let ch = &deploy.db.clickhouse;
-    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
-    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
-    let config = AsyncWriterConfig::new("quant_recommendation_event")
-        .capacity(capacity)
-        .batch_size(ch.batch_size)
-        .flush_interval(flush_interval);
-    let drops = metrics
-        .async_writer_dropped
-        .with_label_values(&["quant_recommendation_event"]);
-    let stream = spawn_fact_stream::<QuantRecommendationEventRow>(
-        queue,
-        TaskId::RecommendationEventsWriter,
-        Arc::new(ChFactWriter::new(
-            Arc::clone(ch_pool),
-            Arc::clone(write_manager),
-            "quant_recommendation_event",
-        )),
-        drops,
-        metrics.async_writer_observability("quant_recommendation_event"),
-        config,
-    );
-    Arc::new(RecommendationEventWriter::new(stream))
 }
 
 /// Wire the final attribution async writer (`quant_recommendation_attribution_event`).

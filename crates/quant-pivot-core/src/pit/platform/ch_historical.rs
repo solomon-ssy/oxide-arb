@@ -19,7 +19,9 @@ use quant_pivot_error::{
     research::{PitResolutionStorageError, ResearchError},
 };
 use quant_pivot_models::{
-    clickhouse::{BookL2CheckpointRow, BookL2EventRow, BookStreamSessionRow, TradeTapeRow},
+    clickhouse::{
+        BookL2CheckpointRow, BookL2EventRow, BookStreamSessionRow, ChPrice, ChShares, TradeTapeRow,
+    },
     domain::{DecisionBoundary, DecisionSource, market::book::BookLevel},
     enums::{
         clickhouse::{ChCanonicalBookEventType, ChStreamSessionState},
@@ -228,7 +230,7 @@ fn replay_error(token_id: &TokenId, detail: &str) -> ResearchError {
     }
 }
 
-fn reconstruct_checkpoint(
+pub(crate) fn reconstruct_checkpoint(
     checkpoint: BookL2CheckpointRow,
     session: &BookStreamSessionRow,
     events: &[BookL2EventRow],
@@ -284,6 +286,131 @@ fn reconstruct_checkpoint(
         source_event: latest_source_event,
         available_at: latest_available_at,
     }))
+}
+
+struct ReplaySequence<'a> {
+    effective_ms: i64,
+    available_ms: i64,
+    event: Option<&'a BookL2EventRow>,
+}
+
+/// Reconstruct a monotonic series of boundaries from one session anchor in a
+/// single sequence walk. The query count and event scan are independent of the
+/// candidate count; only the requested output snapshots are cloned.
+pub(crate) fn reconstruct_checkpoint_series(
+    checkpoint: BookL2CheckpointRow,
+    session: &BookStreamSessionRow,
+    events: &[BookL2EventRow],
+    trades: &[TradeTapeRow],
+    boundaries: &[DecisionBoundary],
+) -> QuantResult<Vec<BookSnapshotAt>> {
+    if boundaries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if boundaries.windows(2).any(|pair| {
+        pair[0].decision_at() >= pair[1].decision_at()
+            || pair[0].cutoff_for(DecisionSource::Book) >= pair[1].cutoff_for(DecisionSource::Book)
+    }) {
+        return Err(replay_error(
+            &checkpoint.token_id,
+            "series boundaries are not strictly monotonic",
+        )
+        .into());
+    }
+    validate_replay_identity(&checkpoint, session, events, trades)?;
+    let token_id = checkpoint.token_id.clone();
+    let anchor_sequence = checkpoint.token_sequence;
+    let first = boundaries
+        .first()
+        .ok_or_else(|| replay_error(&token_id, "series has no first boundary"))?;
+    let (anchor, status) = snapshot_from_row(
+        checkpoint,
+        first.cutoff_for(DecisionSource::Book),
+        first.decision_at(),
+    );
+    if status.counts_as_failure() {
+        return Err(
+            replay_error(&token_id, &format!("checkpoint decode status {status:?}")).into(),
+        );
+    }
+    let anchor = anchor.ok_or_else(|| replay_error(&token_id, "checkpoint is empty"))?;
+    let mut book = OrderBook::new(token_id.clone());
+    book.apply_snapshot_validated(anchor.bids, anchor.asks, anchor.timestamp_ms);
+    let mut latest_event_time = anchor.timestamp_ms;
+    let mut latest_available_at = anchor.available_at;
+    let mut latest_version = anchor.version;
+    let mut latest_sequence = anchor.sequence;
+    let mut latest_source_event = anchor.source_event;
+
+    let mut sequence_rows = BTreeMap::<u64, ReplaySequence<'_>>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.token_sequence > anchor_sequence)
+    {
+        sequence_rows.insert(
+            event.token_sequence,
+            ReplaySequence {
+                effective_ms: event.venue_event_time,
+                available_ms: event.persisted_time,
+                event: Some(event),
+            },
+        );
+    }
+    for trade in trades {
+        let sequence = trade
+            .token_sequence
+            .ok_or_else(|| replay_error(&token_id, "Market WS trade has no token sequence"))?;
+        if sequence <= anchor_sequence {
+            continue;
+        }
+        sequence_rows.entry(sequence).or_insert(ReplaySequence {
+            effective_ms: trade.event_time,
+            available_ms: trade.ingestion_time,
+            event: None,
+        });
+    }
+    let sequence_rows = sequence_rows.into_iter().collect::<Vec<_>>();
+    let mut cursor = 0_usize;
+    let mut snapshots = Vec::with_capacity(boundaries.len());
+    for boundary in boundaries {
+        let cutoff_ms = boundary.cutoff_for(DecisionSource::Book).timestamp_millis();
+        let decision_ms = boundary.decision_at().timestamp_millis();
+        while let Some((_, row)) = sequence_rows.get(cursor) {
+            if row.effective_ms > cutoff_ms || row.available_ms > decision_ms {
+                break;
+            }
+            if let Some(event) = row.event {
+                apply_replay_event(&mut book, event, &token_id)?;
+                latest_event_time = u64::try_from(event.venue_event_time)
+                    .map_err(|_| replay_error(&token_id, "event timestamp is negative"))?;
+                latest_available_at = DateTime::from_timestamp_millis(event.persisted_time)
+                    .ok_or_else(|| replay_error(&token_id, "persisted timestamp is invalid"))?;
+                latest_version = event.book_version;
+                latest_sequence = event.token_sequence;
+                latest_source_event = Some(CanonicalBookEventRef {
+                    stream_session_id: event.stream_session_id,
+                    token_sequence: event.token_sequence,
+                    source_event_hash: event.payload_hash.clone(),
+                });
+            }
+            cursor = cursor
+                .checked_add(1)
+                .ok_or_else(|| replay_error(&token_id, "series cursor overflow"))?;
+        }
+        snapshots.push(BookSnapshotAt {
+            token_id: token_id.clone(),
+            source_cutoff: boundary.cutoff_for(DecisionSource::Book),
+            decision_at: boundary.decision_at(),
+            bids: Arc::from(book.bids()),
+            asks: Arc::from(book.asks()),
+            timestamp_ms: latest_event_time,
+            version: latest_version,
+            sequence: latest_sequence,
+            source_event: latest_source_event.clone(),
+            available_at: latest_available_at,
+        });
+    }
+    Ok(snapshots)
 }
 
 fn validate_replay_identity(
@@ -435,8 +562,7 @@ fn decode_event_levels(
     {
         return Err(replay_error(token_id, "snapshot price/size vector lengths differ").into());
     }
-    let decode = |price: &quant_pivot_models::clickhouse::ChPrice,
-                  size: &quant_pivot_models::clickhouse::ChShares| {
+    let decode = |price: &ChPrice, size: &ChShares| {
         BookLevel::from_decimal(price.to_price(), size.to_shares())
             .map_err(|_| replay_error(token_id, "snapshot contains invalid level"))
     };

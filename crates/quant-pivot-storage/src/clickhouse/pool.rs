@@ -2,11 +2,12 @@
 
 use crate::clickhouse::{ensure, schema};
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::config::ClickHouseConfig;
+use quant_pivot_models::config::{ClickHouseConfig, ClickHouseRawLifecycleConfig};
 use tracing::info;
 
 pub struct ClickHousePool {
     client: clickhouse::Client,
+    raw_lifecycle: ClickHouseRawLifecycleConfig,
 }
 
 impl ClickHousePool {
@@ -33,6 +34,7 @@ impl ClickHousePool {
                 .with_database(&config.database)
                 .with_user(&config.user)
                 .with_password(&config.password),
+            raw_lifecycle: config.raw_lifecycle.clone(),
         }
     }
 
@@ -55,7 +57,40 @@ impl ClickHousePool {
         for ddl in schema::all_ddl() {
             self.client.query(&ddl).execute().await?;
         }
+        self.apply_raw_lifecycle().await?;
         info!("ClickHouse schema ensured");
+        Ok(())
+    }
+
+    async fn apply_raw_lifecycle(&self) -> Result<(), StorageError> {
+        let lifecycle = &self.raw_lifecycle;
+        for spec in schema::RAW_LIFECYCLE_TABLES {
+            let query = match &lifecycle.cold_volume {
+                Some(volume) if lifecycle.delete_enabled => format!(
+                    "ALTER TABLE {} MODIFY TTL {} + INTERVAL {} DAY TO VOLUME '{}', {} + INTERVAL {} DAY DELETE",
+                    spec.table,
+                    spec.time_column,
+                    lifecycle.hot_days,
+                    volume,
+                    spec.time_column,
+                    lifecycle.retention_days,
+                ),
+                Some(volume) => format!(
+                    "ALTER TABLE {} MODIFY TTL {} + INTERVAL {} DAY TO VOLUME '{}'",
+                    spec.table, spec.time_column, lifecycle.hot_days, volume,
+                ),
+                None => format!("ALTER TABLE {} REMOVE TTL", spec.table),
+            };
+            self.client.query(&query).execute().await?;
+        }
+        info!(
+            hot_days = lifecycle.hot_days,
+            retention_days = lifecycle.retention_days,
+            cold_volume = lifecycle.cold_volume.as_deref().unwrap_or("disabled"),
+            delete_enabled = lifecycle.delete_enabled,
+            retention_plan_bound = lifecycle.signed_retention_plan_hash.is_some(),
+            "ClickHouse native raw lifecycle applied"
+        );
         Ok(())
     }
 }

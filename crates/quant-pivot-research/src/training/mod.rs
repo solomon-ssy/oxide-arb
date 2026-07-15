@@ -18,11 +18,12 @@ mod parquet;
 mod planner;
 
 pub use labeler::{
-    HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LiquidityExitLabeler,
-    MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS, MaxAdverseExcursionLabeler,
-    MaxFavorableExcursionLabeler, POLICY_ENTRY_FILL_RATIO, POLICY_EXIT_FILL_RATIO,
-    POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON, ReturnToHorizonLabeler,
-    SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, label_names, label_names_for_sources,
+    HOLD_VS_EXIT_ALPHA_BPS, HoldVsExitProceedsLabeler, LIQUIDITY_EXIT_POSSIBLE,
+    LiquidityExitLabeler, MAX_ADVERSE_EXCURSION_BPS, MAX_FAVORABLE_EXCURSION_BPS,
+    MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, POLICY_ENTRY_FILL_RATIO,
+    POLICY_EXIT_FILL_RATIO, POLICY_NET_POSITIVE, POLICY_NET_RETURN_BPS, RETURN_TO_HORIZON,
+    ReturnToHorizonLabeler, SETTLEMENT_OUTCOME, SettlementOutcomeLabeler, label_names,
+    label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
@@ -53,9 +54,10 @@ use quant_pivot_models::{
     enums::{feature::EvidenceSourceKind, quant::DatasetPurpose},
     types::{
         ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, MarketId,
-        ModelSpecId, OrderIntentId, PositionId, Price, RuntimeConfigVersionId, SchemaVersion,
-        Shares, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId,
-        TrainingExampleId, TrainingSampleSource, Usd, default_sample_sources,
+        ModelSpecId, OrderIntentId, PositionId, Price, ResearchProfileRef, RuntimeConfigVersionId,
+        SchemaVersion, Shares, SourceSliceManifestRef, TokenId, TradePolicyArtifactId,
+        TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingSampleSource,
+        Usd, default_sample_sources,
     },
 };
 use rust_decimal::Decimal;
@@ -83,12 +85,20 @@ stable_name! {
 pub struct DatasetPlanRequest {
     /// Model spec the dataset is built for.
     pub model_spec_id: ModelSpecId,
+    /// Immutable research contract governing every row.
+    pub profile_ref: ResearchProfileRef,
+    /// Hash of profile + candidate set + declared experiment family.
+    pub research_program_hash: ContentHash,
+    /// Immutable PIT source slice consumed by this build.
+    pub source_slice: SourceSliceManifestRef,
     /// Config version governing selection / feature / factor / label schemas.
     pub runtime_config_version_id: RuntimeConfigVersionId,
     /// Inclusive window start (first sample `as_of`).
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (samples are strictly before this).
     pub window_end: DateTime<Utc>,
+    /// Frozen information-availability cutoff for every source and label fact.
+    pub pit_cutoff: DateTime<Utc>,
     /// Deterministic sampling cadence within the window, in seconds (`>= 1`).
     pub sample_interval_secs: u64,
     /// Forward label horizons, in seconds (one label column per horizon).
@@ -357,6 +367,41 @@ pub struct PolicySimulationOutcome {
     pub terminal_at: DateTime<Utc>,
 }
 
+/// Typed identity of every label projected from one complete policy simulation.
+///
+/// Keeping the identity typed prevents the publication gate from depending on
+/// an unverified string column, while [`PolicySimulationLabels`] preserves the
+/// all-or-nothing relationship between the four values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicySimulationLabelKind {
+    NetReturnBps,
+    NetPositive,
+    EntryFillRatio,
+    ExitFillRatio,
+}
+
+impl PolicySimulationLabelKind {
+    const fn name(self) -> LabelName {
+        match self {
+            Self::NetReturnBps => POLICY_NET_RETURN_BPS,
+            Self::NetPositive => POLICY_NET_POSITIVE,
+            Self::EntryFillRatio => POLICY_ENTRY_FILL_RATIO,
+            Self::ExitFillRatio => POLICY_EXIT_FILL_RATIO,
+        }
+    }
+
+    fn value(self, outcome: &PolicySimulationOutcome) -> Decimal {
+        match self {
+            Self::NetReturnBps => outcome.net_return_bps,
+            Self::NetPositive if outcome.net_return_bps > Decimal::ZERO => Decimal::ONE,
+            Self::NetPositive => Decimal::ZERO,
+            Self::EntryFillRatio => outcome.entry_fill_ratio,
+            Self::ExitFillRatio => outcome.exit_fill_ratio,
+        }
+    }
+}
+
 /// All policy-dependent labels produced from one simulation, or one atomic
 /// failure applying to the complete set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,40 +452,18 @@ pub fn policy_simulation_labels(
             detail: "policy simulation fill ratios must both be within [0, 1]".to_owned(),
         };
     }
-    let positive = if outcome.net_return_bps > Decimal::ZERO {
-        Decimal::ONE
-    } else {
-        Decimal::ZERO
+    let project = |kind: PolicySimulationLabelKind| TrainingLabel {
+        label_name: kind.name(),
+        horizon_secs,
+        value: kind.value(outcome),
+        is_resolved: true,
+        matured_at: outcome.terminal_at,
     };
     PolicySimulationLabels::Available(Box::new([
-        TrainingLabel {
-            label_name: POLICY_NET_RETURN_BPS,
-            horizon_secs,
-            value: outcome.net_return_bps,
-            is_resolved: true,
-            matured_at: outcome.terminal_at,
-        },
-        TrainingLabel {
-            label_name: POLICY_NET_POSITIVE,
-            horizon_secs,
-            value: positive,
-            is_resolved: true,
-            matured_at: outcome.terminal_at,
-        },
-        TrainingLabel {
-            label_name: POLICY_ENTRY_FILL_RATIO,
-            horizon_secs,
-            value: outcome.entry_fill_ratio,
-            is_resolved: true,
-            matured_at: outcome.terminal_at,
-        },
-        TrainingLabel {
-            label_name: POLICY_EXIT_FILL_RATIO,
-            horizon_secs,
-            value: outcome.exit_fill_ratio,
-            is_resolved: true,
-            matured_at: outcome.terminal_at,
-        },
+        project(PolicySimulationLabelKind::NetReturnBps),
+        project(PolicySimulationLabelKind::NetPositive),
+        project(PolicySimulationLabelKind::EntryFillRatio),
+        project(PolicySimulationLabelKind::ExitFillRatio),
     ]))
 }
 

@@ -8,7 +8,7 @@ use quant_pivot_models::{
         common::{OrderType, Side},
         execution::VenueOrderStatus,
     },
-    types::{MarketId, Price, TokenId, Usd, execution_payload::OrderAmount},
+    types::{MarketId, Price, TokenId, Usd, VenueOrderAmount},
 };
 use rust_decimal_macros::dec;
 use std::env::var;
@@ -38,7 +38,7 @@ async fn fok_order_sign_and_submit() {
         market_id: MarketId::new(market_id),
         token_id: TokenId::new(token_id),
         side: Side::Buy,
-        amount: OrderAmount::Usd(Usd::new(dec!(5))),
+        amount: VenueOrderAmount::GrossUsd(Usd::new(dec!(5))),
         price: Price::new(dec!(0.01)),
         order_type: OrderType::Fok,
         post_only: false,

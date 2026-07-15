@@ -7,66 +7,56 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::{
-    domain::{TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, pagination::PageRequest},
-    enums::quant::{TradePolicyGovernanceAction, TradePolicyStatus},
+    domain::{
+        TradePolicyArtifactInfo, TradePolicyGovernanceAuditInfo, TradePolicyTrialAttemptInfo,
+        TradePolicyValidationRowInfo, TradePolicyValidationRunInfo, pagination::PageRequest,
+    },
+    enums::quant::{
+        ResearchReadinessEvidenceKind, TradePolicyGovernanceAction, TradePolicyStatus,
+        TradePolicyTrialScope, TradePolicyTrialStatus, TradePolicyValidationStatus,
+    },
     types::{
-        ContentHash, TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
-        TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker, TradePolicyQualityGate,
-        TrainingDatasetId, Usd, VerticalActivationTarget,
+        ArtifactUri, ContentHash, MarketId, ResearchEvaluationTrack, ResearchJobId,
+        ResearchProfileArtifact, ResearchProfileRef, RuntimeConfigVersionId, SourceSliceId,
+        SourceSliceManifestRef, SourceSliceObjectKind, SourceSliceObjectRef, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
+        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyPublicationBlocker,
+        TradePolicyTrialAttemptId, TradePolicyTrialMetrics, TradePolicyValidationRunId,
+        TrainingDatasetId, TrainingExampleId, resolve_builtin_research_profile,
     },
 };
 
-/// Caller-owned fit boundary. Runtime version, methodology, horizon, embargo,
+/// Caller-owned fit selection. Window, horizon, cash budget, methodology,
 /// latency profile, and publication floors are resolved by the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyFitSelection {
-    pub source_dataset_id: TrainingDatasetId,
-    pub fit_window_start: DateTime<Utc>,
-    pub fit_window_end: DateTime<Utc>,
+    pub profile_ref: ResearchProfileRef,
     pub pit_cutoff: DateTime<Utc>,
-    pub notional_tiers: Vec<Usd>,
-    /// Optional caller tightening; `None` means the frozen Runtime v13 floors.
-    pub quality_gate: Option<TradePolicyQualityGate>,
 }
 
 impl TradePolicyFitSelection {
     pub fn validate(&self) -> Result<(), String> {
-        if self.fit_window_start >= self.fit_window_end {
-            return Err("trade-policy fit window must be half-open and non-empty".to_owned());
-        }
-        if self.fit_window_end > self.pit_cutoff {
-            return Err("trade-policy fit window must end at or before pit_cutoff".to_owned());
-        }
-        let required_tiers = [
-            Usd::new(rust_decimal::Decimal::new(25, 0)),
-            Usd::new(rust_decimal::Decimal::new(100, 0)),
-            Usd::new(rust_decimal::Decimal::new(500, 0)),
-        ];
-        if self.notional_tiers != required_tiers {
-            return Err("policy fit tiers must be exactly $25/$100/$500".to_owned());
-        }
-        if let Some(gate) = &self.quality_gate {
-            gate.validate()?;
-        }
-        Ok(())
+        resolve_builtin_research_profile(&self.profile_ref).map(|_| ())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct FitTradePolicyRequest {
     pub selection: TradePolicyFitSelection,
-    pub activation_target: VerticalActivationTarget,
+    pub evaluation_track: ResearchEvaluationTrack,
     #[validate(length(min = 1, max = 32))]
     pub candidates: Vec<TradePolicyCandidateSpec>,
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
+    #[validate(length(min = 1, max = 128))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct TradePolicyFitPreflightRequest {
     pub selection: TradePolicyFitSelection,
-    pub activation_target: VerticalActivationTarget,
+    pub evaluation_track: ResearchEvaluationTrack,
     #[validate(length(min = 1, max = 32))]
     pub candidates: Vec<TradePolicyCandidateSpec>,
 }
@@ -95,6 +85,87 @@ pub struct TradePolicyAuditListQuery {
     pub page: PageRequest,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct TradePolicyValidationListQuery {
+    pub status: Option<TradePolicyValidationStatus>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct TradePolicyValidationRowListQuery {
+    pub passed: Option<bool>,
+    pub evidence_kind: Option<String>,
+    pub diagnostic_kind: Option<String>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct TradePolicyTrialListQuery {
+    pub candidate_id: Option<String>,
+    pub scope: Option<TradePolicyTrialScope>,
+    pub status: Option<TradePolicyTrialStatus>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct TradePolicySourceSliceObjectListQuery {
+    pub kind: Option<SourceSliceObjectKind>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyTrialAttemptView {
+    pub trial_attempt_id: TradePolicyTrialAttemptId,
+    pub fit_job_id: ResearchJobId,
+    pub attempt_ordinal: i64,
+    pub experiment_family_hash: ContentHash,
+    pub research_program_hash: ContentHash,
+    pub candidate_id: String,
+    pub candidate_hash: ContentHash,
+    pub scope: TradePolicyTrialScope,
+    pub fold_index: Option<i32>,
+    pub path_index: Option<i32>,
+    pub status: TradePolicyTrialStatus,
+    pub metrics: Option<TradePolicyTrialMetrics>,
+    pub evidence_hash: Option<ContentHash>,
+    pub evidence_row_count: Option<i64>,
+    pub failure_detail: Option<String>,
+    pub row_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<TradePolicyTrialAttemptInfo> for TradePolicyTrialAttemptView {
+    fn from(info: TradePolicyTrialAttemptInfo) -> Self {
+        Self {
+            trial_attempt_id: info.trial_attempt_id,
+            fit_job_id: info.fit_job_id,
+            attempt_ordinal: info.attempt_ordinal,
+            experiment_family_hash: info.experiment_family_hash,
+            research_program_hash: info.research_program_hash,
+            candidate_id: info.candidate_id,
+            candidate_hash: info.candidate_hash,
+            scope: info.scope,
+            fold_index: info.fold_index,
+            path_index: info.path_index,
+            status: info.status,
+            metrics: info.metrics_json,
+            evidence_hash: info.evidence_hash,
+            evidence_row_count: info.evidence_row_count,
+            failure_detail: info.failure_detail,
+            row_hash: info.row_hash,
+            created_at: info.created_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TradePolicyGovernanceAuditView {
     pub audit_id: TradePolicyGovernanceAuditId,
@@ -119,6 +190,94 @@ impl From<TradePolicyGovernanceAuditInfo> for TradePolicyGovernanceAuditView {
             content_hash: info.content_hash,
             actor_id: info.actor_id,
             reason: info.reason,
+            created_at: info.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyValidationRunView {
+    pub validation_run_id: TradePolicyValidationRunId,
+    pub artifact_id: TradePolicyArtifactId,
+    pub artifact_hash: ContentHash,
+    pub source_dataset_id: TrainingDatasetId,
+    pub source_dataset_hash: ContentHash,
+    pub source_slice_manifest_hash: ContentHash,
+    pub evidence_manifest_hash: ContentHash,
+    pub status: TradePolicyValidationStatus,
+    pub total_rows: i64,
+    pub passed_rows: i64,
+    pub failed_rows: i64,
+    pub validation_hash: Option<ContentHash>,
+    pub failure_detail: Option<String>,
+    pub actor_id: Uuid,
+    pub reason: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<TradePolicyValidationRunInfo> for TradePolicyValidationRunView {
+    fn from(info: TradePolicyValidationRunInfo) -> Self {
+        Self {
+            validation_run_id: info.validation_run_id,
+            artifact_id: info.artifact_id,
+            artifact_hash: info.artifact_hash,
+            source_dataset_id: info.source_dataset_id,
+            source_dataset_hash: info.source_dataset_hash,
+            source_slice_manifest_hash: info.source_slice_manifest_hash,
+            evidence_manifest_hash: info.evidence_manifest_hash,
+            status: info.status,
+            total_rows: info.total_rows,
+            passed_rows: info.passed_rows,
+            failed_rows: info.failed_rows,
+            validation_hash: info.validation_hash,
+            failure_detail: info.failure_detail,
+            actor_id: info.actor_id,
+            reason: info.reason,
+            started_at: info.started_at,
+            completed_at: info.completed_at,
+            created_at: info.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyValidationRowView {
+    pub validation_run_id: TradePolicyValidationRunId,
+    pub row_ordinal: i64,
+    pub evidence_kind: String,
+    pub record_key: String,
+    pub example_id: Option<TrainingExampleId>,
+    pub market_id: Option<MarketId>,
+    pub token_id: Option<TokenId>,
+    pub decision_at: Option<DateTime<Utc>>,
+    pub expected_row_hash: Option<ContentHash>,
+    pub actual_row_hash: Option<ContentHash>,
+    pub passed: bool,
+    pub diagnostic_kind: Option<String>,
+    pub detail: Option<String>,
+    pub row_hash: ContentHash,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<TradePolicyValidationRowInfo> for TradePolicyValidationRowView {
+    fn from(info: TradePolicyValidationRowInfo) -> Self {
+        Self {
+            validation_run_id: info.validation_run_id,
+            row_ordinal: info.row_ordinal,
+            evidence_kind: info.evidence_kind,
+            record_key: info.record_key,
+            example_id: info.example_id,
+            market_id: info.market_id,
+            token_id: info.token_id,
+            decision_at: info.decision_at,
+            expected_row_hash: info.expected_row_hash,
+            actual_row_hash: info.actual_row_hash,
+            passed: info.passed,
+            diagnostic_kind: info.diagnostic_kind,
+            detail: info.detail,
+            row_hash: info.row_hash,
             created_at: info.created_at,
         }
     }
@@ -174,6 +333,55 @@ pub struct TradePolicyDetailView {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicySourceSliceView {
+    pub artifact_id: TradePolicyArtifactId,
+    pub profile_ref: ResearchProfileRef,
+    pub source_slice: SourceSliceManifestRef,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicySourceSliceObjectView {
+    pub kind: SourceSliceObjectKind,
+    pub uri: ArtifactUri,
+    pub object_version: String,
+    pub byte_hash: ContentHash,
+    pub schema_hash: ContentHash,
+    pub row_count: u64,
+    pub min_event_at: Option<DateTime<Utc>>,
+    pub max_event_at: Option<DateTime<Utc>>,
+    pub min_available_at: Option<DateTime<Utc>>,
+    pub max_available_at: Option<DateTime<Utc>>,
+}
+
+impl From<SourceSliceObjectRef> for TradePolicySourceSliceObjectView {
+    fn from(object: SourceSliceObjectRef) -> Self {
+        Self {
+            kind: object.kind,
+            uri: object.uri,
+            object_version: object.object_version,
+            byte_hash: object.byte_hash,
+            schema_hash: object.schema_hash,
+            row_count: object.row_count,
+            min_event_at: object.min_event_at,
+            max_event_at: object.max_event_at,
+            min_available_at: object.min_available_at,
+            max_available_at: object.max_available_at,
+        }
+    }
+}
+
+/// Short-lived, backend-signed access to one immutable evidence object.
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyEvidenceDownloadView {
+    pub artifact_id: TradePolicyArtifactId,
+    pub kind: TradePolicyEvidenceObjectKind,
+    pub byte_hash: ContentHash,
+    pub row_count: u64,
+    pub expires_at: DateTime<Utc>,
+    pub url: String,
+}
+
 impl From<TradePolicyArtifactInfo> for TradePolicyDetailView {
     fn from(info: TradePolicyArtifactInfo) -> Self {
         let blockers = info.payload_json.publication_blockers();
@@ -205,25 +413,94 @@ impl From<TradePolicyArtifactInfo> for TradePolicyDetailView {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TradePolicyFitPreflightView {
+    pub readiness: TradePolicyFitReadiness,
+    pub reusable_source_dataset_id: Option<TrainingDatasetId>,
+    pub profile: Option<ResearchProfileArtifact>,
+    pub fit_window_start: Option<DateTime<Utc>>,
+    pub fit_window_end: Option<DateTime<Utc>>,
+    pub research_program_hash: Option<ContentHash>,
+    pub source_slice_id: Option<SourceSliceId>,
+    pub source_slice_identity_hash: Option<ContentHash>,
+    pub estimated_candidate_trials: u64,
+    pub estimated_fold_evaluations: u64,
+    pub catalog_completeness_proven: TradePolicyPreflightCheckStatus,
+    pub source_completeness_proven: TradePolicyPreflightCheckStatus,
+    pub required_raw_retention_days: Option<u32>,
+    pub retention_runway_days: Option<u32>,
+    pub retention_runway_proven: TradePolicyPreflightCheckStatus,
     pub contract_valid: TradePolicyPreflightCheckStatus,
     pub source_dataset_ready: TradePolicyPreflightCheckStatus,
     pub source_dataset_policy_fit: TradePolicyPreflightCheckStatus,
     pub raw_trajectory_labels_present: TradePolicyPreflightCheckStatus,
+    pub profile_lineage_valid: TradePolicyPreflightCheckStatus,
+    pub source_slice_verified: TradePolicyPreflightCheckStatus,
     pub fit_window_contained: TradePolicyPreflightCheckStatus,
-    pub requested_gate_tight_enough: TradePolicyPreflightCheckStatus,
-    pub runtime_quality_gate: Option<TradePolicyQualityGate>,
-    pub runtime_config_version_id: Option<crate::types::RuntimeConfigVersionId>,
+    pub profile_quality_gate_available: TradePolicyPreflightCheckStatus,
+    pub runtime_config_version_id: Option<RuntimeConfigVersionId>,
     pub methodology_hash: Option<ContentHash>,
     pub latency_profile_present: TradePolicyPreflightCheckStatus,
+    pub latency_evidence: Option<TradePolicyOperationalEvidenceView>,
     pub pit_cutoff_valid: TradePolicyPreflightCheckStatus,
     pub labels_matured_by_cutoff: u64,
     pub labels_excluded_after_cutoff: u64,
     pub full_l2_trajectory_present: TradePolicyPreflightCheckStatus,
     pub fee_model_present: TradePolicyPreflightCheckStatus,
+    pub retention_evidence: Option<TradePolicyOperationalEvidenceView>,
     pub publishable_input: TradePolicyPreflightCheckStatus,
     pub canonical_candidates: Option<Vec<TradePolicyCandidateSpec>>,
     pub candidate_set_hash: Option<ContentHash>,
-    pub messages: Vec<String>,
+    pub blockers: Vec<TradePolicyPreflightBlockerView>,
+}
+
+/// Verified append-only operational evidence reference. Canonical object URIs
+/// remain server-side; operators use the stable hash/version identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyOperationalEvidenceView {
+    pub evidence_id: Uuid,
+    pub kind: ResearchReadinessEvidenceKind,
+    pub payload_hash: ContentHash,
+    pub artifact_version: String,
+    pub attestation_key_id: String,
+    pub observed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Server-derived readiness of an immutable trade-policy fit plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePolicyFitReadiness {
+    Blocked,
+    ReadyToMaterialize,
+    Reusable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradePolicyPreflightBlockerKind {
+    ContractInvalid,
+    DatasetNotReady,
+    DatasetPurposeMismatch,
+    RawTrajectoryLabelsMissing,
+    ProfileLineageMismatch,
+    SourceSliceUnverified,
+    FitWindowNotContained,
+    QualityGateUnavailable,
+    PitCutoffInvalid,
+    FullL2TrajectoryMissing,
+    PitFeeFactsMissing,
+    ProductionLatencyProfileMissing,
+    RetentionRunwayUnproven,
+}
+
+/// Actionable, server-derived denial. `actual` and `required` retain their
+/// native JSON scalar/object shapes; callers never parse prose to recover facts.
+#[derive(Debug, Clone, Serialize)]
+pub struct TradePolicyPreflightBlockerView {
+    pub kind: TradePolicyPreflightBlockerKind,
+    pub actual: serde_json::Value,
+    pub required: serde_json::Value,
+    pub remediation: String,
+    pub evidence_link: Option<String>,
 }
 
 /// Binary outcome of one deterministic trade-policy fit preflight check.

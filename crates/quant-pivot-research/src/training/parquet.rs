@@ -354,8 +354,9 @@ mod tests {
         domain::{DecisionClock, DecisionSource},
         enums::quant::DatasetPurpose,
         types::{
-            ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest, ModelSpecId,
-            RuntimeConfigVersionId, TrainingDatasetId,
+            ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetManifest,
+            ModelSpecId, RuntimeConfigVersionId, SourceSliceManifestRef, TrainingDatasetId,
+            builtin_research_profiles,
         },
     };
     use std::{
@@ -389,6 +390,15 @@ mod tests {
         DatasetManifest {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: TrainingDatasetId::from_v7(),
+            profile_ref: builtin_research_profiles()
+                .expect("built-in profiles")
+                .remove(0)
+                .profile_ref,
+            research_program_hash: hash('4'),
+            source_slice: SourceSliceManifestRef {
+                manifest_uri: ArtifactUri::parse("s3://fixture/source-slice.json").expect("URI"),
+                manifest_hash: hash('5'),
+            },
             model_spec_id,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -471,7 +481,7 @@ mod tests {
 
     #[test]
     fn dataset_artifact_version_is_four() {
-        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 4);
+        assert_eq!(DATASET_ARTIFACT_FORMAT_VERSION, 5);
     }
 
     #[tokio::test(flavor = "multi_thread")]

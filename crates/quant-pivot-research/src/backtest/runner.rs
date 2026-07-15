@@ -448,6 +448,7 @@ mod tests {
         types::{
             BacktestReportId, ContentHash, FactorDefinitionId, MarketId, ModelInputContract,
             ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, TokenId, Usd,
+            builtin_research_profiles,
         },
     };
     use rust_decimal_macros::dec;
@@ -488,6 +489,10 @@ mod tests {
             WeightedFactorModelArtifact {
                 header: ModelArtifactHeader {
                     model_version_id: ModelVersionId::from_v7(),
+                    profile_ref: builtin_research_profiles()
+                        .expect("built-in profiles")
+                        .remove(0)
+                        .profile_ref,
                     model_family: ModelFamily::WeightedFactor,
                     feature_schema_hash: hash("aa"),
                     factor_schema_hash: hash("bb"),

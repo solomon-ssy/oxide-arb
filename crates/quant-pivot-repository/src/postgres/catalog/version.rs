@@ -10,11 +10,11 @@ use crate::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogSyncFailureStage,
-        CatalogSyncStatus, CatalogWindowInfo, DecisionBoundary, DecisionSource,
-        EventCatalogVersionInfo, EventRegistryInfo, MarketCatalogVersionInfo, NewCatalogSyncBatch,
-        NewEventCatalogVersion, NewFailedCatalogSyncBatch, NewMarketCatalogVersion, UpsertEvent,
-        UpsertMarket,
+        CatalogBatchChainInfo, CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo,
+        CatalogSyncFailureStage, CatalogSyncKind, CatalogSyncStatus, CatalogWindowInfo,
+        DecisionBoundary, DecisionSource, EventCatalogVersionInfo, EventRegistryInfo,
+        MarketCatalogVersionInfo, NewCatalogSyncBatch, NewEventCatalogVersion,
+        NewFailedCatalogSyncBatch, NewMarketCatalogVersion, UpsertEvent, UpsertMarket,
     },
     entities::{catalog_sync_batch, event_catalog_version, market_catalog_version},
     types::{CatalogSyncBatchId, EventCatalogVersionId, EventId, MarketId},
@@ -365,6 +365,39 @@ impl CatalogVersionRepository for PgCatalogVersionRepository {
             .map(|row| row.and_then(|model| model.committed_at));
         txn.commit().await.map_err(StorageError::from)?;
         result
+    }
+
+    async fn batch_chain(
+        &self,
+        window_start: chrono::DateTime<chrono::Utc>,
+        pit_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<CatalogBatchChainInfo>, StorageError> {
+        if window_start > pit_cutoff {
+            return Err(StorageError::InvariantViolation {
+                entity: Some("catalog_sync_batch"),
+                detail: "catalog proof window_start cannot be after pit_cutoff".to_owned(),
+            });
+        }
+        let txn = self.begin_catalog_read().await?;
+        let rows = catalog_sync_batch::Entity::find()
+            .filter(catalog_sync_batch::Column::Status.eq(CatalogSyncStatus::Committed.as_str()))
+            .filter(catalog_sync_batch::Column::CommittedAt.lte(pit_cutoff))
+            .order_by_asc(catalog_sync_batch::Column::CommittedAt)
+            .order_by_asc(catalog_sync_batch::Column::CatalogSyncBatchId)
+            .all(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let baseline = rows.iter().rposition(|row| {
+            row.sync_kind == CatalogSyncKind::Full.as_str()
+                && row
+                    .committed_at
+                    .is_some_and(|committed| committed <= window_start)
+        });
+        let result = baseline.map(|index| CatalogBatchChainInfo {
+            batches: rows[index..].iter().cloned().map(Into::into).collect(),
+        });
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(result.filter(|chain| !chain.batches.is_empty()))
     }
 
     async fn market_at(

@@ -28,6 +28,7 @@ pub enum QuantModelVersion {
     ModelSpecId,
     Version,
     ArtifactHash,
+    ProfileRef,
     TrainingDatasetId,
     TradePolicyArtifactId,
     TradePolicyHash,
@@ -58,6 +59,11 @@ pub fn table() -> TableCreateStatement {
         .col(
             ColumnDef::new(QuantModelVersion::ArtifactHash)
                 .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantModelVersion::ProfileRef)
+                .json_binary()
                 .not_null(),
         )
         .col(column::uuid_null(QuantModelVersion::TrainingDatasetId))

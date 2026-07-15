@@ -1,7 +1,6 @@
 //! Quant-pivot persistence DTOs for Phase 1 schema-first repositories.
 
 mod account;
-mod archive;
 mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
@@ -38,20 +37,26 @@ mod recommendation;
 mod reconciliation;
 mod report_data_quality;
 mod report_diff;
+#[allow(clippy::needless_update)] // Insert DTO omits delivery-managed timestamps and lease fields.
+mod report_fact_delivery;
 mod report_txn;
 #[allow(clippy::needless_update)] // NewResearchJob omits DB-managed timestamps
 mod research_job;
+#[allow(clippy::needless_update)] // Insert DTO omits DB-managed created_at.
+mod research_readiness;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
 #[allow(clippy::needless_update)] // NewSettlementRedeem* omit DB-managed timestamps
 mod settlement;
 #[allow(clippy::needless_update)] // NewShadowComparison omits DB-managed created_at
 mod shadow;
+#[allow(clippy::needless_update)] // NewSourceSlice omits DB-managed timestamps
+mod source_slice;
 #[allow(clippy::needless_update)] // Insert DTOs omit DB-managed timestamps.
 mod trade_policy;
+mod trade_policy_trial;
 
 pub use account::*;
-pub use archive::*;
 pub use attribution::*;
 pub use backtest::*;
 pub use backtest_path_set::*;
@@ -76,9 +81,13 @@ pub use recommendation::*;
 pub use reconciliation::*;
 pub use report_data_quality::*;
 pub use report_diff::*;
+pub use report_fact_delivery::*;
 pub use report_txn::*;
 pub use research_job::*;
+pub use research_readiness::*;
 pub use selection::*;
 pub use settlement::*;
 pub use shadow::*;
+pub use source_slice::*;
 pub use trade_policy::*;
+pub use trade_policy_trial::*;

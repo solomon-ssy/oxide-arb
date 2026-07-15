@@ -8,7 +8,6 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_core::pit::platform::ch_historical::DurablePitSource;
 use quant_pivot_core::service::training_dataset::{
     TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
@@ -18,8 +17,9 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, ChDecimal64, ChPrice, ChSchemaVersion, ChUsd,
-        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+        BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
+        ChDecimal64, ChPrice, ChSchemaVersion, ChShares, ChUsd, DomainObservationRow,
+        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     config::GammaConfig,
     domain::{
@@ -37,7 +37,9 @@ use quant_pivot_models::{
         quant_market_linkage::{Column as LinkageColumn, Entity as LinkageEntity},
     },
     enums::{
-        clickhouse::ChFactSource,
+        clickhouse::{
+            ChCanonicalBookEventType, ChFactSource, ChStreamSessionEndReason, ChStreamSessionState,
+        },
         common::{CategorySet, MarketCategory, TickSize},
         domain::{DomainFamily, DomainMetric, KlineInterval, LinkageSourceRole, ResolverTier},
         factor::FactorFamily,
@@ -63,10 +65,10 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgAttributionRepository, PgCalibrationArtifactRepository, PgCatalogVersionRepository,
-        PgFeatureRepository, PgMarketLinkageRepository, PgMarketRepository,
-        PgMarketSelectionRepository, PgModelRegistryRepository, PgPositionRepository,
-        PgRecommendationRepository, PgRuntimeConfigVersionRepository, PgTradePolicyRepository,
-        PgTrainingDatasetRepository,
+        PgClobMarketInfoRepository, PgFeatureRepository, PgMarketLinkageRepository,
+        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
+        PgPositionRepository, PgRecommendationRepository, PgRuntimeConfigVersionRepository,
+        PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         CatalogVersionRepository, MarketLinkageRepository, ModelRegistryRepository,
@@ -86,6 +88,7 @@ use quant_pivot_research::{
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
+    execution_pg_seed::{content_hash as fixture_hash, fixture_profile_ref},
     pg::setup_pg,
     report_pipeline_harness::EmptyLinkageRepo,
 };
@@ -151,6 +154,9 @@ fn ledger_manifest(
     DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: training_dataset_id.clone(),
+        profile_ref: fixture_profile_ref(),
+        research_program_hash: fixture_hash('4'),
+        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
@@ -260,6 +266,56 @@ impl QuantFactReadRepository for ControllableFactRead {
                 .max_by_key(|row| (row.event_time, row.created_at, row.token_sequence))
                 .cloned()
         }))
+    }
+
+    async fn book_l2_events_from(
+        &self,
+        token_id: &TokenId,
+        stream_session_id: Uuid,
+        from_sequence: u64,
+        source_cutoff_ms: i64,
+        decision_at_ms: i64,
+    ) -> Result<Vec<BookL2EventRow>, StorageError> {
+        let scenario = self.scenario.lock().expect("lock");
+        Ok(scenario
+            .books
+            .get(token_id)
+            .and_then(|rows| {
+                rows.iter()
+                    .filter(|row| {
+                        row.stream_session_id == stream_session_id
+                            && row.token_sequence == from_sequence
+                            && row.event_time <= source_cutoff_ms
+                            && row.created_at <= decision_at_ms
+                    })
+                    .max_by_key(|row| (row.event_time, row.created_at))
+            })
+            .map(checkpoint_anchor_event)
+            .into_iter()
+            .collect())
+    }
+
+    async fn book_stream_session_at(
+        &self,
+        stream_session_id: Uuid,
+        _decision_at_ms: i64,
+    ) -> Result<Option<BookStreamSessionRow>, StorageError> {
+        Ok(
+            (stream_session_id == Uuid::nil()).then(|| BookStreamSessionRow {
+                stream_session_id,
+                shard_id: 0,
+                ledger_sequence: 1,
+                state: ChStreamSessionState::Open,
+                end_reason: ChStreamSessionEndReason::None,
+                subscription_token_hash: catalog_fixture_hash('0'),
+                subscription_token_count: 1,
+                received_sequence_json: "{}".to_owned(),
+                persisted_sequence_json: "{}".to_owned(),
+                opened_at: 0,
+                recorded_at: 0,
+                schema_version: ChSchemaVersion(2),
+            }),
+        )
     }
 
     async fn book_checkpoints_between(
@@ -409,6 +465,29 @@ impl QuantFactReadRepository for ControllableFactRead {
         _bucket_secs: u32,
     ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
+    }
+}
+
+fn checkpoint_anchor_event(checkpoint: &BookL2CheckpointRow) -> BookL2EventRow {
+    BookL2EventRow {
+        stream_session_id: checkpoint.stream_session_id,
+        shard_id: 0,
+        token_id: checkpoint.token_id.clone(),
+        market_id: checkpoint.market_id.clone(),
+        token_sequence: checkpoint.token_sequence,
+        event_type: ChCanonicalBookEventType::Snapshot,
+        bid_prices: vec![ChPrice::from(Price::new(Decimal::new(48, 2)))],
+        bid_sizes: vec![ChShares::from(Decimal::from(100))],
+        ask_prices: vec![ChPrice::from(Price::new(Decimal::new(52, 2)))],
+        ask_sizes: vec![ChShares::from(Decimal::from(100))],
+        book_version: checkpoint.book_version,
+        old_tick_size: None,
+        new_tick_size: None,
+        venue_event_time: checkpoint.event_time,
+        ingress_time: checkpoint.created_at,
+        persisted_time: checkpoint.created_at,
+        payload_hash: checkpoint.source_event_hash.clone(),
+        schema_version: checkpoint.schema_version,
     }
 }
 
@@ -706,7 +785,6 @@ fn market_registry_payload(
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(dec!(1000))),
         volume_24h: Some(Usd::new(dec!(1000))),
-        fee_schedule: None,
         start_date: Some(context.source_effective_at),
         end_date: Some(context.end_date),
         resolved_at: None,
@@ -875,7 +953,7 @@ fn service_with_selection_and_linkage(
             feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
             selection_repo: Arc::new(PgMarketSelectionRepository::new(db.clone())),
             position_repo: Arc::new(PgPositionRepository::new(db.clone())),
-            fee_calculator: Arc::new(FeeCalculator::new()),
+            clob_market_info_repo: Arc::new(PgClobMarketInfoRepository::new(db.clone())),
             linkage_repo,
             model_registry: Arc::new(PgModelRegistryRepository::new(db.clone())),
             trade_policy_repo: Arc::new(PgTradePolicyRepository::new(db.clone())),
@@ -924,9 +1002,13 @@ async fn plan_request(
     service
         .plan(DatasetPlanRequest {
             model_spec_id,
+            profile_ref: fixture_profile_ref(),
+            research_program_hash: fixture_hash('4'),
+            source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
             runtime_config_version_id,
             window_start,
             window_end,
+            pit_cutoff: window_end + chrono::Duration::seconds(60),
             sample_interval_secs: 60,
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,
@@ -1095,9 +1177,13 @@ async fn calibration_dataset_build_fails_closed_on_purge_overlap() {
     let calibration_plan = svc
         .plan(DatasetPlanRequest {
             model_spec_id,
+            profile_ref: fixture_profile_ref(),
+            research_program_hash: fixture_hash('4'),
+            source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
             runtime_config_version_id: rc_id,
             window_start,
             window_end,
+            pit_cutoff: window_end + chrono::Duration::seconds(60),
             sample_interval_secs: 60,
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,
@@ -1148,8 +1234,7 @@ async fn build_cancelled_before_spine_yields_cancelled_and_no_row() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let sink: Arc<dyn JobProgressSink> = Arc::new(NoopProgressSink);
-    let err = svc
-        .build_with_progress(plan, sink, cancel)
+    let err = Box::pin(svc.build_with_progress(plan, sink, cancel))
         .await
         .expect_err("cancelled build must fail closed");
     assert!(
@@ -1400,9 +1485,13 @@ async fn build_crypto_pit_dataset_with_resolved_linkage() -> TrainingDatasetArti
     let plan = svc
         .plan(DatasetPlanRequest {
             model_spec_id,
+            profile_ref: fixture_profile_ref(),
+            research_program_hash: fixture_hash('4'),
+            source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
             runtime_config_version_id: rc_id,
             window_start,
             window_end,
+            pit_cutoff: window_end + chrono::Duration::seconds(60),
             sample_interval_secs: 60,
             horizons_secs: vec![60],
             knowledge_lag_secs: domain_config.crypto.availability_lag_secs,
@@ -1480,9 +1569,13 @@ async fn plan_estimates_pit_keep_rate() {
 
     let request = DatasetPlanRequest {
         model_spec_id,
+        profile_ref: fixture_profile_ref(),
+        research_program_hash: fixture_hash('4'),
+        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
         runtime_config_version_id: rc_id,
         window_start,
         window_end,
+        pit_cutoff: window_end + chrono::Duration::seconds(60),
         sample_interval_secs: 60,
         horizons_secs: vec![60],
         knowledge_lag_secs: 10,
@@ -1924,6 +2017,7 @@ async fn model_version_training_dataset_id_is_typed() {
             model_spec_id,
             version: 2,
             artifact_hash: hash,
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: Some(dataset_id.clone()),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -1975,9 +2069,13 @@ async fn plan_count_respects_sample_sources() {
     let historical_only_plan = svc
         .plan(DatasetPlanRequest {
             model_spec_id,
+            profile_ref: fixture_profile_ref(),
+            research_program_hash: fixture_hash('4'),
+            source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('5'),
             runtime_config_version_id: rc_id,
             window_start,
             window_end,
+            pit_cutoff: window_end + chrono::Duration::seconds(60),
             sample_interval_secs: 60,
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,

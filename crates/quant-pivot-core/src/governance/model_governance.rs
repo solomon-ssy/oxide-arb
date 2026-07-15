@@ -1106,6 +1106,7 @@ impl ModelGovernanceService {
                 model_spec_id: version.model_spec_id.clone(),
                 version: next,
                 artifact_hash,
+                profile_ref: version.profile_ref.clone(),
                 training_dataset_id: version.training_dataset_id.clone(),
                 trade_policy_artifact_id: calibrated.header().trade_policy_artifact_id.clone(),
                 trade_policy_hash: calibrated.header().trade_policy_hash.clone(),

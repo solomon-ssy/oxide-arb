@@ -1,16 +1,15 @@
 //! Deploy-config validation: detects infeasible values and credential-policy
 //! violations that would cause silent failure at runtime.
 
-use super::DeployConfig;
+use super::{DeployConfig, WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS};
 use crate::{
     constants::POLYGON_CHAIN_ID,
     enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
-    types::IcaoStation,
+    types::{ContentHash, IcaoStation, minimum_raw_retention_days},
 };
 use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
-use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 /// Mode-agnostic deploy validation: structural and platform invariants that
@@ -31,27 +30,10 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "must be > 0 so an ambiguous order POST cannot hang indefinitely".into(),
         });
     }
-
-    if deploy.polymarket.fees.exponent <= Decimal::ZERO {
+    if deploy.polymarket.clob_market_info_refresh_secs < 60 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.fees.exponent",
-            detail: "must be > 0".into(),
-        });
-    }
-    for (category, rate) in &deploy.polymarket.fees.category_rates {
-        if *rate < Decimal::ZERO || *rate > dec!(1) {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "polymarket.fees.category_rates",
-                detail: format!("{category} rate {rate} out of range [0, 1]"),
-            });
-        }
-    }
-    if deploy.polymarket.fees.unknown_category_rate < Decimal::ZERO
-        || deploy.polymarket.fees.unknown_category_rate > dec!(1)
-    {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "polymarket.fees.unknown_category_rate",
-            detail: "must be in [0, 1]".into(),
+            field: "polymarket.clob_market_info_refresh_secs",
+            detail: "must be at least 60 seconds".to_owned(),
         });
     }
 
@@ -77,6 +59,52 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "db.clickhouse",
             detail: "batch_size, flush_interval_secs, max_concurrent_inserts must be > 0".into(),
+        });
+    }
+    let lifecycle = &deploy.db.clickhouse.raw_lifecycle;
+    let minimum_retention_days = match minimum_raw_retention_days() {
+        Ok(days) => days,
+        Err(detail) => {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "db.clickhouse.raw_lifecycle.retention_days",
+                detail: format!("cannot derive the immutable profile retention floor: {detail}"),
+            });
+            u32::MAX
+        }
+    };
+    if lifecycle.hot_days == 0
+        || lifecycle.retention_days < minimum_retention_days
+        || lifecycle.hot_days >= lifecycle.retention_days
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse.raw_lifecycle",
+            detail: format!(
+                "hot_days must be positive and retention_days must be at least {minimum_retention_days} and greater than hot_days"
+            ),
+        });
+    }
+    if lifecycle.cold_volume.as_ref().is_some_and(|volume| {
+        volume.is_empty()
+            || !volume
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse.raw_lifecycle.cold_volume",
+            detail: "must contain only lowercase ASCII letters, digits, and underscores".into(),
+        });
+    }
+    if lifecycle.delete_enabled
+        && (lifecycle.cold_volume.is_none()
+            || lifecycle
+                .signed_retention_plan_hash
+                .as_ref()
+                .is_none_or(|hash| ContentHash::parse(hash).is_err()))
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "db.clickhouse.raw_lifecycle.delete_enabled",
+            detail: "TTL DELETE requires a cold volume and canonical signed_retention_plan_hash"
+                .into(),
         });
     }
 
@@ -140,11 +168,14 @@ fn validate_domain_sources(deploy: &DeployConfig, report: &mut ConfigValidationR
     if sources.aviation_weather.enabled
         && (sources.aviation_weather.poll_secs == 0
             || sources.aviation_weather.request_timeout_ms == 0
-            || sources.aviation_weather.day_close_grace_secs == 0)
+            || sources.aviation_weather.day_close_grace_secs
+                != WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS)
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "domain_sources.aviation_weather",
-            detail: "poll_secs, request_timeout_ms, and day_close_grace_secs must be > 0".into(),
+            detail: format!(
+                "poll_secs and request_timeout_ms must be > 0; day_close_grace_secs must equal governed methodology value {WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS}"
+            ),
         });
     }
     if sources.ghcnh.enabled

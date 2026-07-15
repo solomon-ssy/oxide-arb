@@ -14,7 +14,7 @@ use quant_pivot_models::{
     types::{Bps, OrderAmount, Usd},
 };
 use quant_pivot_research::execution_semantics::{
-    BookWalkFill, BookWalkOutcome, LiquidityRole, walk_buy_exact_shares, walk_buy_exact_usd,
+    BookWalkFill, BookWalkOutcome, LiquidityRole, walk_buy_cash_budget, walk_buy_exact_shares,
 };
 use rust_decimal::Decimal;
 
@@ -245,7 +245,7 @@ impl AdmissionCheck for VenueMetadataCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
-        let metadata = input.venue_metadata;
+        let metadata = &input.venue_metadata;
         if metadata.registry_tick_size != metadata.venue_tick_size {
             return AdmissionCheckTrace::deny(self.id(), "registry/venue tick-size mismatch")
                 .with_threshold(metadata.registry_tick_size.as_str())
@@ -581,7 +581,7 @@ impl AdmissionCheck for LiquidityDepthCheck {
             return AdmissionCheckTrace::deny(self.id(), "recommendation trade plan unavailable");
         };
         let min_depth = entry.min_depth_usd;
-        let visible = walk_buy_exact_usd(
+        let visible = walk_buy_cash_budget(
             &book.asks,
             min_depth,
             spec.limit_price,
@@ -590,15 +590,18 @@ impl AdmissionCheck for LiquidityDepthCheck {
             LiquidityRole::Taker,
             input.now,
         )
-        .map_or(Usd::ZERO, |fill| fill.gross_notional);
-        if visible < min_depth {
+        .ok();
+        let visible_cash = visible.as_ref().map_or(Usd::ZERO, |fill| {
+            Usd::new((-fill.total_cash_delta).max(Decimal::ZERO))
+        });
+        if !visible.is_some_and(|fill| fill.outcome == BookWalkOutcome::Filled) {
             return AdmissionCheckTrace::defer(self.id(), "visible depth below minimum")
                 .with_threshold(min_depth.to_string())
-                .with_actual(visible.to_string());
+                .with_actual(visible_cash.to_string());
         }
         AdmissionCheckTrace::pass(self.id(), "liquidity depth sufficient")
             .with_threshold(min_depth.to_string())
-            .with_actual(visible.to_string())
+            .with_actual(visible_cash.to_string())
     }
 }
 
@@ -660,7 +663,7 @@ fn entry_walk(input: &AdmissionInput) -> Result<BookWalkFill, ()> {
         OrderType::Gtc | OrderType::Gtd { .. } => return Err(()),
     };
     let fill = match spec.amount {
-        OrderAmount::Usd(usd) => walk_buy_exact_usd(
+        OrderAmount::CashBudget(usd) => walk_buy_cash_budget(
             &book.asks,
             usd,
             spec.limit_price,

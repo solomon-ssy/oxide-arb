@@ -7,8 +7,8 @@ use crate::{
     },
     types::{
         BacktestPathSetId, ContentHash, MarketSelectionId, ModelInputContract, ModelRunId,
-        ModelSpecId, ModelTrainingContract, ModelVersionId, RuntimeConfigVersionId, SchemaVersion,
-        TradePolicyArtifactId, TrainingDatasetId,
+        ModelSpecId, ModelTrainingContract, ModelVersionId, ResearchProfileRef,
+        RuntimeConfigVersionId, SchemaVersion, TradePolicyArtifactId, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -70,6 +70,7 @@ pub struct ModelVersionInfo {
     pub model_family: ModelFamily,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    pub profile_ref: ResearchProfileRef,
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,
@@ -91,6 +92,7 @@ pub struct NewModelVersion {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    pub profile_ref: ResearchProfileRef,
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,

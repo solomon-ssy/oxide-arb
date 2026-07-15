@@ -4,16 +4,24 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
         FitTradePolicyRequest, JobSubmitContext, Paginated, ResearchJobView,
-        TradePolicyAuditListQuery, TradePolicyDetailView, TradePolicyFitPreflightRequest,
-        TradePolicyFitPreflightView, TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest,
-        TradePolicyListQuery, TradePolicyPreflightCheckStatus, TradePolicySummaryView,
+        TradePolicyAuditListQuery, TradePolicyDetailView, TradePolicyEvidenceDownloadView,
+        TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
+        TradePolicyGovernanceAuditView, TradePolicyGovernanceRequest, TradePolicyListQuery,
+        TradePolicyPreflightCheckStatus, TradePolicySourceSliceObjectListQuery,
+        TradePolicySourceSliceObjectView, TradePolicySourceSliceView, TradePolicySummaryView,
+        TradePolicyTrialAttemptView, TradePolicyTrialListQuery, TradePolicyValidationJobParams,
+        TradePolicyValidationListQuery, TradePolicyValidationRowListQuery,
+        TradePolicyValidationRowView, TradePolicyValidationRunView,
     },
     enums::{
         operation_log::OperationCategory,
         quant::{ResearchJobKind, TradePolicyStatus},
         rbac::{Operation, ResourceType},
     },
-    types::{ResearchJobId, TradePolicyArtifactId},
+    types::{
+        ResearchJobId, ResearchProfileArtifact, TradePolicyArtifactId, TradePolicyCohort,
+        TradePolicyEvidenceObjectKind, TradePolicyValidationRunId,
+    },
 };
 use uuid::Uuid;
 
@@ -29,6 +37,18 @@ use crate::{
 
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
+        spec(
+            Method::GET,
+            "/research/trade-policy-profiles",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            profiles,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policy-profiles/{id}/{version}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            profile,
+        ),
         spec(
             Method::GET,
             "/research/trade-policies",
@@ -55,9 +75,39 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
+            "/research/trade-policy-fits/{id}/trials",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            get_fit_trials,
+        ),
+        spec(
+            Method::GET,
             "/research/trade-policies/{id}",
             Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
             get,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policies/{id}/cohorts",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            cohorts,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policies/{id}/source-slice",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            source_slice,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policies/{id}/source-slice/objects",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            source_slice_objects,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policies/{id}/evidence/{kind}/download",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            evidence_download,
         ),
         spec(
             Method::GET,
@@ -70,6 +120,24 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/research/trade-policies/{id}/validate",
             Rule::ActingRoleGoverned(ResourceType::Materialization, Operation::Create),
             validate,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policies/{id}/validations",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            validations,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policy-validations/{id}",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            validation,
+        ),
+        spec(
+            Method::GET,
+            "/research/trade-policy-validations/{id}/rows",
+            Rule::ResourceOp(ResourceType::Materialization, Operation::Read),
+            validation_rows,
         ),
         spec(
             Method::POST,
@@ -86,6 +154,24 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
+pub async fn profiles(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<Vec<ResearchProfileArtifact>>, WebError> {
+    Ok(WebResponse::ok(state.trade_policies.list_profiles()?))
+}
+
+pub async fn profile(
+    state: web::Data<AppState>,
+    path: web::Path<(String, u32)>,
+) -> Result<WebResponse<ResearchProfileArtifact>, WebError> {
+    let (id, version) = path.into_inner();
+    let profile = state
+        .trade_policies
+        .find_profile(&id, version)?
+        .ok_or_else(|| WebError::NotFound(format!("research profile not found: {id}@{version}")))?;
+    Ok(WebResponse::ok(profile))
+}
+
 pub async fn get_fit(
     state: web::Data<AppState>,
     id: web::Path<ResearchJobId>,
@@ -97,6 +183,26 @@ pub async fn get_fit(
         .filter(|job| job.kind == ResearchJobKind::TradePolicyFit)
         .ok_or_else(|| WebError::NotFound(format!("trade-policy fit not found: {id}")))?;
     Ok(WebResponse::ok(job))
+}
+
+pub async fn get_fit_trials(
+    state: web::Data<AppState>,
+    id: web::Path<ResearchJobId>,
+    query: web::Query<TradePolicyTrialListQuery>,
+) -> Result<WebResponse<Paginated<TradePolicyTrialAttemptView>>, WebError> {
+    let fit_job_id = id.into_inner();
+    state
+        .research_jobs
+        .get(&fit_job_id)
+        .await?
+        .filter(|job| job.kind == ResearchJobKind::TradePolicyFit)
+        .ok_or_else(|| WebError::NotFound(format!("trade-policy fit not found: {fit_job_id}")))?;
+    let page = state
+        .trade_policies
+        .page_trials(&fit_job_id, query.into_inner())
+        .await?
+        .map(TradePolicyTrialAttemptView::from);
+    Ok(WebResponse::ok(page))
 }
 
 pub async fn audits(
@@ -136,6 +242,56 @@ pub async fn get(
     Ok(WebResponse::ok(TradePolicyDetailView::from(info)))
 }
 
+pub async fn cohorts(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyArtifactId>,
+) -> Result<WebResponse<Vec<TradePolicyCohort>>, WebError> {
+    let info = state
+        .trade_policies
+        .find(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {id}")))?;
+    Ok(WebResponse::ok(info.payload_json.cohorts))
+}
+
+pub async fn source_slice(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyArtifactId>,
+) -> Result<WebResponse<TradePolicySourceSliceView>, WebError> {
+    let view = state
+        .trade_policies
+        .source_slice(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {id}")))?;
+    Ok(WebResponse::ok(view))
+}
+
+pub async fn source_slice_objects(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyArtifactId>,
+    query: web::Query<TradePolicySourceSliceObjectListQuery>,
+) -> Result<WebResponse<Paginated<TradePolicySourceSliceObjectView>>, WebError> {
+    let page = state
+        .trade_policies
+        .page_source_slice_objects(&id, query.into_inner())
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {id}")))?;
+    Ok(WebResponse::ok(page))
+}
+
+pub async fn evidence_download(
+    state: web::Data<AppState>,
+    path: web::Path<(TradePolicyArtifactId, TradePolicyEvidenceObjectKind)>,
+) -> Result<WebResponse<TradePolicyEvidenceDownloadView>, WebError> {
+    let (artifact_id, kind) = path.into_inner();
+    let view = state
+        .trade_policies
+        .evidence_download(&artifact_id, kind)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade policy not found: {artifact_id}")))?;
+    Ok(WebResponse::ok(view))
+}
+
 pub async fn preflight(
     state: web::Data<AppState>,
     body: ValidatedJson<TradePolicyFitPreflightRequest>,
@@ -158,14 +314,18 @@ pub async fn fit(
         .trade_policies
         .preflight(&TradePolicyFitPreflightRequest {
             selection: request.selection.clone(),
-            activation_target: request.activation_target,
+            evaluation_track: request.evaluation_track,
             candidates: request.candidates.clone(),
         })
         .await?;
     if preflight.publishable_input != TradePolicyPreflightCheckStatus::Pass {
         return Err(WebError::BadRequest(format!(
-            "trade-policy fit preflight blocked enqueue: {}",
-            preflight.messages.join("; ")
+            "trade-policy fit preflight blocked enqueue: {:?}",
+            preflight
+                .blockers
+                .iter()
+                .map(|blocker| blocker.kind)
+                .collect::<Vec<_>>()
         )));
     }
     let reason = request.reason.clone();
@@ -199,20 +359,80 @@ pub async fn validate(
     request_id: RequestId,
     op_ctx: OperationCtx,
     body: ValidatedJson<TradePolicyGovernanceRequest>,
-) -> Result<WebResponse<TradePolicyDetailView>, WebError> {
-    transition(
-        TransitionContext {
-            state,
-            artifact_id: id.into_inner(),
-            actor,
-            role,
-            request_id,
-            op_ctx,
-            request: body.into_inner(),
-        },
-        TradePolicyStatus::Validated,
-    )
-    .await
+) -> Result<WebResponse<ResearchJobView>, WebError> {
+    let artifact_id = id.into_inner();
+    let actor_id = Uuid::parse_str(&actor.claims.sub)
+        .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))?;
+    let request = body.into_inner();
+    let reason = request.reason.clone();
+    let job = state
+        .research_jobs
+        .enqueue_trade_policy_validation(
+            TradePolicyValidationJobParams {
+                validation_run_id: TradePolicyValidationRunId::from_v7(),
+                artifact_id: artifact_id.clone(),
+                actor_id,
+                reason: request.reason,
+            },
+            JobSubmitContext {
+                acting_role: role.0.clone(),
+                requested_by: Some(actor.claims.sub),
+            },
+        )
+        .await?;
+    op_ctx.set_action(OperationCategory::Governance, "trade_policy.validate");
+    op_ctx.set_resource(ResourceType::Materialization, artifact_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "artifact_id": artifact_id.to_string(),
+        "job_id": job.job_id.to_string(),
+        "acting_role": role.0,
+        "request_id": request_id.0,
+        "reason": reason,
+    }));
+    Ok(WebResponse::accepted(job))
+}
+
+pub async fn validations(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyArtifactId>,
+    query: web::Query<TradePolicyValidationListQuery>,
+) -> Result<WebResponse<Paginated<TradePolicyValidationRunView>>, WebError> {
+    let page = state
+        .trade_policies
+        .page_validations(&id, query.into_inner())
+        .await?
+        .map(TradePolicyValidationRunView::from);
+    Ok(WebResponse::ok(page))
+}
+
+pub async fn validation(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyValidationRunId>,
+) -> Result<WebResponse<TradePolicyValidationRunView>, WebError> {
+    let run = state
+        .trade_policies
+        .find_validation(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade-policy validation not found: {id}")))?;
+    Ok(WebResponse::ok(TradePolicyValidationRunView::from(run)))
+}
+
+pub async fn validation_rows(
+    state: web::Data<AppState>,
+    id: web::Path<TradePolicyValidationRunId>,
+    query: web::Query<TradePolicyValidationRowListQuery>,
+) -> Result<WebResponse<Paginated<TradePolicyValidationRowView>>, WebError> {
+    if state.trade_policies.find_validation(&id).await?.is_none() {
+        return Err(WebError::NotFound(format!(
+            "trade-policy validation not found: {id}"
+        )));
+    }
+    let page = state
+        .trade_policies
+        .page_validation_rows(&id, query.into_inner())
+        .await?
+        .map(TradePolicyValidationRowView::from);
+    Ok(WebResponse::ok(page))
 }
 
 pub async fn publish(

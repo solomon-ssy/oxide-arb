@@ -6,7 +6,7 @@
 use super::{
     NewAccountSnapshot, NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot,
     NewFeatureParityRun, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-    NewReportDataQualitySnapshot, NewResearchJob,
+    NewReportDataQualitySnapshot, NewReportFactDelivery, NewResearchJob,
 };
 use crate::{domain::governance::NewOperationLog, types::FeatureParityStateId};
 
@@ -52,6 +52,9 @@ pub struct NewReportTransaction {
     /// Pre-inference reports carry a report-scoped parity subject, never an
     /// invented model-run id.
     pub sampled_feature_parity: Option<NewReportFeatureParity>,
+    /// Required durable fact-bundle outbox row. The lifecycle writes the
+    /// content-addressed object first, then attaches this row before PG commit.
+    pub fact_delivery: Option<NewReportFactDelivery>,
     /// Operator/audit trail row committed with the authoritative report rows.
     pub operation_log: NewOperationLog,
 }

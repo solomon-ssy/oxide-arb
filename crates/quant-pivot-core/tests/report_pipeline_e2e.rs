@@ -44,7 +44,13 @@ async fn ad_hoc_publishes_report_with_recommendations() {
         .await
         .expect("ad-hoc report");
 
-    assert_eq!(report.status, RecommendationReportStatus::Published);
+    assert_eq!(
+        report.status,
+        RecommendationReportStatus::Published,
+        "unexpected empty report: reason={:?}, summary={:?}",
+        report.status_reason,
+        report.summary_json
+    );
     assert!(report.summary_json.published_recommendation_count >= 1);
 
     let publish_logs = PgOperationLogRepository::new(db.clone())
@@ -139,6 +145,41 @@ async fn empty_selection_publishes_published_empty() {
         .await
         .expect("load recommendations");
     assert!(recs.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn missing_trade_policy_publishes_explicit_non_actionable_empty_report() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let harness =
+        ReportPipelineHarness::bootstrap(&db, HarnessOptions::missing_trade_policy()).await;
+
+    let report = harness
+        .lifecycle
+        .run_ad_hoc(AdHocReportRequest {
+            request_id: "missing-trade-policy".to_owned(),
+            trigger_time: Utc::now(),
+            top_n: Some(5),
+            knowledge_lag_secs: Some(0),
+        })
+        .await
+        .expect("missing policy must produce an auditable empty report");
+
+    assert_eq!(report.status, RecommendationReportStatus::PublishedEmpty);
+    assert_eq!(
+        report.status_reason.as_deref(),
+        Some(EmptyReportReason::TradePolicyUnavailable.as_str())
+    );
+    assert_eq!(report.summary_json.published_recommendation_count, 0);
+    assert!(
+        harness
+            .recommendation_repo
+            .find_by_report(&report.recommendation_report_id)
+            .await
+            .expect("load recommendations")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -327,13 +368,14 @@ async fn neutral_kelly_fraction(collateral: Usd) -> Decimal {
         .find_by_report(&report.recommendation_report_id)
         .await
         .expect("load neutral recommendations");
-    recommendations
+    let recommendation = recommendations
         .iter()
         .find(|recommendation| recommendation.market_id.as_str() == MARKET_ID)
-        .expect("neutral baseline must publish primary market recommendation")
+        .expect("neutral baseline must publish primary market recommendation");
+    recommendation
         .trade_plan
         .sizing()
-        .expect("frozen sizing")
+        .unwrap_or_else(|| panic!("frozen sizing: {:?}", recommendation.trade_plan))
         .kelly_fraction_applied
         .expect("neutral kelly fraction")
 }

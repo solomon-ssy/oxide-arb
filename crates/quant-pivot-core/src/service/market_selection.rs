@@ -143,7 +143,9 @@ mod tests {
             }],
             excluded: vec![ExcludedMarket {
                 market_id: MarketId::new("0xblocked"),
-                reason: ExclusionReason::SelectionCapExceeded,
+                event_id: EventId::new("evt-1"),
+                primary_token_id: TokenId::new("yes"),
+                reason: ExclusionReason::ManuallyBlocked,
             }],
             exclusion_summary: SelectionExclusionSummary::default(),
         };

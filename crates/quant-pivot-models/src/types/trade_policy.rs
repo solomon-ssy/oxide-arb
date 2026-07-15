@@ -19,19 +19,19 @@ use crate::{
     hashing::CanonicalDigest,
     jsonb_active,
     types::{
-        Bps, ClockAnchor, ContentHash, ENTRY_CONDITION_MAX_DEPTH,
+        ArtifactUri, Bps, ClockAnchor, ContentHash, ENTRY_CONDITION_MAX_DEPTH,
         ENTRY_CONDITION_MAX_GROUP_CHILDREN, ENTRY_CONDITION_MAX_NODES,
-        ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure,
-        OpportunisticExitPolicy, Price, RuntimeConfigVersionId, TradePolicyArtifactId,
-        TrainingDatasetId, Usd,
+        ENTRY_CONDITION_MIN_GROUP_CHILDREN, FactorDefinitionId, FactorMeasure, ModelVersionId,
+        OpportunisticExitPolicy, Price, ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef,
+        RuntimeConfigVersionId, TradePolicyArtifactId, TrainingDatasetId, Usd,
+        resolve_builtin_research_profile,
     },
 };
 
 /// Breaking wire version for the standalone policy artifact family.
-pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 3;
-pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 1;
+pub const TRADE_POLICY_ARTIFACT_FORMAT_VERSION: u32 = 5;
+pub const TRADE_POLICY_EVIDENCE_BUNDLE_FORMAT_VERSION: u32 = 2;
 pub const TRADE_POLICY_MAX_CANDIDATES: usize = 32;
-pub const TRADE_POLICY_HORIZON_SECS: u64 = 3_600;
 
 /// Immutable statistical and execution-quality thresholds used for publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ pub struct TradePolicyQualityGate {
     pub min_common_candidate_support: Decimal,
     pub min_passive_reconciled_trade_coverage: Decimal,
     pub min_fee_catalog_coverage: Decimal,
-    pub min_universe_coverage: Decimal,
+    pub min_eligible_market_coverage: Decimal,
     pub min_cpcv_paths: u32,
     pub min_deflated_sharpe_ratio: Decimal,
     pub max_probability_of_backtest_overfitting: Decimal,
@@ -76,7 +76,11 @@ impl TradePolicyQualityGate {
                 self.min_fee_catalog_coverage,
                 false,
             ),
-            ("min_universe_coverage", self.min_universe_coverage, false),
+            (
+                "min_eligible_market_coverage",
+                self.min_eligible_market_coverage,
+                false,
+            ),
             (
                 "max_probability_of_backtest_overfitting",
                 self.max_probability_of_backtest_overfitting,
@@ -107,7 +111,10 @@ impl TradePolicyQualityGate {
                 "min_passive_reconciled_trade_coverage",
                 self.min_passive_reconciled_trade_coverage,
             ),
-            ("min_universe_coverage", self.min_universe_coverage),
+            (
+                "min_eligible_market_coverage",
+                self.min_eligible_market_coverage,
+            ),
         ] {
             if value < Decimal::new(95, 2) {
                 return Err(format!("{name} cannot be lower than 0.95"));
@@ -138,15 +145,20 @@ impl TradePolicyQualityGate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyFitContract {
+    pub profile_ref: ResearchProfileRef,
+    pub evaluation_track: ResearchEvaluationTrack,
+    pub research_program_hash: ContentHash,
     pub source_dataset_id: TrainingDatasetId,
+    pub model_version_id: ModelVersionId,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub fit_window_start: DateTime<Utc>,
     pub fit_window_end: DateTime<Utc>,
     /// Latest point-in-time instant from which any fit evidence may be consumed.
     pub pit_cutoff: DateTime<Utc>,
-    pub horizon_secs: u64,
-    pub notional_tiers: Vec<Usd>,
+    pub target_horizon_secs: u64,
+    pub cash_budget_tiers: Vec<Usd>,
     pub methodology_hash: ContentHash,
+    pub latency_evidence_id: uuid::Uuid,
     pub latency_profile_hash: ContentHash,
     pub quality_gate: TradePolicyQualityGate,
 }
@@ -159,28 +171,29 @@ impl TradePolicyFitContract {
         if self.fit_window_end > self.pit_cutoff {
             return Err("trade-policy fit window must end at or before pit_cutoff".to_owned());
         }
-        if self.horizon_secs != TRADE_POLICY_HORIZON_SECS {
-            return Err("the first policy-fit release supports only a 1h horizon".to_owned());
+        if self.latency_evidence_id.is_nil() {
+            return Err("trade-policy latency evidence identity cannot be nil".to_owned());
         }
-        if self.notional_tiers.is_empty()
-            || self.notional_tiers.iter().any(|tier| !tier.is_positive())
-        {
-            return Err("trade-policy notional tiers must be non-empty and positive".to_owned());
+        let profile = resolve_builtin_research_profile(&self.profile_ref)?;
+        if !profile.spec.permits(self.evaluation_track) {
+            return Err(
+                "research profile does not permit the requested evaluation track".to_owned(),
+            );
         }
-        if self
-            .notional_tiers
-            .windows(2)
-            .any(|tiers| tiers[0] >= tiers[1])
-        {
-            return Err("trade-policy notional tiers must be strictly increasing".to_owned());
+        let expected_span = chrono::Duration::days(i64::from(profile.spec.fit_span_days));
+        if self.fit_window_end - self.fit_window_start != expected_span {
+            return Err("trade-policy fit window does not match the immutable profile".to_owned());
         }
-        let required_tiers = [
-            Usd::new(Decimal::new(25, 0)),
-            Usd::new(Decimal::new(100, 0)),
-            Usd::new(Decimal::new(500, 0)),
-        ];
-        if self.notional_tiers != required_tiers {
-            return Err("policy fit tiers must be exactly $25/$100/$500".to_owned());
+        if self.target_horizon_secs != profile.spec.target_horizon_secs {
+            return Err("trade-policy horizon does not match the immutable profile".to_owned());
+        }
+        if self.cash_budget_tiers != profile.spec.allowed_cash_budget_tiers {
+            return Err(
+                "trade-policy cash-budget tiers do not match the immutable profile".to_owned(),
+            );
+        }
+        if self.quality_gate != profile.spec.quality_gate {
+            return Err("trade-policy quality gate must equal the immutable profile".to_owned());
         }
         self.quality_gate.validate()
     }
@@ -199,11 +212,12 @@ pub struct TradePolicyCohortDimension {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyCohortKey {
+    pub profile_ref: ResearchProfileRef,
     pub category: MarketCategory,
     pub horizon_secs: u64,
     pub entry_price_min: Price,
     pub entry_price_max: Price,
-    pub notional_tier: Usd,
+    pub cash_budget_tier: Usd,
     pub liquidity: TradePolicyCohortDimension,
     pub volatility: TradePolicyCohortDimension,
 }
@@ -543,20 +557,67 @@ pub struct TradePolicyValidationEvidence {
     pub depth_failure_rate: Option<Decimal>,
     pub common_candidate_support: Option<Decimal>,
     pub fee_catalog_coverage: Option<Decimal>,
-    pub universe_coverage: Option<Decimal>,
+    pub eligible_market_coverage: Option<Decimal>,
+}
+
+/// Typed metrics carried by one successful trial-ledger attempt. Percentages
+/// use exact decimals in `[0, 1]`; no JSON number or floating-point money enters
+/// the immutable experiment record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+#[serde(deny_unknown_fields)]
+pub struct TradePolicyTrialMetrics {
+    pub sample_count: u64,
+    pub effective_sample_size: Decimal,
+    pub net_return_bps: Decimal,
+    pub sharpe_ratio: Option<Decimal>,
+    pub executable_coverage: Decimal,
+    pub full_l2_coverage: Decimal,
+    pub fee_catalog_coverage: Decimal,
+    pub ambiguous_touch_rate: Decimal,
+    pub depth_failure_rate: Decimal,
+    pub latency_stress_multiplier: Decimal,
+}
+
+impl TradePolicyTrialMetrics {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.sample_count == 0
+            || self.effective_sample_size <= Decimal::ZERO
+            || self.effective_sample_size > Decimal::from(self.sample_count)
+            || self.latency_stress_multiplier < Decimal::ONE
+        {
+            return Err("trade-policy trial sample/ESS/latency metrics are invalid".to_owned());
+        }
+        if [
+            self.executable_coverage,
+            self.full_l2_coverage,
+            self.fee_catalog_coverage,
+            self.ambiguous_touch_rate,
+            self.depth_failure_rate,
+        ]
+        .into_iter()
+        .any(|value| !unit_interval(value))
+        {
+            return Err(
+                "trade-policy trial coverage/rate metrics must be within [0, 1]".to_owned(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Durable row-level evidence referenced by a compact policy artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradePolicyEvidenceBundleRef {
-    pub manifest_uri: crate::types::ArtifactUri,
+    pub manifest_uri: ArtifactUri,
     pub manifest_hash: ContentHash,
     pub simulator_hash: ContentHash,
-    pub code_hash: ContentHash,
+    pub replay_kernel_hash: ContentHash,
     pub methodology_hash: ContentHash,
+    pub latency_evidence_id: uuid::Uuid,
     pub latency_profile_hash: ContentHash,
     pub catalog_ledger_hash: ContentHash,
-    pub archive_manifest_set_hash: ContentHash,
+    pub source_slice_manifest_hash: ContentHash,
+    pub fit_job_id: ResearchJobId,
     pub trial_ledger_hash: ContentHash,
 }
 
@@ -589,8 +650,9 @@ impl TradePolicyEvidenceObjectKind {
 #[serde(deny_unknown_fields)]
 pub struct TradePolicyEvidenceObjectRef {
     pub kind: TradePolicyEvidenceObjectKind,
-    pub uri: crate::types::ArtifactUri,
+    pub uri: ArtifactUri,
     pub byte_hash: ContentHash,
+    pub row_chain_hash: ContentHash,
     pub row_count: u64,
 }
 
@@ -603,11 +665,13 @@ pub struct TradePolicyEvidenceBundleManifest {
     pub source_dataset_hash: ContentHash,
     pub candidate_set_hash: ContentHash,
     pub simulator_hash: ContentHash,
-    pub code_hash: ContentHash,
+    pub replay_kernel_hash: ContentHash,
     pub methodology_hash: ContentHash,
+    pub latency_evidence_id: uuid::Uuid,
     pub latency_profile_hash: ContentHash,
     pub catalog_ledger_hash: ContentHash,
-    pub archive_manifest_set_hash: ContentHash,
+    pub source_slice_manifest_hash: ContentHash,
+    pub fit_job_id: ResearchJobId,
     pub trial_ledger_cutoff: DateTime<Utc>,
     pub trial_ledger_hash: ContentHash,
     pub objects: Vec<TradePolicyEvidenceObjectRef>,
@@ -624,6 +688,11 @@ impl TradePolicyEvidenceBundleManifest {
         if self.objects.len() != TradePolicyEvidenceObjectKind::REQUIRED.len() {
             return Err(
                 "policy evidence bundle must contain every required object once".to_owned(),
+            );
+        }
+        if self.latency_evidence_id.is_nil() {
+            return Err(
+                "policy evidence manifest has no signed latency evidence identity".to_owned(),
             );
         }
         let mut prior = None;
@@ -701,6 +770,7 @@ pub struct TradePolicyPitCutoffEvidence {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TradePolicyPublicationBlocker {
     UnsupportedFormat { actual: u32 },
+    ResearchOnlyEvaluationTrack,
     InvalidFitContract { detail: String },
     InvalidConditionCandidates { detail: String },
     ConditionCandidateSetHashMismatch,
@@ -731,8 +801,8 @@ pub enum TradePolicyPublicationBlocker {
     InsufficientCommonCandidateSupport,
     MissingFeeCatalogCoverage,
     InsufficientFeeCatalogCoverage,
-    MissingUniverseCoverage,
-    InsufficientUniverseCoverage,
+    MissingEligibleMarketCoverage,
+    InsufficientEligibleMarketCoverage,
     InsufficientCohortEffectiveSampleSize { cohort_index: u32 },
     InsufficientCohortCoverage { cohort_index: u32 },
     InsufficientCohortFullL2Coverage { cohort_index: u32 },
@@ -1055,6 +1125,9 @@ impl TradePolicyArtifactPayload {
         if let Err(detail) = self.fit_contract.validate() {
             blockers.push(TradePolicyPublicationBlocker::InvalidFitContract { detail });
         }
+        if self.fit_contract.evaluation_track == ResearchEvaluationTrack::ResearchOnly {
+            blockers.push(TradePolicyPublicationBlocker::ResearchOnlyEvaluationTrack);
+        }
         if let Err(detail) = self.validate_candidates() {
             blockers.push(TradePolicyPublicationBlocker::InvalidConditionCandidates { detail });
         } else {
@@ -1104,6 +1177,7 @@ impl TradePolicyArtifactPayload {
             None => blockers.push(TradePolicyPublicationBlocker::MissingEvidenceBundle),
             Some(bundle)
                 if bundle.methodology_hash != self.fit_contract.methodology_hash
+                    || bundle.latency_evidence_id != self.fit_contract.latency_evidence_id
                     || bundle.latency_profile_hash != self.fit_contract.latency_profile_hash
                     || self.validation.trial_ledger_hash.as_ref()
                         != Some(&bundle.trial_ledger_hash) =>
@@ -1221,10 +1295,10 @@ impl TradePolicyArtifactPayload {
             }
             Some(_) => {}
         }
-        match validation.universe_coverage {
-            None => blockers.push(TradePolicyPublicationBlocker::MissingUniverseCoverage),
-            Some(value) if value < gate.min_universe_coverage => {
-                blockers.push(TradePolicyPublicationBlocker::InsufficientUniverseCoverage);
+        match validation.eligible_market_coverage {
+            None => blockers.push(TradePolicyPublicationBlocker::MissingEligibleMarketCoverage),
+            Some(value) if value < gate.min_eligible_market_coverage => {
+                blockers.push(TradePolicyPublicationBlocker::InsufficientEligibleMarketCoverage);
             }
             Some(_) => {}
         }
@@ -1358,19 +1432,25 @@ pub struct TradePolicyArtifact {
     pub updated_at: DateTime<Utc>,
 }
 
-jsonb_active!(TradePolicyFitContract, TradePolicyArtifactPayload);
+jsonb_active!(
+    TradePolicyFitContract,
+    TradePolicyArtifactPayload,
+    TradePolicyTrialMetrics
+);
 
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use rust_decimal_macros::dec;
 
     use super::{
         TRADE_POLICY_ARTIFACT_FORMAT_VERSION, TradePolicyArtifactPayload,
         TradePolicyExecutionEvidence, TradePolicyFitContract, TradePolicyPublicationBlocker,
-        TradePolicyQualityGate, TradePolicyValidationEvidence, VerticalActivationTarget,
+        TradePolicyValidationEvidence, VerticalActivationTarget,
     };
-    use crate::types::{Bps, ContentHash, RuntimeConfigVersionId, TrainingDatasetId, Usd};
+    use crate::types::{
+        ContentHash, ModelVersionId, ResearchEvaluationTrack, RuntimeConfigVersionId,
+        TrainingDatasetId, builtin_research_profiles,
+    };
 
     fn hash(digit: char) -> ContentHash {
         ContentHash::parse(format!("blake3:{}", digit.to_string().repeat(64)))
@@ -1378,31 +1458,28 @@ mod tests {
     }
 
     fn contract() -> TradePolicyFitContract {
+        let profile = builtin_research_profiles()
+            .expect("profiles")
+            .into_iter()
+            .next()
+            .expect("pooled profile");
         let fit_window_end = Utc.timestamp_opt(1_700_086_400, 0).single().expect("time");
         TradePolicyFitContract {
+            profile_ref: profile.profile_ref,
+            evaluation_track: ResearchEvaluationTrack::ResearchOnly,
+            research_program_hash: hash('7'),
             source_dataset_id: TrainingDatasetId::from_v7(),
+            model_version_id: ModelVersionId::from_v7(),
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
-            fit_window_start: Utc.timestamp_opt(1_700_000_000, 0).single().expect("time"),
+            fit_window_start: fit_window_end - chrono::Duration::days(30),
             fit_window_end,
             pit_cutoff: fit_window_end,
-            horizon_secs: 3_600,
-            notional_tiers: vec![Usd::new(dec!(25)), Usd::new(dec!(100)), Usd::new(dec!(500))],
+            target_horizon_secs: profile.spec.target_horizon_secs,
+            cash_budget_tiers: profile.spec.allowed_cash_budget_tiers,
             methodology_hash: hash('8'),
+            latency_evidence_id: uuid::Uuid::now_v7(),
             latency_profile_hash: hash('9'),
-            quality_gate: TradePolicyQualityGate {
-                min_effective_sample_size: 100,
-                min_full_l2_coverage: dec!(0.95),
-                min_common_candidate_support: dec!(0.95),
-                min_passive_reconciled_trade_coverage: dec!(0.95),
-                min_fee_catalog_coverage: dec!(1),
-                min_universe_coverage: dec!(0.95),
-                min_cpcv_paths: 21,
-                min_deflated_sharpe_ratio: dec!(0.95),
-                max_probability_of_backtest_overfitting: dec!(0.5),
-                max_ambiguous_touch_rate: dec!(0.05),
-                max_depth_failure_rate: dec!(0.05),
-                min_lower_confidence_utility_bps: Bps::ZERO,
-            },
+            quality_gate: profile.spec.quality_gate,
         }
     }
 
@@ -1411,6 +1488,16 @@ mod tests {
         let mut value = contract();
         value.pit_cutoff = value.fit_window_end - chrono::Duration::seconds(1);
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn fit_contract_rejects_a_second_quality_gate_truth() {
+        let mut value = contract();
+        value.quality_gate.min_effective_sample_size += 1;
+        assert_eq!(
+            value.validate(),
+            Err("trade-policy quality gate must equal the immutable profile".to_owned())
+        );
     }
 
     #[test]
@@ -1450,7 +1537,7 @@ mod tests {
                 depth_failure_rate: None,
                 common_candidate_support: None,
                 fee_catalog_coverage: None,
-                universe_coverage: None,
+                eligible_market_coverage: None,
             },
         };
 

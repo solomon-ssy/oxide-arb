@@ -11,7 +11,8 @@ use async_trait::async_trait;
 use crate::{
     domain::{
         Paginated, QuantEvidenceView, QuantRecommendationView, QuantReportDiagnosticsView,
-        QuantReportListQuery, RecommendationReportInfo, ReportDiff,
+        QuantReportFunnelView, QuantReportListQuery, RecommendationReportInfo, ReportDiff,
+        ReportFactDeliveryInfo, ReportFunnelMarketListQuery, ReportFunnelMarketView,
     },
     enums::quant::ReportKind,
     types::{RecommendationId, RecommendationReportId},
@@ -59,11 +60,27 @@ pub trait QuantReportPort: Send + Sync {
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<RecommendationReportInfo>>;
 
+    async fn find_report_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<ReportFactDeliveryInfo>>;
+
     /// Load durable serving diagnostics for one report.
     async fn find_report_diagnostics(
         &self,
         report_id: &RecommendationReportId,
     ) -> QuantResult<Option<QuantReportDiagnosticsView>>;
+
+    async fn find_report_funnel(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<QuantReportFunnelView>>;
+
+    async fn page_report_funnel_markets(
+        &self,
+        report_id: &RecommendationReportId,
+        query: ReportFunnelMarketListQuery,
+    ) -> QuantResult<Option<Paginated<ReportFunnelMarketView>>>;
 
     /// Load the latest published (or published-empty) report of `kind`.
     async fn latest_report(

@@ -20,12 +20,11 @@ use quant_pivot_models::{
         RecommendationInfo, RecommendationReportInfo, RuntimeConfigVersionInfo,
     },
     enums::{market::MarketStatus, quant::PublicationStatus},
-    hashing::CanonicalDigest,
-    types::{Bps, Usd},
+    types::{Bps, ClobMarketInfoVersion, Usd},
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, EntryConditionRepository, ExecutionOrderRepository,
-    MarketRepository, ModelRegistryRepository, OrderIntentRepository,
+    CapitalAllocationRepository, ClobMarketInfoRepository, EntryConditionRepository,
+    ExecutionOrderRepository, MarketRepository, ModelRegistryRepository, OrderIntentRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
     RuntimeConfigVersionRepository, TradePolicyRepository,
 };
@@ -70,6 +69,7 @@ pub struct AdmissionInputBuilderDeps {
     pub conditions: Arc<dyn EntryConditionRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub markets: Arc<dyn MarketRepository>,
+    pub clob_market_info: Arc<dyn ClobMarketInfoRepository>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     pub account_factory: Arc<AccountProviderFactory>,
     pub book_store: Arc<BookStore>,
@@ -143,8 +143,12 @@ impl AdmissionInputBuilder {
                 .ok_or_else(|| ExecutionError::IntentDenied {
                     reason: "intent model version no longer exists".to_owned(),
                 })?;
-        require_frozen_trade_policy(deps.trade_policies.as_ref(), model_version, &recommendation)
-            .await?;
+        let profile_ref = require_frozen_trade_policy(
+            deps.trade_policies.as_ref(),
+            model_version,
+            &recommendation,
+        )
+        .await?;
         let model_state = self.resolve_model_state(fetched.model_version).await?;
         let exposure = AdmissionExposureState {
             has_blocking_inflight: fetched.has_blocking_inflight,
@@ -169,9 +173,10 @@ impl AdmissionInputBuilder {
             book_as_of_ms: book.as_ref().map(|snapshot| snapshot.timestamp_ms),
             kill_switch_state: kill_switch,
         };
-        let fee_schedule = pit_fee_schedule(&fetched.market_fee_schedule, now)?;
+        let fee_schedule = pit_fee_schedule(&fetched.clob_market_info, now)?;
 
         Ok(AdmissionInput {
+            profile_ref,
             intent: intent.clone(),
             condition,
             recommendation,
@@ -227,6 +232,7 @@ impl AdmissionInputBuilder {
             active_version_result,
             account_result,
             market_result,
+            clob_market_info_result,
             open_intent_result,
             venue_metadata_result,
         ) = tokio::join!(
@@ -244,6 +250,7 @@ impl AdmissionInputBuilder {
                     .await
             },
             deps.markets.find_by_id(&market_id),
+            deps.clob_market_info.at(&market_id, now, now),
             deps.intents.count_open(),
             async move { clob.order_metadata(&token_id).await },
         );
@@ -253,13 +260,12 @@ impl AdmissionInputBuilder {
         let market = market_result?
             .ok_or_else(|| not_found("market", recommendation.market_id.to_string()))?;
         let manual_block = market.status == MarketStatus::ManuallyBlocked;
-        let market_fee_schedule =
-            market
-                .fee_schedule()
-                .ok_or_else(|| ExecutionError::IntentDenied {
-                    reason: "market fee schedule is incomplete".to_owned(),
-                })?;
+        let clob_market_info =
+            clob_market_info_result?.ok_or_else(|| ExecutionError::IntentDenied {
+                reason: "no point-in-time CLOB market-info observation is available".to_owned(),
+            })?;
         let venue_metadata = venue_metadata_result?;
+        let clob_market_info_hash = clob_market_info.payload_hash.clone();
         let active_version = active_version_result?
             .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
 
@@ -270,14 +276,15 @@ impl AdmissionInputBuilder {
             allocation: allocation_result?,
             account: account_result?,
             manual_block,
-            market_fee_schedule,
+            clob_market_info: clob_market_info.clone(),
             active_version,
             open_intent_count: open_intent_result?,
             venue_metadata: AdmissionVenueMetadata {
-                registry_tick_size: market.tick_size,
-                registry_neg_risk: market.neg_risk,
+                registry_tick_size: clob_market_info.tick_size,
+                registry_neg_risk: clob_market_info.neg_risk,
                 venue_tick_size: venue_metadata.tick_size,
                 venue_neg_risk: venue_metadata.neg_risk,
+                clob_market_info_hash,
             },
         })
     }
@@ -320,36 +327,33 @@ struct ParallelAdmissionFetch {
     allocation: Option<CapitalAllocationInfo>,
     account: AccountSnapshot,
     manual_block: bool,
-    market_fee_schedule: quant_pivot_models::domain::MarketFeeSchedule,
+    clob_market_info: ClobMarketInfoVersion,
     active_version: RuntimeConfigVersionInfo,
     open_intent_count: u64,
     venue_metadata: AdmissionVenueMetadata,
 }
 
-fn pit_fee_schedule(
-    schedule: &quant_pivot_models::domain::MarketFeeSchedule,
+pub fn pit_fee_schedule(
+    market_info: &ClobMarketInfoVersion,
     decision_at: DateTime<Utc>,
 ) -> QuantResult<PitFeeSchedule> {
-    if schedule.observed_at > decision_at {
+    if market_info.effective_at > decision_at || market_info.available_at > decision_at {
         return Err(ExecutionError::IntentDenied {
             reason: "market fee schedule was not point-in-time visible".to_owned(),
         }
         .into());
     }
-    let schedule_hash = CanonicalDigest::content_hash_json(schedule)?;
+    let details = market_info.fee_details;
     Ok(PitFeeSchedule {
-        schedule_hash,
-        effective_at: schedule.observed_at,
-        available_at: schedule.observed_at,
-        platform_rate: if schedule.fees_enabled {
-            schedule.fee_rate
-        } else {
-            Decimal::ZERO
-        },
-        exponent: schedule.exponent,
-        taker_only: schedule.taker_only,
-        builder_maker_fee_bps: Bps::ZERO,
-        builder_taker_fee_bps: Bps::ZERO,
+        schedule_hash: market_info.payload_hash.clone(),
+        effective_at: market_info.effective_at,
+        available_at: market_info.available_at,
+        platform_rate: details.rate,
+        exponent: Decimal::from(details.exponent),
+        taker_only: details.taker_only,
+        builder_maker_fee_bps: Bps::new(Decimal::from(market_info.builder_maker_fee_rate_bps)),
+        builder_taker_fee_bps: Bps::new(Decimal::from(market_info.builder_taker_fee_rate_bps)),
+        builder_attributed: false,
     })
 }
 

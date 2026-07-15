@@ -75,33 +75,6 @@ base_url = "https://relayer-v2.polymarket.com"
 # Purpose: relayer HTTP request timeout (ms). Default: 15000.
 request_timeout_ms = 15000
 
-# Per-category feeRate (official 2026-04-04). Override when PM updates docs.
-# Exponent is always 1 per https://docs.polymarket.com/trading/fees
-[polymarket.fees]
-# Purpose: volatility exponent in fee = C × feeRate × p × (1 − p)^exponent.
-# Caution: Polymarket's official value is 1 — do not change without a docs
-# update. Default: "1".
-exponent = "1"
-# Purpose: fallback feeRate for categories missing from category_rates.
-# Impact: fee estimation → net-profit gating. Default: "0.05".
-unknown_category_rate = "0.05"
-
-# Purpose: per-category feeRate (fraction, not bps). Impact: fee estimation
-# feeds directly into expected-net-profit gates — wrong rates mean trading
-# unprofitable opportunities or skipping profitable ones. Caution: update in
-# lockstep with Polymarket's published fee schedule. Defaults shown.
-[polymarket.fees.category_rates]
-geopolitics = "0"
-sports = "0.03"
-crypto = "0.072"
-finance = "0.04"
-politics = "0.04"
-tech = "0.04"
-economics = "0.05"
-culture = "0.05"
-weather = "0.05"
-other = "0.05"
-
 # ── Market Data Connections ───────────────────────────────────────────────────
 # (Staleness thresholds are runtime config: market_data.staleness_*.)
 
@@ -169,10 +142,23 @@ wallet_kind = "eoa"
 
 # ── Research Plane ────────────────────────────────────────────────────────────
 
-[research]
-# Local filesystem root for the artifact store (training datasets, serialized
-# model artifacts), addressed as file://<artifact_root>/... Default: "./var/artifacts".
-artifact_root = "./var/artifacts"
+[research.artifact_store]
+# Local development uses `kind = "local"` and treats `prefix` as a filesystem
+# root. Production evidence must use `kind = "s3"` with bucket versioning and
+# Object Lock enabled; startup verifies both controls before publication.
+kind = "s3"
+bucket = "REPLACE_WITH_WORM_ARTIFACT_BUCKET"
+prefix = "quant-pivot/production"
+region = "REPLACE_WITH_AWS_REGION"
+path_style = false
+require_object_lock = true
+require_versioning = true
+
+[research.evidence_attestation]
+# Rotate by changing key_id and secret together. Keep prior public audit
+# metadata; readiness verification only accepts the currently configured key.
+key_id = "REPLACE_WITH_EVIDENCE_KEY_ID"
+# Set QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SECRET_HEX to 64 hex chars.
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #

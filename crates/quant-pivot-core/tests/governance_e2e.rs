@@ -96,7 +96,9 @@ use quant_pivot_research::{
         dataset_source_fingerprint,
     },
 };
-use quant_pivot_test_support::{fact_sink::DiscardFactWriter, pg::setup_pg};
+use quant_pivot_test_support::{
+    execution_pg_seed::fixture_profile_ref, fact_sink::DiscardFactWriter, pg::setup_pg,
+};
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
@@ -497,6 +499,9 @@ async fn build_frozen_dataset_fixture(
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: id.clone(),
+        profile_ref: fixture_profile_ref(),
+        research_program_hash: content_hash(u32::from('p')),
+        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('s'),
         model_spec_id: spec.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,
@@ -708,6 +713,7 @@ async fn seed_version(
             model_spec_id: spec.clone(),
             version,
             artifact_hash,
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: dataset,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -738,6 +744,7 @@ async fn store_weighted_artifact(
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
             model_version_id: model_version_id.clone(),
+            profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash: content_hash(u32::from('f')),
             factor_schema_hash: content_hash(u32::from('g')),
@@ -845,6 +852,7 @@ async fn seed_sell_version(
     let artifact = ModelArtifact::SellScorer(Box::new(SellScorerArtifact {
         header: ModelArtifactHeader {
             model_version_id: id.clone(),
+            profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::HoldVsExitWeighted,
             feature_schema_hash: content_hash(u32::from('f')),
             factor_schema_hash: content_hash(u32::from('g')),
@@ -877,6 +885,7 @@ async fn seed_sell_version(
             model_spec_id: spec.clone(),
             version,
             artifact_hash,
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: dataset,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -2582,6 +2591,9 @@ async fn seed_leaking_dataset(
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: dataset_id.clone(),
+        profile_ref: fixture_profile_ref(),
+        research_program_hash: content_hash(u32::from('p')),
+        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('s'),
         model_spec_id: spec.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,

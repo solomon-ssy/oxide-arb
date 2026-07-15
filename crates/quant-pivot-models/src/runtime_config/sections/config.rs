@@ -40,8 +40,6 @@ pub struct SelectionConfig {
     pub min_time_to_resolution_secs: u64,
     /// Maximum seconds until market resolution.
     pub max_time_to_resolution_secs: u64,
-    /// Hard cap on selected markets.
-    pub max_selection_size: u32,
 }
 
 impl Default for SelectionConfig {
@@ -54,7 +52,6 @@ impl Default for SelectionConfig {
             allow_near_resolution: false,
             min_time_to_resolution_secs: 3_600,
             max_time_to_resolution_secs: 31_536_000,
-            max_selection_size: 1_000,
         }
     }
 }
@@ -891,6 +888,9 @@ impl TrainingConfig {
 pub struct ReportsConfig {
     /// Configured report schedules.
     pub schedules: Vec<ReportScheduleConfig>,
+    /// Deployment-proven upper bound for one complete catalog-visible report.
+    /// Exceeding it fails the report; it never truncates market candidates.
+    pub hard_candidate_ceiling: u32,
     /// Maximum `TopN` size (hard upper bound for every schedule and ad-hoc run).
     pub max_top_n: u32,
     /// Fallback prediction horizon (seconds), used **only** when the model
@@ -916,6 +916,7 @@ impl Default for ReportsConfig {
     fn default() -> Self {
         Self {
             schedules: vec![ReportScheduleConfig::default()],
+            hard_candidate_ceiling: 100_000,
             max_top_n: 100,
             fallback_horizon_secs: 86_400,
             publish_empty_reports: true,
@@ -1135,10 +1136,10 @@ impl Default for SemiAutoConfig {
     }
 }
 
-/// Runtime v13 policy-bound `SemiAuto` canary.
+/// Runtime v14 policy-bound `SemiAuto` canary.
 ///
 /// An enabled canary is intentionally narrower than a published policy. It
-/// authorizes only an exact policy identity and explicit notional tiers; it
+/// authorizes only an exact policy identity and explicit cash-budget tiers; it
 /// never acts as an implicit active-policy pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -1149,12 +1150,12 @@ pub struct SemiAutoCanaryConfig {
     pub policy_artifact_id: Option<String>,
     /// Canonical content hash that must match the authorized policy artifact.
     pub policy_content_hash: Option<String>,
-    /// Exact validated USD tiers admitted by this canary (v13: only `$25`).
-    pub allowed_tiers_usd: Vec<DecimalString>,
+    /// Exact validated total cash-budget tiers admitted by this canary (v14: only `$25`).
+    pub allowed_cash_budget_tiers_usd: Vec<DecimalString>,
     /// Transactional global cap on capital-holding or in-flight intents.
     pub max_open_intents: u32,
-    /// Transactional cumulative intent-notional cap for one report.
-    pub max_total_usd_per_report: DecimalString,
+    /// Transactional cumulative cash-budget cap for one report.
+    pub max_total_cash_per_report: DecimalString,
     /// RFC3339 authorization deadline; intents may not outlive this instant.
     pub expires_at: Option<String>,
 }
@@ -1165,9 +1166,9 @@ impl Default for SemiAutoCanaryConfig {
             enabled: false,
             policy_artifact_id: None,
             policy_content_hash: None,
-            allowed_tiers_usd: Vec::new(),
+            allowed_cash_budget_tiers_usd: Vec::new(),
             max_open_intents: 0,
-            max_total_usd_per_report: DecimalString::new("0"),
+            max_total_cash_per_report: DecimalString::new("0"),
             expires_at: None,
         }
     }
@@ -1423,84 +1424,42 @@ pub struct ResearchValidationConfig {
     pub gates: ResearchValidationGatesConfig,
 }
 
-/// Runtime v13 methodology and immutable publication safety floors for policy fit.
+/// Runtime v14 operational limits for policy fitting.
 ///
-/// Fit requests may only tighten the gate subset. Split construction, purge,
-/// trial accounting, and latency stress remain runtime-owned so callers cannot
-/// manufacture an easier experiment definition.
+/// Statistical methodology is versioned code and publication thresholds belong
+/// exclusively to the immutable research profile. Keeping only resource and
+/// evidence-window limits here prevents a second, mutable quality-gate truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicyValidationConfig {
-    /// Frozen CPCV contiguous partition count (v13: `8`).
-    pub cpcv_n_groups: u32,
-    /// Frozen CPCV test partitions per combination (v13: `3`).
-    pub cpcv_k_test: u32,
-    /// Frozen CSCV/PBO block count (v13: `8`).
-    pub pbo_block_count: u32,
-    /// DSR significance level; publication requires probability `>= 1 - alpha`.
-    pub dsr_significance: DecimalString,
-    /// Maximum Probability of Backtest Overfitting.
-    pub max_pbo: DecimalString,
-    /// Minimum concurrency-adjusted effective sample size for every cohort.
-    pub min_effective_sample_size: u64,
-    /// Minimum observation coverage backed by continuous full-L2 replay.
-    pub min_full_l2_coverage: DecimalString,
-    /// Minimum common observation support shared by every attempted candidate.
-    pub min_common_candidate_support: DecimalString,
-    /// Minimum reconciled trade-print coverage for passive queue simulation.
-    pub min_passive_reconciled_trade_coverage: DecimalString,
-    /// Minimum point-in-time fee/catalog coverage across simulated fills.
-    pub min_fee_catalog_coverage: DecimalString,
-    /// Minimum coverage across the complete target universe, including failed leaves.
-    pub min_universe_coverage: DecimalString,
-    /// Maximum rate of source-event ordering ambiguity.
-    pub max_ambiguity_rate: DecimalString,
-    /// Maximum rate of insufficient canonical book depth.
-    pub max_depth_failure_rate: DecimalString,
-    /// One-sided market-cluster bootstrap confidence level.
-    pub utility_confidence: DecimalString,
-    /// Utility boundary; observed lower confidence bounds must be strictly greater.
-    pub min_utility_lower_bound_bps: DecimalString,
-    /// Minimum timeline-span embargo before feature-lookback maxing.
-    pub embargo_time_pct: DecimalString,
     /// Maximum complete candidates in one immutable experiment.
     pub max_candidates_per_experiment: u32,
     /// Minimum signed production latency-probe history in seconds.
     pub min_latency_profile_secs: u64,
-    /// Mandatory stress multiplier applied to the latency simulation floor.
-    pub latency_stress_multiplier: DecimalString,
 }
 
 impl PolicyValidationConfig {
+    /// Frozen contiguous CPCV partition count.
+    pub const CPCV_N_GROUPS: u32 = 8;
+    /// Frozen test partitions per CPCV combination.
+    pub const CPCV_K_TEST: u32 = 3;
+    /// Frozen CSCV/PBO block count.
+    pub const PBO_BLOCK_COUNT: u32 = 8;
     /// Number of complete CPCV paths implied by N=8, k=3.
     pub const COMPLETE_PATH_COUNT: u32 = 21;
-
     /// Number of CPCV folds implied by C(8, 3).
     pub const FOLD_COUNT: u32 = 56;
+    /// One-sided utility confidence, expressed in basis points.
+    pub const UTILITY_CONFIDENCE_BPS: u32 = 9_500;
+    /// Mandatory production-latency stress multiplier.
+    pub const LATENCY_STRESS_MULTIPLIER: u32 = 2;
 }
 
 impl Default for PolicyValidationConfig {
     fn default() -> Self {
         Self {
-            cpcv_n_groups: 8,
-            cpcv_k_test: 3,
-            pbo_block_count: 8,
-            dsr_significance: DecimalString::new("0.05"),
-            max_pbo: DecimalString::new("0.5"),
-            min_effective_sample_size: 100,
-            min_full_l2_coverage: DecimalString::new("0.95"),
-            min_common_candidate_support: DecimalString::new("0.95"),
-            min_passive_reconciled_trade_coverage: DecimalString::new("0.95"),
-            min_fee_catalog_coverage: DecimalString::new("1"),
-            min_universe_coverage: DecimalString::new("0.95"),
-            max_ambiguity_rate: DecimalString::new("0.05"),
-            max_depth_failure_rate: DecimalString::new("0.05"),
-            utility_confidence: DecimalString::new("0.95"),
-            min_utility_lower_bound_bps: DecimalString::new("0"),
-            embargo_time_pct: DecimalString::new("0.02"),
             max_candidates_per_experiment: 32,
             min_latency_profile_secs: 86_400,
-            latency_stress_multiplier: DecimalString::new("2"),
         }
     }
 }
@@ -1513,14 +1472,14 @@ pub struct ResearchConfig {
     pub training: ResearchTrainingConfig,
     /// Governed leakage-aware validation & overfitting-control methodology.
     pub validation: ResearchValidationConfig,
-    /// Executable L2 policy-fit methodology and publication safety floors.
+    /// Executable L2 policy-fit operational limits.
     pub policy_validation: PolicyValidationConfig,
 }
 
 /// Research-feedback plane configuration (attribution feedback + auto-retraining).
 ///
-/// Reserved skeleton frozen at schema v11; 11.9 adds the attribution-feedback,
-/// drift-triggered retraining, and champion-challenger knobs without a bump.
+/// Reserved skeleton carried by Runtime v14; Phase 11.9 adds the first real
+/// feedback/profile-allocation fields with a breaking bump to Runtime v15.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct FeedbackConfig {}

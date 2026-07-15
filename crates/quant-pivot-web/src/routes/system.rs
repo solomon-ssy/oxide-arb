@@ -93,15 +93,11 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
         "polymarket": {
             "clob_base_url": deploy.polymarket.clob_base_url,
             "clob_ws_url": deploy.polymarket.clob_ws_url,
+            "clob_market_info_refresh_secs": deploy.polymarket.clob_market_info_refresh_secs,
             "chain_id": deploy.polymarket.chain_id,
             "onchain": {
                 "rpc_url": deploy.polymarket.onchain.rpc_url,
                 "rpc_timeout_ms": deploy.polymarket.onchain.rpc_timeout_ms,
-            },
-            "fees": {
-                "exponent": deploy.polymarket.fees.exponent,
-                "unknown_category_rate": deploy.polymarket.fees.unknown_category_rate,
-                "category_rates": deploy.polymarket.fees.category_rates,
             },
         },
         "market_data": {

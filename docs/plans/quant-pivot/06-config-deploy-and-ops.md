@@ -43,7 +43,7 @@
 | `[web]` / `[web.jwt]` | 见 struct | admin API/WS + JWT |
 | `[quant.workers]` | `report_expire_sweep_secs`, `intent_expire_sweep_secs`, `execution_dispatch_secs`, `execution_breaker_tick_secs`, `equity_snapshot_secs` | 后台 worker cadence（restart-bound） |
 | `[quant.account]` | `funder`, `wallet_kind` | Data API 持仓读取地址 + 钱包形态 |
-| `[research]` | `artifact_root` | artifact store 根目录 |
+| `[research.artifact_store]` | `kind`, `bucket`, `prefix`, `region`, `endpoint`, `path_style`, `require_object_lock`, `require_versioning` | Local 开发存储或生产 S3/WORM evidence store；生产发布要求 versioning + Object Lock |
 
 ### 1.2 相对旧设计删除的 deploy 字段
 

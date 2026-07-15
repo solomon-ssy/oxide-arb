@@ -28,9 +28,9 @@ use crate::{
     enums::quant::{DatasetPurpose, TrainingDatasetStatus},
     half_open_window_request,
     types::{
-        ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId, RuntimeConfigVersionId,
-        SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs, TrainingSampleSource,
-        TrainingSampleSources, default_sample_sources,
+        ContentHash, DatasetCoverage, DatasetManifest, ModelSpecId, ResearchProfileRef,
+        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId, TrainingHorizonsSecs,
+        TrainingSampleSource, TrainingSampleSources, default_sample_sources,
     },
 };
 
@@ -43,9 +43,11 @@ use crate::{
 /// research-job's `params_json` (the async job ledger replays it on execute).
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "validate_build_training_dataset_request"))]
+#[serde(deny_unknown_fields)]
 pub struct BuildTrainingDatasetRequest {
     /// Target model specification (trainer binds artifacts to this spec).
     pub model_spec_id: ModelSpecId,
+    pub profile_ref: ResearchProfileRef,
     /// What the materialized examples are used for (Phase 11.3 §4). Defaults
     /// to `Training`; set `Calibration` to build an independent held-out split
     /// for `ProbabilityCalibrator` fitting (must be disjoint + embargoed from
@@ -58,6 +60,9 @@ pub struct BuildTrainingDatasetRequest {
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (samples are strictly before this instant).
     pub window_end: DateTime<Utc>,
+    /// Frozen information cutoff. The server derives and verifies the complete
+    /// source window and rejects any fact made available after this instant.
+    pub pit_cutoff: DateTime<Utc>,
     /// Deterministic sample grid step in seconds (`>= 1`).
     #[validate(range(min = 1))]
     pub sample_interval_secs: u64,

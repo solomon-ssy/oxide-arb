@@ -14,9 +14,9 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{
     QuantResult,
+    execution::ExecutionError,
     storage::{StorageError, entity},
 };
 use quant_pivot_models::{
@@ -34,14 +34,15 @@ use quant_pivot_models::{
         quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
     },
     types::{
-        ExecutionOrderId, OrderIntentId, Price, RecommendationId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, Shares, Usd,
+        ExecutionOrderId, FeeEvidence, FeeEvidencePriority, OrderIntentId, Price, RecommendationId,
+        ReconciliationEvidence, ReconciliationEvidenceChain, Shares, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
     OrderIntentRepository, PositionRepository, RecommendationRepository, ReconciliationRepository,
 };
+use quant_pivot_research::execution_semantics::{LiquidityRole, PitFeeSchedule};
 
 use super::{CollectedReconciliation, EvidenceCollector, VenuePresence, decide};
 use crate::{
@@ -101,7 +102,6 @@ pub struct ReconciliationServiceDeps {
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
-    pub fees: Arc<FeeCalculator>,
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
     pub config: Arc<RuntimeConfigStore>,
@@ -273,21 +273,15 @@ impl ReconciliationService {
             resolved_by: WORKER_ACTOR.to_owned(),
             exit_reason: intent.exit_reason,
         };
-        let exit_realized_pnl = exit_reconcile_realized_pnl(
-            &self.deps.fees,
-            order,
-            &recommendation,
-            lot.as_ref(),
-            &terminal,
-        );
-        let write = self.build_terminal_write(
+        let write = Self::build_terminal_write(
             order,
             &recommendation,
             lot.as_ref(),
             terminal,
             ReconciliationEvidenceChain(evidence),
             now,
-        );
+        )?;
+        let exit_realized_pnl = write.exit.as_ref().map(|exit| exit.realized_pnl_usd);
         self.deps
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
@@ -365,21 +359,15 @@ impl ReconciliationService {
             resolved_by: resolution.operator.clone(),
             exit_reason: intent.exit_reason,
         };
-        let exit_realized_pnl = exit_reconcile_realized_pnl(
-            &self.deps.fees,
-            &order,
-            &recommendation,
-            lot.as_ref(),
-            &terminal,
-        );
-        let write = self.build_terminal_write(
+        let write = Self::build_terminal_write(
             &order,
             &recommendation,
             lot.as_ref(),
             terminal,
             ReconciliationEvidenceChain(vec![note]),
             now,
-        );
+        )?;
+        let exit_realized_pnl = write.exit.as_ref().map(|exit| exit.realized_pnl_usd);
         let recorded = self
             .deps
             .submission
@@ -501,7 +489,12 @@ impl ReconciliationService {
             evidence: ReconciliationEvidenceChain(evidence),
             venue_filled_shares: None,
             venue_avg_price: None,
-            discrepancy_usd: None,
+            expected_cash_delta_usd: None,
+            venue_cash_delta_usd: None,
+            realized_pnl_usd: None,
+            expected_fee_usd: None,
+            observed_fee_usd: None,
+            fee_delta_usd: None,
             resolved_by: None,
             resolved_at: None,
         };
@@ -562,14 +555,13 @@ impl ReconciliationService {
     /// applies only the fields the verdict changes; `Unresolvable`/`Pending`
     /// (defensive) leave the base untouched.
     fn build_terminal_write(
-        &self,
         order: &ExecutionOrderInfo,
         recommendation: &RecommendationInfo,
         lot: Option<&PositionInfo>,
         decision: TerminalDecision,
         evidence: ReconciliationEvidenceChain,
         now: DateTime<Utc>,
-    ) -> ReconciliationLedgerWrite {
+    ) -> QuantResult<ReconciliationLedgerWrite> {
         let write = neutral_terminal_write(order, decision.result, evidence);
 
         // Exit-order reconciliation has a distinct money effect (reduce the lot +
@@ -585,8 +577,6 @@ impl ReconciliationService {
                 write,
                 order,
                 lot,
-                recommendation,
-                fees: &self.deps.fees,
                 filled_shares,
                 avg_price,
                 resolved_by,
@@ -598,7 +588,6 @@ impl ReconciliationService {
         entry_reconcile_write(
             write,
             EntryReconcileInput {
-                fees: &self.deps.fees,
                 order,
                 recommendation,
                 decision,
@@ -620,11 +609,66 @@ struct TerminalDecision {
 
 /// Inputs for applying an entry-order terminal verdict to a ledger write.
 struct EntryReconcileInput<'a> {
-    fees: &'a FeeCalculator,
     order: &'a ExecutionOrderInfo,
     recommendation: &'a RecommendationInfo,
     decision: TerminalDecision,
     now: DateTime<Utc>,
+}
+
+struct ReconciliationFee {
+    expected: Usd,
+    observed: Option<Usd>,
+    applied: Usd,
+}
+
+fn reconciliation_fee(
+    order: &ExecutionOrderInfo,
+    evidence: &ReconciliationEvidenceChain,
+    filled_shares: Shares,
+    price: Price,
+    matched_at: DateTime<Utc>,
+) -> QuantResult<ReconciliationFee> {
+    let prepared = &order.prepared_order_json.fee_schedule;
+    let role = if order.prepared_order_json.post_only {
+        LiquidityRole::Maker
+    } else {
+        LiquidityRole::Taker
+    };
+    let expected = PitFeeSchedule {
+        schedule_hash: prepared.schedule_hash.clone(),
+        effective_at: prepared.effective_at,
+        available_at: prepared.available_at,
+        platform_rate: prepared.platform_rate,
+        exponent: prepared.exponent,
+        taker_only: prepared.taker_only,
+        builder_maker_fee_bps: prepared.builder_maker_fee_bps,
+        builder_taker_fee_bps: prepared.builder_taker_fee_bps,
+        builder_attributed: prepared.builder_attributed,
+    }
+    .fee(role, price, filled_shares, matched_at)
+    .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+        reason: format!("frozen fee schedule cannot price reconciled fill: {error:?}"),
+    })?;
+    let strongest = evidence
+        .0
+        .iter()
+        .filter_map(|item| item.fee_evidence.as_ref())
+        .map(FeeEvidence::priority)
+        .filter(|priority| *priority != FeeEvidencePriority::PreparedScheduleExpected)
+        .max();
+    let observed = strongest.map(|priority| {
+        evidence
+            .0
+            .iter()
+            .filter_map(|item| item.fee_evidence.as_ref())
+            .filter(|item| item.priority() == priority)
+            .fold(Usd::ZERO, |total, item| total + item.fee())
+    });
+    Ok(ReconciliationFee {
+        expected,
+        observed,
+        applied: observed.unwrap_or(expected),
+    })
 }
 
 /// Neutral ledger correction before a terminal verdict is applied.
@@ -651,7 +695,12 @@ fn neutral_terminal_write(
         evidence,
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -661,9 +710,8 @@ fn neutral_terminal_write(
 fn entry_reconcile_write(
     mut write: ReconciliationLedgerWrite,
     input: EntryReconcileInput<'_>,
-) -> ReconciliationLedgerWrite {
+) -> QuantResult<ReconciliationLedgerWrite> {
     let EntryReconcileInput {
-        fees,
         order,
         recommendation,
         decision:
@@ -679,14 +727,8 @@ fn entry_reconcile_write(
     match result {
         ReconciliationResult::Filled | ReconciliationResult::PartiallyFilled => {
             let price = avg_price.unwrap_or(order.price);
-            let spent = filled_shares * price
-                + fees.calculate(
-                    filled_shares,
-                    price,
-                    recommendation.identity.category,
-                    &order.market_id,
-                    &order.token_id,
-                );
+            let fee = reconciliation_fee(order, &write.evidence, filled_shares, price, now)?;
+            let spent = filled_shares * price + fee.applied;
             let full = result == ReconciliationResult::Filled;
             write.order_state = if full {
                 ExecutionOrderState::Filled
@@ -715,7 +757,16 @@ fn entry_reconcile_write(
             ));
             write.venue_filled_shares = Some(filled_shares);
             write.venue_avg_price = avg_price;
-            write.discrepancy_usd = Some(spent - filled_shares * order.price);
+            write.expected_cash_delta_usd =
+                Some(Usd::new(order.prepared_order_json.total_cash_delta));
+            write.expected_fee_usd = Some(fee.expected);
+            write.observed_fee_usd = fee.observed;
+            if let Some(observed) = fee.observed {
+                write.venue_cash_delta_usd = Some(Usd::new(
+                    -((filled_shares * price).inner() + observed.inner()),
+                ));
+                write.fee_delta_usd = Some(observed - fee.expected);
+            }
             write.resolved_by = Some(resolved_by);
             write.resolved_at = Some(now);
         }
@@ -747,67 +798,32 @@ fn entry_reconcile_write(
         // Defensive: never reached (the caller handles these out of band).
         ReconciliationResult::Unresolvable | ReconciliationResult::Pending => {}
     }
-    write
-}
-
-/// Realized `PnL` for a reconciled exit fill (net venue fee), when the lot is
-/// present and the verdict is a (partial) fill. Used for ledger writes and the
-/// breaker's daily-loss dimension (same path as [`CoreExitDispatcher`]).
-fn exit_reconcile_realized_pnl(
-    fees: &FeeCalculator,
-    order: &ExecutionOrderInfo,
-    recommendation: &RecommendationInfo,
-    lot: Option<&PositionInfo>,
-    decision: &TerminalDecision,
-) -> Option<Usd> {
-    if order.order_phase != ExecutionOrderPhase::Exit {
-        return None;
-    }
-    let lot = lot?;
-    match decision.result {
-        ReconciliationResult::Filled | ReconciliationResult::PartiallyFilled => {
-            Some(compute_exit_realized_pnl(
-                fees,
-                order,
-                recommendation,
-                lot,
-                decision.filled_shares,
-                decision.avg_price,
-            ))
-        }
-        _ => None,
-    }
+    Ok(write)
 }
 
 /// Exact per-lot average-cost realized `PnL` for an exit fill, net the venue fee
 /// (mirrors [`CoreExitDispatcher::build_exit_ledger_write`]).
+#[cfg(test)]
 fn compute_exit_realized_pnl(
-    fees: &FeeCalculator,
     order: &ExecutionOrderInfo,
-    recommendation: &RecommendationInfo,
     lot: &PositionInfo,
     filled_shares: Shares,
     avg_price: Option<Price>,
-) -> Usd {
+    evidence: &ReconciliationEvidenceChain,
+    matched_at: DateTime<Utc>,
+) -> QuantResult<Usd> {
     let exit_price = avg_price.unwrap_or(order.price);
-    let exit_fee = fees.calculate(
-        filled_shares,
-        exit_price,
-        recommendation.identity.category,
-        &order.market_id,
-        &order.token_id,
-    );
+    let exit_fee =
+        reconciliation_fee(order, evidence, filled_shares, exit_price, matched_at)?.applied;
     let proceeds_usd = filled_shares * exit_price - exit_fee;
     let cost_basis = lot.avg_price * filled_shares;
-    proceeds_usd - cost_basis
+    Ok(proceeds_usd - cost_basis)
 }
 
 struct ExitReconcileWriteInput<'a> {
     write: ReconciliationLedgerWrite,
     order: &'a ExecutionOrderInfo,
     lot: Option<&'a PositionInfo>,
-    recommendation: &'a RecommendationInfo,
-    fees: &'a FeeCalculator,
     filled_shares: Shares,
     avg_price: Option<Price>,
     resolved_by: String,
@@ -815,13 +831,13 @@ struct ExitReconcileWriteInput<'a> {
     now: DateTime<Utc>,
 }
 
-fn exit_reconcile_write(input: ExitReconcileWriteInput<'_>) -> ReconciliationLedgerWrite {
+fn exit_reconcile_write(
+    input: ExitReconcileWriteInput<'_>,
+) -> QuantResult<ReconciliationLedgerWrite> {
     let ExitReconcileWriteInput {
         mut write,
         order,
         lot,
-        recommendation,
-        fees,
         filled_shares,
         avg_price,
         resolved_by,
@@ -851,21 +867,24 @@ fn exit_reconcile_write(input: ExitReconcileWriteInput<'_>) -> ReconciliationLed
             // leave the order terminal but route the lot to manual review.
             let Some(lot) = lot else {
                 write.exit_state = Some(ExitState::ManualRequired);
-                return write;
+                return Ok(write);
             };
             let exit_price = avg_price.unwrap_or(order.price);
-            let exit_fee = fees.calculate(
-                filled_shares,
-                exit_price,
-                recommendation.identity.category,
-                &order.market_id,
-                &order.token_id,
-            );
+            let fee = reconciliation_fee(order, &write.evidence, filled_shares, exit_price, now)?;
+            let exit_fee = fee.applied;
             let proceeds_usd = filled_shares * exit_price - exit_fee;
             let cost_basis = lot.avg_price * filled_shares;
             let realized_pnl_usd = proceeds_usd - cost_basis;
             let fully_exited = filled_shares >= lot.shares;
-            write.discrepancy_usd = Some(proceeds_usd - cost_basis);
+            write.expected_cash_delta_usd =
+                Some(Usd::new(order.prepared_order_json.total_cash_delta));
+            write.venue_cash_delta_usd = fee
+                .observed
+                .map(|observed| filled_shares * exit_price - observed);
+            write.realized_pnl_usd = Some(realized_pnl_usd);
+            write.expected_fee_usd = Some(fee.expected);
+            write.observed_fee_usd = fee.observed;
+            write.fee_delta_usd = fee.observed.map(|observed| observed - fee.expected);
             write.exit = Some(PositionExit {
                 shares: filled_shares,
                 avg_price: exit_price,
@@ -903,7 +922,7 @@ fn exit_reconcile_write(input: ExitReconcileWriteInput<'_>) -> ReconciliationLed
         }
         ReconciliationResult::Unresolvable | ReconciliationResult::Pending => {}
     }
-    write
+    Ok(write)
 }
 
 async fn recollect_after_stale_cancel(
@@ -964,17 +983,17 @@ const fn system_note(
         venue_ref: None,
         shares: None,
         price: None,
+        fee_evidence: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use quant_pivot_api::fees::FeeCalculator;
     use quant_pivot_models::{
         domain::{ExecutionOrderInfo, PositionInfo},
         enums::{
-            common::{MarketCategory, Side},
+            common::{MarketCategory, OrderType, Side},
             execution::{
                 ExecutionOrderPhase, ExitReason, OrderTypeKind, PositionLedgerState,
                 ReconciliationResult,
@@ -982,17 +1001,17 @@ mod tests {
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
         },
         types::{
-            ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price, RecommendationId,
-            RecommendationReportId, ReconciliationEvidenceChain, Shares, TokenId, Usd,
+            ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price,
+            ReconciliationEvidenceChain, Shares, TokenId, Usd, VenueOrderAmount,
         },
     };
-    use quant_pivot_test_support::report_fixtures;
+    use quant_pivot_test_support::execution_pg_seed::prepared_order;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use super::{
-        ExitReconcileWriteInput, TerminalDecision, compute_exit_realized_pnl,
-        exit_reconcile_realized_pnl, exit_reconcile_write, neutral_terminal_write,
+        ExitReconcileWriteInput, compute_exit_realized_pnl, exit_reconcile_write,
+        neutral_terminal_write,
     };
 
     fn lot(avg: Decimal) -> PositionInfo {
@@ -1028,6 +1047,14 @@ mod tests {
             price: Price::new(dec!(0.55)),
             shares: Shares::new(dec!(100)),
             cost_usd: Usd::new(dec!(55)),
+            prepared_order_json: prepared_order(
+                Side::Sell,
+                OrderType::Gtc,
+                VenueOrderAmount::Shares(Shares::new(dec!(100))),
+                Usd::ZERO,
+                Shares::new(dec!(100)),
+                Price::new(dec!(0.55)),
+            ),
             venue_order_id: None,
             venue_status: None,
             state: ExecutionOrderState::Ambiguous,
@@ -1043,83 +1070,62 @@ mod tests {
 
     #[test]
     fn exit_realized_pnl_is_net_fee() {
-        let fees = FeeCalculator::default();
-        let recommendation = report_fixtures::recommendation(
-            RecommendationReportId::from_v7(),
-            RecommendationId::from_v7(),
-            1,
-            "0xmkt",
-            OutcomeSide::Yes,
-            Usd::new(dec!(100)),
-        );
         let order = exit_order();
         let position = lot(dec!(0.60));
+        let matched_at = Utc::now();
         // gross (0.55 - 0.60) * 100 = -5; fee reduces proceeds further
         let pnl = compute_exit_realized_pnl(
-            &fees,
             &order,
-            &recommendation,
             &position,
             Shares::new(dec!(100)),
             Some(Price::new(dec!(0.55))),
-        );
+            &ReconciliationEvidenceChain(Vec::new()),
+            matched_at,
+        )
+        .expect("frozen fee fixture");
         assert!(pnl < Usd::new(dec!(-5)));
     }
 
     #[test]
-    fn exit_reconcile_realized_pnl_only_on_exit_fill() {
-        let fees = FeeCalculator::default();
-        let recommendation = report_fixtures::recommendation(
-            RecommendationReportId::from_v7(),
-            RecommendationId::from_v7(),
-            1,
-            "0xmkt",
-            OutcomeSide::Yes,
-            Usd::new(dec!(100)),
-        );
+    fn exit_reconcile_write_only_realizes_pnl_on_fill() {
         let order = exit_order();
         let position = lot(dec!(0.60));
-        let filled = TerminalDecision {
-            result: ReconciliationResult::Filled,
+        let filled = exit_reconcile_write(ExitReconcileWriteInput {
+            write: neutral_terminal_write(
+                &order,
+                ReconciliationResult::Filled,
+                ReconciliationEvidenceChain(Vec::new()),
+            ),
+            order: &order,
+            lot: Some(&position),
             filled_shares: Shares::new(dec!(100)),
             avg_price: Some(Price::new(dec!(0.55))),
             resolved_by: "test".to_owned(),
-            exit_reason: Some(ExitReason::StopLoss),
-        };
-        assert!(
-            exit_reconcile_realized_pnl(&fees, &order, &recommendation, Some(&position), &filled,)
-                .is_some()
-        );
-        let cancelled = TerminalDecision {
-            result: ReconciliationResult::Cancelled,
+            exit_reason: ExitReason::StopLoss,
+            now: Utc::now(),
+        })
+        .expect("frozen fee fixture");
+        assert!(filled.exit.is_some());
+        let cancelled = exit_reconcile_write(ExitReconcileWriteInput {
+            write: neutral_terminal_write(
+                &order,
+                ReconciliationResult::Cancelled,
+                ReconciliationEvidenceChain(Vec::new()),
+            ),
+            order: &order,
+            lot: Some(&position),
             filled_shares: Shares::ZERO,
             avg_price: None,
             resolved_by: "test".to_owned(),
-            exit_reason: None,
-        };
-        assert!(
-            exit_reconcile_realized_pnl(
-                &fees,
-                &order,
-                &recommendation,
-                Some(&position),
-                &cancelled,
-            )
-            .is_none()
-        );
+            exit_reason: ExitReason::Manual,
+            now: Utc::now(),
+        })
+        .expect("non-fill does not quote fees");
+        assert!(cancelled.exit.is_none());
     }
 
     #[test]
     fn exit_reconcile_write_preserves_trigger_exit_reason() {
-        let fees = FeeCalculator::default();
-        let recommendation = report_fixtures::recommendation(
-            RecommendationReportId::from_v7(),
-            RecommendationId::from_v7(),
-            1,
-            "0xmkt",
-            OutcomeSide::Yes,
-            Usd::new(dec!(100)),
-        );
         let order = exit_order();
         let position = lot(dec!(0.60));
         let write = exit_reconcile_write(ExitReconcileWriteInput {
@@ -1130,14 +1136,13 @@ mod tests {
             ),
             order: &order,
             lot: Some(&position),
-            recommendation: &recommendation,
-            fees: &fees,
             filled_shares: Shares::new(dec!(100)),
             avg_price: Some(Price::new(dec!(0.55))),
             resolved_by: "test".to_owned(),
             exit_reason: ExitReason::StopLoss,
             now: Utc::now(),
-        });
+        })
+        .expect("CLOB fee fixture");
         assert_eq!(
             write.exit.as_ref().expect("exit fill").reason,
             ExitReason::StopLoss

@@ -97,7 +97,6 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(Decimal::from(20_000))),
         volume_24h: Some(Usd::new(Decimal::from(8_000))),
-        fee_schedule: None,
         start_date: Some(Utc::now()),
         end_date: Some(Utc::now() + Duration::days(7)),
         resolved_at: None,
@@ -335,7 +334,6 @@ async fn provider_selector_mapper_persist_round_trip() {
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         selection: SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
-            max_selection_size: 10,
             ..SelectionConfig::default()
         },
         data_quality: DataQualityConfig::default(),

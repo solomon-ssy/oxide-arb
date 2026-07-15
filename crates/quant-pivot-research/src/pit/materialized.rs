@@ -344,7 +344,6 @@ mod tests {
                     min_order_size: Decimal::ONE,
                     liquidity_usd: None,
                     volume_24h: None,
-                    fee_schedule: None,
                     start_date: None,
                     end_date: None,
                     resolved_at: None,

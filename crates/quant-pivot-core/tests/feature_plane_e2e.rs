@@ -117,7 +117,6 @@ fn registry_market(catalog: &E2eCatalog) -> MarketRegistryInfo {
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(Usd::new(Decimal::from(25_000))),
         volume_24h: Some(Usd::new(Decimal::from(9_000))),
-        fee_schedule: None,
         start_date: Some(Utc::now() - ChronoDuration::days(2)),
         end_date: Some(Utc::now() + ChronoDuration::days(5)),
         resolved_at: None,
@@ -583,7 +582,6 @@ async fn create_feature_vector_then_find() {
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         selection: SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
-            max_selection_size: 10,
             ..SelectionConfig::default()
         },
         data_quality: DataQualityConfig::default(),

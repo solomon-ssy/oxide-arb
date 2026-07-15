@@ -181,8 +181,9 @@ pub fn market_context_from_resolved(
             })
         })
         .transpose()?;
-    let fee_rate = registry
-        .and_then(|info| info.fee_schedule.as_ref())
+    let fee_rate = market
+        .fee_schedule
+        .as_ref()
         .map(|schedule| schedule.fee_rate);
 
     Ok(MarketContext {
@@ -581,7 +582,6 @@ mod tests {
             min_order_size: dec!(1),
             liquidity_usd: None,
             volume_24h: None,
-            fee_schedule: None,
             start_date: None,
             end_date: None,
             resolved_at: None,

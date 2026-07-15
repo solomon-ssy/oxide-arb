@@ -294,3 +294,15 @@ pub struct CatalogWindowInfo {
     pub market_versions: Vec<MarketCatalogVersionInfo>,
     pub event_versions: Vec<EventCatalogVersionInfo>,
 }
+
+/// Ordered committed catalog batches proving the ledger prefix used by a
+/// source slice.
+///
+/// The first row is always a complete synchronization committed no later than
+/// the requested source window start. Every later committed batch through the
+/// PIT cutoff is retained in canonical commit order. The materializer hashes
+/// this exact vector; it never substitutes mutable catalog projections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogBatchChainInfo {
+    pub batches: Vec<CatalogSyncBatchInfo>,
+}

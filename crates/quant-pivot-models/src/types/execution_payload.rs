@@ -22,17 +22,65 @@ use crate::{
     jsonb_active,
     types::{
         Bps, ContentHash, ModelVersionId, OpportunisticExitPolicy, Price, Probability,
-        ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId, TrailingStopPolicy, Usd,
+        ResearchProfileRef, ScaleOutTarget, Shares, ThesisInvalidationPolicy, TokenId,
+        TrailingStopPolicy, Usd,
     },
 };
 
-/// Tagged venue amount. Aggressive BUY orders spend USD; resting orders and
-/// SELL orders use an exact share quantity.
+/// Governed intent amount. Aggressive BUY orders carry a total cash budget;
+/// resting orders and SELL orders carry an exact share quantity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "unit", content = "value")]
 pub enum OrderAmount {
-    Usd(Usd),
+    CashBudget(Usd),
     Shares(Shares),
+}
+
+/// Exact amount encoded in a venue order after admission.
+///
+/// This is intentionally distinct from [`OrderAmount`]: CLOB market BUY orders
+/// encode fee-exclusive principal, not the governed cash budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "unit", content = "value")]
+pub enum VenueOrderAmount {
+    GrossUsd(Usd),
+    Shares(Shares),
+}
+
+/// Exact fee schedule frozen at admission. Reconciliation must use this
+/// decision-time evidence, never a process-current fee cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct PreparedFeeSchedule {
+    pub schedule_hash: ContentHash,
+    pub effective_at: DateTime<Utc>,
+    pub available_at: DateTime<Utc>,
+    pub platform_rate: Decimal,
+    pub exponent: Decimal,
+    pub taker_only: bool,
+    pub builder_maker_fee_bps: Bps,
+    pub builder_taker_fee_bps: Bps,
+    pub builder_attributed: bool,
+}
+
+/// Atomic, hash-linked venue order prepared by final admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct PreparedVenueOrder {
+    pub profile_ref: ResearchProfileRef,
+    pub token_id: TokenId,
+    pub side: Side,
+    pub order_type: OrderType,
+    pub post_only: bool,
+    pub worst_price: Price,
+    pub cash_budget: Option<Usd>,
+    pub venue_amount: VenueOrderAmount,
+    pub expected_fee: Usd,
+    pub total_cash_delta: Decimal,
+    pub expected_filled_shares: Shares,
+    pub book_hash: ContentHash,
+    pub clob_market_info_hash: ContentHash,
+    pub fee_schedule: PreparedFeeSchedule,
+    pub prepared_at: DateTime<Utc>,
+    pub valid_until: DateTime<Utc>,
 }
 
 /// Persisted classification of the latest governed thesis re-inference.
@@ -63,9 +111,9 @@ pub struct ExitReinferenceObservation {
 
 impl OrderAmount {
     #[must_use]
-    pub const fn as_usd(self) -> Option<Usd> {
+    pub const fn cash_budget(self) -> Option<Usd> {
         match self {
-            Self::Usd(value) => Some(value),
+            Self::CashBudget(value) => Some(value),
             Self::Shares(_) => None,
         }
     }
@@ -74,7 +122,25 @@ impl OrderAmount {
     pub const fn as_shares(self) -> Option<Shares> {
         match self {
             Self::Shares(value) => Some(value),
-            Self::Usd(_) => None,
+            Self::CashBudget(_) => None,
+        }
+    }
+}
+
+impl VenueOrderAmount {
+    #[must_use]
+    pub const fn gross_usd(self) -> Option<Usd> {
+        match self {
+            Self::GrossUsd(value) => Some(value),
+            Self::Shares(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn shares(self) -> Option<Shares> {
+        match self {
+            Self::Shares(value) => Some(value),
+            Self::GrossUsd(_) => None,
         }
     }
 }
@@ -119,10 +185,10 @@ impl EntryOrderSpec {
     pub fn projected_shares(&self) -> Shares {
         match self.amount {
             OrderAmount::Shares(shares) => shares,
-            OrderAmount::Usd(usd) if self.limit_price.is_positive() => {
+            OrderAmount::CashBudget(usd) if self.limit_price.is_positive() => {
                 Shares::new(usd.inner() / self.limit_price.inner())
             }
-            OrderAmount::Usd(_) => Shares::ZERO,
+            OrderAmount::CashBudget(_) => Shares::ZERO,
         }
     }
 
@@ -130,7 +196,7 @@ impl EntryOrderSpec {
     #[must_use]
     pub fn notional(&self) -> Usd {
         match self.amount {
-            OrderAmount::Usd(usd) => usd,
+            OrderAmount::CashBudget(usd) => usd,
             OrderAmount::Shares(shares) => shares * self.limit_price,
         }
     }
@@ -305,6 +371,7 @@ jsonb_active!(
     EntryOrderSpec,
     ExitPolicySpec,
     ExitReinferenceObservation,
+    PreparedVenueOrder,
     ScaleOutState
 );
 

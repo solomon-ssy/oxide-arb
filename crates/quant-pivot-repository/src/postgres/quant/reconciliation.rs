@@ -90,7 +90,12 @@ impl ReconciliationRepository for PgReconciliationRepository {
         active.result = patch.result.into_active_value();
         active.venue_filled_shares = patch.venue_filled_shares.into_active_value();
         active.venue_avg_price = patch.venue_avg_price.into_active_value();
-        active.discrepancy_usd = patch.discrepancy_usd.into_active_value();
+        active.expected_cash_delta_usd = patch.expected_cash_delta_usd.into_active_value();
+        active.venue_cash_delta_usd = patch.venue_cash_delta_usd.into_active_value();
+        active.realized_pnl_usd = patch.realized_pnl_usd.into_active_value();
+        active.expected_fee_usd = patch.expected_fee_usd.into_active_value();
+        active.observed_fee_usd = patch.observed_fee_usd.into_active_value();
+        active.fee_delta_usd = patch.fee_delta_usd.into_active_value();
         active.resolved_by = patch.resolved_by.into_active_value();
         active.resolved_at = patch.resolved_at.into_active_value();
         active

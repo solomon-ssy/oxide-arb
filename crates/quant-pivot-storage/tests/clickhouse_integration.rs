@@ -4,7 +4,7 @@ use chrono::Utc;
 use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChSchemaVersion, ChShares, ChUsd, TradeTapeRow},
-    config::ClickHouseConfig,
+    config::{ClickHouseConfig, ClickHouseRawLifecycleConfig},
     enums::clickhouse::{
         ChTradeParticipantRole, ChTradeReconciliationStatus, ChTradeSide, ChTradeTapeSource,
     },
@@ -32,6 +32,7 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
+        raw_lifecycle: ClickHouseRawLifecycleConfig::default(),
     }
 }
 
@@ -41,7 +42,7 @@ async fn setup_clickhouse() -> (
     u16,
     testcontainers::ContainerAsync<testcontainers::GenericImage>,
 ) {
-    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "24")
+    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
         .with_wait_for(WaitFor::http(
             HttpWaitStrategy::new("/ping")
@@ -63,7 +64,7 @@ async fn setup_clickhouse() -> (
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn clickhouse_database_bootstrap_creates_missing_database() {
-    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "24")
+    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
         .with_wait_for(WaitFor::http(
             HttpWaitStrategy::new("/ping")

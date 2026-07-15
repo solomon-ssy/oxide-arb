@@ -9,11 +9,14 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow, WeatherForecastPointRow,
-        WeatherObservationReportRow,
+        MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
+        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
     },
     enums::clickhouse::{ChTradeReconciliationStatus, ChTradeTapeSource},
-    types::{DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId, TokenId},
+    types::{
+        DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
+        RecommendationReportId, TokenId,
+    },
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
 use uuid::Uuid;
@@ -35,6 +38,86 @@ impl ChQuantFactReadRepository {
 
 #[async_trait]
 impl QuantFactReadRepository for ChQuantFactReadRepository {
+    async fn report_market_funnel_counts(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<ReportMarketFunnelCountRow>, StorageError> {
+        self.pool
+            .client()
+            .query(
+                "SELECT terminal_stage, count() AS row_count \
+                 FROM quant_report_market_funnel FINAL \
+                 WHERE recommendation_report_id = ? \
+                 GROUP BY terminal_stage ORDER BY terminal_stage",
+            )
+            .bind(report_id.clone())
+            .fetch_all::<ReportMarketFunnelCountRow>()
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn report_market_funnel_count(
+        &self,
+        report_id: &RecommendationReportId,
+        terminal_stage: Option<&str>,
+        primary_reason: Option<&str>,
+    ) -> Result<u64, StorageError> {
+        let mut sql = "SELECT count() AS row_count FROM quant_report_market_funnel FINAL \
+                       WHERE recommendation_report_id = ?"
+            .to_owned();
+        if terminal_stage.is_some() {
+            sql.push_str(" AND terminal_stage = ?");
+        }
+        if primary_reason.is_some() {
+            sql.push_str(" AND primary_reason = ?");
+        }
+        let mut query = self.pool.client().query(&sql).bind(report_id.clone());
+        if let Some(stage) = terminal_stage {
+            query = query.bind(stage);
+        }
+        if let Some(reason) = primary_reason {
+            query = query.bind(reason);
+        }
+        query
+            .fetch_one::<FunnelTotalRow>()
+            .await
+            .map(|row| row.row_count)
+            .map_err(Into::into)
+    }
+
+    async fn report_market_funnel_page(
+        &self,
+        report_id: &RecommendationReportId,
+        terminal_stage: Option<&str>,
+        primary_reason: Option<&str>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
+        let mut sql = "SELECT ?fields FROM quant_report_market_funnel FINAL \
+                       WHERE recommendation_report_id = ?"
+            .to_owned();
+        if terminal_stage.is_some() {
+            sql.push_str(" AND terminal_stage = ?");
+        }
+        if primary_reason.is_some() {
+            sql.push_str(" AND primary_reason = ?");
+        }
+        sql.push_str(" ORDER BY market_id LIMIT ? OFFSET ?");
+        let mut query = self.pool.client().query(&sql).bind(report_id.clone());
+        if let Some(stage) = terminal_stage {
+            query = query.bind(stage);
+        }
+        if let Some(reason) = primary_reason {
+            query = query.bind(reason);
+        }
+        query
+            .bind(limit)
+            .bind(offset)
+            .fetch_all::<ReportMarketFunnelRow>()
+            .await
+            .map_err(Into::into)
+    }
+
     async fn latest_applied_entry_condition_evaluation(
         &self,
         instance_id: &EntryConditionInstanceId,
@@ -510,6 +593,36 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .map_err(StorageError::from)
     }
 
+    async fn book_l2_events_between(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        available_by_ms: i64,
+    ) -> Result<Vec<BookL2EventRow>, StorageError> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_book_l2_event \
+                 WHERE token_id IN ? \
+                 AND venue_event_time >= fromUnixTimestamp64Milli(?) \
+                 AND venue_event_time < fromUnixTimestamp64Milli(?) \
+                 AND persisted_time <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_id, stream_session_id, token_sequence, persisted_time DESC, payload_hash \
+                 LIMIT 1 BY token_id, stream_session_id, token_sequence",
+            )
+            .bind(token_ids)
+            .bind(from_ms)
+            .bind(to_ms)
+            .bind(available_by_ms)
+            .fetch_all::<BookL2EventRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
     async fn market_ws_trades_from(
         &self,
         token_id: &TokenId,
@@ -559,6 +672,30 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(stream_session_id)
             .bind(decision_at_ms)
             .fetch_optional::<BookStreamSessionRow>()
+            .await
+            .map_err(StorageError::from)
+    }
+
+    async fn book_stream_sessions(
+        &self,
+        stream_session_ids: Vec<Uuid>,
+        available_by_ms: i64,
+    ) -> Result<Vec<BookStreamSessionRow>, StorageError> {
+        if stream_session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.pool
+            .client()
+            .query(
+                "SELECT ?fields FROM quant_book_stream_session \
+                 WHERE stream_session_id IN ? \
+                 AND recorded_at <= fromUnixTimestamp64Milli(?) \
+                 ORDER BY stream_session_id, ledger_sequence DESC, recorded_at DESC \
+                 LIMIT 1 BY stream_session_id",
+            )
+            .bind(stream_session_ids)
+            .bind(available_by_ms)
+            .fetch_all::<BookStreamSessionRow>()
             .await
             .map_err(StorageError::from)
     }
@@ -788,4 +925,9 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
 #[derive(clickhouse::Row, serde::Deserialize)]
 struct ObservedMarketRow {
     market_id: MarketId,
+}
+
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct FunnelTotalRow {
+    row_count: u64,
 }

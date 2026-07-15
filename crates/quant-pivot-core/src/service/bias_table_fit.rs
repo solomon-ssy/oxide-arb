@@ -315,7 +315,7 @@ impl BiasTableFitService {
             settled.push(SettledMarket {
                 market_id: info.market_id.clone(),
                 yes_token_id: info.yes_token_id.clone(),
-                category: info.fee_category(),
+                category: info.primary_category(),
                 resolved_at,
                 settled_yes: *winning_token_id == info.yes_token_id,
             });
@@ -352,6 +352,7 @@ impl BiasTableFitService {
         let spec = WindowSpec {
             window_start: window.from,
             window_end: window.to,
+            available_by: window.to,
             samples: samples_spec,
             lookback: StdDuration::ZERO,
             knowledge_lag,

@@ -66,6 +66,7 @@ use quant_pivot_models::{
         RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
         SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
         TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
+        builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -87,8 +88,8 @@ use quant_pivot_repository::{
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     execution_pg_seed::{
-        ReportSeedConfig, claim_entry_for_test, entry_claim_for_test,
-        seed_conditional_price_report_on_infra, seed_shared_demo_infra,
+        ReportSeedConfig, claim_entry_for_test, entry_claim_for_test, fixture_profile_ref,
+        prepared_order, seed_conditional_price_report_on_infra, seed_shared_demo_infra,
     },
     pg::setup_pg,
     report_fixtures,
@@ -1089,6 +1090,7 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
         runtime_mode: QuantRuntimeMode::SemiAuto,
         runtime_config_version_id: ids.runtime_config_version.clone(),
         model_version_id: ids.model_version.clone(),
+        profile_ref: fixture_profile_ref(),
         intent_kind: OrderIntentKind::Buy,
         status: OrderIntentStatus::PendingApproval,
         approval_status: ApprovalStatus::Pending,
@@ -1202,7 +1204,12 @@ fn pending_recon_row(eo: &ExecutionOrderId, intent: &OrderIntentId) -> NewReconc
         evidence_json: ReconciliationEvidenceChain(vec![recon_evidence("submit: ambiguous")]),
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -1216,6 +1223,7 @@ fn recon_evidence(detail: &str) -> ReconciliationEvidence {
         venue_ref: None,
         shares: None,
         price: None,
+        fee_evidence: None,
     }
 }
 
@@ -1240,7 +1248,12 @@ fn filled_write() -> ReconciliationLedgerWrite {
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: filled")]),
         venue_filled_shares: Some(Shares::new(dec!(100))),
         venue_avg_price: Some(Price::new(dec!(0.6))),
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     }
@@ -1317,7 +1330,12 @@ async fn reconcile_ambiguous_to_not_filled_releases_capital() {
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: not filled")]),
         venue_filled_shares: Some(Shares::ZERO),
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     };
@@ -1370,7 +1388,12 @@ async fn reconcile_unresolvable_impairs_capital_and_leaves_order_ambiguous() {
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: unresolvable")]),
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     };
@@ -1433,7 +1456,12 @@ async fn reconcile_partial_fill_splits_capital_and_writes_position() {
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: partial fill")]),
         venue_filled_shares: Some(Shares::new(PARTIAL_SHARES)),
         venue_avg_price: Some(Price::new(dec!(0.6))),
-        discrepancy_usd: Some(Usd::new(PARTIAL_SPENT - PARTIAL_SHARES * dec!(0.6))),
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: Some(Usd::new(-PARTIAL_SPENT)),
+        realized_pnl_usd: None,
+        expected_fee_usd: Some(Usd::new(PARTIAL_SPENT - PARTIAL_SHARES * dec!(0.6))),
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: Some("system:reconciliation_worker".to_owned()),
         resolved_at: Some(Utc::now()),
     };
@@ -1564,7 +1592,12 @@ async fn operator_resolve_impaired_to_filled_spends_capital() {
                 evidence: ReconciliationEvidenceChain(vec![recon_evidence("unresolvable")]),
                 venue_filled_shares: None,
                 venue_avg_price: None,
-                discrepancy_usd: None,
+                expected_cash_delta_usd: None,
+                venue_cash_delta_usd: None,
+                realized_pnl_usd: None,
+                expected_fee_usd: None,
+                observed_fee_usd: None,
+                fee_delta_usd: None,
                 resolved_by: None,
                 resolved_at: None,
             },
@@ -1618,6 +1651,14 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &TxnIds) -> NewExecutionO
         price: Price::new(dec!(0.6)),
         shares: Shares::new(dec!(100)),
         cost_usd: Usd::new(NOTIONAL),
+        prepared_order_json: prepared_order(
+            Side::Buy,
+            OrderType::Gtc,
+            quant_pivot_models::types::VenueOrderAmount::Shares(Shares::new(dec!(100))),
+            Usd::ZERO,
+            Shares::new(dec!(100)),
+            Price::new(dec!(0.6)),
+        ),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -1661,10 +1702,16 @@ fn reconciliation_row(
             venue_ref: None,
             shares: None,
             price: None,
+            fee_evidence: None,
         }]),
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -1682,6 +1729,7 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 runtime_mode: QuantRuntimeMode::AutoExecution,
                 runtime_config_version_id: ids.runtime_config_version.clone(),
                 model_version_id: ids.model_version.clone(),
+                profile_ref: fixture_profile_ref(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::ApprovedByPolicy,
                 approval_status: ApprovalStatus::NotRequired,
@@ -1896,6 +1944,7 @@ async fn seed_model_version(
             model_version_id: model_version_id.clone(),
             model_spec_id,
             version: 1,
+            profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             artifact_hash: content_hash('a'),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
@@ -2021,6 +2070,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         entry_condition_artifacts: Vec::new(),
         entry_condition_instances: vec![entry_condition_instance],
         sampled_feature_parity: Some(sampled_feature_parity),
+        fact_delivery: Some(report_fixtures::pending_fact_delivery(&ids.report)),
         operation_log: report_operation_log(ids),
     }
 }
@@ -2062,6 +2112,7 @@ fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
 
 fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommendationReport {
     NewRecommendationReport {
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         recommendation_report_id: ids.report.clone(),
         report_kind: ReportKind::TopN,
         trigger_kind: ReportTriggerKind::Scheduled,
@@ -2094,6 +2145,7 @@ fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommen
 
 fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
     NewRecommendation {
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         recommendation_id: ids.recommendation.clone(),
         recommendation_report_id: ids.report.clone(),
         rank: 1,
@@ -2301,11 +2353,17 @@ fn trade_plan() -> RecommendationTradePlan {
             artifact_hash,
             cohort_index: 0,
             cohort_key: TradePolicyCohortKey {
+                profile_ref: builtin_research_profiles()
+                    .expect("research profiles")
+                    .into_iter()
+                    .next()
+                    .expect("control profile")
+                    .profile_ref,
                 category: MarketCategory::Politics,
                 horizon_secs: 86_400,
                 entry_price_min: Price::new(dec!(0.01)),
                 entry_price_max: Price::new(dec!(0.99)),
-                notional_tier: Usd::new(NOTIONAL),
+                cash_budget_tier: Usd::new(NOTIONAL),
                 liquidity: dimension.clone(),
                 volatility: dimension,
             },
@@ -2511,6 +2569,14 @@ fn exit_order(
         price: Price::new(price),
         shares: Shares::new(shares),
         cost_usd: Shares::new(shares) * Price::new(price),
+        prepared_order_json: prepared_order(
+            Side::Sell,
+            OrderType::Gtc,
+            quant_pivot_models::types::VenueOrderAmount::Shares(Shares::new(shares)),
+            Usd::ZERO,
+            Shares::new(shares),
+            Price::new(price),
+        ),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,

@@ -3,7 +3,7 @@ use quant_pivot_models::clickhouse::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
     QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
     QuantPositionEventRow, QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
-    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow,
+    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, ReportMarketFunnelRow,
 };
 
 /// Generic batch sink for one `ClickHouse` fact stream.
@@ -53,6 +53,11 @@ pub trait QuantFactRepository: Send + Sync {
     async fn insert_recommendation_events(
         &self,
         rows: Vec<QuantRecommendationEventRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_report_market_funnel(
+        &self,
+        rows: Vec<ReportMarketFunnelRow>,
     ) -> Result<(), StorageError>;
 
     async fn insert_execution_events(

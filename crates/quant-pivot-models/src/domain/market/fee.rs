@@ -1,10 +1,7 @@
 //! Polymarket fee schedule and quote domain types.
 
 use crate::{
-    enums::{
-        common::{MarketCategory, Side},
-        fee::{FeeLiquidityRole, FeeSource},
-    },
+    enums::{common::Side, fee::FeeLiquidityRole},
     types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -23,52 +20,7 @@ pub struct MarketFeeSchedule {
     pub exponent: Decimal,
     pub taker_only: bool,
     pub rebate_rate: Option<Decimal>,
-    pub source: FeeSource,
     pub observed_at: DateTime<Utc>,
-}
-
-/// Persistable fee columns on the `market` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarketFeeColumns {
-    pub fees_enabled: bool,
-    pub fee_rate: Option<Decimal>,
-    pub fee_exponent: Option<Decimal>,
-    pub fee_taker_only: Option<bool>,
-    pub fee_rebate_rate: Option<Decimal>,
-    pub fee_source: Option<FeeSource>,
-    pub fee_observed_at: Option<DateTime<Utc>>,
-}
-
-impl MarketFeeColumns {
-    /// Build disabled fee columns for markets without fee metadata.
-    #[must_use]
-    pub const fn disabled() -> Self {
-        Self {
-            fees_enabled: false,
-            fee_rate: None,
-            fee_exponent: None,
-            fee_taker_only: None,
-            fee_rebate_rate: None,
-            fee_source: None,
-            fee_observed_at: None,
-        }
-    }
-}
-
-impl MarketFeeSchedule {
-    /// Project a fee schedule into `market` table fee columns.
-    #[must_use]
-    pub const fn to_market_fee_columns(&self) -> MarketFeeColumns {
-        MarketFeeColumns {
-            fees_enabled: self.fees_enabled,
-            fee_rate: Some(self.fee_rate),
-            fee_exponent: Some(self.exponent),
-            fee_taker_only: Some(self.taker_only),
-            fee_rebate_rate: self.rebate_rate,
-            fee_source: Some(self.source),
-            fee_observed_at: Some(self.observed_at),
-        }
-    }
 }
 
 /// Input for a Polymarket fee quote request.
@@ -76,12 +28,10 @@ impl MarketFeeSchedule {
 pub struct FeeQuoteInput {
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub category: MarketCategory,
     pub side: Side,
     pub liquidity_role: FeeLiquidityRole,
     pub shares: Shares,
     pub price: Price,
-    pub allow_category_fallback: bool,
 }
 
 /// Fee quote returned by the Polymarket fee estimator.

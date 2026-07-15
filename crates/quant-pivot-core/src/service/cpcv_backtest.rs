@@ -345,6 +345,14 @@ impl CpcvBacktestService {
         }
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
+            profile_ref: dataset
+                .manifest_json
+                .as_ref()
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "v5 CPCV dataset is missing its manifest".to_owned(),
+                })?
+                .profile_ref
+                .clone(),
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
             factor_schema_hash: materialization.factor_schema_hash.clone(),
@@ -595,6 +603,14 @@ impl CpcvBacktestService {
         let seed_weights = sell_seed_weights(&examples)?;
         let header_template = ModelArtifactHeader {
             model_version_id: ModelVersionId::from_v7(),
+            profile_ref: dataset
+                .manifest_json
+                .as_ref()
+                .ok_or_else(|| ResearchError::ValidationMethodology {
+                    detail: "v5 sell CPCV dataset is missing its manifest".to_owned(),
+                })?
+                .profile_ref
+                .clone(),
             model_family: input.model_family,
             feature_schema_hash: materialization.feature_schema_hash.clone(),
             factor_schema_hash: materialization.factor_schema_hash.clone(),
@@ -2040,6 +2056,7 @@ mod tests {
             DefaultCombinatorialPurgedBacktester, PurgeConfig, SharpeDistribution,
         },
     };
+    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::{collections::BTreeMap, sync::Arc};
@@ -2415,6 +2432,7 @@ mod tests {
             seed_weights,
             header_template: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                profile_ref: fixture_profile_ref(),
                 model_family: ModelFamily::HoldVsExitWeighted,
                 feature_schema_hash: content_hash_seed(1),
                 factor_schema_hash: content_hash_seed(2),

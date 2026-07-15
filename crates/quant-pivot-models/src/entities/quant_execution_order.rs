@@ -6,7 +6,10 @@ use crate::{
         execution::{ExecutionOrderPhase, OrderTypeKind, VenueOrderStatus},
         quant::ExecutionOrderState,
     },
-    types::{ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, Shares, TokenId, Usd},
+    types::{
+        ExecutionOrderId, MarketId, OrderId, OrderIntentId, PreparedVenueOrder, Price, Shares,
+        TokenId, Usd,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -25,6 +28,8 @@ pub struct Model {
     pub price: Price,
     pub shares: Shares,
     pub cost_usd: Usd,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub prepared_order_json: PreparedVenueOrder,
     pub venue_order_id: Option<OrderId>,
     pub venue_status: Option<VenueOrderStatus>,
     pub state: ExecutionOrderState,

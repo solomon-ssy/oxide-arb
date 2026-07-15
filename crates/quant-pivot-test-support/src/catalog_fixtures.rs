@@ -53,12 +53,5 @@ pub fn make_market(
         start_date: None,
         end_date,
         resolved_at: None,
-        fees_enabled: true,
-        fee_rate: None,
-        fee_exponent: None,
-        fee_taker_only: None,
-        fee_rebate_rate: None,
-        fee_source: None,
-        fee_observed_at: None,
     }
 }

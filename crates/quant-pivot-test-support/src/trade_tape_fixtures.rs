@@ -8,8 +8,8 @@ use quant_pivot_api::exchange::EXCHANGE_CONTRACTS;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::{
-        BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion, ChShares, ChUsd,
-        DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
+        BookL2CheckpointRow, BookMicrostructureRow, ChBps, ChPrice, ChSchemaVersion, ChShares,
+        ChUsd, DomainObservationRow, MarketResolutionRow, MidPriceBucketRow, TradeTapeRow,
     },
     domain::{TradeTapeBlockCursorInfo, UpsertTradeTapeBlockCursor},
     enums::clickhouse::{
@@ -114,7 +114,7 @@ fn maker_trade_tape_row(
         source_event_id: format!("fixture:{address}:{sequence}"),
         source: ChTradeTapeSource::OnChainOrderFilled,
         observed_field_flags: u16::MAX,
-        fee_rate_bps: Some(quant_pivot_models::clickhouse::ChBps::from(Decimal::ZERO)),
+        fee_rate_bps: Some(ChBps::from(Decimal::ZERO)),
         reconciliation_status: ChTradeReconciliationStatus::Matched,
         matched_source_event_id: Some(format!("ws:fixture:{sequence}")),
         revision: 2,

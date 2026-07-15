@@ -58,13 +58,6 @@ async fn seed_market(db: &sea_orm::DatabaseConnection, market_id: &str) {
             start_date: None,
             end_date: None,
             resolved_at: None,
-            fees_enabled: true,
-            fee_rate: None,
-            fee_exponent: None,
-            fee_taker_only: None,
-            fee_rebate_rate: None,
-            fee_source: None,
-            fee_observed_at: None,
         })
         .await
         .expect("seed market");

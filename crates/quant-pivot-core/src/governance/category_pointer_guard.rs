@@ -139,6 +139,7 @@ mod tests {
             WeightedFactorModelArtifact, model_input_contract_hash,
         },
     };
+    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use rust_decimal_macros::dec;
     use std::{
         collections::BTreeMap,
@@ -288,6 +289,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash,
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -312,6 +314,7 @@ mod tests {
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id,
+                profile_ref: fixture_profile_ref(),
                 model_family: ResearchModelFamily::WeightedFactor,
                 feature_schema_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64)))
                     .expect("hash"),

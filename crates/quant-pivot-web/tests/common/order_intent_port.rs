@@ -29,7 +29,10 @@ use quant_pivot_repository::{
         TradePolicyRepository,
     },
 };
-use quant_pivot_research::{artifact::LocalArtifactStore, model::CalibrationArtifactLoader};
+use quant_pivot_research::{
+    artifact::{ArtifactStore, LocalArtifactStore},
+    model::CalibrationArtifactLoader,
+};
 use sea_orm::DatabaseConnection;
 
 struct ClearFeatureParityGate;
@@ -49,16 +52,25 @@ impl FeatureParityGatePort for ClearFeatureParityGate {
 pub fn build_order_intent_service(
     db: &DatabaseConnection,
     intent_lifecycle: Arc<IntentLifecyclePublisher>,
-) -> Arc<CoreOrderIntentService> {
+) -> (
+    Arc<CoreOrderIntentService>,
+    Arc<dyn ArtifactStore>,
+    Arc<RuntimeConfigStore>,
+) {
     let runtime_mode = RuntimeModeHandle::new(QuantRuntimeMode::SemiAuto);
     let kill_switch = KillSwitchHandle::new(KillSwitchState::Closed);
     let config = Arc::new(RuntimeConfigStore::new(RuntimeConfig::default()));
     let mode_gate: Arc<dyn RuntimeModeGate> =
         Arc::new(DefaultRuntimeModeGate::new(Arc::clone(&config)));
-    Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
+    let artifact_store = Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(
+        "qp_web_test_order_intent_{}_{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )))) as Arc<dyn ArtifactStore>;
+    let service = Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
         mode_gate,
         runtime_mode,
-        runtime_config: config,
+        runtime_config: Arc::clone(&config),
         kill_switch,
         recommendations: Arc::new(PgRecommendationRepository::new(db.clone()))
             as Arc<dyn RecommendationRepository>,
@@ -75,16 +87,13 @@ pub fn build_order_intent_service(
             as Arc<dyn ModelRegistryRepository>,
         trade_policies: Arc::new(PgTradePolicyRepository::new(db.clone()))
             as Arc<dyn TradePolicyRepository>,
-        artifact_store: Arc::new(LocalArtifactStore::new(std::env::temp_dir().join(format!(
-            "qp_web_test_order_intent_{}_{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        )))),
+        artifact_store: Arc::clone(&artifact_store),
         calibration_loader: Arc::new(CoreCalibrationArtifactLoader::new(Arc::new(
             PgCalibrationArtifactRepository::new(db.clone()),
         )
             as Arc<dyn CalibrationArtifactRepository>))
             as Arc<dyn CalibrationArtifactLoader>,
         feature_parity_gate: Arc::new(ClearFeatureParityGate),
-    }))
+    }));
+    (service, artifact_store, config)
 }

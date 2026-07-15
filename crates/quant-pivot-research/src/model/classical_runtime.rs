@@ -850,7 +850,7 @@ mod tests {
         enums::quant::{DataQualityStatus, OutcomeSide},
         types::{
             ArtifactUri, ContentHash, MarketId, ModelArtifactId, ModelInputRequiredness,
-            ModelInputSpec, ModelRunId, ModelVersionId, Price, TokenId,
+            ModelInputSpec, ModelRunId, ModelVersionId, Price, TokenId, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -920,6 +920,10 @@ mod tests {
         ClassicalModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                profile_ref: builtin_research_profiles()
+                    .expect("built-in profiles")
+                    .remove(0)
+                    .profile_ref,
                 model_family: ModelFamily::from_classical(ClassicalKind::RandomForest),
                 feature_schema_hash: hash("feat"),
                 factor_schema_hash: hash("fac"),

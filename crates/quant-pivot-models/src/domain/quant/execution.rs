@@ -19,9 +19,9 @@ use crate::{
     },
     types::{
         ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
-        ExitReinferenceObservation, MarketId, ModelVersionId, OrderId, OrderIntentId, Price,
-        RecommendationId, RecommendationReportId, RuntimeConfigVersionId, ScaleOutState, Shares,
-        TokenId, Usd,
+        ExitReinferenceObservation, MarketId, ModelVersionId, OrderId, OrderIntentId,
+        PreparedVenueOrder, Price, RecommendationId, RecommendationReportId, ResearchProfileRef,
+        RuntimeConfigVersionId, ScaleOutState, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -38,6 +38,7 @@ pub struct OrderIntentInfo {
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
+    pub profile_ref: ResearchProfileRef,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
@@ -66,7 +67,7 @@ pub struct OrderIntentInfo {
 
 info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
     order_intent_id, recommendation_id, runtime_mode, runtime_config_version_id,
-    model_version_id, intent_kind, status, approval_status, approved_by,
+    model_version_id, profile_ref, intent_kind, status, approval_status, approved_by,
     approval_reason, approved_at, policy_id, policy_hash, status_reason,
     admission_trace_ref, condition_instance_id, entry_order_json, exit_policy_json, risk_envelope_hash,
     expires_at, exit_state, exit_reason, next_check_at, peak_mark_price,
@@ -82,6 +83,7 @@ pub struct NewOrderIntent {
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
+    pub profile_ref: ResearchProfileRef,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
@@ -108,7 +110,7 @@ pub struct NewOrderIntent {
 pub struct IntentCreationLimits {
     pub recommendation_report_id: RecommendationReportId,
     pub max_open_intents: u32,
-    pub max_total_usd_per_report: Usd,
+    pub max_total_cash_per_report: Usd,
 }
 
 /// Approval transition payload for an order intent.
@@ -133,6 +135,7 @@ pub struct ExecutionOrderInfo {
     pub price: Price,
     pub shares: Shares,
     pub cost_usd: Usd,
+    pub prepared_order_json: PreparedVenueOrder,
     pub venue_order_id: Option<OrderId>,
     pub venue_status: Option<VenueOrderStatus>,
     pub state: ExecutionOrderState,
@@ -147,7 +150,7 @@ pub struct ExecutionOrderInfo {
 
 info_from_model!(ExecutionOrderInfo, crate::entities::quant_execution_order::Model, {
     execution_order_id, order_intent_id, order_phase, market_id, token_id, side,
-    order_type, price, shares, cost_usd, venue_order_id, venue_status, state,
+    order_type, price, shares, cost_usd, prepared_order_json, venue_order_id, venue_status, state,
     submitted_at, filled_at, cancelled_at, gtd_expiration_at, error_message, created_at, updated_at,
 });
 
@@ -165,6 +168,7 @@ pub struct NewExecutionOrder {
     pub price: Price,
     pub shares: Shares,
     pub cost_usd: Usd,
+    pub prepared_order_json: PreparedVenueOrder,
     pub venue_order_id: Option<OrderId>,
     pub venue_status: Option<VenueOrderStatus>,
     pub state: ExecutionOrderState,

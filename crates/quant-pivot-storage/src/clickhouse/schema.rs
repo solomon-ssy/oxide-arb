@@ -1,5 +1,34 @@
 //! `ClickHouse` DDL statements for `MergeTree` tables and materialized views.
 
+#[derive(Debug, Clone, Copy)]
+pub struct RawLifecycleTable {
+    pub table: &'static str,
+    pub time_column: &'static str,
+}
+
+pub const RAW_LIFECYCLE_TABLES: [RawLifecycleTable; 5] = [
+    RawLifecycleTable {
+        table: "quant_book_stream_session",
+        time_column: "opened_at",
+    },
+    RawLifecycleTable {
+        table: "quant_book_l2_event",
+        time_column: "venue_event_time",
+    },
+    RawLifecycleTable {
+        table: "quant_book_l2_checkpoint",
+        time_column: "event_time",
+    },
+    RawLifecycleTable {
+        table: "book_microstructure_1s",
+        time_column: "bucket_time",
+    },
+    RawLifecycleTable {
+        table: "quant_trade_tape",
+        time_column: "event_time",
+    },
+];
+
 pub fn all_ddl() -> Vec<String> {
     [
         include_str!("sql/quant_book_stream_session.sql"),
@@ -80,6 +109,7 @@ mod tests {
         assert!(ddl.contains("DROP TABLE IF EXISTS book_microstructure_1m_mv"));
         assert!(ddl.contains("book_microstructure_1m_availability_v2_mv"));
         assert!(ddl.contains("max(available_at) AS available_at"));
+        assert!(!ddl.contains("PARTITION BY toYYYYMMDD"));
     }
 
     #[test]

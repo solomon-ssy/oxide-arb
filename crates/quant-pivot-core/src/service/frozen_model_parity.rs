@@ -824,6 +824,7 @@ mod tests {
         features::FeatureVector, model::model_input_contract_hash, selection::SelectedMarket,
         training::TrainingExample,
     };
+    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
 
     use super::{
         FrozenEvidenceRequest, frozen_model_evidence_rows, validate_passed_model_parity_run,
@@ -847,6 +848,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash: hash('b'),
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: Some(training_dataset_id.clone()),
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

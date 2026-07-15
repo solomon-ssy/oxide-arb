@@ -15,7 +15,6 @@ use quant_pivot_models::{
     },
     enums::{
         common::{MarketCategory, TickSize},
-        fee::FeeSource,
         market::MarketStatus,
     },
     schema::column,
@@ -126,12 +125,6 @@ fn market_upsert_on_conflict() -> OnConflict {
             MarketColumn::StartDate,
             MarketColumn::EndDate,
             MarketColumn::ResolvedAt,
-            MarketColumn::FeesEnabled,
-            MarketColumn::FeeRate,
-            MarketColumn::FeeExponent,
-            MarketColumn::FeeTakerOnly,
-            MarketColumn::FeeRebateRate,
-            MarketColumn::FeeObservedAt,
         ])
         .values([
             (
@@ -145,10 +138,6 @@ fn market_upsert_on_conflict() -> OnConflict {
             (
                 MarketColumn::TickSize,
                 column::pg_enum_excluded::<TickSize>(MarketColumn::TickSize),
-            ),
-            (
-                MarketColumn::FeeSource,
-                column::pg_enum_excluded::<FeeSource>(MarketColumn::FeeSource),
             ),
         ])
         .to_owned()
@@ -170,8 +159,6 @@ async fn do_upsert_batch(
     db: &impl ConnectionTrait,
     dtos: Vec<UpsertMarket>,
 ) -> Result<u64, StorageError> {
-    // Mixed NULL / non-NULL native-enum columns (e.g. `fee_source`) in one batch
-    // are homogenised inside `upsert_many_chunked` — see `align_partial_columns`.
     upsert_many_chunked::<MarketEntity, UpsertMarket>(db, dtos, market_upsert_on_conflict()).await
 }
 

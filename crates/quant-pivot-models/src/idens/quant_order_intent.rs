@@ -34,6 +34,7 @@ pub enum QuantOrderIntent {
     RuntimeMode,
     RuntimeConfigVersionId,
     ModelVersionId,
+    ProfileRef,
     IntentKind,
     Status,
     ApprovalStatus,
@@ -71,6 +72,11 @@ pub fn table() -> TableCreateStatement {
         ))
         .col(column::uuid_fk(QuantOrderIntent::RuntimeConfigVersionId))
         .col(column::uuid_fk(QuantOrderIntent::ModelVersionId))
+        .col(
+            ColumnDef::new(QuantOrderIntent::ProfileRef)
+                .json_binary()
+                .not_null(),
+        )
         .col(column::pg_enum::<OrderIntentKind>(
             QuantOrderIntent::IntentKind,
         ))

@@ -88,14 +88,16 @@ mod tests {
     use quant_pivot_models::{
         enums::{
             clickhouse::{ChExecutionSide, ChPositionLedgerState, ChQuantLedgerEventKind},
-            common::{MarketCategory, Side},
+            common::{MarketCategory, OrderType, Side},
             execution::{ExecutionOrderPhase, OrderTypeKind, PositionLedgerState},
             quant::{AccountSource, ExecutionOrderState, OutcomeSide},
         },
         types::{
             ExecutionOrderId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd,
+            VenueOrderAmount,
         },
     };
+    use quant_pivot_test_support::execution_pg_seed::prepared_order;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -112,6 +114,14 @@ mod tests {
             price: Price::new(dec!(0.55)),
             shares: Shares::new(dec!(10)),
             cost_usd: Usd::new(dec!(5.5)),
+            prepared_order_json: prepared_order(
+                Side::Buy,
+                OrderType::Fok,
+                VenueOrderAmount::GrossUsd(Usd::new(dec!(5.4))),
+                Usd::new(dec!(0.1)),
+                Shares::new(dec!(10)),
+                Price::new(dec!(0.55)),
+            ),
             venue_order_id: None,
             venue_status: None,
             state: ExecutionOrderState::Submitted,

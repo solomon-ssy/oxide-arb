@@ -298,7 +298,10 @@ mod tests {
     };
     use quant_pivot_models::{
         enums::{factor::FactorFamily, quant::FactorDirection},
-        types::{ContentHash, FactorDefinitionId, ModelInputContract, ModelVersionId, Probability},
+        types::{
+            ContentHash, FactorDefinitionId, ModelInputContract, ModelVersionId, Probability,
+            builtin_research_profiles,
+        },
     };
     use rust_decimal_macros::dec;
 
@@ -325,6 +328,10 @@ mod tests {
         SellScorerArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                profile_ref: builtin_research_profiles()
+                    .expect("built-in profiles")
+                    .remove(0)
+                    .profile_ref,
                 model_family: ModelFamily::HoldVsExitWeighted,
                 feature_schema_hash: hash("aa"),
                 factor_schema_hash: hash("bb"),

@@ -41,8 +41,6 @@ pub struct SelectorHashInput {
     pub min_time_to_resolution_secs: u64,
     /// Maximum seconds-to-resolution threshold.
     pub max_time_to_resolution_secs: u64,
-    /// Selection size cap.
-    pub max_selection_size: u32,
     /// Maximum allowed published-book age, in milliseconds.
     pub max_book_age_ms: u64,
     /// Maximum allowed worst-case ingest pipeline lag (enqueue→flush), in ms.
@@ -105,7 +103,6 @@ impl SelectorHashInput {
             allow_near_resolution: selection.allow_near_resolution,
             min_time_to_resolution_secs: selection.min_time_to_resolution_secs,
             max_time_to_resolution_secs: selection.max_time_to_resolution_secs,
-            max_selection_size: selection.max_selection_size,
             max_book_age_ms: data_quality.max_book_age_ms,
             max_ingest_lag_ms: data_quality.max_ingest_lag_ms,
             reject_crossed_books: data_quality.reject_crossed_books,

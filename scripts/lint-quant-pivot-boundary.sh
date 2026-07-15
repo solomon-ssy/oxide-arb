@@ -15,6 +15,49 @@ if rg -n 'quant_pivot_(algorithm|risk|control)::|use quant_pivot_(algorithm|risk
   exit 1
 fi
 
+# Phase 11.7.2 breaking-contract gate. These semantics were deleted rather
+# than deprecated; tests and UI fixtures are included so no shadow contract can
+# silently keep them alive.
+PHASE_1172_DELETED='max_selection_size|SelectionCapExceeded|FeeSource::CategoryDefault|allow_category_fallback|archive_manifest_set_hash|notional_tier|min_universe_coverage|\buniverse_coverage\b|\bfee_category\b|\bfee_rank\b|X-API-Version|x-api-version'
+if rg -n "$PHASE_1172_DELETED" crates/ config/ ui/packages/types/src ui/apps/web-antdv-next/src 2>/dev/null; then
+  echo "ERROR: deleted Phase 11.7.2 compatibility/archive/selection/fee semantic detected"
+  exit 1
+fi
+
+if rg -n 'fee_details: Option<ClobFeeDetails>|builder_(maker|taker)_fee_rate_bps: Option<u32>' \
+  crates/quant-pivot-models/src/types/clob_market_info.rs \
+  crates/quant-pivot-models/src/entities/clob_market_info_version.rs 2>/dev/null; then
+  echo "ERROR: CLOB V2 fee facts are mandatory; zero/optional fee fallback is forbidden"
+  exit 1
+fi
+
+# Active Phase 11.7 documents split stable contracts from one mutable completion
+# ledger. Fail CI if superseded version, archive, sizing, canary, or drawer
+# semantics drift back into that active chain.
+PHASE_117_ACTIVE_DOCS=(
+  docs/plans/quant-pivot/phase-11/README.md
+  docs/plans/quant-pivot/phase-11/11.7-labeling-entry-exit-closed-loop.md
+  docs/plans/quant-pivot/phase-11/11.7.1-composable-entry-event-triggers.md
+  docs/plans/quant-pivot/phase-11/11.7.2-executable-l2-policy-validation.md
+  docs/plans/quant-pivot/phase-11/11.7.2-closed-loop-completion-plan-2026-07-14.md
+  docs/plans/quant-pivot/phase-11/11.9-attribution-feedback-and-auto-retraining.md
+)
+PHASE_117_STALE_DOC='Runtime v13|runtime config \*\*v13\*\*|runtime config v13|v13 ?→ ?v14|dataset/model artifact (v4|`format_version = 4`)|policy v3|TradePolicy artifact (只接受 )?v3|exact-(notional|tier)|notional tier|WORM 日分区 Parquet|archive seal|archive worker 待|archive worker 驱动|30 ?天 canary|窄屏 drawer'
+if rg -n "$PHASE_117_STALE_DOC" "${PHASE_117_ACTIVE_DOCS[@]}" 2>/dev/null; then
+  echo "ERROR: stale Phase 11.7 contract detected in an active design document"
+  exit 1
+fi
+
+# Gamma may retain provider wire payloads for source audit, but normalized,
+# persisted, registry, and Web DTOs must never reintroduce fee truth.
+if rg -n '\b(fee_exponent|fee_rate_bps|maker_base_fee|taker_base_fee)\b' \
+  crates/quant-pivot-api/src/gamma/{catalog.rs,mapper.rs} \
+  crates/quant-pivot-models/src/{entities/market.rs,domain/api/market.rs,domain/market/registry.rs} \
+  crates/quant-pivot-core/src/ingest/market_registry.rs 2>/dev/null; then
+  echo "ERROR: Gamma-derived canonical fee field detected outside raw provider audit payload"
+  exit 1
+fi
+
 if rg -n 'pub use .*::Opportunity;|pub use .*ScoredOpportunity;' \
   crates/**/lib.rs crates/**/mod.rs 2>/dev/null; then
   echo "ERROR: forbidden re-export of legacy symbols"

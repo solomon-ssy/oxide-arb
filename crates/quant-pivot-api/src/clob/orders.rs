@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use quant_pivot_models::{
-    enums::common::Side,
-    types::{MarketId, OrderId, Price, Shares, TokenId},
+    enums::{common::Side, fee::FeeLiquidityRole},
+    types::{Bps, MarketId, OrderId, Price, Shares, TokenId},
 };
 
 /// Result of cancelling a single order.
@@ -44,6 +44,20 @@ pub struct ClobTrade {
     pub side: Side,
     pub size: Shares,
     pub price: Price,
+    pub fee_rate_bps: Bps,
+    pub trader_side: FeeLiquidityRole,
+    pub maker_orders: Vec<ClobMakerOrder>,
     pub tx_hash: String,
     pub matched_at: DateTime<Utc>,
+}
+
+/// Maker leg retained from an authenticated CLOB trade response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClobMakerOrder {
+    pub order_id: OrderId,
+    pub side: Side,
+    pub size: Shares,
+    pub price: Price,
+    pub fee_rate_bps: Bps,
+    pub token_id: TokenId,
 }

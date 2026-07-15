@@ -15,10 +15,13 @@ use quant_pivot_models::{
     clickhouse::{
         BookL2CheckpointRow, BookL2EventRow, BookMicrostructureRow, BookStreamSessionRow,
         CryptoPriceReportRow, DomainObservationRow, EntryConditionEvaluationEventRow,
-        MarketResolutionRow, MidPriceBucketRow, TradeTapeRow, WeatherForecastPointRow,
-        WeatherObservationReportRow,
+        MarketResolutionRow, MidPriceBucketRow, ReportMarketFunnelCountRow, ReportMarketFunnelRow,
+        TradeTapeRow, WeatherForecastPointRow, WeatherObservationReportRow,
     },
-    types::{DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId, TokenId},
+    types::{
+        DomainInstrumentKey, DomainSourceId, EntryConditionInstanceId, MarketId,
+        RecommendationReportId, TokenId,
+    },
 };
 use uuid::Uuid;
 
@@ -26,6 +29,33 @@ use uuid::Uuid;
 /// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
+    async fn report_market_funnel_counts(
+        &self,
+        _report_id: &RecommendationReportId,
+    ) -> Result<Vec<ReportMarketFunnelCountRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn report_market_funnel_count(
+        &self,
+        _report_id: &RecommendationReportId,
+        _terminal_stage: Option<&str>,
+        _primary_reason: Option<&str>,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
+    async fn report_market_funnel_page(
+        &self,
+        _report_id: &RecommendationReportId,
+        _terminal_stage: Option<&str>,
+        _primary_reason: Option<&str>,
+        _offset: u64,
+        _limit: u64,
+    ) -> Result<Vec<ReportMarketFunnelRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Latest authoritative applied evaluation, explicitly deduplicated by
     /// deterministic `evaluation_id` rather than `MergeTree` background merges.
     async fn latest_applied_entry_condition_evaluation(
@@ -187,6 +217,18 @@ pub trait QuantFactReadRepository: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Canonical L2 events for one token page. Query shape is page-bounded and
+    /// must not issue one query per token.
+    async fn book_l2_events_between(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _available_by_ms: i64,
+    ) -> Result<Vec<BookL2EventRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Market-WS trade observations interleaved in the same per-token stream.
     async fn market_ws_trades_from(
         &self,
@@ -206,6 +248,15 @@ pub trait QuantFactReadRepository: Send + Sync {
         _decision_at_ms: i64,
     ) -> Result<Option<BookStreamSessionRow>, StorageError> {
         Ok(None)
+    }
+
+    /// Latest visible ledger state for a page of stream sessions.
+    async fn book_stream_sessions(
+        &self,
+        _stream_session_ids: Vec<Uuid>,
+        _available_by_ms: i64,
+    ) -> Result<Vec<BookStreamSessionRow>, StorageError> {
+        Ok(Vec::new())
     }
 
     /// Freshest visible book per token at one source cutoff. Implementations

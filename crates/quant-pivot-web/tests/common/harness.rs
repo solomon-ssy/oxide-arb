@@ -20,7 +20,7 @@ use actix_web::{
 use async_trait::async_trait;
 use quant_pivot_core::{
     app::ports::execution_read::CoreExecutionReadPort, execution::IntentLifecyclePublisher,
-    report::AdHocReportRequest,
+    report::AdHocReportRequest, runtime_config::RuntimeConfigStore,
 };
 use quant_pivot_error::{
     QuantError, QuantResult, auth::AuthError, control::ControlError, execution::ExecutionError,
@@ -66,9 +66,11 @@ use quant_pivot_models::{
         RunFullFeatureParityRequest, RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand,
         StructuralMonitorPort, SystemStatus, TradePolicyArtifactInfo, TradePolicyAuditListQuery,
         TradePolicyFitPreflightView, TradePolicyGovernanceAuditInfo, TradePolicyListQuery,
-        TradePolicyPort, TradeTapeCoverageView, TradeTapeSourceHealthView, TrainModelRequest,
-        TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, TrainingDatasetPlanView,
-        TrainingDatasetPort, TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
+        TradePolicyPort, TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
+        TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo, TradeTapeCoverageView,
+        TradeTapeSourceHealthView, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
+        TrainingDatasetListQuery, TrainingDatasetPlanView, TrainingDatasetPort,
+        TrainingDatasetView, UpsertDomainSourceCursor, empty_catalog_page,
     },
     entities::quant_entry_condition_evaluation_outbox,
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
@@ -91,7 +93,7 @@ use quant_pivot_repository::{
         QuantFactReadRepository, ReconciliationRepository, SettlementRedeemRepository,
     },
 };
-use quant_pivot_research::features::FeatureValueKind;
+use quant_pivot_research::{artifact::ArtifactStore, features::FeatureValueKind};
 use quant_pivot_storage::cache::connect_pool;
 use quant_pivot_test_support::{
     account::core_account_read_port, report_pipeline_harness::FixtureReportSeedContext,
@@ -222,6 +224,10 @@ pub struct TestEnv {
     pub state: AppState,
     /// Postgres connection (migrations applied; RBAC seeded).
     pub db: DatabaseConnection,
+    /// Content-addressed model store shared by the real order-intent service and fixtures.
+    pub model_artifact_store: Arc<dyn ArtifactStore>,
+    /// Active runtime configuration read by the real order-intent service.
+    pub order_intent_runtime_config: Arc<RuntimeConfigStore>,
     core_report: CoreReportTestHandle,
     /// Ad-hoc enqueue capture from [`FakeReportScheduleRunner`].
     pub ad_hoc_enqueued: Arc<Mutex<Vec<AdHocReportRequest>>>,
@@ -275,7 +281,8 @@ impl TestEnv {
         let catalog = Arc::new(MockCatalogStatus);
         let data_quality = Arc::new(MockDataQuality);
         let core_report = core_report_port::build_core_report_stack(&db, events.clone()).await;
-        let order_intents = build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
+        let (order_intents, model_artifact_store, order_intent_runtime_config) =
+            build_order_intent_service(&db, Arc::clone(&intent_lifecycle));
         let state = web_harness_app_state(WebHarnessAppStateInput {
             db: &db,
             repos: &repos,
@@ -296,6 +303,8 @@ impl TestEnv {
         Self {
             state,
             db,
+            model_artifact_store,
+            order_intent_runtime_config,
             ad_hoc_enqueued: Arc::clone(&core_report.enqueued),
             core_report,
             pg_container,
@@ -680,6 +689,25 @@ pub struct MockTradePolicyPort;
 
 #[async_trait]
 impl TradePolicyPort for MockTradePolicyPort {
+    fn list_profiles(
+        &self,
+    ) -> QuantResult<Vec<quant_pivot_models::types::ResearchProfileArtifact>> {
+        quant_pivot_models::types::builtin_research_profiles().map_err(|detail| {
+            quant_pivot_error::research::ResearchError::ValidationMethodology { detail }.into()
+        })
+    }
+
+    fn find_profile(
+        &self,
+        id: &str,
+        version: u32,
+    ) -> QuantResult<Option<quant_pivot_models::types::ResearchProfileArtifact>> {
+        Ok(self
+            .list_profiles()?
+            .into_iter()
+            .find(|profile| profile.profile_ref.id == id && profile.profile_ref.version == version))
+    }
+
     async fn preflight(
         &self,
         _: &quant_pivot_models::domain::TradePolicyFitPreflightRequest,
@@ -693,7 +721,27 @@ impl TradePolicyPort for MockTradePolicyPort {
 
     async fn fit(
         &self,
+        _: &quant_pivot_models::types::ResearchJobId,
+        _: &quant_pivot_models::types::TrainingDatasetId,
         _: quant_pivot_models::domain::FitTradePolicyRequest,
+        _: Arc<dyn JobProgressSink>,
+        _: CancellationToken,
+    ) -> QuantResult<TradePolicyArtifactInfo> {
+        Err(StorageError::NotFound {
+            entity: "trade_policy_artifact",
+            id: "mock".into(),
+        }
+        .into())
+    }
+
+    async fn validate(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyValidationRunId,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        _: uuid::Uuid,
+        _: String,
+        _: &dyn JobProgressSink,
+        _: &CancellationToken,
     ) -> QuantResult<TradePolicyArtifactInfo> {
         Err(StorageError::NotFound {
             entity: "trade_policy_artifact",
@@ -709,6 +757,30 @@ impl TradePolicyPort for MockTradePolicyPort {
         Ok(None)
     }
 
+    async fn source_slice(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+    ) -> QuantResult<Option<quant_pivot_models::domain::TradePolicySourceSliceView>> {
+        Ok(None)
+    }
+
+    async fn page_source_slice_objects(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        _: quant_pivot_models::domain::TradePolicySourceSliceObjectListQuery,
+    ) -> QuantResult<Option<Paginated<quant_pivot_models::domain::TradePolicySourceSliceObjectView>>>
+    {
+        Ok(None)
+    }
+
+    async fn evidence_download(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        _: quant_pivot_models::types::TradePolicyEvidenceObjectKind,
+    ) -> QuantResult<Option<quant_pivot_models::domain::TradePolicyEvidenceDownloadView>> {
+        Ok(None)
+    }
+
     async fn page(
         &self,
         query: TradePolicyListQuery,
@@ -721,6 +793,37 @@ impl TradePolicyPort for MockTradePolicyPort {
         _: &quant_pivot_models::types::TradePolicyArtifactId,
         query: TradePolicyAuditListQuery,
     ) -> QuantResult<Paginated<TradePolicyGovernanceAuditInfo>> {
+        Ok(Paginated::empty(query.page.page, query.page.size))
+    }
+
+    async fn page_trials(
+        &self,
+        _: &quant_pivot_models::types::ResearchJobId,
+        query: quant_pivot_models::domain::TradePolicyTrialListQuery,
+    ) -> QuantResult<Paginated<quant_pivot_models::domain::TradePolicyTrialAttemptInfo>> {
+        Ok(Paginated::empty(query.page.page, query.page.size))
+    }
+
+    async fn find_validation(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyValidationRunId,
+    ) -> QuantResult<Option<TradePolicyValidationRunInfo>> {
+        Ok(None)
+    }
+
+    async fn page_validations(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyArtifactId,
+        query: TradePolicyValidationListQuery,
+    ) -> QuantResult<Paginated<TradePolicyValidationRunInfo>> {
+        Ok(Paginated::empty(query.page.page, query.page.size))
+    }
+
+    async fn page_validation_rows(
+        &self,
+        _: &quant_pivot_models::types::TradePolicyValidationRunId,
+        query: TradePolicyValidationRowListQuery,
+    ) -> QuantResult<Paginated<TradePolicyValidationRowInfo>> {
         Ok(Paginated::empty(query.page.page, query.page.size))
     }
 
@@ -1171,6 +1274,17 @@ impl TrainingDatasetPort for MockTrainingDatasetPort {
     ) -> QuantResult<TrainingDatasetView> {
         Err(QuantError::NotImplemented("training dataset build".into()))
     }
+
+    async fn build_policy_fit(
+        &self,
+        _request: quant_pivot_models::domain::PolicyFitDatasetBuildRequest,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetView> {
+        Err(QuantError::NotImplemented(
+            "internal PolicyFit Dataset build".into(),
+        ))
+    }
 }
 
 /// No-op research-job engine port for web integration tests.
@@ -1239,6 +1353,16 @@ impl ResearchJobPort for MockResearchJobPort {
     ) -> QuantResult<ResearchJobView> {
         Err(QuantError::NotImplemented(
             "enqueue trade policy fit".into(),
+        ))
+    }
+
+    async fn enqueue_trade_policy_validation(
+        &self,
+        _request: quant_pivot_models::domain::TradePolicyValidationJobParams,
+        _ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        Err(QuantError::NotImplemented(
+            "enqueue trade policy validation".into(),
         ))
     }
 

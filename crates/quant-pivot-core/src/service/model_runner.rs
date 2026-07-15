@@ -42,7 +42,7 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        Probability, RuntimeConfigVersionId,
+        Probability, RuntimeConfigVersionId, SignalCandidateId, TokenId,
     },
 };
 use quant_pivot_repository::traits::{
@@ -206,8 +206,19 @@ pub struct ModelRunOutcome {
     pub accepted: Vec<SignalCandidate>,
     /// Total candidates emitted to the fact stream (accepted + audited rejects).
     pub emitted: u32,
+    /// One row-level gate decision for every scored market candidate.
+    pub decisions: Vec<ModelMarketDecision>,
     /// Shadow outcome, when a shadow model was configured.
     pub shadow: Option<ShadowRunOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelMarketDecision {
+    pub signal_candidate_id: SignalCandidateId,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub gate_passed: bool,
+    pub primary_reason: Option<String>,
 }
 
 /// The successful active-path result threaded back to [`ModelRunner::run`].
@@ -216,6 +227,7 @@ struct ActiveResult {
     metrics: serde_json::Value,
     accepted: Vec<SignalCandidate>,
     emitted: u32,
+    decisions: Vec<ModelMarketDecision>,
     /// The active model version that produced this result (for the shadow record).
     active_version_id: ModelVersionId,
     /// Per-market `(composite_score, outcome_side)` for the shadow diff.
@@ -395,6 +407,7 @@ impl ModelRunner {
                     model_run_id,
                     accepted: active.accepted,
                     emitted: active.emitted,
+                    decisions: active.decisions,
                     shadow,
                 })
             }
@@ -599,7 +612,7 @@ impl ModelRunner {
         })?;
         // The full ranked candidate set feeds the signal-layer shadow comparison.
         let active_candidates = output.candidates.clone();
-        let (rows, accepted) =
+        let (rows, accepted, decisions) =
             partition_candidates(output.candidates, floor, min_confidence, event_time);
         let metrics = serde_json::json!({
             "markets_scored": output.runtime_metrics.markets_scored,
@@ -615,6 +628,7 @@ impl ModelRunner {
             metrics,
             accepted,
             emitted,
+            decisions,
             active_version_id: version_id.clone(),
             active_index,
             active_candidates,
@@ -1397,17 +1411,29 @@ fn partition_candidates(
     floor: Decimal,
     min_confidence: Decimal,
     event_time: i64,
-) -> (Vec<QuantSignalCandidateEventRow>, Vec<SignalCandidate>) {
+) -> (
+    Vec<QuantSignalCandidateEventRow>,
+    Vec<SignalCandidate>,
+    Vec<ModelMarketDecision>,
+) {
     let mut rows = Vec::with_capacity(candidates.len());
     let mut accepted = Vec::new();
+    let mut decisions = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let reason = rejection_reason(&candidate, floor, min_confidence);
+        decisions.push(ModelMarketDecision {
+            signal_candidate_id: candidate.signal_candidate_id.clone(),
+            market_id: candidate.market_id.clone(),
+            token_id: candidate.token_id.clone(),
+            gate_passed: reason.is_empty(),
+            primary_reason: (!reason.is_empty()).then(|| reason.to_owned()),
+        });
         rows.push(signal_candidate_event(&candidate, reason, event_time));
         if reason.is_empty() {
             accepted.push(candidate);
         }
     }
-    (rows, accepted)
+    (rows, accepted, decisions)
 }
 
 /// Establish the one global pre-portfolio order after all category routes have
@@ -1820,6 +1846,7 @@ mod tests {
         features::FeatureVector,
         model::{ModelInputAuditRow, ModelInputAuditState},
     };
+    use quant_pivot_test_support::execution_pg_seed::fixture_profile_ref;
     use std::collections::BTreeMap;
 
     fn version(status: PublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
@@ -1829,6 +1856,7 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

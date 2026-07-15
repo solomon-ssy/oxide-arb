@@ -1,8 +1,11 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
-use aws_sdk_s3::{Client as S3ControlClient, config::Region, types::ObjectLockRetentionMode};
+use aws_sdk_s3::{
+    Client as S3ControlClient, config::Region, presigning::PresigningConfig,
+    types::ObjectLockRetentionMode,
+};
 use chrono::Utc;
 use futures_util::StreamExt;
 use object_store::{
@@ -331,6 +334,35 @@ impl ArtifactStore for S3ArtifactStore {
                 object_locked,
             },
         })
+    }
+
+    async fn signed_download_url(
+        &self,
+        uri: &ArtifactUri,
+        valid_for: Duration,
+    ) -> QuantResult<String> {
+        let object = self.object_ref_from_uri(uri)?;
+        let signing =
+            PresigningConfig::expires_in(valid_for).map_err(|error| ResearchError::ArtifactIo {
+                uri: uri.as_str().to_owned(),
+                detail: format!("invalid signed-download lifetime: {error}"),
+            })?;
+        self.control_client()
+            .await
+            .get_object()
+            .bucket(&self.bucket)
+            .key(object.path.to_string())
+            .set_version_id(object.version_id)
+            .presigned(signing)
+            .await
+            .map(|request| request.uri().to_owned())
+            .map_err(|error| {
+                ResearchError::ArtifactIo {
+                    uri: uri.as_str().to_owned(),
+                    detail: format!("failed to sign evidence download: {error}"),
+                }
+                .into()
+            })
     }
 
     async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool> {

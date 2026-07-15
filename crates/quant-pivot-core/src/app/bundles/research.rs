@@ -33,13 +33,13 @@ use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
         AttributionRepository, BacktestPathSetRepository, BacktestReportRepository,
-        BasisAlertRepository, CalibrationArtifactRepository, CatalogVersionRepository, FactWriter,
-        FactorRepository, FeatureParityRepository, FeatureRepository, MarketLinkageRepository,
-        MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
-        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
-        PositionRepository, QuantFactReadRepository, RecommendationRepository,
-        RuntimeConfigVersionRepository, ShadowComparisonRepository, TradePolicyRepository,
-        TradeTapeBlockCursorRepository, TrainingDatasetRepository,
+        BasisAlertRepository, CalibrationArtifactRepository, CatalogVersionRepository,
+        ClobMarketInfoRepository, FactWriter, FactorRepository, FeatureParityRepository,
+        FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
+        ModelComparisonReportRepository, ModelGovernanceAuditRepository, ModelRegistryRepository,
+        ModelRunRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
+        RuntimeConfigVersionRepository, ShadowComparisonRepository, SourceSliceRepository,
+        TradePolicyRepository, TradeTapeBlockCursorRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -102,6 +102,8 @@ pub struct ResearchBundle {
     pub model_runner: Arc<ModelRunner>,
     /// Frozen training-dataset ledger persistence (3.5).
     pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Server-owned point-in-time source-slice materialization ledger.
+    pub source_slice_repo: Arc<dyn SourceSliceRepository>,
     /// Governed executable trade-policy catalog.
     pub trade_policy_repo: Arc<dyn TradePolicyRepository>,
     /// Final attribution rows available for supervised live samples (5.7).
@@ -132,6 +134,8 @@ pub struct ResearchBundle {
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Append-only catalog ledger for every offline PIT metadata read.
     pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
+    /// Append-only point-in-time CLOB parameters and fee schedules.
+    pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
     pub market_repo: Arc<dyn MarketRepository>,
     /// Frozen market → external-subject linkage ledger (11.2.2).
@@ -293,6 +297,7 @@ impl ResearchBundle {
             frozen_model_parity,
             model_runner,
             training_dataset_repo: offline.training_dataset,
+            source_slice_repo: Arc::clone(&repos.source_slice) as Arc<dyn SourceSliceRepository>,
             trade_policy_repo: Arc::clone(&repos.trade_policy) as Arc<dyn TradePolicyRepository>,
             attribution_repo: offline.attribution,
             recommendation_repo: offline.recommendation,
@@ -308,6 +313,8 @@ impl ResearchBundle {
             calibration_loader,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             catalog_version_repo: Arc::clone(&deps.data.catalog_version_repo),
+            clob_market_info_repo: Arc::clone(&repos.clob_market_info)
+                as Arc<dyn ClobMarketInfoRepository>,
             market_repo: Arc::clone(&deps.data.market_repo),
             market_linkage_repo: Arc::clone(&market_linkage_repo),
             position_repo: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
@@ -338,7 +345,7 @@ impl ResearchBundle {
                 feature_repo: Arc::clone(&self.feature_repo),
                 selection_repo: Arc::clone(&self.market_selection_repo),
                 position_repo: Arc::clone(&self.position_repo),
-                fee_calculator: Arc::clone(&self.fee_calculator),
+                clob_market_info_repo: Arc::clone(&self.clob_market_info_repo),
                 linkage_repo: Arc::clone(&self.market_linkage_repo),
                 model_registry: Arc::clone(&self.model_registry_repo),
                 trade_policy_repo: Arc::clone(&self.trade_policy_repo),

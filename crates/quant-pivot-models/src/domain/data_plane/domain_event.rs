@@ -178,7 +178,7 @@ impl WeatherObservationReportKind {
 }
 
 /// Persisted Weather observation with projection-assigned local date/revision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeatherObservationFact {
     pub source_id: DomainSourceId,
     pub station: IcaoStation,
@@ -216,7 +216,7 @@ impl WeatherObservationFact {
 
 /// One raw GEFS ensemble point. Bias is intentionally absent until a real
 /// station×lead calibration artifact is available.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeatherForecastPoint {
     pub source_id: DomainSourceId,
     pub station: IcaoStation,

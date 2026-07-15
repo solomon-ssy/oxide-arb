@@ -219,7 +219,6 @@ fn domain_test_registry(
         min_order_size: dec!(1),
         liquidity_usd: Some(Usd::new(dec!(100))),
         volume_24h: None,
-        fee_schedule: None,
         start_date: context.start_date,
         end_date: context.end_date,
         resolved_at: None,

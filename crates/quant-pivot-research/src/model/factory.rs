@@ -130,6 +130,12 @@ impl DefaultModelRuntimeFactory {
             }
             .into());
         }
+        if header.profile_ref != model_version.profile_ref {
+            return Err(ResearchError::InvalidModelArtifact {
+                detail: "artifact research profile disagrees with registry row".to_owned(),
+            }
+            .into());
+        }
         if header.feature_schema_hash != self.binding.feature_schema_hash {
             return Err(ResearchError::FeatureSchemaMismatch {
                 expected: header.feature_schema_hash.as_str().to_owned(),
@@ -296,6 +302,7 @@ mod tests {
         runtime_config::FactorCrossSectionConfig,
         types::{
             CalibrationArtifactId, ContentHash, ModelInputContract, ModelSpecId, ModelVersionId,
+            builtin_research_profiles,
         },
     };
     use rust_decimal_macros::dec;
@@ -356,6 +363,10 @@ mod tests {
         ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: version.clone(),
+                profile_ref: builtin_research_profiles()
+                    .expect("built-in profiles")
+                    .remove(0)
+                    .profile_ref,
                 model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: feature_hash,
                 factor_schema_hash: hash("fac"),
@@ -388,6 +399,10 @@ mod tests {
             model_family: ModelFamily::WeightedFactor,
             version: 1,
             artifact_hash,
+            profile_ref: builtin_research_profiles()
+                .expect("built-in profiles")
+                .remove(0)
+                .profile_ref,
             training_dataset_id: None,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,

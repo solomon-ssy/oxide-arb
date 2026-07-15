@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use quant_pivot_models::config::DeployConfig;
+use quant_pivot_research::artifact::build_artifact_store;
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
 use quant_pivot_test_support::{
     research_ui_seed::ResearchUiSeedSummary,
@@ -48,9 +49,11 @@ async fn main() -> Result<()> {
         .await
         .context("connect postgres")?;
     let db = pg.connection().clone();
+    let model_artifact_store = build_artifact_store(&deploy.research.artifact_store)
+        .context("build research artifact store")?;
 
     tracing::info!(funder = %funder, "seeding Postgres ui-demo fixtures");
-    let summary = seed_ui_demo_pg(&db, &funder).await;
+    let summary = seed_ui_demo_pg(&db, &funder, &model_artifact_store).await;
     tracing::info!(
         reports = summary.reports,
         intents = summary.intents,

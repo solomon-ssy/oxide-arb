@@ -655,7 +655,12 @@ async fn upsert_reconciliation_summary(
         active.evidence_json = ActiveValue::Set(chain);
         active.venue_filled_shares = ActiveValue::Set(write.venue_filled_shares);
         active.venue_avg_price = ActiveValue::Set(write.venue_avg_price);
-        active.discrepancy_usd = ActiveValue::Set(write.discrepancy_usd);
+        active.expected_cash_delta_usd = ActiveValue::Set(write.expected_cash_delta_usd);
+        active.venue_cash_delta_usd = ActiveValue::Set(write.venue_cash_delta_usd);
+        active.realized_pnl_usd = ActiveValue::Set(write.realized_pnl_usd);
+        active.expected_fee_usd = ActiveValue::Set(write.expected_fee_usd);
+        active.observed_fee_usd = ActiveValue::Set(write.observed_fee_usd);
+        active.fee_delta_usd = ActiveValue::Set(write.fee_delta_usd);
         active.resolved_by = ActiveValue::Set(write.resolved_by);
         active.resolved_at = ActiveValue::Set(write.resolved_at);
         active.update(db).await.map_err(StorageError::from)?;
@@ -670,7 +675,12 @@ async fn upsert_reconciliation_summary(
         evidence_json: write.evidence,
         venue_filled_shares: write.venue_filled_shares,
         venue_avg_price: write.venue_avg_price,
-        discrepancy_usd: write.discrepancy_usd,
+        expected_cash_delta_usd: write.expected_cash_delta_usd,
+        venue_cash_delta_usd: write.venue_cash_delta_usd,
+        realized_pnl_usd: write.realized_pnl_usd,
+        expected_fee_usd: write.expected_fee_usd,
+        observed_fee_usd: write.observed_fee_usd,
+        fee_delta_usd: write.fee_delta_usd,
         resolved_by: write.resolved_by,
         resolved_at: write.resolved_at,
     };

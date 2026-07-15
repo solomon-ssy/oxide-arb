@@ -4,7 +4,7 @@ use std::{
     io::{Error, ErrorKind},
     path::{self, Path, PathBuf},
     process,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -31,7 +31,7 @@ pub struct LocalArtifactStore {
 }
 
 impl LocalArtifactStore {
-    /// Build a store rooted at `root` (the deploy-configured `artifact_root`).
+    /// Build a store rooted at the Local artifact-store `prefix`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -154,6 +154,18 @@ impl ArtifactStore for LocalArtifactStore {
                 object_locked: false,
             },
         })
+    }
+
+    async fn signed_download_url(
+        &self,
+        uri: &ArtifactUri,
+        _valid_for: Duration,
+    ) -> QuantResult<String> {
+        Err(ResearchError::ArtifactIo {
+            uri: uri.as_str().to_owned(),
+            detail: "local artifact storage cannot issue signed download URLs".to_owned(),
+        }
+        .into())
     }
 
     async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool> {

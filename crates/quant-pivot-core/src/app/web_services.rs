@@ -25,7 +25,8 @@ use crate::{
     service::{
         feature_integrity::{CatalogFeatureIntegrityCoverage, FeatureIntegrityService},
         model_calibration_fit::ModelCalibrationFitService,
-        trade_policy::TradePolicyService,
+        research_readiness::{EvidenceAttestor, ResearchReadinessEvidenceService},
+        trade_policy::{TradePolicyService, TradePolicyServiceDeps},
     },
 };
 use quant_pivot_error::{QuantResult, infra::InfraError};
@@ -33,6 +34,7 @@ use quant_pivot_models::domain::{
     CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
     FeatureIntegrityPort, MarketLinkageGovernancePort, ModelCalibrationFitPort, NewOperationLog,
     OrderIntentPort, ReconciliationPort, ResearchJobPort, RuntimeConfigPort, TradePolicyPort,
+    TrainingDatasetPort,
 };
 use quant_pivot_repository::{
     clickhouse::ChFeatureParityEventRepository,
@@ -42,10 +44,10 @@ use quant_pivot_repository::{
         EntryConditionRepository, EquitySnapshotRepository, ExecutionOrderRepository,
         FeatureParityEventRepository, FeatureRepository, MenuRepository, OperationLogRepository,
         OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository, ReconciliationRepository, RoleMenuRepository,
-        RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
-        ServingEvidenceRepository, SettlementRedeemRepository, TradePolicyRepository,
-        TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
+        RecommendationRepository, ReconciliationRepository, ResearchReadinessEvidenceRepository,
+        RoleMenuRepository, RolePermissionRepository, RoleRepository,
+        RuntimeConfigVersionRepository, ServingEvidenceRepository, SettlementRedeemRepository,
+        TradePolicyRepository, TradeTapeBlockCursorRepository, UserRepository, UserRoleRepository,
     },
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterWorker};
@@ -118,6 +120,8 @@ async fn build_app_state(
     let auth = build_web_auth(ctx).await?;
     let execution = build_web_execution_ports(ctx);
     let research_ports = build_research_web_ports(ctx);
+    let trade_policy_dataset_builder: Arc<dyn TrainingDatasetPort> =
+        research_ports.training_datasets.clone();
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
@@ -154,7 +158,7 @@ async fn build_app_state(
             Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
             Some(Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>),
         )),
-        training_datasets: research_ports.training_datasets,
+        training_datasets: research_ports.training_datasets.clone(),
         model_training: research_ports.model_training,
         backtests: research_ports.backtests,
         cpcv_backtests: research_ports.cpcv_backtests,
@@ -167,7 +171,7 @@ async fn build_app_state(
         calibration_artifacts: Arc::clone(&ctx.research.calibration_artifact_fit),
         model_calibration_fit: research_ports.model_calibration_fit
             as Arc<dyn ModelCalibrationFitPort>,
-        trade_policies: build_trade_policy_port(ctx),
+        trade_policies: build_trade_policy_port(ctx, trade_policy_dataset_builder)?,
         market_linkages: Arc::clone(&ctx.research.market_linkage_repo),
         domain_source_cursors: Arc::clone(&ctx.infra.repos.domain_source_cursor)
             as Arc<dyn DomainSourceCursorRepository>,
@@ -198,6 +202,7 @@ async fn build_app_state(
             feature_repo: Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>,
             runtime_config_repo: Arc::clone(&repos.runtime_config)
                 as Arc<dyn RuntimeConfigVersionRepository>,
+            quant_fact_read: Arc::clone(&ctx.infra.quant_fact_read),
         })),
         order_intents,
         entry_conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
@@ -213,13 +218,30 @@ async fn build_app_state(
     })
 }
 
-fn build_trade_policy_port(ctx: &AppContext) -> Arc<dyn TradePolicyPort> {
-    Arc::new(TradePolicyService::new(
-        Arc::clone(&ctx.research.training_dataset_repo),
+fn build_trade_policy_port(
+    ctx: &AppContext,
+    dataset_builder: Arc<dyn TrainingDatasetPort>,
+) -> QuantResult<Arc<dyn TradePolicyPort>> {
+    let attestor = EvidenceAttestor::from_config(&ctx.config.research.evidence_attestation)?;
+    let readiness = Arc::new(ResearchReadinessEvidenceService::new(
+        Arc::clone(&ctx.infra.repos.research_readiness)
+            as Arc<dyn ResearchReadinessEvidenceRepository>,
         Arc::clone(&ctx.research.artifact_store),
-        Arc::clone(&ctx.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
-        Arc::clone(&ctx.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
-    ))
+        attestor,
+        &ctx.config.db.clickhouse.raw_lifecycle,
+    )?);
+    Ok(Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
+        datasets: Arc::clone(&ctx.research.training_dataset_repo),
+        dataset_builder,
+        artifacts: Arc::clone(&ctx.research.artifact_store),
+        policies: Arc::clone(&ctx.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
+        model_registry: Arc::clone(&ctx.research.model_registry_repo),
+        runtime_configs: Arc::clone(&ctx.infra.repos.runtime_config)
+            as Arc<dyn RuntimeConfigVersionRepository>,
+        source_slices: Arc::clone(&ctx.research.source_slice_repo),
+        readiness,
+        model_runtime_factory_builder: Arc::clone(&ctx.research.model_runtime_factory_builder),
+    })))
 }
 
 fn build_feature_integrity(ctx: &AppContext) -> Arc<dyn FeatureIntegrityPort> {

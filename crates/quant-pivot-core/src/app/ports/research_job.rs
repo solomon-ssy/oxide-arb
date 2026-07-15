@@ -15,7 +15,7 @@ use quant_pivot_models::{
         FitTradePolicyRequest, JobSubmitContext, ModelCalibrationFitJobParams, ModelTrainJobParams,
         NewResearchJob, Paginated, ResearchJobError, ResearchJobInfo, ResearchJobListQuery,
         ResearchJobPort, ResearchJobView, RunBacktestRequest, RunCpcvBacktestRequest,
-        TrainModelRequest,
+        TradePolicyFitJobParams, TradePolicyValidationJobParams, TrainModelRequest,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
     types::{
@@ -25,13 +25,14 @@ use quant_pivot_models::{
 };
 
 use crate::app::research_job::ResearchJobEngine;
-use quant_pivot_repository::traits::TrainingDatasetRepository;
+use quant_pivot_repository::traits::{RuntimeConfigVersionRepository, TrainingDatasetRepository};
 use std::sync::Arc;
 
 /// Core implementation of [`ResearchJobPort`] — the HTTP enqueue/cancel/retry surface.
 pub struct CoreResearchJobPort {
     engine: ResearchJobEngine,
     training_datasets: Arc<dyn TrainingDatasetRepository>,
+    runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
     max_recovery_attempts: i32,
 }
 
@@ -41,11 +42,13 @@ impl CoreResearchJobPort {
     pub const fn new(
         engine: ResearchJobEngine,
         training_datasets: Arc<dyn TrainingDatasetRepository>,
+        runtime_configs: Arc<dyn RuntimeConfigVersionRepository>,
         max_recovery_attempts: i32,
     ) -> Self {
         Self {
             engine,
             training_datasets,
+            runtime_configs,
             max_recovery_attempts,
         }
     }
@@ -248,22 +251,42 @@ impl ResearchJobPort for CoreResearchJobPort {
         request: FitTradePolicyRequest,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView> {
-        let dataset = self
-            .training_datasets
-            .find_by_id(&request.selection.source_dataset_id)
+        let runtime_config = self
+            .runtime_configs
+            .load_active_at(request.selection.pit_cutoff)
             .await
             .map_err(QuantError::from)?
             .ok_or_else(|| StorageError::NotFound {
-                entity: "training_dataset",
-                id: request.selection.source_dataset_id.to_string(),
+                entity: "runtime_config_version",
+                id: format!("active_at: {}", request.selection.pit_cutoff),
             })?;
-        let runtime_config_version_id = Some(dataset.runtime_config_version_id);
-        let params = to_params(&request)?;
+        let runtime_config_version_id = Some(runtime_config.runtime_config_version_id);
+        let params = to_params(&TradePolicyFitJobParams {
+            training_dataset_id: TrainingDatasetId::from_v7(),
+            request,
+        })?;
         let job = self.new_job(
             ResearchJobKind::TradePolicyFit,
             params,
             None,
             runtime_config_version_id,
+            None,
+            &ctx,
+        );
+        self.enqueue(job).await
+    }
+
+    async fn enqueue_trade_policy_validation(
+        &self,
+        request: TradePolicyValidationJobParams,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView> {
+        let params = to_params(&request)?;
+        let job = self.new_job(
+            ResearchJobKind::TradePolicyValidation,
+            params,
+            None,
+            None,
             None,
             &ctx,
         );

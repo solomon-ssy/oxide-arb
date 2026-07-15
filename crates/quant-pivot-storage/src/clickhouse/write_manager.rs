@@ -132,7 +132,7 @@ impl ChWriteManager {
         for attempt in 0..MAX_INSERT_ATTEMPTS {
             let start = Instant::now();
             let permit = self.acquire_write_permit().await?;
-            let result = Self::insert_rows(client, table, &rows).await;
+            let result = Self::insert_rows(client, table, &rows, None).await;
             drop(permit);
 
             match result {
@@ -166,11 +166,71 @@ impl ChWriteManager {
         }))
     }
 
-    async fn insert_rows<T>(client: &Client, table: &str, rows: &[T]) -> Result<(), StorageError>
+    /// Durable insert with a deterministic `ClickHouse` deduplication token.
+    /// The token must identify one immutable chunk, not one retry attempt.
+    pub async fn write_batch_deduplicated<T>(
+        &self,
+        client: &Client,
+        table: &'static str,
+        deduplication_token: &str,
+        rows: Vec<T>,
+    ) -> Result<(), StorageError>
+    where
+        T: RowOwned + RowWrite + Send + Sync,
+    {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let count = rows.len();
+        let mut last_error: Option<StorageError> = None;
+        for attempt in 0..MAX_INSERT_ATTEMPTS {
+            let start = Instant::now();
+            let permit = self.acquire_write_permit().await?;
+            let result = Self::insert_rows(client, table, &rows, Some(deduplication_token)).await;
+            drop(permit);
+            match result {
+                Ok(()) => {
+                    self.metrics
+                        .rows_written
+                        .with_label_values(&[table])
+                        .inc_by(ToPrimitive::to_u64(&count).unwrap_or(u64::MAX));
+                    self.metrics
+                        .insert_duration_seconds
+                        .with_label_values(&[table])
+                        .set(start.elapsed().as_secs_f64());
+                    return Ok(());
+                }
+                Err(error) => {
+                    if attempt + 1 < MAX_INSERT_ATTEMPTS {
+                        let delay = Duration::from_millis(100 * 2u64.pow(attempt));
+                        warn!(table, attempt = attempt + 1, rows = count, %error, "ClickHouse deduplicated insert failed; retrying in {delay:?}");
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        error!(table, rows = count, %error, "ClickHouse deduplicated insert failed after {MAX_INSERT_ATTEMPTS} attempts");
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+        self.metrics.insert_errors.with_label_values(&[table]).inc();
+        Err(last_error.unwrap_or_else(|| {
+            StorageError::Connection("ClickHouse deduplicated insert exhausted retries".into())
+        }))
+    }
+
+    async fn insert_rows<T>(
+        client: &Client,
+        table: &str,
+        rows: &[T],
+        deduplication_token: Option<&str>,
+    ) -> Result<(), StorageError>
     where
         T: RowOwned + RowWrite + Send + Sync,
     {
         let mut insert = client.insert::<T>(table).await?;
+        if let Some(token) = deduplication_token {
+            insert = insert.with_setting("insert_deduplication_token", token);
+        }
         for row in rows {
             insert.write(row).await?;
         }

@@ -23,6 +23,7 @@ mod builder;
 mod checks;
 mod engine;
 
+pub(crate) use builder::pit_fee_schedule;
 pub use builder::{AdmissionInputBuilder, AdmissionInputBuilderDeps};
 pub use engine::DefaultAdmissionEngine;
 
@@ -30,20 +31,29 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{
         BookSnapshot, CapitalAllocationInfo, DataQualitySnapshot, EntryConditionInstanceInfo,
         OrderIntentInfo, RecommendationInfo, RecommendationReportInfo,
     },
     enums::{
-        common::TickSize,
+        common::{OrderType, Side, TickSize},
         execution::{AdmissionCheckId, AdmissionOutcome, KillSwitchState},
-        quant::QuantRuntimeMode,
+        quant::{FillRequirement, QuantRuntimeMode},
     },
-    types::{RuntimeConfigVersionId, Usd},
+    hashing::CanonicalDigest,
+    types::{
+        ContentHash, OrderAmount, PreparedFeeSchedule, PreparedVenueOrder, ResearchProfileRef,
+        RuntimeConfigVersionId, Usd, VenueOrderAmount,
+    },
 };
-use quant_pivot_research::portfolio::AccountSnapshot;
+use quant_pivot_research::{
+    execution_semantics::{
+        BookWalkOutcome, LiquidityRole, PitFeeSchedule, walk_buy_cash_budget, walk_buy_exact_shares,
+    },
+    portfolio::AccountSnapshot,
+};
 use serde::{Deserialize, Serialize};
 
 /// Venue-health seam read by `VenueGuardCheck` (#18).
@@ -111,12 +121,13 @@ pub struct AdmissionExposureState {
 }
 
 /// Registry-versus-venue metadata frozen by the admission input builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionVenueMetadata {
     pub registry_tick_size: TickSize,
     pub registry_neg_risk: bool,
     pub venue_tick_size: TickSize,
     pub venue_neg_risk: bool,
+    pub clob_market_info_hash: ContentHash,
 }
 
 /// Immutable, decision-time-frozen aggregate consumed by every admission check.
@@ -126,6 +137,8 @@ pub struct AdmissionVenueMetadata {
 /// inside a check.
 #[derive(Debug, Clone)]
 pub struct AdmissionInput {
+    /// Immutable research profile bound through policy and model governance.
+    pub profile_ref: ResearchProfileRef,
     /// The intent being admitted (frozen entry spec + risk-envelope hash).
     pub intent: OrderIntentInfo,
     /// Recommendation-owned, revisioned entry-condition state.
@@ -145,7 +158,7 @@ pub struct AdmissionInput {
     /// Latest published L2 book for the intent's token (`None` = absent).
     pub book: Option<Arc<BookSnapshot>>,
     /// Point-in-time fee schedule visible before this admission decision.
-    pub fee_schedule: quant_pivot_research::execution_semantics::PitFeeSchedule,
+    pub fee_schedule: PitFeeSchedule,
     /// Governed total budget cap (`portfolio.budget.total_budget_usd`), distilled
     /// from the active config at build time.
     pub budget_total_usd: Usd,
@@ -298,4 +311,156 @@ pub trait ExecutionAdmissionEngine: Send + Sync {
     /// Evaluate every check without short-circuit (diagnostics / audit). The
     /// outcome is identical to [`Self::evaluate`]; only the trace is complete.
     async fn evaluate_full(&self, input: AdmissionInput) -> QuantResult<AdmissionDecision>;
+}
+
+/// Freeze the exact venue amount and all execution-semantic hashes consumed by
+/// the dispatcher. The dispatcher must submit this object verbatim.
+pub fn prepare_entry_order(input: &AdmissionInput) -> QuantResult<PreparedVenueOrder> {
+    let spec = &input.intent.entry_order_json;
+    if spec.side != Side::Buy {
+        return Err(ExecutionError::IntentDenied {
+            reason: "opening entry must be a BUY".to_owned(),
+        }
+        .into());
+    }
+    let book = input
+        .book
+        .as_ref()
+        .ok_or_else(|| ExecutionError::IntentDenied {
+            reason: "cannot prepare venue order without a PIT L2 book".to_owned(),
+        })?;
+    let book_hash = CanonicalDigest::content_hash_json(&(
+        book.timestamp_ms,
+        book.version,
+        book.bids.as_ref(),
+        book.asks.as_ref(),
+    ))?;
+    let requirement = match spec.order_type {
+        OrderType::Fak => FillRequirement::AllowPartial,
+        OrderType::Fok | OrderType::Gtc | OrderType::Gtd { .. } => FillRequirement::AllOrNothing,
+    };
+
+    let (cash_budget, venue_amount, expected_fee, total_cash_delta, expected_filled_shares, worst) =
+        match spec.amount {
+            OrderAmount::CashBudget(budget) => {
+                if !matches!(spec.order_type, OrderType::Fok | OrderType::Fak) {
+                    return Err(ExecutionError::IntentDenied {
+                        reason: "cash-budget BUY is valid only for FOK/FAK".to_owned(),
+                    }
+                    .into());
+                }
+                let fill = walk_buy_cash_budget(
+                    &book.asks,
+                    budget,
+                    spec.limit_price,
+                    requirement,
+                    &input.fee_schedule,
+                    LiquidityRole::Taker,
+                    input.now,
+                )
+                .map_err(|error| ExecutionError::IntentDenied {
+                    reason: format!("cash-budget execution preparation failed: {error:?}"),
+                })?;
+                if fill.outcome == BookWalkOutcome::Unfilled
+                    || !fill.gross_order_amount.is_positive()
+                {
+                    return Err(ExecutionError::IntentDenied {
+                        reason: "cash budget cannot be executed from the admitted L2 book"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+                if fill.gross_order_amount.inner() + fill.expected_fee.inner() > budget.inner() {
+                    return Err(ExecutionError::IntentDenied {
+                        reason: "prepared BUY exceeds governed cash budget".to_owned(),
+                    }
+                    .into());
+                }
+                (
+                    Some(budget),
+                    VenueOrderAmount::GrossUsd(fill.gross_order_amount),
+                    fill.expected_fee,
+                    fill.total_cash_delta,
+                    fill.filled_shares,
+                    fill.worst_price.unwrap_or(spec.limit_price),
+                )
+            }
+            OrderAmount::Shares(shares) => {
+                let fill = walk_buy_exact_shares(
+                    &book.asks,
+                    shares,
+                    spec.limit_price,
+                    requirement,
+                    &input.fee_schedule,
+                    if spec.post_only {
+                        LiquidityRole::Maker
+                    } else {
+                        LiquidityRole::Taker
+                    },
+                    input.now,
+                )
+                .map_err(|error| ExecutionError::IntentDenied {
+                    reason: format!("share execution preparation failed: {error:?}"),
+                })?;
+                if matches!(spec.order_type, OrderType::Fok | OrderType::Fak)
+                    && fill.outcome == BookWalkOutcome::Unfilled
+                {
+                    return Err(ExecutionError::IntentDenied {
+                        reason: "share order cannot be executed from the admitted L2 book"
+                            .to_owned(),
+                    }
+                    .into());
+                }
+                let expected_fee = if spec.post_only {
+                    Usd::ZERO
+                } else {
+                    fill.expected_fee
+                };
+                (
+                    None,
+                    VenueOrderAmount::Shares(shares),
+                    expected_fee,
+                    if spec.post_only {
+                        -(shares * spec.limit_price).inner()
+                    } else {
+                        fill.total_cash_delta
+                    },
+                    if spec.post_only {
+                        shares
+                    } else {
+                        fill.filled_shares
+                    },
+                    fill.worst_price.unwrap_or(spec.limit_price),
+                )
+            }
+        };
+
+    Ok(PreparedVenueOrder {
+        profile_ref: input.profile_ref.clone(),
+        token_id: spec.token_id.clone(),
+        side: spec.side,
+        order_type: spec.order_type,
+        post_only: spec.post_only,
+        worst_price: worst,
+        cash_budget,
+        venue_amount,
+        expected_fee,
+        total_cash_delta,
+        expected_filled_shares,
+        book_hash,
+        clob_market_info_hash: input.venue_metadata.clob_market_info_hash.clone(),
+        fee_schedule: PreparedFeeSchedule {
+            schedule_hash: input.fee_schedule.schedule_hash.clone(),
+            effective_at: input.fee_schedule.effective_at,
+            available_at: input.fee_schedule.available_at,
+            platform_rate: input.fee_schedule.platform_rate,
+            exponent: input.fee_schedule.exponent,
+            taker_only: input.fee_schedule.taker_only,
+            builder_maker_fee_bps: input.fee_schedule.builder_maker_fee_bps,
+            builder_taker_fee_bps: input.fee_schedule.builder_taker_fee_bps,
+            builder_attributed: input.fee_schedule.builder_attributed,
+        },
+        prepared_at: input.now,
+        valid_until: spec.valid_until,
+    })
 }

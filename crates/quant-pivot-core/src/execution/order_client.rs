@@ -16,18 +16,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_api::{
-    clob::{ClobClient, OrderSubmissionError, OrderSubmissionStage},
-    fees::FeeCalculator,
-};
+use quant_pivot_api::clob::{ClobClient, OrderSubmissionError, OrderSubmissionStage};
 use quant_pivot_error::api::ApiError;
 use quant_pivot_models::{
     domain::{OrderRequest, OrderResponse},
     enums::{
-        common::{MarketCategory, OrderType, Side},
+        common::{OrderType, Side},
         execution::{ReconciliationResult, VenueOrderStatus},
     },
-    types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
+    types::{
+        ContentHash, FeeEvidence, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
+    },
 };
 
 /// The concrete order an admitted intent submits to the venue (SDK-free).
@@ -40,13 +39,14 @@ pub struct VenueOrder {
     /// Hard limit price.
     pub price: Price,
     /// Tagged venue amount (USD spend for aggressive BUY; shares otherwise).
-    pub amount: OrderAmount,
+    pub amount: VenueOrderAmount,
     /// Time-in-force / order type (`Fok` | `Gtc` | `Gtd { expiration }`).
     pub order_type: OrderType,
     /// Maker-only placement for passive limit orders.
     pub post_only: bool,
-    /// Market category for taker-fee derivation when the venue omits fee fields.
-    pub category: MarketCategory,
+    /// Fee frozen by final admission from the same inputs that produced amount.
+    pub expected_fee: Usd,
+    pub fee_schedule_hash: ContentHash,
 }
 
 /// Façade classification of a submission outcome, including the unconfirmed case.
@@ -166,7 +166,15 @@ pub struct VenueSubmitResult {
     pub venue_order_id: Option<OrderId>,
     pub filled_shares: Shares,
     pub avg_fill_price: Option<Price>,
-    pub fee_paid: Usd,
+    /// Fee projected from the immutable schedule at preparation time. This is
+    /// suitable for conservative capital accounting, but is never presented as
+    /// venue-observed truth.
+    pub expected_fee: Usd,
+    /// Exact or reconstructed venue fee. Submit responses do not carry enough
+    /// evidence, so this remains `None` until authenticated-trade or on-chain
+    /// reconciliation supplies it.
+    pub observed_fee: Option<Usd>,
+    pub fee_evidence: FeeEvidence,
     pub tx_hash: Option<String>,
     /// Human-readable detail (error message for ambiguous / rejected outcomes).
     pub detail: Option<String>,
@@ -175,13 +183,22 @@ pub struct VenueSubmitResult {
 }
 
 impl VenueSubmitResult {
-    fn from_response(resp: OrderResponse) -> Self {
+    fn from_response(
+        resp: OrderResponse,
+        expected_fee: Usd,
+        fee_schedule_hash: ContentHash,
+    ) -> Self {
         Self {
             outcome: VenueOutcome::from_status(resp.status),
             venue_order_id: Some(resp.order_id),
             filled_shares: resp.filled_shares,
             avg_fill_price: resp.avg_fill_price,
-            fee_paid: resp.fee_paid,
+            expected_fee,
+            observed_fee: None,
+            fee_evidence: FeeEvidence::PreparedScheduleExpected {
+                schedule_hash: fee_schedule_hash,
+                expected_fee,
+            },
             tx_hash: resp.tx_hash,
             detail: None,
             submitted_at: resp.submitted_at,
@@ -189,13 +206,23 @@ impl VenueSubmitResult {
         }
     }
 
-    fn from_error(error: &OrderSubmissionError, submitted_at: DateTime<Utc>) -> Self {
+    fn from_error(
+        error: &OrderSubmissionError,
+        submitted_at: DateTime<Utc>,
+        expected_fee: Usd,
+        fee_schedule_hash: ContentHash,
+    ) -> Self {
         Self {
             outcome: error.into(),
             venue_order_id: None,
             filled_shares: Shares::ZERO,
             avg_fill_price: None,
-            fee_paid: Usd::ZERO,
+            expected_fee,
+            observed_fee: None,
+            fee_evidence: FeeEvidence::PreparedScheduleExpected {
+                schedule_hash: fee_schedule_hash,
+                expected_fee,
+            },
             tx_hash: None,
             detail: Some(error.to_string()),
             submitted_at,
@@ -234,27 +261,12 @@ pub trait PolymarketOrderClient: Send + Sync {
 /// [`PolymarketOrderClient`] backed by the shared authenticated [`ClobClient`].
 pub struct ClobOrderClient {
     clob: Arc<ClobClient>,
-    fees: Arc<FeeCalculator>,
 }
 
 impl ClobOrderClient {
     #[must_use]
-    pub const fn new(clob: Arc<ClobClient>, fees: Arc<FeeCalculator>) -> Self {
-        Self { clob, fees }
-    }
-
-    fn derive_taker_fee(&self, order: &VenueOrder, response: &OrderResponse) -> Usd {
-        if !response.filled_shares.is_positive() {
-            return Usd::ZERO;
-        }
-        let price = response.avg_fill_price.unwrap_or(order.price);
-        self.fees.calculate(
-            response.filled_shares,
-            price,
-            order.category,
-            &order.market_id,
-            &order.token_id,
-        )
+    pub const fn new(clob: Arc<ClobClient>) -> Self {
+        Self { clob }
     }
 }
 
@@ -262,6 +274,8 @@ impl ClobOrderClient {
 impl PolymarketOrderClient for ClobOrderClient {
     async fn submit(&self, order: VenueOrder) -> VenueSubmitResult {
         let submitted_at = Utc::now();
+        let expected_fee = order.expected_fee;
+        let fee_schedule_hash = order.fee_schedule_hash.clone();
         let request = OrderRequest {
             market_id: order.market_id.clone(),
             token_id: order.token_id.clone(),
@@ -273,12 +287,11 @@ impl PolymarketOrderClient for ClobOrderClient {
         };
         match self.clob.place_order(&request).await {
             Ok(response) => {
-                let fee_paid = self.derive_taker_fee(&order, &response);
-                let mut result = VenueSubmitResult::from_response(response);
-                result.fee_paid = fee_paid;
-                result
+                VenueSubmitResult::from_response(response, expected_fee, fee_schedule_hash)
             }
-            Err(error) => VenueSubmitResult::from_error(&error, submitted_at),
+            Err(error) => {
+                VenueSubmitResult::from_error(&error, submitted_at, expected_fee, fee_schedule_hash)
+            }
         }
     }
 
@@ -305,7 +318,7 @@ impl PolymarketOrderClient for ClobOrderClient {
 mod tests {
     use quant_pivot_models::{
         enums::common::OrderType,
-        types::{Shares, Usd},
+        types::{ContentHash, FeeEvidence, Shares, Usd},
     };
 
     use super::{VenueOutcome, VenueSubmitResult};
@@ -334,7 +347,15 @@ mod tests {
             venue_order_id: None,
             filled_shares: Shares::ZERO,
             avg_fill_price: None,
-            fee_paid: Usd::ZERO,
+            expected_fee: Usd::ZERO,
+            observed_fee: None,
+            fee_evidence: FeeEvidence::PreparedScheduleExpected {
+                schedule_hash: ContentHash::parse(
+                    "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+                )
+                .expect("valid hash"),
+                expected_fee: Usd::ZERO,
+            },
             tx_hash: None,
             detail: None,
             submitted_at: Utc::now(),

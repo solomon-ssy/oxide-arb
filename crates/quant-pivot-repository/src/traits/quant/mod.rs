@@ -1,7 +1,6 @@
 //! Quant-pivot repository traits.
 
 mod account_snapshot;
-mod archive;
 mod attribution;
 mod backtest_path_set;
 mod backtest_report;
@@ -32,15 +31,16 @@ mod recommendation;
 mod recommendation_report;
 mod reconciliation;
 mod research_job;
+mod research_readiness;
 mod reserved_capital;
 mod selection;
 mod settlement_redeem;
 mod shadow_comparison;
+mod source_slice;
 mod trade_policy;
 mod trade_tape_block_cursor;
 
 pub use account_snapshot::*;
-pub use archive::*;
 pub use attribution::*;
 pub use backtest_path_set::*;
 pub use backtest_report::*;
@@ -71,9 +71,11 @@ pub use recommendation::*;
 pub use recommendation_report::*;
 pub use reconciliation::*;
 pub use research_job::*;
+pub use research_readiness::*;
 pub use reserved_capital::*;
 pub use selection::*;
 pub use settlement_redeem::*;
 pub use shadow_comparison::*;
+pub use source_slice::*;
 pub use trade_policy::*;
 pub use trade_tape_block_cursor::*;

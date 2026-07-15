@@ -384,7 +384,6 @@ pub const fn accumulate_exclusion(
         | ExclusionReason::SpreadTooWide
         | ExclusionReason::IngestLagExceeded
         | ExclusionReason::ResolutionAmbiguous
-        | ExclusionReason::SelectionCapExceeded
         | ExclusionReason::ModelFeatureUnavailable { .. } => summary.other_count += 1,
     }
 }

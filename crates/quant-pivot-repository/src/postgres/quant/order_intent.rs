@@ -677,7 +677,7 @@ async fn enforce_creation_limits(
 ) -> Result<(), StorageError> {
     if intent.runtime_mode != QuantRuntimeMode::SemiAuto
         || limits.max_open_intents == 0
-        || !limits.max_total_usd_per_report.is_positive()
+        || !limits.max_total_cash_per_report.is_positive()
         || recommendation.recommendation_report_id != limits.recommendation_report_id
     {
         return Err(error::invariant_violation(
@@ -712,13 +712,13 @@ async fn enforce_creation_limits(
                 )
             })
         })?;
-    if total > limits.max_total_usd_per_report.inner() {
+    if total > limits.max_total_cash_per_report.inner() {
         return Err(error::state_conflict(
             entity::QUANT_ORDER_INTENT,
             None::<&OrderIntentId>,
             format!(
                 "SemiAuto canary report total {total} exceeds {}",
-                limits.max_total_usd_per_report
+                limits.max_total_cash_per_report
             ),
         ));
     }

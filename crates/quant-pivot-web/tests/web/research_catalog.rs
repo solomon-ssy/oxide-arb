@@ -7,7 +7,7 @@ use actix_web::{
     http::{StatusCode, header::AUTHORIZATION},
     test::TestRequest,
 };
-use quant_pivot_models::types::{FactorDefinitionId, FeatureParityRunId};
+use quant_pivot_models::types::{FactorDefinitionId, FeatureParityRunId, TradePolicyArtifactId};
 use serde_json::json;
 
 use crate::harness::{self, API_VERSION, TestEnv};
@@ -216,6 +216,21 @@ async fn factor_detail_not_found_returns_404() {
 }
 
 #[tokio::test]
+async fn trade_policy_source_slice_object_query_reaches_the_typed_handler() {
+    let env = TestEnv::start().await;
+    let admin = admin_token(&env).await;
+    let id = TradePolicyArtifactId::from_v7();
+    let req = TestRequest::get()
+        .uri(&format!(
+            "/api/research/trade-policies/{id}/source-slice/objects?kind=l2_event&page=1&size=100"
+        ))
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&admin));
+    let res = harness::call(&env.state, req).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn training_dataset_plan_rejects_inverted_window() {
     let env = TestEnv::start().await;
     let admin = admin_token(&env).await;
@@ -226,9 +241,15 @@ async fn training_dataset_plan_rejects_inverted_window() {
         .insert_header(("X-Acting-Role", "quant"))
         .set_json(json!({
             "model_spec_id": "019f2964-d6e3-7711-aa6c-1dbb87257e9e",
+            "profile_ref": {
+                "id": "pooled_1h_control",
+                "version": 1,
+                "content_hash": format!("blake3:{}", "1".repeat(64)),
+            },
             "runtime_config_version_id": "019f2964-d5f4-7740-aa85-9a65e487aab2",
             "window_start": "2026-07-05T00:00:00.000Z",
             "window_end": "2026-07-02T00:00:00.000Z",
+            "pit_cutoff": "2026-07-06T00:00:00.000Z",
             "sample_interval_secs": 60,
             "horizons_secs": [3600],
             "knowledge_lag_secs": 1,
@@ -244,9 +265,15 @@ async fn training_dataset_plan_and_build_match_post_handlers_not_id_route() {
     let admin = admin_token(&env).await;
     let body = json!({
         "model_spec_id": "019f2964-d6e3-7711-aa6c-1dbb87257e9e",
+        "profile_ref": {
+            "id": "pooled_1h_control",
+            "version": 1,
+            "content_hash": format!("blake3:{}", "1".repeat(64)),
+        },
         "runtime_config_version_id": "019f2964-d5f4-7740-aa85-9a65e487aab2",
         "window_start": "2026-07-02T00:00:00.000+08:00",
         "window_end": "2026-07-05T23:59:59.000+08:00",
+        "pit_cutoff": "2026-07-07T00:00:00.000+08:00",
         "sample_interval_secs": 60,
         "horizons_secs": [3600],
         "knowledge_lag_secs": 1,

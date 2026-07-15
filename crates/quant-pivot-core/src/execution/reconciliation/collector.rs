@@ -10,12 +10,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_api::clob::ClobTrade;
+use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::ExecutionOrderInfo,
-    enums::execution::ReconciliationEvidenceKind,
-    types::{Price, ReconciliationEvidence, Shares, TokenId, Usd},
+    enums::{execution::ReconciliationEvidenceKind, fee::FeeLiquidityRole},
+    types::{FeeEvidence, Price, ReconciliationEvidence, Shares, TokenId, Usd},
 };
+use quant_pivot_research::execution_semantics::{LiquidityRole, PitFeeSchedule};
 
 use super::{ReconcileFacts, VenuePresence, VenueReconciliationReader};
 use crate::ingest::book_store::BookStore;
@@ -77,8 +79,53 @@ impl VenueEvidenceCollector {
             venue_ref: Some(token_id.to_string()),
             shares: None,
             price: None,
+            fee_evidence: None,
         }
     }
+}
+
+fn authenticated_fee_evidence(
+    order: &ExecutionOrderInfo,
+    trade: &ClobTrade,
+) -> QuantResult<FeeEvidence> {
+    let prepared = &order.prepared_order_json.fee_schedule;
+    let role = match trade.trader_side {
+        FeeLiquidityRole::Maker => LiquidityRole::Maker,
+        FeeLiquidityRole::Taker => LiquidityRole::Taker,
+    };
+    let schedule = PitFeeSchedule {
+        schedule_hash: prepared.schedule_hash.clone(),
+        effective_at: prepared.effective_at,
+        available_at: prepared.available_at,
+        platform_rate: trade.fee_rate_bps.to_fraction(),
+        exponent: prepared.exponent,
+        taker_only: prepared.taker_only,
+        builder_maker_fee_bps: prepared.builder_maker_fee_bps,
+        builder_taker_fee_bps: prepared.builder_taker_fee_bps,
+        builder_attributed: prepared.builder_attributed,
+    };
+    let reconstructed_fee = schedule
+        .fee(role, trade.price, trade.size, trade.matched_at)
+        .map_err(|error| ExecutionError::ReconciliationUnresolvable {
+            reason: format!(
+                "authenticated trade {} fee reconstruction failed: {error:?}",
+                trade.trade_id
+            ),
+        })?;
+    Ok(FeeEvidence::AuthenticatedTradeReconstructed {
+        trade_id: trade.trade_id.clone(),
+        order_id: trade.order_id.clone(),
+        liquidity_role: trade.trader_side,
+        fee_rate_bps: trade.fee_rate_bps,
+        reconstructed_fee,
+        transaction_hash: trade.tx_hash.clone(),
+        matched_at: trade.matched_at,
+        maker_order_ids: trade
+            .maker_orders
+            .iter()
+            .map(|maker| maker.order_id.clone())
+            .collect(),
+    })
 }
 
 #[async_trait]
@@ -92,7 +139,7 @@ impl EvidenceCollector for VenueEvidenceCollector {
         let token_id = &order.token_id;
         let submitted_at = order.submitted_at.unwrap_or(order.created_at);
         let attributable = order.venue_order_id.is_some();
-        let mut evidence = Vec::with_capacity(5);
+        let mut evidence = Vec::with_capacity(8);
 
         // 1 — CLOB order status: presence in open orders means still working.
         let open_orders = self.reader.open_orders().await?;
@@ -110,35 +157,49 @@ impl EvidenceCollector for VenueEvidenceCollector {
             venue_ref: order.venue_order_id.as_ref().map(ToString::to_string),
             shares: None,
             price: None,
+            fee_evidence: None,
         });
 
         // 2 — CLOB trades: the realized fill attributed to this venue order.
         let trades = self.reader.trades_for(token_id, submitted_at).await?;
+        let matched_trades = trades
+            .iter()
+            .filter(|trade| order.venue_order_id.as_ref() == Some(&trade.order_id))
+            .collect::<Vec<_>>();
         let mut filled_shares = Shares::ZERO;
         let mut filled_cost = Usd::ZERO;
-        for trade in trades
-            .iter()
-            .filter(|t| order.venue_order_id.as_ref() == Some(&t.order_id))
-        {
+        for trade in &matched_trades {
             filled_shares += trade.size;
             filled_cost += trade.size * trade.price;
+            evidence.push(ReconciliationEvidence {
+                kind: ReconciliationEvidenceKind::ClobTrades,
+                observed_at: now,
+                detail: format!(
+                    "trade_id={}; role={:?}; matched_at={}; tx_hash={}",
+                    trade.trade_id, trade.trader_side, trade.matched_at, trade.tx_hash
+                ),
+                venue_ref: Some(trade.order_id.to_string()),
+                shares: Some(trade.size),
+                price: Some(trade.price),
+                fee_evidence: Some(authenticated_fee_evidence(order, trade)?),
+            });
         }
         let avg_price = if filled_shares.is_positive() {
             Some(Price::new(filled_cost.inner() / filled_shares.inner()))
         } else {
             None
         };
-        evidence.push(ReconciliationEvidence {
-            kind: ReconciliationEvidenceKind::ClobTrades,
-            observed_at: now,
-            detail: format!(
-                "matched_trades={}; filled_shares={filled_shares}",
-                trades.len()
-            ),
-            venue_ref: order.venue_order_id.as_ref().map(ToString::to_string),
-            shares: Some(filled_shares),
-            price: avg_price,
-        });
+        if matched_trades.is_empty() {
+            evidence.push(ReconciliationEvidence {
+                kind: ReconciliationEvidenceKind::ClobTrades,
+                observed_at: now,
+                detail: "matched_trades=0; filled_shares=0".to_owned(),
+                venue_ref: order.venue_order_id.as_ref().map(ToString::to_string),
+                shares: Some(Shares::ZERO),
+                price: None,
+                fee_evidence: None,
+            });
+        }
 
         // 3 — Token balance: absolute corroboration that shares were received.
         let token_balance = self.reader.token_balance(token_id).await?;
@@ -149,6 +210,7 @@ impl EvidenceCollector for VenueEvidenceCollector {
             venue_ref: Some(token_id.to_string()),
             shares: Some(token_balance),
             price: None,
+            fee_evidence: None,
         });
 
         // 4 — Account balance: absolute corroboration that collateral was spent.
@@ -160,6 +222,7 @@ impl EvidenceCollector for VenueEvidenceCollector {
             venue_ref: None,
             shares: None,
             price: None,
+            fee_evidence: None,
         });
 
         // 5 — Book context: price sanity around the submission (best effort).

@@ -145,6 +145,14 @@ pub struct EventCatalogVersionId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarketCatalogVersionId(Arc<Uuid>);
 
+/// Append-only point-in-time CLOB market-info observation.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClobMarketInfoVersionId(Arc<Uuid>);
+
+/// Deterministic point-in-time source-slice materialization ledger row.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceSliceId(Arc<Uuid>);
+
 /// Point-in-time feature vector snapshot identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FeatureVectorId(Arc<Uuid>);
@@ -249,6 +257,26 @@ impl DomainEventId {
 /// Append-only governance audit row for a trade-policy artifact.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TradePolicyGovernanceAuditId(Arc<Uuid>);
+
+/// One immutable independent validation attempt for a trade-policy artifact.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TradePolicyValidationRunId(Arc<Uuid>);
+
+/// One immutable candidate/fold/path attempt in a policy-fit trial ledger.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TradePolicyTrialAttemptId(Arc<Uuid>);
+
+impl TradePolicyTrialAttemptId {
+    /// Deterministic identity for one immutable ordinal in a fit job.
+    /// Lease recovery therefore replays the exact same append-only row instead
+    /// of manufacturing a second attempt.
+    #[must_use]
+    pub fn from_fit_job_ordinal(fit_job_id: &ResearchJobId, attempt_ordinal: i64) -> Self {
+        const NAMESPACE: Uuid = Uuid::from_u128(0x6bc1_1f75_8ca8_4f31_9be5_17ad_1170_0722);
+        let identity = format!("{}:{attempt_ordinal}", fit_job_id.as_uuid());
+        Self::new(Uuid::new_v5(&NAMESPACE, identity.as_bytes()))
+    }
+}
 
 /// Point-in-time backtest report identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

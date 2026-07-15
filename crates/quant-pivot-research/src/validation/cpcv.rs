@@ -133,6 +133,17 @@ pub enum FoldRuntime {
     Buy(Box<dyn QuantModelRuntime>),
     /// A Sell-side (`HoldVsExitWeighted`, Phase 11.5.1) fold runtime.
     Sell(Box<dyn SellScorerRuntime>),
+    /// Policy-fit fold selection over precomputed executable candidate paths.
+    Policy(PolicyFoldRuntime),
+}
+
+/// Candidate selected using only one fold's purged training groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyFoldRuntime {
+    pub candidate_index: usize,
+    pub candidate_id: String,
+    pub training_group_count: u64,
+    pub training_utility_bps: Decimal,
 }
 
 impl FoldRuntime {
@@ -146,7 +157,7 @@ impl FoldRuntime {
     pub fn as_buy(&self) -> QuantResult<&dyn QuantModelRuntime> {
         match self {
             Self::Buy(runtime) => Ok(runtime.as_ref()),
-            Self::Sell(_) => Err(ResearchError::ValidationMethodology {
+            Self::Sell(_) | Self::Policy(_) => Err(ResearchError::ValidationMethodology {
                 detail: "expected a Buy-side FoldRuntime, got Sell".to_owned(),
             }
             .into()),
@@ -161,8 +172,19 @@ impl FoldRuntime {
     pub fn as_sell(&self) -> QuantResult<&dyn SellScorerRuntime> {
         match self {
             Self::Sell(runtime) => Ok(runtime.as_ref()),
-            Self::Buy(_) => Err(ResearchError::ValidationMethodology {
+            Self::Buy(_) | Self::Policy(_) => Err(ResearchError::ValidationMethodology {
                 detail: "expected a Sell-side FoldRuntime, got Buy".to_owned(),
+            }
+            .into()),
+        }
+    }
+
+    /// Project to a policy-fit candidate selection.
+    pub fn as_policy(&self) -> QuantResult<&PolicyFoldRuntime> {
+        match self {
+            Self::Policy(runtime) => Ok(runtime),
+            Self::Buy(_) | Self::Sell(_) => Err(ResearchError::ValidationMethodology {
+                detail: "expected a Policy FoldRuntime, got a model runtime".to_owned(),
             }
             .into()),
         }

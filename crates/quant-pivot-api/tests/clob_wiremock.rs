@@ -10,7 +10,7 @@ use quant_pivot_api::{clob::ClobClient, keystore::OrderSigner};
 use quant_pivot_models::{
     domain::order::OrderRequest,
     enums::common::{OrderType, Side},
-    types::{MarketId, Price, Shares, TokenId, Usd, execution_payload::OrderAmount},
+    types::{MarketId, Price, Shares, TokenId, Usd, VenueOrderAmount},
 };
 use rust_decimal_macros::dec;
 use std::{str::FromStr as _, sync::Arc, time::Duration};
@@ -129,7 +129,7 @@ pub async fn test_clob_client_with_order_timeout(
     order_post_timeout: Duration,
 ) -> ClobClient {
     let sdk = test_sdk_client(server).await;
-    ClobClient::from_sdk_for_test(sdk, test_signer(), order_post_timeout)
+    ClobClient::from_sdk_for_test(sdk, server.uri(), test_signer(), order_post_timeout)
 }
 
 pub fn test_order_request(order_type: OrderType) -> OrderRequest {
@@ -138,9 +138,9 @@ pub fn test_order_request(order_type: OrderType) -> OrderRequest {
         token_id: test_token_id(),
         side: Side::Buy,
         amount: match order_type {
-            OrderType::Fok | OrderType::Fak => OrderAmount::Usd(Usd::new(dec!(100))),
+            OrderType::Fok | OrderType::Fak => VenueOrderAmount::GrossUsd(Usd::new(dec!(100))),
             OrderType::Gtc | OrderType::Gtd { expiration: _ } => {
-                OrderAmount::Shares(Shares::new(dec!(100)))
+                VenueOrderAmount::Shares(Shares::new(dec!(100)))
             }
         },
         price: Price::new(dec!(0.92)),

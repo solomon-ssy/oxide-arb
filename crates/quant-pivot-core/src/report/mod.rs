@@ -2,6 +2,9 @@
 
 mod builder;
 mod composer;
+mod fact_bundle;
+mod fact_delivery;
+mod funnel;
 mod lifecycle;
 mod publisher;
 mod readiness;
@@ -10,6 +13,7 @@ mod types;
 
 pub use builder::{DefaultReportBuilder, ReportBuilder, ReportBuilderDeps};
 pub use composer::{DefaultRecommendationComposer, RecommendationComposer};
+pub use fact_delivery::{ReportFactDeliveryDeps, ReportFactDeliveryWorker};
 pub use lifecycle::{
     AdHocReportRequest, ReportLifecycleDeps, ReportLifecycleService, ScheduledReportRequest,
 };

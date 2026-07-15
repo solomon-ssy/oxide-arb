@@ -11,14 +11,11 @@ use super::catalog::{CatalogEvent, CatalogMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::market::MarketError;
 use quant_pivot_models::{
-    domain::{
-        fee::{MarketFeeColumns, MarketFeeSchedule},
-        market::{
-            EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
-            resolve_binary_pair_exact,
-        },
+    domain::market::{
+        EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
+        resolve_binary_pair_exact,
     },
-    enums::{common::CategorySet, fee::FeeSource},
+    enums::common::CategorySet,
     types::{EventId, MarketId, TokenId},
 };
 use std::collections::HashMap;
@@ -40,7 +37,6 @@ pub struct GammaCatalogBatch {
     pub registry_markets: Vec<MarketRegistryInfo>,
     pub event_source_timestamps: HashMap<EventId, CatalogSourceTimestamps>,
     pub market_source_timestamps: HashMap<MarketId, CatalogSourceTimestamps>,
-    pub fee_data: Vec<MarketFeeSchedule>,
     /// Markets dropped during normalization, for sync summaries and metrics.
     pub rejected: Vec<RejectedMarket>,
 }
@@ -73,16 +69,6 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
                 })
             })
             .collect();
-        let fee_data = events
-            .iter()
-            .flat_map(|event| {
-                event
-                    .markets
-                    .iter()
-                    .filter_map(|market| market.fee_schedule_with_observed_at(market.updated_at))
-            })
-            .collect();
-
         let mut upsert_events = Vec::with_capacity(events.len());
         let mut upsert_markets = Vec::new();
         let mut registry_events = Vec::with_capacity(events.len());
@@ -124,7 +110,6 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
             registry_markets,
             event_source_timestamps,
             market_source_timestamps,
-            fee_data,
             rejected,
         }
     }
@@ -198,11 +183,6 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
         let status = market.status;
         let created = market.created_at;
         let updated = market.updated_at.unwrap_or_else(Utc::now);
-        let fee_schedule = market.fee_schedule_with_observed_at(Some(updated));
-        let fee_columns = fee_schedule.as_ref().map_or_else(
-            MarketFeeColumns::disabled,
-            MarketFeeSchedule::to_market_fee_columns,
-        );
         let outcome = market
             .settlement
             .as_ref()
@@ -228,13 +208,6 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             start_date: market.start_date,
             end_date: market.end_date,
             resolved_at,
-            fees_enabled: fee_columns.fees_enabled,
-            fee_rate: fee_columns.fee_rate,
-            fee_exponent: fee_columns.fee_exponent,
-            fee_taker_only: fee_columns.fee_taker_only,
-            fee_rebate_rate: fee_columns.fee_rebate_rate,
-            fee_source: fee_columns.fee_source,
-            fee_observed_at: fee_columns.fee_observed_at,
         };
 
         let registry = MarketRegistryInfo {
@@ -257,7 +230,6 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             min_order_size: market.min_order_size,
             liquidity_usd: market.liquidity_usd,
             volume_24h: market.volume_24h_usd,
-            fee_schedule,
             start_date: market.start_date,
             end_date: market.end_date,
             resolved_at,
@@ -279,25 +251,6 @@ impl From<&CatalogMarket> for TokenInfoPair {
             neg_risk: market.neg_risk,
         };
         Self([leg(0), leg(1)])
-    }
-}
-
-impl CatalogMarket {
-    pub fn fee_schedule_with_observed_at(
-        &self,
-        observed_at: Option<DateTime<Utc>>,
-    ) -> Option<MarketFeeSchedule> {
-        let fee = self.fee_schedule.as_ref()?;
-        Some(MarketFeeSchedule {
-            market_id: MarketId::new(&self.condition_id),
-            fees_enabled: self.fees_enabled,
-            fee_rate: fee.rate?,
-            exponent: fee.exponent?,
-            taker_only: fee.taker_only.unwrap_or(true),
-            rebate_rate: fee.rebate_rate,
-            source: FeeSource::GammaFeeSchedule,
-            observed_at: observed_at.unwrap_or_else(Utc::now),
-        })
     }
 }
 
@@ -336,7 +289,7 @@ mod tests {
         assert_eq!(upsert.yes_token_id.as_str(), "11");
         assert_eq!(upsert.no_token_id.as_str(), "22");
         assert_eq!(upsert.categories, registry.categories);
-        assert_eq!(registry.fee_category(), MarketCategory::Sports);
+        assert_eq!(registry.primary_category(), MarketCategory::Sports);
         assert_eq!(upsert.event_id, registry.event_id);
         assert!(batch.rejected.is_empty());
     }

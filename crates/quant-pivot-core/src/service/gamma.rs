@@ -14,7 +14,6 @@ use crate::{
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use quant_pivot_api::{
-    fees::FeeCalculator,
     gamma::{CatalogSourceTimestamps, GammaClient, RejectedMarket},
     ws::TOKEN_INTERN,
 };
@@ -24,7 +23,7 @@ use quant_pivot_models::{
         CATALOG_ORIGIN_GAMMA_SYNC, CatalogCommit, CatalogStatusPort, CatalogSyncFailureStage,
         CatalogSyncKind, CatalogTimestampQuality, CoreEvent, CoreEventPublisher,
         NewCatalogSyncBatch, NewEventCatalogVersion, NewFailedCatalogSyncBatch,
-        NewMarketCatalogVersion, market,
+        NewMarketCatalogVersion,
         market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
     enums::market::MarketStatus,
@@ -54,7 +53,6 @@ pub struct GammaServiceDeps {
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
     pub market_filter: Arc<MarketFilter>,
-    pub fee_calculator: Arc<FeeCalculator>,
     pub market_repo: Arc<dyn MarketRepository>,
     pub catalog_version_repo: Arc<dyn CatalogVersionRepository>,
     pub cache: Arc<CacheManager>,
@@ -79,7 +77,6 @@ pub struct GammaService {
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
     market_filter: Arc<MarketFilter>,
-    fee_calculator: Arc<FeeCalculator>,
     market_repo: Arc<dyn MarketRepository>,
     catalog_version_repo: Arc<dyn CatalogVersionRepository>,
     cache: Arc<CacheManager>,
@@ -101,7 +98,6 @@ impl GammaService {
             market_registry: deps.market_registry,
             market_cache: deps.market_cache,
             market_filter: deps.market_filter,
-            fee_calculator: deps.fee_calculator,
             market_repo: deps.market_repo,
             catalog_version_repo: deps.catalog_version_repo,
             cache: deps.cache,
@@ -284,8 +280,6 @@ impl GammaService {
         prewarm_token_intern(&batch.registry_markets);
         self.market_registry
             .register_markets(batch.registry_markets.clone());
-        self.fee_calculator
-            .ingest_market_fee_schedules(batch.fee_data);
         self.publish_market_resolutions(newly_settled);
         self.market_cache.rebuild();
         self.sync_ws_subscriptions();
@@ -339,10 +333,9 @@ impl GammaService {
 
         let missing_ids = collect_missing_market_ids(&batch.registry_events, &embedded_ids);
         let mut extra_registry = Vec::new();
-        let mut extra_upserts = Vec::new();
-        let mut fee_data = batch.fee_data;
-
-        if !missing_ids.is_empty() {
+        let extra_upserts = if missing_ids.is_empty() {
+            Vec::new()
+        } else {
             let fetched = self
                 .gamma_client
                 .fetch_markets_bounded(&missing_ids, INCREMENTAL_FETCH_CONCURRENCY)
@@ -365,10 +358,8 @@ impl GammaService {
                     }
                 }
             }
-
-            fee_data.extend(market::collect_fee_data(&extra_registry));
-            extra_upserts = convert_registry_to_upsert(&extra_registry);
-        }
+            convert_registry_to_upsert(&extra_registry)
+        };
 
         let mut all_registry = batch.registry_markets;
         all_registry.extend(extra_registry);
@@ -405,7 +396,6 @@ impl GammaService {
             .register_events(batch.registry_events.clone());
         prewarm_token_intern(&all_registry);
         self.market_registry.register_markets(all_registry);
-        self.fee_calculator.ingest_market_fee_schedules(fee_data);
         self.publish_market_resolutions(newly_settled);
         self.market_cache.rebuild();
         self.sync_ws_subscriptions();
@@ -1109,7 +1099,6 @@ mod tests {
             min_order_size: Decimal::ONE,
             liquidity_usd: None,
             volume_24h: None,
-            fee_schedule: None,
             start_date: None,
             end_date: None,
             resolved_at,

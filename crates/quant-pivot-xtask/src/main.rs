@@ -18,6 +18,8 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-repository", "pg_training_dataset"),
     ("quant-pivot-repository", "pg_model_registry"),
     ("quant-pivot-repository", "pg_research_job"),
+    ("quant-pivot-repository", "pg_research_readiness"),
+    ("quant-pivot-repository", "pg_trade_policy_trial"),
     ("quant-pivot-repository", "pg_backtest_report"),
     ("quant-pivot-repository", "pg_comparison_report"),
     ("quant-pivot-repository", "pg_execution_submission"),
@@ -62,6 +64,12 @@ enum Commands {
     /// Run network-shaped API tests that are ignored by default.
     #[command(name = "test-network")]
     Network,
+    /// Derive the report hard ceiling from the recent 30-day catalog-visible p99.
+    #[command(name = "report-capacity-ceiling")]
+    ReportCapacityCeiling {
+        #[arg(long)]
+        catalog_visible_p99: u64,
+    },
 }
 
 fn main() -> ExitCode {
@@ -79,7 +87,26 @@ fn run() -> Result<()> {
         Commands::Full => test_full(),
         Commands::Docker => test_docker(),
         Commands::Network => test_network(),
+        Commands::ReportCapacityCeiling {
+            catalog_visible_p99,
+        } => {
+            println!("{}", report_capacity_ceiling(catalog_visible_p99)?);
+            Ok(())
+        }
     }
+}
+
+fn report_capacity_ceiling(catalog_visible_p99: u64) -> Result<u64> {
+    const MINIMUM: u64 = 100_000;
+    const QUANTUM: u64 = 1_000;
+
+    let doubled = catalog_visible_p99
+        .checked_mul(2)
+        .context("catalog-visible p99 overflow while applying the 2x runway")?;
+    let raw = doubled.max(MINIMUM);
+    raw.checked_add(QUANTUM - 1)
+        .map(|value| value / QUANTUM * QUANTUM)
+        .context("catalog-visible report capacity ceiling overflow")
 }
 
 fn workspace_root() -> Result<PathBuf> {
@@ -169,4 +196,16 @@ fn run_ignored_suites(suites: &[(&str, &str)], label: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::report_capacity_ceiling;
+
+    #[test]
+    fn report_capacity_ceiling_enforces_floor_double_runway_and_rounding() {
+        assert_eq!(report_capacity_ceiling(1).expect("ceiling"), 100_000);
+        assert_eq!(report_capacity_ceiling(50_001).expect("ceiling"), 101_000);
+        assert_eq!(report_capacity_ceiling(120_000).expect("ceiling"), 240_000);
+    }
 }

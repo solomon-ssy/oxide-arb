@@ -10,6 +10,10 @@ use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+/// Governed NOAA observation-day close grace used by live projection and
+/// immutable Weather policy replay. It is methodology, not an ops tuning knob.
+pub const WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS: u64 = 7_200;
+
 /// External domain data-source connections.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -166,7 +170,7 @@ impl Default for AviationWeatherSourceConfig {
             base_url: "https://aviationweather.gov/api/data".into(),
             poll_secs: 60,
             request_timeout_ms: 10_000,
-            day_close_grace_secs: 7_200,
+            day_close_grace_secs: WEATHER_OBSERVATION_DAY_CLOSE_GRACE_SECS,
         }
     }
 }

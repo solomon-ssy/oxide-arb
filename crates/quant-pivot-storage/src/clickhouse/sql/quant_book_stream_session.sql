@@ -14,6 +14,6 @@ CREATE TABLE IF NOT EXISTS quant_book_stream_session (
     session_date            Date MATERIALIZED toDate(opened_at)
 )
 ENGINE = MergeTree()
-PARTITION BY toYYYYMMDD(session_date)
+PARTITION BY toYYYYMM(session_date)
 ORDER BY (stream_session_id, ledger_sequence)
 SETTINGS index_granularity = 4096

@@ -23,7 +23,6 @@
 mod cache;
 mod db;
 mod domain_sources;
-mod fees;
 mod keys;
 mod market_data;
 mod observability;
@@ -38,7 +37,6 @@ use std::collections::HashMap;
 pub use cache::*;
 pub use db::*;
 pub use domain_sources::*;
-pub use fees::*;
 pub use keys::*;
 pub use market_data::*;
 pub use observability::*;

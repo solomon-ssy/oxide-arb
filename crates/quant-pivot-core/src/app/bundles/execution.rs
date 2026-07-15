@@ -17,12 +17,12 @@ use quant_pivot_models::{
     domain::{DataQualityPort, ExecutionSubmitPort},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, CapitalAllocationRepository, EntryConditionRepository,
-    ExecutionOrderRepository, ExecutionSubmissionRepository, FactorRepository,
-    FeatureParityRepository, MarketRepository, ModelRegistryRepository, OperationLogRepository,
-    OrderIntentRepository, PositionRepository, RecommendationReportRepository,
-    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
-    SettlementRedeemRepository, TradePolicyRepository,
+    AttributionRepository, CapitalAllocationRepository, ClobMarketInfoRepository,
+    EntryConditionRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
+    FactorRepository, FeatureParityRepository, MarketRepository, ModelRegistryRepository,
+    OperationLogRepository, OrderIntentRepository, PositionRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RuntimeConfigVersionRepository, SettlementRedeemRepository, TradePolicyRepository,
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
@@ -73,6 +73,8 @@ pub struct ExecutionBundleDeps<'a> {
 
 /// Entry-execution subsystem: order client + admission + breaker + dispatcher.
 pub struct ExecutionBundle {
+    /// Shared authenticated venue client used by runtime market-info capture.
+    pub clob: Arc<ClobClient>,
     pub order_client: Arc<dyn PolymarketOrderClient>,
     pub dispatcher: Arc<dyn ExecutionSubmitPort>,
     pub breaker: Arc<ExecutionBreaker>,
@@ -113,10 +115,8 @@ impl ExecutionBundle {
         let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&infra.metrics)));
 
         let clob = Arc::clone(&deps.clob);
-        let order_client: Arc<dyn PolymarketOrderClient> = Arc::new(ClobOrderClient::new(
-            Arc::clone(&clob),
-            Arc::clone(&deps.data.fee_calculator),
-        ));
+        let order_client: Arc<dyn PolymarketOrderClient> =
+            Arc::new(ClobOrderClient::new(Arc::clone(&clob)));
 
         let submission: Arc<dyn ExecutionSubmissionRepository> =
             Arc::clone(&repos.execution_submission) as Arc<dyn ExecutionSubmissionRepository>;
@@ -159,7 +159,6 @@ impl ExecutionBundle {
             positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
             reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
             submission: Arc::clone(&submission),
-            fees: Arc::clone(&deps.data.fee_calculator),
             breaker: Arc::clone(&breaker),
             metrics: Arc::clone(&infra.metrics),
             config: Arc::clone(&deps.governance.runtime_config),
@@ -189,6 +188,7 @@ impl ExecutionBundle {
         let settlement_redeem = build_settlement_redeem_service(deps)?;
 
         Ok(Self {
+            clob,
             order_client,
             dispatcher,
             breaker,
@@ -318,6 +318,7 @@ fn build_admission_builder(
         conditions: Arc::clone(&repos.entry_condition) as Arc<dyn EntryConditionRepository>,
         capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
         markets: Arc::clone(&deps.data.market_repo),
+        clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
         config_versions: Arc::clone(&repos.runtime_config)
             as Arc<dyn RuntimeConfigVersionRepository>,
         account_factory: Arc::clone(&deps.account.provider_factory),
@@ -405,6 +406,8 @@ fn build_exit_monitor(
         metrics: Arc::clone(&metrics),
         execution_events: Arc::clone(&wiring.infra.execution_event_writer),
         intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+        clob_market_info: Arc::clone(&repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
+        book_store: Arc::clone(&wiring.data.book_store),
     }));
     Arc::new(ExitMonitorService::new(ExitMonitorServiceDeps {
         positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,

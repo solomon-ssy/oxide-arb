@@ -137,7 +137,7 @@ impl OfflinePitSelector {
             .map(|snapshot| {
                 (
                     snapshot.market.market_id.clone(),
-                    snapshot.market.fee_category(),
+                    snapshot.market.primary_category(),
                 )
             })
             .collect();
@@ -207,7 +207,7 @@ fn project_candidate(
     Ok(MarketCandidate {
         market_id: market.market_id.clone(),
         event_id: market.event_id.clone(),
-        category: market.fee_category(),
+        category: market.primary_category(),
         // Prefer the point-in-time lifecycle status (resolution-aware) over the
         // current registry status, so a since-resolved market is `Active` at an
         // `as_of` that predates its resolution.
@@ -324,7 +324,6 @@ mod tests {
             min_order_size: Decimal::ONE,
             liquidity_usd: None,
             volume_24h: None,
-            fee_schedule: None,
             start_date: Some(now),
             end_date: Some(now),
             resolved_at: None,

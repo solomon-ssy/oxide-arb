@@ -136,7 +136,6 @@ pub struct MarketView {
     pub no_token_id: TokenId,
     pub tick_size: TickSize,
     pub neg_risk: bool,
-    pub fees_enabled: bool,
     /// Whether both of the market's tokens are live on the CLOB WS transport
     /// (engine baseline or operator overlay).
     pub subscribed: bool,
@@ -167,7 +166,6 @@ impl MarketView {
             no_token_id: m.no_token_id,
             tick_size: m.tick_size,
             neg_risk: m.neg_risk,
-            fees_enabled: m.fees_enabled,
             subscribed,
             book,
             start_date: m.start_date,

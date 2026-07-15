@@ -35,11 +35,12 @@ pub enum TaskId {
     DomainLiveIngestWorker,
     /// Delivers typed derived-domain events from the `PostgreSQL` outbox to `ClickHouse`.
     DomainEventOutboxWorker,
-    /// Seals old `ClickHouse` partitions to Parquet before explicit deletion.
-    ArchivePartitionWorker,
+    /// Delivers and verifies report facts before reports become actionable.
+    ReportFactDeliveryWorker,
 
     // ── Catalog ───────────────────────────────────────────────────────
     GammaSync,
+    ClobMarketInfoSync,
     CalibrationUpdater,
 
     // ── Cache / book workers ──────────────────────────────────────────
@@ -101,7 +102,6 @@ pub enum TaskId {
     MarketResolutionWriter,
     FactorEventsWriter,
     SignalCandidateEventsWriter,
-    RecommendationEventsWriter,
     BookSnapshotPublisher,
     RiskStatePersist,
     RiskStateDebouncer,
@@ -127,6 +127,8 @@ pub enum TaskId {
     /// Leases + executes durable research jobs (dataset build / model train /
     /// backtest) off the HTTP hot path, with crash recovery.
     ResearchJobWorker,
+    /// Captures signed `ClickHouse` retention and `ReportOnly` latency evidence.
+    ResearchReadinessEvidenceWorker,
     /// Idempotently enqueues the frozen daily 24-hour full parity replay.
     FeatureParityScheduler,
 }
@@ -144,7 +146,9 @@ impl TaskId {
             | Self::TradeTapeWorker
             | Self::DomainIngestWorker
             | Self::DomainLiveIngestWorker => TaskKind::WsIngress,
-            Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
+            Self::GammaSync | Self::ClobMarketInfoSync | Self::CalibrationUpdater => {
+                TaskKind::CatalogSync
+            }
             Self::Coalescer => TaskKind::CacheWorker,
             Self::TradeTapeReconciliationWorker => TaskKind::BookReconciliation,
             Self::PotentialLossEscalation
@@ -172,8 +176,8 @@ impl TaskId {
             | Self::IntentDeadlineScheduler => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
             Self::DetectionWriter
-            | Self::ArchivePartitionWorker
             | Self::DomainEventOutboxWorker
+            | Self::ReportFactDeliveryWorker
             | Self::EntryConditionEvaluationOutboxWorker
             | Self::BookStreamSessionWriter
             | Self::BookL2EventWriter
@@ -183,7 +187,6 @@ impl TaskId {
             | Self::MarketResolutionWriter
             | Self::FactorEventsWriter
             | Self::SignalCandidateEventsWriter
-            | Self::RecommendationEventsWriter
             | Self::AttributionEventsWriter
             | Self::ExecutionEventsWriter
             | Self::ExitSignalEvaluationEventsWriter
@@ -191,7 +194,9 @@ impl TaskId {
             | Self::PositionEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
-            Self::ResearchJobWorker | Self::FeatureParityScheduler => TaskKind::ResearchJob,
+            Self::ResearchJobWorker
+            | Self::ResearchReadinessEvidenceWorker
+            | Self::FeatureParityScheduler => TaskKind::ResearchJob,
         }
     }
 

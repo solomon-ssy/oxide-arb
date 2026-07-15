@@ -299,16 +299,6 @@ async fn versioned_route_requires_matching_version_header() {
         harness::call(&env.state, wrong_version).await.status,
         StatusCode::NOT_FOUND
     );
-
-    // Legacy header is honoured as a fallback.
-    let legacy = actix_web::test::TestRequest::post()
-        .uri("/api/auth/login")
-        .insert_header(("X-API-Version", "v1"))
-        .set_json(&credentials);
-    assert_eq!(
-        harness::call(&env.state, legacy).await.status,
-        StatusCode::OK
-    );
 }
 
 #[actix_web::test]

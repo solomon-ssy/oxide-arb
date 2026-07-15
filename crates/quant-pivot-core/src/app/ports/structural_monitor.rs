@@ -181,7 +181,7 @@ impl CoreStructuralMonitor {
             .map(|market| SelectedMarket {
                 market_id: market.market_id.clone(),
                 event_id: market.event_id.clone(),
-                category: market.fee_category(),
+                category: market.primary_category(),
                 primary_token_id: market.token_yes.clone(),
                 secondary_token_id: Some(market.token_no.clone()),
                 liquidity_usd: market.liquidity_usd,

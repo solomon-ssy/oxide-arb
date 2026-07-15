@@ -16,6 +16,7 @@ use quant_pivot_models::{
     domain::{
         DecisionBoundary, DecisionSource,
         market::{
+            MarketFeeSchedule,
             book::BookSnapshot,
             registry::{EventRegistryInfo, MarketRegistryInfo, NegRiskLegSet},
         },
@@ -30,6 +31,7 @@ use quant_pivot_research::pit::{
     BookSnapshotAt, CanonicalBookEventRef, MarketContextAt, PointInTimeSnapshotSource,
     ResolvedMarketSnapshot,
 };
+use rust_decimal::Decimal;
 
 /// Frozen test-only projection of current in-memory ingest state.
 pub struct InMemoryDecisionSnapshotSource {
@@ -37,16 +39,35 @@ pub struct InMemoryDecisionSnapshotSource {
     markets: HashMap<MarketId, Arc<MarketRegistryInfo>>,
     events: HashMap<EventId, Arc<EventRegistryInfo>>,
     leg_sets: HashMap<EventId, NegRiskLegSet>,
+    fee_schedules: HashMap<MarketId, MarketFeeSchedule>,
 }
 
 impl InMemoryDecisionSnapshotSource {
     /// Freeze every active market, event, and published YES/NO book.
     #[must_use]
     pub fn freeze(registry: &MarketRegistry, book_store: &BookStore) -> Self {
+        Self::freeze_inner(registry, book_store, false)
+    }
+
+    /// Freeze a test venue whose catalog explicitly proves that fees are disabled.
+    #[must_use]
+    pub fn freeze_with_zero_fee_schedule(
+        registry: &MarketRegistry,
+        book_store: &BookStore,
+    ) -> Self {
+        Self::freeze_inner(registry, book_store, true)
+    }
+
+    fn freeze_inner(
+        registry: &MarketRegistry,
+        book_store: &BookStore,
+        include_zero_fee_schedule: bool,
+    ) -> Self {
         let mut books = HashMap::new();
         let mut markets = HashMap::new();
         let mut events = HashMap::new();
         let mut leg_sets = HashMap::new();
+        let mut fee_schedules = HashMap::new();
         for market_id in registry.active_markets().iter() {
             let Some(market) = registry.get_market(market_id) else {
                 continue;
@@ -62,6 +83,20 @@ impl InMemoryDecisionSnapshotSource {
                     .or_insert_with(|| registry.neg_risk_leg_set(&event.event_id));
                 events.insert(event.event_id.clone(), Arc::new(event));
             }
+            if include_zero_fee_schedule {
+                fee_schedules.insert(
+                    market.market_id.clone(),
+                    MarketFeeSchedule {
+                        market_id: market.market_id.clone(),
+                        fees_enabled: false,
+                        fee_rate: Decimal::ZERO,
+                        exponent: Decimal::from(2),
+                        taker_only: true,
+                        rebate_rate: None,
+                        observed_at: market.updated_at,
+                    },
+                );
+            }
             markets.insert(market.market_id.clone(), market);
         }
         Self {
@@ -69,6 +104,7 @@ impl InMemoryDecisionSnapshotSource {
             markets,
             events,
             leg_sets,
+            fee_schedules,
         }
     }
 }
@@ -153,7 +189,7 @@ impl PointInTimeSnapshotSource for InMemoryDecisionSnapshotSource {
             start_date: market.start_date,
             end_date: market.end_date,
             created_at: market.created_at,
-            fee_schedule: None,
+            fee_schedule: self.fee_schedules.get(market_id).cloned(),
         };
         Ok(Some(ResolvedMarketSnapshot {
             boundary: boundary.clone(),

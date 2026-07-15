@@ -67,6 +67,8 @@ pub struct WindowSpec {
     pub window_start: DateTime<Utc>,
     /// Exclusive window end (last `as_of` is strictly before).
     pub window_end: DateTime<Utc>,
+    /// Frozen information-availability cutoff for all materialized facts.
+    pub available_by: DateTime<Utc>,
     /// Distinct `(market, token)` samples to prefetch facts for.
     pub samples: Vec<ReplaySample>,
     /// Maximum trailing feature lookback.
@@ -114,6 +116,21 @@ pub struct HistoricalWindow {
     pub pit: MaterializedPitEngine,
     /// Count of book snapshot rows that failed to decode (data-quality signal).
     pub book_decode_failures: u64,
+}
+
+/// Build the zero-I/O replay engine from an already verified Source Slice.
+/// This is the only Dataset/Fit/Validate entry after materialization; it cannot
+/// reach `ClickHouse` or `Postgres`.
+pub(crate) fn historical_window_from_prefetched(
+    prefetched: Prefetched,
+    max_book_staleness: Duration,
+) -> QuantResult<HistoricalWindow> {
+    let (pit, book_decode_failures) = build_materialized_pit(&prefetched, max_book_staleness)?;
+    Ok(HistoricalWindow {
+        prefetched,
+        pit,
+        book_decode_failures,
+    })
 }
 
 /// Loads + materializes a historical window from `ClickHouse` facts + the PG catalog.
@@ -218,24 +235,25 @@ impl HistoricalWindowLoader {
             .timestamp_millis();
         let resolution_to = micro_to;
 
+        let available_by_ms = spec.available_by.timestamp_millis();
         let book_rows = self
             .fact_read
-            .book_checkpoints_between(book_tokens, book_from, book_to, book_to)
+            .book_checkpoints_between(book_tokens, book_from, book_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
         let micro_rows = self
             .fact_read
-            .microstructure_window(tokens.clone(), micro_from, micro_to, micro_to)
+            .microstructure_window(tokens.clone(), micro_from, micro_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
         let trade_rows = self
             .fact_read
-            .trade_tape_window_by_market(markets.clone(), micro_from, micro_to, micro_to)
+            .trade_tape_window_by_market(markets.clone(), micro_from, micro_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
         let resolution_rows = self
             .fact_read
-            .resolutions_between(markets.clone(), 0, resolution_to, resolution_to)
+            .resolutions_between(markets.clone(), 0, resolution_to, available_by_ms)
             .await
             .map_err(QuantError::from)?;
 
@@ -671,7 +689,7 @@ fn mapped_domain_markets(
         .filter(|market_id| {
             catalog_markets.iter().any(|market| {
                 &market.market_id == *market_id
-                    && DomainFamily::for_category(market.fee_category())
+                    && DomainFamily::for_category(market.primary_category())
                         .is_some_and(|family| spec.domain.family_enabled(family))
             })
         })
@@ -703,12 +721,26 @@ fn window_end_boundary(spec: &WindowSpec) -> QuantResult<DecisionBoundary> {
             "historical knowledge lag must be expressed in whole seconds",
         ));
     }
-    replay_boundary(
-        spec.window_end,
-        spec.knowledge_lag.as_secs(),
-        spec.domain.crypto.availability_lag_secs,
-        spec.domain.weather.availability_lag_secs,
-    )
+    let availability_delay = spec
+        .available_by
+        .signed_duration_since(spec.window_end)
+        .to_std()
+        .map_err(|error| {
+            QuantError::config(format!(
+                "historical availability cutoff precedes the replay window: {error}"
+            ))
+        })?;
+    let global_lag = availability_delay
+        .as_secs()
+        .checked_add(spec.knowledge_lag.as_secs())
+        .ok_or_else(|| QuantError::config("historical availability lag overflow"))?;
+    let crypto_lag = global_lag
+        .checked_add(spec.domain.crypto.availability_lag_secs)
+        .ok_or_else(|| QuantError::config("historical Crypto availability lag overflow"))?;
+    let weather_lag = global_lag
+        .checked_add(spec.domain.weather.availability_lag_secs)
+        .ok_or_else(|| QuantError::config("historical Weather availability lag overflow"))?;
+    replay_boundary(spec.available_by, global_lag, crypto_lag, weather_lag)
 }
 
 /// Construct the sole frozen boundary for one offline replay decision.
@@ -832,7 +864,7 @@ pub fn selected_market(info: &MarketRegistryInfo) -> SelectedMarket {
     SelectedMarket {
         market_id: info.market_id.clone(),
         event_id: info.event_id.clone(),
-        category: info.fee_category(),
+        category: info.primary_category(),
         primary_token_id: info.token_yes.clone(),
         secondary_token_id: Some(info.token_no.clone()),
         liquidity_usd: info.liquidity_usd,

@@ -33,8 +33,7 @@ CREATE TABLE IF NOT EXISTS book_microstructure_1s (
     bucket_date           Date MATERIALIZED toDate(bucket_time)
 )
 ENGINE = MergeTree()
-PARTITION BY toYYYYMMDD(bucket_date)
+PARTITION BY toYYYYMM(bucket_date)
 ORDER BY (token_id, bucket_time)
-TTL bucket_date + INTERVAL 90 DAY DELETE
 SETTINGS index_granularity = 4096
 ;

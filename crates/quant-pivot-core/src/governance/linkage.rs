@@ -302,7 +302,7 @@ impl LinkageResolverService {
             .into_iter()
             .filter(|market| {
                 matches!(
-                    market.fee_category(),
+                    market.primary_category(),
                     MarketCategory::Crypto | MarketCategory::Weather
                 )
             })

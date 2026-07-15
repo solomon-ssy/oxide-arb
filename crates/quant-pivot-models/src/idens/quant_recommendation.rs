@@ -23,6 +23,7 @@ use crate::{
 pub enum QuantRecommendation {
     Table,
     RecommendationId,
+    ProfileRef,
     RecommendationReportId,
     Rank,
     MarketId,
@@ -67,6 +68,11 @@ pub fn table() -> TableCreateStatement {
 fn add_identity_columns(table: &mut TableCreateStatement) {
     table
         .col(column::uuid_pk(QuantRecommendation::RecommendationId))
+        .col(
+            ColumnDef::new(QuantRecommendation::ProfileRef)
+                .json_binary()
+                .not_null(),
+        )
         .col(column::uuid_fk(QuantRecommendation::RecommendationReportId))
         .col(
             ColumnDef::new(QuantRecommendation::Rank)

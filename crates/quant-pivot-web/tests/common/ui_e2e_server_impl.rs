@@ -20,35 +20,52 @@ use quant_pivot_error::{QuantError, QuantResult, control::ControlError, storage:
 use quant_pivot_models::{
     domain::{
         ApplyEntryConditionEvaluation, BacktestPathSetInfo, BacktestPathSetListQuery,
-        BacktestReportInfo, BacktestReportListQuery, BookLevel, EntryConditionArtifactInfo,
-        EntryConditionInstanceInfo, FactorCollinearitySource, FactorCollinearityView,
-        FactorDefinitionInfo, FactorDefinitionListQuery, JobProgressSink, MarketDataPort,
-        ModelComparisonReportInfo, ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery,
-        ModelTrainingPort, ModelVersionInfo, ModelVersionListQuery, Paginated,
-        PublishedModelOptionView, RecommendationInfo, ResearchCatalogPort, TradePolicyArtifactInfo,
-        TradePolicyAuditListQuery, TradePolicyFitPreflightRequest, TradePolicyFitPreflightView,
-        TradePolicyGovernanceAuditInfo, TradePolicyListQuery, TradePolicyPort, TrainModelRequest,
+        BacktestReportInfo, BacktestReportListQuery, BookLevel, CompleteTrainingDatasetBuild,
+        EntryConditionArtifactInfo, EntryConditionInstanceInfo, FactorCollinearitySource,
+        FactorCollinearityView, FactorDefinitionInfo, FactorDefinitionListQuery,
+        FailTradePolicyValidation, JobProgressSink, MarketDataPort, ModelComparisonReportInfo,
+        ModelPublishedCatalogQuery, ModelSpecInfo, ModelSpecListQuery, ModelTrainingPort,
+        ModelVersionInfo, ModelVersionListQuery, NewTradePolicyValidationRow,
+        NewTradePolicyValidationRun, NewTrainingDatasetPlan, Paginated, PublishedModelOptionView,
+        RecommendationInfo, ResearchCatalogPort, TradePolicyArtifactInfo,
+        TradePolicyAuditListQuery, TradePolicyEvidenceDownloadView, TradePolicyFitPreflightRequest,
+        TradePolicyFitPreflightView, TradePolicyFitReadiness, TradePolicyGovernanceAuditInfo,
+        TradePolicyListQuery, TradePolicyPort, TradePolicyPreflightBlockerKind,
+        TradePolicyPreflightBlockerView, TradePolicyPreflightCheckStatus,
+        TradePolicySourceSliceObjectListQuery, TradePolicySourceSliceObjectView,
+        TradePolicySourceSliceView, TradePolicyValidationListQuery, TradePolicyValidationRowInfo,
+        TradePolicyValidationRowListQuery, TradePolicyValidationRunInfo, TrainModelRequest,
         TrainedModelView, TrainingDatasetInfo, TrainingDatasetListQuery, empty_catalog_page,
     },
     entities::{quant_entry_condition_instance, quant_recommendation},
-    enums::quant::{EntryConditionState, TradePolicyGovernanceAction, TradePolicyStatus},
+    enums::quant::{
+        DatasetPurpose, EntryConditionState, TradePolicyGovernanceAction, TradePolicyStatus,
+        TradePolicyValidationStatus, TrainingDatasetStatus,
+    },
+    runtime_config::{DecimalString, RuntimeConfig},
     types::{
-        FactorDefinitionId, ModelVersionId, OrderIntentId, Price, RecommendationId,
-        RecommendationTradePlan, Shares, TokenId, TradePlanBlocker, TradePolicyArtifactId,
-        TradePolicyGovernanceAuditId,
+        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetCoverage,
+        DatasetManifest, FactorDefinitionId, ModelVersionId, OrderIntentId, Price,
+        RecommendationId, RecommendationTradePlan, Shares, SourceSliceManifestRef,
+        SourceSliceObjectKind, TokenId, TradePlanBlocker, TradePolicyArtifactId,
+        TradePolicyEvidenceObjectKind, TradePolicyGovernanceAuditId, TradePolicyValidationRunId,
+        TrainingExampleId, TrainingHorizonsSecs, TrainingSampleSources, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgEntryConditionRepository, PgExecutionSubmissionRepository, PgModelRegistryRepository,
-        PgOrderIntentRepository, PgRecommendationRepository, PgTradePolicyRepository,
-        PgTrainingDatasetRepository,
+        PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgTradePolicyRepository, PgTrainingDatasetRepository,
     },
     traits::{
         EntryConditionRepository, ExecutionSubmissionRepository, ModelRegistryRepository,
-        OrderIntentRepository, RecommendationRepository, TradePolicyRepository,
-        TrainingDatasetRepository,
+        OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+        TradePolicyRepository, TrainingDatasetRepository,
     },
+};
+use quant_pivot_research::{
+    artifact::ArtifactStore, hashing::ResearchHasher, training::dataset_manifest_hash,
 };
 use quant_pivot_test_support::ui_demo_seed::{DemoSeedRecord, seed_ui_demo_pg};
 use quant_pivot_web::{middleware, routes};
@@ -57,6 +74,7 @@ use rust_decimal_macros::dec;
 use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::harness;
@@ -76,24 +94,185 @@ impl E2eTradePolicyPort {
     }
 }
 
+fn e2e_artifact_uri(
+    artifact_id: &TradePolicyArtifactId,
+    object_name: &str,
+) -> QuantResult<ArtifactUri> {
+    ArtifactUri::parse(format!(
+        "s3://ui-e2e/source-slices/{artifact_id}/{object_name}"
+    ))
+    .map_err(|error| QuantError::config(format!("invalid UI E2E artifact URI: {error}")))
+}
+
 #[async_trait]
 impl TradePolicyPort for E2eTradePolicyPort {
+    fn list_profiles(
+        &self,
+    ) -> QuantResult<Vec<quant_pivot_models::types::ResearchProfileArtifact>> {
+        quant_pivot_models::types::builtin_research_profiles().map_err(|detail| {
+            quant_pivot_error::research::ResearchError::ValidationMethodology { detail }.into()
+        })
+    }
+
+    fn find_profile(
+        &self,
+        id: &str,
+        version: u32,
+    ) -> QuantResult<Option<quant_pivot_models::types::ResearchProfileArtifact>> {
+        Ok(self
+            .list_profiles()?
+            .into_iter()
+            .find(|profile| profile.profile_ref.id == id && profile.profile_ref.version == version))
+    }
+
     async fn preflight(
         &self,
-        _request: &TradePolicyFitPreflightRequest,
+        request: &TradePolicyFitPreflightRequest,
     ) -> QuantResult<TradePolicyFitPreflightView> {
+        let profile = self
+            .find_profile(
+                &request.selection.profile_ref.id,
+                request.selection.profile_ref.version,
+            )?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "research_profile",
+                id: format!(
+                    "{}@{}",
+                    request.selection.profile_ref.id, request.selection.profile_ref.version
+                ),
+            })?;
+        let fit_window_end = request.selection.pit_cutoff
+            - Duration::seconds(i64::try_from(profile.spec.target_horizon_secs).map_err(
+                |error| QuantError::NotImplemented(format!("invalid E2E target horizon: {error}")),
+            )?);
+        let fit_window_start =
+            fit_window_end - Duration::days(i64::from(profile.spec.fit_span_days));
+        let candidate_set_hash = ResearchHasher::canonical(&request.candidates)?;
+        let methodology_hash =
+            ResearchHasher::canonical(&("ui-e2e-methodology-v14", &profile.profile_ref))?;
+        let research_program_hash = ResearchHasher::canonical(&(
+            &request.selection,
+            request.evaluation_track,
+            &request.candidates,
+        ))?;
+        let estimated_candidate_trials =
+            u64::try_from(request.candidates.len()).map_err(|error| {
+                QuantError::NotImplemented(format!("invalid E2E candidate count: {error}"))
+            })?;
+        let required_raw_retention_days = profile
+            .spec
+            .required_days()
+            .map_err(QuantError::NotImplemented)?
+            .checked_mul(2)
+            .map(|days| days.max(180));
+        let fail = TradePolicyPreflightCheckStatus::Fail;
+        let pass = TradePolicyPreflightCheckStatus::Pass;
+        Ok(TradePolicyFitPreflightView {
+            readiness: TradePolicyFitReadiness::Blocked,
+            reusable_source_dataset_id: None,
+            profile: Some(profile),
+            fit_window_start: Some(fit_window_start),
+            fit_window_end: Some(fit_window_end),
+            research_program_hash: Some(research_program_hash),
+            source_slice_id: None,
+            source_slice_identity_hash: Some(candidate_set_hash.clone()),
+            estimated_candidate_trials,
+            estimated_fold_evaluations: estimated_candidate_trials * 56,
+            catalog_completeness_proven: fail,
+            source_completeness_proven: fail,
+            required_raw_retention_days,
+            retention_runway_days: None,
+            retention_runway_proven: fail,
+            contract_valid: pass,
+            source_dataset_ready: pass,
+            source_dataset_policy_fit: pass,
+            raw_trajectory_labels_present: pass,
+            profile_lineage_valid: pass,
+            source_slice_verified: fail,
+            fit_window_contained: pass,
+            profile_quality_gate_available: pass,
+            runtime_config_version_id: None,
+            methodology_hash: Some(methodology_hash),
+            latency_profile_present: fail,
+            latency_evidence: None,
+            pit_cutoff_valid: pass,
+            labels_matured_by_cutoff: 11_200,
+            labels_excluded_after_cutoff: 0,
+            full_l2_trajectory_present: fail,
+            fee_model_present: fail,
+            retention_evidence: None,
+            publishable_input: fail,
+            canonical_candidates: Some(request.candidates.clone()),
+            candidate_set_hash: Some(candidate_set_hash),
+            blockers: vec![
+                TradePolicyPreflightBlockerView {
+                    kind: TradePolicyPreflightBlockerKind::SourceSliceUnverified,
+                    actual: serde_json::json!({ "verified": false }),
+                    required: serde_json::json!({ "source_slice_format": 2, "byte_hash_verified": true }),
+                    remediation: "Materialize and hash-verify every required Source Slice v2 object."
+                        .to_owned(),
+                    evidence_link: None,
+                },
+                TradePolicyPreflightBlockerView {
+                    kind: TradePolicyPreflightBlockerKind::FullL2TrajectoryMissing,
+                    actual: serde_json::json!(false),
+                    required: serde_json::json!(["l2_event", "l2_checkpoint", "l2_session", "l2_gap", "trade_tape"]),
+                    remediation: "Materialize continuous snapshot-rooted L2 sessions and reconciled trade tape."
+                        .to_owned(),
+                    evidence_link: None,
+                },
+                TradePolicyPreflightBlockerView {
+                    kind: TradePolicyPreflightBlockerKind::PitFeeFactsMissing,
+                    actual: serde_json::json!(false),
+                    required: serde_json::json!({ "clob_market_info": "complete at match time" }),
+                    remediation: "Backfill append-only CLOB market-info versions for every sample."
+                        .to_owned(),
+                    evidence_link: None,
+                },
+                TradePolicyPreflightBlockerView {
+                    kind: TradePolicyPreflightBlockerKind::ProductionLatencyProfileMissing,
+                    actual: serde_json::Value::Null,
+                    required: serde_json::json!({ "signed_window_hours": 24, "latency_injection": "2x_recent_p95" }),
+                    remediation: "Capture, sign, and bind the latest complete 24-hour production latency profile."
+                        .to_owned(),
+                    evidence_link: None,
+                },
+                TradePolicyPreflightBlockerView {
+                    kind: TradePolicyPreflightBlockerKind::RetentionRunwayUnproven,
+                    actual: serde_json::json!({ "retention_runway_days": null }),
+                    required: serde_json::json!({ "minimum_days": required_raw_retention_days }),
+                    remediation: "Bind a signed retention plan and current ClickHouse runway measurement."
+                        .to_owned(),
+                    evidence_link: None,
+                },
+            ],
+        })
+    }
+
+    async fn fit(
+        &self,
+        _fit_job_id: &quant_pivot_models::types::ResearchJobId,
+        _training_dataset_id: &quant_pivot_models::types::TrainingDatasetId,
+        _request: quant_pivot_models::domain::FitTradePolicyRequest,
+        _progress: Arc<dyn JobProgressSink>,
+        _cancel: CancellationToken,
+    ) -> QuantResult<TradePolicyArtifactInfo> {
         Err(QuantError::NotImplemented(
             "trade-policy fit is outside the UI E2E server".to_owned(),
         ))
     }
 
-    async fn fit(
+    async fn validate(
         &self,
-        _request: quant_pivot_models::domain::FitTradePolicyRequest,
+        _validation_run_id: &quant_pivot_models::types::TradePolicyValidationRunId,
+        artifact_id: &TradePolicyArtifactId,
+        actor_id: Uuid,
+        reason: String,
+        _progress: &dyn JobProgressSink,
+        _cancel: &CancellationToken,
     ) -> QuantResult<TradePolicyArtifactInfo> {
-        Err(QuantError::NotImplemented(
-            "trade-policy fit is outside the UI E2E server".to_owned(),
-        ))
+        self.transition(artifact_id, TradePolicyStatus::Validated, actor_id, reason)
+            .await
     }
 
     async fn find(
@@ -101,6 +280,115 @@ impl TradePolicyPort for E2eTradePolicyPort {
         artifact_id: &TradePolicyArtifactId,
     ) -> QuantResult<Option<TradePolicyArtifactInfo>> {
         self.policies.find(artifact_id).await.map_err(Into::into)
+    }
+
+    async fn source_slice(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+    ) -> QuantResult<Option<TradePolicySourceSliceView>> {
+        let Some(policy) = self.find(artifact_id).await? else {
+            return Ok(None);
+        };
+        let bundle = policy.payload_json.evidence_bundle.ok_or_else(|| {
+            QuantError::config("UI E2E policy must bind a Source Slice evidence bundle")
+        })?;
+        Ok(Some(TradePolicySourceSliceView {
+            artifact_id: artifact_id.clone(),
+            profile_ref: policy.payload_json.fit_contract.profile_ref,
+            source_slice: SourceSliceManifestRef {
+                manifest_uri: e2e_artifact_uri(artifact_id, "manifest.json")?,
+                manifest_hash: bundle.source_slice_manifest_hash,
+            },
+        }))
+    }
+
+    async fn page_source_slice_objects(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        query: TradePolicySourceSliceObjectListQuery,
+    ) -> QuantResult<Option<Paginated<TradePolicySourceSliceObjectView>>> {
+        let Some(policy) = self.find(artifact_id).await? else {
+            return Ok(None);
+        };
+        let objects = [
+            (SourceSliceObjectKind::ClobMarketInfo, 4_800_u64),
+            (SourceSliceObjectKind::L2Event, 240_000_u64),
+            (SourceSliceObjectKind::TradeTape, 18_400_u64),
+        ]
+        .into_iter()
+        .filter(|(kind, _)| query.kind.is_none_or(|requested| requested == *kind))
+        .map(|(kind, row_count)| {
+            let object_hash = ResearchHasher::canonical(&(
+                "ui_e2e_source_slice_object_v1",
+                artifact_id,
+                kind,
+                row_count,
+            ))?;
+            let schema_hash =
+                ResearchHasher::canonical(&("source_slice_parquet_envelope_v2", kind))?;
+            Ok(TradePolicySourceSliceObjectView {
+                kind,
+                uri: e2e_artifact_uri(artifact_id, &format!("{kind:?}.parquet"))?,
+                object_version: format!("ui-e2e-object-lock:{}", object_hash.as_str()),
+                byte_hash: object_hash,
+                schema_hash,
+                row_count,
+                min_event_at: Some(policy.payload_json.fit_contract.fit_window_start),
+                max_event_at: Some(policy.payload_json.fit_contract.fit_window_end),
+                min_available_at: Some(policy.payload_json.fit_contract.fit_window_start),
+                max_available_at: Some(policy.payload_json.fit_contract.pit_cutoff),
+            })
+        })
+        .collect::<QuantResult<Vec<_>>>()?;
+        let page = query.page.normalized();
+        let total = u64::try_from(objects.len())
+            .map_err(|error| QuantError::config(format!("invalid E2E object count: {error}")))?;
+        let offset = usize::try_from(page.offset())
+            .map_err(|error| QuantError::config(format!("invalid E2E page offset: {error}")))?;
+        let size = usize::try_from(page.limit())
+            .map_err(|error| QuantError::config(format!("invalid E2E page size: {error}")))?;
+        Ok(Some(Paginated::new(
+            objects.into_iter().skip(offset).take(size).collect(),
+            total,
+            page.page,
+            page.size,
+        )))
+    }
+
+    async fn evidence_download(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        kind: TradePolicyEvidenceObjectKind,
+    ) -> QuantResult<Option<TradePolicyEvidenceDownloadView>> {
+        let Some(policy) = self.find(artifact_id).await? else {
+            return Ok(None);
+        };
+        let bundle = policy
+            .payload_json
+            .evidence_bundle
+            .ok_or_else(|| QuantError::config("UI E2E policy must bind an evidence bundle"))?;
+        let byte_hash =
+            ResearchHasher::canonical(&("ui_e2e_evidence_object_v1", artifact_id, kind))?;
+        let expires_at = Utc::now() + Duration::minutes(5);
+        let signature = ResearchHasher::canonical(&(
+            "ui_e2e_signed_download_v1",
+            artifact_id,
+            kind,
+            expires_at.timestamp(),
+            &bundle.manifest_hash,
+        ))?;
+        Ok(Some(TradePolicyEvidenceDownloadView {
+            artifact_id: artifact_id.clone(),
+            kind,
+            byte_hash,
+            row_count: 128,
+            expires_at,
+            url: format!(
+                "http://{LISTEN_HOST}:{LISTEN_PORT}/__test/evidence/{artifact_id}/{kind:?}?expires={}&signature={}",
+                expires_at.timestamp(),
+                signature.as_str(),
+            ),
+        }))
     }
 
     async fn page(
@@ -117,6 +405,46 @@ impl TradePolicyPort for E2eTradePolicyPort {
     ) -> QuantResult<Paginated<TradePolicyGovernanceAuditInfo>> {
         self.policies
             .page_audits(artifact_id, query)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn page_trials(
+        &self,
+        _fit_job_id: &quant_pivot_models::types::ResearchJobId,
+        query: quant_pivot_models::domain::TradePolicyTrialListQuery,
+    ) -> QuantResult<Paginated<quant_pivot_models::domain::TradePolicyTrialAttemptInfo>> {
+        Ok(Paginated::empty(query.page.page, query.page.size))
+    }
+
+    async fn find_validation(
+        &self,
+        validation_run_id: &quant_pivot_models::types::TradePolicyValidationRunId,
+    ) -> QuantResult<Option<TradePolicyValidationRunInfo>> {
+        self.policies
+            .find_validation(validation_run_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn page_validations(
+        &self,
+        artifact_id: &TradePolicyArtifactId,
+        query: TradePolicyValidationListQuery,
+    ) -> QuantResult<Paginated<TradePolicyValidationRunInfo>> {
+        self.policies
+            .page_validations(artifact_id, query)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn page_validation_rows(
+        &self,
+        validation_run_id: &quant_pivot_models::types::TradePolicyValidationRunId,
+        query: TradePolicyValidationRowListQuery,
+    ) -> QuantResult<Paginated<TradePolicyValidationRowInfo>> {
+        self.policies
+            .page_validation_rows(validation_run_id, query)
             .await
             .map_err(Into::into)
     }
@@ -350,6 +678,7 @@ struct E2eFixtures {
     position_id: quant_pivot_models::types::PositionId,
     model_version_id: quant_pivot_models::types::ModelVersionId,
     trade_policy_artifact_id: TradePolicyArtifactId,
+    trade_policy_content_hash: ContentHash,
 }
 
 struct E2eControlState {
@@ -381,6 +710,15 @@ struct E2eConditionFixture {
 
 async fn get_fixtures(control: web::Data<E2eControlState>) -> web::Json<E2eFixtures> {
     web::Json(control.fixtures.clone())
+}
+
+async fn get_test_evidence(path: web::Path<(TradePolicyArtifactId, String)>) -> HttpResponse {
+    let (artifact_id, kind) = path.into_inner();
+    HttpResponse::Ok().json(serde_json::json!({
+        "artifact_id": artifact_id,
+        "kind": kind,
+        "signed": true,
+    }))
 }
 
 async fn observe_book(
@@ -625,8 +963,244 @@ async fn seed_exit_reinference_observation(
         .expect("seed exit monitor observation");
 }
 
-async fn prepare_e2e_fixtures(db: &DatabaseConnection, books: &BookStore) -> E2eFixtures {
-    let summary = seed_ui_demo_pg(db, "0x0000000000000000000000000000000000000001").await;
+async fn seed_policy_validation_dataset(
+    db: &DatabaseConnection,
+    artifact: &TradePolicyArtifactInfo,
+    recommendation: &RecommendationInfo,
+) {
+    let datasets = PgTrainingDatasetRepository::new(db.clone());
+    if datasets
+        .find_by_id(&artifact.source_dataset_id)
+        .await
+        .expect("find policy validation dataset")
+        .is_some()
+    {
+        return;
+    }
+    let models = PgModelRegistryRepository::new(db.clone());
+    let version = models
+        .find_model_version_by_id(&recommendation.evidence_refs.model_version_id)
+        .await
+        .expect("find policy validation model version")
+        .expect("policy validation model version");
+    let spec = models
+        .find_model_spec_by_id(&version.model_spec_id)
+        .await
+        .expect("find policy validation model spec")
+        .expect("policy validation model spec");
+    let contract = &artifact.payload_json.fit_contract;
+    let bundle = artifact
+        .payload_json
+        .evidence_bundle
+        .as_ref()
+        .expect("UI E2E policy evidence bundle");
+    let sample_count = artifact
+        .payload_json
+        .pit_cutoff_evidence
+        .as_ref()
+        .map_or(1, |evidence| evidence.filtered_sample_count.max(1));
+    let sample_interval_secs = 3_600_u64;
+    let knowledge_lag_secs = 10_u64;
+    let factor_schema_hash =
+        ResearchHasher::canonical(&("ui_e2e_policy_fit_factor_schema_v1", &artifact.artifact_id))
+            .expect("hash policy validation factor schema");
+    let source_fingerprint = ResearchHasher::canonical(&(
+        "ui_e2e_policy_fit_sources_v1",
+        &artifact.artifact_id,
+        &bundle.source_slice_manifest_hash,
+    ))
+    .expect("hash policy validation sources");
+    let source_slice = SourceSliceManifestRef {
+        manifest_uri: e2e_artifact_uri(&artifact.artifact_id, "manifest.json")
+            .expect("policy validation Source Slice URI"),
+        manifest_hash: bundle.source_slice_manifest_hash.clone(),
+    };
+    let manifest = DatasetManifest {
+        format_version: DATASET_ARTIFACT_FORMAT_VERSION,
+        training_dataset_id: artifact.source_dataset_id.clone(),
+        profile_ref: contract.profile_ref.clone(),
+        research_program_hash: contract.research_program_hash.clone(),
+        source_slice,
+        model_spec_id: version.model_spec_id.clone(),
+        trade_policy_artifact_id: None,
+        trade_policy_hash: None,
+        runtime_config_version_id: contract.runtime_config_version_id.clone(),
+        window_start: contract.fit_window_start,
+        window_end: contract.fit_window_end,
+        purpose: DatasetPurpose::PolicyFit,
+        knowledge_lag_secs,
+        sample_interval_secs,
+        horizons_secs: vec![contract.target_horizon_secs],
+        feature_schema_hash: artifact.payload_json.feature_schema_hash.clone(),
+        factor_schema_hash: factor_schema_hash.clone(),
+        label_schema_hash: artifact.payload_json.label_schema_hash.clone(),
+        semantic_dataset_hash: artifact.payload_json.source_dataset_hash.clone(),
+        source_fingerprint,
+        sample_count,
+    };
+    let manifest_hash = dataset_manifest_hash(&manifest).expect("hash policy validation manifest");
+    datasets
+        .create_plan(NewTrainingDatasetPlan {
+            training_dataset_id: artifact.source_dataset_id.clone(),
+            model_spec_id: version.model_spec_id,
+            window_start: contract.fit_window_start,
+            window_end: contract.fit_window_end,
+            purpose: DatasetPurpose::PolicyFit,
+            knowledge_lag_secs: i64::try_from(knowledge_lag_secs)
+                .expect("policy validation knowledge lag fits i64"),
+            sample_interval_secs: i64::try_from(sample_interval_secs)
+                .expect("policy validation sample interval fits i64"),
+            horizons_secs: TrainingHorizonsSecs(vec![contract.target_horizon_secs]),
+            feature_schema_version: Some(spec.feature_schema_version),
+            sample_sources: Some(TrainingSampleSources(default_sample_sources())),
+            runtime_config_version_id: contract.runtime_config_version_id.clone(),
+        })
+        .await
+        .expect("create policy validation dataset");
+    datasets
+        .start_build(&artifact.source_dataset_id)
+        .await
+        .expect("start policy validation dataset");
+    let sample_count_i64 =
+        i64::try_from(sample_count).expect("policy validation sample count fits i64");
+    datasets
+        .complete_build(
+            &artifact.source_dataset_id,
+            CompleteTrainingDatasetBuild {
+                status: TrainingDatasetStatus::Ready,
+                feature_schema_hash: artifact.payload_json.feature_schema_hash.clone(),
+                factor_schema_hash,
+                label_schema_hash: artifact.payload_json.label_schema_hash.clone(),
+                dataset_hash: artifact.payload_json.source_dataset_hash.clone(),
+                manifest_hash,
+                manifest_json: manifest,
+                artifact_bytes_hash: ResearchHasher::canonical(&(
+                    "ui_e2e_policy_fit_parquet_v1",
+                    &artifact.artifact_id,
+                ))
+                .expect("hash policy validation parquet"),
+                parquet_uri: e2e_artifact_uri(&artifact.artifact_id, "policy-fit.parquet")
+                    .expect("policy validation parquet URI"),
+                sample_count: sample_count_i64,
+                coverage_json: DatasetCoverage {
+                    planned_samples: sample_count,
+                    built_examples: sample_count,
+                    markets: 1,
+                    labels_available: sample_count,
+                    ..DatasetCoverage::default()
+                },
+                failure_detail: None,
+            },
+        )
+        .await
+        .expect("complete policy validation dataset");
+}
+
+async fn seed_policy_validation_diagnostic(
+    db: &DatabaseConnection,
+    artifact_id: &TradePolicyArtifactId,
+    recommendation: &RecommendationInfo,
+) {
+    let policies = PgTradePolicyRepository::new(db.clone());
+    let artifact = policies
+        .find(artifact_id)
+        .await
+        .expect("load policy for validation diagnostic")
+        .expect("policy validation diagnostic artifact");
+    seed_policy_validation_dataset(db, &artifact, recommendation).await;
+    let bundle = artifact
+        .payload_json
+        .evidence_bundle
+        .as_ref()
+        .expect("UI E2E policy evidence bundle");
+    let validation_run_id = TradePolicyValidationRunId::from_v7();
+    policies
+        .begin_validation(NewTradePolicyValidationRun {
+            validation_run_id: validation_run_id.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            artifact_hash: artifact.content_hash.clone(),
+            source_dataset_id: artifact.source_dataset_id.clone(),
+            source_dataset_hash: artifact.payload_json.source_dataset_hash.clone(),
+            source_slice_manifest_hash: bundle.source_slice_manifest_hash.clone(),
+            evidence_manifest_hash: bundle.manifest_hash.clone(),
+            status: TradePolicyValidationStatus::Running,
+            actor_id: Uuid::nil(),
+            reason: "test-only independent row diagnostic".to_owned(),
+        })
+        .await
+        .expect("begin policy validation diagnostic");
+    let decision_at = artifact.payload_json.fit_contract.fit_window_end - Duration::seconds(1);
+    let diagnostic_kind = "fee_evidence_mismatch".to_owned();
+    let detail = "test-only row proves failed diagnostics remain inspectable".to_owned();
+    let evidence_kind = "candidate_trials".to_owned();
+    let record_key = format!("test-only:{}", recommendation.recommendation_id);
+    let expected_row_hash = artifact.content_hash.clone();
+    let actual_row_hash = artifact.payload_json.source_dataset_hash.clone();
+    let row_hash = ResearchHasher::canonical(&(
+        "ui_e2e_trade_policy_validation_row_v2",
+        &validation_run_id,
+        &evidence_kind,
+        &record_key,
+        &recommendation.market_id,
+        &recommendation.token_id,
+        decision_at,
+        &expected_row_hash,
+        &actual_row_hash,
+        &diagnostic_kind,
+        &detail,
+    ))
+    .expect("hash policy validation diagnostic row");
+    policies
+        .append_validation_rows(vec![NewTradePolicyValidationRow {
+            validation_run_id: validation_run_id.clone(),
+            row_ordinal: 0,
+            evidence_kind,
+            record_key,
+            example_id: Some(TrainingExampleId::from_v7()),
+            market_id: Some(recommendation.market_id.clone()),
+            token_id: Some(recommendation.token_id.clone()),
+            decision_at: Some(decision_at),
+            expected_row_hash: Some(expected_row_hash),
+            actual_row_hash: Some(actual_row_hash),
+            passed: false,
+            diagnostic_kind: Some(diagnostic_kind),
+            detail: Some(detail),
+            row_hash,
+        }])
+        .await
+        .expect("append policy validation diagnostic row");
+    let validation_hash = ResearchHasher::canonical(&(
+        "ui_e2e_trade_policy_validation_failure_v1",
+        &validation_run_id,
+        &artifact.content_hash,
+    ))
+    .expect("hash policy validation diagnostic failure");
+    policies
+        .fail_validation(
+            &validation_run_id,
+            FailTradePolicyValidation {
+                status: TradePolicyValidationStatus::Failed,
+                validation_hash,
+                failure_detail: "test-only validation failure retains immutable row diagnostics"
+                    .to_owned(),
+            },
+        )
+        .await
+        .expect("complete failed policy validation diagnostic");
+}
+
+async fn prepare_e2e_fixtures(
+    db: &DatabaseConnection,
+    books: &BookStore,
+    model_artifact_store: &Arc<dyn ArtifactStore>,
+) -> E2eFixtures {
+    let summary = seed_ui_demo_pg(
+        db,
+        "0x0000000000000000000000000000000000000001",
+        model_artifact_store,
+    )
+    .await;
+    verify_seeded_report_fact_deliveries(db).await;
     let unavailable_recommendation_id = summary
         .actionable_recommendation_id
         .clone()
@@ -656,6 +1230,7 @@ async fn prepare_e2e_fixtures(db: &DatabaseConnection, books: &BookStore) -> E2e
         .trade_plan
         .frozen()
         .expect("seeded recommendation must carry a Frozen trade plan");
+    seed_policy_validation_diagnostic(db, &policy.artifact_id, &frozen).await;
     let pending_intent_id = frozen_record
         .intent_id
         .clone()
@@ -708,15 +1283,64 @@ async fn prepare_e2e_fixtures(db: &DatabaseConnection, books: &BookStore) -> E2e
         position_id,
         model_version_id: frozen.evidence_refs.model_version_id,
         trade_policy_artifact_id: policy.artifact_id.clone(),
+        trade_policy_content_hash: policy.artifact_hash.clone(),
+    }
+}
+
+async fn verify_seeded_report_fact_deliveries(db: &DatabaseConnection) {
+    // `seed_ui_demo_pg` has already written the matching ClickHouse facts. Move
+    // every seeded bundle through the same repository CAS used by the delivery
+    // worker so governed execution sees only explicitly verified reports.
+    let reports = PgRecommendationReportRepository::new(db.clone());
+    let worker_id = Uuid::now_v7();
+    loop {
+        let now = Utc::now();
+        let delivery = reports
+            .claim_fact_delivery(worker_id, now, now + Duration::seconds(30))
+            .await
+            .expect("claim seeded report fact delivery");
+        let Some(delivery) = delivery else {
+            break;
+        };
+        reports
+            .verify_fact_delivery(&delivery.recommendation_report_id, worker_id, Utc::now())
+            .await
+            .expect("verify seeded report fact delivery");
     }
 }
 
 #[actix_web::test]
 #[ignore = "long-running Playwright backend; requires Docker"]
 async fn serve_protected_ui_e2e() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
     let mut env = harness::TestEnv::start_with_core_report_port().await;
     let books = Arc::new(BookStore::new(Arc::new(MetricsHub::new())));
-    let fixtures = prepare_e2e_fixtures(&env.db, &books).await;
+    let fixtures = prepare_e2e_fixtures(&env.db, &books, &env.model_artifact_store).await;
+    let mut runtime_config = RuntimeConfig::default();
+    runtime_config.execution.semi_auto.canary.enabled = true;
+    runtime_config.execution.semi_auto.canary.policy_artifact_id =
+        Some(fixtures.trade_policy_artifact_id.to_string());
+    runtime_config
+        .execution
+        .semi_auto
+        .canary
+        .policy_content_hash = Some(fixtures.trade_policy_content_hash.to_string());
+    runtime_config
+        .execution
+        .semi_auto
+        .canary
+        .allowed_cash_budget_tiers_usd = vec![DecimalString::new("25")];
+    runtime_config.execution.semi_auto.canary.max_open_intents = 1;
+    runtime_config
+        .execution
+        .semi_auto
+        .canary
+        .max_total_cash_per_report = DecimalString::new("25");
+    runtime_config.execution.semi_auto.canary.expires_at =
+        Some((Utc::now() + Duration::hours(1)).to_rfc3339());
+    env.order_intent_runtime_config.replace(runtime_config);
     env.state.market_data = Arc::new(E2eMarketData {
         books: Arc::clone(&books),
     });
@@ -742,6 +1366,10 @@ async fn serve_protected_ui_e2e() {
             .service(
                 web::scope("/__test")
                     .route("/fixtures", web::get().to(get_fixtures))
+                    .route(
+                        "/evidence/{artifact_id}/{kind}",
+                        web::get().to(get_test_evidence),
+                    )
                     .route("/intents/{id}/book", web::post().to(observe_book)),
             )
             .configure(routes::configure)

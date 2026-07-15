@@ -12,7 +12,8 @@ use crate::{
     domain::{
         BuildTrainingDatasetRequest, FitBiasTableRequest, FitModelCalibratorRequest,
         FitTradePolicyRequest, Paginated, ResearchJobListQuery, ResearchJobView,
-        RunBacktestRequest, RunCpcvBacktestRequest, TrainModelRequest,
+        RunBacktestRequest, RunCpcvBacktestRequest, TradePolicyValidationJobParams,
+        TrainModelRequest,
     },
     types::{ModelVersionId, ResearchJobId, RuntimeConfigVersionId},
 };
@@ -88,6 +89,13 @@ pub trait ResearchJobPort: Send + Sync {
     async fn enqueue_trade_policy_fit(
         &self,
         request: FitTradePolicyRequest,
+        ctx: JobSubmitContext,
+    ) -> QuantResult<ResearchJobView>;
+
+    /// Enqueue independent row-level validation of one immutable Draft policy.
+    async fn enqueue_trade_policy_validation(
+        &self,
+        request: TradePolicyValidationJobParams,
         ctx: JobSubmitContext,
     ) -> QuantResult<ResearchJobView>;
 

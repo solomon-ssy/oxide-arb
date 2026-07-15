@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 13),
+# They live in the versioned runtime configuration (schema_version = 14),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -45,6 +45,7 @@ clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # Impact: timeout is Ambiguous and enters reconciliation; it is never retried.
 # Default: 15000.
 order_post_timeout_ms = 15000
+clob_market_info_refresh_secs = 900
 # Purpose: EVM chain id. Impact: order signing domain + on-chain reads.
 # Caution: must be Polygon (137) — any other value is fatal at startup.
 # Default: 137.
@@ -75,32 +76,6 @@ base_url = "https://relayer-v2.polymarket.com"
 # api_key_address = "0x...."
 # Purpose: relayer HTTP request timeout (ms). Default: 15000.
 request_timeout_ms = 15000
-
-# Per-category feeRate (official 2026-04-04). Override when PM updates docs.
-# Exponent is always 1 per https://docs.polymarket.com/trading/fees
-[polymarket.fees]
-# Purpose: volatility exponent in fee = C × feeRate × p × (1 − p)^exponent.
-# Caution: Polymarket's official value is 1 — do not change without a docs
-# update. Default: "1".
-exponent = "1"
-# Purpose: fallback feeRate for categories missing from category_rates.
-# Impact: fee estimation → net-profit gating. Default: "0.05".
-unknown_category_rate = "0.05"
-
-# Purpose: per-category feeRate (fraction, not bps). Impact: fee estimation
-# feeds directly into expected-net-profit gates — wrong rates mean trading
-# unprofitable opportunities or skipping profitable ones. Defaults shown.
-[polymarket.fees.category_rates]
-geopolitics = "0"
-sports = "0.03"
-crypto = "0.072"
-finance = "0.04"
-politics = "0.04"
-tech = "0.04"
-economics = "0.05"
-culture = "0.05"
-weather = "0.05"
-other = "0.05"
 
 # ── Market Data Connections ───────────────────────────────────────────────────
 # (Staleness thresholds are runtime config: market_data.staleness_*.)
@@ -285,6 +260,7 @@ backtest_concurrency = 2
 feature_parity_concurrency = 1
 # Executable policy fits are artifact-heavy and deterministic; serialize.
 trade_policy_fit_concurrency = 1
+trade_policy_validation_concurrency = 1
 # Lease TTL (seconds): a lease not renewed within this window is reclaimable by
 # the boot recovery sweep. Default: 90.
 lease_ttl_secs = 90
@@ -341,6 +317,12 @@ region = "us-east-1"
 path_style = true
 require_object_lock = false
 require_versioning = false
+
+[research.evidence_attestation]
+# Dedicated 32-byte keyed-BLAKE3 secret; never reuse the wallet or JWT key.
+# Set through QUANT_PIVOT__RESEARCH__EVIDENCE_ATTESTATION__SECRET_HEX.
+key_id = ""
+# secret_hex = "64 lowercase hex characters"
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -450,6 +432,16 @@ batch_size = 5000
 # Purpose: maximum concurrent insert operations (semaphore). Impact: caps
 # write pressure on the CH server under high tick rates. Default: 8.
 max_concurrent_inserts = 8
+
+[db.clickhouse.raw_lifecycle]
+# Runtime v14 requires 90d fit + 7d lookback + 1d horizon + 2d embargo,
+# doubled for reproducible refits. Raw deletion remains fail-closed by default.
+hot_days = 14
+retention_days = 200
+delete_enabled = false
+# Configure both values together only after capacity, restore, and source-slice drills.
+# cold_volume = "cold"
+# signed_retention_plan_hash = "blake3:<64 lowercase hex>"
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 

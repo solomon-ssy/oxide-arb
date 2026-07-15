@@ -25,6 +25,6 @@ CREATE TABLE IF NOT EXISTS quant_trade_tape (
     event_date            Date MATERIALIZED toDate(event_time)
 )
 ENGINE = MergeTree
-PARTITION BY toYYYYMMDD(event_date)
+PARTITION BY toYYYYMM(event_date)
 ORDER BY (market_id, token_id, event_time, source_event_id, participant_address)
 SETTINGS index_granularity = 8192

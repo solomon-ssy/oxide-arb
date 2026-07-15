@@ -10,4 +10,6 @@ use thiserror::Error;
 pub enum FeeQuoteError {
     #[error("missing fee schedule for market {market_id}: {detail}")]
     MissingSchedule { market_id: String, detail: String },
+    #[error("invalid fee calculation input: {detail}")]
+    InvalidCalculation { detail: String },
 }

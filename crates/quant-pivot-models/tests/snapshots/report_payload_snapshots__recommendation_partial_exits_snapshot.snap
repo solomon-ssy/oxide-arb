@@ -1,6 +1,5 @@
 ---
 source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
-assertion_line: 32
 expression: recommendation_partial_exits()
 ---
 {
@@ -46,11 +45,16 @@ expression: recommendation_partial_exits()
       "artifact_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
       "cohort_index": 0,
       "cohort_key": {
+        "profile_ref": {
+          "id": "pooled_1h_control",
+          "version": 1,
+          "content_hash": "blake3:b8565ef1c0ca149af2dd471db95ea94c7b19cc67b649c70d8d7ca0366c09ff9b"
+        },
         "category": "politics",
         "horizon_secs": 86400,
         "entry_price_min": "0.01",
         "entry_price_max": "0.99",
-        "notional_tier": "250",
+        "cash_budget_tier": "250",
         "liquidity": {
           "methodology_id": "fixture-v1",
           "methodology_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
@@ -129,6 +133,13 @@ expression: recommendation_partial_exits()
         "min_score_retention": "0.6",
         "min_expected_return_bps": "0",
         "require_execution_eligibility": true
+      },
+      "opportunistic_exit": {
+        "min_confidence": "0.65",
+        "min_expected_alpha_bps": "50",
+        "min_p_exit_better": "0.5",
+        "max_cumulative_exit_pct": "1",
+        "min_incremental_exit_pct": "0.1"
       },
       "settlement_mode": "hold_to_resolution",
       "redeem_policy": "manual",

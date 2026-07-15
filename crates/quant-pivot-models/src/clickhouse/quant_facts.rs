@@ -9,10 +9,10 @@ use crate::{
         ChQuantLedgerEventKind, ChRecommendationAttributionOutcome, ChRecommendationStatus,
     },
     types::{
-        CapitalAllocationId, ExecutionOrderId, FeatureParityEventId, FeatureParityRunId,
-        FeatureVectorId, MarketId, ModelRunId, ModelVersionId, OrderId, OrderIntentId, PositionId,
-        RecommendationId, RecommendationReportId, RuntimeConfigVersionId, SignalCandidateId,
-        TokenId, TrainingDatasetId,
+        CapitalAllocationId, EventId, ExecutionOrderId, FeatureParityEventId, FeatureParityRunId,
+        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OrderId,
+        OrderIntentId, PositionId, RecommendationId, RecommendationReportId,
+        RuntimeConfigVersionId, SignalCandidateId, TokenId, TrainingDatasetId,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -205,6 +205,41 @@ pub struct QuantRecommendationEventRow {
     pub suggested_usd: Option<ChUsd>,
     pub valid_until: i64,
     pub status: ChRecommendationStatus,
+}
+
+/// Conserved, report-scoped decision for one catalog-visible market.
+///
+/// `(recommendation_report_id, market_id)` is the logical key. Every report
+/// must durably acknowledge the complete batch before its Postgres header can
+/// become visible.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct ReportMarketFunnelRow {
+    pub event_time: i64,
+    pub recommendation_report_id: RecommendationReportId,
+    pub market_selection_id: MarketSelectionId,
+    pub profile_id: String,
+    pub profile_version: u32,
+    pub profile_content_hash: String,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_version_id: ModelVersionId,
+    pub model_run_id: Option<ModelRunId>,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub token_id: TokenId,
+    pub terminal_stage: String,
+    pub primary_reason: String,
+    pub secondary_diagnostics_json: String,
+    pub feature_vector_id: Option<FeatureVectorId>,
+    pub signal_candidate_id: Option<SignalCandidateId>,
+    pub recommendation_id: Option<RecommendationId>,
+    pub row_hash: String,
+    pub ingestion_time: i64,
+}
+
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct ReportMarketFunnelCountRow {
+    pub terminal_stage: String,
+    pub row_count: u64,
 }
 
 /// Execution lifecycle fact.

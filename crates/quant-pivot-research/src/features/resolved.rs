@@ -12,11 +12,11 @@ use std::{sync::Arc, time::Duration};
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
 use quant_pivot_error::research::ResearchError;
 use quant_pivot_models::{
-    domain::TradeTapePrint,
     domain::market::{
         book::{BookLevel, IMBALANCE_DEPTH_LEVELS, top_n_share_depth},
         registry::MarketRegistryInfo,
     },
+    domain::{TradeTapePrint, fee::MarketFeeSchedule},
     enums::market::MarketStatus,
     types::{Bps, MarketId, MicroUsd, Price, TokenId, Usd},
 };
@@ -316,8 +316,8 @@ pub struct ResolvedMarketContext {
     pub end_date: Option<DateTime<Utc>>,
     /// Upstream catalog creation time, when the source supplied one.
     pub created_at: Option<DateTime<Utc>>,
-    /// Point-in-time fee schedule from the same catalog revision.
-    pub fee_schedule: Option<quant_pivot_models::domain::fee::MarketFeeSchedule>,
+    /// Point-in-time fee schedule from the independently versioned CLOB market-info source.
+    pub fee_schedule: Option<MarketFeeSchedule>,
 }
 
 impl ResolvedMarketContext {
@@ -333,7 +333,7 @@ impl ResolvedMarketContext {
             start_date: info.start_date,
             end_date: info.end_date,
             created_at: info.created_at,
-            fee_schedule: info.fee_schedule.clone(),
+            fee_schedule: None,
         }
     }
 }

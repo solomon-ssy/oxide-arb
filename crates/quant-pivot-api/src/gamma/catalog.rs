@@ -1,6 +1,6 @@
 //! Normalized Gamma catalog rows — validated wire → mapper input.
 
-use super::wire::{WireEvent, WireFeeSchedule, WireMarket};
+use super::wire::{WireEvent, WireMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::{
@@ -52,8 +52,6 @@ pub struct CatalogMarket {
     pub resolved_at: Option<DateTime<Utc>>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
-    pub fees_enabled: bool,
-    pub fee_schedule: Option<WireFeeSchedule>,
     pub min_order_size: Decimal,
     /// Gamma-reported liquidity in USD (`liquidityNum`), when published.
     pub liquidity_usd: Option<Usd>,
@@ -237,8 +235,6 @@ impl TryFrom<WireMarket> for CatalogMarket {
             resolved_at,
             start_date,
             end_date,
-            fees_enabled: wire.fees_enabled.unwrap_or(true),
-            fee_schedule: wire.fee_schedule,
             min_order_size: wire.order_min_size.unwrap_or(Decimal::ONE),
             liquidity_usd: wire.liquidity_num.map(Usd::new),
             volume_24h_usd: wire.volume_24hr.map(Usd::new),
@@ -600,6 +596,9 @@ mod tests {
         assert_eq!(event.status, EventStatus::Closed);
         assert_eq!(event.tags, vec!["politics", "geopolitics", "trump"]);
         assert_eq!(event.categories.iter().count(), 2);
-        assert_eq!(event.categories.fee_category(), MarketCategory::Politics);
+        assert_eq!(
+            event.categories.primary_category(),
+            MarketCategory::Politics
+        );
     }
 }

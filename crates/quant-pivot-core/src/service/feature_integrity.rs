@@ -1218,6 +1218,7 @@ mod tests {
     fn new_report(info: RecommendationReportInfo) -> NewRecommendationReport {
         NewRecommendationReport {
             recommendation_report_id: info.recommendation_report_id,
+            profile_ref: info.profile_ref,
             report_kind: info.report_kind,
             trigger_kind: info.trigger_kind,
             trigger_key: info.trigger_key,

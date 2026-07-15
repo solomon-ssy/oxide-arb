@@ -8,7 +8,7 @@ use crate::{
     types::{
         ContentHash, EntryConditionInstanceId, EntryOrderSpec, ExitPolicySpec,
         ExitReinferenceObservation, ModelVersionId, OrderIntentId, Price, RecommendationId,
-        RuntimeConfigVersionId, ScaleOutState,
+        ResearchProfileRef, RuntimeConfigVersionId, ScaleOutState,
     },
 };
 use chrono::{DateTime, Utc};
@@ -24,6 +24,8 @@ pub struct Model {
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub profile_ref: ResearchProfileRef,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,

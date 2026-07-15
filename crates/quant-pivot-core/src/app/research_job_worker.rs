@@ -36,9 +36,10 @@ use quant_pivot_models::{
     domain::{
         BacktestJobParams, BacktestPort, BiasTableFitJobParams, BuildTrainingDatasetRequest,
         CalibrationArtifactFitPort, CpcvBacktestJobParams, CpcvBacktestPort,
-        FeatureParityExecutionPort, FeatureParityJobParams, FitTradePolicyRequest, JobProgressSink,
+        FeatureParityExecutionPort, FeatureParityJobParams, JobProgressSink,
         ModelCalibrationFitJobParams, ModelCalibrationFitPort, ModelTrainJobParams,
-        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress, TradePolicyPort,
+        ModelTrainingPort, ResearchJobError, ResearchJobInfo, ResearchJobProgress,
+        TradePolicyFitJobParams, TradePolicyPort, TradePolicyValidationJobParams,
         TrainingDatasetPort,
     },
     enums::quant::{ResearchJobErrorCode, ResearchJobKind, ResearchJobStatus},
@@ -48,8 +49,8 @@ use quant_pivot_repository::{
     clickhouse::{ChFactWriter, ChFeatureParityEventRepository},
     traits::{
         CalibrationArtifactRepository, FactWriter, FeatureParityRepository,
-        RecommendationReportRepository, RuntimeConfigVersionRepository, ServingEvidenceRepository,
-        TradePolicyRepository,
+        RecommendationReportRepository, ResearchReadinessEvidenceRepository,
+        RuntimeConfigVersionRepository, ServingEvidenceRepository, TradePolicyRepository,
     },
 };
 
@@ -67,10 +68,11 @@ use crate::service::{
     durable_feature_parity::{DurableFeatureParityDeps, DurableFeatureParitySource},
     feature_parity_executor::{FeatureParityExecutor, ReportFeatureParityIncidentResponse},
     model_calibration_fit::ModelCalibrationFitService,
-    trade_policy::TradePolicyService,
+    research_readiness::{EvidenceAttestor, ResearchReadinessEvidenceService},
+    trade_policy::{TradePolicyService, TradePolicyServiceDeps},
 };
 
-const ALL_KINDS: [ResearchJobKind; 8] = [
+const ALL_KINDS: [ResearchJobKind; 9] = [
     ResearchJobKind::DatasetBuild,
     ResearchJobKind::ModelTrain,
     ResearchJobKind::Backtest,
@@ -79,6 +81,7 @@ const ALL_KINDS: [ResearchJobKind; 8] = [
     ResearchJobKind::ModelCalibrationFit,
     ResearchJobKind::FeatureParity,
     ResearchJobKind::TradePolicyFit,
+    ResearchJobKind::TradePolicyValidation,
 ];
 
 fn lease_deadline(lease_ttl_secs: i64) -> DateTime<Utc> {
@@ -231,10 +234,36 @@ impl ResearchJobExecutor {
                 })
             }
             ResearchJobKind::TradePolicyFit => {
-                let request: FitTradePolicyRequest = from_params(&job.params_json)?;
-                let view = self.trade_policies.fit(request).await?;
+                let params: TradePolicyFitJobParams = from_params(&job.params_json)?;
+                let view = self
+                    .trade_policies
+                    .fit(
+                        &job.job_id,
+                        &params.training_dataset_id,
+                        params.request,
+                        Arc::clone(&progress),
+                        cancel.clone(),
+                    )
+                    .await?;
                 Ok(JobOutcome {
                     result_ref: Some(view.artifact_id.as_uuid()),
+                    coverage: None,
+                })
+            }
+            ResearchJobKind::TradePolicyValidation => {
+                let params: TradePolicyValidationJobParams = from_params(&job.params_json)?;
+                self.trade_policies
+                    .validate(
+                        &params.validation_run_id,
+                        &params.artifact_id,
+                        params.actor_id,
+                        params.reason,
+                        progress.as_ref(),
+                        &cancel,
+                    )
+                    .await?;
+                Ok(JobOutcome {
+                    result_ref: Some(params.validation_run_id.as_uuid()),
                     coverage: None,
                 })
             }
@@ -252,12 +281,23 @@ fn from_params<T: DeserializeOwned>(params: &Value) -> QuantResult<T> {
 
 impl AppContext {
     /// Register the durable research-job worker (`TaskId::ResearchJobWorker`).
-    pub fn register_research_job_worker(&self, runner: &mut AppRunner, engine: ResearchJobEngine) {
+    pub fn register_research_job_worker(
+        &self,
+        runner: &mut AppRunner,
+        engine: ResearchJobEngine,
+    ) -> QuantResult<()> {
         let runtime_config =
             Arc::clone(&self.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
         let bias_table_repo = Arc::clone(&self.infra.repos.calibration_artifact)
             as Arc<dyn CalibrationArtifactRepository>;
         let config = self.config.quant.research_jobs;
+        let readiness = Arc::new(ResearchReadinessEvidenceService::new(
+            Arc::clone(&self.infra.repos.research_readiness)
+                as Arc<dyn ResearchReadinessEvidenceRepository>,
+            Arc::clone(&self.research.artifact_store),
+            EvidenceAttestor::from_config(&self.config.research.evidence_attestation)?,
+            &self.config.db.clickhouse.raw_lifecycle,
+        )?);
         let backtest_port = Arc::new(CoreBacktestPort::from_research(
             &self.research,
             Arc::clone(&runtime_config),
@@ -279,6 +319,14 @@ impl AppContext {
         let serving_evidence = Arc::new(ChFeatureParityEventRepository::new(Arc::clone(
             &self.infra.ch,
         ))) as Arc<dyn ServingEvidenceRepository>;
+        let dataset_port = Arc::new(CoreTrainingDatasetPort::from_research(
+            &self.research,
+            Arc::clone(&runtime_config),
+            Arc::clone(&bias_table_repo),
+            config.max_spine_samples,
+            config.plan_sample_slices,
+            config.plan_sample_markets,
+        )) as Arc<dyn TrainingDatasetPort>;
         let parity_replay = Arc::new(DurableFeatureParitySource::new(DurableFeatureParityDeps {
             model_runs: Arc::clone(&self.research.model_run_repo),
             model_registry: Arc::clone(&self.research.model_registry_repo),
@@ -296,14 +344,7 @@ impl AppContext {
             runtime_factory: Arc::clone(&self.research.model_runtime_factory_builder),
         }));
         let executor = ResearchJobExecutor {
-            datasets: Arc::new(CoreTrainingDatasetPort::from_research(
-                &self.research,
-                Arc::clone(&runtime_config),
-                Arc::clone(&bias_table_repo),
-                config.max_spine_samples,
-                config.plan_sample_slices,
-                config.plan_sample_markets,
-            )),
+            datasets: Arc::clone(&dataset_port),
             training: Arc::new(CoreModelTrainingPort::from_research(
                 &self.research,
                 Arc::clone(&runtime_config),
@@ -331,17 +372,26 @@ impl AppContext {
                 ChronoDuration::minutes(10),
                 Duration::from_secs(config.poll_secs.max(1)),
             )) as Arc<dyn FeatureParityExecutionPort>,
-            trade_policies: Arc::new(TradePolicyService::new(
-                Arc::clone(&self.research.training_dataset_repo),
-                Arc::clone(&self.research.artifact_store),
-                Arc::clone(&self.infra.repos.trade_policy) as Arc<dyn TradePolicyRepository>,
-                Arc::clone(&self.infra.repos.runtime_config)
+            trade_policies: Arc::new(TradePolicyService::new(TradePolicyServiceDeps {
+                datasets: Arc::clone(&self.research.training_dataset_repo),
+                dataset_builder: dataset_port,
+                artifacts: Arc::clone(&self.research.artifact_store),
+                policies: Arc::clone(&self.infra.repos.trade_policy)
+                    as Arc<dyn TradePolicyRepository>,
+                model_registry: Arc::clone(&self.research.model_registry_repo),
+                runtime_configs: Arc::clone(&self.infra.repos.runtime_config)
                     as Arc<dyn RuntimeConfigVersionRepository>,
-            )),
+                source_slices: Arc::clone(&self.research.source_slice_repo),
+                readiness,
+                model_runtime_factory_builder: Arc::clone(
+                    &self.research.model_runtime_factory_builder,
+                ),
+            })),
         };
         runner.spawn(TaskId::ResearchJobWorker, move |token| async move {
             run_worker(engine, executor, config, token).await;
         });
+        Ok(())
     }
 }
 

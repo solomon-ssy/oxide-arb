@@ -84,8 +84,35 @@ CREATE TABLE IF NOT EXISTS quant_recommendation_event
     valid_until DateTime64(3, 'UTC'),
     status Enum8('published' = 1, 'revoked' = 2, 'expired' = 3, 'intent_created' = 4, 'executed' = 5, 'attributed' = 6)
 )
-ENGINE = MergeTree
-ORDER BY (recommendation_report_id, rank, market_id);
+ENGINE = ReplacingMergeTree(event_time)
+ORDER BY (recommendation_report_id, recommendation_id);
+
+CREATE TABLE IF NOT EXISTS quant_report_market_funnel
+(
+    event_time DateTime64(3, 'UTC'),
+    recommendation_report_id String,
+    market_selection_id String,
+    profile_id LowCardinality(String),
+    profile_version UInt32,
+    profile_content_hash String,
+    runtime_config_version_id String,
+    model_version_id String,
+    model_run_id Nullable(String),
+    market_id String,
+    event_id String,
+    token_id String,
+    terminal_stage LowCardinality(String),
+    primary_reason LowCardinality(String),
+    secondary_diagnostics_json String,
+    feature_vector_id Nullable(String),
+    signal_candidate_id Nullable(String),
+    recommendation_id Nullable(String),
+    row_hash String,
+    ingestion_time DateTime64(3, 'UTC')
+)
+ENGINE = ReplacingMergeTree(ingestion_time)
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (recommendation_report_id, market_id);
 
 CREATE TABLE IF NOT EXISTS quant_execution_event
 (

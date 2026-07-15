@@ -13,8 +13,8 @@ use rust_decimal_macros::dec;
 use quant_pivot_models::{
     domain::{
         FeatureParityJobParams, NewFeatureParityRun, NewRecommendationReport,
-        NewReportFeatureParity, NewResearchJob, RecommendationInfo, RecommendationReportInfo,
-        RunFullFeatureParityRequest,
+        NewReportFactDelivery, NewReportFeatureParity, NewResearchJob, RecommendationInfo,
+        RecommendationReportInfo, RunFullFeatureParityRequest,
     },
     enums::{
         common::{MarketCategory, TickSize::Hundredth},
@@ -24,11 +24,12 @@ use quant_pivot_models::{
             AccountSource, BindingConstraint, ExitSettlementMode, FactorDirection,
             FeatureParityRunKind, FeatureParityRunStatus, IneligibilityReason, OutcomeSide,
             QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportKind, ReportTriggerKind, ResearchJobKind, ResearchJobStatus, SizingModelKind,
+            ReportFactDeliveryStatus, ReportKind, ReportTriggerKind, ResearchJobKind,
+            ResearchJobStatus, SizingModelKind,
         },
     },
     types::{
-        AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
+        AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
         DataQualitySummary, EligibilitySummary, EntryConditionPlan, EntryOrderPolicy, EntryPlan,
         EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
         FactorBreakdownEntry, FeatureParityRunId, FeatureVectorId, MarketContext, MarketId,
@@ -38,12 +39,31 @@ use quant_pivot_models::{
         ReportDataQualitySnapshotId, ReportSummary, ResearchJobId, RiskEnvelope,
         RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, ThesisInvalidationPolicy,
         TokenId, TradePolicyArtifactId, TradePolicyCohortDimension, TradePolicyCohortKey,
-        TradePolicyCohortProvenance, Usd,
+        TradePolicyCohortProvenance, Usd, builtin_research_profiles,
     },
 };
 
+use crate::execution_pg_seed::fixture_profile_ref;
+
 fn content_hash() -> ContentHash {
     ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")
+}
+
+/// Build a pending fixture outbox row for repository-level report tests.
+#[must_use]
+pub fn pending_fact_delivery(report_id: &RecommendationReportId) -> NewReportFactDelivery {
+    NewReportFactDelivery {
+        recommendation_report_id: report_id.clone(),
+        status: ReportFactDeliveryStatus::Pending,
+        bundle_uri: ArtifactUri::parse(format!("fixture://report-facts/{report_id}.json"))
+            .expect("valid fixture URI"),
+        bundle_hash: content_hash(),
+        bundle_bytes: 2,
+        recommendation_row_count: 0,
+        recommendation_row_chain_hash: content_hash(),
+        funnel_row_count: 0,
+        funnel_row_chain_hash: content_hash(),
+    }
 }
 
 /// Build the mandatory sampled-parity run/job committed atomically with a
@@ -122,6 +142,7 @@ pub fn report(
 ) -> RecommendationReportInfo {
     RecommendationReportInfo {
         recommendation_report_id: id,
+        profile_ref: fixture_profile_ref(),
         report_kind: kind,
         trigger_kind: ReportTriggerKind::Scheduled,
         trigger_key: "scheduled:daily-topn:2023-11-14T22:13:20Z".to_owned(),
@@ -206,6 +227,7 @@ pub fn recommendation(
 ) -> RecommendationInfo {
     RecommendationInfo {
         recommendation_id: id,
+        profile_ref: fixture_profile_ref(),
         recommendation_report_id: report_id,
         rank,
         market_id: MarketId::new(market),
@@ -324,11 +346,17 @@ fn trade_policy_provenance() -> TradePolicyCohortProvenance {
         artifact_hash,
         cohort_index: 0,
         cohort_key: TradePolicyCohortKey {
+            profile_ref: builtin_research_profiles()
+                .expect("research profiles")
+                .into_iter()
+                .next()
+                .expect("control profile")
+                .profile_ref,
             category: MarketCategory::Politics,
             horizon_secs: 86_400,
             entry_price_min: Price::new(dec!(0.01)),
             entry_price_max: Price::new(dec!(0.99)),
-            notional_tier: Usd::new(dec!(250)),
+            cash_budget_tier: Usd::new(dec!(250)),
             liquidity: dimension.clone(),
             volatility: dimension,
         },

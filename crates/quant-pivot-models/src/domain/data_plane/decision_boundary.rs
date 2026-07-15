@@ -144,6 +144,31 @@ impl DecisionBoundary {
     pub const fn per_source_cutoffs(&self) -> &BTreeMap<DecisionSource, DateTime<Utc>> {
         &self.per_source_cutoffs
     }
+
+    /// Move a persisted boundary to another decision instant while preserving
+    /// every governed global/source availability lag exactly once.
+    pub fn rebased(&self, decision_at: DateTime<Utc>) -> QuantResult<Self> {
+        let mut boundary = DecisionClock::new(self.knowledge_lag_secs).boundary(decision_at)?;
+        for (source, cutoff) in &self.per_source_cutoffs {
+            let source_lag = self
+                .decision_at
+                .signed_duration_since(*cutoff)
+                .num_seconds();
+            if source_lag < 0 {
+                return Err(QuantError::config(format!(
+                    "source {source:?} cutoff is after the original decision"
+                )));
+            }
+            boundary = boundary.with_source_cutoff(
+                *source,
+                u64::try_from(source_lag).map_err(|error| {
+                    QuantError::config(format!("source {source:?} lag is invalid: {error}"))
+                })?,
+            )?;
+        }
+        boundary.validate()?;
+        Ok(boundary)
+    }
 }
 
 /// Constructs [`DecisionBoundary`] values from one governed knowledge lag.
@@ -319,5 +344,30 @@ mod tests {
             serde_json::from_value(payload).expect("deserialize shape");
 
         assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn rebase_preserves_every_effective_source_lag() {
+        let original_at = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let rebased_at = original_at + Duration::hours(6);
+        let original = DecisionClock::new(120)
+            .serving_boundary(original_at, 300, 600)
+            .expect("boundary");
+        let rebased = original.rebased(rebased_at).expect("rebased");
+
+        for source in [
+            DecisionSource::Catalog,
+            DecisionSource::Book,
+            DecisionSource::Microstructure,
+            DecisionSource::TradeTape,
+            DecisionSource::Linkage,
+            DecisionSource::DomainCrypto,
+            DecisionSource::DomainWeather,
+        ] {
+            assert_eq!(
+                original_at - original.cutoff_for(source),
+                rebased_at - rebased.cutoff_for(source)
+            );
+        }
     }
 }

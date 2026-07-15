@@ -451,6 +451,9 @@ async fn seed_dataset(
     let manifest = DatasetManifest {
         format_version: DATASET_ARTIFACT_FORMAT_VERSION,
         training_dataset_id: dataset_id.clone(),
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
+        research_program_hash: content_hash('p'),
+        source_slice: quant_pivot_test_support::execution_pg_seed::source_slice_ref('s'),
         model_spec_id: model_spec_id.clone(),
         trade_policy_artifact_id: None,
         trade_policy_hash: None,

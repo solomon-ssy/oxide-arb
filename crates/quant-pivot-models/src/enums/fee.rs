@@ -1,13 +1,4 @@
-//! Fee authority enums.
-
-pg_enum! {
-    type_name = "qp_fee_source",
-    pub enum FeeSource {
-        ClobMarketInfo => "clob_market_info",
-        GammaFeeSchedule => "gamma_fee_schedule",
-        CategoryDefault => "category_default",
-    }
-}
+//! Fee quote enums.
 
 /// Fee liquidity role on the wire (not persisted to Postgres).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

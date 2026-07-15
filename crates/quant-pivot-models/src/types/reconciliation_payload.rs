@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::execution::ReconciliationEvidenceKind,
     jsonb_active,
-    types::{Price, Shares},
+    types::{FeeEvidence, Price, Shares},
 };
 
 /// One reconciliation observation used to explain an execution-order result.
@@ -19,6 +19,8 @@ pub struct ReconciliationEvidence {
     pub venue_ref: Option<String>,
     pub shares: Option<Shares>,
     pub price: Option<Price>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_evidence: Option<FeeEvidence>,
 }
 
 /// Ordered evidence chain for one reconciliation summary row.
@@ -58,6 +60,7 @@ mod tests {
             venue_ref: Some("0xorder".to_owned()),
             shares: Some(Shares::new(dec!(12.5))),
             price: None,
+            fee_evidence: None,
         }]);
 
         let encoded = serde_json::to_value(&chain).expect("serialize");

@@ -4,7 +4,7 @@ use quant_pivot_error::{QuantResult, execution::ExecutionError};
 use quant_pivot_models::{
     domain::{ModelVersionInfo, RecommendationInfo},
     enums::quant::{PublicationStatus, TradePolicyStatus},
-    types::{RecommendationTradePlan, TradePolicyArtifactId},
+    types::{RecommendationTradePlan, ResearchProfileRef, TradePolicyArtifactId},
 };
 use quant_pivot_repository::traits::TradePolicyRepository;
 use quant_pivot_research::hashing::ResearchHasher;
@@ -15,12 +15,18 @@ pub async fn require_frozen_trade_policy(
     policies: &dyn TradePolicyRepository,
     model_version: &ModelVersionInfo,
     recommendation: &RecommendationInfo,
-) -> QuantResult<()> {
+) -> QuantResult<ResearchProfileRef> {
     let RecommendationTradePlan::Frozen { policy, sizing, .. } = &recommendation.trade_plan else {
         return Err(denied("recommendation trade plan is unavailable").into());
     };
     if model_version.publication_status != PublicationStatus::Published {
         return Err(denied("model version is no longer Published").into());
+    }
+    if model_version.profile_ref != recommendation.profile_ref {
+        return Err(denied(
+            "recommendation research profile does not match the frozen model version",
+        )
+        .into());
     }
     if model_version.trade_policy_artifact_id.as_ref() != Some(&policy.artifact_id)
         || model_version.trade_policy_hash.as_ref() != Some(&policy.artifact_hash)
@@ -48,6 +54,12 @@ pub async fn require_frozen_trade_policy(
             denied("frozen trade-policy artifact no longer passes publication gates").into(),
         );
     }
+    if artifact.payload_json.fit_contract.profile_ref != model_version.profile_ref {
+        return Err(denied(
+            "trade-policy research profile does not match the frozen model version",
+        )
+        .into());
+    }
     let cohort_index = usize::try_from(policy.cohort_index)
         .map_err(|_| denied("frozen trade-policy cohort index is not representable"))?;
     let cohort = artifact
@@ -58,13 +70,19 @@ pub async fn require_frozen_trade_policy(
     if cohort.key != policy.cohort_key {
         return Err(denied("frozen trade-policy cohort provenance does not match artifact").into());
     }
-    if cohort.key.notional_tier != sizing.suggested_usd {
+    if cohort.key.profile_ref != recommendation.profile_ref {
         return Err(denied(
-            "recommendation sizing does not exactly match the validated notional tier",
+            "trade-policy cohort research profile does not match the recommendation",
         )
         .into());
     }
-    Ok(())
+    if cohort.key.cash_budget_tier != sizing.suggested_usd {
+        return Err(denied(
+            "recommendation sizing does not exactly match the validated cash-budget tier",
+        )
+        .into());
+    }
+    Ok(model_version.profile_ref.clone())
 }
 
 fn denied(reason: impl Into<String>) -> ExecutionError {

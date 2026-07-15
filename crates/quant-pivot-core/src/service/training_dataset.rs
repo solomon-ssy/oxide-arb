@@ -16,9 +16,10 @@ use crate::{
     prefetch::{
         domain_availability::{LiveDomainAvailabilitySource, PrefetchedDomainAvailabilitySource},
         historical_window::{
-            HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec, forward_window,
-            replay_boundary,
+            HistoricalWindow, HistoricalWindowLoader, Prefetched, ReplaySample, WindowSpec,
+            forward_window, historical_window_from_prefetched, replay_boundary,
         },
+        source_slice::FrozenSourceSlice,
     },
     service::{
         calibration_shared::assert_disjoint_from_all_training_datasets,
@@ -30,20 +31,19 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, ChPrice},
     domain::{
         CompleteTrainingDatasetBuild, DecisionBoundary, DecisionClock, DecisionSource,
-        ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo,
+        ExitTrainingLotRow, FeatureVectorInfo, JobProgressSink, MarketInfo, MarketRegistryInfo,
         MarketSelectionMemberInfo, NewTrainingDatasetPlan, NoopProgressSink,
         RecommendationAttributionInfo, RecommendationInfo, ResearchJobProgress,
-        TrainingDatasetInfo, TrainingDatasetMaterialization, fee::FeeQuoteInput, query::TimeWindow,
+        TrainingDatasetInfo, TrainingDatasetMaterialization, fee::MarketFeeSchedule,
+        query::TimeWindow,
     },
     enums::{
-        common::{MarketCategory, Side},
-        fee::FeeLiquidityRole,
+        common::MarketCategory,
         quant::{
             DatasetPurpose, RecommendationAttributionOutcome, TradePolicyStatus,
             TrainingDatasetStatus,
@@ -55,18 +55,19 @@ use quant_pivot_models::{
         TrainingConfig,
     },
     types::{
-        ArtifactUri, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION, DatasetFeatureStateCounts,
-        DatasetManifest, FeatureVectorId, MarketId, MarketSelectionId, ModelInputContract,
-        ModelSpecId, Price, RecommendationId, Shares, TokenId, TradePolicyArtifactId,
-        TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId, TrainingHorizonsSecs,
-        TrainingSampleSource, TrainingSampleSources, Usd,
+        ArtifactUri, ClobMarketInfoVersion, ContentHash, DATASET_ARTIFACT_FORMAT_VERSION,
+        DatasetFeatureStateCounts, DatasetManifest, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelInputContract, ModelSpecId, Price, RecommendationId, Shares, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TrainingDatasetId, TrainingExampleId,
+        TrainingHorizonsSecs, TrainingSampleSource, TrainingSampleSources, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     AttributionRepository, CalibrationArtifactRepository, CatalogVersionRepository,
-    FeatureRepository, MarketLinkageRepository, MarketRepository, MarketSelectionRepository,
-    ModelRegistryRepository, PositionRepository, QuantFactReadRepository, RecommendationRepository,
-    TradePolicyRepository, TrainingDatasetRepository,
+    ClobMarketInfoRepository, FeatureRepository, MarketLinkageRepository, MarketRepository,
+    MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
+    QuantFactReadRepository, RecommendationRepository, TradePolicyRepository,
+    TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
@@ -448,8 +449,8 @@ pub struct TrainingDatasetServiceDeps {
     pub selection_repo: Arc<dyn MarketSelectionRepository>,
     /// Position ledger for closed-lot `ExitDecision` sampling.
     pub position_repo: Arc<dyn PositionRepository>,
-    /// Venue fee calculator for governed exit-fee-aware Sell labels (06.1).
-    pub fee_calculator: Arc<FeeCalculator>,
+    /// Append-only point-in-time CLOB market parameters and fee schedules.
+    pub clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     /// Frozen market → external-subject linkage ledger (11.2.2).
     pub linkage_repo: Arc<dyn MarketLinkageRepository>,
     /// Model registry — resolves the target `ModelSpec`'s governed feature
@@ -521,7 +522,7 @@ pub struct TrainingDatasetService {
     feature_repo: Arc<dyn FeatureRepository>,
     selection_repo: Arc<dyn MarketSelectionRepository>,
     position_repo: Arc<dyn PositionRepository>,
-    fee_calculator: Arc<FeeCalculator>,
+    clob_market_info_repo: Arc<dyn ClobMarketInfoRepository>,
     linkage_repo: Arc<dyn MarketLinkageRepository>,
     model_registry: Arc<dyn ModelRegistryRepository>,
     trade_policy_repo: Arc<dyn TradePolicyRepository>,
@@ -547,6 +548,122 @@ pub struct TrainingDatasetService {
 }
 
 impl TrainingDatasetService {
+    /// Plan exclusively from a verified Source Slice. Dynamic repository reads
+    /// for candidate discovery are structurally absent from this path.
+    pub async fn plan_with_frozen_source(
+        &self,
+        request: DatasetPlanRequest,
+        source: &FrozenSourceSlice,
+    ) -> QuantResult<DatasetPlan> {
+        require_half_open_dataset_window(request.window_start, request.window_end)?;
+        if request
+            .sample_sources
+            .iter()
+            .any(|source| !matches!(source, TrainingSampleSource::HistoricalPit))
+        {
+            return Err(ResearchError::DatasetPlan {
+                detail: "Source Slice V2 Dataset builds currently accept only historical_pit; live_attribution and exit_decision require their complete immutable evidence graphs"
+                    .to_owned(),
+            }
+            .into());
+        }
+        let (trade_policy_artifact_id, trade_policy_hash, trade_policy) =
+            self.resolve_trade_policy_binding(&request).await?;
+        let plan_markets = self.frozen_plan_markets(&request, &source.prefetched)?;
+        let samples = plan_samples(&request, &plan_markets)?;
+        let training_dataset_id = request
+            .training_dataset_id
+            .clone()
+            .unwrap_or_else(TrainingDatasetId::from_v7);
+        let label_names =
+            label_names_for_sources(&request.sample_sources, trade_policy_artifact_id.is_some());
+        Ok(DatasetPlan {
+            request,
+            training_dataset_id,
+            samples,
+            lot_samples: Vec::new(),
+            exit_training_lots: Vec::new(),
+            label_names,
+            trade_policy_artifact_id,
+            trade_policy_hash,
+            trade_policy,
+        })
+    }
+
+    fn frozen_plan_markets(
+        &self,
+        request: &DatasetPlanRequest,
+        prefetched: &Prefetched,
+    ) -> QuantResult<Vec<PlanMarket>> {
+        let mut versions = BTreeMap::<MarketId, Vec<_>>::new();
+        for version in &prefetched.catalog.market_versions {
+            versions
+                .entry(version.market_id.clone())
+                .or_default()
+                .push(version);
+        }
+        let mut markets = Vec::new();
+        for (market_id, mut history) in versions {
+            history.sort_by(|left, right| {
+                (
+                    left.source_effective_at,
+                    left.available_at,
+                    &left.market_catalog_version_id,
+                )
+                    .cmp(&(
+                        right.source_effective_at,
+                        right.available_at,
+                        &right.market_catalog_version_id,
+                    ))
+            });
+            let Some(latest) = history.last() else {
+                continue;
+            };
+            let info = serde_json::from_value::<MarketRegistryInfo>(latest.payload.clone())
+                .map_err(|error| ResearchError::DatasetPlan {
+                    detail: format!("Source Slice catalog market {market_id} is invalid: {error}"),
+                })?;
+            let observed = [&info.token_yes, &info.token_no].iter().any(|token| {
+                prefetched.books.get(*token).is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        DateTime::from_timestamp_millis(row.event_time).is_some_and(|at| {
+                            at < request.window_end
+                                && at
+                                    + ChronoDuration::from_std(self.max_book_staleness)
+                                        .unwrap_or(ChronoDuration::MAX)
+                                    >= request.window_start
+                        })
+                    })
+                })
+            });
+            if !observed
+                || (!self.enabled_categories.is_empty()
+                    && !info
+                        .categories
+                        .iter()
+                        .any(|category| self.enabled_categories.contains(&category)))
+            {
+                continue;
+            }
+            let created_at = info
+                .created_at
+                .unwrap_or_else(|| history[0].source_effective_at);
+            if created_at >= request.window_end
+                || info.end_date.is_some_and(|end| end <= request.window_start)
+            {
+                continue;
+            }
+            markets.push(PlanMarket {
+                market_id,
+                token_id: info.token_yes,
+                created_at,
+                end_date: info.end_date,
+            });
+        }
+        markets.sort_by(|left, right| left.market_id.cmp(&right.market_id));
+        Ok(markets)
+    }
+
     /// Wire the service from boot-time dependencies and a frozen config snapshot.
     ///
     /// `max_spine_samples` is a deploy-level resource guard (not part of the
@@ -573,7 +690,7 @@ impl TrainingDatasetService {
             feature_repo: deps.feature_repo,
             selection_repo: deps.selection_repo,
             position_repo: deps.position_repo,
-            fee_calculator: deps.fee_calculator,
+            clob_market_info_repo: deps.clob_market_info_repo,
             linkage_repo: deps.linkage_repo,
             model_registry: deps.model_registry,
             trade_policy_repo: deps.trade_policy_repo,
@@ -629,6 +746,9 @@ impl TrainingDatasetService {
         Option<ContentHash>,
         Option<TradePolicyArtifactPayload>,
     )> {
+        if request.purpose == DatasetPurpose::PolicyFit {
+            return Ok((None, None, None));
+        }
         let spec = self
             .model_registry
             .find_model_spec_by_id(&request.model_spec_id)
@@ -753,8 +873,8 @@ impl TrainingDatasetService {
     /// window (`created_at < window_end` and it had not resolved before
     /// `window_start`), so markets that were tradable during the window but have
     /// since resolved are included — not just the currently-active catalog. The
-    /// enabled-category gate mirrors the online [`CategoryFilter`] (fee-dominant
-    /// category), not the raw Postgres `categories[]` membership list.
+    /// enabled-category gate mirrors the online [`CategoryFilter`] by accepting
+    /// any governed category membership, not a lossy single-category projection.
     fn in_selection(
         &self,
         info: &MarketInfo,
@@ -767,7 +887,11 @@ impl TrainingDatasetService {
         if info.end_date.is_some_and(|end| end <= window_start) {
             return false;
         }
-        self.enabled_categories.is_empty() || self.enabled_categories.contains(&info.fee_category())
+        self.enabled_categories.is_empty()
+            || info
+                .categories
+                .iter()
+                .any(|category| self.enabled_categories.contains(category))
     }
 
     /// The deterministic candidate selection for a plan window.
@@ -1123,8 +1247,7 @@ impl TrainingDatasetService {
 #[async_trait]
 impl TrainingDatasetBuilder for TrainingDatasetService {
     async fn build(&self, plan: DatasetPlan) -> QuantResult<TrainingDatasetArtifact> {
-        self.build_inner(plan, Arc::new(NoopProgressSink), CancellationToken::new())
-            .await
+        Box::pin(self.build_inner(plan, Arc::new(NoopProgressSink), CancellationToken::new())).await
     }
 }
 
@@ -1137,7 +1260,42 @@ impl TrainingDatasetService {
         sink: Arc<dyn JobProgressSink>,
         cancel: CancellationToken,
     ) -> QuantResult<TrainingDatasetArtifact> {
-        self.build_inner(plan, sink, cancel).await
+        Box::pin(self.build_inner(plan, sink, cancel)).await
+    }
+
+    /// Build from verified object bytes with no dynamic historical reads.
+    pub async fn build_with_frozen_source(
+        &self,
+        plan: DatasetPlan,
+        source: FrozenSourceSlice,
+        sink: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        self.prepare_build_ledger(&plan).await?;
+        let training_dataset_id = plan.training_dataset_id.clone();
+        let result = historical_window_from_prefetched(source.prefetched, self.max_book_staleness)
+            .and_then(|window| {
+                if source.invalid_sessions.is_empty() {
+                    Ok(window)
+                } else {
+                    Err(ResearchError::DatasetBuild {
+                        detail: format!(
+                            "Source Slice contains {} invalid L2 sessions",
+                            source.invalid_sessions.len()
+                        ),
+                    }
+                    .into())
+                }
+            });
+        let result = match result {
+            Ok(window) => {
+                self.materialize_window(plan, sink, cancel, window, source.clob_market_info)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        self.persist_build_failure(&training_dataset_id, result)
+            .await
     }
 
     async fn build_inner(
@@ -1148,7 +1306,7 @@ impl TrainingDatasetService {
     ) -> QuantResult<TrainingDatasetArtifact> {
         self.prepare_build_ledger(&plan).await?;
         let training_dataset_id = plan.training_dataset_id.clone();
-        let result = self.materialize_inner(plan, sink, cancel).await;
+        let result = Box::pin(self.materialize_inner(plan, sink, cancel)).await;
         self.persist_build_failure(&training_dataset_id, result)
             .await
     }
@@ -1181,6 +1339,20 @@ impl TrainingDatasetService {
         let window = loader
             .load(&context.window_spec(&plan, &self.domain))
             .await?;
+        let clob_market_info = self.load_clob_market_info(&plan).await?;
+        self.materialize_window(plan, sink, cancel, window, clob_market_info)
+            .await
+    }
+
+    async fn materialize_window(
+        &self,
+        plan: DatasetPlan,
+        sink: Arc<dyn JobProgressSink>,
+        cancel: CancellationToken,
+        window: HistoricalWindow,
+        clob_market_info: Vec<ClobMarketInfoVersion>,
+    ) -> QuantResult<TrainingDatasetArtifact> {
+        let context = ReplayContext::new(&plan, &self.features)?;
         let coverage = DatasetCoverage {
             planned_samples: planned_historical_samples(&plan),
             book_decode_failures: window.book_decode_failures,
@@ -1230,6 +1402,7 @@ impl TrainingDatasetService {
             BuildTail {
                 pit: &*pit,
                 prefetched: &prefetched,
+                clob_market_info: &clob_market_info,
                 context: &context,
                 sink: &*sink,
             },
@@ -1237,6 +1410,34 @@ impl TrainingDatasetService {
             spine,
         )
         .await
+    }
+
+    async fn load_clob_market_info(
+        &self,
+        plan: &DatasetPlan,
+    ) -> QuantResult<Vec<ClobMarketInfoVersion>> {
+        let mut market_ids = plan
+            .samples
+            .iter()
+            .map(|sample| sample.market_id.clone())
+            .chain(
+                plan.lot_samples
+                    .iter()
+                    .map(|sample| sample.market_id.clone()),
+            )
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        market_ids.sort();
+        self.clob_market_info_repo
+            .window(
+                &market_ids,
+                plan.request.window_start,
+                plan.request.window_end,
+                plan.request.pit_cutoff,
+            )
+            .await
+            .map_err(Into::into)
     }
 
     async fn prepare_build_ledger(&self, plan: &DatasetPlan) -> QuantResult<()> {
@@ -1374,6 +1575,7 @@ impl TrainingDatasetService {
         let prefetched = loader
             .prefetch(&context.window_spec(&plan, &self.domain))
             .await?;
+        let clob_market_info = self.load_clob_market_info(&plan).await?;
         let mut coverage = DatasetCoverage {
             planned_samples: planned_historical_samples(&plan),
             ..DatasetCoverage::default()
@@ -1394,6 +1596,7 @@ impl TrainingDatasetService {
             BuildTail {
                 pit,
                 prefetched: &prefetched,
+                clob_market_info: &clob_market_info,
                 context: &context,
                 sink: &NoopProgressSink,
             },
@@ -1482,6 +1685,7 @@ impl TrainingDatasetService {
         let BuildTail {
             pit,
             prefetched,
+            clob_market_info,
             context,
             sink,
         } = tail;
@@ -1511,6 +1715,7 @@ impl TrainingDatasetService {
                     plan: &plan,
                     pit,
                     prefetched,
+                    clob_market_info,
                     context,
                 },
                 &mut ExampleBuildSink {
@@ -1724,6 +1929,7 @@ impl TrainingDatasetService {
                         market_index: index,
                         request: &input.plan.request,
                         prefetched: input.prefetched,
+                        clob_market_info: input.clob_market_info,
                         pit: input.pit,
                         max_horizon_secs: input.context.max_horizon_secs,
                         labelers: &exit_labelers,
@@ -1856,7 +2062,17 @@ impl TrainingDatasetService {
         let fee_schedule = decision_book
             .as_ref()
             .and_then(decision_book_quote_price)
-            .map(|price| self.exit_fee_schedule(remaining, price, market, &input.sample.token_id))
+            .map(|price| {
+                pit_exit_fee_schedule(
+                    remaining,
+                    price,
+                    market,
+                    &input.sample.token_id,
+                    input.sample.decision_at,
+                    boundary.knowledge_cutoff(),
+                    input.clob_market_info,
+                )
+            })
             .transpose()?;
         Ok(ResolvedExitDecisionEvidence {
             peak_mark,
@@ -1870,47 +2086,6 @@ impl TrainingDatasetService {
             },
             book_fidelity,
         })
-    }
-
-    /// Effective exit fee in basis points of the exit notional, quoted from the
-    /// governed venue fee calculator (same schedule the live exit dispatcher
-    /// uses). A missing schedule or invalid notional fails the dataset build;
-    /// only an explicit fee-disabled schedule produces a legitimate zero.
-    fn exit_fee_schedule(
-        &self,
-        shares: Shares,
-        price: Price,
-        market: &SelectedMarket,
-        token_id: &TokenId,
-    ) -> QuantResult<quant_pivot_models::domain::fee::MarketFeeSchedule> {
-        let notional = shares.inner() * price.inner();
-        if notional <= Decimal::ZERO {
-            return Err(ResearchError::LabelResolution {
-                detail: format!(
-                    "exit fee quote requires positive notional, got shares={shares} price={price}"
-                ),
-            }
-            .into());
-        }
-        let quote = self
-            .fee_calculator
-            .quote(&FeeQuoteInput {
-                market_id: market.market_id.clone(),
-                token_id: token_id.clone(),
-                category: market.category,
-                side: Side::Sell,
-                liquidity_role: FeeLiquidityRole::Taker,
-                shares,
-                price,
-                allow_category_fallback: false,
-            })
-            .map_err(|error| ResearchError::LabelResolution {
-                detail: format!(
-                    "exit fee quote failed for market {} token {}: {error}",
-                    market.market_id, token_id
-                ),
-            })?;
-        Ok(quote.schedule.as_ref().clone())
     }
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
@@ -2096,6 +2271,9 @@ impl TrainingDatasetService {
         let manifest = DatasetManifest {
             format_version: DATASET_ARTIFACT_FORMAT_VERSION,
             training_dataset_id: plan.training_dataset_id.clone(),
+            profile_ref: plan.request.profile_ref.clone(),
+            research_program_hash: plan.request.research_program_hash.clone(),
+            source_slice: plan.request.source_slice.clone(),
             model_spec_id: plan.request.model_spec_id.clone(),
             trade_policy_artifact_id: plan.trade_policy_artifact_id.clone(),
             trade_policy_hash: plan.trade_policy_hash.clone(),
@@ -3003,6 +3181,64 @@ fn decision_book_quote_price(book: &DecisionBook) -> Option<Price> {
     }
 }
 
+fn pit_exit_fee_schedule(
+    shares: Shares,
+    price: Price,
+    market: &SelectedMarket,
+    token_id: &TokenId,
+    effective_at: DateTime<Utc>,
+    available_at_cutoff: DateTime<Utc>,
+    versions: &[ClobMarketInfoVersion],
+) -> QuantResult<MarketFeeSchedule> {
+    let notional = shares.inner() * price.inner();
+    if notional <= Decimal::ZERO {
+        return Err(ResearchError::LabelResolution {
+            detail: format!(
+                "exit fee resolution requires positive notional, got shares={shares} price={price}"
+            ),
+        }
+        .into());
+    }
+    let version = versions
+        .iter()
+        .filter(|version| {
+            version.market_id == market.market_id
+                && version
+                    .tokens
+                    .iter()
+                    .any(|token| token.token_id == *token_id)
+                && version.effective_at <= effective_at
+                && version.available_at <= available_at_cutoff
+        })
+        .max_by(|left, right| {
+            (
+                left.effective_at,
+                left.available_at,
+                &left.payload_hash,
+            )
+                .cmp(&(
+                    right.effective_at,
+                    right.available_at,
+                    &right.payload_hash,
+                ))
+        })
+        .ok_or_else(|| ResearchError::LabelResolution {
+            detail: format!(
+                "Source Slice has no PIT-visible CLOB fee schedule for market {} token {} at effective_at={effective_at} available_by={available_at_cutoff}",
+                market.market_id, token_id
+            ),
+        })?;
+    version
+        .validate()
+        .map_err(|detail| ResearchError::LabelResolution {
+            detail: format!(
+                "Source Slice CLOB fee schedule {} is invalid: {detail}",
+                version.version_id
+            ),
+        })?;
+    Ok(version.fee_schedule())
+}
+
 async fn decision_book_at(
     pit: &dyn PointInTimeSnapshotSource,
     token_id: &TokenId,
@@ -3061,6 +3297,7 @@ struct CrossSectionAppendInput<'a> {
 struct BuildTail<'a> {
     pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
+    clob_market_info: &'a [ClobMarketInfoVersion],
     context: &'a ReplayContext,
     sink: &'a dyn JobProgressSink,
 }
@@ -3079,6 +3316,7 @@ struct ExitDecisionAppendInput<'a> {
     plan: &'a DatasetPlan,
     pit: &'a dyn PointInTimeSnapshotSource,
     prefetched: &'a Prefetched,
+    clob_market_info: &'a [ClobMarketInfoVersion],
     context: &'a ReplayContext,
 }
 
@@ -3100,6 +3338,7 @@ struct ExitDecisionSampleBuild<'a> {
     market_index: usize,
     request: &'a DatasetPlanRequest,
     prefetched: &'a Prefetched,
+    clob_market_info: &'a [ClobMarketInfoVersion],
     pit: &'a dyn PointInTimeSnapshotSource,
     max_horizon_secs: u64,
     labelers: &'a [Box<dyn Labeler>],
@@ -3150,6 +3389,7 @@ impl ReplayContext {
         WindowSpec {
             window_start: plan.request.window_start,
             window_end: plan.request.window_end,
+            available_by: plan.request.pit_cutoff,
             samples: plan
                 .samples
                 .iter()
@@ -3245,6 +3485,9 @@ mod keep_rate_tests {
         enums::quant::DatasetPurpose,
         types::{ModelSpecId, RuntimeConfigVersionId, SchemaVersion, default_sample_sources},
     };
+    use quant_pivot_test_support::execution_pg_seed::{
+        content_hash, fixture_profile_ref, source_slice_ref,
+    };
 
     use super::{DatasetPlanRequest, KeepRateEstimate, KeepRateGrid};
 
@@ -3252,9 +3495,13 @@ mod keep_rate_tests {
         let window_start = Utc.timestamp_opt(1_000, 0).single().expect("start");
         DatasetPlanRequest {
             model_spec_id: ModelSpecId::from_v7(),
+            profile_ref: fixture_profile_ref(),
+            research_program_hash: content_hash('4'),
+            source_slice: source_slice_ref('5'),
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             window_start,
             window_end: window_start + Duration::seconds(100),
+            pit_cutoff: window_start + Duration::seconds(160),
             sample_interval_secs: 10,
             horizons_secs: vec![60],
             knowledge_lag_secs: 10,
@@ -3370,5 +3617,114 @@ mod decision_book_tests {
             decision_book_quote_price(&book),
             Some(Price::new(Decimal::new(55, 2)))
         );
+    }
+}
+
+#[cfg(test)]
+mod pit_fee_tests {
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        enums::common::{MarketCategory, TickSize},
+        hashing::CanonicalDigest,
+        types::{
+            ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
+            EventId, MarketId, Price, Shares, TokenId,
+        },
+    };
+    use quant_pivot_research::selection::SelectedMarket;
+    use rust_decimal_macros::dec;
+
+    use super::pit_exit_fee_schedule;
+
+    fn version(
+        market_id: &MarketId,
+        token_id: &TokenId,
+        rate: rust_decimal::Decimal,
+        effective_at: chrono::DateTime<Utc>,
+        available_at: chrono::DateTime<Utc>,
+    ) -> ClobMarketInfoVersion {
+        let raw_payload = serde_json::json!({
+            "market": market_id,
+            "rate": rate,
+            "effective_at": effective_at,
+            "available_at": available_at,
+        });
+        ClobMarketInfoVersion {
+            version_id: ClobMarketInfoVersionId::from_v7(),
+            market_id: market_id.clone(),
+            tokens: vec![
+                ClobTokenDescriptor {
+                    token_id: token_id.clone(),
+                    outcome: "Yes".to_owned(),
+                },
+                ClobTokenDescriptor {
+                    token_id: TokenId::new("fee-token-no"),
+                    outcome: "No".to_owned(),
+                },
+            ],
+            tick_size: TickSize::Hundredth,
+            minimum_order_size: dec!(1),
+            neg_risk: false,
+            taker_order_delay_enabled: false,
+            minimum_order_age_secs: None,
+            blockaid_check_enabled: false,
+            fee_details: ClobFeeDetails {
+                rate,
+                exponent: 1,
+                taker_only: true,
+            },
+            builder_maker_fee_rate_bps: 0,
+            builder_taker_fee_rate_bps: 0,
+            effective_at,
+            available_at,
+            payload_hash: CanonicalDigest::content_hash_json(&raw_payload).expect("payload hash"),
+            raw_payload,
+        }
+    }
+
+    #[test]
+    fn exit_fee_uses_only_the_pit_visible_market_info_version() {
+        let decision_at = Utc.timestamp_opt(1_700_000_000, 0).single().expect("time");
+        let cutoff = decision_at - Duration::seconds(10);
+        let market_id = MarketId::new("fee-market");
+        let token_id = TokenId::new("fee-token");
+        let market = SelectedMarket {
+            market_id: market_id.clone(),
+            event_id: EventId::new("fee-event"),
+            category: MarketCategory::Crypto,
+            primary_token_id: token_id.clone(),
+            secondary_token_id: None,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            source_refs: Vec::new(),
+        };
+        let visible = version(
+            &market_id,
+            &token_id,
+            dec!(0.02),
+            decision_at - Duration::hours(1),
+            cutoff,
+        );
+        let future_knowledge = version(
+            &market_id,
+            &token_id,
+            dec!(0.09),
+            decision_at - Duration::minutes(1),
+            cutoff + Duration::seconds(1),
+        );
+
+        let schedule = pit_exit_fee_schedule(
+            Shares::new(dec!(10)),
+            Price::new(dec!(0.5)),
+            &market,
+            &token_id,
+            decision_at,
+            cutoff,
+            &[visible, future_knowledge],
+        )
+        .expect("PIT fee schedule");
+
+        assert_eq!(schedule.fee_rate, dec!(0.02));
+        assert_eq!(schedule.observed_at, cutoff);
     }
 }

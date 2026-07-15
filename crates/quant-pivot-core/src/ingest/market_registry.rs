@@ -321,7 +321,6 @@ mod tests {
             min_order_size: dec!(5),
             liquidity_usd: None,
             volume_24h: None,
-            fee_schedule: None,
             start_date: None,
             end_date: None,
             resolved_at: None,

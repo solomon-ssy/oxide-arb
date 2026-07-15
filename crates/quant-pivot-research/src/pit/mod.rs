@@ -106,7 +106,7 @@ pub struct MarketContextAt {
     /// Upstream catalog creation time (event-age proxy). `None` means Gamma did
     /// not publish a source clock; callers must preserve Missing.
     pub created_at: Option<DateTime<Utc>>,
-    /// Fee schedule carried by the same immutable catalog revision.
+    /// Fee schedule resolved from the independent append-only CLOB market-info ledger.
     pub fee_schedule: Option<MarketFeeSchedule>,
 }
 
@@ -210,7 +210,7 @@ pub fn resolve_catalog_snapshot(
         start_date: market.start_date,
         end_date: market.end_date,
         created_at: snapshot.market.source_created_at,
-        fee_schedule: market.fee_schedule.clone(),
+        fee_schedule: None,
     };
     Ok(ResolvedMarketSnapshot {
         boundary: boundary.clone(),

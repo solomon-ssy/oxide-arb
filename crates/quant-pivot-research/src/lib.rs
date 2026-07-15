@@ -48,8 +48,14 @@ pub mod hashing;
 pub mod linkage;
 pub mod model;
 pub mod pit;
+#[cfg(feature = "dataframe")]
+pub mod policy_evidence;
+pub mod policy_replay;
+pub mod policy_validation;
 pub mod portfolio;
 pub mod selection;
+#[cfg(feature = "dataframe")]
+pub mod source_slice;
 pub mod trade_tape;
 pub mod training;
 pub mod validation;

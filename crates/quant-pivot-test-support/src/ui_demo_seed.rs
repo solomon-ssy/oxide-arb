@@ -68,6 +68,7 @@ use quant_pivot_repository::{
         RecommendationReportRepository, RecommendationRepository, SettlementRedeemRepository,
     },
 };
+use quant_pivot_research::artifact::ArtifactStore;
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use rust_decimal_macros::dec;
 use sea_orm::{
@@ -83,7 +84,7 @@ use crate::{
         close_position_full, demo_recommendation, entry_execution_order, fill_entry_lot,
         report_operation_log, seed_approved_intent, seed_conditional_price_report_on_infra,
         seed_manual_approved_intent, seed_pending_intent, seed_report_on_infra,
-        seed_shared_demo_infra,
+        seed_shared_demo_infra_with_artifact_store,
     },
     research_ui_seed::{ResearchUiSeedSummary, seed_research_ui_demo_pg},
 };
@@ -130,8 +131,12 @@ pub struct UiDemoSeedSummary {
 }
 
 /// Seed Postgres demo data for execution-plane UI pages.
-pub async fn seed_ui_demo_pg(db: &DatabaseConnection, funder: &str) -> UiDemoSeedSummary {
-    let infra = seed_shared_demo_infra(db).await;
+pub async fn seed_ui_demo_pg(
+    db: &DatabaseConnection,
+    funder: &str,
+    model_artifact_store: &Arc<dyn ArtifactStore>,
+) -> UiDemoSeedSummary {
+    let infra = seed_shared_demo_infra_with_artifact_store(db, model_artifact_store).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
     let mut summary = UiDemoSeedSummary::default();
 
@@ -1001,7 +1006,12 @@ fn pending_reconciliation(
         )]),
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -1021,7 +1031,12 @@ fn unresolvable_reconciliation(
         )]),
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -1035,6 +1050,7 @@ fn recon_evidence(detail: &str) -> ReconciliationEvidence {
         venue_ref: Some("ui-demo-venue".to_owned()),
         shares: None,
         price: None,
+        fee_evidence: None,
     }
 }
 
@@ -1069,7 +1085,12 @@ fn filled_reconciliation_write(
         )]),
         venue_filled_shares: Some(Shares::new(dec!(100))),
         venue_avg_price: Some(Price::new(dec!(0.6))),
-        discrepancy_usd: Some(Usd::ZERO),
+        expected_cash_delta_usd: Some(Usd::ZERO),
+        venue_cash_delta_usd: Some(Usd::ZERO),
+        realized_pnl_usd: None,
+        expected_fee_usd: Some(Usd::ZERO),
+        observed_fee_usd: Some(Usd::ZERO),
+        fee_delta_usd: Some(Usd::ZERO),
         resolved_by: Some("ui-demo-operator".to_owned()),
         resolved_at: Some(Utc::now()),
     }

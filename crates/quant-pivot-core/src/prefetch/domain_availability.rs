@@ -579,13 +579,6 @@ mod tests {
             start_date: None,
             end_date: None,
             resolved_at: None,
-            fees_enabled: false,
-            fee_rate: None,
-            fee_exponent: None,
-            fee_taker_only: None,
-            fee_rebate_rate: None,
-            fee_source: None,
-            fee_observed_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -722,7 +715,7 @@ mod tests {
         ];
         let refs: Vec<_> = markets
             .iter()
-            .map(|market| (market.market_id.clone(), market.fee_category()))
+            .map(|market| (market.market_id.clone(), market.primary_category()))
             .collect();
 
         let source = PrefetchedDomainAvailabilitySource::new(&prefetched, &domain);
@@ -1006,7 +999,7 @@ mod tests {
         let result = source
             .resolve(
                 &boundary,
-                &[(market.market_id.clone(), market.fee_category())],
+                &[(market.market_id.clone(), market.primary_category())],
             )
             .await
             .expect("resolve");

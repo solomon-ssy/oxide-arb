@@ -7,8 +7,8 @@ use crate::{
     infra::schedule::ReportScheduleRunner,
     report::{
         DefaultRecommendationComposer, DefaultReportBuilder, DefaultReportReadinessGate,
-        ReportBuilderDeps, ReportLifecycleDeps, ReportLifecycleService, ReportPublisher,
-        ReportPublisherDeps, build_report_scheduler,
+        ReportBuilderDeps, ReportFactDeliveryDeps, ReportFactDeliveryWorker, ReportLifecycleDeps,
+        ReportLifecycleService, ReportPublisher, ReportPublisherDeps, build_report_scheduler,
     },
     service::equity::EquitySnapshotService,
     service::feature_integrity::{FeatureParityRunCoordinator, RepositoryFeatureParityGate},
@@ -35,6 +35,7 @@ pub struct ReportBundleDeps<'a> {
 /// Recommendation report bundle (Phase 4+).
 pub struct ReportBundle {
     pub lifecycle: Arc<ReportLifecycleService>,
+    pub fact_delivery: Arc<ReportFactDeliveryWorker>,
     pub scheduler: Arc<dyn ReportScheduleRunner>,
     pub feature_parity: Arc<FeatureParityRunCoordinator>,
 }
@@ -85,7 +86,6 @@ impl ReportBundle {
         }));
         let publisher = Arc::new(ReportPublisher::new(ReportPublisherDeps {
             events: deps.events,
-            recommendation_writer: Arc::clone(&deps.infra.recommendation_event_writer),
             alerts: Arc::clone(&deps.governance.alerts),
             metrics: Arc::clone(&deps.infra.metrics),
         }));
@@ -94,7 +94,7 @@ impl ReportBundle {
             recommendation_repo,
             runtime_config_repo,
             builder,
-            publisher,
+            publisher: Arc::clone(&publisher),
             runtime_mode: deps.governance.runtime_mode.clone(),
             metrics: Arc::clone(&deps.infra.metrics),
             feature_parity_gate: Arc::new(RepositoryFeatureParityGate::new(Arc::clone(
@@ -102,6 +102,15 @@ impl ReportBundle {
             )
                 as Arc<dyn FeatureParityRepository>)),
             feature_parity_runs: Arc::clone(&feature_parity),
+            artifact_store: Arc::clone(&deps.research.artifact_store),
+        }));
+        let fact_delivery = Arc::new(ReportFactDeliveryWorker::new(ReportFactDeliveryDeps {
+            reports: Arc::clone(&repos.recommendation_report)
+                as Arc<dyn RecommendationReportRepository>,
+            artifacts: Arc::clone(&deps.research.artifact_store),
+            clickhouse: Arc::clone(&deps.infra.ch),
+            write_manager: Arc::clone(&deps.infra.ch_write_manager),
+            publisher,
         }));
         let scheduler = build_report_scheduler(
             Arc::clone(&lifecycle),
@@ -111,6 +120,7 @@ impl ReportBundle {
         .await?;
         Ok(Self {
             lifecycle,
+            fact_delivery,
             scheduler,
             feature_parity,
         })

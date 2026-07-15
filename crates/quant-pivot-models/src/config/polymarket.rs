@@ -3,7 +3,6 @@
 //! This is the sole venue. There is no abstraction layer for "multiple venues" —
 //! quant-pivot operates exclusively on Polymarket (Polygon chain).
 
-use super::fees::FeesConfig;
 use serde::Deserialize;
 use std::fmt;
 
@@ -19,14 +18,14 @@ pub struct PolymarketConfig {
     /// Hard timeout for the single `POST /order` attempt, in milliseconds.
     /// A timeout is ambiguous and must be reconciled; it is never retried.
     pub order_post_timeout_ms: u64,
+    /// Refresh cadence for append-only CLOB market-info observations.
+    pub clob_market_info_refresh_secs: u64,
     /// EVM chain ID; must be Polygon (`137`) — validated at startup.
     pub chain_id: u64,
     /// On-chain (Polygon RPC) parameters.
     pub onchain: OnchainConfig,
     /// Gasless relayer used for Proxy / Gnosis Safe money-moving transactions.
     pub relayer: RelayerConfig,
-    /// Per-category fee schedule.
-    pub fees: FeesConfig,
 }
 
 impl Default for PolymarketConfig {
@@ -35,10 +34,10 @@ impl Default for PolymarketConfig {
             clob_base_url: default_clob_url(),
             clob_ws_url: default_clob_ws_url(),
             order_post_timeout_ms: default_order_post_timeout(),
+            clob_market_info_refresh_secs: default_clob_market_info_refresh_secs(),
             chain_id: default_chain_id(),
             onchain: OnchainConfig::default(),
             relayer: RelayerConfig::default(),
-            fees: FeesConfig::default(),
         }
     }
 }
@@ -54,6 +53,9 @@ const fn default_chain_id() -> u64 {
 }
 const fn default_order_post_timeout() -> u64 {
     15_000
+}
+const fn default_clob_market_info_refresh_secs() -> u64 {
+    900
 }
 
 /// On-chain interaction parameters (Polygon RPC).

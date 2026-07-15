@@ -232,7 +232,7 @@ impl MarketCandidateProvider {
     ) -> QuantResult<HashMap<MarketId, DomainAvailability>> {
         let markets: Vec<(MarketId, MarketCategory)> = infos
             .iter()
-            .map(|info| (info.market_id.clone(), info.fee_category()))
+            .map(|info| (info.market_id.clone(), info.primary_category()))
             .collect();
         resolve_domain_availability(
             self.linkage_repo.as_ref(),
@@ -266,7 +266,7 @@ fn project_candidate(
     Ok(MarketCandidate {
         market_id: info.market_id.clone(),
         event_id: info.event_id.clone(),
-        category: info.fee_category(),
+        category: info.primary_category(),
         status: info.status,
         primary_token_id: info.token_yes.clone(),
         secondary_token_id: Some(info.token_no.clone()),

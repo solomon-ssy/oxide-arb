@@ -21,6 +21,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
 };
+use quant_pivot_research::artifact::ArtifactStore;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -32,6 +33,7 @@ use crate::{
 
 use super::{
     builder::{ReportBuilder, report_decision_at},
+    fact_bundle::prepare_report_fact_bundle,
     publisher::ReportPublisher,
     types::{BuildReportRequest, ComposedReport, ReportTrigger},
 };
@@ -63,6 +65,7 @@ pub struct ReportLifecycleDeps {
     pub metrics: Arc<MetricsHub>,
     pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
     pub feature_parity_runs: Arc<FeatureParityRunCoordinator>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
 }
 
 /// End-to-end report lifecycle entry point.
@@ -76,6 +79,7 @@ pub struct ReportLifecycleService {
     metrics: Arc<MetricsHub>,
     feature_parity_gate: Arc<dyn FeatureParityGatePort>,
     feature_parity_runs: Arc<FeatureParityRunCoordinator>,
+    artifact_store: Arc<dyn ArtifactStore>,
     run_lock: Mutex<()>,
     /// Post-commit event sink for intents atomically invalidated by report or
     /// recommendation terminal repository commands.
@@ -96,6 +100,7 @@ impl ReportLifecycleService {
             metrics: deps.metrics,
             feature_parity_gate: deps.feature_parity_gate,
             feature_parity_runs: deps.feature_parity_runs,
+            artifact_store: deps.artifact_store,
             run_lock: Mutex::new(()),
             intent_terminal_events: OnceLock::new(),
         }
@@ -385,15 +390,16 @@ impl ReportLifecycleService {
                 .commit_state_id("report commit")
                 .await?,
         );
+        if let Err(error) = prepare_report_fact_bundle(&self.artifact_store, &mut composed).await {
+            self.publish_failed(&trigger_key, runtime_mode, decision_at, &error);
+            return Err(error);
+        }
         match self
             .report_repo
             .create_report(composed.transaction.clone())
             .await
         {
-            Ok(report) => {
-                self.publisher.publish_committed(&report, &composed).await;
-                Ok(report)
-            }
+            Ok(report) => Ok(report),
             Err(error) => {
                 if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
                     self.feature_parity_runs

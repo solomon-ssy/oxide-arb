@@ -7,7 +7,6 @@ use sea_orm::{
 use crate::{
     enums::{
         common::{MarketCategory, TickSize},
-        fee::FeeSource,
         market::MarketStatus,
     },
     idens::event::Event,
@@ -39,13 +38,6 @@ pub enum Market {
     StartDate,
     EndDate,
     ResolvedAt,
-    FeesEnabled,
-    FeeRate,
-    FeeExponent,
-    FeeTakerOnly,
-    FeeRebateRate,
-    FeeSource,
-    FeeObservedAt,
     CreatedAt,
     UpdatedAt,
 }
@@ -89,30 +81,6 @@ pub fn table() -> TableCreateStatement {
         )
         .col(
             ColumnDef::new(Market::ResolvedAt)
-                .timestamp_with_time_zone()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(Market::FeesEnabled)
-                .boolean()
-                .not_null()
-                .default(true),
-        )
-        .col(ColumnDef::new(Market::FeeRate).decimal_len(20, 18).null())
-        .col(
-            ColumnDef::new(Market::FeeExponent)
-                .decimal_len(20, 18)
-                .null(),
-        )
-        .col(ColumnDef::new(Market::FeeTakerOnly).boolean().null())
-        .col(
-            ColumnDef::new(Market::FeeRebateRate)
-                .decimal_len(20, 18)
-                .null(),
-        )
-        .col(column::pg_enum_null::<FeeSource>(Market::FeeSource))
-        .col(
-            ColumnDef::new(Market::FeeObservedAt)
                 .timestamp_with_time_zone()
                 .null(),
         )

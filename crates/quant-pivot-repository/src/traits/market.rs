@@ -1,11 +1,11 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo, CatalogWindowInfo,
-        DecisionBoundary, EventCatalogVersionInfo, MarketCatalogVersionInfo, MarketInfo,
-        MarketPageQuery, NewFailedCatalogSyncBatch, Paginated, UpsertMarket,
+        CatalogBatchChainInfo, CatalogCommit, CatalogSnapshotInfo, CatalogSyncBatchInfo,
+        CatalogWindowInfo, DecisionBoundary, EventCatalogVersionInfo, MarketCatalogVersionInfo,
+        MarketInfo, MarketPageQuery, NewFailedCatalogSyncBatch, Paginated, UpsertMarket,
     },
-    types::{EventId, MarketId},
+    types::{ClobMarketInfoVersion, EventId, MarketId},
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -27,6 +27,40 @@ pub trait MarketRepository: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
+/// Append-only bitemporal authority for CLOB market parameters and fees.
+#[async_trait::async_trait]
+pub trait ClobMarketInfoRepository: Send + Sync {
+    async fn insert_observation(
+        &self,
+        observation: ClobMarketInfoVersion,
+    ) -> Result<ClobMarketInfoVersion, StorageError>;
+
+    async fn at(
+        &self,
+        market_id: &MarketId,
+        effective_at: chrono::DateTime<chrono::Utc>,
+        available_at_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<ClobMarketInfoVersion>, StorageError>;
+
+    async fn latest(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<Option<ClobMarketInfoVersion>, StorageError>;
+
+    /// Every PIT-visible version needed to replay a market page: the latest
+    /// baseline before `effective_from`, followed by all versions in the
+    /// half-open effective window.
+    async fn window(
+        &self,
+        _market_ids: &[MarketId],
+        _effective_from: chrono::DateTime<chrono::Utc>,
+        _effective_to: chrono::DateTime<chrono::Utc>,
+        _available_by: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<ClobMarketInfoVersion>, StorageError> {
+        Ok(Vec::new())
+    }
+}
+
 /// Atomic writer and point-in-time reader for the immutable Gamma catalog ledger.
 ///
 /// Historical/replay callers must use this repository instead of the mutable
@@ -45,6 +79,18 @@ pub trait CatalogVersionRepository: Send + Sync {
 
     /// Commit watermark of the newest complete catalog sync batch.
     async fn watermark(&self) -> Result<Option<chrono::DateTime<chrono::Utc>>, StorageError>;
+
+    /// Freeze the complete committed batch chain visible to a source slice.
+    ///
+    /// Implementations return `None` when no complete baseline was committed
+    /// by `window_start` or when no committed batch is visible by `pit_cutoff`.
+    async fn batch_chain(
+        &self,
+        _window_start: chrono::DateTime<chrono::Utc>,
+        _pit_cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<CatalogBatchChainInfo>, StorageError> {
+        Ok(None)
+    }
 
     async fn market_at(
         &self,

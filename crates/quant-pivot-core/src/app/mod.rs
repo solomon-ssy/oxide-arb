@@ -1,6 +1,5 @@
 //! Application context — system composition root and lifecycle manager.
 
-pub mod archive_partition_worker;
 pub mod attribution_worker;
 pub mod book_update_coalescer;
 pub mod bootstrap;
@@ -21,6 +20,7 @@ pub mod reconciliation_worker;
 pub mod report_scheduler;
 pub mod research_job;
 pub mod research_job_worker;
+pub mod research_readiness_worker;
 pub mod runtime_tasks;
 pub mod settlement_redeem_worker;
 pub mod system_status_broadcaster;
@@ -31,6 +31,7 @@ pub mod trade_tape_worker;
 pub mod web_services;
 
 mod bundles;
+mod clob_market_info_worker;
 
 pub use bundles::*;
 

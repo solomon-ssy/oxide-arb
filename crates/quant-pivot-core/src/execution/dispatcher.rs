@@ -34,8 +34,8 @@ use quant_pivot_models::{
     },
     hashing::CanonicalDigest,
     types::{
-        EntryOrderSpec, ExecutionOrderId, FeatureParityStateId, OrderIntentId, Price,
-        ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
+        EntryOrderSpec, ExecutionOrderId, FeatureParityStateId, OrderIntentId, PreparedVenueOrder,
+        Price, ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -44,7 +44,9 @@ use quant_pivot_repository::traits::{
 
 use crate::{
     execution::{
-        admission::{AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine},
+        admission::{
+            AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine, prepare_entry_order,
+        },
         breaker::ExecutionBreaker,
         intent_lifecycle::IntentLifecyclePublisher,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
@@ -74,6 +76,16 @@ pub struct ExecutionDispatcherDeps {
     /// revalidated under the parity advisory lock inside the write-ahead
     /// transaction so a newly opened latch cannot race entry.
     pub feature_parity_gate: Arc<dyn FeatureParityGatePort>,
+}
+
+struct VenueSubmissionContext<'a> {
+    intent_id: &'a OrderIntentId,
+    intent: &'a OrderIntentInfo,
+    recommendation: &'a RecommendationInfo,
+    prepared_order: &'a PreparedVenueOrder,
+    prior_status: OrderIntentStatus,
+    feature_parity_state_id: &'a FeatureParityStateId,
+    now: DateTime<Utc>,
 }
 
 /// Production [`ExecutionSubmitPort`]: the single bridge from an admitted intent
@@ -120,7 +132,7 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
         // 2. Evaluate against a read-only frozen snapshot. The exact condition
         //    revision and admission fingerprint are revalidated by the atomic
         //    claim below, so a concurrent correction cannot slip through.
-        let (recommendation, condition_claim) =
+        let (recommendation, condition_claim, prepared_order) =
             Box::pin(self.evaluate_admission(intent_id, &intent, now)).await?;
         // 3. Atomically claim intent + condition. There is no observable
         //    `AdmissionPending` intent with an unconsumed condition.
@@ -143,14 +155,15 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             Ok(state_id) => state_id,
             Err(error) => return Err(self.revert_and(intent_id, error).await),
         };
-        self.venue_submit_and_settle(
+        self.venue_submit_and_settle(VenueSubmissionContext {
             intent_id,
-            &intent,
-            &recommendation,
+            intent: &intent,
+            recommendation: &recommendation,
+            prepared_order: &prepared_order,
             prior_status,
-            &feature_parity_state_id,
+            feature_parity_state_id: &feature_parity_state_id,
             now,
-        )
+        })
         .await
     }
 }
@@ -163,13 +176,14 @@ impl CoreExecutionDispatcher {
         intent_id: &OrderIntentId,
         intent: &OrderIntentInfo,
         now: DateTime<Utc>,
-    ) -> QuantResult<(RecommendationInfo, EntryConditionClaim)> {
+    ) -> QuantResult<(RecommendationInfo, EntryConditionClaim, PreparedVenueOrder)> {
         let input = match self.deps.admission_builder.build(intent, now).await {
             Ok(input) => input,
             Err(error) => return Err(error),
         };
         let recommendation = input.recommendation.clone();
         let condition = input.condition.clone();
+        let prepared_order = prepare_entry_order(&input)?;
         let decision = match self.deps.admission.evaluate(input).await {
             Ok(decision) => decision,
             Err(error) => return Err(error),
@@ -193,6 +207,7 @@ impl CoreExecutionDispatcher {
                         admission_state_version,
                         claimed_at: now,
                     },
+                    prepared_order,
                 ))
             }
             AdmissionOutcome::Deny => {
@@ -223,15 +238,19 @@ impl CoreExecutionDispatcher {
     /// health, settle the ledger, and fan out the post-settle intent lifecycle.
     async fn venue_submit_and_settle(
         &self,
-        intent_id: &OrderIntentId,
-        intent: &OrderIntentInfo,
-        recommendation: &RecommendationInfo,
-        prior_status: OrderIntentStatus,
-        feature_parity_state_id: &FeatureParityStateId,
-        now: DateTime<Utc>,
+        context: VenueSubmissionContext<'_>,
     ) -> QuantResult<ExecutionOrderInfo> {
+        let VenueSubmissionContext {
+            intent_id,
+            intent,
+            recommendation,
+            prepared_order,
+            prior_status,
+            feature_parity_state_id,
+            now,
+        } = context;
         let spec = intent.entry_order_json.clone();
-        let new_order = build_new_execution_order(intent, recommendation, &spec)?;
+        let new_order = build_new_execution_order(intent, recommendation, &spec, prepared_order)?;
         let execution_order = match self
             .deps
             .submission
@@ -252,7 +271,7 @@ impl CoreExecutionDispatcher {
         let result = self
             .deps
             .order_client
-            .submit(build_venue_order(recommendation, &spec))
+            .submit(build_venue_order(recommendation, prepared_order))
             .await
             .with_order_type_semantics(&spec.order_type);
 
@@ -406,6 +425,7 @@ fn build_new_execution_order(
     intent: &OrderIntentInfo,
     recommendation: &RecommendationInfo,
     spec: &EntryOrderSpec,
+    prepared_order: &PreparedVenueOrder,
 ) -> Result<NewExecutionOrder, ExecutionError> {
     Ok(NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
@@ -416,8 +436,11 @@ fn build_new_execution_order(
         side: spec.side,
         order_type: order_type_kind(&spec.order_type),
         price: spec.limit_price,
-        shares: spec.projected_shares(),
-        cost_usd: spec.notional(),
+        shares: prepared_order.expected_filled_shares,
+        cost_usd: prepared_order
+            .cash_budget
+            .unwrap_or_else(|| spec.notional()),
+        prepared_order_json: prepared_order.clone(),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -429,16 +452,20 @@ fn build_new_execution_order(
     })
 }
 
-fn build_venue_order(recommendation: &RecommendationInfo, spec: &EntryOrderSpec) -> VenueOrder {
+fn build_venue_order(
+    recommendation: &RecommendationInfo,
+    prepared: &PreparedVenueOrder,
+) -> VenueOrder {
     VenueOrder {
         market_id: recommendation.market_id.clone(),
-        token_id: spec.token_id.clone(),
-        side: spec.side,
-        price: spec.limit_price,
-        amount: spec.amount,
-        order_type: spec.order_type,
-        post_only: spec.post_only,
-        category: recommendation.identity.category,
+        token_id: prepared.token_id.clone(),
+        side: prepared.side,
+        price: prepared.worst_price,
+        amount: prepared.venue_amount,
+        order_type: prepared.order_type,
+        post_only: prepared.post_only,
+        expected_fee: prepared.expected_fee,
+        fee_schedule_hash: prepared.fee_schedule.schedule_hash.clone(),
     }
 }
 
@@ -463,7 +490,7 @@ fn position_fill(
         side: recommendation.outcome_side,
         shares: result.filled_shares,
         price,
-        cost_usd: fill_cost + result.fee_paid,
+        cost_usd: fill_cost + result.expected_fee,
         filled_at: result.responded_at,
         source: AccountSource::Polymarket,
     }
@@ -485,6 +512,7 @@ fn reconciliation_row(
         venue_ref: result.venue_order_id.as_ref().map(ToString::to_string),
         shares: Some(result.filled_shares),
         price: result.avg_fill_price,
+        fee_evidence: Some(result.fee_evidence.clone()),
     }]);
     NewReconciliation {
         reconciliation_id: ReconciliationId::from_v7(),
@@ -494,7 +522,14 @@ fn reconciliation_row(
         evidence_json: evidence,
         venue_filled_shares: Some(result.filled_shares),
         venue_avg_price: result.avg_fill_price,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: Some(Usd::new(
+            execution_order.prepared_order_json.total_cash_delta,
+        )),
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: Some(result.expected_fee),
+        observed_fee_usd: result.observed_fee,
+        fee_delta_usd: result.observed_fee.map(|fee| fee - result.expected_fee),
         resolved_by: None,
         resolved_at: None,
     }
@@ -510,7 +545,7 @@ fn build_ledger_write(
 ) -> SubmissionLedgerWrite {
     let outcome = result.outcome;
     let fill_cost = result.filled_shares * fill_avg_price(result, spec);
-    let total_spent = fill_cost + result.fee_paid;
+    let total_spent = fill_cost + result.expected_fee;
     let common_venue_status = outcome.venue_order_status();
 
     match outcome {

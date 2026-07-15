@@ -2,7 +2,7 @@ use super::{market_filter::MarketFilter, market_registry::MarketRegistry};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    enums::common::{CategorySet, MarketCategory, TickSize},
+    enums::common::{CategorySet, TickSize},
     types::{EventId, MarketId, TokenId},
 };
 use std::{collections::HashMap, sync::Arc};
@@ -19,9 +19,6 @@ pub struct CachedMarketScanEntry {
     pub token_no: TokenId,
     /// Category memberships (market-filter source of truth).
     pub categories: CategorySet,
-    /// Pre-derived `categories.fee_category()` — cached at rebuild so the
-    /// per-sweep scan never re-derives it.
-    pub fee_category: MarketCategory,
     pub tick_size: TickSize,
     pub neg_risk: bool,
     pub settlement_deadline: Option<DateTime<Utc>>,
@@ -78,7 +75,6 @@ impl MarketCache {
                 token_yes: market.token_yes.clone(),
                 token_no: market.token_no.clone(),
                 categories: market.categories,
-                fee_category: market.fee_category(),
                 tick_size: market.tick_size,
                 neg_risk: market.neg_risk,
                 settlement_deadline: market.end_date,
@@ -109,7 +105,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
-        enums::market::MarketStatus,
+        enums::{common::MarketCategory, market::MarketStatus},
     };
     use rust_decimal_macros::dec;
 
@@ -157,7 +153,6 @@ mod tests {
             min_order_size: dec!(5),
             liquidity_usd: None,
             volume_24h: None,
-            fee_schedule: None,
             start_date: None,
             end_date,
             resolved_at: None,
@@ -218,7 +213,7 @@ mod tests {
         let cache = MarketCache::new(reg, admit_all());
         let entry = cache.get(&MarketId::new("m1")).unwrap();
         assert_eq!(entry.market_id.as_str(), "m1");
-        assert_eq!(entry.fee_category, MarketCategory::Other);
+        assert_eq!(entry.categories.primary_category(), MarketCategory::Other);
     }
 
     #[test]

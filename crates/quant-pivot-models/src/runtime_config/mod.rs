@@ -1,5 +1,5 @@
 //! Versioned, hot-reloadable runtime configuration
-//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `13`).
+//! (`schema_version` — see [`RUNTIME_CONFIG_SCHEMA_VERSION`], currently `14`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -37,7 +37,7 @@ use crate::types::SchemaVersion;
 /// migration; non-matching documents are rejected). Phase 11.4 hardening bumps
 /// to 9 for honest RankIC-weighted `RankNet` naming, `TopN` pseudo-portfolio knobs,
 /// and diagnostic `ndcg_k` under `research.training`.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(13);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(14);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -312,7 +312,7 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(13));
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, SchemaVersion::new(14));
     }
 
     #[test]

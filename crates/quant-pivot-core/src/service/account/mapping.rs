@@ -16,11 +16,15 @@ use crate::ingest::market_registry::MarketRegistry;
 #[must_use]
 pub fn map_position(venue: &VenuePosition, registry: &MarketRegistry) -> PositionSnapshot {
     let market_id = MarketId::new(&venue.condition_id);
-    let (event_id, category) = registry
-        .get_market(&market_id)
-        .map_or((None, MarketCategory::Other), |info| {
-            (Some(info.event_id.clone()), info.categories.fee_category())
-        });
+    let (event_id, category) =
+        registry
+            .get_market(&market_id)
+            .map_or((None, MarketCategory::Other), |info| {
+                (
+                    Some(info.event_id.clone()),
+                    info.categories.primary_category(),
+                )
+            });
     PositionSnapshot {
         token_id: TokenId::new(&venue.asset),
         market_id,

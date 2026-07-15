@@ -216,6 +216,8 @@ pub struct ClickHouseConfig {
     /// Maximum concurrent insert operations (semaphore). Prevents overwhelming
     /// the server under high tick ingestion rates. Default: `8`.
     pub max_concurrent_inserts: usize,
+    /// Native hot/cold/delete lifecycle for raw fact tables.
+    pub raw_lifecycle: ClickHouseRawLifecycleConfig,
 }
 
 impl Default for ClickHouseConfig {
@@ -228,6 +230,36 @@ impl Default for ClickHouseConfig {
             flush_interval_secs: default_ch_flush_interval(),
             batch_size: default_ch_batch_size(),
             max_concurrent_inserts: default_ch_max_concurrent_inserts(),
+            raw_lifecycle: ClickHouseRawLifecycleConfig::default(),
+        }
+    }
+}
+
+/// Deploy-time lifecycle policy. Deletion is disabled unless an immutable
+/// retention-plan hash is explicitly supplied.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClickHouseRawLifecycleConfig {
+    /// Days retained on the hot volume before native TTL MOVE.
+    pub hot_days: u32,
+    /// Total raw retention; Runtime v14 profiles require at least 200 days.
+    pub retention_days: u32,
+    /// `ClickHouse` volume configured by the operator for cold/object storage.
+    pub cold_volume: Option<String>,
+    /// Enable native TTL DELETE after `retention_days`.
+    pub delete_enabled: bool,
+    /// Canonical hash of the signed capacity, restore, and retention plan.
+    pub signed_retention_plan_hash: Option<String>,
+}
+
+impl Default for ClickHouseRawLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            hot_days: 14,
+            retention_days: 200,
+            cold_volume: None,
+            delete_enabled: false,
+            signed_retention_plan_hash: None,
         }
     }
 }

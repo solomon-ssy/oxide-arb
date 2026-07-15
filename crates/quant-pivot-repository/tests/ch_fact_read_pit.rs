@@ -3,7 +3,7 @@
 use chrono::Utc;
 use quant_pivot_models::{
     clickhouse::{BookL2CheckpointRow, BookMicrostructureRow, ChPrice, ChSchemaVersion},
-    config::ClickHouseConfig,
+    config::{ClickHouseConfig, ClickHouseRawLifecycleConfig},
     enums::clickhouse::ChFactSource,
     types::{ContentHash, MarketId, Price, Shares, TokenId, Usd},
 };
@@ -29,6 +29,7 @@ fn test_ch_config(port: u16) -> ClickHouseConfig {
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
+        raw_lifecycle: ClickHouseRawLifecycleConfig::default(),
     }
 }
 
@@ -37,7 +38,7 @@ async fn setup_clickhouse() -> (
     clickhouse::Client,
     testcontainers::ContainerAsync<testcontainers::GenericImage>,
 ) {
-    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "24")
+    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "26.5")
         .with_exposed_port(8123.into())
         .with_wait_for(WaitFor::http(
             HttpWaitStrategy::new("/ping")

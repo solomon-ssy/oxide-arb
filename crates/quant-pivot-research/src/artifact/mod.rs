@@ -26,6 +26,7 @@ use std::{
     fmt::{self, Display, Formatter},
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 pub type ArtifactByteStream = Pin<Box<dyn Stream<Item = QuantResult<Bytes>> + Send>>;
@@ -55,8 +56,6 @@ impl ArtifactDurability {
 /// Logical grouping for an artifact, mapped to a sub-directory / key prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArtifactNamespace {
-    /// Verified `ClickHouse` partition archives (`archives/`).
-    Archive,
     /// Frozen training datasets (`datasets/`).
     Dataset,
     /// Serialized model artifacts (`models/`).
@@ -65,6 +64,12 @@ pub enum ArtifactNamespace {
     Backtest,
     /// Row-level executable-policy evidence bundles.
     PolicyEvidence,
+    /// Immutable point-in-time source objects and manifests.
+    SourceSlice,
+    /// Atomic report-fact outbox bundles awaiting verified `ClickHouse` delivery.
+    ReportFacts,
+    /// Signed operational-readiness observations consumed by fit preflight.
+    ReadinessEvidence,
 }
 
 impl ArtifactNamespace {
@@ -72,11 +77,13 @@ impl ArtifactNamespace {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Archive => "archives",
             Self::Dataset => "datasets",
             Self::Model => "models",
             Self::Backtest => "backtests",
             Self::PolicyEvidence => "policy-evidence",
+            Self::SourceSlice => "source-slices",
+            Self::ReportFacts => "report-facts",
+            Self::ReadinessEvidence => "readiness-evidence",
         }
     }
 }
@@ -172,10 +179,19 @@ pub trait ArtifactStore: Send + Sync {
     /// Prove the durability properties required by a publication boundary.
     async fn durability(&self, uri: &ArtifactUri) -> QuantResult<ArtifactDurability>;
 
-    /// Read immutable object identity used by archive/evidence manifests.
+    /// Read immutable object identity used by evidence manifests.
     async fn metadata(&self, uri: &ArtifactUri) -> QuantResult<ArtifactObjectMetadata>;
 
-    /// Convenience for small objects; large evidence/archive paths call
+    /// Issue a short-lived backend-signed GET URL. Production callers never
+    /// expose canonical bucket URIs or proxy multi-gigabyte evidence through
+    /// the application process.
+    async fn signed_download_url(
+        &self,
+        uri: &ArtifactUri,
+        valid_for: Duration,
+    ) -> QuantResult<String>;
+
+    /// Convenience for small objects; large evidence paths call
     /// [`Self::put_stream`] directly.
     async fn put(&self, key: ArtifactKey, bytes: &[u8]) -> QuantResult<ArtifactUri> {
         let bytes = Bytes::copy_from_slice(bytes);

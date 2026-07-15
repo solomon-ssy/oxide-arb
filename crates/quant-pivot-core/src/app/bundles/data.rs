@@ -73,7 +73,7 @@ pub struct DataBundle {
     pub pit_source: Arc<dyn PointInTimeSnapshotSource>,
     /// Best-effort nudge when pipeline status changes (web readiness).
     pub status_nudge: SystemStatusNudge,
-    /// Polymarket taker fee calculator (category schedules from Gamma sync).
+    /// Polymarket fee calculator populated only by CLOB market-info observations.
     pub fee_calculator: Arc<FeeCalculator>,
 }
 
@@ -94,7 +94,7 @@ impl DataBundle {
             None,
         ));
         let gamma_client = Arc::new(GammaClient::new(deps.deploy.market_data.gamma.clone()));
-        let fee_calculator = Arc::new(FeeCalculator::from_config(&deps.deploy.polymarket.fees));
+        let fee_calculator = Arc::new(FeeCalculator::new());
         let book_store = Arc::new(BookStore::new(Arc::clone(deps.metrics)));
         let market_registry = Arc::new(MarketRegistry::new());
         let market_filter = Arc::new(MarketFilter::new(
@@ -136,7 +136,6 @@ impl DataBundle {
             market_registry: &market_registry,
             market_cache: &market_cache,
             market_filter: &market_filter,
-            fee_calculator: &fee_calculator,
             catalog: &catalog,
             linkage_resolver: &linkage_resolver,
             status_nudge: status_nudge.clone(),
@@ -200,7 +199,6 @@ struct GammaServiceAssembly<'a> {
     market_registry: &'a Arc<MarketRegistry>,
     market_cache: &'a Arc<MarketCache>,
     market_filter: &'a Arc<MarketFilter>,
-    fee_calculator: &'a Arc<FeeCalculator>,
     catalog: &'a Arc<CatalogReadiness>,
     linkage_resolver: &'a Arc<LinkageResolverService>,
     status_nudge: SystemStatusNudge,
@@ -218,7 +216,6 @@ fn assemble_gamma_service(
         market_registry,
         market_cache,
         market_filter,
-        fee_calculator,
         catalog,
         linkage_resolver,
         status_nudge,
@@ -241,7 +238,6 @@ fn assemble_gamma_service(
         market_registry: Arc::clone(market_registry),
         market_cache: Arc::clone(market_cache),
         market_filter: Arc::clone(market_filter),
-        fee_calculator: Arc::clone(fee_calculator),
         market_repo: Arc::clone(market_repo),
         catalog_version_repo: Arc::clone(catalog_version_repo),
         cache: Arc::clone(&deps.infra.cache),

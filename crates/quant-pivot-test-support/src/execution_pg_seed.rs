@@ -3,19 +3,21 @@
 //! Shared fixture chain extracted from `pg_execution_submission` so attribution,
 //! submission, and capital tests can drive the same money-critical ledger paths.
 
-use std::{collections::BTreeMap, str::FromStr};
+use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_core::governance::{ModelScoreCalibrationPayload, model_score_content_hash};
 use quant_pivot_models::{
     domain::{
         ApproveOrderIntent, CapitalSettlement, EntryConditionClaim, ExitLedgerWrite,
-        NewAccountSnapshot, NewCapitalAllocation, NewEntryConditionArtifact,
-        NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder, NewFeatureParityState,
-        NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
-        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
-        NewRuntimeConfigVersion, NewTradePolicyArtifact, NewTradePolicyGovernanceAudit,
-        PositionExit, PositionFill, SubmissionLedgerWrite,
+        NewAccountSnapshot, NewCalibrationArtifact, NewCapitalAllocation,
+        NewEntryConditionArtifact, NewEntryConditionInstance, NewEquitySnapshot, NewExecutionOrder,
+        NewFeatureParityState, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
+        NewReportTransaction, NewRuntimeConfigVersion, NewTradePolicyArtifact,
+        NewTradePolicyGovernanceAudit, PositionExit, PositionFill, SubmissionLedgerWrite,
+        TimeWindow,
     },
     entities::{
         quant_feature_parity_state, quant_model_run, quant_model_spec, quant_model_version,
@@ -31,62 +33,76 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, BindingConstraint, EmptyReportReason,
-            EntryConditionState, ExecutionOrderState, ExitSettlementMode, FactorDirection,
-            FeatureParityLatchState, FeatureParityStateTransition, FillRequirement, ModelRunKind,
-            ModelRunStatus, OrderIntentStatus, OutcomeSide, PriceComparison, PublicationStatus,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
-            ReportKind, ReportTriggerKind, SizingModelKind, TradePolicyGovernanceAction,
-            TradePolicyStatus,
+            AccountSource, ApprovalStatus, BindingConstraint, CalibrationKind, DownsideSource,
+            EmptyReportReason, EntryConditionState, ExecutionOrderState, ExitSettlementMode,
+            FactorDirection, FeatureParityLatchState, FeatureParityStateTransition,
+            FillRequirement, ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide,
+            PriceComparison, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, RedeemPolicy, ReportKind, ReportTriggerKind, SizingModelKind,
+            TradePolicyGovernanceAction, TradePolicyStatus,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
     },
+    runtime_config::FactorCrossSectionConfig,
     types::{
         AccountPositions, AccountSnapshotId, ArtifactUri, BookSnapshotRef, Bps,
-        CapitalAllocationId, ConditionTruth, ConfidenceSummary, ConfirmationPolicy, ContentHash,
-        DataQualitySummary, ENTRY_CONDITION_EVALUATOR_VERSION, ENTRY_CONDITION_SCHEMA_VERSION,
-        EligibilitySummary, EntryConditionArtifactId, EntryConditionArtifactV1,
-        EntryConditionBinding, EntryConditionFoldState, EntryConditionInstanceId,
-        EntryConditionPlan, EntryConditionTemplate, EntryConditionV1, EntryOrderPolicy,
-        EntryOrderSpec, EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
-        ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId, ExitExecutionTemplate,
-        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureParityStateId,
-        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelInputContract,
-        ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId, OperationLogId,
-        OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
-        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
-        PositionSnapshot, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
+        CalibrationArtifactId, CapitalAllocationId, ConditionTruth, ConfidenceSummary,
+        ConfirmationPolicy, ContentHash, DataQualitySummary, ENTRY_CONDITION_EVALUATOR_VERSION,
+        ENTRY_CONDITION_SCHEMA_VERSION, EligibilitySummary, EntryConditionArtifactId,
+        EntryConditionArtifactV1, EntryConditionBinding, EntryConditionFoldState,
+        EntryConditionInstanceId, EntryConditionPlan, EntryConditionTemplate, EntryConditionV1,
+        EntryOrderPolicy, EntryOrderSpec, EntryOrderTemplate, EntryPlan, EquitySnapshotId, EventId,
+        EvidenceRefs, ExecutablePriceBasis, ExecutionEligibility, ExecutionOrderId,
+        ExitExecutionTemplate, ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry,
+        FeatureParityStateId, FeatureVectorId, MarketContext, MarketId, MarketSelectionId,
+        ModelInputContract, ModelRunId, ModelSpecId, ModelTrainingContract, ModelVersionId,
+        OperationLogId, OpportunisticExitPolicy, OrderAmount, OrderId, OrderIntentId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, PreparedFeeSchedule,
+        PreparedVenueOrder, Price, PriceCondition, Probability, RecommendationFactorBreakdown,
         RecommendationId, RecommendationIdentity, RecommendationReportId, RecommendationTradePlan,
         ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId,
-        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary, ResidualSharePolicy,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
+        ResearchEvaluationTrack, ResearchJobId, ResearchProfileRef, ResidualSharePolicy,
         RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
-        ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId, TradePolicyArtifactPayload,
-        TradePolicyCandidateSpec, TradePolicyCohort, TradePolicyCohortDimension,
-        TradePolicyCohortKey, TradePolicyCohortProvenance, TradePolicyEvidenceBundleRef,
-        TradePolicyExecutionEvidence, TradePolicyExitTemplate, TradePolicyFitContract,
-        TradePolicyGovernanceAuditId, TradePolicyParameterSource, TradePolicyPitCutoffEvidence,
-        TradePolicyQualityGate, TradePolicyValidationEvidence, TrainingDatasetId, Usd,
-        VerticalActivationTarget,
+        SignalCandidateId, SizingPlan, SourceSliceManifestRef,
+        TRADE_POLICY_ARTIFACT_FORMAT_VERSION, ThesisInvalidationPolicy, TokenId,
+        TradePolicyArtifactId, TradePolicyArtifactPayload, TradePolicyCandidateSpec,
+        TradePolicyCohort, TradePolicyCohortDimension, TradePolicyCohortKey,
+        TradePolicyCohortProvenance, TradePolicyEvidenceBundleRef, TradePolicyExecutionEvidence,
+        TradePolicyExitTemplate, TradePolicyFitContract, TradePolicyGovernanceAuditId,
+        TradePolicyParameterSource, TradePolicyPitCutoffEvidence, TradePolicyValidationEvidence,
+        TrainingDatasetId, Usd, VenueOrderAmount, VerticalActivationTarget, VerticalGateEvidence,
+        VerticalGateKind, builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEntryConditionRepository, PgEventRepository, PgExecutionSubmissionRepository,
-        PgFeatureParityRepository, PgMarketRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgModelRunRepository, PgOrderIntentRepository,
-        PgRecommendationReportRepository, PgRuntimeConfigVersionRepository,
-        PgTradePolicyRepository,
+        PgCalibrationArtifactRepository, PgEntryConditionRepository, PgEventRepository,
+        PgExecutionSubmissionRepository, PgFeatureParityRepository, PgMarketRepository,
+        PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgOrderIntentRepository, PgRecommendationReportRepository,
+        PgRuntimeConfigVersionRepository, PgTradePolicyRepository,
     },
     traits::{
-        EntryConditionRepository, EventRepository, ExecutionSubmissionRepository,
-        FeatureParityRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, ModelRunRepository, OrderIntentRepository,
-        RecommendationReportRepository, RuntimeConfigVersionRepository, TradePolicyRepository,
+        CalibrationArtifactRepository, EntryConditionRepository, EventRepository,
+        ExecutionSubmissionRepository, FeatureParityRepository, MarketRepository,
+        MarketSelectionRepository, ModelRegistryRepository, ModelRunRepository,
+        OrderIntentRepository, RecommendationReportRepository, RuntimeConfigVersionRepository,
+        TradePolicyRepository,
     },
 };
-use quant_pivot_research::hashing::ResearchHasher;
+use quant_pivot_research::{
+    artifact::ArtifactStore,
+    factors::{FrozenReferenceQuantiles, names::LIQUIDITY_DEPTH},
+    hashing::ResearchHasher,
+    model::{
+        CalibratedReturnModel, FactorWeight, IsotonicKnot, ModelArtifact, ModelArtifactHeader,
+        MonotoneMapping, ReliabilityBin, ReliabilityReport, ReturnModelSpec, ScoreMultiplierSpec,
+        SubstitutionConfidenceRules, WeightedFactorModelArtifact, model_input_contract_hash,
+    },
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{
@@ -100,7 +116,8 @@ use crate::{
 };
 
 /// shares (100) * `limit_price` (0.6).
-pub const EXECUTION_NOTIONAL: Decimal = dec!(60);
+/// Weather `SemiAuto` fixtures use the profile's only governed total cash-budget tier.
+pub const EXECUTION_NOTIONAL: Decimal = dec!(25);
 
 /// Claim the fixture's current condition and intent through the same atomic
 /// transaction used by the production dispatcher.
@@ -237,6 +254,21 @@ impl ReportBuildOptions {
 
 /// Seed runtime config + model registry once; reuse for many reports.
 pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra {
+    seed_shared_demo_infra_inner(db, None).await
+}
+
+/// Seed execution UI lineage with a loadable, calibrated model artifact.
+pub async fn seed_shared_demo_infra_with_artifact_store(
+    db: &DatabaseConnection,
+    artifact_store: &Arc<dyn ArtifactStore>,
+) -> SharedDemoInfra {
+    seed_shared_demo_infra_inner(db, Some(artifact_store)).await
+}
+
+async fn seed_shared_demo_infra_inner(
+    db: &DatabaseConnection,
+    artifact_store: Option<&Arc<dyn ArtifactStore>>,
+) -> SharedDemoInfra {
     let runtime_config_repo = PgRuntimeConfigVersionRepository::new(db.clone());
     let runtime_config_version_id = match runtime_config_repo
         .load_current()
@@ -250,12 +282,19 @@ pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra 
         }
     };
 
-    if let Some(infra) = find_existing_demo_infra(db, &runtime_config_version_id).await {
+    if let Some(infra) =
+        find_existing_demo_infra(db, &runtime_config_version_id, artifact_store).await
+    {
         return infra;
     }
 
-    let (model_version_id, model_run_id, trade_policy) =
-        seed_model_version_named(db, &runtime_config_version_id, "ui-demo-seed-model").await;
+    let (model_version_id, model_run_id, trade_policy) = seed_model_version_named(
+        db,
+        &runtime_config_version_id,
+        "ui-demo-seed-model",
+        artifact_store,
+    )
+    .await;
     SharedDemoInfra {
         feature_parity_state_id: ensure_clear_feature_parity_state(db).await,
         runtime_config_version_id,
@@ -268,6 +307,7 @@ pub async fn seed_shared_demo_infra(db: &DatabaseConnection) -> SharedDemoInfra 
 async fn find_existing_demo_infra(
     db: &DatabaseConnection,
     active_runtime_config_version_id: &RuntimeConfigVersionId,
+    artifact_store: Option<&Arc<dyn ArtifactStore>>,
 ) -> Option<SharedDemoInfra> {
     let spec = quant_model_spec::Entity::find()
         .filter(quant_model_spec::Column::Name.eq("ui-demo-seed-model"))
@@ -280,6 +320,12 @@ async fn find_existing_demo_infra(
         .one(db)
         .await
         .ok()??;
+    if let Some(store) = artifact_store {
+        let key = ModelArtifact::artifact_key(&version.artifact_hash).ok()?;
+        if !store.exists_by_key(&key).await.ok()? {
+            return None;
+        }
+    }
     let run = quant_model_run::Entity::find()
         .filter(quant_model_run::Column::ModelVersionId.eq(version.model_version_id.clone()))
         .filter(
@@ -479,6 +525,7 @@ pub fn demo_recommendation(
 ) -> NewRecommendation {
     NewRecommendation {
         recommendation_id,
+        profile_ref: fixture_profile_ref(),
         recommendation_report_id: report_id,
         rank,
         market_id: MarketId::new(market_id),
@@ -728,6 +775,7 @@ fn new_order_intent(
         runtime_mode,
         runtime_config_version_id: ids.runtime_config_version.clone(),
         model_version_id: ids.model_version.clone(),
+        profile_ref: fixture_profile_ref(),
         intent_kind: OrderIntentKind::Buy,
         status,
         approval_status,
@@ -738,12 +786,15 @@ fn new_order_intent(
             None
         },
         approved_at: approved.then(Utc::now),
-        policy_id: if status == OrderIntentStatus::ApprovedByPolicy {
+        policy_id: if runtime_mode == QuantRuntimeMode::SemiAuto {
+            Some(ids.trade_policy.artifact_id.to_string())
+        } else if status == OrderIntentStatus::ApprovedByPolicy {
             Some("auto".to_owned())
         } else {
             None
         },
-        policy_hash: None,
+        policy_hash: (runtime_mode == QuantRuntimeMode::SemiAuto)
+            .then(|| ids.trade_policy.artifact_hash.clone()),
         status_reason: None,
         admission_trace_ref: None,
         condition_instance_id: ids.condition_instance.clone(),
@@ -753,7 +804,7 @@ fn new_order_intent(
             order_type: OrderType::Fak,
             post_only: false,
             limit_price: Price::new(dec!(0.6)),
-            amount: OrderAmount::Usd(Usd::new(EXECUTION_NOTIONAL)),
+            amount: OrderAmount::CashBudget(Usd::new(EXECUTION_NOTIONAL)),
             max_slippage_bps: Bps::new(dec!(50)),
             valid_until: Utc::now() + chrono::Duration::hours(1),
         },
@@ -809,6 +860,63 @@ pub fn entry_execution_order(
     new_execution_order(intent_id, ids)
 }
 
+pub fn fixture_profile_ref() -> ResearchProfileRef {
+    builtin_research_profiles()
+        .expect("research profiles")
+        .into_iter()
+        .find(|profile| {
+            profile.spec.activation_eligibility == ResearchEvaluationTrack::SemiAutoCandidate
+        })
+        .expect("weather profile")
+        .profile_ref
+}
+
+pub fn prepared_order(
+    side: Side,
+    order_type: OrderType,
+    venue_amount: VenueOrderAmount,
+    expected_fee: Usd,
+    expected_filled_shares: Shares,
+    worst_price: Price,
+) -> PreparedVenueOrder {
+    let now = Utc::now();
+    let total_cash_delta = match (side, venue_amount) {
+        (Side::Buy, VenueOrderAmount::GrossUsd(gross)) => -(gross.inner() + expected_fee.inner()),
+        (Side::Sell, VenueOrderAmount::Shares(shares)) => {
+            shares.inner() * worst_price.inner() - expected_fee.inner()
+        }
+        _ => Decimal::ZERO,
+    };
+    PreparedVenueOrder {
+        profile_ref: fixture_profile_ref(),
+        token_id: TokenId::new("1001"),
+        side,
+        order_type,
+        post_only: false,
+        worst_price,
+        cash_budget: venue_amount.gross_usd().map(|gross| gross + expected_fee),
+        venue_amount,
+        expected_fee,
+        total_cash_delta,
+        expected_filled_shares,
+        book_hash: content_hash('b'),
+        clob_market_info_hash: content_hash('c'),
+        fee_schedule: PreparedFeeSchedule {
+            schedule_hash: content_hash('f'),
+            effective_at: now,
+            available_at: now,
+            platform_rate: dec!(0.02),
+            exponent: Decimal::ONE,
+            taker_only: true,
+            builder_maker_fee_bps: Bps::ZERO,
+            builder_taker_fee_bps: Bps::ZERO,
+            builder_attributed: false,
+        },
+        prepared_at: now,
+        valid_until: now + chrono::Duration::hours(1),
+    }
+}
+
 fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewExecutionOrder {
     NewExecutionOrder {
         execution_order_id: ExecutionOrderId::from_v7(),
@@ -821,6 +929,14 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &ExecutionTxnIds) -> NewE
         price: Price::new(dec!(0.6)),
         shares: Shares::new(dec!(100)),
         cost_usd: Usd::new(EXECUTION_NOTIONAL),
+        prepared_order_json: prepared_order(
+            Side::Buy,
+            OrderType::Fak,
+            VenueOrderAmount::GrossUsd(Usd::new(dec!(24))),
+            Usd::new(dec!(1)),
+            Shares::new(dec!(40)),
+            Price::new(dec!(0.6)),
+        ),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -879,10 +995,16 @@ fn reconciliation_row(
             venue_ref: None,
             shares: None,
             price: None,
+            fee_evidence: None,
         }]),
         venue_filled_shares: None,
         venue_avg_price: None,
-        discrepancy_usd: None,
+        expected_cash_delta_usd: None,
+        venue_cash_delta_usd: None,
+        realized_pnl_usd: None,
+        expected_fee_usd: None,
+        observed_fee_usd: None,
+        fee_delta_usd: None,
         resolved_by: None,
         resolved_at: None,
     }
@@ -905,6 +1027,14 @@ fn exit_order(
         price: Price::new(price),
         shares: Shares::new(shares),
         cost_usd: Shares::new(shares) * Price::new(price),
+        prepared_order_json: prepared_order(
+            Side::Sell,
+            OrderType::Gtc,
+            VenueOrderAmount::Shares(Shares::new(shares)),
+            Usd::ZERO,
+            Shares::new(shares),
+            Price::new(price),
+        ),
         venue_order_id: None,
         venue_status: None,
         state: ExecutionOrderState::Submitted,
@@ -972,37 +1102,29 @@ async fn seed_runtime_config_named(
 /// Production fitters in Phase 11.7 intentionally cannot create Published
 /// cohorts; this fixture exists solely to exercise guarded execution paths in
 /// isolated database tests until the 11.7.2 research activation is delivered.
-fn executable_policy_fixture_key() -> TradePolicyCohortKey {
+fn executable_policy_fixture_key(category: MarketCategory) -> TradePolicyCohortKey {
+    let profile_ref = builtin_research_profiles()
+        .expect("research profiles")
+        .into_iter()
+        .find(|profile| {
+            profile.spec.activation_eligibility == ResearchEvaluationTrack::SemiAutoCandidate
+        })
+        .expect("weather profile")
+        .profile_ref;
     let dimension = TradePolicyCohortDimension {
         methodology_id: "test-only-structural-volatility-v1".to_owned(),
         methodology_hash: content_hash('7'),
         bucket_id: "fixture".to_owned(),
     };
     TradePolicyCohortKey {
-        category: MarketCategory::Politics,
-        horizon_secs: 3_600,
+        profile_ref,
+        category,
+        horizon_secs: 86_400,
         entry_price_min: Price::new(dec!(0.01)),
         entry_price_max: Price::new(dec!(0.99)),
-        notional_tier: Usd::new(dec!(25)),
+        cash_budget_tier: Usd::new(dec!(25)),
         liquidity: dimension.clone(),
         volatility: dimension,
-    }
-}
-
-const fn executable_policy_fixture_gate() -> TradePolicyQualityGate {
-    TradePolicyQualityGate {
-        min_effective_sample_size: 100,
-        min_full_l2_coverage: dec!(0.95),
-        min_common_candidate_support: dec!(0.95),
-        min_passive_reconciled_trade_coverage: dec!(0.95),
-        min_fee_catalog_coverage: Decimal::ONE,
-        min_universe_coverage: dec!(0.95),
-        min_cpcv_paths: 21,
-        min_deflated_sharpe_ratio: dec!(0.95),
-        max_probability_of_backtest_overfitting: dec!(0.5),
-        max_ambiguous_touch_rate: dec!(0.05),
-        max_depth_failure_rate: dec!(0.05),
-        min_lower_confidence_utility_bps: Bps::ZERO,
     }
 }
 
@@ -1043,7 +1165,7 @@ fn executable_policy_fixture_cohort(key: TradePolicyCohortKey) -> TradePolicyCoh
         probability_of_backtest_overfitting: Decimal::ZERO,
         ambiguous_touch_rate: Decimal::ZERO,
         depth_failure_rate: Decimal::ZERO,
-        lower_confidence_utility_bps: Some(Bps::new(dec!(1))),
+        lower_confidence_utility_bps: Some(Bps::new(dec!(2))),
         parameter_source: TradePolicyParameterSource {
             relaxed_dimensions: Vec::new(),
             source_sample_count: 100,
@@ -1095,21 +1217,52 @@ fn executable_policy_fixture_payload(
     let candidate_set_hash = ResearchHasher::canonical(&candidates).expect("candidate hash");
     let methodology_hash = content_hash('9');
     let latency_profile_hash = content_hash('a');
+    let latency_evidence_id = Uuid::now_v7();
     let trial_ledger_hash = content_hash('6');
+    let profile = builtin_research_profiles()
+        .expect("research profiles")
+        .into_iter()
+        .find(|profile| profile.profile_ref == cohort_key.profile_ref)
+        .expect("cohort profile");
+    let vertical_gate_evidence = if cohort_key.category == MarketCategory::Weather {
+        vec![VerticalGateEvidence {
+            gate: VerticalGateKind::WeatherNoaaProxy,
+            target: VerticalActivationTarget::SemiAuto,
+            evidence_window_start: now - chrono::Duration::days(31),
+            evidence_window_end: now,
+            sample_count: 500,
+            distinct_subject_count: 20,
+            distinct_local_dates: 30,
+            availability: dec!(0.99),
+            agreement_wilson_lower_bound: dec!(0.95),
+            target_subject_sample_count: Some(20),
+            target_subject_wilson_lower_bound: Some(dec!(0.90)),
+            unresolved_mismatch_count: 0,
+            gaps_recovered: true,
+            methodology_hash: content_hash('9'),
+        }]
+    } else {
+        Vec::new()
+    };
     TradePolicyArtifactPayload {
         format_version: TRADE_POLICY_ARTIFACT_FORMAT_VERSION,
         activation_target: VerticalActivationTarget::SemiAuto,
         fit_contract: TradePolicyFitContract {
+            profile_ref: profile.profile_ref,
+            evaluation_track: ResearchEvaluationTrack::SemiAutoCandidate,
+            research_program_hash: content_hash('7'),
             source_dataset_id: TrainingDatasetId::from_v7(),
+            model_version_id: ModelVersionId::from_v7(),
             runtime_config_version_id: runtime_config_version_id.clone(),
-            fit_window_start: now - chrono::Duration::days(30),
+            fit_window_start: now - chrono::Duration::days(92),
             fit_window_end: now - chrono::Duration::days(2),
             pit_cutoff: now - chrono::Duration::days(1),
-            horizon_secs: 3_600,
-            notional_tiers: vec![Usd::new(dec!(25)), Usd::new(dec!(100)), Usd::new(dec!(500))],
+            target_horizon_secs: profile.spec.target_horizon_secs,
+            cash_budget_tiers: profile.spec.allowed_cash_budget_tiers,
             methodology_hash: methodology_hash.clone(),
+            latency_evidence_id,
             latency_profile_hash: latency_profile_hash.clone(),
-            quality_gate: executable_policy_fixture_gate(),
+            quality_gate: profile.spec.quality_gate,
         },
         source_dataset_hash: content_hash('1'),
         feature_schema_hash: content_hash('2'),
@@ -1137,14 +1290,16 @@ fn executable_policy_fixture_payload(
                 .expect("artifact uri"),
             manifest_hash: content_hash('b'),
             simulator_hash: content_hash('c'),
-            code_hash: content_hash('d'),
+            replay_kernel_hash: content_hash('d'),
             methodology_hash,
+            latency_evidence_id,
             latency_profile_hash,
             catalog_ledger_hash: content_hash('e'),
-            archive_manifest_set_hash: content_hash('f'),
+            source_slice_manifest_hash: content_hash('f'),
+            fit_job_id: ResearchJobId::from_v7(),
             trial_ledger_hash: trial_ledger_hash.clone(),
         }),
-        vertical_gate_evidence: Vec::new(),
+        vertical_gate_evidence,
         cohorts: vec![executable_policy_fixture_cohort(cohort_key.clone())],
         validation: TradePolicyValidationEvidence {
             trial_ledger_cutoff: Some(now),
@@ -1158,21 +1313,23 @@ fn executable_policy_fixture_payload(
             depth_failure_rate: Some(Decimal::ZERO),
             common_candidate_support: Some(Decimal::ONE),
             fee_catalog_coverage: Some(Decimal::ONE),
-            universe_coverage: Some(Decimal::ONE),
+            eligible_market_coverage: Some(Decimal::ONE),
         },
     }
 }
 
-async fn seed_executable_trade_policy_fixture(
+async fn seed_trade_policy_fixture(
     db: &DatabaseConnection,
     runtime_config_version_id: &RuntimeConfigVersionId,
+    category: MarketCategory,
 ) -> TradePolicyCohortProvenance {
     let now = Utc::now();
-    let cohort_key = executable_policy_fixture_key();
+    let cohort_key = executable_policy_fixture_key(category);
     let payload = executable_policy_fixture_payload(now, runtime_config_version_id, &cohort_key);
+    let blockers = payload.publication_blockers();
     assert!(
-        payload.is_publishable(),
-        "execution fixture policy must pass its frozen gates"
+        blockers.is_empty(),
+        "execution fixture policy must pass its frozen gates: {blockers:?}"
     );
     let artifact_hash = ResearchHasher::canonical(&payload).expect("hash fixture policy");
     let artifact_id = TradePolicyArtifactId::from_content_hash(&artifact_hash);
@@ -1213,10 +1370,147 @@ async fn seed_executable_trade_policy_fixture(
     }
 }
 
+/// Seed a coherent Published policy for report-pipeline integration tests.
+///
+/// The production fitter remains the only non-test path that may construct a
+/// policy artifact. This helper exists to bind report fixtures to the same
+/// immutable policy contract enforced by serving.
+pub async fn seed_report_trade_policy_fixture(
+    db: &DatabaseConnection,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+    category: MarketCategory,
+) -> TradePolicyCohortProvenance {
+    seed_trade_policy_fixture(db, runtime_config_version_id, category).await
+}
+
+async fn seed_executable_trade_policy_fixture(
+    db: &DatabaseConnection,
+    runtime_config_version_id: &RuntimeConfigVersionId,
+) -> TradePolicyCohortProvenance {
+    seed_trade_policy_fixture(db, runtime_config_version_id, MarketCategory::Weather).await
+}
+
+/// Seed a coherent held-out score calibration for model/report integration tests.
+pub async fn seed_model_score_calibration_fixture(
+    db: &DatabaseConnection,
+    model_version_id: &ModelVersionId,
+) -> CalibrationArtifactId {
+    let calibration_id = CalibrationArtifactId::from_v7();
+    let fit_window_start = Utc::now() - Duration::days(90);
+    let fit_window_end = Utc::now() - Duration::days(1);
+    let fit_window = TimeWindow::new(fit_window_start, fit_window_end);
+    let calibration_split_hash = content_hash('c');
+    let calibration_payload = ModelScoreCalibrationPayload {
+        model_version_id: model_version_id.clone(),
+        calibration_dataset_id: TrainingDatasetId::from_v7(),
+        mapping: MonotoneMapping::Isotonic {
+            knots: vec![
+                IsotonicKnot {
+                    score: Decimal::ZERO,
+                    probability: dec!(0.55),
+                },
+                IsotonicKnot {
+                    score: Decimal::ONE,
+                    probability: dec!(0.65),
+                },
+            ],
+        },
+        reliability: ReliabilityReport {
+            bins: vec![ReliabilityBin {
+                predicted_lo: Decimal::ZERO,
+                predicted_hi: Decimal::ONE,
+                sample_count: 500,
+                mean_predicted: Probability::new(dec!(0.60)),
+                empirical_frequency: Probability::new(dec!(0.60)),
+                wilson_ci: (Probability::new(dec!(0.55)), Probability::new(dec!(0.65))),
+                mean_adverse_excursion_bps: Some(dec!(-500)),
+            }],
+            brier_score: dec!(0.24),
+            log_loss: dec!(0.67),
+            ece: dec!(0.02),
+            n_samples: 500,
+        },
+    };
+    let calibration_hash =
+        model_score_content_hash(&fit_window, &calibration_split_hash, &calibration_payload)
+            .expect("hash demo calibration artifact");
+    PgCalibrationArtifactRepository::new(db.clone())
+        .create(NewCalibrationArtifact {
+            artifact_id: calibration_id.clone(),
+            kind: CalibrationKind::ModelScore,
+            content_hash: calibration_hash,
+            fit_window_start,
+            fit_window_end,
+            calibration_split_hash,
+            sample_count: 500,
+            payload_json: serde_json::to_value(calibration_payload)
+                .expect("serialize demo calibration artifact"),
+            active: true,
+        })
+        .await
+        .expect("seed active demo calibration artifact");
+
+    calibration_id
+}
+
+async fn seed_calibrated_execution_model_artifact(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    model_version_id: &ModelVersionId,
+    trade_policy: &TradePolicyCohortProvenance,
+) -> ContentHash {
+    let calibration_id = seed_model_score_calibration_fixture(db, model_version_id).await;
+
+    let input_contract = ModelInputContract::single_required("book.mid");
+    let input_contract_hash =
+        model_input_contract_hash(&input_contract).expect("hash demo model input contract");
+    let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
+        header: ModelArtifactHeader {
+            model_version_id: model_version_id.clone(),
+            profile_ref: fixture_profile_ref(),
+            model_family: ModelFamily::WeightedFactor,
+            feature_schema_hash: content_hash('f'),
+            factor_schema_hash: content_hash('6'),
+            trade_policy_artifact_id: Some(trade_policy.artifact_id.clone()),
+            trade_policy_hash: Some(trade_policy.artifact_hash.clone()),
+        },
+        training_dataset_hash: content_hash('d'),
+        training_input_hash: content_hash('7'),
+        input_contract,
+        input_contract_hash,
+        weights: vec![FactorWeight {
+            factor: LIQUIDITY_DEPTH,
+            weight: Decimal::ONE,
+        }],
+        prediction_horizon_secs: 86_400,
+        multipliers: ScoreMultiplierSpec::conservative(),
+        substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+        return_model: ReturnModelSpec::Calibrated(CalibratedReturnModel {
+            calibrator_ref: calibration_id,
+            downside_source: DownsideSource::MfeMae,
+        }),
+        factor_cross_section: FactorCrossSectionConfig::default(),
+        frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
+        objective_report: None,
+        category_scope: None,
+    }));
+    artifact.validate().expect("validate demo model artifact");
+    let artifact_hash = artifact.content_hash().expect("hash demo model artifact");
+    store
+        .put(
+            ModelArtifact::artifact_key(&artifact_hash).expect("key demo model artifact"),
+            &artifact.to_bytes().expect("serialize demo model artifact"),
+        )
+        .await
+        .expect("store demo model artifact");
+    artifact_hash
+}
+
 async fn seed_model_version_named(
     db: &DatabaseConnection,
     rc_id: &RuntimeConfigVersionId,
     model_name: &str,
+    artifact_store: Option<&Arc<dyn ArtifactStore>>,
 ) -> (ModelVersionId, ModelRunId, TradePolicyCohortProvenance) {
     let registry = PgModelRegistryRepository::new(db.clone());
     let model_spec_id = if let Some(existing) = quant_model_spec::Entity::find()
@@ -1251,12 +1545,20 @@ async fn seed_model_version_named(
         .await
         .expect("next demo model version");
     let model_version_id = ModelVersionId::from_v7();
+    let artifact_hash = match artifact_store {
+        Some(store) => {
+            seed_calibrated_execution_model_artifact(db, store, &model_version_id, &trade_policy)
+                .await
+        }
+        None => content_hash('a'),
+    };
     registry
         .create_model_version(NewModelVersion {
             model_version_id: model_version_id.clone(),
             model_spec_id,
             version,
-            artifact_hash: content_hash('a'),
+            artifact_hash,
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: Some(trade_policy.artifact_id.clone()),
             trade_policy_hash: Some(trade_policy.artifact_hash.clone()),
@@ -1382,6 +1684,7 @@ fn build_report_transaction_inner(
         entry_condition_artifacts,
         entry_condition_instances,
         sampled_feature_parity: Some(sampled_feature_parity),
+        fact_delivery: Some(report_fixtures::pending_fact_delivery(&ids.report)),
         operation_log: report_operation_log(ids),
     }
 }
@@ -1503,6 +1806,7 @@ fn fixture_report(
         .sum();
     let report = NewRecommendationReport {
         recommendation_report_id: ids.report.clone(),
+        profile_ref: fixture_profile_ref(),
         report_kind: ReportKind::TopN,
         trigger_kind: ReportTriggerKind::Scheduled,
         trigger_key: trigger_key.to_owned(),
@@ -1533,8 +1837,16 @@ fn fixture_report(
     (report, allocated_usd)
 }
 
-fn content_hash(seed: char) -> ContentHash {
+pub fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
+}
+
+pub fn source_slice_ref(seed: char) -> SourceSliceManifestRef {
+    SourceSliceManifestRef {
+        manifest_uri: ArtifactUri::parse(format!("s3://fixture/source-slices/{seed}.json"))
+            .expect("source-slice URI"),
+        manifest_hash: content_hash(seed),
+    }
 }
 
 fn new_account_snapshot(ids: &ExecutionTxnIds) -> NewAccountSnapshot {

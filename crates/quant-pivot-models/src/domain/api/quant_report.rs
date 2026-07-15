@@ -9,15 +9,17 @@
 use crate::{
     domain::{
         DecisionBoundaryEvidenceView, ModelRouteEvidenceView, RecommendationDelta,
-        RecommendationReportInfo, ReportDiff, pagination::PageRequest,
+        RecommendationReportInfo, ReportDiff, ReportFactDeliveryInfo, pagination::PageRequest,
     },
     enums::quant::{
         AccountSource, EmptyReportReason, FeatureParityStage, OutcomeSide, QuantRuntimeMode,
-        RecommendationReportStatus, ReportKind, ReportTriggerKind,
+        RecommendationReportStatus, ReportFactDeliveryStatus, ReportKind, ReportTriggerKind,
     },
     types::{
-        AccountSnapshotId, EligibilitySummary, MarketSelectionId, ModelRunId, ModelVersionId,
-        RecommendationId, RecommendationReportId, ReportSummary, RuntimeConfigVersionId, Usd,
+        AccountSnapshotId, ContentHash, EligibilitySummary, EventId, FeatureVectorId, MarketId,
+        MarketSelectionId, ModelRunId, ModelVersionId, RecommendationId, RecommendationReportId,
+        ReportFunnelReason, ReportFunnelStage, ReportSummary, ResearchProfileRef,
+        RuntimeConfigVersionId, SignalCandidateId, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -30,6 +32,7 @@ use validator::Validate;
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantReportView {
     pub recommendation_report_id: RecommendationReportId,
+    pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub trigger_kind: ReportTriggerKind,
     pub status: RecommendationReportStatus,
@@ -52,6 +55,7 @@ impl From<RecommendationReportInfo> for QuantReportView {
     fn from(info: RecommendationReportInfo) -> Self {
         Self {
             recommendation_report_id: info.recommendation_report_id,
+            profile_ref: info.profile_ref,
             report_kind: info.report_kind,
             trigger_kind: info.trigger_kind,
             status: info.status,
@@ -77,6 +81,7 @@ impl From<RecommendationReportInfo> for QuantReportView {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuantReportDetailView {
     pub recommendation_report_id: RecommendationReportId,
+    pub profile_ref: ResearchProfileRef,
     pub report_kind: ReportKind,
     pub trigger_kind: ReportTriggerKind,
     pub trigger_key: String,
@@ -95,6 +100,7 @@ pub struct QuantReportDetailView {
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub summary: ReportSummary,
+    pub fact_delivery: Option<ReportFactDeliveryView>,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expired_at: Option<DateTime<Utc>>,
@@ -106,6 +112,7 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
     fn from(info: RecommendationReportInfo) -> Self {
         Self {
             recommendation_report_id: info.recommendation_report_id,
+            profile_ref: info.profile_ref,
             report_kind: info.report_kind,
             trigger_kind: info.trigger_kind,
             trigger_key: info.trigger_key,
@@ -124,6 +131,7 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
             model_version_id: info.model_version_id,
             market_selection_id: info.market_selection_id,
             summary: info.summary_json,
+            fact_delivery: None,
             published_at: info.published_at,
             revoked_at: info.revoked_at,
             expired_at: info.expired_at,
@@ -131,6 +139,97 @@ impl From<RecommendationReportInfo> for QuantReportDetailView {
             created_at: info.created_at,
         }
     }
+}
+
+impl QuantReportDetailView {
+    #[must_use]
+    pub fn from_parts(
+        info: RecommendationReportInfo,
+        delivery: Option<ReportFactDeliveryInfo>,
+    ) -> Self {
+        let mut view = Self::from(info);
+        view.fact_delivery = delivery.map(Into::into);
+        view
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportFactDeliveryView {
+    pub status: ReportFactDeliveryStatus,
+    pub bundle_hash: ContentHash,
+    pub recommendation_row_count: i64,
+    pub recommendation_row_chain_hash: ContentHash,
+    pub funnel_row_count: i64,
+    pub funnel_row_chain_hash: ContentHash,
+    pub attempt_count: i32,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub announced_at: Option<DateTime<Utc>>,
+}
+
+impl From<ReportFactDeliveryInfo> for ReportFactDeliveryView {
+    fn from(info: ReportFactDeliveryInfo) -> Self {
+        Self {
+            status: info.status,
+            bundle_hash: info.bundle_hash,
+            recommendation_row_count: info.recommendation_row_count,
+            recommendation_row_chain_hash: info.recommendation_row_chain_hash,
+            funnel_row_count: info.funnel_row_count,
+            funnel_row_chain_hash: info.funnel_row_chain_hash,
+            attempt_count: info.attempt_count,
+            next_attempt_at: info.next_attempt_at,
+            last_error: info.last_error,
+            verified_at: info.verified_at,
+            announced_at: info.announced_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportFunnelStageView {
+    pub stage: ReportFunnelStage,
+    pub input_count: u64,
+    pub output_count: u64,
+    pub excluded_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantReportFunnelView {
+    pub recommendation_report_id: RecommendationReportId,
+    pub catalog_visible_count: u64,
+    pub published_count: u64,
+    pub conserved: bool,
+    pub stages: Vec<ReportFunnelStageView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportFunnelMarketView {
+    pub recommendation_report_id: RecommendationReportId,
+    pub market_selection_id: MarketSelectionId,
+    pub profile_ref: ResearchProfileRef,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_version_id: ModelVersionId,
+    pub model_run_id: Option<ModelRunId>,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub token_id: TokenId,
+    pub terminal_stage: ReportFunnelStage,
+    pub primary_reason: ReportFunnelReason,
+    pub secondary_diagnostics: serde_json::Value,
+    pub feature_vector_id: Option<FeatureVectorId>,
+    pub signal_candidate_id: Option<SignalCandidateId>,
+    pub recommendation_id: Option<RecommendationId>,
+    pub row_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, NormalizePageQuery)]
+pub struct ReportFunnelMarketListQuery {
+    pub terminal_stage: Option<ReportFunnelStage>,
+    pub primary_reason: Option<ReportFunnelReason>,
+    #[normalize_page]
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 /// Subject whose durable evidence is projected by report diagnostics.

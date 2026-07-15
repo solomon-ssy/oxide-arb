@@ -1,5 +1,7 @@
 //! Postgres-backed recommendation report repository.
 
+use std::{collections::HashSet, convert::identity};
+
 use super::equity_snapshot::insert_equity_snapshot_monotonic;
 use crate::{
     postgres::{
@@ -16,22 +18,22 @@ use quant_pivot_models::{
     domain::{
         FeatureParityJobParams, NewEntryConditionArtifact, NewEntryConditionAudit,
         NewEntryConditionInstance, NewOperationLog, NewRecommendation, NewRecommendationReport,
-        NewReportDataQualitySnapshot, NewReportFeatureParity, NewReportTransaction,
-        OrderIntentInfo, PageWindow, Paginated, QuantReportListQuery, RecommendationReportInfo,
-        ReportDataQualitySnapshotInfo,
+        NewReportDataQualitySnapshot, NewReportFactDelivery, NewReportFeatureParity,
+        NewReportTransaction, OrderIntentInfo, PageWindow, Paginated, QuantReportListQuery,
+        RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo,
     },
     entities::{
         operation_log, quant_account_snapshot, quant_entry_condition_artifact,
         quant_entry_condition_audit, quant_entry_condition_instance, quant_feature_parity_run,
         quant_portfolio_plan, quant_recommendation, quant_recommendation_report,
-        quant_report_data_quality_snapshot, quant_research_job,
+        quant_report_data_quality_snapshot, quant_report_fact_delivery, quant_research_job,
     },
     enums::{
         execution::ApprovalInvalidation,
         quant::{
             EntryConditionAuditAction, EntryConditionState, FeatureParityRunKind,
-            FeatureParityRunStatus, RecommendationReportStatus, RecommendationStatus, ReportKind,
-            ResearchJobKind, ResearchJobStatus,
+            FeatureParityRunStatus, RecommendationReportStatus, RecommendationStatus,
+            ReportFactDeliveryStatus, ReportKind, ResearchJobKind, ResearchJobStatus,
         },
     },
     types::{
@@ -43,9 +45,13 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction,
     EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
     TransactionTrait,
+    sea_query::{LockBehavior, LockType},
 };
 
-use std::collections::HashSet;
+use uuid::Uuid;
+
+const REPORT_FACT_RETRY_MAX_SECS: i64 = 300;
+const REPORT_FACT_ERROR_MAX_CHARS: usize = 4_096;
 
 /// Postgres-backed recommendation report repository.
 pub struct PgRecommendationReportRepository {
@@ -56,6 +62,27 @@ impl PgRecommendationReportRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+}
+
+async fn claimed_fact_delivery(
+    txn: &DatabaseTransaction,
+    report_id: &RecommendationReportId,
+    worker_id: Uuid,
+) -> Result<quant_report_fact_delivery::Model, StorageError> {
+    let row = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+        .lock_exclusive()
+        .one(txn)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id))?;
+    if row.status != ReportFactDeliveryStatus::Delivering || row.claim_owner != Some(worker_id) {
+        return Err(StorageError::state_conflict(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            Some(report_id),
+            "report fact delivery is not leased by this worker",
+        ));
+    }
+    Ok(row)
 }
 
 async fn verify_feature_parity_commit(
@@ -330,6 +357,15 @@ async fn insert_sampled_feature_parity(
 fn validate_report_transaction(
     transaction: &NewReportTransaction,
 ) -> Result<DateTime<Utc>, StorageError> {
+    if transaction.recommendations.iter().any(|recommendation| {
+        recommendation.recommendation_report_id != transaction.report.recommendation_report_id
+            || recommendation.profile_ref != transaction.report.profile_ref
+    }) {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "every recommendation must bind the exact report id and research profile",
+        ));
+    }
     validate_sampled_feature_parity(
         &transaction.report,
         transaction.sampled_feature_parity.as_ref(),
@@ -340,12 +376,37 @@ fn validate_report_transaction(
         &transaction.entry_condition_artifacts,
         &transaction.entry_condition_instances,
     )?;
+    validate_fact_delivery(&transaction.report, transaction.fact_delivery.as_ref())?;
     transaction.report.published_at.ok_or_else(|| {
         StorageError::invariant_violation(
             Some(entity::QUANT_RECOMMENDATION_REPORT),
             "published report requires published_at for condition audit",
         )
     })
+}
+
+fn validate_fact_delivery(
+    report: &NewRecommendationReport,
+    delivery: Option<&NewReportFactDelivery>,
+) -> Result<(), StorageError> {
+    let delivery = delivery.ok_or_else(|| {
+        StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "report commit requires an atomic report-fact delivery row",
+        )
+    })?;
+    if delivery.recommendation_report_id != report.recommendation_report_id
+        || delivery.status != ReportFactDeliveryStatus::Pending
+        || delivery.bundle_bytes <= 0
+        || delivery.recommendation_row_count < 0
+        || delivery.funnel_row_count < 0
+    {
+        return Err(StorageError::invariant_violation(
+            Some(entity::QUANT_RECOMMENDATION_REPORT),
+            "report-fact delivery must be pending, non-empty, and bind the exact report id",
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -366,6 +427,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             entry_condition_artifacts,
             entry_condition_instances,
             sampled_feature_parity,
+            fact_delivery,
             operation_log,
         } = transaction;
 
@@ -397,6 +459,16 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .map_err(StorageError::from)?;
         let report_model = quant_recommendation_report::Entity::insert(report.into_active_model())
             .exec_with_returning(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let fact_delivery = fact_delivery.ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "validated report-fact delivery disappeared before insert",
+            )
+        })?;
+        quant_report_fact_delivery::Entity::insert(fact_delivery.into_active_model())
+            .exec(&txn)
             .await
             .map_err(StorageError::from)?;
         if !entry_condition_artifacts.is_empty() {
@@ -463,6 +535,223 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn find_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<ReportFactDeliveryInfo>, StorageError> {
+        quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn claim_fact_delivery(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+    ) -> Result<Option<ReportFactDeliveryInfo>, StorageError> {
+        if lease_expires_at <= now {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "report fact delivery lease must expire after claim time",
+            ));
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = quant_report_fact_delivery::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(
+                        quant_report_fact_delivery::Column::Status
+                            .eq(ReportFactDeliveryStatus::Pending),
+                    )
+                    .add(
+                        Condition::all()
+                            .add(
+                                quant_report_fact_delivery::Column::Status
+                                    .eq(ReportFactDeliveryStatus::Retrying),
+                            )
+                            .add(quant_report_fact_delivery::Column::NextAttemptAt.lte(now)),
+                    )
+                    .add(
+                        Condition::all()
+                            .add(
+                                quant_report_fact_delivery::Column::Status
+                                    .eq(ReportFactDeliveryStatus::Delivering),
+                            )
+                            .add(quant_report_fact_delivery::Column::LeaseExpiresAt.lte(now)),
+                    ),
+            )
+            .order_by_asc(quant_report_fact_delivery::Column::CreatedAt)
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let Some(row) = row else {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(None);
+        };
+        let attempt_count = row.attempt_count.checked_add(1).ok_or_else(|| {
+            StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "report fact delivery attempt count overflow",
+            )
+        })?;
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(ReportFactDeliveryStatus::Delivering);
+        active.attempt_count = ActiveValue::Set(attempt_count);
+        active.claim_owner = ActiveValue::Set(Some(worker_id));
+        active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
+        active.next_attempt_at = ActiveValue::Set(None);
+        active.last_error = ActiveValue::Set(None);
+        active.updated_at = ActiveValue::Set(now);
+        let claimed = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(Some(claimed.into()))
+    }
+
+    async fn fail_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+        worker_id: Uuid,
+        status: ReportFactDeliveryStatus,
+        error: &str,
+    ) -> Result<ReportFactDeliveryInfo, StorageError> {
+        if !matches!(
+            status,
+            ReportFactDeliveryStatus::Retrying | ReportFactDeliveryStatus::Failed
+        ) {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "failed report fact delivery must transition to retrying or failed",
+            ));
+        }
+        if error.trim().is_empty() {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "failed report fact delivery requires a non-empty diagnostic",
+            ));
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = claimed_fact_delivery(&txn, report_id, worker_id).await?;
+        let now = Utc::now();
+        let next_attempt_at = if status == ReportFactDeliveryStatus::Retrying {
+            Some(now + report_fact_retry_delay(row.attempt_count))
+        } else {
+            None
+        };
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(status);
+        active.claim_owner = ActiveValue::Set(None);
+        active.lease_expires_at = ActiveValue::Set(None);
+        active.next_attempt_at = ActiveValue::Set(next_attempt_at);
+        active.last_error = ActiveValue::Set(Some(
+            error.chars().take(REPORT_FACT_ERROR_MAX_CHARS).collect(),
+        ));
+        active.updated_at = ActiveValue::Set(now);
+        let updated = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated.into())
+    }
+
+    async fn verify_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+        worker_id: Uuid,
+        verified_at: DateTime<Utc>,
+    ) -> Result<ReportFactDeliveryInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = claimed_fact_delivery(&txn, report_id, worker_id).await?;
+        let mut active = row.into_active_model();
+        active.status = ActiveValue::Set(ReportFactDeliveryStatus::Verified);
+        active.claim_owner = ActiveValue::Set(None);
+        active.lease_expires_at = ActiveValue::Set(None);
+        active.next_attempt_at = ActiveValue::Set(None);
+        active.last_error = ActiveValue::Set(None);
+        active.verified_at = ActiveValue::Set(Some(verified_at));
+        active.updated_at = ActiveValue::Set(verified_at);
+        let updated = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated.into())
+    }
+
+    async fn claim_fact_announcement(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+    ) -> Result<Option<ReportFactDeliveryInfo>, StorageError> {
+        if lease_expires_at <= now {
+            return Err(StorageError::invariant_violation(
+                Some(entity::QUANT_RECOMMENDATION_REPORT),
+                "report fact announcement lease must expire after claim time",
+            ));
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = quant_report_fact_delivery::Entity::find()
+            .filter(
+                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
+            )
+            .filter(quant_report_fact_delivery::Column::AnnouncedAt.is_null())
+            .filter(
+                Condition::any()
+                    .add(quant_report_fact_delivery::Column::LeaseExpiresAt.is_null())
+                    .add(quant_report_fact_delivery::Column::LeaseExpiresAt.lte(now)),
+            )
+            .order_by_asc(quant_report_fact_delivery::Column::VerifiedAt)
+            .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked)
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        let Some(row) = row else {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(None);
+        };
+        let mut active = row.into_active_model();
+        active.claim_owner = ActiveValue::Set(Some(worker_id));
+        active.lease_expires_at = ActiveValue::Set(Some(lease_expires_at));
+        active.updated_at = ActiveValue::Set(now);
+        let claimed = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(Some(claimed.into()))
+    }
+
+    async fn acknowledge_fact_announcement(
+        &self,
+        report_id: &RecommendationReportId,
+        worker_id: Uuid,
+        announced_at: DateTime<Utc>,
+    ) -> Result<ReportFactDeliveryInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let row = quant_report_fact_delivery::Entity::find_by_id(report_id.clone())
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::not_found(entity::QUANT_RECOMMENDATION_REPORT, report_id)
+            })?;
+        if row.status != ReportFactDeliveryStatus::Verified
+            || row.announced_at.is_some()
+            || row.claim_owner != Some(worker_id)
+        {
+            return Err(StorageError::state_conflict(
+                entity::QUANT_RECOMMENDATION_REPORT,
+                Some(report_id),
+                "report fact announcement is not leased by this worker",
+            ));
+        }
+        let mut active = row.into_active_model();
+        active.announced_at = ActiveValue::Set(Some(announced_at));
+        active.claim_owner = ActiveValue::Set(None);
+        active.lease_expires_at = ActiveValue::Set(None);
+        active.updated_at = ActiveValue::Set(announced_at);
+        let updated = active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(updated.into())
     }
 
     async fn find_by_model_run_id(
@@ -541,11 +830,15 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         kind: ReportKind,
     ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         quant_recommendation_report::Entity::find()
+            .inner_join(quant_report_fact_delivery::Entity)
             .filter(quant_recommendation_report::Column::ReportKind.eq(kind))
             .filter(quant_recommendation_report::Column::Status.is_in([
                 RecommendationReportStatus::Published,
                 RecommendationReportStatus::PublishedEmpty,
             ]))
+            .filter(
+                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
+            )
             .order_by_desc(quant_recommendation_report::Column::PublishedAt)
             .one(&self.db)
             .await
@@ -577,6 +870,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             ));
         }
         quant_recommendation_report::Entity::find()
+            .inner_join(quant_report_fact_delivery::Entity)
             .select_only()
             .column(quant_recommendation_report::Column::RecommendationReportId)
             .filter(quant_recommendation_report::Column::DecisionAt.gte(from))
@@ -585,6 +879,9 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 RecommendationReportStatus::Published,
                 RecommendationReportStatus::PublishedEmpty,
             ]))
+            .filter(
+                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
+            )
             .order_by_asc(quant_recommendation_report::Column::DecisionAt)
             .into_tuple::<RecommendationReportId>()
             .all(&self.db)
@@ -598,10 +895,14 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         limit: u64,
     ) -> Result<Vec<RecommendationReportId>, StorageError> {
         quant_recommendation_report::Entity::find()
+            .inner_join(quant_report_fact_delivery::Entity)
             .filter(quant_recommendation_report::Column::Status.is_in([
                 RecommendationReportStatus::Published,
                 RecommendationReportStatus::PublishedEmpty,
             ]))
+            .filter(
+                quant_report_fact_delivery::Column::Status.eq(ReportFactDeliveryStatus::Verified),
+            )
             .filter(quant_recommendation_report::Column::ValidUntil.lte(now))
             .order_by_asc(quant_recommendation_report::Column::ValidUntil)
             .limit(limit)
@@ -694,6 +995,15 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
         )
         .await
     }
+}
+
+fn report_fact_retry_delay(attempt_count: i32) -> chrono::Duration {
+    let exponent = u32::try_from(attempt_count.saturating_sub(1)).map_or(u32::MAX, identity);
+    let seconds = 1_i64
+        .checked_shl(exponent.min(62))
+        .map_or(i64::MAX, identity)
+        .min(REPORT_FACT_RETRY_MAX_SECS);
+    chrono::Duration::seconds(seconds)
 }
 
 fn page_condition(query: &QuantReportListQuery) -> Condition {
@@ -831,7 +1141,7 @@ async fn transition_report_status(
 
 #[cfg(test)]
 mod tests {
-    use super::page_condition;
+    use super::{REPORT_FACT_RETRY_MAX_SECS, page_condition, report_fact_retry_delay};
     use quant_pivot_models::{
         domain::{QuantReportListQuery, pagination::PageRequest},
         entities::quant_recommendation_report,
@@ -862,5 +1172,15 @@ mod tests {
         assert!(sql.contains(r#""quant_recommendation_report"."status" ="#));
         assert!(sql.contains(r#""quant_recommendation_report"."trigger_kind" ="#));
         assert!(sql.contains(r#""quant_recommendation_report"."runtime_mode" ="#));
+    }
+
+    #[test]
+    fn report_fact_retry_backoff_is_bounded() {
+        assert_eq!(report_fact_retry_delay(1).num_seconds(), 1);
+        assert_eq!(report_fact_retry_delay(4).num_seconds(), 8);
+        assert_eq!(
+            report_fact_retry_delay(i32::MAX).num_seconds(),
+            REPORT_FACT_RETRY_MAX_SECS
+        );
     }
 }

@@ -3,7 +3,7 @@
 use super::AppContext;
 use crate::{
     app::{
-        archive_partition_worker::ArchivePartitionWorker,
+        clob_market_info_worker::ClobMarketInfoWorker,
         domain_event_outbox_worker::DomainEventOutboxWorker,
         domain_ingest_worker::DomainIngestWorker,
         domain_live_ingest_worker::{DomainLiveIngestDeps, DomainLiveIngestWorker},
@@ -28,12 +28,12 @@ use quant_pivot_models::clickhouse::{
 use quant_pivot_repository::{
     clickhouse::ChFactWriter,
     traits::{
-        ArchivePartitionRepository, CalibrationArtifactRepository, DomainProjectionRepository,
-        DomainSourceCursorRepository, FactWriter, MarketLinkageRepository,
+        CalibrationArtifactRepository, ClobMarketInfoRepository, DomainProjectionRepository,
+        DomainSourceCursorRepository, FactWriter, MarketLinkageRepository, MarketRepository,
         TradeTapeBlockCursorRepository,
     },
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 impl AppContext {
     pub fn register_runtime_tasks(&self, runner: &mut AppRunner) {
@@ -88,15 +88,21 @@ impl AppContext {
                 tracing::error!(%error, "DomainEventOutboxWorker exited with error");
             }
         });
-        let archive_worker = Arc::new(ArchivePartitionWorker::new(
-            Arc::clone(&self.infra.ch),
-            Arc::clone(&self.infra.repos.archive_partition) as Arc<dyn ArchivePartitionRepository>,
-            self.artifact_store(),
-        ));
-        runner.spawn(TaskId::ArchivePartitionWorker, move |token| async move {
-            if let Err(error) = archive_worker.run(token).await {
-                tracing::error!(%error, "ArchivePartitionWorker exited with error");
+        let report_fact_delivery = Arc::clone(&self.report.fact_delivery);
+        runner.spawn(TaskId::ReportFactDeliveryWorker, move |token| async move {
+            if let Err(error) = report_fact_delivery.run(token).await {
+                tracing::error!(%error, "ReportFactDeliveryWorker exited with error");
             }
+        });
+        let clob_market_info = Arc::new(ClobMarketInfoWorker::new(
+            Arc::clone(&self.execution.clob),
+            Arc::clone(&self.infra.repos.market) as Arc<dyn MarketRepository>,
+            Arc::clone(&self.infra.repos.clob_market_info) as Arc<dyn ClobMarketInfoRepository>,
+            Arc::clone(&self.data.fee_calculator),
+            Duration::from_secs(self.config.polymarket.clob_market_info_refresh_secs),
+        ));
+        runner.spawn(TaskId::ClobMarketInfoSync, move |token| async move {
+            clob_market_info.run(token).await;
         });
     }
 

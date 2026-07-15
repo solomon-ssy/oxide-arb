@@ -5,7 +5,7 @@ use crate::{
         common::{OrderType, Side},
         execution::VenueOrderStatus,
     },
-    types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderId, Price, Shares, TokenId, VenueOrderAmount},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub struct OrderRequest {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub amount: OrderAmount,
+    pub amount: VenueOrderAmount,
     pub price: Price,
     pub order_type: OrderType,
     /// Maker-only admission at the venue; valid only for GTC/GTD limit orders.
@@ -31,7 +31,6 @@ pub struct OrderResponse {
     pub tx_hash: Option<String>,
     pub filled_shares: Shares,
     pub avg_fill_price: Option<Price>,
-    pub fee_paid: Usd,
     pub submitted_at: DateTime<Utc>,
     pub responded_at: DateTime<Utc>,
 }

@@ -35,6 +35,7 @@ pub enum QuantExecutionOrder {
     Price,
     Shares,
     CostUsd,
+    PreparedOrderJson,
     VenueOrderId,
     VenueStatus,
     State,
@@ -65,6 +66,11 @@ pub fn table() -> TableCreateStatement {
         .col(column::price(QuantExecutionOrder::Price))
         .col(column::shares(QuantExecutionOrder::Shares))
         .col(column::usd(QuantExecutionOrder::CostUsd))
+        .col(
+            ColumnDef::new(QuantExecutionOrder::PreparedOrderJson)
+                .json_binary()
+                .not_null(),
+        )
         .col(column::text_id_null(QuantExecutionOrder::VenueOrderId))
         .col(column::pg_enum_null::<VenueOrderStatus>(
             QuantExecutionOrder::VenueStatus,

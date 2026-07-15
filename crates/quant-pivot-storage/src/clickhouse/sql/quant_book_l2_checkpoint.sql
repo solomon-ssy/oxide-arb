@@ -14,6 +14,6 @@ CREATE TABLE IF NOT EXISTS quant_book_l2_checkpoint (
     checkpoint_date   Date MATERIALIZED toDate(event_time)
 )
 ENGINE = MergeTree()
-PARTITION BY toYYYYMMDD(checkpoint_date)
+PARTITION BY toYYYYMM(checkpoint_date)
 ORDER BY (token_id, event_time, stream_session_id, token_sequence)
 SETTINGS index_granularity = 4096

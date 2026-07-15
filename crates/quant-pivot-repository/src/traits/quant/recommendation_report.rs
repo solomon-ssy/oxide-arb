@@ -3,11 +3,12 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
         NewOperationLog, NewReportTransaction, OrderIntentInfo, Paginated, QuantReportListQuery,
-        RecommendationReportInfo, ReportDataQualitySnapshotInfo,
+        RecommendationReportInfo, ReportDataQualitySnapshotInfo, ReportFactDeliveryInfo,
     },
-    enums::quant::ReportKind,
+    enums::quant::{ReportFactDeliveryStatus, ReportKind},
     types::{ModelRunId, RecommendationReportId},
 };
+use uuid::Uuid;
 
 #[async_trait::async_trait]
 pub trait RecommendationReportRepository: Send + Sync {
@@ -23,6 +24,54 @@ pub trait RecommendationReportRepository: Send + Sync {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Load the report-scoped durable fact-delivery acknowledgement.
+    async fn find_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
+
+    /// Lease one claimable report fact bundle using `FOR UPDATE SKIP LOCKED`.
+    async fn claim_fact_delivery(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+    ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
+
+    /// Release a claimed delivery into an explicit retry or terminal failure.
+    async fn fail_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+        worker_id: Uuid,
+        status: ReportFactDeliveryStatus,
+        error: &str,
+    ) -> Result<ReportFactDeliveryInfo, StorageError>;
+
+    /// CAS acknowledgement after independent `ClickHouse` count/hash verification.
+    async fn verify_fact_delivery(
+        &self,
+        report_id: &RecommendationReportId,
+        worker_id: Uuid,
+        verified_at: DateTime<Utc>,
+    ) -> Result<ReportFactDeliveryInfo, StorageError>;
+
+    /// Lease one verified delivery whose committed event/notification has not
+    /// yet been acknowledged.
+    async fn claim_fact_announcement(
+        &self,
+        worker_id: Uuid,
+        now: DateTime<Utc>,
+        lease_expires_at: DateTime<Utc>,
+    ) -> Result<Option<ReportFactDeliveryInfo>, StorageError>;
+
+    /// Acknowledge post-verification side effects under the exact lease owner.
+    async fn acknowledge_fact_announcement(
+        &self,
+        report_id: &RecommendationReportId,
+        worker_id: Uuid,
+        announced_at: DateTime<Utc>,
+    ) -> Result<ReportFactDeliveryInfo, StorageError>;
 
     /// Report produced by an exact serving run. The schema enforces at most one
     /// report per non-null run id.

@@ -12,6 +12,20 @@ pg_enum! {
     }
 }
 
+pg_enum! {
+    type_name = "qp_trade_policy_validation_status",
+    /// Independent validation-run lifecycle. Row diagnostics are append-only;
+    /// only the run summary transitions from Running to one terminal state.
+    @derive(Default)
+    pub enum TradePolicyValidationStatus {
+        #[default]
+        Running => "running",
+        Succeeded => "succeeded",
+        Failed => "failed",
+        Cancelled => "cancelled",
+    }
+}
+
 impl QuantRuntimeMode {
     /// Whether this mode may submit CLOB orders.
     #[must_use]
@@ -82,6 +96,20 @@ pg_enum! {
         Failed => "failed",
         Revoked => "revoked",
         Expired => "expired",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_report_fact_delivery_status",
+    /// Delivery lifecycle for the two-table report fact bundle.
+    @derive(Default)
+    pub enum ReportFactDeliveryStatus {
+        #[default]
+        Pending => "pending",
+        Delivering => "delivering",
+        Retrying => "retrying",
+        Failed => "failed",
+        Verified => "verified",
     }
 }
 
@@ -472,6 +500,53 @@ pg_enum! {
 }
 
 pg_enum! {
+    type_name = "qp_source_slice_status",
+    /// Server-owned source-slice materialization lifecycle.
+    ///
+    /// Identity is immutable and content-addressed. A failed materialization
+    /// retains its diagnostics and may be retried as a new ledger row only
+    /// after the underlying evidence identity changes.
+    @derive(Default)
+    pub enum SourceSliceStatus {
+        #[default]
+        Materializing => "materializing",
+        Ready => "ready",
+        Failed => "failed",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_research_readiness_evidence_kind",
+    /// Narrow operational evidence classes consumed by policy-fit preflight.
+    pub enum ResearchReadinessEvidenceKind {
+        RetentionRunway => "retention_runway",
+        ShadowLatencyProfile => "shadow_latency_profile",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_trade_policy_trial_scope",
+    /// Immutable unit evaluated by one policy-fit trial attempt.
+    pub enum TradePolicyTrialScope {
+        Candidate => "candidate",
+        Fold => "fold",
+        Path => "path",
+        LatencyStress => "latency_stress",
+    }
+}
+
+pg_enum! {
+    type_name = "qp_trade_policy_trial_status",
+    /// Terminal outcome of an attempted policy-fit unit. There is no mutable
+    /// in-progress row: an attempt is appended exactly once at completion.
+    pub enum TradePolicyTrialStatus {
+        Succeeded => "succeeded",
+        Failed => "failed",
+        Cancelled => "cancelled",
+    }
+}
+
+pg_enum! {
     type_name = "qp_research_job_kind",
     /// The kind of long-running research task a durable job carries.
     ///
@@ -493,6 +568,9 @@ pg_enum! {
         FeatureParity => "feature_parity",
         /// Fit a governed executable entry/exit policy artifact (Phase 11.7).
         TradePolicyFit => "trade_policy_fit",
+        /// Independently re-read and validate a Draft trade policy before CAS
+        /// governance transition (Phase 11.7.2).
+        TradePolicyValidation => "trade_policy_validation",
     }
 }
 
@@ -853,6 +931,9 @@ wire_enum! {
         /// The active model has no calibrated probability and therefore cannot
         /// produce a truthful capital plan.
         ReturnModelUncalibrated => "return_model_uncalibrated",
+        /// The active model does not bind a Published, hash-consistent trade
+        /// policy and therefore cannot produce an executable trade plan.
+        TradePolicyUnavailable => "trade_policy_unavailable",
         /// The system was degraded below the generation threshold (readiness
         /// gate not `Operational`, or the portfolio solver was unavailable).
         SystemDegraded => "system_degraded",

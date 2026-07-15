@@ -3,8 +3,8 @@
 use crate::{
     enums::quant::PublicationStatus,
     types::{
-        BacktestPathSetId, ContentHash, ModelSpecId, ModelVersionId, TradePolicyArtifactId,
-        TrainingDatasetId,
+        BacktestPathSetId, ContentHash, ModelSpecId, ModelVersionId, ResearchProfileRef,
+        TradePolicyArtifactId, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -18,6 +18,8 @@ pub struct Model {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub profile_ref: ResearchProfileRef,
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub trade_policy_artifact_id: Option<TradePolicyArtifactId>,
     pub trade_policy_hash: Option<ContentHash>,

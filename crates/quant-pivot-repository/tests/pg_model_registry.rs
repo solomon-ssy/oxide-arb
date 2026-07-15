@@ -13,7 +13,7 @@ use quant_pivot_repository::{
     postgres::PgModelRegistryRepository,
     traits::{ModelRegistryRepository, RollbackModelVersionCommit},
 };
-use quant_pivot_test_support::pg::setup_pg;
+use quant_pivot_test_support::{execution_pg_seed::fixture_profile_ref, pg::setup_pg};
 
 fn content_hash(seed: char) -> ContentHash {
     let pair = format!("{:02x}", seed as u32);
@@ -43,6 +43,7 @@ fn new_version(model_spec_id: ModelSpecId, seed: char) -> NewModelVersion {
         // Preview only — `create_model_version` re-allocates under lock.
         version: 0,
         artifact_hash: content_hash(seed),
+        profile_ref: fixture_profile_ref(),
         training_dataset_id: None,
         trade_policy_artifact_id: None,
         trade_policy_hash: None,

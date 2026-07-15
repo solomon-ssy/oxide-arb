@@ -271,7 +271,7 @@ impl BookFactWriter {
         market_id: Option<MarketId>,
         old_tick: TickSize,
         new_tick: TickSize,
-        trace: quant_pivot_models::domain::pipeline::IngressTrace,
+        trace: IngressTrace,
     ) -> bool {
         let payload_hash = CanonicalDigest::content_hash_json(&serde_json::json!({
             "event_type": "tick_size_change",

@@ -26,7 +26,8 @@ use quant_pivot_models::{
     runtime_config::{FactorCrossSectionConfig, SmallCrossSectionPolicy},
     types::{
         ArtifactUri, CalibrationArtifactId, ContentHash, ModelArtifactId, ModelInputContract,
-        ModelInputRequiredness, ModelVersionId, Price, Probability, TradePolicyArtifactId,
+        ModelInputRequiredness, ModelVersionId, Price, Probability, ResearchProfileRef,
+        TradePolicyArtifactId,
     },
 };
 use rust_decimal::Decimal;
@@ -111,6 +112,8 @@ fn input_features_from_contract(contract: &ModelInputContract) -> Vec<FeatureNam
 pub struct ModelArtifactHeader {
     /// The published model version this artifact realizes.
     pub model_version_id: ModelVersionId,
+    /// Immutable research profile shared by the source slice and dataset.
+    pub profile_ref: ResearchProfileRef,
     /// Model family.
     pub model_family: ModelFamily,
     /// Feature-schema hash the artifact was trained/built against.
@@ -1458,7 +1461,7 @@ pub enum ModelArtifact {
 }
 
 /// Breaking stored-model wire version. No legacy parser is provided.
-pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 4;
+pub const MODEL_ARTIFACT_FORMAT_VERSION: u32 = 5;
 
 #[derive(Serialize)]
 pub(crate) struct StoredModelArtifactRef<'a> {
@@ -1615,7 +1618,7 @@ mod tests {
         runtime_config::FactorCrossSectionConfig,
         types::{
             CalibrationArtifactId, ContentHash, ModelInputContract, ModelInputRequiredness,
-            ModelInputSpec, ModelVersionId, Price, Probability,
+            ModelInputSpec, ModelVersionId, Price, Probability, builtin_research_profiles,
         },
     };
     use rust_decimal::Decimal;
@@ -1651,6 +1654,10 @@ mod tests {
         WeightedFactorModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                profile_ref: builtin_research_profiles()
+                    .expect("built-in profiles")
+                    .remove(0)
+                    .profile_ref,
                 model_family: ModelFamily::WeightedFactor,
                 feature_schema_hash: hash("aaa"),
                 factor_schema_hash: hash("bbb"),
@@ -1751,6 +1758,10 @@ mod tests {
         SellScorerArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
+                profile_ref: builtin_research_profiles()
+                    .expect("built-in profiles")
+                    .remove(0)
+                    .profile_ref,
                 model_family: family,
                 feature_schema_hash: hash("aaa"),
                 factor_schema_hash: hash("bbb"),

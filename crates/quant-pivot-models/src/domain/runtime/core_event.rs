@@ -397,6 +397,8 @@ pub enum MaterializationRunKind {
     FeatureParity,
     /// Executable trade-policy fit (Phase 11.7).
     TradePolicyFit,
+    /// Independent row-level trade-policy validation (Phase 11.7.2).
+    TradePolicyValidation,
 }
 
 /// Terminal-or-progress status of a materialization run.
@@ -430,6 +432,7 @@ impl From<ResearchJobKind> for MaterializationRunKind {
             ResearchJobKind::CpcvBacktest => Self::CpcvBacktest,
             ResearchJobKind::FeatureParity => Self::FeatureParity,
             ResearchJobKind::TradePolicyFit => Self::TradePolicyFit,
+            ResearchJobKind::TradePolicyValidation => Self::TradePolicyValidation,
         }
     }
 }

@@ -9,13 +9,16 @@ mod token;
 
 pub use book::OrderbookSnapshot;
 pub use convert::{ClobSide, SdkSideConversionError};
-pub use orders::{CancelAllResult, CancelResult, ClobTrade, OpenOrder};
+pub use orders::{CancelAllResult, CancelResult, ClobMakerOrder, ClobTrade, OpenOrder};
 pub use rate_limiter::RateLimiter;
 pub use sdk_error::SdkClobError;
 pub use token::WireTokenId;
 
 use crate::{
-    infra::retry::{self, RetryPolicy},
+    infra::{
+        http::get_text_with_retry,
+        retry::{self, RetryPolicy},
+    },
     keystore::OrderSigner,
     wallet::WalletTopology,
     ws::BookLevelRejectHook,
@@ -28,8 +31,9 @@ use polymarket_client_sdk_v2::{
         Client as SdkClient, Config as SdkConfig,
         types::{
             Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide, SignableOrder,
+            TraderSide,
             request::{BalanceAllowanceRequest, OrderBookSummaryRequest, TradesRequest},
-            response::PostOrderResponse,
+            response::{ClobMarketInfoResponse, PostOrderResponse},
         },
     },
     types::{B256, U256},
@@ -45,10 +49,16 @@ use quant_pivot_models::{
     enums::{
         common::{OrderType, Side, TickSize},
         execution::VenueOrderStatus,
+        fee::FeeLiquidityRole,
     },
-    types::{MarketId, OrderAmount, OrderId, Price, Shares, TokenId, Usd},
+    hashing::CanonicalDigest,
+    types::{
+        Bps, ClobFeeDetails, ClobMarketInfoVersion, ClobMarketInfoVersionId, ClobTokenDescriptor,
+        MarketId, OrderId, Price, Shares, TokenId, Usd, VenueOrderAmount,
+    },
 };
 use rust_decimal::Decimal;
+use serde::Deserialize;
 use std::{convert::TryFrom, str::FromStr, sync::Arc, time::Duration};
 
 /// Stage reached by a single-attempt money-changing order submission.
@@ -99,10 +109,55 @@ impl OrderSubmissionError {
 /// money-changing `POST /order` is always a single bounded attempt.
 pub struct ClobClient {
     sdk: Arc<SdkClient<Authenticated<Normal>>>,
+    http: reqwest::Client,
+    clob_base_url: String,
     signer: Arc<OrderSigner>,
     order_post_timeout: Duration,
     rate_limiter: RateLimiter,
     on_book_level_rejected: Option<BookLevelRejectHook>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawClobMarketInfo {
+    #[serde(rename = "t")]
+    tokens: Vec<RawClobToken>,
+    #[serde(rename = "mts")]
+    minimum_tick_size: Decimal,
+    #[serde(rename = "mos")]
+    minimum_order_size: Decimal,
+    #[serde(rename = "nr")]
+    neg_risk: bool,
+    #[serde(rename = "itode")]
+    #[serde(default)]
+    taker_order_delay_enabled: bool,
+    #[serde(rename = "ibce")]
+    blockaid_check_enabled: bool,
+    #[serde(rename = "oas")]
+    minimum_order_age_secs: u64,
+    #[serde(rename = "fd")]
+    fee_details: RawClobFeeDetails,
+    #[serde(rename = "mbf")]
+    builder_maker_fee_rate_bps: u32,
+    #[serde(rename = "tbf")]
+    builder_taker_fee_rate_bps: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawClobToken {
+    #[serde(rename = "t")]
+    token_id: String,
+    #[serde(rename = "o")]
+    outcome: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+struct RawClobFeeDetails {
+    #[serde(rename = "r")]
+    rate: Decimal,
+    #[serde(rename = "e")]
+    exponent: u32,
+    #[serde(rename = "to")]
+    taker_only: bool,
 }
 
 /// Venue-owned order metadata re-read immediately before admission.
@@ -129,17 +184,17 @@ fn push_rest_level(
     }
 }
 
-fn sdk_amount(amount: OrderAmount) -> Result<Amount, ApiError> {
+fn sdk_amount(amount: VenueOrderAmount) -> Result<Amount, ApiError> {
     match amount {
-        OrderAmount::Usd(value) => Amount::usdc(value.inner()),
-        OrderAmount::Shares(value) => Amount::shares(value.inner()),
+        VenueOrderAmount::GrossUsd(value) => Amount::usdc(value.inner()),
+        VenueOrderAmount::Shares(value) => Amount::shares(value.inner()),
     }
     .map_err(|error| ApiError::Sdk(error.to_string()))
 }
 
-fn limit_order_shares(amount: OrderAmount) -> Result<Decimal, ApiError> {
+fn limit_order_shares(amount: VenueOrderAmount) -> Result<Decimal, ApiError> {
     amount
-        .as_shares()
+        .shares()
         .map(Shares::inner)
         .ok_or_else(|| ApiError::Clob {
             endpoint: "order.build".to_owned(),
@@ -152,7 +207,7 @@ fn limit_order_shares(amount: OrderAmount) -> Result<Decimal, ApiError> {
 fn map_post_order_response(
     req: &OrderRequest,
     order_type: OrderType,
-    order_amount: OrderAmount,
+    order_amount: VenueOrderAmount,
     submitted_at: chrono::DateTime<chrono::Utc>,
     resp: &PostOrderResponse,
 ) -> OrderResponse {
@@ -164,10 +219,10 @@ fn map_post_order_response(
         VenueOrderStatus::Rejected
     } else if order_type == OrderType::Fok {
         if order_amount
-            .as_shares()
+            .shares()
             .is_some_and(|shares| filled_shares >= shares)
             || order_amount
-                .as_usd()
+                .gross_usd()
                 .is_some_and(|usd| cash_amount >= usd.inner())
         {
             VenueOrderStatus::Filled
@@ -178,10 +233,10 @@ fn map_post_order_response(
             VenueOrderStatus::PartiallyFilled
         }
     } else if order_amount
-        .as_shares()
+        .shares()
         .is_some_and(|shares| filled_shares >= shares)
         || order_amount
-            .as_usd()
+            .gross_usd()
             .is_some_and(|usd| cash_amount >= usd.inner())
     {
         VenueOrderStatus::Filled
@@ -201,13 +256,132 @@ fn map_post_order_response(
         tx_hash: resp.transaction_hashes.first().map(|h| format!("{h:#x}")),
         filled_shares,
         avg_fill_price,
-        fee_paid: Usd::ZERO,
         submitted_at,
         responded_at: chrono::Utc::now(),
     }
 }
 
 impl ClobClient {
+    /// Capture one append-only V2 CLOB market-info observation.
+    #[tracing::instrument(skip(self), fields(market_id = %market_id))]
+    pub async fn clob_market_info_version(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<ClobMarketInfoVersion, ApiError> {
+        self.rate_limiter
+            .acquire("GET /clob-markets/{condition_id}")
+            .await;
+        let url = format!(
+            "{}/clob-markets/{}",
+            self.clob_base_url.trim_end_matches('/'),
+            market_id.as_str()
+        );
+        let raw_body = get_text_with_retry(&self.http, &RetryPolicy::clob_default(), &url).await?;
+        let raw_payload =
+            serde_json::from_str::<serde_json::Value>(&raw_body).map_err(|error| {
+                ApiError::Deserialize {
+                    context: "CLOB market-info raw payload".to_owned(),
+                    detail: error.to_string(),
+                }
+            })?;
+        let raw =
+            serde_json::from_value::<RawClobMarketInfo>(raw_payload.clone()).map_err(|error| {
+                ApiError::Deserialize {
+                    context: "CLOB market-info contract".to_owned(),
+                    detail: error.to_string(),
+                }
+            })?;
+        // Validate the exact captured bytes against the pinned official SDK wire
+        // contract. A second HTTP request would compare different observations,
+        // double venue load, and introduce a market-update TOCTOU race.
+        let response = serde_json::from_value::<ClobMarketInfoResponse>(raw_payload.clone())
+            .map_err(|error| ApiError::Deserialize {
+                context: "pinned SDK CLOB market-info contract".to_owned(),
+                detail: error.to_string(),
+            })?;
+        let sdk_tokens = response
+            .tokens
+            .into_iter()
+            .flatten()
+            .map(|token| ClobTokenDescriptor {
+                token_id: TokenId::new(token.token_id.to_string()),
+                outcome: token.outcome,
+            })
+            .collect::<Vec<_>>();
+        let tick_size =
+            TickSize::try_from(raw.minimum_tick_size).map_err(|error| ApiError::Clob {
+                endpoint: "GET /clob-markets/{condition_id}".to_owned(),
+                code: "unsupported_tick_size".to_owned(),
+                message: error.to_string(),
+                retryable: false,
+            })?;
+        let tokens = raw
+            .tokens
+            .into_iter()
+            .map(|token| ClobTokenDescriptor {
+                token_id: TokenId::new(token.token_id),
+                outcome: token.outcome,
+            })
+            .collect::<Vec<_>>();
+        let fee_details = ClobFeeDetails {
+            rate: raw.fee_details.rate,
+            exponent: raw.fee_details.exponent,
+            taker_only: raw.fee_details.taker_only,
+        };
+        let sdk_fee_details = response.fee_details.map(|fee| ClobFeeDetails {
+            rate: fee.rate,
+            exponent: fee.exponent,
+            taker_only: fee.taker_only,
+        });
+        if sdk_tokens != tokens
+            || response.min_tick_size.as_decimal() != raw.minimum_tick_size
+            || response.min_order_size != raw.minimum_order_size
+            || response.neg_risk != raw.neg_risk
+            || sdk_fee_details.as_ref() != Some(&fee_details)
+            || response.maker_base_fee.and_then(|value| value.to_u32())
+                != Some(raw.builder_maker_fee_rate_bps)
+            || response.taker_base_fee.and_then(|value| value.to_u32())
+                != Some(raw.builder_taker_fee_rate_bps)
+        {
+            return Err(ApiError::Clob {
+                endpoint: "GET /clob-markets/{condition_id}".to_owned(),
+                code: "market_info_read_inconsistent".to_owned(),
+                message: "raw response and pinned SDK projection disagree".to_owned(),
+                retryable: true,
+            });
+        }
+        let payload_hash = CanonicalDigest::content_hash_json(&raw_payload).map_err(|error| {
+            ApiError::Deserialize {
+                context: "CLOB market info hash".to_owned(),
+                detail: error.to_string(),
+            }
+        })?;
+        let available_at = chrono::Utc::now();
+        let version = ClobMarketInfoVersion {
+            version_id: ClobMarketInfoVersionId::from_v7(),
+            market_id: market_id.clone(),
+            tokens,
+            tick_size,
+            minimum_order_size: raw.minimum_order_size,
+            neg_risk: raw.neg_risk,
+            taker_order_delay_enabled: raw.taker_order_delay_enabled,
+            minimum_order_age_secs: Some(raw.minimum_order_age_secs),
+            blockaid_check_enabled: raw.blockaid_check_enabled,
+            fee_details,
+            builder_maker_fee_rate_bps: raw.builder_maker_fee_rate_bps,
+            builder_taker_fee_rate_bps: raw.builder_taker_fee_rate_bps,
+            effective_at: available_at,
+            available_at,
+            payload_hash,
+            raw_payload,
+        };
+        version.validate().map_err(|detail| ApiError::Deserialize {
+            context: "CLOB market info".to_owned(),
+            detail,
+        })?;
+        Ok(version)
+    }
+
     /// Read the SDK's authoritative tick-size and `NegRisk` metadata for a token.
     ///
     /// The official SDK caches these endpoints and also consumes them while
@@ -277,9 +451,21 @@ impl ClobClient {
             .authenticate()
             .await
             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|error| ApiError::Http {
+                method: "GET",
+                url: config.clob_base_url.clone(),
+                status: 0,
+                body: error.to_string(),
+                retryable: false,
+            })?;
 
         Ok(Self {
             sdk: Arc::new(sdk),
+            http,
+            clob_base_url: config.clob_base_url.clone(),
             signer,
             order_post_timeout: Duration::from_millis(config.order_post_timeout_ms),
             rate_limiter: RateLimiter::new(),
@@ -676,19 +862,98 @@ impl ClobClient {
                 resp.data
                     .into_iter()
                     .map(|trade| {
+                        let trader_side = match trade.trader_side {
+                            TraderSide::Taker => FeeLiquidityRole::Taker,
+                            TraderSide::Maker => FeeLiquidityRole::Maker,
+                            TraderSide::Unknown(value) => {
+                                return Err(ApiError::Deserialize {
+                                    context: "CLOB trade trader_side".into(),
+                                    detail: format!("unknown trader side: {value}"),
+                                });
+                            }
+                            _ => {
+                                return Err(ApiError::Deserialize {
+                                    context: "CLOB trade trader_side".into(),
+                                    detail: "unsupported trader side".to_owned(),
+                                });
+                            }
+                        };
+                        let authenticated_maker_order = trade
+                            .maker_orders
+                            .iter()
+                            .find(|order| order.owner == trade.owner);
+                        let (
+                            order_id,
+                            token_id,
+                            side,
+                            matched_size,
+                            matched_price,
+                            matched_fee_rate_bps,
+                        ) = match trader_side {
+                            FeeLiquidityRole::Taker => (
+                                OrderId::new(&trade.taker_order_id),
+                                TokenId::new(trade.asset_id.to_string()),
+                                ClobSide::try_from(trade.side).map(|side| side.0).map_err(
+                                    |error| ApiError::Deserialize {
+                                        context: "CLOB trade side".into(),
+                                        detail: error.to_string(),
+                                    },
+                                )?,
+                                Shares::new(trade.size),
+                                Price::new(trade.price),
+                                Bps::new(trade.fee_rate_bps),
+                            ),
+                            FeeLiquidityRole::Maker => {
+                                let order = authenticated_maker_order.ok_or_else(|| ApiError::Deserialize {
+                                    context: "CLOB trade maker_orders".into(),
+                                    detail: "maker-side trade has no order owned by the authenticated account"
+                                        .to_owned(),
+                                })?;
+                                (
+                                    OrderId::new(&order.order_id),
+                                    TokenId::new(order.asset_id.to_string()),
+                                    ClobSide::try_from(order.side).map(|side| side.0).map_err(
+                                        |error| ApiError::Deserialize {
+                                            context: "CLOB authenticated maker order side".into(),
+                                            detail: error.to_string(),
+                                        },
+                                    )?,
+                                    Shares::new(order.matched_amount),
+                                    Price::new(order.price),
+                                    Bps::new(order.fee_rate_bps),
+                                )
+                            }
+                        };
+                        let maker_orders = trade
+                            .maker_orders
+                            .into_iter()
+                            .map(|order| {
+                                Ok(ClobMakerOrder {
+                                    order_id: OrderId::new(&order.order_id),
+                                    side: ClobSide::try_from(order.side).map(|side| side.0).map_err(
+                                        |error| ApiError::Deserialize {
+                                            context: "CLOB trade maker order side".into(),
+                                            detail: error.to_string(),
+                                        },
+                                    )?,
+                                    size: Shares::new(order.matched_amount),
+                                    price: Price::new(order.price),
+                                    fee_rate_bps: Bps::new(order.fee_rate_bps),
+                                    token_id: TokenId::new(order.asset_id.to_string()),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, ApiError>>()?;
                         Ok(ClobTrade {
                             trade_id: trade.id,
-                            order_id: OrderId::new(&trade.taker_order_id),
+                            order_id,
                             market_id: MarketId::new(format!("{:#x}", trade.market)),
-                            token_id: TokenId::new(trade.asset_id.to_string()),
-                            side: ClobSide::try_from(trade.side).map(|s| s.0).map_err(|e| {
-                                ApiError::Deserialize {
-                                    context: "CLOB trade side".into(),
-                                    detail: e.to_string(),
-                                }
-                            })?,
-                            size: Shares::new(trade.size),
-                            price: Price::new(trade.price),
+                            token_id,
+                            side,
+                            size: matched_size,
+                            price: matched_price,
+                            fee_rate_bps: matched_fee_rate_bps,
+                            trader_side,
+                            maker_orders,
                             tx_hash: format!("{:#x}", trade.transaction_hash),
                             matched_at: trade.match_time,
                         })
@@ -746,11 +1011,14 @@ impl ClobClient {
     #[doc(hidden)]
     pub fn from_sdk_for_test(
         sdk: Arc<SdkClient<Authenticated<Normal>>>,
+        clob_base_url: String,
         signer: Arc<OrderSigner>,
         order_post_timeout: Duration,
     ) -> Self {
         Self {
             sdk,
+            http: reqwest::Client::new(),
+            clob_base_url,
             signer,
             order_post_timeout,
             rate_limiter: RateLimiter::new(),

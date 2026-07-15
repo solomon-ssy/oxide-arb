@@ -15,7 +15,7 @@ use quant_pivot_models::clickhouse::{
     QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantExitSignalEvaluationEventRow,
     QuantFactorEventRow, QuantFeatureEventRow, QuantFeatureParityEventRow, QuantModelInputEventRow,
     QuantPositionEventRow, QuantRecommendationAttributionEventRow, QuantRecommendationEventRow,
-    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow,
+    QuantServingEvidenceCompletionRow, QuantSignalCandidateEventRow, ReportMarketFunnelRow,
 };
 use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 
@@ -143,6 +143,15 @@ impl QuantFactRepository for ChQuantFactRepository {
     ) -> Result<(), StorageError> {
         self.write_manager
             .write_batch(self.pool.client(), "quant_recommendation_event", rows)
+            .await
+    }
+
+    async fn insert_report_market_funnel(
+        &self,
+        rows: Vec<ReportMarketFunnelRow>,
+    ) -> Result<(), StorageError> {
+        self.write_manager
+            .write_batch(self.pool.client(), "quant_report_market_funnel", rows)
             .await
     }
 

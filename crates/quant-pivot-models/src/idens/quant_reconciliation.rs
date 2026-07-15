@@ -26,7 +26,12 @@ pub enum QuantReconciliation {
     EvidenceJson,
     VenueFilledShares,
     VenueAvgPrice,
-    DiscrepancyUsd,
+    ExpectedCashDeltaUsd,
+    VenueCashDeltaUsd,
+    RealizedPnlUsd,
+    ExpectedFeeUsd,
+    ObservedFeeUsd,
+    FeeDeltaUsd,
     ResolvedBy,
     ResolvedAt,
     CreatedAt,
@@ -50,7 +55,12 @@ pub fn table() -> TableCreateStatement {
         )
         .col(column::shares_null(QuantReconciliation::VenueFilledShares))
         .col(column::price_null(QuantReconciliation::VenueAvgPrice))
-        .col(column::usd_null(QuantReconciliation::DiscrepancyUsd))
+        .col(column::usd_null(QuantReconciliation::ExpectedCashDeltaUsd))
+        .col(column::usd_null(QuantReconciliation::VenueCashDeltaUsd))
+        .col(column::usd_null(QuantReconciliation::RealizedPnlUsd))
+        .col(column::usd_null(QuantReconciliation::ExpectedFeeUsd))
+        .col(column::usd_null(QuantReconciliation::ObservedFeeUsd))
+        .col(column::usd_null(QuantReconciliation::FeeDeltaUsd))
         .col(
             ColumnDef::new(QuantReconciliation::ResolvedBy)
                 .text()

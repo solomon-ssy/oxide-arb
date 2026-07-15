@@ -33,8 +33,8 @@ use quant_pivot_models::{
             ExecutionOrderState, ExitSettlementMode, FactorDirection, FeatureParityLatchState,
             FeatureParityStateTransition, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
-            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
-            ReportTriggerKind, SizingModelKind,
+            RecommendationReportStatus, RecommendationStatus, RedeemPolicy,
+            ReportFactDeliveryStatus, ReportKind, ReportTriggerKind, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
@@ -57,6 +57,7 @@ use quant_pivot_models::{
         RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
         SignalCandidateId, SizingPlan, ThesisInvalidationPolicy, TokenId, TradePolicyArtifactId,
         TradePolicyCohortDimension, TradePolicyCohortKey, TradePolicyCohortProvenance, Usd,
+        builtin_research_profiles,
     },
 };
 use quant_pivot_repository::{
@@ -79,6 +80,7 @@ use quant_pivot_repository::{
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
+    execution_pg_seed::{fixture_profile_ref, prepared_order},
     pg::setup_pg,
     report_fixtures,
 };
@@ -86,6 +88,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{EntityTrait, IntoActiveModel};
 use std::str::FromStr;
+use uuid::Uuid;
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -234,6 +237,27 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
         .await
         .expect("create report");
 
+    let pending_due = report_repo
+        .find_expirable(Utc::now() + Duration::hours(2), 100)
+        .await
+        .expect("find pending delivery");
+    assert!(
+        pending_due.is_empty(),
+        "a report with unverified facts must not enter actionable lifecycle queries"
+    );
+    let worker_id = Uuid::new_v4();
+    let now = Utc::now();
+    let claimed = report_repo
+        .claim_fact_delivery(worker_id, now, now + Duration::minutes(1))
+        .await
+        .expect("claim report facts")
+        .expect("pending report facts");
+    assert_eq!(claimed.recommendation_report_id, ids.report);
+    report_repo
+        .verify_fact_delivery(&ids.report, worker_id, Utc::now())
+        .await
+        .expect("verify report facts");
+
     // Not yet due: the report's roll-up `valid_until` is in the future (now + 1h).
     let not_due = report_repo
         .find_expirable(Utc::now(), 100)
@@ -300,6 +324,120 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
     assert!(
         hashed_transitions >= 2,
         "recommendation expire and report roll-up must write before/after hashes"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn report_fact_delivery_recovers_retry_and_expired_lease_without_early_claim() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+
+    let rc_id = seed_runtime_config(&db).await;
+    let (model_version_id, model_run_id) = seed_model_version(&db, &rc_id).await;
+    let event_id = "evt-1";
+    let market_id = "0xmarket";
+    seed_market_catalog(&db, event_id, market_id).await;
+    let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
+    let ids = TxnIds {
+        feature_parity_state_id: seed_clear_feature_parity_state(&db).await,
+        account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
+        report: RecommendationReportId::from_v7(),
+        recommendation: RecommendationId::from_v7(),
+        condition_instance: EntryConditionInstanceId::from_v7(),
+        model_version: model_version_id,
+        model_run: model_run_id,
+        market_selection: market_selection_id,
+        runtime_config_version: rc_id,
+        market: market_id.to_owned(),
+        event: event_id.to_owned(),
+    };
+    let repo = PgRecommendationReportRepository::new(db);
+    repo.create_report(build_report_transaction(&ids))
+        .await
+        .expect("create report");
+
+    let worker_one = Uuid::new_v4();
+    let claimed_at = Utc::now();
+    repo.claim_fact_delivery(worker_one, claimed_at, claimed_at + Duration::minutes(1))
+        .await
+        .expect("claim initial delivery")
+        .expect("pending delivery");
+    let retrying = repo
+        .fail_fact_delivery(
+            &ids.report,
+            worker_one,
+            ReportFactDeliveryStatus::Retrying,
+            "injected ClickHouse chunk crash",
+        )
+        .await
+        .expect("schedule retry");
+    let next_attempt_at = retrying.next_attempt_at.expect("retry deadline");
+    assert!(
+        repo.claim_fact_delivery(
+            Uuid::new_v4(),
+            next_attempt_at - Duration::milliseconds(1),
+            next_attempt_at + Duration::minutes(1),
+        )
+        .await
+        .expect("poll before retry deadline")
+        .is_none(),
+        "retry must not hot-loop before next_attempt_at"
+    );
+
+    let worker_two = Uuid::new_v4();
+    let second_lease_end = next_attempt_at + Duration::minutes(1);
+    let second = repo
+        .claim_fact_delivery(worker_two, next_attempt_at, second_lease_end)
+        .await
+        .expect("claim due retry")
+        .expect("retry became claimable");
+    assert_eq!(second.attempt_count, 2);
+    assert!(
+        repo.claim_fact_delivery(
+            Uuid::new_v4(),
+            second_lease_end - Duration::milliseconds(1),
+            second_lease_end + Duration::minutes(1),
+        )
+        .await
+        .expect("poll live lease")
+        .is_none(),
+        "a live delivery lease must be exclusive"
+    );
+
+    let worker_three = Uuid::new_v4();
+    let recovered = repo
+        .claim_fact_delivery(
+            worker_three,
+            second_lease_end,
+            second_lease_end + Duration::minutes(1),
+        )
+        .await
+        .expect("recover expired lease")
+        .expect("expired delivery lease");
+    assert_eq!(recovered.attempt_count, 3);
+    let failed = repo
+        .fail_fact_delivery(
+            &ids.report,
+            worker_three,
+            ReportFactDeliveryStatus::Failed,
+            "retry budget exhausted",
+        )
+        .await
+        .expect("terminal failure");
+    assert!(failed.next_attempt_at.is_none());
+    assert!(
+        repo.claim_fact_delivery(
+            Uuid::new_v4(),
+            second_lease_end + Duration::hours(1),
+            second_lease_end + Duration::hours(2),
+        )
+        .await
+        .expect("poll terminal failure")
+        .is_none(),
+        "terminal delivery failure must require explicit operator intervention"
     );
 }
 
@@ -395,6 +533,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
                 runtime_mode: QuantRuntimeMode::SemiAuto,
                 runtime_config_version_id: runtime_config_version_id.clone(),
                 model_version_id: model_version_id.clone(),
+                profile_ref: fixture_profile_ref(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::PendingApproval,
                 approval_status: ApprovalStatus::Pending,
@@ -517,6 +656,14 @@ async fn create_and_submit_execution_order(
             price: Price::new(dec!(0.6)),
             shares: Shares::new(dec!(100)),
             cost_usd: Usd::new(dec!(60)),
+            prepared_order_json: prepared_order(
+                Side::Buy,
+                OrderType::Gtc,
+                quant_pivot_models::types::VenueOrderAmount::Shares(Shares::new(dec!(100))),
+                Usd::ZERO,
+                Shares::new(dec!(100)),
+                Price::new(dec!(0.6)),
+            ),
             venue_order_id: None,
             venue_status: None,
             state: ExecutionOrderState::Planned,
@@ -562,7 +709,12 @@ async fn append_and_resolve_reconciliation(
             evidence_json: ReconciliationEvidenceChain::default(),
             venue_filled_shares: None,
             venue_avg_price: None,
-            discrepancy_usd: None,
+            expected_cash_delta_usd: None,
+            venue_cash_delta_usd: None,
+            realized_pnl_usd: None,
+            expected_fee_usd: None,
+            observed_fee_usd: None,
+            fee_delta_usd: None,
             resolved_by: None,
             resolved_at: None,
         })
@@ -586,6 +738,7 @@ async fn append_and_resolve_reconciliation(
                     venue_ref: Some("0xvenue".to_owned()),
                     shares: None,
                     price: None,
+                    fee_evidence: None,
                 },
             },
         )
@@ -600,7 +753,12 @@ async fn append_and_resolve_reconciliation(
                 result: Patch::set(ReconciliationResult::PartiallyFilled),
                 venue_filled_shares: NullablePatch::set(Shares::new(dec!(10))),
                 venue_avg_price: NullablePatch::set(Price::new(dec!(0.6))),
-                discrepancy_usd: NullablePatch::set(Usd::ZERO),
+                expected_cash_delta_usd: NullablePatch::set(Usd::ZERO),
+                venue_cash_delta_usd: NullablePatch::set(Usd::ZERO),
+                realized_pnl_usd: NullablePatch::Keep,
+                expected_fee_usd: NullablePatch::set(Usd::ZERO),
+                observed_fee_usd: NullablePatch::set(Usd::ZERO),
+                fee_delta_usd: NullablePatch::set(Usd::ZERO),
                 resolved_by: NullablePatch::set("operator".to_owned()),
                 resolved_at: NullablePatch::set(Utc::now()),
             },
@@ -764,6 +922,7 @@ async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -
                 runtime_mode: QuantRuntimeMode::SemiAuto,
                 runtime_config_version_id: ids.runtime_config_version.clone(),
                 model_version_id: ids.model_version.clone(),
+                profile_ref: fixture_profile_ref(),
                 intent_kind: OrderIntentKind::Buy,
                 status: OrderIntentStatus::PendingApproval,
                 approval_status: ApprovalStatus::Pending,
@@ -876,6 +1035,7 @@ async fn seed_model_version(
             model_spec_id,
             version: 1,
             artifact_hash: content_hash('a'),
+            profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
             training_dataset_id: None,
             trade_policy_artifact_id: None,
             trade_policy_hash: None,
@@ -1004,6 +1164,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         entry_condition_artifacts: Vec::new(),
         entry_condition_instances: vec![entry_condition_instance],
         sampled_feature_parity: Some(sampled_feature_parity),
+        fact_delivery: Some(report_fixtures::pending_fact_delivery(&ids.report)),
         operation_log: report_operation_log(ids),
     }
 }
@@ -1046,6 +1207,7 @@ fn report_portfolio_plan(ids: &TxnIds) -> NewPortfolioPlan {
 fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommendationReport {
     NewRecommendationReport {
         recommendation_report_id: ids.report.clone(),
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         report_kind: ReportKind::TopN,
         trigger_kind: ReportTriggerKind::Scheduled,
         trigger_key: report_trigger_key(ids),
@@ -1078,6 +1240,7 @@ fn report_row(ids: &TxnIds, equity_snapshot_id: EquitySnapshotId) -> NewRecommen
 fn report_recommendation(ids: &TxnIds) -> NewRecommendation {
     NewRecommendation {
         recommendation_id: ids.recommendation.clone(),
+        profile_ref: quant_pivot_test_support::execution_pg_seed::fixture_profile_ref(),
         recommendation_report_id: ids.report.clone(),
         rank: 1,
         market_id: MarketId::new(&ids.market),
@@ -1252,11 +1415,17 @@ fn trade_plan(notional: Usd) -> RecommendationTradePlan {
             artifact_hash,
             cohort_index: 0,
             cohort_key: TradePolicyCohortKey {
+                profile_ref: builtin_research_profiles()
+                    .expect("research profiles")
+                    .into_iter()
+                    .next()
+                    .expect("control profile")
+                    .profile_ref,
                 category: MarketCategory::Politics,
                 horizon_secs: 86_400,
                 entry_price_min: Price::new(dec!(0.01)),
                 entry_price_max: Price::new(dec!(0.99)),
-                notional_tier: notional,
+                cash_budget_tier: notional,
                 liquidity: dimension.clone(),
                 volatility: dimension,
             },

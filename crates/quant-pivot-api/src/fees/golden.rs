@@ -32,8 +32,9 @@ fn formula_matches_reference_production_tiers() {
 
     for (amount_usd, price, rate, expected) in cases {
         let shares = amount_usd / price;
-        let ours =
-            calculate_fee(Shares::new(shares), Price::new(price), rate, Decimal::ONE).inner();
+        let ours = calculate_fee(Shares::new(shares), Price::new(price), rate, Decimal::ONE)
+            .expect("valid fee vector")
+            .inner();
         let reference = production_fee_usd(shares, price, rate);
         close(ours, reference);
         close(ours, expected);
@@ -48,10 +49,24 @@ fn formula_matches_sdk_legacy_exponent_two() {
     let rate = dec!(0.25);
     let exponent = dec!(2);
 
-    let ours = calculate_fee(Shares::new(shares), Price::new(price), rate, exponent).inner();
+    let ours = calculate_fee(Shares::new(shares), Price::new(price), rate, exponent)
+        .expect("valid fee vector")
+        .inner();
     let reference = platform_fee_usd(shares, price, rate, exponent);
     close(ours, reference);
     close(ours, dec!(1.5625));
+}
+
+#[test]
+fn formula_supports_market_level_exponent_zero() {
+    let shares = dec!(20);
+    let price = dec!(0.25);
+    let rate = dec!(0.01);
+    let ours = calculate_fee(Shares::new(shares), Price::new(price), rate, Decimal::ZERO)
+        .expect("valid exponent-zero fee vector")
+        .inner();
+    close(ours, platform_fee_usd(shares, price, rate, Decimal::ZERO));
+    close(ours, dec!(0.2));
 }
 
 #[test]
@@ -61,7 +76,8 @@ fn sub_minimum_fee_rounds_to_zero() {
         Price::new(dec!(0.5)),
         dec!(0.000001),
         dec!(1),
-    );
+    )
+    .expect("valid fee vector");
     assert_eq!(fee, Usd::ZERO);
     assert_eq!(round_fee(dec!(0.000005)), Decimal::ZERO);
 }
@@ -73,12 +89,14 @@ fn peak_fee_at_midpoint_exceeds_wings() {
         Price::new(dec!(0.5)),
         dec!(0.05),
         dec!(1),
-    );
+    )
+    .expect("valid fee vector");
     let wing = calculate_fee(
         Shares::new(dec!(100)),
         Price::new(dec!(0.9)),
         dec!(0.05),
         dec!(1),
-    );
+    )
+    .expect("valid fee vector");
     assert!(mid > wing);
 }

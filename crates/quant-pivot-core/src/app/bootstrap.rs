@@ -6,7 +6,9 @@ use crate::app::{
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{config::DeployConfig, domain::ResearchJobPort};
-use quant_pivot_repository::traits::{ResearchJobRepository, TrainingDatasetRepository};
+use quant_pivot_repository::traits::{
+    ResearchJobRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
+};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -42,9 +44,11 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     let research_jobs: Arc<dyn ResearchJobPort> = Arc::new(CoreResearchJobPort::new(
         job_engine.clone(),
         Arc::clone(&ctx.infra.repos.training_dataset) as Arc<dyn TrainingDatasetRepository>,
+        Arc::clone(&ctx.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
         ctx.config.quant.research_jobs.max_recovery_attempts,
     ));
-    ctx.register_research_job_worker(&mut runner, job_engine);
+    ctx.register_research_job_worker(&mut runner, job_engine)?;
+    ctx.register_research_readiness_evidence_worker(&mut runner)?;
     ctx.register_feature_parity_scheduler(&mut runner);
 
     let order_intents = ctx.register_execution_services(&mut runner);

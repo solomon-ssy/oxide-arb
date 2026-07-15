@@ -30,6 +30,7 @@ use crate::{
 pub enum QuantRecommendationReport {
     Table,
     RecommendationReportId,
+    ProfileRef,
     ReportKind,
     TriggerKind,
     TriggerKey,
@@ -79,6 +80,11 @@ fn add_identity_columns(table: &mut TableCreateStatement) {
         .col(column::uuid_pk(
             QuantRecommendationReport::RecommendationReportId,
         ))
+        .col(
+            ColumnDef::new(QuantRecommendationReport::ProfileRef)
+                .json_binary()
+                .not_null(),
+        )
         .col(column::pg_enum::<ReportKind>(
             QuantRecommendationReport::ReportKind,
         ))

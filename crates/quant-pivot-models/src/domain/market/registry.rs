@@ -1,10 +1,8 @@
 //! Polymarket catalog persistence DTOs.
 
 use crate::{
-    domain::{MarketFeeColumns, MarketFeeSchedule},
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
-        fee::FeeSource,
         market::{EventStatus, MarketStatus},
     },
     types::{EventId, MarketId, TokenId, Usd},
@@ -36,13 +34,6 @@ pub struct MarketInfo {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
-    pub fees_enabled: bool,
-    pub fee_rate: Option<Decimal>,
-    pub fee_exponent: Option<Decimal>,
-    pub fee_taker_only: Option<bool>,
-    pub fee_rebate_rate: Option<Decimal>,
-    pub fee_source: Option<FeeSource>,
-    pub fee_observed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -50,8 +41,7 @@ pub struct MarketInfo {
 info_from_model!(MarketInfo, crate::entities::market::Model, {
     market_id, event_id, question, slug, description, categories, status, outcome,
     yes_token_id, no_token_id, tick_size, neg_risk, start_date, end_date, resolved_at,
-    fees_enabled, fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate,
-    fee_source, fee_observed_at, created_at, updated_at,
+    created_at, updated_at,
 });
 
 impl MarketInfo {
@@ -61,37 +51,10 @@ impl MarketInfo {
         CategorySet::from(self.categories.as_slice())
     }
 
-    /// Deterministic single category for fee estimation.
+    /// Deterministic primary category for single-cohort consumers.
     #[must_use]
-    pub fn fee_category(&self) -> MarketCategory {
-        self.category_set().fee_category()
-    }
-
-    /// Reconstruct the complete fee schedule persisted with this catalog row.
-    #[must_use]
-    pub fn fee_schedule(&self) -> Option<MarketFeeSchedule> {
-        let (fee_rate, exponent, taker_only, source, observed_at) = (
-            self.fee_rate,
-            self.fee_exponent,
-            self.fee_taker_only,
-            self.fee_source,
-            self.fee_observed_at,
-        );
-        match (fee_rate, exponent, taker_only, source, observed_at) {
-            (Some(fee_rate), Some(exponent), Some(taker_only), Some(source), Some(observed_at)) => {
-                Some(MarketFeeSchedule {
-                    market_id: self.market_id.clone(),
-                    fees_enabled: self.fees_enabled,
-                    fee_rate,
-                    exponent,
-                    taker_only,
-                    rebate_rate: self.fee_rebate_rate,
-                    source,
-                    observed_at,
-                })
-            }
-            _ => None,
-        }
+    pub fn primary_category(&self) -> MarketCategory {
+        self.category_set().primary_category()
     }
 }
 
@@ -114,13 +77,6 @@ pub struct UpsertMarket {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
-    pub fees_enabled: bool,
-    pub fee_rate: Option<Decimal>,
-    pub fee_exponent: Option<Decimal>,
-    pub fee_taker_only: Option<bool>,
-    pub fee_rebate_rate: Option<Decimal>,
-    pub fee_source: Option<FeeSource>,
-    pub fee_observed_at: Option<DateTime<Utc>>,
 }
 
 /// Outcome token metadata held in the in-memory market registry.
@@ -260,7 +216,6 @@ pub struct MarketRegistryInfo {
     pub liquidity_usd: Option<Usd>,
     /// Gamma-reported trailing 24h volume when published by the upstream source.
     pub volume_24h: Option<Usd>,
-    pub fee_schedule: Option<MarketFeeSchedule>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
@@ -271,10 +226,10 @@ pub struct MarketRegistryInfo {
 }
 
 impl MarketRegistryInfo {
-    /// Deterministic fee category derived from the market category set.
+    /// Deterministic primary category derived from the category set.
     #[must_use]
-    pub fn fee_category(&self) -> MarketCategory {
-        self.categories.fee_category()
+    pub fn primary_category(&self) -> MarketCategory {
+        self.categories.primary_category()
     }
 
     /// Resolve the YES/NO token pair represented by this registry row.
@@ -300,10 +255,6 @@ impl UpsertMarket {
     /// Build a persistable upsert DTO from an in-memory Gamma registry row.
     pub fn from_registry(value: &MarketRegistryInfo) -> Result<Self, MarketError> {
         value.resolve_token_pair()?;
-        let fee_columns = value.fee_schedule.as_ref().map_or_else(
-            MarketFeeColumns::disabled,
-            MarketFeeSchedule::to_market_fee_columns,
-        );
         Ok(Self {
             market_id: value.market_id.clone(),
             event_id: value.event_id.clone(),
@@ -320,13 +271,6 @@ impl UpsertMarket {
             start_date: value.start_date,
             end_date: value.end_date,
             resolved_at: value.resolved_at,
-            fees_enabled: fee_columns.fees_enabled,
-            fee_rate: fee_columns.fee_rate,
-            fee_exponent: fee_columns.fee_exponent,
-            fee_taker_only: fee_columns.fee_taker_only,
-            fee_rebate_rate: fee_columns.fee_rebate_rate,
-            fee_source: fee_columns.fee_source,
-            fee_observed_at: fee_columns.fee_observed_at,
         })
     }
 }
@@ -365,13 +309,4 @@ pub fn resolve_binary_pair_exact(
         return Err(MarketError::DuplicateTokenPair { market_id });
     }
     Ok((yes, no))
-}
-
-/// Collect fee schedules from in-memory market registry rows.
-#[must_use]
-pub fn collect_fee_data(markets: &[MarketRegistryInfo]) -> Vec<MarketFeeSchedule> {
-    markets
-        .iter()
-        .filter_map(|market| market.fee_schedule.clone())
-        .collect()
 }

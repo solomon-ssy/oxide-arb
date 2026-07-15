@@ -165,7 +165,7 @@ impl Display for AlertLevel {
 
 pg_enum! {
     type_name = "qp_market_category",
-    /// Polymarket event category for fee-rate lookup and opportunity scoring.
+    /// Polymarket event category for business selection and model cohorts.
     @derive(PartialOrd, Ord, schemars::JsonSchema)
     @no_from_str
     pub enum MarketCategory {
@@ -215,7 +215,7 @@ impl MarketCategory {
         }
     }
 
-    /// Map a Gamma event tag slug to a fee category.
+    /// Map a Gamma event tag slug to a governed business category.
     ///
     /// The Gamma API exposes no dedicated category field anymore: the official
     /// categorization is the event `tags[]` array, whose slugs correspond to
@@ -238,16 +238,13 @@ impl MarketCategory {
         }
     }
 
-    /// Fee-conservatism rank: higher rank means a higher documented fee rate.
+    /// Stable precedence for consumers that require one primary cohort.
     ///
-    /// Used to break ties when an event maps to several categories — picking
-    /// the highest-fee category overestimates (never underestimates) fees,
-    /// which is the safe direction for net-profit gating.
-    /// Order per Polymarket fee docs: crypto 0.072 > economics/culture/weather
-    /// 0.05 > politics/finance/tech 0.04 > sports 0.03 > geopolitics 0.
+    /// Fee calculation must never use this projection. Venue fees come only
+    /// from point-in-time CLOB market-info observations.
     #[must_use]
     #[inline]
-    pub const fn fee_rank(self) -> u8 {
+    pub const fn primary_rank(self) -> u8 {
         match self {
             Self::Crypto => 9,
             Self::Economics => 8,
@@ -267,8 +264,8 @@ impl MarketCategory {
 ///
 /// One event frequently carries several category tags (e.g. politics +
 /// geopolitics + world). The set preserves every membership for selection
-/// filtering, while [`Self::fee_category`] collapses to a deterministic
-/// single category for fee estimation.
+/// filtering, while [`Self::primary_category`] supplies a deterministic
+/// single category only to consumers whose contract requires one cohort.
 ///
 /// Serialized as an array of category names for registry snapshots and
 /// debuggability.
@@ -324,15 +321,14 @@ impl CategorySet {
             .filter(move |category| self.contains(*category))
     }
 
-    /// Deterministic single category for fee estimation.
+    /// Deterministic single category for single-cohort consumers.
     ///
-    /// Picks the member with the highest [`MarketCategory::fee_rank`]
-    /// (fee-conservative: overestimate, never underestimate). The empty set
-    /// collapses to [`MarketCategory::Other`].
+    /// Fee calculation must use PIT CLOB market info, never this category. The
+    /// empty set collapses to [`MarketCategory::Other`].
     #[must_use]
-    pub fn fee_category(self) -> MarketCategory {
+    pub fn primary_category(self) -> MarketCategory {
         self.iter()
-            .max_by_key(|category| category.fee_rank())
+            .max_by_key(|category| category.primary_rank())
             .unwrap_or(MarketCategory::Other)
     }
 }
@@ -465,17 +461,16 @@ mod tests {
     fn category_set_from_empty_slugs_is_empty() {
         let set = CategorySet::from_slugs([] as [&str; 0]);
         assert!(set.is_empty());
-        assert_eq!(set.fee_category(), MarketCategory::Other);
+        assert_eq!(set.primary_category(), MarketCategory::Other);
     }
 
     #[test]
-    fn fee_category_picks_the_highest_fee_member() {
-        // crypto 0.072 beats politics 0.04 beats geopolitics 0.
+    fn primary_category_uses_stable_precedence() {
         let set = CategorySet::from_slugs(["politics", "crypto", "geopolitics"]);
-        assert_eq!(set.fee_category(), MarketCategory::Crypto);
+        assert_eq!(set.primary_category(), MarketCategory::Crypto);
 
         let set = CategorySet::from_slugs(["sports", "geopolitics"]);
-        assert_eq!(set.fee_category(), MarketCategory::Sports);
+        assert_eq!(set.primary_category(), MarketCategory::Sports);
     }
 
     #[test]
@@ -528,10 +523,10 @@ mod tests {
     }
 
     #[test]
-    fn fee_rank_is_a_total_order_over_all_variants() {
+    fn primary_rank_is_a_total_order_over_all_variants() {
         let mut ranks: Vec<u8> = MarketCategory::ALL_VARIANTS
             .iter()
-            .map(|category| category.fee_rank())
+            .map(|category| category.primary_rank())
             .collect();
         ranks.sort_unstable();
         ranks.dedup();

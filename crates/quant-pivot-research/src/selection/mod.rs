@@ -232,6 +232,10 @@ impl From<&MarketCandidate> for SelectedMarket {
 pub struct ExcludedMarket {
     /// Market id.
     pub market_id: MarketId,
+    /// Owning event frozen with the catalog-visible candidate.
+    pub event_id: EventId,
+    /// Primary token frozen with the catalog-visible candidate.
+    pub primary_token_id: TokenId,
     /// Why it was excluded.
     pub reason: ExclusionReason,
 }
@@ -256,8 +260,6 @@ pub enum ExclusionReason {
     ResolutionAmbiguous,
     /// Manually blocked by an operator.
     ManuallyBlocked,
-    /// Passed every filter but dropped by `max_selection_size` cap.
-    SelectionCapExceeded,
     /// The model requires features unavailable for this market.
     ModelFeatureUnavailable {
         /// The missing required features.

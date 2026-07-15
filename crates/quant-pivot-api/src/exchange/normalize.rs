@@ -1,14 +1,14 @@
 //! Normalize decoded `OrderFilled` logs into trade-tape prints.
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 use chrono::{DateTime, TimeZone, Utc};
 use quant_pivot_models::{
     domain::{
         TradeParticipantRole, TradeTapePrint, TradeTapeSourceKind,
         trade_tape_coverage::{PARTICIPANT_ADDRESS, PARTICIPANT_ROLE, SIDE, TOKEN_ID, TX_HASH},
     },
-    enums::common::Side,
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    enums::{common::Side, fee::FeeLiquidityRole},
+    types::{FeeEvidence, MarketId, OrderId, Price, Shares, TokenId, Usd, VenueFillObservation},
 };
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -29,6 +29,7 @@ pub enum DecodeRejectReason {
     UnknownToken,
     ZeroNotional,
     DenylistedMaker,
+    MissingIdentity,
 }
 
 /// Normalized primary/secondary prints for one `OrderFilled` log.
@@ -36,6 +37,7 @@ pub enum DecodeRejectReason {
 pub struct NormalizedFillLegs {
     pub primary: TradeTapePrint,
     pub secondary_taker: Option<TradeTapePrint>,
+    pub venue_fill: Option<VenueFillObservation>,
 }
 
 /// Normalize a V1 `OrderFilled` log.
@@ -99,6 +101,7 @@ fn normalize_v1_decoded(
             shares_raw,
             maker: decoded.maker,
             taker: decoded.taker,
+            exact_order_evidence: None,
         },
         market_for_token,
     )
@@ -138,6 +141,17 @@ fn normalize_v2_decoded(
             shares_raw,
             maker: decoded.maker,
             taker: decoded.taker,
+            exact_order_evidence: Some(ExactOrderEvidence {
+                order_hash: decoded.order_hash,
+                fee: decoded.fee,
+                builder: decoded.builder,
+                metadata: decoded.metadata,
+                liquidity_role: if decoded.taker == contract.address {
+                    FeeLiquidityRole::Taker
+                } else {
+                    FeeLiquidityRole::Maker
+                },
+            }),
         },
         market_for_token,
     )
@@ -152,6 +166,16 @@ struct FillAmounts<'a> {
     shares_raw: U256,
     maker: Address,
     taker: Address,
+    exact_order_evidence: Option<ExactOrderEvidence>,
+}
+
+#[derive(Clone, Copy)]
+struct ExactOrderEvidence {
+    order_hash: B256,
+    fee: U256,
+    builder: B256,
+    metadata: B256,
+    liquidity_role: FeeLiquidityRole,
 }
 
 fn build_legs(
@@ -167,6 +191,7 @@ fn build_legs(
         shares_raw,
         maker,
         taker,
+        exact_order_evidence,
     } = fill;
     let market_id = market_for_token(&token_id).ok_or(DecodeRejectReason::UnknownToken)?;
     let event_time = event_time_from_block_timestamp(fetched.block_timestamp)?;
@@ -178,20 +203,28 @@ fn build_legs(
         .log
         .transaction_hash
         .map(|hash| format!("{hash:#x}"));
-    let log_index = fetched.log.log_index.unwrap_or_default();
+    let log_index = fetched.log.log_index;
     let trade_id_base = format!(
         "{}:{}:{}",
         contract.key,
         tx_hash.as_deref().unwrap_or("0x0"),
-        log_index
+        log_index.unwrap_or_default()
     );
     let raw_payload = json!({
         "exchange_version": contract.version.as_str(),
         "exchange_key": contract.key,
         "block_number": fetched.block_number,
         "log_index": log_index,
+        "order_hash": exact_order_evidence.map(|value| format!("{:#x}", value.order_hash)),
+        "fee_raw": exact_order_evidence.map(|value| value.fee.to_string()),
+        "builder": exact_order_evidence.map(|value| format!("{:#x}", value.builder)),
+        "metadata": exact_order_evidence.map(|value| format!("{:#x}", value.metadata)),
     })
     .to_string();
+    let primary_role = match exact_order_evidence.map(|value| value.liquidity_role) {
+        Some(FeeLiquidityRole::Taker) => TradeParticipantRole::Taker,
+        Some(FeeLiquidityRole::Maker) | None => TradeParticipantRole::Maker,
+    };
     let coverage = PARTICIPANT_ADDRESS | PARTICIPANT_ROLE | TOKEN_ID | SIDE | TX_HASH;
     let primary = TradeTapePrint {
         market_id: market_id.clone(),
@@ -199,7 +232,7 @@ fn build_legs(
         event_time,
         available_at: None,
         participant_address: maker.to_checksum(None),
-        participant_role: TradeParticipantRole::Maker,
+        participant_role: primary_role,
         side: Some(side),
         price,
         size_shares,
@@ -222,7 +255,7 @@ fn build_legs(
             price,
             size_shares,
             notional_usd: Usd::new(notional),
-            tx_hash,
+            tx_hash: tx_hash.clone(),
             trade_id: format!("{trade_id_base}:taker"),
             source: TradeTapeSourceKind::OnChain,
             coverage_flags: coverage,
@@ -231,9 +264,37 @@ fn build_legs(
     } else {
         None
     };
+    let venue_fill = exact_order_evidence
+        .map(|exact| {
+            let transaction_hash = tx_hash.clone().ok_or(DecodeRejectReason::MissingIdentity)?;
+            let log_index = log_index.ok_or(DecodeRejectReason::MissingIdentity)?;
+            let actual_fee = Usd::new(u256_to_decimal(exact.fee, 6)?);
+            let builder_code =
+                (exact.builder != B256::ZERO).then(|| format!("{:#x}", exact.builder));
+            Ok(VenueFillObservation {
+                order_id: OrderId::new(format!("{:#x}", exact.order_hash)),
+                liquidity_role: exact.liquidity_role,
+                filled_shares: size_shares,
+                average_price: price,
+                matched_at: event_time,
+                maker_order_ids: Vec::new(),
+                builder_code: builder_code.clone(),
+                fee_evidence: FeeEvidence::OnChainExact {
+                    order_id: OrderId::new(format!("{:#x}", exact.order_hash)),
+                    liquidity_role: exact.liquidity_role,
+                    transaction_hash,
+                    log_index,
+                    matched_at: event_time,
+                    actual_fee,
+                    builder_code,
+                },
+            })
+        })
+        .transpose()?;
     Ok(NormalizedFillLegs {
         primary,
         secondary_taker,
+        venue_fill,
     })
 }
 

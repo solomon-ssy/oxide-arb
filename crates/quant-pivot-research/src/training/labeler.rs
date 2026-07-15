@@ -388,6 +388,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
             taker_only: fee_schedule.taker_only,
             builder_maker_fee_bps: Bps::ZERO,
             builder_taker_fee_bps: Bps::ZERO,
+            builder_attributed: false,
         };
         let Ok(fill) = walk_sell_exact_shares(
             bids,
@@ -407,7 +408,7 @@ impl Labeler for HoldVsExitProceedsLabeler {
                 reason: MissingLabelReason::NoForwardData,
             };
         }
-        let exit_proceeds = fill.gross_notional.inner() - fill.fee.inner();
+        let exit_proceeds = fill.gross_order_amount.inner() - fill.expected_fee.inner();
         let hold_terminal = hold_terminal_proceeds(&ctx.terminal, input.decision_at).inner();
         let alpha = (exit_proceeds - hold_terminal) / cost_basis * bps_denominator();
         LabelBuildOutput::Available(TrainingLabel {
@@ -470,7 +471,6 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::{BookLevel, MarketFeeSchedule},
-        enums::fee::FeeSource,
         types::{MarketId, Price, Shares, TokenId, Usd},
     };
     use rust_decimal::Decimal;
@@ -679,7 +679,6 @@ mod tests {
                 exponent: Decimal::ONE,
                 taker_only: true,
                 rebate_rate: None,
-                source: FeeSource::GammaFeeSchedule,
                 observed_at: at(0),
             }),
             terminal,

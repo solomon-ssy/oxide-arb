@@ -1,8 +1,8 @@
 //! [`ConfiguredMarketSelector`]: the pure selection function.
 //!
 //! Given a frozen [`MarketSelectionBuildRequest`] and a frozen
-//! `Vec<MarketCandidate>`, it runs the [`FilterChain`], stably caps the survivors
-//! at `max_selection_size`, computes the canonical [`selector_hash`], and returns
+//! `Vec<MarketCandidate>`, it runs the [`FilterChain`] over the complete candidate set,
+//! computes the canonical [`selector_hash`], and returns
 //! a [`MarketSelectionSnapshot`]. It performs no I/O and reads no clock — an
 //! empty result is a normal snapshot, never an error.
 
@@ -17,7 +17,7 @@ use crate::{
     features::FeatureSchema,
     hashing::ResearchHasher,
     selection::{
-        ExcludedMarket, ExclusionReason, FilterChain, FilterOutcome, MarketCandidateCtx,
+        ExcludedMarket, FilterChain, FilterOutcome, MarketCandidateCtx,
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
         SelectionResult, SelectionThresholds, SelectorHashInput, accumulate_exclusion,
     },
@@ -37,7 +37,7 @@ impl ConfiguredMarketSelector {
         }
     }
 
-    /// Run the filter chain + stable cap over `candidates`, returning the
+    /// Run the filter chain over `candidates`, returning the
     /// included / excluded partition — the pure selection core, with no snapshot
     /// id or canonical hash.
     ///
@@ -70,34 +70,22 @@ impl ConfiguredMarketSelector {
                     accumulate_exclusion(&mut exclusion_summary, &reason);
                     excluded.push(ExcludedMarket {
                         market_id: candidate.market_id.clone(),
+                        event_id: candidate.event_id.clone(),
+                        primary_token_id: candidate.primary_token_id.clone(),
                         reason,
                     });
                 }
             }
         }
 
-        // Stable cap: highest liquidity first, then market id ascending, so the
-        // same candidate slice always yields the same truncated selection.
+        // Canonical ordering makes identical complete-candidate inputs hash and
+        // persist identically without dropping otherwise eligible markets.
         included.sort_by(|left, right| {
             right
                 .liquidity_usd
                 .cmp(&left.liquidity_usd)
                 .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
         });
-        let cap = request.selection.max_selection_size as usize;
-        if included.len() > cap {
-            for market in included.drain(cap..) {
-                accumulate_exclusion(
-                    &mut exclusion_summary,
-                    &ExclusionReason::SelectionCapExceeded,
-                );
-                excluded.push(ExcludedMarket {
-                    market_id: market.market_id,
-                    reason: ExclusionReason::SelectionCapExceeded,
-                });
-            }
-        }
-
         Ok(SelectionResult {
             included,
             excluded,
@@ -537,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn max_selection_size_truncation_is_stable() {
+    async fn complete_candidate_set_is_retained_in_canonical_order() {
         let mut high = healthy_candidate("0xhigh");
         high.liquidity_usd = Some(Usd::new(Decimal::from(90_000)));
         let mut mid = healthy_candidate("0xmid");
@@ -545,28 +533,17 @@ mod tests {
         let mut low = healthy_candidate("0xlow");
         low.liquidity_usd = Some(Usd::new(Decimal::from(10_000)));
 
-        let mut selection = selection_config();
-        selection.max_selection_size = 2;
-
         let snapshot = build(
-            request_with(selection),
+            request_with(selection_config()),
             vec![low, high.clone(), mid.clone()],
         )
         .await;
 
-        assert_eq!(snapshot.included.len(), 2);
+        assert_eq!(snapshot.included.len(), 3);
         assert_eq!(snapshot.included[0].market_id.as_str(), "0xhigh");
         assert_eq!(snapshot.included[1].market_id.as_str(), "0xmid");
-        assert_eq!(snapshot.excluded.len(), 1);
-        assert_eq!(
-            snapshot.excluded[0].market_id.as_str(),
-            "0xlow",
-            "cap-truncated market must appear in excluded"
-        );
-        assert_eq!(
-            snapshot.excluded[0].reason,
-            ExclusionReason::SelectionCapExceeded
-        );
+        assert_eq!(snapshot.included[2].market_id.as_str(), "0xlow");
+        assert!(snapshot.excluded.is_empty());
     }
 
     #[tokio::test]

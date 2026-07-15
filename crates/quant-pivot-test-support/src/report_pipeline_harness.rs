@@ -7,6 +7,9 @@ use std::{
 
 use crate::{
     catalog_fixtures::{make_event, make_market},
+    execution_pg_seed::{
+        fixture_profile_ref, seed_model_score_calibration_fixture, seed_report_trade_policy_fixture,
+    },
     fact_sink::DiscardFactWriter,
     factor_governance::publish_all_factor_definitions,
     pit::InMemoryDecisionSnapshotSource,
@@ -26,7 +29,6 @@ use quant_pivot_core::{
         alert_dispatcher::AlertDispatcher, factor_fact_writer::FactorEventWriter,
         feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
         model_input_fact_writer::ModelInputEventWriter,
-        recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
     prefetch::{feature_window::FeatureWindowProvider, market_candidates::MarketCandidateProvider},
@@ -73,8 +75,9 @@ use quant_pivot_models::{
         model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EntryConditionState, FeatureParityLatchState, FeatureParityStateTransition,
-            OutcomeSide, PublicationStatus, RecommendationReportStatus, ReportKind,
+            DownsideSource, EntryConditionState, FeatureParityLatchState,
+            FeatureParityStateTransition, OutcomeSide, PublicationStatus,
+            RecommendationReportStatus, ReportKind,
         },
         rbac::ResourceType,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -119,9 +122,9 @@ use quant_pivot_research::{
     features::FeatureSchema,
     hashing::ResearchHasher,
     model::{
-        CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact,
-        ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
-        WeightedFactorModelArtifact, model_input_contract_hash,
+        CalibratedReturnModel, CalibrationArtifactLoader, DefaultModelRuntimeFactoryBuilder,
+        FactorWeight, ModelArtifact, ModelArtifactHeader, ReturnModelSpec, ScoreMultiplierSpec,
+        SubstitutionConfidenceRules, WeightedFactorModelArtifact, model_input_contract_hash,
     },
     pit::PointInTimeSnapshotSource,
     portfolio::HistoricalCorrelationEstimator,
@@ -166,6 +169,7 @@ pub struct HarnessOptions {
     pub selection: SelectionPreset,
     pub account: AccountFixture,
     pub collateral: Usd,
+    pub bind_trade_policy: bool,
 }
 
 impl Default for HarnessOptions {
@@ -174,6 +178,7 @@ impl Default for HarnessOptions {
             selection: SelectionPreset::Standard,
             account: AccountFixture::Stub,
             collateral: Usd::new(dec!(10_000)),
+            bind_trade_policy: true,
         }
     }
 }
@@ -193,6 +198,15 @@ impl HarnessOptions {
     pub fn unavailable_account() -> Self {
         Self {
             account: AccountFixture::Unavailable,
+            ..Self::default()
+        }
+    }
+
+    /// Harness whose active model deliberately has no trade-policy binding.
+    #[must_use]
+    pub fn missing_trade_policy() -> Self {
+        Self {
+            bind_trade_policy: false,
             ..Self::default()
         }
     }
@@ -492,8 +506,7 @@ impl ReportPipelineHarness {
         publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features, &domain)
             .await
             .expect("publish factor definitions");
-        let model_version_id =
-            publish_weighted_model(db, &store, &factors, &features, &domain).await;
+        let model_version_id = ModelVersionId::from_v7();
 
         let runtime_config = runtime_config_for_pipeline(
             &model_version_id,
@@ -503,7 +516,20 @@ impl ReportPipelineHarness {
         );
         let runtime_config_repo = Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
             as Arc<dyn RuntimeConfigVersionRepository>;
-        bootstrap_runtime_config_activation(runtime_config_repo.as_ref(), &runtime_config).await;
+        let runtime_config_version_id =
+            bootstrap_runtime_config_activation(runtime_config_repo.as_ref(), &runtime_config)
+                .await;
+        publish_weighted_model(&WeightedModelFixture {
+            db,
+            store: &store,
+            factors: &factors,
+            features: &features,
+            domain: &domain,
+            model_version_id: &model_version_id,
+            runtime_config_version_id: &runtime_config_version_id,
+            bind_trade_policy: options.bind_trade_policy,
+        })
+        .await;
 
         let version = runtime_config_repo
             .load_active_at(Utc::now())
@@ -521,10 +547,10 @@ impl ReportPipelineHarness {
             book_store: &book_store,
             model_runner,
             account_factory,
-            artifact_store: store,
+            artifact_store: Arc::clone(&store),
             calibration_loader,
         });
-        let lifecycle = build_lifecycle_service(db, runtime_config_repo, builder).await;
+        let lifecycle = build_lifecycle_service(db, runtime_config_repo, builder, store).await;
 
         Self {
             db: db.clone(),
@@ -541,14 +567,9 @@ impl ReportPipelineHarness {
 pub async fn bootstrap_runtime_config_activation(
     repo: &dyn RuntimeConfigVersionRepository,
     config: &RuntimeConfig,
-) {
-    if repo
-        .load_current_activation()
-        .await
-        .expect("activation")
-        .is_some()
-    {
-        return;
+) -> RuntimeConfigVersionId {
+    if let Some(activation) = repo.load_current_activation().await.expect("activation") {
+        return activation.runtime_config_version_id;
     }
     let config_json = config.to_json();
     let config_hash = CanonicalDigest::content_hash_json(&config_json).expect("hash");
@@ -564,6 +585,7 @@ pub async fn bootstrap_runtime_config_activation(
         })
         .await
         .expect("runtime config version");
+    let runtime_config_version_id = version.runtime_config_version_id.clone();
     repo.activate_version(NewRuntimeConfigActivation {
         runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: version.runtime_config_version_id,
@@ -577,6 +599,7 @@ pub async fn bootstrap_runtime_config_activation(
     })
     .await
     .expect("runtime config activation");
+    runtime_config_version_id
 }
 
 /// Persist a pre-built report transaction via the production repository.
@@ -777,6 +800,9 @@ fn fixture_report_transaction(
         entry_condition_artifacts: Vec::new(),
         entry_condition_instances,
         sampled_feature_parity: Some(sampled_feature_parity),
+        fact_delivery: Some(report_fixtures::pending_fact_delivery(
+            &report.recommendation_report_id,
+        )),
         operation_log: fixture_publish_operation_log(report),
     }
 }
@@ -841,6 +867,7 @@ fn fixture_portfolio_plan(report: &RecommendationReportInfo) -> NewPortfolioPlan
 fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationReport {
     NewRecommendationReport {
         recommendation_report_id: report.recommendation_report_id.clone(),
+        profile_ref: report.profile_ref.clone(),
         report_kind: report.report_kind,
         trigger_kind: report.trigger_kind,
         trigger_key: report.trigger_key.clone(),
@@ -873,6 +900,7 @@ fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationRep
 fn fixture_new_recommendation(rec: RecommendationInfo) -> NewRecommendation {
     NewRecommendation {
         recommendation_id: rec.recommendation_id,
+        profile_ref: rec.profile_ref,
         recommendation_report_id: rec.recommendation_report_id,
         rank: rec.rank,
         market_id: rec.market_id,
@@ -993,7 +1021,10 @@ fn build_report_builder(input: ReportBuilderHarnessInput<'_>) -> Arc<DefaultRepo
         calibration_loader,
     } = input;
     let pit_source: Arc<dyn PointInTimeSnapshotSource> = Arc::new(
-        InMemoryDecisionSnapshotSource::freeze(registry.as_ref(), book_store.as_ref()),
+        InMemoryDecisionSnapshotSource::freeze_with_zero_fee_schedule(
+            registry.as_ref(),
+            book_store.as_ref(),
+        ),
     );
     Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
         runtime_config_repo,
@@ -1038,6 +1069,7 @@ async fn build_lifecycle_service(
     db: &DatabaseConnection,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     builder: Arc<DefaultReportBuilder>,
+    artifact_store: Arc<dyn ArtifactStore>,
 ) -> ReportLifecycleService {
     let metrics = Arc::new(MetricsHub::new());
     let (events, _rx) = CoreEventPublisher::bounded(64);
@@ -1055,7 +1087,6 @@ async fn build_lifecycle_service(
         builder,
         publisher: Arc::new(ReportPublisher::new(ReportPublisherDeps {
             events,
-            recommendation_writer: noop_recommendation_writer(),
             alerts: recording_alerts(),
             metrics: Arc::clone(&metrics),
         })),
@@ -1065,6 +1096,7 @@ async fn build_lifecycle_service(
             state_id: seed_clear_feature_parity_state(db).await,
         }),
         feature_parity_runs,
+        artifact_store,
     })
 }
 
@@ -1142,7 +1174,6 @@ fn registry_market(
         min_order_size: Decimal::ONE,
         liquidity_usd: Some(liquidity_usd),
         volume_24h: Some(volume_24h_usd),
-        fee_schedule: None,
         start_date: Some(Utc::now() - ChronoDuration::hours(1)),
         end_date: Some(Utc::now() + ChronoDuration::days(2)),
         resolved_at: None,
@@ -1262,12 +1293,10 @@ fn selection_config(preset: SelectionPreset) -> SelectionConfig {
     match preset {
         SelectionPreset::Standard => SelectionConfig {
             enabled_categories: vec![MarketCategory::Sports],
-            max_selection_size: 10,
             ..SelectionConfig::default()
         },
         SelectionPreset::Empty => SelectionConfig {
             enabled_categories: vec![MarketCategory::Politics],
-            max_selection_size: 10,
             ..SelectionConfig::default()
         },
     }
@@ -1337,14 +1366,19 @@ fn account_factory(
     ))
 }
 
-async fn publish_weighted_model(
-    db: &DatabaseConnection,
-    store: &Arc<dyn ArtifactStore>,
-    factors: &FactorsConfig,
-    features: &FeaturesConfig,
-    domain: &DomainConfig,
-) -> ModelVersionId {
-    let engine = FactorEngine::new(factors, features, domain, None);
+struct WeightedModelFixture<'a> {
+    db: &'a DatabaseConnection,
+    store: &'a Arc<dyn ArtifactStore>,
+    factors: &'a FactorsConfig,
+    features: &'a FeaturesConfig,
+    domain: &'a DomainConfig,
+    model_version_id: &'a ModelVersionId,
+    runtime_config_version_id: &'a RuntimeConfigVersionId,
+    bind_trade_policy: bool,
+}
+
+async fn publish_weighted_model(input: &WeightedModelFixture<'_>) {
+    let engine = FactorEngine::new(input.factors, input.features, input.domain, None);
     let factor_set = engine.factor_set();
     let count = factor_set.definitions.len();
     assert!(count > 0, "the factor set must be non-empty");
@@ -1360,10 +1394,24 @@ async fn publish_weighted_model(
     let tail: Decimal = weights.iter().skip(1).map(|w| w.weight).sum();
     weights[0].weight = Decimal::ONE - tail;
 
-    let model_version_id = ModelVersionId::from_v7();
-    let feature_schema_hash =
-        ResearchHasher::feature_schema(&FeatureSchema::build(features).expect("feature schema"))
-            .expect("feature hash");
+    let trade_policy = if input.bind_trade_policy {
+        Some(
+            seed_report_trade_policy_fixture(
+                input.db,
+                input.runtime_config_version_id,
+                MarketCategory::Sports,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let calibration_id =
+        seed_model_score_calibration_fixture(input.db, input.model_version_id).await;
+    let feature_schema_hash = ResearchHasher::feature_schema(
+        &FeatureSchema::build(input.features).expect("feature schema"),
+    )
+    .expect("feature hash");
     let factor_schema_hash = engine.factor_schema_hash().expect("factor hash");
     let input_contract = ModelInputContract::single_required("book.mid");
     let input_contract_hash =
@@ -1371,12 +1419,17 @@ async fn publish_weighted_model(
 
     let artifact = ModelArtifact::WeightedFactor(Box::new(WeightedFactorModelArtifact {
         header: ModelArtifactHeader {
-            model_version_id: model_version_id.clone(),
+            model_version_id: input.model_version_id.clone(),
+            profile_ref: fixture_profile_ref(),
             model_family: ModelFamily::WeightedFactor,
             feature_schema_hash,
             factor_schema_hash: factor_schema_hash.clone(),
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
+            trade_policy_artifact_id: trade_policy
+                .as_ref()
+                .map(|policy| policy.artifact_id.clone()),
+            trade_policy_hash: trade_policy
+                .as_ref()
+                .map(|policy| policy.artifact_hash.clone()),
         },
         training_dataset_hash: factor_schema_hash.clone(),
         training_input_hash: factor_schema_hash,
@@ -1386,7 +1439,10 @@ async fn publish_weighted_model(
         prediction_horizon_secs: 86_400,
         multipliers: ScoreMultiplierSpec::conservative(),
         substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-        return_model: ReturnModelSpec::heuristic_default(),
+        return_model: ReturnModelSpec::Calibrated(CalibratedReturnModel {
+            calibrator_ref: calibration_id,
+            downside_source: DownsideSource::MfeMae,
+        }),
         factor_cross_section: FactorCrossSectionConfig::default(),
         frozen_reference_quantiles: FrozenReferenceQuantiles::empty(),
         objective_report: None,
@@ -1395,12 +1451,13 @@ async fn publish_weighted_model(
     artifact.validate().expect("artifact valid");
     let artifact_hash = artifact.content_hash().expect("hash");
     let key = ModelArtifact::artifact_key(&artifact_hash).expect("key");
-    store
+    input
+        .store
         .put(key, &artifact.to_bytes().expect("bytes"))
         .await
         .expect("store artifact");
 
-    let registry = PgModelRegistryRepository::new(db.clone());
+    let registry = PgModelRegistryRepository::new(input.db.clone());
     let model_spec_id = ModelSpecId::from_v7();
     registry
         .create_model_spec(NewModelSpec {
@@ -1419,13 +1476,16 @@ async fn publish_weighted_model(
         .expect("create spec");
     registry
         .create_model_version(NewModelVersion {
-            model_version_id: model_version_id.clone(),
+            model_version_id: input.model_version_id.clone(),
             model_spec_id,
             version: 1,
             artifact_hash,
+            profile_ref: fixture_profile_ref(),
             training_dataset_id: None,
-            trade_policy_artifact_id: None,
-            trade_policy_hash: None,
+            trade_policy_artifact_id: trade_policy
+                .as_ref()
+                .map(|policy| policy.artifact_id.clone()),
+            trade_policy_hash: trade_policy.map(|policy| policy.artifact_hash),
             publish_path_set_id: None,
             metrics_json: serde_json::json!({}),
             training_objective_json: serde_json::json!({"kind": "not_trained"}),
@@ -1436,8 +1496,6 @@ async fn publish_weighted_model(
         })
         .await
         .expect("create version");
-
-    model_version_id
 }
 
 fn artifact_store() -> Arc<dyn ArtifactStore> {
@@ -1478,14 +1536,4 @@ fn noop_model_input_writer() -> Arc<ModelInputEventWriter> {
         Arc::new(DiscardFactWriter::new()),
         Arc::new(DiscardFactWriter::new()),
     ))
-}
-
-fn noop_recommendation_writer() -> Arc<RecommendationEventWriter> {
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("report-pipeline-rec").capacity(64),
-        |_| Box::pin(async { Ok(()) }),
-        prometheus::IntCounter::new("report_pipeline_rec_drops", "d").expect("counter"),
-        AsyncWriterObservability::default(),
-    );
-    Arc::new(RecommendationEventWriter::new(Arc::new(writer)))
 }
